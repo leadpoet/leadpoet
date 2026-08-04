@@ -1489,6 +1489,7 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 )
             finally:
                 server.close()
+            provider_scope.assert_accepted_result_is_complete()
         output_hash = sha256_json(result)
         generated_evidence_cache = {}
         if value["operation"] == "run_icp" and value["provider_evidence_mode"] == "record":

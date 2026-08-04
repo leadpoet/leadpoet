@@ -1615,6 +1615,23 @@ def _baseline_progress_public_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in row.items() if not str(key).startswith("_")}
 
 
+def _baseline_distribution_complete(
+    rows: Sequence[Mapping[str, Any]],
+    benchmark_items: Sequence[Mapping[str, Any]],
+) -> bool:
+    expected_refs = {
+        _benchmark_item_ref_for_progress(item) for item in benchmark_items
+    }
+    observed_refs = {
+        _benchmark_item_ref_for_progress(item) for item in rows
+    }
+    return bool(
+        expected_refs
+        and len(expected_refs) == len(benchmark_items)
+        and observed_refs == expected_refs
+    )
+
+
 def _load_baseline_scoring_progress(
     bucket: str,
     object_key: str,
@@ -1633,6 +1650,13 @@ def _load_baseline_scoring_progress(
     except Exception:
         return []
     if not isinstance(doc, Mapping):
+        return []
+    checkpoint_status = str(doc.get("checkpoint_status") or "active")
+    if checkpoint_status != "active":
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=checkpoint_%s",
+            checkpoint_status[:80],
+        )
         return []
     if str(doc.get("benchmark_date") or "") != str(benchmark_date):
         return []
@@ -1692,6 +1716,7 @@ def _store_baseline_scoring_progress(
     doc = {
         "schema_version": "1.0",
         "artifact_type": "research_lab_private_baseline_scoring_progress",
+        "checkpoint_status": "active",
         "benchmark_date": str(benchmark_date),
         "rolling_window_hash": str(window_hash),
         "private_model_artifact_hash": str(private_model_artifact_hash),
@@ -1708,6 +1733,61 @@ def _store_baseline_scoring_progress(
         Body=json.dumps(doc, sort_keys=True, default=str).encode("utf-8"),
         ContentType="application/json",
     )
+    return canonical_hash(doc)
+
+
+def _invalidate_baseline_scoring_progress(
+    bucket: str,
+    object_key: str,
+    *,
+    benchmark_date: str,
+    window_hash: str,
+    private_model_artifact_hash: str,
+    rows: list[dict[str, Any]],
+    reason: str,
+    repo_git_sha: str = "",
+    manifest_hash: str = "",
+) -> str:
+    """Make a conclusively invalid generation impossible to resume."""
+
+    import boto3  # type: ignore
+
+    safe_rows = [
+        _baseline_progress_public_row(row)
+        for row in rows
+        if isinstance(row, Mapping) and _baseline_summary_checkpointable(row)
+    ]
+    doc = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_private_baseline_scoring_progress",
+        "checkpoint_status": "invalidated",
+        "invalidation_reason": str(reason),
+        "benchmark_date": str(benchmark_date),
+        "rolling_window_hash": str(window_hash),
+        "private_model_artifact_hash": str(private_model_artifact_hash),
+        "repo_git_sha": str(repo_git_sha or ""),
+        "manifest_hash": str(manifest_hash or ""),
+        "completed_icp_count": 0,
+        "rejected_icp_count": len(safe_rows),
+        "rejected_results_hash": canonical_hash(safe_rows),
+        "per_icp_results": [],
+    }
+    encoded = json.dumps(doc, sort_keys=True, default=str).encode("utf-8")
+    s3 = boto3.client("s3")
+    s3.put_object(
+        Bucket=bucket,
+        Key=object_key,
+        Body=encoded,
+        ContentType="application/json",
+    )
+    readback = s3.get_object(Bucket=bucket, Key=object_key)["Body"].read()
+    readback_doc = json.loads(readback.decode("utf-8"))
+    if not isinstance(readback_doc, Mapping) or canonical_hash(
+        readback_doc
+    ) != canonical_hash(doc):
+        raise RuntimeError(
+            "research_lab_baseline_progress_invalidation_readback_hash_mismatch"
+        )
     return canonical_hash(doc)
 
 
@@ -11534,6 +11614,36 @@ class ResearchLabGatewayScoringWorker:
                             total_icps=total_icps,
                         )
             if nonempty_output_count <= 0:
+                complete_distribution = _baseline_distribution_complete(
+                    per_icp_summaries,
+                    window.benchmark_items,
+                )
+                if (
+                    complete_distribution
+                    and baseline_progress_location is not None
+                ):
+                    progress_bucket, progress_key = baseline_progress_location
+                    invalidation_hash = await asyncio.to_thread(
+                        _invalidate_baseline_scoring_progress,
+                        progress_bucket,
+                        progress_key,
+                        benchmark_date=today,
+                        window_hash=window.window_hash,
+                        private_model_artifact_hash=artifact.model_artifact_hash,
+                        rows=per_icp_summaries,
+                        reason="globally_all_zero",
+                        repo_git_sha=baseline_repo_main_sha,
+                        manifest_hash=str(artifact.manifest_hash or ""),
+                    )
+                    baseline_progress_rows.clear()
+                    logger.error(
+                        "research_lab_baseline_progress_invalidated "
+                        "reason=globally_all_zero benchmark_date=%s "
+                        "icp_count=%s checkpoint_hash=%s",
+                        today,
+                        len(window.benchmark_items),
+                        invalidation_hash,
+                    )
                 raise PrivateModelRuntimeError(
                     f"private baseline returned zero companies across all {len(window.benchmark_items)} ICPs"
                 )

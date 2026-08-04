@@ -172,6 +172,9 @@ ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION = (
 ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION = (
     "141-research-lab-allocation-frontier-source-contract.sql"
 )
+SOURCE_CATALOG_RESULT_REPLAY_MIGRATION = (
+    "142-research-lab-source-catalog-result-replay.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -205,6 +208,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION,
+    SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
 )
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
@@ -3944,6 +3948,56 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-141 historical source capability is incomplete"
             )
+        database.apply_migration(
+            scripts / SOURCE_CATALOG_RESULT_REPLAY_MIGRATION
+        )
+        applied.append(SOURCE_CATALOG_RESULT_REPLAY_MIGRATION)
+        source_catalog_replay_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_catalog_replay_contract_v2()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        source_catalog_constraints = source_catalog_replay_contract.get(
+            "constraints"
+        )
+        source_catalog_constraint_definitions = (
+            "\n".join(
+                str(constraint.get("constraint_definition") or "")
+                for constraint in source_catalog_constraints.values()
+            )
+            if isinstance(source_catalog_constraints, Mapping)
+            else ""
+        )
+        if (
+            source_catalog_replay_contract.get("schema_version")
+            != "leadpoet.source_catalog_replay_contract.v2"
+            or source_catalog_replay_contract.get("operation")
+            != "source_add_catalog_snapshot_v2"
+            or source_catalog_replay_contract.get("purpose")
+            != "research_lab.source_add_catalog_snapshot.v2"
+            or not isinstance(source_catalog_constraints, Mapping)
+            or set(source_catalog_constraints)
+            != {
+                "research_lab_attested_execution_results_v2_operation_check",
+                "research_lab_attested_execution_results_v2_purpose_check",
+                "research_lab_attested_exec_results_v2_op_purpose_check",
+            }
+            or any(
+                constraint.get("constraint_valid") is not True
+                for constraint in source_catalog_constraints.values()
+            )
+            or "source_add_catalog_snapshot_v2"
+            not in source_catalog_constraint_definitions
+            or "research_lab.source_add_catalog_snapshot.v2"
+            not in source_catalog_constraint_definitions
+        ):
+            raise PostgresContractProbeError(
+                "post-142 source-catalog replay contract differs"
+            )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,
@@ -4070,6 +4124,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post_138_ancestry_checkpoint_bootstrap_purpose_valid": True,
                 "post_139_allocation_frontier_bootstrap_contract_valid": True,
                 "post_141_allocation_frontier_source_contract_valid": True,
+                "post_142_source_catalog_replay_contract_valid": True,
                 "provider_outcome_append_atomic": True,
                 "provider_outcome_contention_zero_rollback": True,
                 "provider_outcome_conflict_head_exact": True,

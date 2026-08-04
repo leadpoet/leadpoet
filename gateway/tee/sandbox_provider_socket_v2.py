@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import socket
 import threading
+import time
 from typing import Any, Dict, Mapping
 
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
@@ -15,6 +16,7 @@ from leadpoet_canonical.attested_v2 import canonical_json
 
 SANDBOX_PROVIDER_SCHEMA_VERSION = "leadpoet.sandbox_provider_rpc.v2"
 MAX_SANDBOX_PROVIDER_FRAME_BYTES = 64 * 1024 * 1024
+DEFAULT_SANDBOX_PROVIDER_DRAIN_TIMEOUT_SECONDS = 30.0
 
 
 class SandboxProviderSocketV2Error(RuntimeError):
@@ -90,13 +92,21 @@ class SandboxProviderSocketServerV2:
         socket_path: Path,
         transport: BrokeredProviderTransportV2,
         execution_scope: Any,
+        drain_timeout_seconds: float = DEFAULT_SANDBOX_PROVIDER_DRAIN_TIMEOUT_SECONDS,
     ) -> None:
+        if float(drain_timeout_seconds) <= 0:
+            raise SandboxProviderSocketV2Error(
+                "sandbox provider drain timeout must be positive"
+            )
         self.socket_path = Path(socket_path)
         self._transport = transport
         self._execution_scope = execution_scope
+        self._drain_timeout_seconds = float(drain_timeout_seconds)
         self._listener = None
         self._thread = None
         self._stop = threading.Event()
+        self._handler_condition = threading.Condition()
+        self._handlers: set[threading.Thread] = set()
 
     @property
     def running(self) -> bool:
@@ -105,12 +115,14 @@ class SandboxProviderSocketServerV2:
     def start(self) -> None:
         if self.running:
             return
+        self._stop.clear()
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         self.socket_path.unlink(missing_ok=True)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(self.socket_path))
         self.socket_path.chmod(0o600)
         listener.listen(32)
+        listener.settimeout(0.25)
         self._listener = listener
         self._thread = threading.Thread(
             target=self._accept_loop,
@@ -121,26 +133,66 @@ class SandboxProviderSocketServerV2:
 
     def close(self) -> None:
         self._stop.set()
-        if self._listener is not None:
+        listener = self._listener
+        self._listener = None
+        if listener is not None:
             try:
-                self._listener.close()
+                listener.close()
             except Exception:
                 pass
-        self._listener = None
+        accept_thread = self._thread
+        if (
+            accept_thread is not None
+            and accept_thread is not threading.current_thread()
+        ):
+            accept_thread.join(timeout=min(1.0, self._drain_timeout_seconds))
+        deadline = time.monotonic() + self._drain_timeout_seconds
+        with self._handler_condition:
+            while self._handlers:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    active_count = len(self._handlers)
+                    self.socket_path.unlink(missing_ok=True)
+                    raise SandboxProviderSocketV2Error(
+                        "sandbox provider request handlers did not drain "
+                        f"within {self._drain_timeout_seconds:.3f}s "
+                        f"(active={active_count})"
+                    )
+                self._handler_condition.wait(timeout=remaining)
+        self._thread = None
         self.socket_path.unlink(missing_ok=True)
 
     def _accept_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                connection, _ = self._listener.accept()
-            except Exception:
+                listener = self._listener
+                if listener is None:
+                    return
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
                 return
-            threading.Thread(
-                target=self._handle,
+            if self._stop.is_set():
+                connection.close()
+                return
+            handler = threading.Thread(
+                target=self._handle_registered,
                 args=(connection,),
                 name="leadpoet-sandbox-provider-request-v2",
                 daemon=True,
-            ).start()
+            )
+            with self._handler_condition:
+                self._handlers.add(handler)
+            handler.start()
+
+    def _handle_registered(self, connection: Any) -> None:
+        try:
+            self._handle(connection)
+        finally:
+            with self._handler_condition:
+                self._handlers.discard(threading.current_thread())
+                self._handler_condition.notify_all()
 
     def _handle(self, connection: Any) -> None:
         try:

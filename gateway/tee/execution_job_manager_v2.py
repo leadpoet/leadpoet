@@ -213,6 +213,11 @@ class ExecutionContextV2:
         default_factory=threading.RLock,
         repr=False,
     )
+    _transport_frozen: bool = field(default=False, repr=False)
+    _frozen_transport_attempts: tuple = field(
+        default_factory=tuple,
+        repr=False,
+    )
     _external_receipt_lock: Any = field(
         default_factory=threading.RLock,
         repr=False,
@@ -252,12 +257,28 @@ class ExecutionContextV2:
                 )
             )
         with self._transport_lock:
+            if self._transport_frozen:
+                raise ExecutionJobV2Error(
+                    "transport attempt arrived after execution was finalized"
+                )
             if any(
                 item["attempt_hash"] == attempt["attempt_hash"]
                 for item in self.transport_attempts
             ):
                 raise ExecutionJobV2Error("transport attempt is duplicated")
             self.transport_attempts.append(dict(attempt))
+
+    def freeze_transport_attempts(self) -> tuple[dict[str, Any], ...]:
+        """Return the one immutable terminal-attempt snapshot for this job."""
+
+        with self._transport_lock:
+            if not self._transport_frozen:
+                self._frozen_transport_attempts = tuple(
+                    json.loads(_canonical_bytes(item).decode("utf-8"))
+                    for item in self.transport_attempts
+                )
+                self._transport_frozen = True
+            return tuple(dict(item) for item in self._frozen_transport_attempts)
 
     def record_artifact(self, artifact_hash: str) -> None:
         digest = str(artifact_hash or "").lower()
@@ -1422,6 +1443,7 @@ class ExecutionJobManagerV2:
         context: ExecutionContextV2,
         root_receipt: Mapping[str, Any],
         local_receipts: Sequence[Mapping[str, Any]],
+        transport_attempts: Sequence[Mapping[str, Any]],
         host_operations: Sequence[Mapping[str, Any]],
         include_external_ancestry_proofs: bool = True,
     ) -> Optional[Dict[str, Any]]:
@@ -1444,7 +1466,7 @@ class ExecutionJobManagerV2:
             "boot_identities": [dict(self.boot_identity)],
             "receipts": local,
             "transport_attempts": [
-                dict(item) for item in context.transport_attempts
+                dict(item) for item in transport_attempts
             ],
             "host_operations": [dict(item) for item in host_operations],
         }
@@ -1806,20 +1828,26 @@ class ExecutionJobManagerV2:
             if not checkpoint_bootstrap_scope:
                 root_parents.extend(context.external_ancestry_roots())
             root_manifest["parent_receipt_hashes"] = sorted(set(root_parents))
+            transport_attempts = context.freeze_transport_attempts()
+            artifact_hashes = tuple(context.artifact_hashes)
+            host_operation_records = tuple(context.host_operation_records())
             receipt = self._receipt(
                 manifest=root_manifest,
                 context=context,
                 output_root=sha256_bytes(receipt_output_bytes),
                 status="succeeded",
                 failure_code=None,
+                transport_attempts=transport_attempts,
+                host_operations=host_operation_records,
+                artifact_hashes=artifact_hashes,
             )
             local_receipts = list(stage_receipts) + [receipt]
-            host_operation_records = list(context.host_operation_records())
             ancestry_compact_proof = self._build_ancestry_compact_proof(
                 manifest=root_manifest,
                 context=context,
                 root_receipt=receipt,
                 local_receipts=local_receipts,
+                transport_attempts=transport_attempts,
                 host_operations=host_operation_records,
                 include_external_ancestry_proofs=(
                     not checkpoint_bootstrap_scope
@@ -1840,6 +1868,9 @@ class ExecutionJobManagerV2:
                         output_root=sha256_bytes(cancelled_bytes),
                         status="failed",
                         failure_code="cancelled",
+                        transport_attempts=transport_attempts,
+                        host_operations=host_operation_records,
+                        artifact_hashes=artifact_hashes,
                     )
                     cancelled_receipts = list(stage_receipts) + [
                         cancelled_receipt
@@ -1849,6 +1880,7 @@ class ExecutionJobManagerV2:
                         context=context,
                         root_receipt=cancelled_receipt,
                         local_receipts=cancelled_receipts,
+                        transport_attempts=transport_attempts,
                         host_operations=host_operation_records,
                         include_external_ancestry_proofs=(
                             not checkpoint_bootstrap_scope
@@ -1860,8 +1892,8 @@ class ExecutionJobManagerV2:
                     job["receipt"] = cancelled_receipt
                     job["receipts"] = cancelled_receipts
                     job["transitions"] = []
-                    job["transport_attempts"] = list(context.transport_attempts)
-                    job["artifact_hashes"] = list(context.artifact_hashes)
+                    job["transport_attempts"] = list(transport_attempts)
+                    job["artifact_hashes"] = list(artifact_hashes)
                     job["host_operations"] = list(
                         host_operation_records
                     )
@@ -1879,9 +1911,9 @@ class ExecutionJobManagerV2:
                     job["receipt"] = receipt
                     job["receipts"] = local_receipts
                     job["transitions"] = transitions
-                    job["transport_attempts"] = list(context.transport_attempts)
-                    job["artifact_hashes"] = list(context.artifact_hashes)
-                    job["host_operations"] = host_operation_records
+                    job["transport_attempts"] = list(transport_attempts)
+                    job["artifact_hashes"] = list(artifact_hashes)
+                    job["host_operations"] = list(host_operation_records)
                     job["external_receipt_graphs"] = list(
                         context.external_receipt_graphs
                     )
@@ -1896,6 +1928,8 @@ class ExecutionJobManagerV2:
             failure_bytes = _canonical_bytes(
                 {"status": "failed", "failure_code": failure_code}
             )
+            failure_transport_attempts = context.freeze_transport_attempts()
+            failure_artifact_hashes = tuple(context.artifact_hashes)
             try:
                 failure_manifest = dict(manifest)
                 failure_parent_roots = (
@@ -1909,24 +1943,28 @@ class ExecutionJobManagerV2:
                 failure_manifest["parent_receipt_hashes"] = sorted(
                     failure_parent_roots
                 )
+                try:
+                    failure_host_operations = tuple(
+                        context.host_operation_records()
+                    )
+                except Exception:
+                    failure_host_operations = ()
                 receipt = self._receipt(
                     manifest=failure_manifest,
                     context=context,
                     output_root=sha256_bytes(failure_bytes),
                     status="failed",
                     failure_code=failure_code,
+                    transport_attempts=failure_transport_attempts,
+                    host_operations=failure_host_operations,
+                    artifact_hashes=failure_artifact_hashes,
                 )
-                try:
-                    failure_host_operations = list(
-                        context.host_operation_records()
-                    )
-                except Exception:
-                    failure_host_operations = []
                 failure_proof = self._build_ancestry_compact_proof(
                     manifest=failure_manifest,
                     context=context,
                     root_receipt=receipt,
                     local_receipts=(receipt,),
+                    transport_attempts=failure_transport_attempts,
                     host_operations=failure_host_operations,
                     include_external_ancestry_proofs=(
                         not checkpoint_bootstrap_scope
@@ -1935,7 +1973,7 @@ class ExecutionJobManagerV2:
             except Exception:
                 receipt = None
                 failure_proof = None
-                failure_host_operations = []
+                failure_host_operations = ()
                 failure_code = "receipt_unavailable"
             with self._lock:
                 job = self._jobs.get(job_id)
@@ -1946,9 +1984,11 @@ class ExecutionJobManagerV2:
                     job["result_hash"] = sha256_bytes(failure_bytes)
                     job["receipt"] = receipt
                     job["receipts"] = [receipt] if receipt is not None else []
-                    job["transport_attempts"] = list(context.transport_attempts)
-                    job["artifact_hashes"] = list(context.artifact_hashes)
-                    job["host_operations"] = failure_host_operations
+                    job["transport_attempts"] = list(
+                        failure_transport_attempts
+                    )
+                    job["artifact_hashes"] = list(failure_artifact_hashes)
+                    job["host_operations"] = list(failure_host_operations)
                     job["external_receipt_graphs"] = list(
                         context.external_receipt_graphs
                     )
@@ -1970,6 +2010,9 @@ class ExecutionJobManagerV2:
         output_root: str,
         status: str,
         failure_code: Optional[str],
+        transport_attempts: Sequence[Mapping[str, Any]],
+        host_operations: Sequence[Mapping[str, Any]],
+        artifact_hashes: Sequence[str],
     ) -> Dict[str, Any]:
         current_boot = dict(self._boot_identity_supplier())
         if current_boot != self.boot_identity:
@@ -1989,18 +2032,18 @@ class ExecutionJobManagerV2:
             input_root=manifest["payload_sha256"],
             output_root=output_root,
             transport_root_hash=(
-                transport_root(context.transport_attempts)
-                if context.transport_attempts
+                transport_root(transport_attempts)
+                if transport_attempts
                 else EMPTY_TRANSPORT_ROOT
             ),
             host_operation_root_hash=(
-                host_operation_root(context.host_operation_records())
-                if context.host_operation_channel is not None
+                host_operation_root(host_operations)
+                if host_operations
                 else EMPTY_HOST_OPERATION_ROOT
             ),
             artifact_root=(
-                merkle_root(context.artifact_hashes, domain="leadpoet-artifact-v2")
-                if context.artifact_hashes
+                merkle_root(artifact_hashes, domain="leadpoet-artifact-v2")
+                if artifact_hashes
                 else EMPTY_ARTIFACT_ROOT
             ),
             parent_receipt_hashes=manifest["parent_receipt_hashes"],

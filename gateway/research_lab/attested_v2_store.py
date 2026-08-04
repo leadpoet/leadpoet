@@ -50,6 +50,10 @@ from leadpoet_canonical.weight_authority_v2 import (
     validate_weight_finalization_submission_v2,
     validate_published_weight_bundle_v2,
 )
+from gateway.tee.source_add_runtime_v2 import (
+    build_source_add_runtime_catalog_v2,
+    validate_source_add_runtime_catalog_v2,
+)
 
 
 BOOT_TABLE = "research_lab_attested_boot_identities_v2"
@@ -122,6 +126,10 @@ _REPLAYABLE_EXECUTION_PAIRS = frozenset(
         (
             "attest_active_private_model",
             "research_lab.active_private_model.v2",
+        ),
+        (
+            "source_add_catalog_snapshot_v2",
+            "research_lab.source_add_catalog_snapshot.v2",
         ),
         (
             "observe_chain_realized_weights_v1",
@@ -1800,6 +1808,58 @@ def _execution_result_projection_v2(
                 "replayable chain-realized settlement result is invalid"
             )
         return dict(settlement)
+    if str(operation) == "source_add_catalog_snapshot_v2":
+        expected_fields = {
+            "schema_version",
+            "provisioned_sources",
+            "provisioned_sources_hash",
+            "private_registry_rows",
+            "private_registry_rows_hash",
+            "runtime_catalog",
+            "runtime_catalog_hash",
+        }
+        provisioned_sources = result.get("provisioned_sources")
+        private_registry_rows = result.get("private_registry_rows")
+        runtime_catalog = result.get("runtime_catalog")
+        if (
+            set(result) != expected_fields
+            or result.get("schema_version")
+            != "leadpoet.source_add_catalog_snapshot.v2"
+            or not isinstance(provisioned_sources, list)
+            or any(not isinstance(item, Mapping) for item in provisioned_sources)
+            or not isinstance(private_registry_rows, list)
+            or any(not isinstance(item, Mapping) for item in private_registry_rows)
+            or not isinstance(runtime_catalog, Mapping)
+        ):
+            raise AttestedV2StoreError(
+                "replayable SOURCE_ADD catalog result is invalid"
+            )
+        normalized_sources = [dict(item) for item in provisioned_sources]
+        normalized_private_rows = [dict(item) for item in private_registry_rows]
+        try:
+            normalized_catalog = validate_source_add_runtime_catalog_v2(
+                runtime_catalog
+            )
+            independently_derived_catalog = build_source_add_runtime_catalog_v2(
+                normalized_sources
+            )
+        except Exception as exc:
+            raise AttestedV2StoreError(
+                "replayable SOURCE_ADD runtime catalog is invalid"
+            ) from exc
+        if (
+            result.get("provisioned_sources_hash")
+            != sha256_json(normalized_sources)
+            or result.get("private_registry_rows_hash")
+            != sha256_json(normalized_private_rows)
+            or normalized_catalog != independently_derived_catalog
+            or result.get("runtime_catalog_hash")
+            != normalized_catalog["catalog_hash"]
+        ):
+            raise AttestedV2StoreError(
+                "replayable SOURCE_ADD catalog commitment differs"
+            )
+        return dict(result)
     return dict(result)
 
 

@@ -762,6 +762,7 @@ def verify_migration_backed_database_contract(
         "post_138_ancestry_checkpoint_bootstrap_purpose_valid",
         "post_139_allocation_frontier_bootstrap_contract_valid",
         "post_141_allocation_frontier_source_contract_valid",
+        "post_142_source_catalog_replay_contract_valid",
         "provider_outcome_append_atomic",
         "provider_outcome_contention_zero_rollback",
         "provider_outcome_conflict_head_exact",

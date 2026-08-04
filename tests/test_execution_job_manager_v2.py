@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
 
 import pytest
@@ -111,6 +112,107 @@ def _payload():
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _transport_attempt(*, request_id_character="1", attempt_number=0):
+    return build_transport_attempt(
+        request_id=request_id_character * 32,
+        logical_operation_id="provider-op-1",
+        job_id="score-job-1",
+        purpose="research_lab.candidate_score.v2",
+        provider_id="openrouter",
+        attempt_number=attempt_number,
+        method="POST",
+        destination_host="openrouter.ai",
+        destination_port=443,
+        path_hash=HASH,
+        nonsecret_headers_hash=HASH,
+        body_hash=HASH_B,
+        credential_ref_hash=HASH,
+        retry_policy_hash=HASH_B,
+        timeout_ms=30000,
+        started_at=NOW,
+        terminal_status="authenticated_response",
+        http_status=200,
+        response_hash=HASH,
+        request_artifact_hash=HASH,
+        response_artifact_hash=HASH_B,
+        tls_peer_chain_hash=HASH,
+        tls_protocol="TLSv1.3",
+        failure_code=None,
+        completed_at=NOW,
+    )
+
+
+def test_execution_context_freezes_one_terminal_transport_snapshot():
+    context = ExecutionContextV2(
+        job_id="score-job-1",
+        purpose="research_lab.candidate_score.v2",
+        epoch_id=24_000,
+    )
+    first = _transport_attempt()
+    context.record_transport(first)
+
+    assert context.freeze_transport_attempts() == (first,)
+    assert context.freeze_transport_attempts() == (first,)
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="transport attempt arrived after execution was finalized",
+    ):
+        context.record_transport(
+            _transport_attempt(request_id_character="2", attempt_number=1)
+        )
+
+
+def test_job_receipt_and_ancestry_use_same_frozen_transport_snapshot():
+    release_late_attempt = threading.Event()
+    late_attempt_finished = threading.Event()
+    late_errors = []
+    first = _transport_attempt()
+    second = _transport_attempt(request_id_character="2", attempt_number=1)
+    late_thread = None
+
+    def _executor(_operation, payload, context):
+        nonlocal late_thread
+        context.record_transport(first)
+
+        def append_late():
+            release_late_attempt.wait(timeout=2)
+            try:
+                context.record_transport(second)
+            except Exception as exc:
+                late_errors.append(exc)
+            finally:
+                late_attempt_finished.set()
+
+        late_thread = threading.Thread(target=append_late)
+        late_thread.start()
+        return {"score": payload["input"]}
+
+    manager, boot = _manager(_executor, checkpoint_lineage=True)
+    assert _run(manager, _payload())["state"] == "succeeded"
+    release_late_attempt.set()
+    assert late_attempt_finished.wait(timeout=1)
+    late_thread.join(timeout=1)
+
+    assert len(late_errors) == 1
+    assert "after execution was finalized" in str(late_errors[0])
+    assert manager.transport_attempts("score-job-1") == (first,)
+    receipt = manager.receipt("score-job-1")
+    assert receipt["transport_root"] == merkle_root(
+        [first["attempt_hash"]], domain="leadpoet-transport-v2"
+    )
+    build_checkpointed_receipt_graph(
+        root_receipt_hash=receipt["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=manager.receipts("score-job-1"),
+        transport_attempts=manager.transport_attempts("score-job-1"),
+        host_operations=manager.host_operations("score-job-1"),
+        ancestry_lineage_id=HASH,
+        ancestry_proof=manager.ancestry_compact_proof("score-job-1"),
+        boot_attestation_verifier=lambda identity: identity,
+        require_boot_attestation_verification=True,
+    )
 
 
 def test_external_receipt_graph_count_is_larger_only_for_allocation_ancestry(

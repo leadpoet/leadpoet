@@ -3,10 +3,18 @@ from __future__ import annotations
 import base64
 import hashlib
 from pathlib import Path
+import socket
+import threading
+import time
+
+import pytest
 
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
 from gateway.tee.sandbox_http_shim_v2 import execute
-from gateway.tee.sandbox_provider_socket_v2 import SandboxProviderSocketServerV2
+from gateway.tee.sandbox_provider_socket_v2 import (
+    SandboxProviderSocketServerV2,
+    SandboxProviderSocketV2Error,
+)
 from leadpoet_canonical.attested_v2 import build_transport_attempt
 
 
@@ -102,3 +110,85 @@ def test_sandbox_socket_preserves_shared_attempt_scope_and_strips_credentials(
     assert [request["attempt_number"] for request in requests] == [0, 1]
     assert all("Authorization" not in request["headers"] for request in requests)
     assert len(terminals) == 2
+
+
+def _blocking_handler_server(tmp_path, *, drain_timeout_seconds):
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    scope = transport.create_scope(
+        job_id="model-job-drain",
+        purpose="research_lab.private_model_run.v2",
+        logical_operation_id="model-job-drain",
+        retry_policy_hashes={},
+    )
+    socket_path = Path("/tmp") / (
+        "lp-sandbox-drain-%s.sock"
+        % hashlib.sha256(str(tmp_path).encode()).hexdigest()[:16]
+    )
+    server = SandboxProviderSocketServerV2(
+        socket_path=socket_path,
+        transport=transport,
+        execution_scope=scope,
+        drain_timeout_seconds=drain_timeout_seconds,
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def block(connection):
+        started.set()
+        release.wait(timeout=2)
+        connection.close()
+
+    server._handle = block
+    server.start()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(str(socket_path))
+    assert started.wait(timeout=1)
+    return server, transport, client, release
+
+
+def test_sandbox_socket_close_drains_active_request_handlers(tmp_path):
+    server, transport, client, release = _blocking_handler_server(
+        tmp_path,
+        drain_timeout_seconds=1,
+    )
+    closed = threading.Event()
+    errors = []
+
+    def close_server():
+        try:
+            server.close()
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            closed.set()
+
+    closer = threading.Thread(target=close_server)
+    closer.start()
+    assert not closed.wait(timeout=0.05)
+    release.set()
+    assert closed.wait(timeout=1)
+    closer.join(timeout=1)
+    client.close()
+    transport.restore()
+    assert errors == []
+
+
+def test_sandbox_socket_close_fails_closed_when_handlers_do_not_drain(tmp_path):
+    server, transport, client, release = _blocking_handler_server(
+        tmp_path,
+        drain_timeout_seconds=0.05,
+    )
+    started = time.monotonic()
+    with pytest.raises(
+        SandboxProviderSocketV2Error,
+        match="provider request handlers did not drain",
+    ):
+        server.close()
+    assert time.monotonic() - started < 0.5
+    release.set()
+    deadline = time.monotonic() + 1
+    while server._handlers and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server._handlers == set()
+    client.close()
+    transport.restore()

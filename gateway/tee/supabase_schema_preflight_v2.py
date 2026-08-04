@@ -544,6 +544,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/141-research-lab-allocation-frontier-source-contract.sql",
         "research_lab_allocation_frontier_historical_source_contract_v1",
     ),
+    (
+        "scripts/142-research-lab-source-catalog-result-replay.sql",
+        "research_lab_source_catalog_replay_contract_v2",
+    ),
 )
 
 

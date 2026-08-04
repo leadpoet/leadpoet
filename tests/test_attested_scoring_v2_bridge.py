@@ -42,6 +42,9 @@ from gateway.tee.release_manifest_v2 import (
     build_release_manifest,
 )
 from gateway.tee.scoring_executor_v2 import SCORING_OPERATIONS_V2
+from gateway.tee.source_add_runtime_v2 import (
+    build_source_add_runtime_catalog_v2,
+)
 from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
@@ -1329,6 +1332,109 @@ async def test_v2_bridge_replays_exact_durable_coordinator_result_without_resubm
     with pytest.raises(AttestedV2StoreError, match="output differs"):
         _execution_result_storage_row_v2(
             operation="attest_weight_input",
+            result=tampered,
+            receipt=fresh["receipt"],
+            artifact_hashes=fresh["artifact_hashes"],
+            release_hash=release["release_hash"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_replays_source_catalog_snapshot_after_runner_restart():
+    release = _release()
+    runtime_catalog = build_source_add_runtime_catalog_v2([])
+    catalog_result = {
+        "schema_version": "leadpoet.source_add_catalog_snapshot.v2",
+        "provisioned_sources": [],
+        "provisioned_sources_hash": sha256_json([]),
+        "private_registry_rows": [],
+        "private_registry_rows_hash": sha256_json([]),
+        "runtime_catalog": runtime_catalog,
+        "runtime_catalog_hash": runtime_catalog["catalog_hash"],
+    }
+    captured = {}
+
+    async def load_missing(**_kwargs):
+        return None
+
+    async def persist(graph):
+        validate_receipt_graph(graph)
+        return {
+            "root_receipt_hash": graph["root_receipt_hash"],
+            "graph_hash": sha256_json(graph),
+        }
+
+    async def persist_result(**kwargs):
+        captured.update(kwargs)
+        return _execution_result_storage_row_v2(**kwargs)
+
+    common = {
+        "operation": "source_add_catalog_snapshot_v2",
+        "purpose": "research_lab.source_add_catalog_snapshot.v2",
+        "epoch_id": 24_354,
+        "sequence": 0,
+        "payload": {"limit": 200},
+        "worker_index": 0,
+        "provider_profile_loader": lambda *args, **kwargs: {
+            "profile": "default",
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        },
+        "release_manifest": release,
+        "persist_graph": persist,
+        "boot_verifier": lambda identity: identity,
+        "poll_seconds": 0.001,
+        "operation_registry": COORDINATOR_OPERATIONS_V2,
+        "physical_role_override": "gateway_coordinator",
+        "expected_service_role": "gateway_coordinator",
+        "rpc_namespace": "coordinator_v2",
+        "receipt_output_projector": coordinator_receipt_output_v2,
+    }
+    fresh = await execute_scoring_v2(
+        **common,
+        client=_CoordinatorClient(
+            release,
+            executor=lambda _operation, _payload, _context: catalog_result,
+        ),
+        load_replayable_result=load_missing,
+        persist_replayable_result=persist_result,
+    )
+    assert captured["operation"] == "source_add_catalog_snapshot_v2"
+    assert captured["result"] == catalog_result
+
+    async def load_replay(**kwargs):
+        assert kwargs["operation"] == "source_add_catalog_snapshot_v2"
+        return {
+            "row": {"release_hash": release["release_hash"]},
+            "result": fresh["result"],
+            "receipt": fresh["receipt"],
+            "receipt_graph": fresh["receipt_graph"],
+            "artifact_hashes": fresh["artifact_hashes"],
+        }
+
+    replay_client = _CoordinatorClient(release)
+
+    async def reject_submit(_manifest):
+        raise AssertionError("catalog replay must not submit a duplicate job")
+
+    replay_client.coordinator_v2_submit_job = reject_submit
+    replayed = await execute_scoring_v2(
+        **common,
+        client=replay_client,
+        load_replayable_result=load_replay,
+        persist_replayable_result=persist_result,
+    )
+    assert replayed["replay_status"] == "durable_exact"
+    assert replayed["result"] == catalog_result
+
+    tampered = dict(catalog_result)
+    tampered["runtime_catalog_hash"] = _hash("f")
+    with pytest.raises(
+        AttestedV2StoreError,
+        match="catalog commitment differs",
+    ):
+        _execution_result_storage_row_v2(
+            operation="source_add_catalog_snapshot_v2",
             result=tampered,
             receipt=fresh["receipt"],
             artifact_hashes=fresh["artifact_hashes"],

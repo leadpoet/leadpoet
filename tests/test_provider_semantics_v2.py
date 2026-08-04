@@ -80,7 +80,16 @@ class _CacheStore:
         self.load_count = 0
         self.persist_count = 0
 
-    def load(self, *, utc_day, request_fingerprint, job_id, purpose):
+    def load(
+        self,
+        *,
+        utc_day,
+        request_fingerprint,
+        job_id,
+        purpose,
+        attempt_number=0,
+    ):
+        del attempt_number
         self.load_count += 1
         payload = self.payloads.get((utc_day, request_fingerprint))
         return {

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -4601,6 +4602,194 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     }
 
 
+def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
+    """Prove repeated nonterminal polls retain unique measured evidence."""
+
+    from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
+    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+    from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
+    from gateway.tee.provider_evidence_cache_store_v2 import (
+        ProviderEvidenceCacheStoreV2,
+    )
+    from gateway.tee.provider_semantics_v2 import ProviderSemanticsAuthorityV2
+    from leadpoet_canonical.attested_v2 import (
+        DIRECT_EGRESS_REF_HASH,
+        build_transport_attempt,
+        sha256_bytes,
+        sha256_json,
+    )
+
+    retry_hashes = {
+        provider: sha256_json({"retry": provider})
+        for provider in ("exa", "supabase")
+    }
+    credential_hashes = {
+        provider: sha256_json({"credential": provider})
+        for provider in ("exa", "supabase")
+    }
+
+    class StrictBoundary:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.records: dict[tuple[str, int], dict[str, Any]] = {}
+            self.retry_policy_hashes = retry_hashes
+
+        @contextmanager
+        def transient_terminal_transaction(self):
+            yield
+
+        def health(self) -> dict[str, Any]:
+            return {"status": "ready", "registry_hash": sha256_json({"registry": 1})}
+
+        def credential_available(self, *, job_id: str, slot: str) -> bool:
+            del job_id
+            return slot in credential_hashes
+
+        def execute(self, request: Mapping[str, Any]) -> dict[str, Any]:
+            request = dict(request)
+            key = (
+                str(request["logical_operation_id"]),
+                int(request["attempt_number"]),
+            )
+            self.calls.append(request)
+            if key in self.records:
+                return dict(self.records[key])
+            provider = str(request["provider_id"])
+            if provider == "supabase":
+                body = b"[]"
+                host = "fixture.supabase.co"
+            elif provider == "exa":
+                body = b'{"status":"running","object":"agent_run"}'
+                host = "api.exa.ai"
+            else:
+                raise RuntimeError("provider evidence probe crossed an undeclared route")
+            ordinal = len(self.records) + 1
+            request_artifact_hash = sha256_json(
+                {"provider": provider, "ordinal": ordinal, "kind": "request"}
+            )
+            response_hash = sha256_bytes(body)
+            attempt = build_transport_attempt(
+                request_id=("%032x" % ordinal)[-32:],
+                logical_operation_id=key[0],
+                job_id=str(request["job_id"]),
+                purpose=str(request["purpose"]),
+                provider_id=provider,
+                attempt_number=key[1],
+                method=str(request["method"]),
+                destination_host=host,
+                destination_port=443,
+                path_hash=sha256_json({"path": provider}),
+                nonsecret_headers_hash=sha256_json(
+                    {"headers": sorted(dict(request["headers"]))}
+                ),
+                body_hash=sha256_bytes(
+                    base64.b64decode(str(request["body_b64"]), validate=True)
+                ),
+                credential_ref_hash=credential_hashes[provider],
+                egress_proxy_ref_hash=DIRECT_EGRESS_REF_HASH,
+                retry_policy_hash=str(request["retry_policy_hash"]),
+                timeout_ms=int(request["timeout_ms"]),
+                started_at=NOW,
+                terminal_status="authenticated_response",
+                http_status=200,
+                response_hash=response_hash,
+                request_artifact_hash=request_artifact_hash,
+                response_artifact_hash=response_hash,
+                tls_peer_chain_hash=sha256_json({"tls": provider}),
+                tls_protocol="TLSv1.3",
+                failure_code=None,
+                completed_at=NOW,
+            )
+            result = {
+                "terminal_status": "authenticated_response",
+                "http_status": 200,
+                "headers": {"content-type": "application/json"},
+                "body_b64": base64.b64encode(body).decode("ascii"),
+                "encrypted_request_artifact_id": request_artifact_hash,
+                "encrypted_artifact_id": response_hash,
+                "transport_attempt": attempt,
+                "evidence_artifact_hashes": [
+                    request_artifact_hash,
+                    response_hash,
+                ],
+            }
+            self.records[key] = dict(result)
+            return result
+
+    boundary = StrictBoundary()
+    vault = EncryptedArtifactVaultV2(
+        master_key=bytes(range(32)),
+        boot_identity_hash=sha256_json({"boot": "provider-evidence"}),
+        retention_days=30,
+    )
+    cache = ProviderEvidenceCacheStoreV2(
+        broker=boundary,
+        vault=vault,
+        source_boot_verifier=lambda _value: None,
+    )
+    signing_key = Ed25519PrivateKey.generate()
+    boot_identity = {
+        "boot_identity_hash": sha256_json({"boot": "provider-evidence"}),
+        "signing_pubkey": signing_key.public_key().public_bytes_raw().hex(),
+    }
+    authority = ProviderSemanticsAuthorityV2(
+        broker=boundary,
+        cache_store=cache,
+        artifact_sink=vault.seal,
+        boot_identity_supplier=lambda: boot_identity,
+        sign_digest=signing_key.sign,
+        clock=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+    context = ExecutionContextV2(
+        job_id="rehearsal:rebenchmark-provider-poll",
+        purpose="research_lab.private_model_run.v2",
+        epoch_id=1,
+        provider_credential_ref_hashes=credential_hashes,
+    )
+    request = {
+        "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
+        "logical_operation_id": "rehearsal:exa-agent-poll",
+        "job_id": context.job_id,
+        "purpose": context.purpose,
+        "provider_id": "exa",
+        "attempt_number": 0,
+        "method": "GET",
+        "url": "https://api.exa.ai/agent/runs/rehearsal-run",
+        "headers": {},
+        "body_b64": "",
+        "timeout_ms": 30_000,
+        "retry_policy_hash": retry_hashes["exa"],
+    }
+    for attempt_number in (0, 1):
+        result = authority.execute(
+            {**request, "attempt_number": attempt_number}
+        )
+        if result.get("evidence") != "live_unrecorded":
+            raise RuntimeError("nonterminal provider poll entered the day cache")
+        for attempt in [
+            *list(result.get("additional_transport_attempts") or ()),
+            result["transport_attempt"],
+        ]:
+            context.record_transport(attempt)
+    supabase_attempts = [
+        item
+        for item in context.transport_attempts
+        if item["provider_id"] == "supabase"
+    ]
+    if (
+        len(supabase_attempts) != 2
+        or [item["attempt_number"] for item in supabase_attempts] != [0, 1]
+        or len({item["attempt_hash"] for item in supabase_attempts}) != 2
+    ):
+        raise RuntimeError("repeated provider cache reads reused transport evidence")
+    return {
+        "nonterminal_polls_live": True,
+        "request_bound_cache_attempts": True,
+        "execution_receipt_transport_unique": True,
+    }
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "signed-private-model-contract-transition": (
         _exercise_signed_private_model_contract_transition
@@ -4611,6 +4800,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "git-tree-replacement": _exercise_git_tree_replacement,
     "model-sandbox-scope-binding": _exercise_model_sandbox_scope_binding,
     "rebenchmark-sandbox-retry": _exercise_rebenchmark_sandbox_retry_contract,
+    "rebenchmark-provider-transport-evidence": (
+        _exercise_rebenchmark_provider_transport_evidence
+    ),
     "historical-metagraph-layouts": _exercise_historical_metagraph_layouts,
     "receipt-graph-aggregate-pagination": (
         _exercise_receipt_graph_aggregate_pagination
@@ -5053,6 +5245,23 @@ def main() -> int:
                 "rebenchmark-sandbox-retry",
                 {},
             ).get("bounded_retry_selected")
+            is True
+        ),
+        "rebenchmark_provider_transport_evidence_unique": (
+            behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("nonterminal_polls_live")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("request_bound_cache_attempts")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("execution_receipt_transport_unique")
             is True
         ),
         "chain_settlement_state_space_complete": (

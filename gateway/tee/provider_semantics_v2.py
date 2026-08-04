@@ -311,6 +311,7 @@ class ProviderSemanticsAuthorityV2:
                     request_fingerprint=fingerprint,
                     job_id=normalized["job_id"],
                     purpose=normalized["purpose"],
+                    attempt_number=normalized["attempt_number"],
                 )
             )
             lookup_attempts = list(lookup["transport_attempts"])

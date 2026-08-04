@@ -287,13 +287,13 @@ class _AiohttpContent:
 
 class _AiohttpResponse:
     def __init__(self, *, url: str, result: Mapping[str, Any]) -> None:
+        self._body = _result_body(result)
         self.status = int(result["http_status"])
         self.headers = dict(result.get("headers") or {})
         self.url = url
         self.reason = "authenticated provider response"
         self.history = ()
         self.request_info = SimpleNamespace(real_url=url)
-        self._body = _result_body(result)
         self.content = _AiohttpContent(self._body)
 
     async def __aenter__(self) -> "_AiohttpResponse":
@@ -441,10 +441,11 @@ def install() -> None:
                     body=bytes(request.content),
                     timeout_ms=DEFAULT_TIMEOUT_MS,
                 )
+                response_body = _result_body(result)
                 return httpx.Response(
                     status_code=int(result["http_status"]),
                     headers=dict(result.get("headers") or {}),
-                    content=_result_body(result),
+                    content=response_body,
                     request=request,
                 )
 
@@ -476,10 +477,11 @@ def install() -> None:
                     body=bytes(body),
                     timeout_ms=_timeout_ms(kwargs.get("timeout")),
                 )
+                response_body = _result_body(result)
                 response = requests.Response()
                 response.status_code = int(result["http_status"])
                 response.headers.update(dict(result.get("headers") or {}))
-                response._content = _result_body(result)
+                response._content = response_body
                 response.url = str(request.url)
                 response.request = request
                 return response

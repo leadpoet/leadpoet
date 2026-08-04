@@ -92,6 +92,35 @@ class _Broker:
         }
 
 
+class _MissingCache:
+    def __init__(self):
+        self.attempt_numbers = []
+
+    def load(
+        self,
+        *,
+        utc_day,
+        request_fingerprint,
+        job_id,
+        purpose,
+        attempt_number=0,
+    ):
+        del utc_day, request_fingerprint, job_id, purpose
+        self.attempt_numbers.append(attempt_number)
+        return {
+            "found": False,
+            "transport_attempts": [],
+            "evidence_artifact_hashes": [],
+        }
+
+    def persist_recorded(self, terminal, *, utc_day, job_id, purpose):
+        del terminal, utc_day, job_id, purpose
+        return {
+            "transport_attempts": [],
+            "evidence_artifact_hashes": [],
+        }
+
+
 def test_provider_evidence_records_once_then_replays_signed_source():
     key = Ed25519PrivateKey.generate()
     identity = _identity(key)
@@ -132,6 +161,28 @@ def test_provider_evidence_replay_miss_never_calls_provider():
     assert result["evidence"] == "replay_miss"
     assert result["transport_attempts"] == []
     assert broker.calls == []
+
+
+def test_provider_evidence_retry_binds_cache_lookup_to_request_attempt() -> None:
+    key = Ed25519PrivateKey.generate()
+    identity = _identity(key)
+    broker = _Broker()
+    cache = _MissingCache()
+    authority = ProviderEvidenceAuthorityV2(
+        broker=broker,
+        boot_identity_supplier=lambda: identity,
+        sign_digest=key.sign,
+        cache_store=cache,
+    )
+
+    first = authority.resolve(_request())
+    authority._cache.clear()
+    second = authority.resolve(_request())
+
+    assert first["evidence"] == "recorded"
+    assert second["evidence"] == "recorded"
+    assert cache.attempt_numbers == [0, 1]
+    assert [request["attempt_number"] for request in broker.calls] == [0, 1]
 
 
 def test_provider_evidence_rejects_tampered_record_and_route():

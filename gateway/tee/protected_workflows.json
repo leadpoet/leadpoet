@@ -1322,7 +1322,7 @@
       "symbol": "provider_registry_document"
     },
     {
-      "ast_sha256": "sha256:49161d1933f6dd4032c24d8dff0bb0ad2d91334d50534f8f7a3206714d7ad757",
+      "ast_sha256": "sha256:c9db6a7a1994d971250b326033e75aaa1b127cecbce1b84287b045918968452c",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:f526633e964837bea390513ccb2bcceb78c61dac1a509c2163436f420906af33",
+  "manifest_hash": "sha256:6122a2a80d469bae187b398a229d66a28b61877d9fb82ea2ac88023ba6840563",
   "protected_source_commit": "a0798fc6336838326bb4708789d24225cd1dcaef",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

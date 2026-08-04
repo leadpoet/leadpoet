@@ -211,6 +211,7 @@ class ProviderEvidenceCacheStoreV2:
         request_fingerprint: str,
         job_id: str,
         purpose: str,
+        attempt_number: int = 0,
     ) -> Dict[str, Any]:
         """Read one exact daily entry and reopen it inside the coordinator."""
 
@@ -220,6 +221,7 @@ class ProviderEvidenceCacheStoreV2:
                 request_fingerprint=request_fingerprint,
                 job_id=job_id,
                 purpose=purpose,
+                attempt_number=attempt_number,
             )
 
     def _load(
@@ -229,7 +231,16 @@ class ProviderEvidenceCacheStoreV2:
         request_fingerprint: str,
         job_id: str,
         purpose: str,
+        attempt_number: int,
     ) -> Dict[str, Any]:
+        if (
+            isinstance(attempt_number, bool)
+            or not isinstance(attempt_number, int)
+            or attempt_number < 0
+        ):
+            raise ProviderEvidenceCacheStoreV2Error(
+                "provider cache request attempt number is invalid"
+            )
         normalized_day = _day(utc_day)
         normalized_fingerprint = _fingerprint(request_fingerprint)
         rows, attempts, artifacts = self._read_rows(
@@ -238,6 +249,7 @@ class ProviderEvidenceCacheStoreV2:
             job_id=job_id,
             purpose=purpose,
             operation_suffix="lookup",
+            attempt_number=attempt_number,
         )
         if not rows:
             return {
@@ -547,6 +559,7 @@ class ProviderEvidenceCacheStoreV2:
         job_id: str,
         purpose: str,
         operation_suffix: str,
+        attempt_number: int = 0,
     ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], set[str]]:
         query = urlencode(
             [
@@ -580,6 +593,7 @@ class ProviderEvidenceCacheStoreV2:
             ),
             job_id=job_id,
             purpose=purpose,
+            attempt_number=attempt_number,
         )
         attempts = []
         artifacts = set()
@@ -621,6 +635,7 @@ class ProviderEvidenceCacheStoreV2:
         logical_operation_id: str,
         job_id: str,
         purpose: str,
+        attempt_number: int = 0,
     ) -> Dict[str, Any]:
         return dict(
             self._broker.execute(
@@ -630,7 +645,7 @@ class ProviderEvidenceCacheStoreV2:
                     "job_id": str(job_id),
                     "purpose": str(purpose),
                     "provider_id": "supabase",
-                    "attempt_number": 0,
+                    "attempt_number": attempt_number,
                     "method": method,
                     "url": url,
                     "headers": dict(headers),

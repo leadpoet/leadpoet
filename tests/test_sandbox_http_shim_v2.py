@@ -110,3 +110,70 @@ def test_all_supported_http_clients_use_the_same_frozen_evidence(
         "clients": 4,
         "fingerprint": fingerprint,
     }
+
+
+def test_all_supported_http_clients_preserve_attested_transport_failure() -> None:
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import json
+        import urllib.request
+
+        import aiohttp
+        import httpx
+        import requests
+
+        import gateway.tee.sandbox_http_shim_v2 as shim
+
+        url = "https://provider.example/v1/search"
+        failure = {
+            "terminal_status": "transport_failure",
+            "failure_code": "timeout",
+        }
+        shim.execute = lambda **_kwargs: dict(failure)
+        shim.install()
+
+        errors = {}
+        for name, call in {
+            "urllib": lambda: urllib.request.urlopen(url, timeout=1),
+            "requests": lambda: requests.get(url, timeout=1),
+            "httpx": lambda: httpx.get(url, timeout=1),
+        }.items():
+            try:
+                call()
+            except Exception as exc:
+                errors[name] = [type(exc).__name__, str(exc)]
+
+        async def call_aiohttp():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    await session.get(url, timeout=1)
+            except Exception as exc:
+                errors["aiohttp"] = [type(exc).__name__, str(exc)]
+
+        asyncio.run(call_aiohttp())
+        assert set(errors) == {"urllib", "requests", "httpx", "aiohttp"}
+        assert all(
+            value == ["SandboxHTTPShimV2Error", "attested transport failure: timeout"]
+            for value in errors.values()
+        )
+        print(json.dumps(errors, sort_keys=True))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=dict(os.environ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert set(json.loads(completed.stdout)) == {
+        "urllib",
+        "requests",
+        "httpx",
+        "aiohttp",
+    }

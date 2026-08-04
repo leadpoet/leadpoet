@@ -295,12 +295,17 @@ class ProviderEvidenceAuthorityV2:
         try:
             lookup_attempts = []
             lookup_artifacts = []
+            attempt_key = (normalized["caller_job_id"], fingerprint)
+            with self._lock:
+                attempt_number = self._attempts.get(attempt_key, 0)
+                self._attempts[attempt_key] = attempt_number + 1
             if self._cache_store is not None:
                 lookup = self._cache_store.load(
                     utc_day=utc_day,
                     request_fingerprint=fingerprint,
                     job_id=normalized["caller_job_id"],
                     purpose=normalized["purpose"],
+                    attempt_number=attempt_number,
                 )
                 lookup_attempts = list(lookup["transport_attempts"])
                 lookup_artifacts = list(lookup["evidence_artifact_hashes"])
@@ -328,10 +333,6 @@ class ProviderEvidenceAuthorityV2:
                     transport_attempts=lookup_attempts,
                     artifact_hashes=lookup_artifacts,
                 )
-            attempt_key = (normalized["caller_job_id"], fingerprint)
-            with self._lock:
-                attempt_number = self._attempts.get(attempt_key, 0)
-                self._attempts[attempt_key] = attempt_number + 1
             logical_operation_id = "%s:probe:%s" % (
                 normalized["caller_job_id"],
                 fingerprint[:16],

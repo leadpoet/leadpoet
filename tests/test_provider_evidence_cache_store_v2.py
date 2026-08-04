@@ -14,6 +14,7 @@ from gateway.tee.provider_evidence_cache_store_v2 import (
     ProviderEvidenceCacheStoreV2,
     ProviderEvidenceCacheStoreV2Error,
 )
+from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.provider_evidence_v2 import (
     REQUEST_SCHEMA_VERSION,
     ProviderEvidenceAuthorityV2,
@@ -163,6 +164,21 @@ class _Broker:
         }
 
 
+class _DeduplicatingBroker(_Broker):
+    def __init__(self):
+        super().__init__()
+        self.records = {}
+
+    def execute(self, request):
+        key = (request["logical_operation_id"], request["attempt_number"])
+        if key in self.records:
+            self.calls.append(dict(request))
+            return dict(self.records[key])
+        result = super().execute(request)
+        self.records[key] = dict(result)
+        return result
+
+
 def _vault(boot_hash=HASH):
     return EncryptedArtifactVaultV2(
         master_key=MASTER_KEY,
@@ -245,6 +261,36 @@ def test_cache_store_miss_and_transport_failure_are_distinct() -> None:
             job_id="job",
             purpose="research_lab.candidate_decision.v2",
         )
+
+
+def test_repeated_cache_reads_have_request_bound_transport_identities() -> None:
+    broker = _DeduplicatingBroker()
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+    )
+    context = ExecutionContextV2(
+        job_id="job",
+        purpose="research_lab.private_model_run.v2",
+        epoch_id=1,
+        provider_credential_ref_hashes={"supabase": HASH},
+    )
+
+    for attempt_number in (0, 1):
+        result = store.load(
+            utc_day="2026-07-10",
+            request_fingerprint="2" * 64,
+            job_id=context.job_id,
+            purpose=context.purpose,
+            attempt_number=attempt_number,
+        )
+        assert result["found"] is False
+        for attempt in result["transport_attempts"]:
+            context.record_transport(attempt)
+
+    assert [item["attempt_number"] for item in context.transport_attempts] == [0, 1]
+    assert len({item["attempt_hash"] for item in context.transport_attempts}) == 2
 
 
 def test_cache_store_rejects_tampered_ciphertext_and_source_hash() -> None:

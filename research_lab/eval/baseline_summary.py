@@ -31,9 +31,11 @@ def _average(values: Sequence[float]) -> float:
     return float(sum(values) / len(values)) if values else 0.0
 
 
-def _summary_has_unresolved_runtime_error(item_summary: Mapping[str, Any]) -> bool:
+def _summary_has_unresolved_provider_failure(item_summary: Mapping[str, Any]) -> bool:
     diagnostics = item_summary.get("diagnostics")
-    return isinstance(diagnostics, Mapping) and bool(diagnostics.get("runtime_error"))
+    return isinstance(diagnostics, Mapping) and bool(
+        diagnostics.get("runtime_error") or diagnostics.get("sourcing_failed")
+    )
 
 
 def build_baseline_health(
@@ -45,7 +47,9 @@ def build_baseline_health(
     day_jump_points: float | None = None,
 ) -> dict[str, Any]:
     unresolved = sum(
-        1 for summary in per_icp_summaries if _summary_has_unresolved_runtime_error(summary)
+        1
+        for summary in per_icp_summaries
+        if _summary_has_unresolved_provider_failure(summary)
     )
     result = {
         "unresolved_provider_errors": unresolved,

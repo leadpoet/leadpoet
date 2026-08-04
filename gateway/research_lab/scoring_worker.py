@@ -1584,6 +1584,13 @@ def _baseline_summary_nonempty(row: Mapping[str, Any]) -> bool:
     return isinstance(breakdowns, list) and len(breakdowns) > 0
 
 
+def _baseline_summary_sourcing_failed(row: Mapping[str, Any]) -> bool:
+    diagnostics = row.get("diagnostics")
+    return isinstance(diagnostics, Mapping) and bool(
+        diagnostics.get("sourcing_failed")
+    )
+
+
 def _icp_company_goal(icp: Any) -> int | None:
     """The ICP's pinned company goal (max_companies), clamped, or None."""
     raw = icp.get("max_companies") if isinstance(icp, Mapping) else None
@@ -1602,6 +1609,11 @@ def _baseline_summary_checkpointable(row: Mapping[str, Any]) -> bool:
     diagnostics = row.get("diagnostics")
     if isinstance(diagnostics, Mapping):
         if diagnostics.get("runtime_error"):
+            return False
+        # build_icp_stats classifies a zero-output row as an infrastructure
+        # sourcing failure. Reusing it would turn a transient/broken model run
+        # into a durable zero score and can poison a later mixed aggregate.
+        if diagnostics.get("sourcing_failed"):
             return False
         categories = {str(value) for value in diagnostics.get("failure_categories") or []}
         if categories.intersection({"runtime_provider_error", "scorer_provider_error", "provider_cost_tracking_failed"}):
@@ -1687,11 +1699,21 @@ def _load_baseline_scoring_progress(
     rows = doc.get("per_icp_results")
     if not isinstance(rows, list):
         return []
-    return [
+    reusable_rows = [
         dict(row)
         for row in rows
         if isinstance(row, Mapping) and _baseline_summary_checkpointable(row)
     ]
+    rejected_count = len(rows) - len(reusable_rows)
+    if rejected_count > 0:
+        logger.warning(
+            "research_lab_baseline_progress_rows_rejected "
+            "reason=unresolved_measurement completed=%s reusable=%s rejected=%s",
+            len(rows),
+            len(reusable_rows),
+            rejected_count,
+        )
+    return reusable_rows
 
 
 def _store_baseline_scoring_progress(
@@ -3022,9 +3044,10 @@ def _build_baseline_health(
 ) -> dict[str, Any]:
     """Health summary for a completed baseline run.
 
-    Retry-exhausted provider errors are scored as zero ICPs and recorded here
-    for audit. When ``baseline_health_gate_enforced`` is on, a failing
-    ``gate_passed`` blocks publication via
+    Retry-exhausted provider errors and empty sourcing attempts are scored as
+    zero ICPs and recorded here for audit. When
+    ``baseline_health_gate_enforced`` is on, a failing ``gate_passed`` blocks
+    publication via
     ``_enforce_baseline_publication_gates``.
     """
     return shared_build_baseline_health(
@@ -12372,6 +12395,11 @@ class ResearchLabGatewayScoringWorker:
                 context_label=f"{mode_label} for {label}",
                 require_non_empty=False,
             )
+            # The shared benchmark diagnostics classify no returned companies
+            # as an infrastructure sourcing failure. Retry it just like a
+            # provider exception; it must not become a durable zero checkpoint.
+            if not outputs:
+                retryable = True
         except PrivateModelRuntimeError as exc:
             outputs = []
             runtime_error = _short_error(exc)
@@ -12871,7 +12899,10 @@ class ResearchLabGatewayScoringWorker:
                         raise fatal[0]
                     recovered = 0
                     for entry in retried:
-                        if not entry.get("_runtime_error"):
+                        if (
+                            not entry.get("_runtime_error")
+                            and not _baseline_summary_sourcing_failed(entry)
+                        ):
                             recovered += 1
                         # Replace on success AND on repeat failure: the fresher
                         # attempt carries the more current diagnostics.
@@ -12905,7 +12936,10 @@ class ResearchLabGatewayScoringWorker:
                                 total_icps=total_icps,
                             )
             unresolved = sorted(
-                item_index for item_index, entry in results.items() if entry.get("_runtime_error")
+                item_index
+                for item_index, entry in results.items()
+                if entry.get("_runtime_error")
+                or _baseline_summary_sourcing_failed(entry)
             )
             logger.info(
                 format_worker_block(

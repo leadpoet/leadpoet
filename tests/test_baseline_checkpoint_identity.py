@@ -84,6 +84,51 @@ def test_invalidated_checkpoint_cannot_be_resumed():
     ) == []
 
 
+def test_sourcing_failed_checkpoint_rows_are_not_reused():
+    rows = _load(
+        _doc(
+            per_icp_results=[
+                {
+                    "icp_ref": "icp-failed",
+                    "score": 0.0,
+                    "company_count": 0,
+                    "diagnostics": {"sourcing_failed": True},
+                },
+                {
+                    "icp_ref": "icp-valid",
+                    "score": 0.0,
+                    "company_count": 1,
+                    "diagnostics": {"sourcing_failed": False},
+                },
+            ]
+        ),
+        repo_git_sha="abc123",
+        manifest_hash="sha256:m1",
+    )
+
+    assert [row["icp_ref"] for row in rows] == ["icp-valid"]
+
+
+def test_partial_39_of_40_empty_checkpoint_cannot_poison_final_aggregate():
+    rows = _load(
+        _doc(
+            per_icp_results=[
+                {
+                    "icp_ref": f"icp-{index}",
+                    "score": 0.0,
+                    "company_count": 0,
+                    "diagnostics": {"sourcing_failed": True},
+                }
+                for index in range(39)
+            ]
+        ),
+        repo_git_sha="abc123",
+        manifest_hash="sha256:m1",
+    )
+
+    assert rows == []
+
+
 def test_complete_distribution_requires_every_unique_icp():
     benchmark_items = [{"icp_ref": "icp-1"}, {"icp_ref": "icp-2"}]
     assert sw._baseline_distribution_complete(

@@ -1244,7 +1244,7 @@ async def test_run_baseline_icp_mode_label_reaches_runner():
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        await worker._run_baseline_icp(
+        summary = await worker._run_baseline_icp(
             runner=runner,
             scorer=NullScorer(),
             item={"icp": {}, "icp_ref": "icp:a", "icp_hash": "h", "set_id": 1, "day_index": 1, "day_rank": 1},
@@ -1257,6 +1257,10 @@ async def test_run_baseline_icp_mode_label_reaches_runner():
     finally:
         executor.shutdown(wait=False)
     assert seen == [{"mode": "confirmation_candidate"}]
+    assert summary["_retryable"] is True
+    assert summary["_nonempty"] is False
+    assert summary["diagnostics"]["sourcing_failed"] is True
+    assert sw._baseline_summary_checkpointable(summary) is False
 
 
 # ---------------------------------------------------------------------------

@@ -1032,6 +1032,30 @@ def test_build_baseline_health_passes_at_threshold():
     assert health["decision"] == "observe_only"
 
 
+def test_build_baseline_health_counts_empty_sourcing_as_unresolved():
+    health = sw._build_baseline_health(
+        per_icp_summaries=[
+            {
+                "icp_ref": "icp-empty",
+                "score": 0.0,
+                "diagnostics": {"sourcing_failed": True},
+            },
+            {
+                "icp_ref": "icp-valid-zero",
+                "score": 0.0,
+                "company_count": 1,
+                "diagnostics": {"sourcing_failed": False},
+            },
+        ],
+        retried=1,
+        recovered=0,
+        max_unresolved_icps=0,
+    )
+
+    assert health["unresolved_provider_errors"] == 1
+    assert health["gate_passed"] is False
+
+
 def test_baseline_health_gate_failure_carries_health():
     health = {"unresolved_provider_errors": 7, "gate_passed": False}
     exc = sw.BaselineHealthGateFailure("gate failed", baseline_health=health)
@@ -1523,6 +1547,14 @@ def test_private_baseline_checkpoint_rejects_unresolved_and_cost_blocked_rows():
             "icp_ref": "cost-blocked",
             "score": 0.0,
             "diagnostics": {"failure_categories": ["provider_cost_cap_blocked"]},
+        }
+    )
+    assert not sw._baseline_summary_checkpointable(
+        {
+            "icp_ref": "empty-sourcing",
+            "score": 0.0,
+            "company_count": 0,
+            "diagnostics": {"sourcing_failed": True},
         }
     )
     assert sw._baseline_summary_checkpointable(

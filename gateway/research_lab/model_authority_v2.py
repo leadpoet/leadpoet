@@ -73,6 +73,9 @@ _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 logger = logging.getLogger(__name__)
 V2_PROVIDER_PROFILE_ENV = "LEADPOET_V2_PROVIDER_CREDENTIAL_PROFILE"
 PROVIDER_EVIDENCE_TAPE_ARTIFACT_KIND = "provider_evidence_tape_v2"
+RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER = (
+    "retryable_attested_provider_transport_failure"
+)
 _CREDENTIAL_ENV_NAMES = frozenset(
     {
         "DEEPLINE_API_KEY",
@@ -103,6 +106,39 @@ _HOST_ONLY_ENV_NAMES = frozenset(
 
 class AttestedPrivateModelRunnerV2Error(PrivateModelRuntimeError):
     """The measured model result or one of its commitments is invalid."""
+
+
+def _has_retryable_attested_provider_transport_failure(
+    error: AttestedScoringV2Error,
+) -> bool:
+    """Recognize the model-scope finalizer from verified receipt evidence."""
+
+    if "execution_providerclientv2error" not in str(error).lower():
+        return False
+    authority = error.authority
+    if not isinstance(authority, Mapping):
+        return False
+    attempts = authority.get("transport_attempts")
+    if not isinstance(attempts, list):
+        return False
+    latest: dict[str, tuple[int, str]] = {}
+    for attempt in attempts:
+        if not isinstance(attempt, Mapping):
+            return False
+        logical_operation_id = str(attempt.get("logical_operation_id") or "")
+        try:
+            attempt_number = int(attempt.get("attempt_number"))
+        except (TypeError, ValueError):
+            return False
+        if not logical_operation_id or attempt_number < 0:
+            return False
+        current = latest.get(logical_operation_id)
+        if current is None or attempt_number > current[0]:
+            latest[logical_operation_id] = (
+                attempt_number,
+                str(attempt.get("terminal_status") or ""),
+            )
+    return any(status == "transport_failure" for _attempt, status in latest.values())
 
 
 def _run_private_source_git(
@@ -779,7 +815,13 @@ class AttestedPrivateModelRunnerV2:
         try:
             return await self._execute_operation(**kwargs)
         except AttestedScoringV2Error as exc:
-            raise AttestedPrivateModelRunnerV2Error(str(exc)) from exc
+            message = str(exc)
+            if _has_retryable_attested_provider_transport_failure(exc):
+                message = "%s; %s" % (
+                    message,
+                    RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
+                )
+            raise AttestedPrivateModelRunnerV2Error(message) from exc
 
     async def _execute_operation(
         self,

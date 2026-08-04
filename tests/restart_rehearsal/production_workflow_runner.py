@@ -4577,28 +4577,63 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     from gateway.research_lab.scoring_worker import _baseline_error_is_retryable
     from research_lab.eval.private_runtime import PrivateModelRuntimeError
 
-    async def fail_measured_operation(**_kwargs: Any) -> Any:
-        raise AttestedScoringV2Error(
+    failures = [
+        AttestedScoringV2Error(
             "V2 scoring failed closed: execution_modelsandboxv2error"
+        ),
+        AttestedScoringV2Error(
+            "V2 scoring failed closed: execution_providerclientv2error",
+            authority={
+                "transport_attempts": [
+                    {
+                        "logical_operation_id": "measured-provider-op",
+                        "attempt_number": 0,
+                        "terminal_status": "transport_failure",
+                    }
+                ]
+            },
+        ),
+    ]
+
+    async def fail_measured_operation(**_kwargs: Any) -> Any:
+        if not failures:
+            raise RuntimeError("rebenchmark retry fixture was exhausted")
+        error = failures.pop(0)
+        raise error
+
+    async def generic_provider_client_failure(**_kwargs: Any) -> Any:
+        raise AttestedScoringV2Error(
+            "V2 scoring failed closed: execution_providerclientv2error",
+            authority={"transport_attempts": []},
         )
 
     runner = object.__new__(AttestedPrivateModelRunnerV2)
     runner._execute_operation = fail_measured_operation  # type: ignore[method-assign]
+    for _expected_failure in range(2):
+        try:
+            asyncio.run(runner._invoke_operation(operation="run_icp"))
+        except AttestedPrivateModelRunnerV2Error as exc:
+            if not isinstance(exc, PrivateModelRuntimeError):
+                raise RuntimeError("measured sandbox failure left the runner contract")
+            if not isinstance(exc.__cause__, AttestedScoringV2Error):
+                raise RuntimeError("measured sandbox failure lost attested ancestry")
+            if not _baseline_error_is_retryable(str(exc)):
+                raise RuntimeError("measured sandbox failure bypassed bounded retry")
+        else:
+            raise RuntimeError("measured sandbox failure did not fail closed")
+    runner._execute_operation = generic_provider_client_failure  # type: ignore[method-assign]
     try:
         asyncio.run(runner._invoke_operation(operation="run_icp"))
     except AttestedPrivateModelRunnerV2Error as exc:
-        if not isinstance(exc, PrivateModelRuntimeError):
-            raise RuntimeError("measured sandbox failure left the runner contract")
-        if not isinstance(exc.__cause__, AttestedScoringV2Error):
-            raise RuntimeError("measured sandbox failure lost attested ancestry")
-        if not _baseline_error_is_retryable(str(exc)):
-            raise RuntimeError("measured sandbox failure bypassed bounded retry")
+        if _baseline_error_is_retryable(str(exc)):
+            raise RuntimeError("generic provider contract failure became retryable")
     else:
-        raise RuntimeError("measured sandbox failure did not fail closed")
+        raise RuntimeError("generic provider contract failure did not fail closed")
     return {
         "attested_ancestry_preserved": True,
         "private_runner_contract_preserved": True,
         "bounded_retry_selected": True,
+        "generic_provider_contract_failure_terminal": True,
     }
 
 

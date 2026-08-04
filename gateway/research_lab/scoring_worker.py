@@ -77,6 +77,7 @@ from gateway.research_lab.maintenance import (
 )
 from gateway.research_lab.model_authority_v2 import (
     AttestedPrivateModelRunnerV2,
+    RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
     V2_PROVIDER_PROFILE_ENV,
     retry_attested_model_runner_v2,
 )
@@ -1079,6 +1080,7 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
         marker in lowered
         for marker in (
             "execution_modelsandboxv2error",
+            RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
             "too many requests",
             "rate limit",
             "timed out",

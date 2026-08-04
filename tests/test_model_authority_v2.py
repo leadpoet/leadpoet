@@ -239,6 +239,57 @@ async def test_measured_execution_failure_preserves_private_runner_contract(
         )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "attempts,marked",
+    [
+        (
+            [
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": 0,
+                    "terminal_status": "transport_failure",
+                }
+            ],
+            True,
+        ),
+        (
+            [
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": 0,
+                    "terminal_status": "transport_failure",
+                },
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": 1,
+                    "terminal_status": "authenticated_response",
+                },
+            ],
+            False,
+        ),
+        ([], False),
+    ],
+)
+async def test_provider_client_failure_marks_only_latest_attested_transport_failure(
+    attempts, marked
+):
+    async def fail_measured_operation(**_kwargs):
+        raise AttestedScoringV2Error(
+            "V2 scoring failed closed: execution_providerclientv2error",
+            authority={"transport_attempts": attempts},
+        )
+
+    runner = object.__new__(AttestedPrivateModelRunnerV2)
+    runner._execute_operation = fail_measured_operation
+    with pytest.raises(AttestedPrivateModelRunnerV2Error) as captured:
+        await runner._invoke_operation(operation="run_icp")
+
+    marker = model_authority_v2.RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER
+    assert (marker in str(captured.value)) is marked
+    assert isinstance(captured.value.__cause__, AttestedScoringV2Error)
+
+
 def _ready_adapter_metadata() -> dict:
     routing_catalog = {"schema_version": 1}
     routing_policy = {"schema_version": 1}

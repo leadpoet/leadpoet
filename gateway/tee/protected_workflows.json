@@ -117,7 +117,7 @@
       "symbol": "recover_research_lab_checkpointed_audit_epochs"
     },
     {
-      "ast_sha256": "sha256:cda4973b82aa18ff087f8ac18098175faba28d8afe67b648679e22228a5bbae8",
+      "ast_sha256": "sha256:04ddcdba4fdbf7df54fa339d1157e2f698f045c29e903823caba52858f01be58",
       "path": "gateway/research_lab/attested_artifacts_v2.py",
       "symbol": "_select_committed_encrypted_artifacts"
     },
@@ -187,7 +187,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:0423cc811b97a71dc4f12f4bea66d6682fef5a3a6ab1c34fa0a538c26a780c1e",
+      "ast_sha256": "sha256:8dc02af3e44176619c7b4487eb97c95bc66f19ed24a7e3dbcab80a91b7b394b5",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:68a8e453874b525433e72886ea2d3d7ded2945b7a2d62fa2d740360ecb48cb78",
+  "manifest_hash": "sha256:42ff7fc330c6766939de73e22adc55275c1bf8f849dfd9de12b8ff5c04bd8a5b",
   "protected_source_commit": "a0798fc6336838326bb4708789d24225cd1dcaef",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

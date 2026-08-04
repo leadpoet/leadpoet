@@ -32,6 +32,7 @@ def _select_committed_encrypted_artifacts(
     artifacts: Any,
     *,
     committed_hashes: Sequence[str],
+    require_descriptor_commitments: bool = False,
 ) -> list[dict[str, Any]]:
     """Exclude transient coordinator envelopes absent from the source receipt."""
 
@@ -51,7 +52,22 @@ def _select_committed_encrypted_artifacts(
             raise AttestedArtifactPersistenceV2Error(
                 "coordinator encrypted artifact plaintext hash is invalid"
             )
-        if plaintext_hash in committed:
+        descriptor_hashes = {
+            str(artifact.get(field) or "")
+            for field in (
+                "artifact_id",
+                "ciphertext_hash",
+                "encryption_context_hash",
+            )
+            if artifact.get(field)
+        }
+        if (
+            plaintext_hash in committed
+            and (
+                not require_descriptor_commitments
+                or descriptor_hashes.issubset(committed)
+            )
+        ):
             selected.append(dict(artifact))
     return selected
 

@@ -2273,6 +2273,31 @@ async def test_v2_bridge_persists_every_authenticated_provider_artifact_first(
         )
 
     client = _Client(release, executor=executor)
+    artifact_client = _ArtifactCoordinator(
+        release,
+        (_hash("8"), _hash("6")),
+    )
+    original_list = artifact_client.v2_list_encrypted_artifacts
+
+    async def list_with_retry_orphan(*, job_id, purpose):
+        listed = await original_list(job_id=job_id, purpose=purpose)
+        return {
+            "artifacts": [
+                *listed["artifacts"],
+                {
+                    "artifact_id": _hash("f"),
+                    "plaintext_hash": _hash("8"),
+                    "ciphertext_hash": _hash("7"),
+                    "encryption_context_hash": _hash("e"),
+                    "artifact_kind": "provider_request",
+                    "persisted": False,
+                    "job_id": job_id,
+                    "purpose": purpose,
+                },
+            ]
+        }
+
+    artifact_client.v2_list_encrypted_artifacts = list_with_retry_orphan
     persisted_artifacts = []
     persisted_graphs = []
     persisted_sidecars = []
@@ -2330,10 +2355,7 @@ async def test_v2_bridge_persists_every_authenticated_provider_artifact_first(
         worker_index=0,
         release_manifest=release,
         client=client,
-        artifact_coordinator_client=_ArtifactCoordinator(
-            release,
-            (_hash("8"), _hash("6")),
-        ),
+        artifact_coordinator_client=artifact_client,
         persist_artifact=persist_artifact,
         artifact_bucket="immutable-bucket",
         persist_graph=persist_graph,

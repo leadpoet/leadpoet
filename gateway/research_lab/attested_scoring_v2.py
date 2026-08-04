@@ -1886,6 +1886,9 @@ async def execute_scoring_v2(
         artifacts = _select_committed_encrypted_artifacts(
             listed.get("artifacts"),
             committed_hashes=job_artifact_hashes,
+            require_descriptor_commitments=(
+                not allow_persistence_bound_artifact_descriptors
+            ),
         )
         observed_hashes = sorted(
             str(item.get("plaintext_hash") or "")

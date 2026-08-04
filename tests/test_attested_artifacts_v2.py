@@ -69,6 +69,53 @@ def test_only_source_receipt_committed_envelopes_are_selected():
     ]
 
 
+def test_descriptor_commitments_exclude_same_plaintext_retry_envelope():
+    committed_artifact = {
+        "artifact_id": _hash("a"),
+        "plaintext_hash": _hash("1"),
+        "ciphertext_hash": _hash("c"),
+        "encryption_context_hash": _hash("e"),
+        "artifact_kind": "provider_response",
+        "persisted": False,
+    }
+    retry_orphan = {
+        **committed_artifact,
+        "artifact_id": _hash("b"),
+        "ciphertext_hash": _hash("d"),
+    }
+    committed_hashes = tuple(
+        committed_artifact[field]
+        for field in (
+            "artifact_id",
+            "plaintext_hash",
+            "ciphertext_hash",
+            "encryption_context_hash",
+        )
+    )
+
+    plaintext_selected = (
+        attested_artifacts_v2._select_committed_encrypted_artifacts(
+            [committed_artifact, retry_orphan],
+            committed_hashes=committed_hashes,
+        )
+    )
+    descriptor_selected = (
+        attested_artifacts_v2._select_committed_encrypted_artifacts(
+            [committed_artifact, retry_orphan],
+            committed_hashes=committed_hashes,
+            require_descriptor_commitments=True,
+        )
+    )
+
+    assert [item["artifact_id"] for item in plaintext_selected] == [
+        _hash("a"),
+        _hash("b"),
+    ]
+    assert [item["artifact_id"] for item in descriptor_selected] == [
+        _hash("a")
+    ]
+
+
 async def _exercise(
     monkeypatch: pytest.MonkeyPatch,
     *,

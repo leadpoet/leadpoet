@@ -3719,11 +3719,42 @@ def _exercise_validator_publication_release_recovery() -> dict[str, Any]:
         rejected += 1
     if rejected != 5:
         raise RuntimeError("validator recovery release tampering was accepted")
+    if authority._recovery_finalization_only_mode(
+        old_boot=current_boot,
+        extrinsic_signature_results=[],
+        allow_cross_release_finalization_only=False,
+    ):
+        raise RuntimeError("same-release recovery became finalization-only")
+    finalization_only = authority._recovery_finalization_only_mode(
+        old_boot=old_boot,
+        extrinsic_signature_results=[{"durable_signed_extrinsic": True}],
+        allow_cross_release_finalization_only=True,
+    )
+    finalization_mode_rejections = 0
+    for signatures, allowed in (
+        ([{"durable_signed_extrinsic": True}], False),
+        ([], True),
+    ):
+        try:
+            authority._recovery_finalization_only_mode(
+                old_boot=old_boot,
+                extrinsic_signature_results=signatures,
+                allow_cross_release_finalization_only=allowed,
+            )
+        except ValidatorHotkeyAuthorityV2Error:
+            finalization_mode_rejections += 1
+    if not finalization_only or finalization_mode_rejections != 2:
+        raise RuntimeError(
+            "cross-release recovery was not constrained to signed finalization"
+        )
     return {
         "approved_n_minus_one_recovered": True,
         "nitro_attestation_rechecked": True,
         "release_tampering_rejected": True,
         "same_release_config_mismatch_rejected": True,
+        "cross_release_finalization_only": True,
+        "unsigned_cross_release_rejected": True,
+        "implicit_cross_release_rejected": True,
     }
 
 
@@ -5177,6 +5208,21 @@ def main() -> int:
                 "validator-publication-release-recovery",
                 {},
             ).get("same_release_config_mismatch_rejected")
+            is True
+            and behavior_evidence.get(
+                "validator-publication-release-recovery",
+                {},
+            ).get("cross_release_finalization_only")
+            is True
+            and behavior_evidence.get(
+                "validator-publication-release-recovery",
+                {},
+            ).get("unsigned_cross_release_rejected")
+            is True
+            and behavior_evidence.get(
+                "validator-publication-release-recovery",
+                {},
+            ).get("implicit_cross_release_rejected")
             is True
         ),
         "canonical_vector_primary_auditor_equal": (

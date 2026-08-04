@@ -642,10 +642,15 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
             published_bundle = request.get("published_bundle")
             event_hash = request.get("weight_submission_event_hash")
             signed_results = request.get("extrinsic_signature_results")
+            allow_cross_release = request.get(
+                "allow_cross_release_finalization_only",
+                False,
+            )
             if (
                 not isinstance(published_bundle, dict)
                 or not isinstance(event_hash, str)
                 or not isinstance(signed_results, list)
+                or not isinstance(allow_cross_release, bool)
             ):
                 return {
                     "status": "error",
@@ -658,6 +663,9 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                         published_bundle=published_bundle,
                         weight_submission_event_hash=event_hash,
                         extrinsic_signature_results=signed_results,
+                        allow_cross_release_finalization_only=(
+                            allow_cross_release
+                        ),
                     )
                 ),
             }
@@ -673,10 +681,15 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
             compact_submission = request.get("compact_submission")
             event_hash = request.get("weight_submission_event_hash")
             signed_results = request.get("extrinsic_signature_results")
+            allow_cross_release = request.get(
+                "allow_cross_release_finalization_only",
+                False,
+            )
             if (
                 not isinstance(compact_submission, dict)
                 or not isinstance(event_hash, str)
                 or not isinstance(signed_results, list)
+                or not isinstance(allow_cross_release, bool)
             ):
                 return {
                     "status": "error",
@@ -694,6 +707,9 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                         compact_submission=normalized_compact,
                         weight_submission_event_hash=event_hash,
                         extrinsic_signature_results=signed_results,
+                        allow_cross_release_finalization_only=(
+                            allow_cross_release
+                        ),
                     )
                 ),
             }

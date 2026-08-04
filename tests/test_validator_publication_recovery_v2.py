@@ -97,9 +97,16 @@ class _Journal:
 
 
 class _Client:
-    def __init__(self, *, signed_extrinsics, confirm_error=False):
+    def __init__(
+        self,
+        *,
+        signed_extrinsics,
+        confirm_error=False,
+        finalization_only=False,
+    ):
         self.signed_extrinsics = list(signed_extrinsics)
         self.confirm_error = confirm_error
+        self.finalization_only = bool(finalization_only)
         self.calls = []
 
     def recover_weight_publication_v2(self, **kwargs):
@@ -107,6 +114,7 @@ class _Client:
         return {
             "weight_authorization_id": NEW_AUTHORIZATION,
             "signed_extrinsics": list(self.signed_extrinsics),
+            "finalization_only": self.finalization_only,
         }
 
     def recover_compact_weight_publication_v2(self, **kwargs):
@@ -114,6 +122,7 @@ class _Client:
         return {
             "weight_authorization_id": NEW_AUTHORIZATION,
             "signed_extrinsics": list(self.signed_extrinsics),
+            "finalization_only": self.finalization_only,
         }
 
     def confirm_weight_publication_v2(
@@ -369,6 +378,44 @@ async def test_signed_crash_rebroadcasts_only_exact_enclave_bytes_then_finalizes
     assert validator.substrate_calls == [
         ("author_submitExtrinsic", ["0xaabbcc"])
     ]
+    assert journal.calls[-1] == ("clear", EVENT)
+
+
+@pytest.mark.asyncio
+async def test_cross_release_signed_recovery_only_proves_finalization(
+    monkeypatch,
+):
+    recovered_extrinsic = {
+        "authorization_hash": "sha256:" + "4" * 64,
+        "extrinsic_hash": "0x" + "5" * 64,
+        "extrinsic_hex": "aabbcc",
+    }
+    journal = _Journal(
+        _compact_record(published=True, signatures=[{"receipt": True}])
+    )
+    client = _Client(
+        signed_extrinsics=[recovered_extrinsic],
+        confirm_error=True,
+        finalization_only=True,
+    )
+    validator = _validator(journal, client)
+
+    async def finalize(**_kwargs):
+        return {"acknowledgment": {"weight_finalization_event_hash": EVENT}}
+
+    monkeypatch.setattr(
+        validator_module,
+        "finalize_authoritative_weight_publication_v2",
+        finalize,
+    )
+
+    outcome = await validator._recover_weight_publication_journal_v2(
+        gateway_url="https://gateway.example"
+    )
+
+    assert outcome.status == "finalized"
+    assert client.calls[0][1]["allow_cross_release_finalization_only"] is True
+    assert validator.substrate_calls == []
     assert journal.calls[-1] == ("clear", EVENT)
 
 

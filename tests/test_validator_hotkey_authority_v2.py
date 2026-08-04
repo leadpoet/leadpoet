@@ -641,6 +641,7 @@ def test_restart_recovery_revalidates_bundle_binding_and_signed_extrinsic(
         extrinsic_signature_results=[signed],
     )
     assert recovered["weight_authorization_id"].startswith("sha256:")
+    assert recovered["finalization_only"] is False
     assert recovered["signed_extrinsics"] == [
         {
             "authorization_hash": signed["authorization_hash"],
@@ -678,15 +679,72 @@ def test_restart_recovery_revalidates_bundle_binding_and_signed_extrinsic(
     }
     authority._weights.clear()
     authority._commits.clear()
+    with pytest.raises(
+        ValidatorHotkeyAuthorityV2Error,
+        match="explicit finalization-only mode",
+    ):
+        authority.recover_weight_publication(
+            published_bundle=bundle,
+            weight_submission_event_hash=event_hash,
+            extrinsic_signature_results=[signed],
+        )
+    with pytest.raises(
+        ValidatorHotkeyAuthorityV2Error,
+        match="requires a signed extrinsic",
+    ):
+        authority.recover_weight_publication(
+            published_bundle=bundle,
+            weight_submission_event_hash=event_hash,
+            extrinsic_signature_results=[],
+            allow_cross_release_finalization_only=True,
+        )
     cross_release = authority.recover_weight_publication(
         published_bundle=bundle,
         weight_submission_event_hash=event_hash,
         extrinsic_signature_results=[signed],
+        allow_cross_release_finalization_only=True,
     )
     assert cross_release["weight_authorization_id"].startswith("sha256:")
+    assert cross_release["finalization_only"] is True
     assert cross_release["signed_extrinsics"][0]["extrinsic_hash"] == signed[
         "extrinsic_hash"
     ]
+    recovered_root = response["receipt_graph"]["root_receipt_hash"]
+    current_binding_message = create_binding_message(
+        netuid=71,
+        chain=_profile()["chain_endpoint"],
+        enclave_pubkey=current_boot["signing_pubkey"],
+        validator_code_hash=current_boot["build_manifest_hash"],
+        version=current_boot["commit_sha"],
+    )
+    with pytest.raises(
+        ValidatorHotkeyAuthorityV2Error,
+        match="cannot sign a gateway binding",
+    ):
+        authority.sign_application_message(
+            message_hex=current_binding_message.encode().hex(),
+            parent_receipt_hash=recovered_root,
+        )
+    with pytest.raises(
+        ValidatorHotkeyAuthorityV2Error,
+        match="cannot prepare a weight commit",
+    ):
+        authority.prepare_weight_commit(
+            weight_authorization_id=cross_release["weight_authorization_id"],
+            weight_submission_event_hash=event_hash,
+            uids=response["weight_result"]["sparse_uids"],
+            weights_u16=response["weight_result"]["sparse_weights_u16"],
+            version_key=10005000,
+            last_epoch_block=response["weight_result"]["block"] - 126,
+            pending_epoch_at=0,
+            subnet_epoch_index=23860,
+            tempo=360,
+            blocks_since_last_step=127,
+            current_block=response["weight_result"]["block"] + 1,
+            subnet_reveal_period_epochs=1,
+            block_time=12.0,
+            hotkey_public_key_hex=HOTKEY_PUBLIC.hex(),
+        )
 
     with pytest.raises(
         ValidatorHotkeyAuthorityV2Error,
@@ -696,7 +754,64 @@ def test_restart_recovery_revalidates_bundle_binding_and_signed_extrinsic(
             published_bundle=bundle,
             weight_submission_event_hash="sha256:" + "f" * 64,
             extrinsic_signature_results=[signed],
+            allow_cross_release_finalization_only=True,
         )
+
+    local_graph = {
+        "root_receipt_hash": response["receipt_graph"]["root_receipt_hash"],
+        "boot_identities": [old_boot],
+        "receipts": response["receipt_graph"]["receipts"],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+    compact = {
+        "validator_hotkey": HOTKEY,
+        "weight_snapshot": response["weight_snapshot"],
+        "weight_result": response["weight_result"],
+        "weights_signature": response["weights_signature"],
+        "validator_receipt_delta": local_graph,
+        "ancestry_commitment": "sha256:" + "c" * 64,
+        "binding_message": binding_message,
+        "validator_hotkey_signature": binding["signature"],
+        "binding_receipt": binding["receipt"],
+        "compact_submission_hash": "sha256:" + "d" * 64,
+    }
+    monkeypatch.setattr(
+        module,
+        "validate_compact_weight_submission_shape_v2",
+        lambda _compact: compact,
+    )
+    monkeypatch.setattr(
+        module,
+        "validate_weight_snapshot_v2",
+        lambda _snapshot: dict(response["weight_result"]),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_validate_compact_weight_delta",
+        lambda **_kwargs: local_graph,
+    )
+    authority._weights.clear()
+    authority._commits.clear()
+    with pytest.raises(
+        ValidatorHotkeyAuthorityV2Error,
+        match="explicit finalization-only mode",
+    ):
+        authority.recover_compact_weight_publication(
+            compact_submission=compact,
+            weight_submission_event_hash=event_hash,
+            extrinsic_signature_results=[signed],
+        )
+    compact_recovery = authority.recover_compact_weight_publication(
+        compact_submission=compact,
+        weight_submission_event_hash=event_hash,
+        extrinsic_signature_results=[signed],
+        allow_cross_release_finalization_only=True,
+    )
+    assert compact_recovery["finalization_only"] is True
+    assert compact_recovery["signed_extrinsics"][0]["extrinsic_hash"] == signed[
+        "extrinsic_hash"
+    ]
 
 
 def test_serve_axon_signer_rebuilds_and_limits_the_exact_call(monkeypatch):

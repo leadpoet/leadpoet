@@ -300,8 +300,8 @@ class ValidatorHotkeyAuthorityV2:
     def _verify_recovery_validator_boot(
         self,
         old_boot: Mapping[str, Any],
-    ) -> None:
-        """Verify a recovery boot against the current or approved release."""
+    ) -> bool:
+        """Verify a recovery boot and report whether it is cross-release."""
 
         if (
             old_boot.get("role") != "validator_weights"
@@ -317,7 +317,10 @@ class ValidatorHotkeyAuthorityV2:
             "build_manifest_hash",
             "dependency_lock_hash",
         )
-        if old_boot.get("commit_sha") == current_boot.get("commit_sha"):
+        same_release = old_boot.get("commit_sha") == current_boot.get(
+            "commit_sha"
+        )
+        if same_release:
             if any(
                 old_boot.get(field) != current_boot.get(field)
                 for field in (*release_fields, "config_hash")
@@ -361,6 +364,31 @@ class ValidatorHotkeyAuthorityV2:
             raise ValidatorHotkeyAuthorityV2Error(
                 "recovery validator boot attestation is invalid"
             ) from exc
+        return not same_release
+
+    def _recovery_finalization_only_mode(
+        self,
+        *,
+        old_boot: Mapping[str, Any],
+        extrinsic_signature_results: Sequence[Mapping[str, Any]],
+        allow_cross_release_finalization_only: bool,
+    ) -> bool:
+        if not isinstance(allow_cross_release_finalization_only, bool):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "cross-release finalization mode is invalid"
+            )
+        cross_release = self._verify_recovery_validator_boot(old_boot)
+        if not cross_release:
+            return False
+        if not allow_cross_release_finalization_only:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "cross-release recovery requires explicit finalization-only mode"
+            )
+        if not extrinsic_signature_results:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "cross-release recovery requires a signed extrinsic"
+            )
+        return True
 
     def recipient_request(self) -> Dict[str, Any]:
         with self._lock:
@@ -650,6 +678,7 @@ class ValidatorHotkeyAuthorityV2:
                 ),
                 "attempts": 0,
                 "finalization": None,
+                "finalization_only": False,
             }
         return authorization_id
 
@@ -816,6 +845,7 @@ class ValidatorHotkeyAuthorityV2:
         published_bundle: Mapping[str, Any],
         weight_submission_event_hash: str,
         extrinsic_signature_results: Sequence[Mapping[str, Any]],
+        allow_cross_release_finalization_only: bool = False,
     ) -> Dict[str, Any]:
         """Recover public signed authority after a parent or enclave restart.
 
@@ -849,7 +879,13 @@ class ValidatorHotkeyAuthorityV2:
                 "recovery bundle needs exactly one computing validator boot"
             )
         old_boot = validator_boots[0]
-        self._verify_recovery_validator_boot(old_boot)
+        finalization_only = self._recovery_finalization_only_mode(
+            old_boot=old_boot,
+            extrinsic_signature_results=extrinsic_signature_results,
+            allow_cross_release_finalization_only=(
+                allow_cross_release_finalization_only
+            ),
+        )
         try:
             binding_signature = bytes.fromhex(
                 str(published_bundle["validator_hotkey_signature"])
@@ -894,6 +930,7 @@ class ValidatorHotkeyAuthorityV2:
             receipt_graph=recovery_graph,
             receipt_graph_delta=None,
             ancestry_commitment=None,
+            finalization_only=finalization_only,
         )
 
     def recover_compact_weight_publication(
@@ -902,6 +939,7 @@ class ValidatorHotkeyAuthorityV2:
         compact_submission: Mapping[str, Any],
         weight_submission_event_hash: str,
         extrinsic_signature_results: Sequence[Mapping[str, Any]],
+        allow_cross_release_finalization_only: bool = False,
     ) -> Dict[str, Any]:
         """Recover bounded public authority without importing historical bodies.
 
@@ -935,7 +973,13 @@ class ValidatorHotkeyAuthorityV2:
                 "compact recovery validator boot is ambiguous"
             )
         old_boot = dict(delta["boot_identities"][0])
-        self._verify_recovery_validator_boot(old_boot)
+        finalization_only = self._recovery_finalization_only_mode(
+            old_boot=old_boot,
+            extrinsic_signature_results=extrinsic_signature_results,
+            allow_cross_release_finalization_only=(
+                allow_cross_release_finalization_only
+            ),
+        )
         expected_result = validate_weight_snapshot_v2(
             compact["weight_snapshot"]
         )
@@ -1039,6 +1083,7 @@ class ValidatorHotkeyAuthorityV2:
             receipt_graph=None,
             receipt_graph_delta=local_graph,
             ancestry_commitment=str(compact["ancestry_commitment"]),
+            finalization_only=finalization_only,
         )
 
     def _restore_recovered_weight_publication(
@@ -1054,6 +1099,7 @@ class ValidatorHotkeyAuthorityV2:
         receipt_graph: Optional[Mapping[str, Any]],
         receipt_graph_delta: Optional[Mapping[str, Any]],
         ancestry_commitment: Optional[str],
+        finalization_only: bool,
     ) -> Dict[str, Any]:
         event_hash = str(weight_submission_event_hash)
         weight_result = dict(weight_result)
@@ -1179,6 +1225,7 @@ class ValidatorHotkeyAuthorityV2:
                 "extrinsic_hashes": [
                     item["output"]["extrinsic_hash"] for item in normalized_signed
                 ],
+                "finalization_only": bool(finalization_only),
             }
         )
         with self._lock:
@@ -1208,6 +1255,7 @@ class ValidatorHotkeyAuthorityV2:
                     "ancestry_commitment": ancestry_commitment,
                     "attempts": len(normalized_signed),
                     "finalization": None,
+                    "finalization_only": bool(finalization_only),
                 }
                 for index, signed in enumerate(normalized_signed):
                     commit_id = sha256_json(
@@ -1236,6 +1284,8 @@ class ValidatorHotkeyAuthorityV2:
                     existing["root_receipt_hash"]
                     != computed_receipt["receipt_hash"]
                     or existing["weight_result"] != weight_result
+                    or bool(existing.get("finalization_only"))
+                    != bool(finalization_only)
                 ):
                     raise ValidatorHotkeyAuthorityV2Error(
                         "recovered weight authorization conflicts"
@@ -1243,6 +1293,7 @@ class ValidatorHotkeyAuthorityV2:
         return {
             "weight_authorization_id": recovery_id,
             "weight_submission_event_hash": event_hash,
+            "finalization_only": bool(finalization_only),
             "signed_extrinsics": [
                 {
                     "authorization_hash": item["authorization"][
@@ -1286,6 +1337,10 @@ class ValidatorHotkeyAuthorityV2:
             if len(records) != 1:
                 raise ValidatorHotkeyAuthorityV2Error(
                     "gateway binding lacks an authoritative weight parent"
+                )
+            if records[0].get("finalization_only") is True:
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "finalization-only recovery cannot sign a gateway binding"
                 )
             parsed, parts, _error = parse_binding_message(message.decode("utf-8"))
             record = records[0]
@@ -1369,6 +1424,10 @@ class ValidatorHotkeyAuthorityV2:
             if record is None:
                 raise ValidatorHotkeyAuthorityV2Error(
                     "weight authorization was not found"
+                )
+            if record.get("finalization_only") is True:
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "finalization-only recovery cannot prepare a weight commit"
                 )
             if record["attempts"] >= max_attempts:
                 raise ValidatorHotkeyAuthorityV2Error(

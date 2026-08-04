@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from validator_tee.enclave import tee_service
 from validator_tee.host.vsock_client import ValidatorEnclaveClient
 
@@ -288,6 +290,7 @@ def test_validator_rpc_exposes_only_structured_hotkey_operations(monkeypatch):
                 "published_bundle": {"bundle": True},
                 "weight_submission_event_hash": "sha256:" + "3" * 64,
                 "extrinsic_signature_results": [],
+                "allow_cross_release_finalization_only": False,
             },
         ),
     ]
@@ -334,7 +337,17 @@ def test_validator_host_client_uses_hotkey_rpc_shapes(monkeypatch):
         published_bundle={"bundle": True},
         weight_submission_event_hash="sha256:" + "4" * 64,
         extrinsic_signature_results=[],
+        allow_cross_release_finalization_only=True,
     )["weight_authorization_id"] == "sha256:" + "3" * 64
+    recovery_request = requests[-1][0]
+    assert recovery_request["allow_cross_release_finalization_only"] is True
+    with pytest.raises(ValueError, match="must be boolean"):
+        client.recover_weight_publication_v2(
+            published_bundle={"bundle": True},
+            weight_submission_event_hash="sha256:" + "4" * 64,
+            extrinsic_signature_results=[],
+            allow_cross_release_finalization_only="yes",
+        )
     assert client.sign_weight_extrinsic_v2({"payload": True}) == {
         "extrinsic": True
     }
@@ -348,3 +361,30 @@ def test_validator_host_client_uses_hotkey_rpc_shapes(monkeypatch):
         "recover_weight_publication_v2",
         "sign_weight_extrinsic_v2",
     ]
+
+
+def test_validator_recovery_rpc_rejects_non_boolean_release_mode(monkeypatch):
+    class FakeHotkeyAuthority:
+        def recover_weight_publication(self, **_kwargs):
+            pytest.fail("invalid recovery request reached the authority")
+
+    monkeypatch.setattr(
+        tee_service,
+        "validator_hotkey_authority_v2",
+        FakeHotkeyAuthority(),
+    )
+
+    response = tee_service.handle_request(
+        {
+            "command": "recover_weight_publication_v2",
+            "published_bundle": {"bundle": True},
+            "weight_submission_event_hash": "sha256:" + "3" * 64,
+            "extrinsic_signature_results": [{"signed": True}],
+            "allow_cross_release_finalization_only": "true",
+        }
+    )
+
+    assert response == {
+        "status": "error",
+        "error": "Invalid weight publication recovery request",
+    }

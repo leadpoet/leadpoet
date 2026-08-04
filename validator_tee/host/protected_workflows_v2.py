@@ -163,6 +163,7 @@ PROTECTED_SYMBOLS = {
         "ValidatorHotkeyAuthorityV2.provision_seed",
         "ValidatorHotkeyAuthorityV2.register_weight_result",
         "ValidatorHotkeyAuthorityV2._verify_recovery_validator_boot",
+        "ValidatorHotkeyAuthorityV2._recovery_finalization_only_mode",
         "ValidatorHotkeyAuthorityV2.recover_weight_publication",
         "ValidatorHotkeyAuthorityV2.recover_compact_weight_publication",
         "ValidatorHotkeyAuthorityV2.sign_application_message",

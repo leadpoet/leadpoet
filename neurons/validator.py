@@ -4724,6 +4724,9 @@ class Validator(BaseValidatorNeuron):
                 extrinsic_signature_results=record[
                     "extrinsic_signature_results"
                 ],
+                allow_cross_release_finalization_only=bool(
+                    record["extrinsic_signature_results"]
+                ),
             )
         except Exception as exc:
             if not epoch_closed:
@@ -4752,6 +4755,12 @@ class Validator(BaseValidatorNeuron):
         )
         weight_result = authority["weight_result"]
         signed_extrinsics = list(recovery["signed_extrinsics"])
+        finalization_only = bool(recovery.get("finalization_only", False))
+        if finalization_only and not signed_extrinsics:
+            raise RuntimeError(
+                "cross-release finalization-only recovery has no signed "
+                "extrinsic"
+            )
         if not signed_extrinsics:
             sdk_uids, sdk_weights = _canonical_sdk_weight_vector(weight_result)
             submitted = await self._set_weights_until_epoch_end(
@@ -4785,7 +4794,18 @@ class Validator(BaseValidatorNeuron):
                 # before the original SDK call. The enclave independently
                 # proves finalized inclusion; this host response is not trusted.
                 latest = signed_extrinsics[-1]
-                if epoch_closed:
+                if finalization_only:
+                    log = (
+                        bt.logging.critical
+                        if epoch_closed
+                        else bt.logging.warning
+                    )
+                    log(
+                        "weight_publication_cross_release_finalization_pending "
+                        f"epoch={epoch_id} extrinsic_hash="
+                        f"{latest['extrinsic_hash']} rebroadcast=false"
+                    )
+                elif epoch_closed:
                     bt.logging.critical(
                         "weight_publication_journal_stale_signed_unresolved "
                         f"epoch={epoch_id} extrinsic_hash="

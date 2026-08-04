@@ -443,7 +443,10 @@ class ValidatorEnclaveClient:
         published_bundle: Dict[str, Any],
         weight_submission_event_hash: str,
         extrinsic_signature_results: list,
+        allow_cross_release_finalization_only: bool = False,
     ) -> Dict[str, Any]:
+        if not isinstance(allow_cross_release_finalization_only, bool):
+            raise ValueError("cross-release finalization mode must be boolean")
         response = self._send_request(
             {
                 "command": "recover_weight_publication_v2",
@@ -453,6 +456,9 @@ class ValidatorEnclaveClient:
                 ),
                 "extrinsic_signature_results": list(
                     extrinsic_signature_results
+                ),
+                "allow_cross_release_finalization_only": (
+                    allow_cross_release_finalization_only
                 ),
             },
             timeout_seconds=600,
@@ -465,7 +471,10 @@ class ValidatorEnclaveClient:
         compact_submission: Dict[str, Any],
         weight_submission_event_hash: str,
         extrinsic_signature_results: list,
+        allow_cross_release_finalization_only: bool = False,
     ) -> Dict[str, Any]:
+        if not isinstance(allow_cross_release_finalization_only, bool):
+            raise ValueError("cross-release finalization mode must be boolean")
         response = self._send_request(
             {
                 "command": "recover_compact_weight_publication_v2",
@@ -475,6 +484,9 @@ class ValidatorEnclaveClient:
                 ),
                 "extrinsic_signature_results": list(
                     extrinsic_signature_results
+                ),
+                "allow_cross_release_finalization_only": (
+                    allow_cross_release_finalization_only
                 ),
             },
             timeout_seconds=600,

@@ -106,6 +106,8 @@ def _boot(signing_key):
     ).hex()
     return {
         "boot_identity_hash": "sha256:" + "1" * 64,
+        "role": "validator_weights",
+        "physical_role": "validator_weights",
         "commit_sha": "2" * 40,
         "pcr0": "3" * 96,
         "build_manifest_hash": "sha256:" + "4" * 64,
@@ -235,6 +237,83 @@ def test_hotkey_seed_is_unsealed_only_to_attested_recipient(monkeypatch):
     assert state["hotkey_public_key"] == HOTKEY_PUBLIC.hex()
     with pytest.raises(ValidatorHotkeyAuthorityV2Error, match="already provisioned"):
         _provision(authority)
+
+
+def test_recovery_boot_accepts_only_attested_approved_validator_release(
+    monkeypatch,
+):
+    authority, old_boot, *_rest = _authority(monkeypatch)
+    current_boot = {
+        **old_boot,
+        "boot_identity_hash": "sha256:" + "a" * 64,
+        "commit_sha": "b" * 40,
+        "pcr0": "c" * 96,
+        "build_manifest_hash": "sha256:" + "d" * 64,
+        "dependency_lock_hash": "sha256:" + "e" * 64,
+        "config_hash": "sha256:" + "f" * 64,
+    }
+    authority._boot_identity_supplier = lambda: current_boot
+    authority._gateway_release_lineage_supplier = lambda: {
+        old_boot["commit_sha"]: {
+            "roles": {
+                "validator_weights": {
+                    field: old_boot[field]
+                    for field in (
+                        "commit_sha",
+                        "pcr0",
+                        "build_manifest_hash",
+                        "dependency_lock_hash",
+                    )
+                }
+            }
+        }
+    }
+    verified = []
+
+    def verify_boot(identity, **kwargs):
+        verified.append((dict(identity), dict(kwargs)))
+        return {"verified": True}
+
+    authority._boot_verifier = verify_boot
+    authority._verify_recovery_validator_boot(old_boot)
+    assert verified == [
+        (
+            old_boot,
+            {
+                "expected_pcr0": old_boot["pcr0"],
+                "certificate_validity_at_attestation_time": True,
+            },
+        )
+    ]
+
+    for field, replacement in (
+        ("pcr0", "0" * 96),
+        ("build_manifest_hash", "sha256:" + "0" * 64),
+        ("dependency_lock_hash", "sha256:" + "0" * 64),
+    ):
+        with pytest.raises(
+            ValidatorHotkeyAuthorityV2Error,
+            match="differs from approved release",
+        ):
+            authority._verify_recovery_validator_boot(
+                {**old_boot, field: replacement}
+            )
+
+    with pytest.raises(
+        ValidatorHotkeyAuthorityV2Error,
+        match="release is not approved",
+    ):
+        authority._verify_recovery_validator_boot(
+            {**old_boot, "commit_sha": "9" * 40}
+        )
+
+    with pytest.raises(
+        ValidatorHotkeyAuthorityV2Error,
+        match="differs from current release",
+    ):
+        authority._verify_recovery_validator_boot(
+            {**current_boot, "config_hash": "sha256:" + "8" * 64}
+        )
 
 
 def test_wrong_seed_cannot_provision_validator_hotkey(monkeypatch):
@@ -570,6 +649,43 @@ def test_restart_recovery_revalidates_bundle_binding_and_signed_extrinsic(
                 "signed_result"
             ]["extrinsic_hex"],
         }
+    ]
+
+    current_boot = {
+        **boot,
+        "boot_identity_hash": "sha256:" + "a" * 64,
+        "commit_sha": "b" * 40,
+        "pcr0": "c" * 96,
+        "build_manifest_hash": "sha256:" + "d" * 64,
+        "dependency_lock_hash": "sha256:" + "e" * 64,
+        "config_hash": "sha256:" + "f" * 64,
+    }
+    authority._boot_identity_supplier = lambda: current_boot
+    authority._gateway_release_lineage_supplier = lambda: {
+        old_boot["commit_sha"]: {
+            "roles": {
+                "validator_weights": {
+                    field: old_boot[field]
+                    for field in (
+                        "commit_sha",
+                        "pcr0",
+                        "build_manifest_hash",
+                        "dependency_lock_hash",
+                    )
+                }
+            }
+        }
+    }
+    authority._weights.clear()
+    authority._commits.clear()
+    cross_release = authority.recover_weight_publication(
+        published_bundle=bundle,
+        weight_submission_event_hash=event_hash,
+        extrinsic_signature_results=[signed],
+    )
+    assert cross_release["weight_authorization_id"].startswith("sha256:")
+    assert cross_release["signed_extrinsics"][0]["extrinsic_hash"] == signed[
+        "extrinsic_hash"
     ]
 
     with pytest.raises(

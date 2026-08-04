@@ -246,6 +246,9 @@ class ValidatorHotkeyAuthorityV2:
         self,
         *,
         boot_identity_supplier: Callable[[], Mapping[str, Any]],
+        gateway_release_lineage_supplier: Optional[
+            Callable[[], Mapping[str, Any]]
+        ] = None,
         validator_hotkey: str,
         hotkey_public_key_hex: str,
         chain_profile: Mapping[str, Any],
@@ -254,9 +257,13 @@ class ValidatorHotkeyAuthorityV2:
         drand_backend: Any,
         chain_source: Any = None,
         sr25519_backend: Any = None,
+        boot_verifier: Optional[Callable[..., Mapping[str, Any]]] = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._boot_identity_supplier = boot_identity_supplier
+        self._gateway_release_lineage_supplier = (
+            gateway_release_lineage_supplier or (lambda: {})
+        )
         self.validator_hotkey = str(validator_hotkey or "")
         if not _HOTKEY_RE.fullmatch(self.validator_hotkey):
             raise ValidatorHotkeyAuthorityV2Error("validator hotkey is invalid")
@@ -274,6 +281,7 @@ class ValidatorHotkeyAuthorityV2:
         self._drand = drand_backend
         self._chain_source = chain_source
         self._sr25519 = sr25519_backend or _Sr25519Backend()
+        self._boot_verifier = boot_verifier
         self._clock = clock
         self._recipient_private_key = rsa.generate_private_key(
             public_exponent=65537, key_size=3072
@@ -288,6 +296,71 @@ class ValidatorHotkeyAuthorityV2:
         self._commits = {}  # type: Dict[str, Dict[str, Any]]
         self._serve_axon_signature_count = 0
         self._lock = threading.Lock()
+
+    def _verify_recovery_validator_boot(
+        self,
+        old_boot: Mapping[str, Any],
+    ) -> None:
+        """Verify a recovery boot against the current or approved release."""
+
+        if (
+            old_boot.get("role") != "validator_weights"
+            or old_boot.get("physical_role") != "validator_weights"
+        ):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "recovery boot is not a validator weight authority"
+            )
+        current_boot = dict(self._boot_identity_supplier())
+        release_fields = (
+            "commit_sha",
+            "pcr0",
+            "build_manifest_hash",
+            "dependency_lock_hash",
+        )
+        if old_boot.get("commit_sha") == current_boot.get("commit_sha"):
+            if any(
+                old_boot.get(field) != current_boot.get(field)
+                for field in (*release_fields, "config_hash")
+            ):
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "recovery validator release differs from current release"
+                )
+            expected_pcr0 = str(current_boot["pcr0"])
+        else:
+            lineage = self._gateway_release_lineage_supplier()
+            release = (
+                lineage.get(str(old_boot.get("commit_sha") or "").lower())
+                if isinstance(lineage, Mapping)
+                else None
+            )
+            roles = release.get("roles") if isinstance(release, Mapping) else None
+            expectation = (
+                roles.get("validator_weights")
+                if isinstance(roles, Mapping)
+                else None
+            )
+            if not isinstance(expectation, Mapping):
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "recovery validator release is not approved"
+                )
+            if any(
+                old_boot.get(field) != expectation.get(field)
+                for field in release_fields
+            ):
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "recovery validator boot differs from approved release"
+                )
+            expected_pcr0 = str(expectation["pcr0"])
+        try:
+            (self._boot_verifier or verify_boot_identity_nitro)(
+                old_boot,
+                expected_pcr0=expected_pcr0,
+                certificate_validity_at_attestation_time=True,
+            )
+        except Exception as exc:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "recovery validator boot attestation is invalid"
+            ) from exc
 
     def recipient_request(self) -> Dict[str, Any]:
         with self._lock:
@@ -776,28 +849,7 @@ class ValidatorHotkeyAuthorityV2:
                 "recovery bundle needs exactly one computing validator boot"
             )
         old_boot = validator_boots[0]
-        current_boot = dict(self._boot_identity_supplier())
-        for field in (
-            "commit_sha",
-            "pcr0",
-            "build_manifest_hash",
-            "dependency_lock_hash",
-            "config_hash",
-        ):
-            if old_boot.get(field) != current_boot.get(field):
-                raise ValidatorHotkeyAuthorityV2Error(
-                    "recovery validator release differs at %s" % field
-                )
-        try:
-            verify_boot_identity_nitro(
-                old_boot,
-                expected_pcr0=old_boot["pcr0"],
-                certificate_validity_at_attestation_time=True,
-            )
-        except Exception as exc:
-            raise ValidatorHotkeyAuthorityV2Error(
-                "recovery validator boot attestation is invalid"
-            ) from exc
+        self._verify_recovery_validator_boot(old_boot)
         try:
             binding_signature = bytes.fromhex(
                 str(published_bundle["validator_hotkey_signature"])
@@ -883,28 +935,7 @@ class ValidatorHotkeyAuthorityV2:
                 "compact recovery validator boot is ambiguous"
             )
         old_boot = dict(delta["boot_identities"][0])
-        current_boot = dict(self._boot_identity_supplier())
-        for field in (
-            "commit_sha",
-            "pcr0",
-            "build_manifest_hash",
-            "dependency_lock_hash",
-            "config_hash",
-        ):
-            if old_boot.get(field) != current_boot.get(field):
-                raise ValidatorHotkeyAuthorityV2Error(
-                    "compact recovery validator release differs at %s" % field
-                )
-        try:
-            verify_boot_identity_nitro(
-                old_boot,
-                expected_pcr0=old_boot["pcr0"],
-                certificate_validity_at_attestation_time=True,
-            )
-        except Exception as exc:
-            raise ValidatorHotkeyAuthorityV2Error(
-                "compact recovery validator attestation is invalid"
-            ) from exc
+        self._verify_recovery_validator_boot(old_boot)
         expected_result = validate_weight_snapshot_v2(
             compact["weight_snapshot"]
         )

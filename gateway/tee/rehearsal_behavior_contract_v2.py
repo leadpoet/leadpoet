@@ -41,6 +41,7 @@ BEHAVIOR_SCENARIOS = (
     "research-lab-allocation-conservation",
     "settlement-frontier-terminal-retirement",
     "current-frontier-release-recovery",
+    "validator-publication-release-recovery",
 )
 
 AUTHORITY_DIAGNOSTICS = (
@@ -68,6 +69,7 @@ BEHAVIORAL_INVARIANTS = (
     "research_lab_allocation_conserved",
     "settlement_frontier_terminal_retirement_verified",
     "current_frontier_release_recovery_verified",
+    "validator_publication_release_recovery_verified",
     "canonical_vector_primary_auditor_equal",
     "receipt_ancestry_verified",
     "sdk_signing_bridge_verified",

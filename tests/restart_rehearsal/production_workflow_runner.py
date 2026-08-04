@@ -65,6 +65,7 @@ from sanitized_weight_fixture import (  # noqa: E402
     EMPTY_ARTIFACT_ROOT,
     EMPTY_TRANSPORT_ROOT,
     SanitizedWeightFixture,
+    VALIDATOR_HOTKEY,
 )
 from validator_tee.enclave.hotkey_authority_v2 import (  # noqa: E402
     _Sr25519Backend,
@@ -3603,6 +3604,129 @@ def _exercise_current_frontier_release_recovery() -> dict[str, Any]:
     }
 
 
+def _exercise_validator_publication_release_recovery() -> dict[str, Any]:
+    """Prove an approved N-1 validator journal survives N activation."""
+
+    import subprocess
+
+    from leadpoet_canonical.attested_v2 import sha256_json
+    from validator_tee.enclave.hotkey_authority_v2 import (
+        ValidatorHotkeyAuthorityV2,
+        ValidatorHotkeyAuthorityV2Error,
+        load_chain_signing_profile,
+    )
+
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(SOURCE_ROOT), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    from_sha = str(os.environ.get("REHEARSAL_FROM_SHA") or "").lower()
+    if (
+        len(from_sha) != 40
+        or any(value not in "0123456789abcdef" for value in from_sha)
+        or from_sha == candidate_sha
+    ):
+        raise RuntimeError(
+            "validator publication recovery requires a distinct N-1 release"
+        )
+    current = SanitizedWeightFixture(candidate_sha=candidate_sha, epoch_id=30_000)
+    previous = SanitizedWeightFixture(candidate_sha=from_sha, epoch_id=30_000)
+    current_boot = current._boot(
+        role="validator_weights",
+        key=current.weight_key,
+        config_hash=sha256_json({"release": candidate_sha}),
+    )
+    old_boot = previous._boot(
+        role="validator_weights",
+        key=previous.weight_key,
+        config_hash=sha256_json({"release": from_sha}),
+    )
+    expectation_fields = (
+        "commit_sha",
+        "pcr0",
+        "build_manifest_hash",
+        "dependency_lock_hash",
+    )
+    lineage = {
+        from_sha: {
+            "roles": {
+                "validator_weights": {
+                    field: old_boot[field] for field in expectation_fields
+                }
+            }
+        }
+    }
+    verified = []
+
+    def verify_boot(identity, **kwargs):
+        if identity.get("pcr0") != kwargs.get("expected_pcr0"):
+            raise RuntimeError("recovery boot PCR0 differs")
+        if kwargs.get("certificate_validity_at_attestation_time") is not True:
+            raise RuntimeError("historical attestation time was not enforced")
+        verified.append(str(identity["boot_identity_hash"]))
+        return {"verified": True}
+
+    class _UnusedSr25519:
+        pass
+
+    authority = ValidatorHotkeyAuthorityV2(
+        boot_identity_supplier=lambda: current_boot,
+        gateway_release_lineage_supplier=lambda: lineage,
+        validator_hotkey=VALIDATOR_HOTKEY,
+        hotkey_public_key_hex="1" * 64,
+        chain_profile=load_chain_signing_profile(
+            SOURCE_ROOT
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ),
+        sign_receipt_digest=current.weight_key.sign,
+        attestation_supplier=lambda **_kwargs: b"unused",
+        drand_backend=object(),
+        sr25519_backend=_UnusedSr25519(),
+        boot_verifier=verify_boot,
+    )
+    authority._verify_recovery_validator_boot(old_boot)
+    if verified != [old_boot["boot_identity_hash"]]:
+        raise RuntimeError("approved N-1 validator boot was not attested")
+
+    rejected = 0
+    for field, value in (
+        ("pcr0", "0" * 96),
+        ("build_manifest_hash", "sha256:" + "0" * 64),
+        ("dependency_lock_hash", "sha256:" + "0" * 64),
+    ):
+        try:
+            authority._verify_recovery_validator_boot(
+                {**old_boot, field: value}
+            )
+        except ValidatorHotkeyAuthorityV2Error:
+            rejected += 1
+    try:
+        authority._verify_recovery_validator_boot(
+            {**old_boot, "commit_sha": "0" * 40}
+        )
+    except ValidatorHotkeyAuthorityV2Error:
+        rejected += 1
+    try:
+        authority._verify_recovery_validator_boot(
+            {
+                **current_boot,
+                "config_hash": "sha256:" + "0" * 64,
+            }
+        )
+    except ValidatorHotkeyAuthorityV2Error:
+        rejected += 1
+    if rejected != 5:
+        raise RuntimeError("validator recovery release tampering was accepted")
+    return {
+        "approved_n_minus_one_recovered": True,
+        "nitro_attestation_rechecked": True,
+        "release_tampering_rejected": True,
+        "same_release_config_mismatch_rejected": True,
+    }
+
+
 def _exercise_receipt_graph_aggregate_pagination() -> dict[str, Any]:
     """Exercise aggregate evidence paging through the candidate store helper."""
 
@@ -4435,6 +4559,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "current-frontier-release-recovery": (
         _exercise_current_frontier_release_recovery
     ),
+    "validator-publication-release-recovery": (
+        _exercise_validator_publication_release_recovery
+    ),
 }
 
 
@@ -5028,6 +5155,28 @@ def main() -> int:
                 "current-frontier-release-recovery",
                 {},
             ).get("malformed_release_rejected")
+            is True
+        ),
+        "validator_publication_release_recovery_verified": (
+            behavior_evidence.get(
+                "validator-publication-release-recovery",
+                {},
+            ).get("approved_n_minus_one_recovered")
+            is True
+            and behavior_evidence.get(
+                "validator-publication-release-recovery",
+                {},
+            ).get("nitro_attestation_rechecked")
+            is True
+            and behavior_evidence.get(
+                "validator-publication-release-recovery",
+                {},
+            ).get("release_tampering_rejected")
+            is True
+            and behavior_evidence.get(
+                "validator-publication-release-recovery",
+                {},
+            ).get("same_release_config_mismatch_rejected")
             is True
         ),
         "canonical_vector_primary_auditor_equal": (

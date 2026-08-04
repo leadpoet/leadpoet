@@ -316,6 +316,9 @@ def configure_hotkey_authority_v2(
         )
         validator_hotkey_authority_v2 = ValidatorHotkeyAuthorityV2(
             boot_identity_supplier=validator_runtime_v2.boot_identity,
+            gateway_release_lineage_supplier=(
+                validator_runtime_v2.gateway_release_lineage
+            ),
             validator_hotkey=normalized["validator_hotkey"],
             hotkey_public_key_hex=normalized["hotkey_public_key"],
             chain_profile=profile,

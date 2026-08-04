@@ -1132,7 +1132,7 @@
       "symbol": "CoordinatorWeightSourceV2"
     },
     {
-      "ast_sha256": "sha256:eef76d1f791bc58afb4bf97554224f808d6c42165decbc87e6f766be6276264d",
+      "ast_sha256": "sha256:cca4983424a151aa80ffe375c6d4b2ef3e6ead0f4ebfc7b0fc2e0b0ac65ecb23",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
     },
@@ -1217,7 +1217,7 @@
       "symbol": "MODEL_SANDBOX_VISIBLE_ROOT"
     },
     {
-      "ast_sha256": "sha256:d8a943f123faf4d5a68e417abe8dafaa449500fade49f052e24643d68150cafb",
+      "ast_sha256": "sha256:fadd067219b7722b8ffdc8e82bd1ce313626a25bcb218107a0b3214dd15017dc",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:6122a2a80d469bae187b398a229d66a28b61877d9fb82ea2ac88023ba6840563",
+  "manifest_hash": "sha256:41c79f34e16a889506c1eace30c2a01530c6d7ec4578a853b898c9842c7ce829",
   "protected_source_commit": "a0798fc6336838326bb4708789d24225cd1dcaef",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

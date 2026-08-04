@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+import concurrent.futures
 from dataclasses import replace
 import json
 import logging
@@ -599,6 +600,7 @@ class AttestedPrivateModelRunnerV2:
             "authorities": [],
             "generated_caches": {},
             "evidence_summaries": {},
+            "catalog_snapshot_futures": {},
             "lock": threading.Lock(),
         }
 
@@ -622,6 +624,37 @@ class AttestedPrivateModelRunnerV2:
     def attested_authorities(self) -> list[dict[str, Any]]:
         with self._shared_state["lock"]:
             return [dict(item) for item in self._shared_state["authorities"]]
+
+    async def _load_catalog_snapshot(self, *, epoch_id: int) -> Mapping[str, Any]:
+        """Load one exact measured catalog outcome per shared runner epoch."""
+
+        with self._shared_state["lock"]:
+            futures = self._shared_state.setdefault("catalog_snapshot_futures", {})
+            future = futures.get(epoch_id)
+            leader = future is None
+            if leader:
+                future = concurrent.futures.Future()
+                futures[epoch_id] = future
+
+        if leader:
+            catalog_loader = (
+                self._catalog_snapshot_loader or load_source_add_catalog_snapshot_v2
+            )
+            try:
+                outcome = await catalog_loader(epoch_id=epoch_id)
+            except BaseException as exc:
+                future.set_exception(exc)
+                # Mark the exception observed for the leader-only case while
+                # preserving it for any followers already awaiting this future.
+                future.exception()
+                with self._shared_state["lock"]:
+                    if futures.get(epoch_id) is future:
+                        del futures[epoch_id]
+                raise
+            future.set_result(outcome)
+            return outcome
+
+        return await asyncio.shield(asyncio.wrap_future(future))
 
     async def __call__(
         self,
@@ -833,10 +866,9 @@ class AttestedPrivateModelRunnerV2:
                 dict(input_doc.get("context") or {}).get("evaluation_epoch") or 0
             )
         )
-        catalog_loader = (
-            self._catalog_snapshot_loader or load_source_add_catalog_snapshot_v2
+        catalog_outcome = await self._load_catalog_snapshot(
+            epoch_id=int(execution_epoch)
         )
-        catalog_outcome = await catalog_loader(epoch_id=int(execution_epoch))
         catalog_result = catalog_outcome.get("result")
         catalog_graph = catalog_outcome.get("receipt_graph")
         catalog_lineage_receipt = catalog_outcome.get("receipt")

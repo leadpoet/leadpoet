@@ -144,6 +144,21 @@ def events(
     return sorted(rows, key=lambda row: int(row.get("at_ns") or 0))
 
 
+def serialized_adapter_events(
+    state_root: Path = Path("/rehearsal-state"),
+) -> list[dict]:
+    """Return adapter events in their authoritative append order."""
+
+    path = state_root / "events.jsonl"
+    if not path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 def require_order(values: list[str], required: list[str]) -> None:
     cursor = -1
     for expected in required:
@@ -1740,7 +1755,7 @@ def main() -> int:
             raise SystemExit("gateway did not start the exact three-enclave topology")
     else:
         restart_invariants = verify_validator_gateway_activation_barrier(
-            rows,
+            serialized_adapter_events(),
             from_sha=from_sha,
             candidate_sha=candidate_sha,
             late_activation_supported=(

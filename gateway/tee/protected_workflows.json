@@ -2322,7 +2322,7 @@
       "symbol": "validate_code_edit_draft"
     },
     {
-      "ast_sha256": "sha256:737c211f52aa855830efdfe0a0e8af112321d85eb624e51d83080541b35744b5",
+      "ast_sha256": "sha256:851bb3534f9b20beba3021a005dae0b630ef2af482b1b7a0f02d6886adb60e74",
       "path": "research_lab/eval/baseline_summary.py",
       "symbol": "build_baseline_health"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:41c79f34e16a889506c1eace30c2a01530c6d7ec4578a853b898c9842c7ce829",
-  "protected_source_commit": "a0798fc6336838326bb4708789d24225cd1dcaef",
+  "manifest_hash": "sha256:8002d884f57d51cf05de7e82429568c0dea193812fc32c0f674ec2aac30b7cef",
+  "protected_source_commit": "1803f3802b3667e2036a54fbf6ada14b7edfa206",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -187,7 +187,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:8dc02af3e44176619c7b4487eb97c95bc66f19ed24a7e3dbcab80a91b7b394b5",
+      "ast_sha256": "sha256:95e7ca4fa723e5d56abb8f5b00a0ab36551840241fa29210281c6aaba84401ae",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:f37e0e4c69c9a80e2ab8f75d0ab7cfd2f2ba362930b7e6d74619950251aea382",
+  "manifest_hash": "sha256:f526633e964837bea390513ccb2bcceb78c61dac1a509c2163436f420906af33",
   "protected_source_commit": "a0798fc6336838326bb4708789d24225cd1dcaef",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

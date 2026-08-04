@@ -388,15 +388,27 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
             }
         ],
     }
+    tape_lineage_graph = {
+        "root_receipt_hash": "sha256:" + "b" * 64,
+        "receipts": [
+            {
+                "receipt_hash": "sha256:" + "b" * 64,
+                "role": "gateway_coordinator",
+                "purpose": "leadpoet.artifact_persistence.v2",
+                "status": "succeeded",
+                "parent_receipt_hashes": [tape_graph["root_receipt_hash"]],
+            }
+        ],
+    }
 
-    async def load_tape_graph(**kwargs):
+    async def load_tape_graphs(**kwargs):
         assert kwargs == {"cache_ref": cache_ref, "cache_hash": cache_hash}
-        return dict(tape_graph)
+        return (dict(tape_graph), dict(tape_lineage_graph))
 
     monkeypatch.setattr(
         model_authority_v2,
-        "_load_provider_evidence_tape_graph",
-        load_tape_graph,
+        "_load_provider_evidence_tape_graphs",
+        load_tape_graphs,
     )
     observed = []
 
@@ -480,6 +492,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
     assert payload["provider_evidence_cache_ref"] == cache_ref
     assert observed[0]["parent_graphs"] == (
         tape_graph,
+        tape_lineage_graph,
         _catalog_outcome()["execution_receipt_graph"],
         _catalog_outcome()["receipt_graph"],
     )
@@ -607,7 +620,8 @@ async def test_private_baseline_persists_signed_tape_before_atomic_cache_publish
         "input_root": provider_evidence_tape_input_root(cache_ref, cache_hash),
         "output_root": cache_hash,
     }
-    root_receipt = {"receipt_hash": "sha256:" + "6" * 64}
+    source_receipt = {"receipt_hash": "sha256:" + "6" * 64}
+    lineage_receipt = {"receipt_hash": "sha256:" + "7" * 64}
     events = []
 
     async def persist_link(**kwargs):
@@ -653,10 +667,15 @@ async def test_private_baseline_persists_signed_tape_before_atomic_cache_publish
                 "trace_entries": [_runtime_receipt(897.0)],
                 "generated_provider_evidence_cache": cache_doc,
             },
-            "receipt": root_receipt,
+            "receipt": lineage_receipt,
             "receipt_graph": {
-                "root_receipt_hash": root_receipt["receipt_hash"],
-                "receipts": [tape_receipt, root_receipt],
+                "root_receipt_hash": lineage_receipt["receipt_hash"],
+                "receipts": [lineage_receipt],
+            },
+            "execution_receipt": source_receipt,
+            "execution_receipt_graph": {
+                "root_receipt_hash": source_receipt["receipt_hash"],
+                "receipts": [tape_receipt, source_receipt],
             },
         }
 
@@ -674,7 +693,7 @@ async def test_private_baseline_persists_signed_tape_before_atomic_cache_publish
         (
             "persist",
             {
-                "receipt_hash": root_receipt["receipt_hash"],
+                "receipt_hash": lineage_receipt["receipt_hash"],
                 "cache_ref": cache_ref,
                 "cache_hash": cache_hash,
             },
@@ -686,6 +705,70 @@ async def test_private_baseline_persists_signed_tape_before_atomic_cache_publish
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+@pytest.mark.asyncio
+async def test_provider_tape_loader_preserves_source_and_persistence_ancestry(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    cache_ref = "1" * 64
+    cache_hash = "sha256:" + "2" * 64
+    source_hash = "sha256:" + "3" * 64
+    lineage_hash = "sha256:" + "4" * 64
+    tape_receipt = {
+        "receipt_hash": "sha256:" + "5" * 64,
+        "role": "gateway_scoring",
+        "purpose": "research_lab.provider_evidence_tape.v2",
+        "status": "succeeded",
+        "input_root": provider_evidence_tape_input_root(cache_ref, cache_hash),
+        "output_root": cache_hash,
+    }
+    source_graph = {
+        "root_receipt_hash": source_hash,
+        "receipts": [tape_receipt, {"receipt_hash": source_hash}],
+    }
+    lineage_graph = {
+        "root_receipt_hash": lineage_hash,
+        "receipts": [
+            {
+                "receipt_hash": lineage_hash,
+                "role": "gateway_coordinator",
+                "purpose": "leadpoet.artifact_persistence.v2",
+                "status": "succeeded",
+                "parent_receipt_hashes": [source_hash],
+            }
+        ],
+    }
+
+    async def load_business(**kwargs):
+        assert kwargs == {
+            "artifact_kind": "provider_evidence_tape_v2",
+            "artifact_ref": cache_ref,
+            "artifact_hash": cache_hash,
+        }
+        return lineage_graph
+
+    async def load_receipt(receipt_hash):
+        assert receipt_hash == source_hash
+        return source_graph
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        load_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graph_v2",
+        load_receipt,
+    )
+
+    assert await model_authority_v2._load_provider_evidence_tape_graphs(
+        cache_ref=cache_ref,
+        cache_hash=cache_hash,
+    ) == (source_graph, lineage_graph)
 
 
 @pytest.mark.asyncio
@@ -717,7 +800,7 @@ async def test_candidate_cache_without_exact_tape_graph_fails_before_execution(
 
     monkeypatch.setattr(
         model_authority_v2,
-        "_load_provider_evidence_tape_graph",
+        "_load_provider_evidence_tape_graphs",
         missing_graph,
     )
     calls = []

@@ -385,22 +385,58 @@ def _require_tape_receipt(
     return matches[0]
 
 
-async def _load_provider_evidence_tape_graph(
+async def _load_provider_evidence_tape_graphs(
     *,
     cache_ref: str,
     cache_hash: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], ...]:
     from gateway.research_lab.attested_v2_store import (
         load_business_artifact_graph_v2,
+        load_receipt_graph_v2,
     )
 
-    graph = await load_business_artifact_graph_v2(
+    lineage_graph = await load_business_artifact_graph_v2(
         artifact_kind=PROVIDER_EVIDENCE_TAPE_ARTIFACT_KIND,
         artifact_ref=cache_ref,
         artifact_hash=cache_hash,
     )
-    _require_tape_receipt(graph, cache_ref=cache_ref, cache_hash=cache_hash)
-    return dict(graph)
+    try:
+        _require_tape_receipt(
+            lineage_graph,
+            cache_ref=cache_ref,
+            cache_hash=cache_hash,
+        )
+        return (dict(lineage_graph),)
+    except AttestedPrivateModelRunnerV2Error:
+        receipts = {
+            str(item.get("receipt_hash") or ""): item
+            for item in lineage_graph.get("receipts") or ()
+            if isinstance(item, Mapping)
+        }
+        lineage_root = receipts.get(
+            str(lineage_graph.get("root_receipt_hash") or "")
+        )
+        parent_hashes = (
+            list(lineage_root.get("parent_receipt_hashes") or ())
+            if isinstance(lineage_root, Mapping)
+            else []
+        )
+        if (
+            not isinstance(lineage_root, Mapping)
+            or lineage_root.get("role") != "gateway_coordinator"
+            or lineage_root.get("purpose")
+            != "leadpoet.artifact_persistence.v2"
+            or lineage_root.get("status") != "succeeded"
+            or len(parent_hashes) != 1
+        ):
+            raise
+        source_graph = await load_receipt_graph_v2(str(parent_hashes[0]))
+        _require_tape_receipt(
+            source_graph,
+            cache_ref=cache_ref,
+            cache_hash=cache_hash,
+        )
+        return (dict(source_graph), dict(lineage_graph))
 
 
 async def _persist_provider_evidence_tape_link(
@@ -597,11 +633,9 @@ class AttestedPrivateModelRunnerV2:
         )
         cache_parent_graphs = ()
         if cache_document:
-            cache_parent_graphs = (
-                await _load_provider_evidence_tape_graph(
-                    cache_ref=cache_ref,
-                    cache_hash=sha256_json(cache_document),
-                ),
+            cache_parent_graphs = await _load_provider_evidence_tape_graphs(
+                cache_ref=cache_ref,
+                cache_hash=sha256_json(cache_document),
             )
         run_mode = str(dict(context or {}).get("mode") or "")
         evidence_mode = (
@@ -1051,7 +1085,7 @@ class AttestedPrivateModelRunnerV2:
                 "measured model receipt is missing"
             )
         if generated_cache:
-            graph = outcome.get("receipt_graph")
+            graph = outcome.get("execution_receipt_graph")
             if not isinstance(graph, Mapping):
                 raise AttestedPrivateModelRunnerV2Error(
                     "measured provider evidence tape graph is missing"

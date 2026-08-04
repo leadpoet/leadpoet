@@ -1941,7 +1941,11 @@ async def execute_scoring_v2(
         lineage_payload = {
             "source_receipt_hash": receipt["receipt_hash"],
             "artifact_ids": [item["artifact_id"] for item in artifacts],
-            "artifact_plaintext_hashes": expected_artifact_hashes,
+            # Persist every exact receipt-committed descriptor, including
+            # authenticated retry envelopes that are not terminal transport
+            # artifacts. The coordinator requires one plaintext commitment
+            # for each artifact ID and revalidates both against vault evidence.
+            "artifact_plaintext_hashes": observed_hashes,
         }
         lineage_job_id = derive_execution_job_id_v2(
             operation=OP_ATTEST_ARTIFACT_PERSISTENCE,

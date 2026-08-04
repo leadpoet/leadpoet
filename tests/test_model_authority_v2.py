@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 
@@ -194,6 +195,73 @@ def _catalog_outcome(rows=()):
 async def _load_empty_catalog(*, epoch_id):
     assert epoch_id >= 0
     return _catalog_outcome()
+
+
+@pytest.mark.asyncio
+async def test_catalog_snapshot_load_is_singleflight_across_shared_runner_clones(
+    tmp_path,
+):
+    artifact = _artifact(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def load_catalog(*, epoch_id):
+        calls.append(epoch_id)
+        started.set()
+        await release.wait()
+        return _catalog_outcome()
+
+    runner = AttestedPrivateModelRunnerV2(
+        artifact=artifact,
+        spec=DockerPrivateModelSpec(image_digest=artifact["image_digest"]),
+        model_kind="private",
+        worker_index=0,
+        epoch_id=24001,
+        catalog_snapshot_loader=load_catalog,
+    )
+    clone = runner.with_spec(runner.spec)
+
+    loads = [
+        asyncio.create_task(candidate._load_catalog_snapshot(epoch_id=24001))
+        for candidate in (runner, clone, runner, clone)
+    ]
+    await started.wait()
+    await asyncio.sleep(0)
+    assert calls == [24001]
+
+    release.set()
+    outcomes = await asyncio.gather(*loads)
+    assert all(outcome is outcomes[0] for outcome in outcomes)
+    assert calls == [24001]
+
+
+@pytest.mark.asyncio
+async def test_catalog_snapshot_failed_load_is_not_cached(tmp_path):
+    artifact = _artifact(tmp_path)
+    calls = []
+
+    async def load_catalog(*, epoch_id):
+        calls.append(epoch_id)
+        if len(calls) == 1:
+            raise RuntimeError("catalog unavailable")
+        return _catalog_outcome()
+
+    runner = AttestedPrivateModelRunnerV2(
+        artifact=artifact,
+        spec=DockerPrivateModelSpec(image_digest=artifact["image_digest"]),
+        model_kind="private",
+        worker_index=0,
+        epoch_id=24001,
+        catalog_snapshot_loader=load_catalog,
+    )
+
+    with pytest.raises(RuntimeError, match="catalog unavailable"):
+        await runner._load_catalog_snapshot(epoch_id=24001)
+    outcome = await runner._load_catalog_snapshot(epoch_id=24001)
+
+    assert outcome == _catalog_outcome()
+    assert calls == [24001, 24001]
 
 
 @pytest.mark.asyncio

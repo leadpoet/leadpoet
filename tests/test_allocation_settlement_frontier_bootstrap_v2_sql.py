@@ -42,6 +42,12 @@ SOURCE_CONTRACT_MIGRATION_NAME = (
 SOURCE_CONTRACT_SQL = (ROOT / SOURCE_CONTRACT_MIGRATION_NAME).read_text(
     encoding="utf-8"
 )
+SOURCE_CATALOG_REPLAY_MIGRATION_NAME = (
+    "scripts/142-research-lab-source-catalog-result-replay.sql"
+)
+SOURCE_CATALOG_REPLAY_SQL = (
+    ROOT / SOURCE_CATALOG_REPLAY_MIGRATION_NAME
+).read_text(encoding="utf-8")
 RPC = "persist_research_lab_allocation_frontier_bootstrap_v2"
 CONTRACT_RPC = "research_lab_allocation_frontier_bootstrap_contract_v2"
 SOURCE_CONTRACT_RPC = (
@@ -197,7 +203,7 @@ def test_migration_is_additive_private_and_declares_current_contract() -> None:
             expected_purposes
         )
 
-    pair_clause = SQL.split(
+    pair_clause = SOURCE_CATALOG_REPLAY_SQL.split(
         "research_lab_attested_exec_results_v2_op_purpose_check",
         1,
     )[1].split(") NOT VALID;", 1)[0]

@@ -817,20 +817,27 @@ class ScoringExecutorV2:
                 scope_key,
                 ProviderPreflight(),
             )
-        with self._transport.scope(
-            job_id=context.job_id,
-            purpose=context.purpose,
-            logical_operation_id=context.job_id,
-            retry_policy_hashes=self._retry_policy_hashes,
-            terminal_sink=context.record_transport,
-            artifact_sink=context.record_artifact,
-            allow_transport_failures=True,
-        ):
-            result = await asyncio.to_thread(
-                preflight.check,
-                force=force,
-                settings=dict(settings),
-            )
+        def measured_preflight() -> dict[str, Any]:
+            # Keep the cache transaction and transport-scope finalizer on the
+            # same thread so a missing terminal rolls back the verdict/streak.
+            # Provider probes are blocking, so this entire unit belongs in the
+            # executor thread rather than on the enclave event loop.
+            with preflight.measurement_transaction():
+                with self._transport.scope(
+                    job_id=context.job_id,
+                    purpose=context.purpose,
+                    logical_operation_id=context.job_id,
+                    retry_policy_hashes=self._retry_policy_hashes,
+                    terminal_sink=context.record_transport,
+                    artifact_sink=context.record_artifact,
+                    allow_transport_failures=True,
+                ):
+                    return preflight.check(
+                        force=force,
+                        settings=dict(settings),
+                    )
+
+        result = await asyncio.to_thread(measured_preflight)
         return ExecutionResultV2(output=dict(result))
 
     async def _execute_dev_replay(

@@ -187,7 +187,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:24fe0d3d20896f4f49ced6d14189c77c61603d140a735a57a587cf891c931af3",
+      "ast_sha256": "sha256:0423cc811b97a71dc4f12f4bea66d6682fef5a3a6ab1c34fa0a538c26a780c1e",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -1517,7 +1517,7 @@
       "symbol": "rpc_method_allowed"
     },
     {
-      "ast_sha256": "sha256:b5d00194edc55c4eea7e8a9493105066383a17bc4f5a935527746464de33dd6c",
+      "ast_sha256": "sha256:75cbaf8f1da6a198f928bcfe5740d65d55ca5930597d87ad7dd095b58c7433e4",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:b93d9a16e25075e18040ce4234373fb70e2498a2cc8085f34ae8b99cc8811ac6",
+  "manifest_hash": "sha256:68a8e453874b525433e72886ea2d3d7ded2945b7a2d62fa2d740360ecb48cb78",
   "protected_source_commit": "a0798fc6336838326bb4708789d24225cd1dcaef",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

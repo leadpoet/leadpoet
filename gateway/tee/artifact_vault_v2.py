@@ -22,7 +22,13 @@ ARTIFACT_ENVELOPE_SCHEMA_VERSION = "leadpoet.encrypted_artifact.v2"
 ARTIFACT_MASTER_KEY_SLOT = "artifact_master_key"
 ARTIFACT_MASTER_KEY_HASH_DOMAIN = b"leadpoet-artifact-master-key-v2:"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
-MAX_IN_MEMORY_ARTIFACTS = 2048
+# The measured topology permits ten concurrent scoring jobs. A normal ICP can
+# retain hundreds of request/response envelopes until its execution receipt is
+# available for host-side Object Lock persistence, so 2,048 entries could be
+# exhausted by healthy concurrency. Keep a generous count bound for small
+# envelopes and an independent encoded-byte bound for enclave memory safety.
+MAX_IN_MEMORY_ARTIFACTS = 16384
+MAX_IN_MEMORY_ARTIFACT_BYTES = 1024 * 1024 * 1024
 TRANSIENT_EVICTION_MIN_AGE_SECONDS = 600.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES = frozenset(
@@ -86,6 +92,7 @@ class EncryptedArtifactVaultV2:
         self._persisted_artifacts = {}  # type: Dict[str, Dict[str, Any]]
         self._active_transaction_counts = {}  # type: Dict[str, int]
         self._evicted_transient_count = 0
+        self._transient_artifact_bytes = 0
         self._lock = threading.RLock()
         self._transaction_state = threading.local()
 
@@ -110,7 +117,7 @@ class EncryptedArtifactVaultV2:
                 for artifact_id in created:
                     record = self._artifacts.get(artifact_id)
                     if record is not None and record["persistence"] is None:
-                        del self._artifacts[artifact_id]
+                        self._drop_transient_locked(artifact_id)
             raise
         finally:
             with self._lock:
@@ -177,16 +184,27 @@ class EncryptedArtifactVaultV2:
             "persistence": None,
             "_sealed_at": now,
         }
+        record["_memory_bytes"] = self._record_memory_bytes(record)
         transactions = tuple(getattr(self._transaction_state, "stack", ()))
         with self._lock:
             existing = self._artifacts.get(artifact_id)
             if existing is not None:
                 return self.descriptor(artifact_id)
-            if len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS:
-                self._evict_stale_transients(now)
-                if len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS:
+            record_bytes = int(record["_memory_bytes"])
+            if (
+                len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS
+                or self._transient_artifact_bytes + record_bytes
+                > MAX_IN_MEMORY_ARTIFACT_BYTES
+            ):
+                self._evict_stale_transients(now, required_bytes=record_bytes)
+                if (
+                    len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS
+                    or self._transient_artifact_bytes + record_bytes
+                    > MAX_IN_MEMORY_ARTIFACT_BYTES
+                ):
                     raise ArtifactVaultV2Error("artifact vault capacity is full")
             self._artifacts[artifact_id] = record
+            self._transient_artifact_bytes += record_bytes
             for transaction in transactions:
                 transaction.add(artifact_id)
                 self._active_transaction_counts[artifact_id] = (
@@ -194,7 +212,33 @@ class EncryptedArtifactVaultV2:
                 )
         return self.descriptor(artifact_id)
 
-    def _evict_stale_transients(self, now: datetime) -> int:
+    @staticmethod
+    def _record_memory_bytes(record: Mapping[str, Any]) -> int:
+        """Return the exact encoded string/byte payload retained by a record."""
+
+        return sum(
+            len(value)
+            if isinstance(value, (bytes, bytearray))
+            else len(value.encode("utf-8"))
+            for value in record.values()
+            if isinstance(value, (str, bytes, bytearray))
+        )
+
+    def _drop_transient_locked(self, artifact_id: str) -> None:
+        record = self._artifacts.pop(str(artifact_id), None)
+        if record is not None:
+            self._transient_artifact_bytes = max(
+                0,
+                self._transient_artifact_bytes
+                - int(record.get("_memory_bytes") or 0),
+            )
+
+    def _evict_stale_transients(
+        self,
+        now: datetime,
+        *,
+        required_bytes: int = 0,
+    ) -> int:
         """Reclaim old orphan envelopes only when capacity blocks new work."""
 
         eligible = sorted(
@@ -208,14 +252,19 @@ class EncryptedArtifactVaultV2:
             ),
             key=lambda item: item[0],
         )
-        needed = len(self._artifacts) - MAX_IN_MEMORY_ARTIFACTS + 1
+        needed = max(0, len(self._artifacts) - MAX_IN_MEMORY_ARTIFACTS + 1)
         freed = 0
         for _sealed_at, artifact_id in eligible:
-            if freed >= needed:
+            count_ready = freed >= needed
+            bytes_ready = (
+                self._transient_artifact_bytes + int(required_bytes)
+                <= MAX_IN_MEMORY_ARTIFACT_BYTES
+            )
+            if count_ready and bytes_ready:
                 break
             record = self._artifacts.get(artifact_id)
             if record is not None and record["persistence"] is None:
-                del self._artifacts[artifact_id]
+                self._drop_transient_locked(artifact_id)
                 freed += 1
         self._evicted_transient_count += freed
         return freed
@@ -225,6 +274,8 @@ class EncryptedArtifactVaultV2:
             return {
                 "transient_artifact_count": len(self._artifacts),
                 "maximum_transient_artifacts": MAX_IN_MEMORY_ARTIFACTS,
+                "transient_artifact_bytes": self._transient_artifact_bytes,
+                "maximum_transient_artifact_bytes": MAX_IN_MEMORY_ARTIFACT_BYTES,
                 "evicted_orphan_count": self._evicted_transient_count,
             }
 
@@ -287,7 +338,7 @@ class EncryptedArtifactVaultV2:
                 raise ArtifactVaultV2Error("encrypted artifact is unavailable")
             if record["persistence"] is not None:
                 raise ArtifactVaultV2Error("persisted Object Lock artifact is not transient")
-            del self._artifacts[str(artifact_id)]
+            self._drop_transient_locked(str(artifact_id))
 
     def decrypt_storage_document(
         self,
@@ -489,7 +540,7 @@ class EncryptedArtifactVaultV2:
                     "persistence",
                 )
             }
-            del self._artifacts[str(artifact_id)]
+            self._drop_transient_locked(str(artifact_id))
             return {
                 **self.descriptor(artifact_id),
                 "artifact_ref": persistence["artifact_ref"],

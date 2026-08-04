@@ -8,6 +8,7 @@ import threading
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from gateway.tee import artifact_vault_v2
 from gateway.tee.artifact_vault_v2 import (
     ARTIFACT_MASTER_KEY_HASH_DOMAIN,
     ArtifactVaultV2Error,
@@ -136,7 +137,32 @@ def test_transient_envelope_can_be_released_after_durable_ciphertext_readback() 
 
     with pytest.raises(ArtifactVaultV2Error, match="unavailable"):
         vault.descriptor(artifact_id)
+    assert vault.transient_capacity_state()["transient_artifact_bytes"] == 0
     assert vault.decrypt_storage_document(storage_document) == b"hidden provider response"
+
+
+def test_measured_scoring_pool_fits_before_host_side_persistence() -> None:
+    vault = _vault()
+    jobs = 10
+    envelopes_per_job = 600
+
+    for job_index in range(jobs):
+        for artifact_index in range(envelopes_per_job):
+            vault.seal(
+                f"provider-{job_index}-{artifact_index}".encode(),
+                job_id=f"scoring-job-{job_index}",
+                purpose="research_lab.private_model_run.v2",
+                artifact_kind="provider_response",
+            )
+
+    capacity = vault.transient_capacity_state()
+    assert capacity["transient_artifact_count"] == jobs * envelopes_per_job
+    assert capacity["transient_artifact_count"] < (
+        artifact_vault_v2.MAX_IN_MEMORY_ARTIFACTS
+    )
+    assert capacity["transient_artifact_bytes"] < (
+        artifact_vault_v2.MAX_IN_MEMORY_ARTIFACT_BYTES
+    )
 
 
 def test_transient_transaction_discards_only_failed_thread_artifacts() -> None:
@@ -179,6 +205,9 @@ def test_transient_transaction_discards_only_failed_thread_artifacts() -> None:
     with pytest.raises(ArtifactVaultV2Error, match="unavailable"):
         vault.descriptor(failed_id)
     assert vault.descriptor(successful_id)["persisted"] is False
+    capacity = vault.transient_capacity_state()
+    assert capacity["transient_artifact_count"] == 1
+    assert capacity["transient_artifact_bytes"] > 0
     assert [item["artifact_id"] for item in vault.job_artifacts(
         job_id="shared-job",
         purpose="research_lab.provider_preflight.v2",
@@ -202,6 +231,7 @@ def test_transient_transaction_discards_cancelled_artifacts() -> None:
         job_id="cancelled-job",
         purpose="research_lab.provider_preflight.v2",
     ) == ()
+    assert vault.transient_capacity_state()["transient_artifact_bytes"] == 0
 
 
 @pytest.mark.parametrize(

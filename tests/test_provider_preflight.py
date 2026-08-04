@@ -168,6 +168,38 @@ def test_transport_failures_pause_only_after_streak(monkeypatch):
     assert third["pause_worthy"] is True  # streak threshold reached
 
 
+def test_failed_measured_transport_rolls_back_cached_verdict_and_streak(
+    monkeypatch,
+):
+    state = {"healthy": True}
+
+    def probe(provider):
+        return pp.ProviderVerdict(
+            provider=provider,
+            healthy=state["healthy"],
+            status="healthy" if state["healthy"] else "transport_failure",
+        )
+
+    monkeypatch.setitem(pp._PROBES, "exa", lambda _timeout=None: probe("exa"))
+    monkeypatch.setitem(
+        pp._PROBES,
+        "scrapingdog",
+        lambda _timeout=None: probe("scrapingdog"),
+    )
+    preflight = pp.ProviderPreflight()
+    assert preflight.check(force=True)["healthy"] is True
+
+    state["healthy"] = False
+    with pytest.raises(RuntimeError, match="transport scope failed"):
+        with preflight.measurement_transaction():
+            assert preflight.check(force=True)["healthy"] is False
+            raise RuntimeError("transport scope failed")
+
+    state["healthy"] = True
+    assert preflight.check(force=False)["healthy"] is True
+    assert preflight._failure_streaks == {"exa": 0, "scrapingdog": 0}
+
+
 def test_credit_failure_pause_worthy_immediately(monkeypatch):
     monkeypatch.setitem(
         pp._PROBES,

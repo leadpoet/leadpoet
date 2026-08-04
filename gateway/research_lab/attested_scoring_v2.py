@@ -1395,32 +1395,83 @@ async def execute_scoring_v2(
         "provider_credential_ref_hashes": dict(sorted(credential_refs.items())),
     }
     async def run_remote_job() -> tuple[dict[str, Any], str, dict[str, Any]]:
-        try:
-            await upload_attested_execution_job_v2(
-                manifest=manifest,
-                payload=payload_bytes,
-                chunk_size=UPLOAD_CHUNK_BYTES,
-                submit_job=rpc_method("submit_job"),
-                put_chunk=rpc_method("put_chunk"),
-                seal_job=rpc_method("seal_job"),
-                get_status=rpc_method("get_status"),
-            )
-        except AttestedExecutionUploadV2Error as exc:
-            raise AttestedScoringV2Error(str(exc)) from exc
+        async def cancel_abandoned_job() -> None:
+            cleanup_seconds = max(1.0, min(15.0, float(timeout_seconds)))
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + cleanup_seconds
+            try:
+                remaining = max(0.1, deadline - loop.time())
+                summary = await asyncio.wait_for(
+                    rpc_method("cancel_job")(job_id),
+                    timeout=remaining,
+                )
+                state = str(summary.get("state") or "")
+                while state not in {"succeeded", "failed", "cancelled"}:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        logger.warning(
+                            "v2_scoring_abandoned_job_cancel_timeout job_id=%s",
+                            job_id,
+                        )
+                        return
+                    await asyncio.sleep(
+                        min(max(0.01, float(poll_seconds)), remaining)
+                    )
+                    summary = await asyncio.wait_for(
+                        rpc_method("get_status")(job_id),
+                        timeout=max(0.1, deadline - loop.time()),
+                    )
+                    state = str(summary.get("state") or "")
+            except BaseException as cleanup_error:
+                logger.warning(
+                    "v2_scoring_abandoned_job_cancel_failed job_id=%s error_type=%s",
+                    job_id,
+                    type(cleanup_error).__name__,
+                )
 
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + max(1.0, float(timeout_seconds))
-        while True:
-            status = await rpc_method("get_status")(job_id)
-            state = str(status.get("state") or "")
-            if state in {"succeeded", "failed", "cancelled"}:
-                break
-            if loop.time() >= deadline:
-                await rpc_method("cancel_job")(job_id)
-                raise AttestedScoringV2Error("V2 scoring job timed out")
-            await asyncio.sleep(max(0.01, float(poll_seconds)))
-        receipt = await rpc_method("get_receipt")(job_id)
-        return dict(status), state, dict(receipt)
+        submission_attempted = False
+        try:
+            try:
+                submission_attempted = True
+                await upload_attested_execution_job_v2(
+                    manifest=manifest,
+                    payload=payload_bytes,
+                    chunk_size=UPLOAD_CHUNK_BYTES,
+                    submit_job=rpc_method("submit_job"),
+                    put_chunk=rpc_method("put_chunk"),
+                    seal_job=rpc_method("seal_job"),
+                    get_status=rpc_method("get_status"),
+                )
+            except AttestedExecutionUploadV2Error as exc:
+                raise AttestedScoringV2Error(str(exc)) from exc
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max(1.0, float(timeout_seconds))
+            while True:
+                status = await rpc_method("get_status")(job_id)
+                state = str(status.get("state") or "")
+                if state in {"succeeded", "failed", "cancelled"}:
+                    break
+                if loop.time() >= deadline:
+                    raise AttestedScoringV2Error("V2 scoring job timed out")
+                await asyncio.sleep(max(0.01, float(poll_seconds)))
+            receipt = await rpc_method("get_receipt")(job_id)
+            return dict(status), state, dict(receipt)
+        except BaseException:
+            if submission_attempted:
+                cleanup_task = asyncio.create_task(cancel_abandoned_job())
+                try:
+                    await asyncio.shield(cleanup_task)
+                except BaseException as cleanup_wait_error:
+                    # Preserve the original bridge failure. The cleanup task is
+                    # independently bounded and remains attached to this loop.
+                    logger.warning(
+                        "v2_scoring_abandoned_job_cleanup_wait_interrupted "
+                        "job_id=%s error_type=%s",
+                        job_id,
+                        type(cleanup_wait_error).__name__,
+                    )
+            raise
 
     leased_credentials = False
     leased_slot_count = 0

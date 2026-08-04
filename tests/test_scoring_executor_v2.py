@@ -23,6 +23,7 @@ from gateway.tee.scoring_executor_v2 import (
     ScoringExecutorV2,
 )
 from gateway.tee.model_sandbox_v2 import provider_evidence_tape_input_root
+from gateway.tee.provider_client_v2 import ProviderClientV2Error
 from gateway.tee.research_lab_runtime_config_v2 import (
     build_research_lab_execution_config,
 )
@@ -276,6 +277,113 @@ async def test_v2_preflight_authenticates_both_providers_and_worker_proxy():
         item["egress_proxy_ref_hash"] == provider_refs["egress_proxy"]
         for item in context.transport_attempts
     )
+
+
+@pytest.mark.asyncio
+async def test_v2_preflight_transport_scope_failure_does_not_poison_cache():
+    provider_refs = {
+        "exa": "sha256:" + "b" * 64,
+        "scrapingdog": "sha256:" + "c" * 64,
+        "egress_proxy": "sha256:" + "d" * 64,
+    }
+    state = {"fail": True, "calls": 0}
+
+    def provider_execute(request):
+        state["calls"] += 1
+        if state["fail"]:
+            raise RuntimeError("coordinator relay failed before terminal")
+        provider_id = request["provider_id"]
+        body = b"{}"
+        attempt = build_transport_attempt(
+            request_id="%032x" % state["calls"],
+            logical_operation_id=request["logical_operation_id"],
+            job_id=request["job_id"],
+            purpose=request["purpose"],
+            provider_id=provider_id,
+            attempt_number=request["attempt_number"],
+            method=request["method"],
+            destination_host={
+                "exa": "api.exa.ai",
+                "scrapingdog": "api.scrapingdog.com",
+            }[provider_id],
+            destination_port=443,
+            path_hash=HASH,
+            nonsecret_headers_hash=HASH,
+            body_hash=HASH,
+            credential_ref_hash=provider_refs[provider_id],
+            egress_proxy_ref_hash=provider_refs["egress_proxy"],
+            retry_policy_hash=HASH,
+            timeout_ms=request["timeout_ms"],
+            started_at="2026-07-10T20:00:00Z",
+            terminal_status="authenticated_response",
+            http_status=200,
+            response_hash=HASH,
+            request_artifact_hash=HASH,
+            response_artifact_hash=HASH,
+            tls_peer_chain_hash=HASH,
+            tls_protocol="TLSv1.3",
+            failure_code=None,
+            completed_at="2026-07-10T20:00:00Z",
+        )
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": 200,
+            "headers": {"content-type": "application/json"},
+            "body_b64": base64.b64encode(body).decode("ascii"),
+            "encrypted_request_artifact_id": HASH,
+            "encrypted_artifact_id": HASH,
+            "transport_attempt": attempt,
+        }
+
+    executor = ScoringExecutorV2(
+        provider_execute=provider_execute,
+        retry_policy_hashes={"exa": HASH, "scrapingdog": HASH},
+    )
+    payload = {
+        "_v2_provider_credential_profile": "provider_preflight",
+        "_v2_provider_credential_ref_hashes": provider_refs,
+        "schema_version": PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
+        "measurement_id": "3" * 32,
+        "scope_key": "scoring:worker-3",
+        "force": False,
+        "settings": {
+            "enabled": True,
+            "ttl_seconds": 600.0,
+            "timeout_seconds": 12.0,
+            "failure_streak_threshold": 3,
+        },
+    }
+    try:
+        with pytest.raises(ProviderClientV2Error, match="signed terminal"):
+            await executor(
+                OP_PROVIDER_PREFLIGHT_V2,
+                payload,
+                ExecutionContextV2(
+                    job_id="provider-preflight-failed-scope",
+                    purpose="research_lab.provider_preflight.v2",
+                    epoch_id=0,
+                    provider_credential_profile="provider_preflight",
+                    provider_credential_ref_hashes=provider_refs,
+                ),
+            )
+        failed_call_count = state["calls"]
+        state["fail"] = False
+        result = await executor(
+            OP_PROVIDER_PREFLIGHT_V2,
+            {**payload, "measurement_id": "4" * 32},
+            ExecutionContextV2(
+                job_id="provider-preflight-recovered-scope",
+                purpose="research_lab.provider_preflight.v2",
+                epoch_id=0,
+                provider_credential_profile="provider_preflight",
+                provider_credential_ref_hashes=provider_refs,
+            ),
+        )
+    finally:
+        executor.close()
+
+    assert result.output["healthy"] is True
+    assert state["calls"] == failed_call_count + 2
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
@@ -243,9 +244,23 @@ class ProviderPreflight:
     """Per-process cached preflight with failure-streak tracking."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._verdicts: dict[str, ProviderVerdict] = {}
         self._failure_streaks: dict[str, int] = {}
+
+    @contextmanager
+    def measurement_transaction(self):
+        """Commit cached verdicts only with the enclosing measured transport."""
+
+        with self._lock:
+            verdicts = copy.deepcopy(self._verdicts)
+            failure_streaks = dict(self._failure_streaks)
+            try:
+                yield
+            except BaseException:
+                self._verdicts = verdicts
+                self._failure_streaks = failure_streaks
+                raise
 
     def check(
         self,

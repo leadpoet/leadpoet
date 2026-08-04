@@ -579,6 +579,29 @@ class _ConcurrentSubmitClient(_Client):
         return summary
 
 
+class _AbandonedPollClient(_Client):
+    def __init__(self, release, *, block_poll=False):
+        super().__init__(release)
+        self.block_poll = block_poll
+        self.poll_started = asyncio.Event()
+        self.cancelled_jobs = []
+        self.cancelled = False
+
+    async def scoring_v2_get_status(self, job_id):
+        if self.cancelled:
+            return {"job_id": job_id, "state": "cancelled"}
+        self.poll_started.set()
+        if self.block_poll:
+            await asyncio.Event().wait()
+        raise RuntimeError("inter-enclave status relay failed")
+
+    async def scoring_v2_cancel_job(self, job_id):
+        self.cancelled_jobs.append(job_id)
+        self.cancelled = True
+        self.manager.cancel(job_id)
+        return {"job_id": job_id, "state": "cancelled"}
+
+
 @pytest.mark.asyncio
 async def test_v2_bridge_returns_only_durable_release_verified_result():
     release = _release()
@@ -630,6 +653,55 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
     assert result["execution_receipt"] == result["receipt"]
     assert result["execution_receipt_graph"] == result["receipt_graph"]
     assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_cancels_remote_job_when_status_rpc_fails():
+    release = _release()
+    client = _AbandonedPollClient(release)
+
+    with pytest.raises(RuntimeError, match="status relay failed"):
+        await execute_scoring_v2(
+            operation="benchmark_icp_score",
+            purpose="research_lab.benchmark.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"scores": [1.0]},
+            worker_index=0,
+            release_manifest=release,
+            client=client,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+    assert len(client.cancelled_jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_cancels_remote_job_when_host_task_is_cancelled():
+    release = _release()
+    client = _AbandonedPollClient(release, block_poll=True)
+    task = asyncio.create_task(
+        execute_scoring_v2(
+            operation="benchmark_icp_score",
+            purpose="research_lab.benchmark.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"scores": [1.0]},
+            worker_index=0,
+            release_manifest=release,
+            client=client,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+    )
+    await asyncio.wait_for(client.poll_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(client.cancelled_jobs) == 1
 
 
 @pytest.mark.asyncio

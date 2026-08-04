@@ -18,12 +18,16 @@ from leadpoet_canonical.attested_v2 import (
     validate_transport_attempt,
 )
 from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
     build_weight_inputs_request_v2,
     weight_inputs_request_message_v2,
 )
 from leadpoet_canonical.weight_authority_v2 import (
+    GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2,
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
     WEIGHT_INPUT_PURPOSES,
+    gateway_weight_input_value_documents_v2,
+    normalize_gateway_measured_weight_inputs_v2,
 )
 from validator_tee.host.vsock_client import ValidatorEnclaveClient
 from leadpoet_observability import (
@@ -375,10 +379,18 @@ async def fetch_gateway_weight_inputs_v2(
     # which does force a rebuild and compounds the delay.
     max_attempts: int = 10,
     retry_delay_seconds: float = 2.0,
+    snapshot_authority_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Request one exact, enclave-signed gateway input set and verify its shape."""
 
     calculation = dict(calculation_snapshot)
+    normalized_mode = (
+        snapshot_authority_mode == GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    if snapshot_authority_mode is not None and not normalized_mode:
+        raise GatewayWeightInputsV2Error(
+            "gateway V2 weight input snapshot authority mode is invalid"
+        )
     runtime_sha = str(
         os.environ.get("GITHUB_SHA")
         or os.environ.get("GIT_COMMIT")
@@ -409,6 +421,7 @@ async def fetch_gateway_weight_inputs_v2(
             allocation_hash=allocation_hash,
             leaderboard_window_start=leaderboard_window_start,
             leaderboard_window_end=leaderboard_window_end,
+            snapshot_authority_mode=snapshot_authority_mode,
         )
     except Exception as exc:
         raise GatewayWeightInputsV2Error(
@@ -521,10 +534,24 @@ async def fetch_gateway_weight_inputs_v2(
         "upstream_ancestry_proofs",
         "upstream_transport_attempts",
     }
+    normalized_fields = {
+        "snapshot_authority_mode",
+        "authoritative_calculation_snapshot",
+        "authoritative_calculation_snapshot_hash",
+        "normalized_source_categories",
+    }
+    normalized_full_fields = full_fields | normalized_fields
+    normalized_compact_fields = compact_fields | normalized_fields
     response_fields = set(response) if isinstance(response, Mapping) else set()
     if (
         not isinstance(response, Mapping)
-        or response_fields not in (full_fields, compact_fields)
+        or response_fields
+        not in (
+            full_fields,
+            compact_fields,
+            normalized_full_fields,
+            normalized_compact_fields,
+        )
     ):
         raise GatewayWeightInputsV2Error("gateway V2 weight input response fields are invalid")
     if (
@@ -551,7 +578,76 @@ async def fetch_gateway_weight_inputs_v2(
         "gateway_authority_event_hash": authority_hash,
         "request_authorization": dict(signature_result),
     }
-    if response_fields == full_fields:
+    if normalized_mode:
+        if response_fields not in (normalized_full_fields, normalized_compact_fields):
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 normalized response fields are invalid"
+            )
+        if response.get("snapshot_authority_mode") != snapshot_authority_mode:
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 normalized response mode differs from request"
+            )
+        authoritative = response.get("authoritative_calculation_snapshot")
+        authoritative_hash = str(
+            response.get("authoritative_calculation_snapshot_hash") or ""
+        )
+        categories = response.get("normalized_source_categories")
+        if (
+            not isinstance(authoritative, Mapping)
+            or sha256_json(authoritative) != authoritative_hash
+            or not isinstance(categories, list)
+            or any(not isinstance(category, str) for category in categories)
+            or categories != sorted(set(categories))
+            or not set(categories).issubset(
+                GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2
+            )
+        ):
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 normalized response authority is invalid"
+            )
+        try:
+            authoritative_documents = gateway_weight_input_value_documents_v2(
+                calculation_snapshot=authoritative,
+                gateway_authority_event_hash=authority_hash,
+            )
+            measured_documents = {
+                category: authoritative_documents[category]
+                for category in sorted(
+                    GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2
+                )
+            }
+            normalized = normalize_gateway_measured_weight_inputs_v2(
+                calculation_snapshot=calculation,
+                measured_documents=measured_documents,
+                gateway_authority_event_hash=authority_hash,
+            )
+        except Exception as exc:
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 normalized authority does not reproduce canonically"
+            ) from exc
+        if (
+            dict(authoritative)
+            != normalized["authoritative_calculation_snapshot"]
+            or authoritative_hash
+            != normalized["authoritative_calculation_snapshot_hash"]
+            or categories != normalized["normalized_source_categories"]
+        ):
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 normalized authority differs from canonical overlay"
+            )
+        result.update(
+            {
+                "snapshot_authority_mode": snapshot_authority_mode,
+                "authoritative_calculation_snapshot": dict(authoritative),
+                "authoritative_calculation_snapshot_hash": authoritative_hash,
+                "normalized_source_categories": list(categories),
+            }
+        )
+    elif response_fields in (normalized_full_fields, normalized_compact_fields):
+        raise GatewayWeightInputsV2Error(
+            "gateway V2 returned normalized authority without signed selection"
+        )
+    if response_fields in (full_fields, normalized_full_fields):
         receipt_set = _validate_receipt_set(
             value=response["upstream_receipt_set"],
             input_receipt_hashes=input_hashes,

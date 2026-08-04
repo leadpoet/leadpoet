@@ -27,7 +27,7 @@
       "symbol": "get_compact_published_weights_v2"
     },
     {
-      "ast_sha256": "sha256:221f2772f3def021f0e33ae9fb892d8d3cb5f899e71663f4b9ab417a45f06a47",
+      "ast_sha256": "sha256:d98887f46be31b044ba2f3188fa871ffdcaa3045b1d9bece1f4f821d81c73173",
       "path": "gateway/api/weights.py",
       "symbol": "get_weight_inputs_v2"
     },
@@ -187,7 +187,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:24fe0d3d20896f4f49ced6d14189c77c61603d140a735a57a587cf891c931af3",
+      "ast_sha256": "sha256:344102421b92997d3d401ad3f93d3bcc4dfeebf78bec752602a1e9539cc5ac27",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -327,12 +327,12 @@
       "symbol": "persist_receipt_graph_v2"
     },
     {
-      "ast_sha256": "sha256:46b17b5d046a65184e9c2eb5fcb001f3f065fada7086fc4e866f0b10a3b5f1db",
+      "ast_sha256": "sha256:7d466e03e6aa54791742b9b423e2331f25fb75f298f71a9540e0133dd624d551",
       "path": "gateway/research_lab/attested_weight_inputs_v2.py",
       "symbol": "_compact_weight_ancestry"
     },
     {
-      "ast_sha256": "sha256:da63615aa8f1899f4991e51ee8b5889991d58766c7e73ab7c16b47e2ced04c9d",
+      "ast_sha256": "sha256:9ad76264b370e3ca4c09851d9cc8a81750f038ec60bac0942cf342f6d3728e2f",
       "path": "gateway/research_lab/attested_weight_inputs_v2.py",
       "symbol": "build_gateway_weight_inputs_v2"
     },
@@ -1102,7 +1102,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:6a8701f85baec4969d70bed93747087b3637a27d9c8c75d837d55f6ff4580f91",
+      "ast_sha256": "sha256:bc2ced6ae7ac1468908161bc21a8b98f52a0ccf2ff0d783a3183ddcc697ebead",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -1127,7 +1127,7 @@
       "symbol": "CoordinatorSourceAddProvenanceV2"
     },
     {
-      "ast_sha256": "sha256:e905b2afad9ec079af4bdefe16ce5479e93c58fbe75639c1c5313cf88ae96a2b",
+      "ast_sha256": "sha256:892b9012b4f1b2c6a947f51a7a6f52ff5f5981ace94dd59053c214a1589068d8",
       "path": "gateway/tee/coordinator_weight_source_v2.py",
       "symbol": "CoordinatorWeightSourceV2"
     },
@@ -2042,6 +2042,21 @@
       "symbol": "validate_compact_weight_submission_shape_v2"
     },
     {
+      "ast_sha256": "sha256:909e3844e13605252787c525a626f5125400c2f97502d456f5bd395031ebedc1",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2"
+    },
+    {
+      "ast_sha256": "sha256:9c3fb03ceca70d1d63d16115296be740c25a41485c8873ab64462305b45478da",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "build_weight_inputs_request_v2"
+    },
+    {
+      "ast_sha256": "sha256:ca3d6da2d4143cef596bd0cfad85ea69125cc56e13caaa28a2207a96e4319a93",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "validate_weight_inputs_request_v2"
+    },
+    {
       "ast_sha256": "sha256:ca4917c451f42deb8c1a394125aa3bac38ff1d7bd605603be3eace8b0c5f11c6",
       "path": "leadpoet_canonical/kms_recipient.py",
       "symbol": "decrypt_kms_recipient_ciphertext"
@@ -2082,6 +2097,16 @@
       "symbol": "validate_legacy_weight_bundle_v2"
     },
     {
+      "ast_sha256": "sha256:a7ca9b2cf159d66a64d453895ddd3d316101f169d932c940e7a94e77ba3046d8",
+      "path": "leadpoet_canonical/sourcing_history_v2.py",
+      "symbol": "SOURCING_BANNED_HOTKEY_PENALTY_V2"
+    },
+    {
+      "ast_sha256": "sha256:e9c971d8e6c66fe2048bed5a73c46606be16568758dd6129bca76e56927bbdc6",
+      "path": "leadpoet_canonical/sourcing_history_v2.py",
+      "symbol": "rolling_sourcing_history_v2"
+    },
+    {
       "ast_sha256": "sha256:9da83659412c65a826b0c1e9c6aa9d7b9cce7bf255ae164fc120ea09f0641378",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "build_weight_snapshot_v2"
@@ -2090,6 +2115,11 @@
       "ast_sha256": "sha256:1f522a1f8ac8edbd984c0ef39606574b2a9dd0595b7bdb95ec7de1ebdbc44105",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "gateway_weight_input_value_documents_v2"
+    },
+    {
+      "ast_sha256": "sha256:b1c299b7319f5a9965c2178b2b5106ec3189e575bcd5ab17cd006e83eacbf411",
+      "path": "leadpoet_canonical/weight_authority_v2.py",
+      "symbol": "normalize_gateway_measured_weight_inputs_v2"
     },
     {
       "ast_sha256": "sha256:d20544a7f9e324c4edb69c7168a5df059ac835d64e7737896ad524f215fbffd8",
@@ -2597,7 +2627,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:b93d9a16e25075e18040ce4234373fb70e2498a2cc8085f34ae8b99cc8811ac6",
+  "manifest_hash": "sha256:4c2fd31eb8b41b7fb0f25f95bb4a29bbbc21e3e40166e3d68a0c670aadf4d234",
   "protected_source_commit": "a0798fc6336838326bb4708789d24225cd1dcaef",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

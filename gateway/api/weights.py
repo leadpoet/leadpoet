@@ -79,6 +79,7 @@ from leadpoet_canonical.compact_auditor_authority_v2 import (
     verify_compact_weight_submission_v2,
 )
 from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
     subnet_epoch_candidate_authorization_message_v1,
     validate_weight_inputs_request_v2,
     weight_inputs_request_message_v2,
@@ -118,11 +119,11 @@ _WEIGHT_AUTHORITY_LOADS_INFLIGHT: Dict[
     asyncio.Task,
 ] = {}
 _WEIGHT_INPUT_LOADS_INFLIGHT: Dict[
-    tuple[int, str],
+    tuple[int, str, str],
     asyncio.Task,
 ] = {}
 _WEIGHT_INPUT_RESULTS: Dict[
-    tuple[int, str],
+    tuple[int, str, str],
     tuple[float, Dict[str, Any]],
 ] = {}
 _WEIGHT_INPUT_RESULT_TTL_SECONDS = 120.0
@@ -214,6 +215,7 @@ async def _build_weight_inputs_v2_singleflight(
     calculation_snapshot: Dict[str, Any],
     leaderboard_window_start: str,
     leaderboard_window_end: str,
+    snapshot_authority_mode: Optional[str],
 ) -> Dict[str, Any]:
     """Share one exact immutable input reconstruction across HTTP retries."""
 
@@ -225,7 +227,7 @@ async def _build_weight_inputs_v2_singleflight(
     )
 
     loop = asyncio.get_running_loop()
-    key = (id(loop), str(request_hash))
+    key = (id(loop), str(request_hash), str(snapshot_authority_mode or "legacy"))
     cached = _WEIGHT_INPUT_RESULTS.get(key)
     if cached is not None:
         expires_at, result = cached
@@ -249,6 +251,7 @@ async def _build_weight_inputs_v2_singleflight(
                 allocation_graph=allocation_graph,
                 leaderboard_window_start=str(leaderboard_window_start),
                 leaderboard_window_end=str(leaderboard_window_end),
+                snapshot_authority_mode=snapshot_authority_mode,
             )
 
         task = asyncio.create_task(_build())
@@ -280,11 +283,13 @@ async def _build_weight_inputs_v2_singleflight(
     return await asyncio.shield(task)
 
 
-def _weight_inputs_v2_has_authorized_work(request_hash: str) -> bool:
+def _weight_inputs_v2_has_authorized_work(
+    request_hash: str, snapshot_authority_mode: Optional[str]
+) -> bool:
     """Return whether this process already authorized the exact request."""
 
     loop = asyncio.get_running_loop()
-    key = (id(loop), str(request_hash))
+    key = (id(loop), str(request_hash), str(snapshot_authority_mode or "legacy"))
     cached = _WEIGHT_INPUT_RESULTS.get(key)
     if cached is not None:
         expires_at, _result = cached
@@ -771,6 +776,10 @@ class WeightInputsV2Response(BaseModel):
     input_receipt_hashes: Dict[str, str]
     gateway_authority_event_hash: str
     upstream_receipt_set: Dict[str, Any]
+    snapshot_authority_mode: Optional[str] = None
+    authoritative_calculation_snapshot: Optional[Dict[str, Any]] = None
+    authoritative_calculation_snapshot_hash: Optional[str] = None
+    normalized_source_categories: Optional[List[str]] = None
 
 
 class WeightInputsCompactV2Response(BaseModel):
@@ -782,6 +791,10 @@ class WeightInputsCompactV2Response(BaseModel):
     gateway_authority_event_hash: str
     upstream_ancestry_proofs: Dict[str, Any]
     upstream_transport_attempts: List[Dict[str, Any]]
+    snapshot_authority_mode: Optional[str] = None
+    authoritative_calculation_snapshot: Optional[Dict[str, Any]] = None
+    authoritative_calculation_snapshot_hash: Optional[str] = None
+    normalized_source_categories: Optional[List[str]] = None
 
 
 class SubnetEpochCandidateSubmissionV1(BaseModel):
@@ -1632,7 +1645,10 @@ async def get_weight_inputs_v2(
     # An exact signed retry may arrive after the original authorized build has
     # outlived MAX_BLOCK_DRIFT. Attach it to that same immutable work/result;
     # all new request hashes must still pass current chain authority.
-    authorized_work = _weight_inputs_v2_has_authorized_work(request["request_hash"])
+    snapshot_authority_mode = request.get("snapshot_authority_mode")
+    authorized_work = _weight_inputs_v2_has_authorized_work(
+        request["request_hash"], snapshot_authority_mode
+    )
     if not authorized_work:
         await _verify_epoch_block_authority(
             netuid=request["netuid"],
@@ -1664,6 +1680,7 @@ async def get_weight_inputs_v2(
                 calculation_snapshot=calculation,
                 leaderboard_window_start=request["leaderboard_window_start"],
                 leaderboard_window_end=request["leaderboard_window_end"],
+                snapshot_authority_mode=snapshot_authority_mode,
             )
     except HTTPException:
         raise
@@ -1704,6 +1721,31 @@ async def get_weight_inputs_v2(
         == "compact-v2"
     )
     compact = result.get("compact_ancestry")
+    normalized_response = (
+        snapshot_authority_mode == GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    normalized_kwargs = {}
+    if normalized_response:
+        expected_fields = {
+            "snapshot_authority_mode",
+            "authoritative_calculation_snapshot",
+            "authoritative_calculation_snapshot_hash",
+            "normalized_source_categories",
+        }
+        if not expected_fields.issubset(set(result)):
+            raise HTTPException(
+                status_code=503,
+                detail="Authenticated normalized V2 weight inputs are incomplete",
+            )
+        if result.get("snapshot_authority_mode") != snapshot_authority_mode:
+            raise HTTPException(
+                status_code=503,
+                detail="Authenticated normalized V2 weight input mode differs",
+            )
+        normalized_kwargs = {
+            field: result[field]
+            for field in sorted(expected_fields)
+        }
     if compact_requested:
         if not isinstance(compact, Mapping):
             # A compact-capable validator has explicitly selected the bounded
@@ -1733,6 +1775,7 @@ async def get_weight_inputs_v2(
             upstream_transport_attempts=compact[
                 "upstream_transport_attempts"
             ],
+            **normalized_kwargs,
         )
     else:
         # Old persisted results and N-1 validators retain their exact full
@@ -1744,9 +1787,10 @@ async def get_weight_inputs_v2(
             input_receipt_hashes=result["input_receipt_hashes"],
             gateway_authority_event_hash=result["gateway_authority_event_hash"],
             upstream_receipt_set=result["upstream_receipt_set"],
+            **normalized_kwargs,
         )
     return _weight_authority_http_response(
-        response.model_dump(mode="json"),
+        response.model_dump(mode="json", exclude_none=True),
         accept_encoding=http_request.headers.get("accept-encoding", ""),
     )
 

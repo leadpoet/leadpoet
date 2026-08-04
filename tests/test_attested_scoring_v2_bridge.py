@@ -67,6 +67,54 @@ def _hash(character):
     return "sha256:" + character * 64
 
 
+def _artifact_persistence_lineage_output():
+    artifacts = [
+        {
+            "artifact_id": _hash("8"),
+            "plaintext_hash": _hash("1"),
+            "ciphertext_hash": _hash("2"),
+            "artifact_ref": "s3://immutable/8.json",
+            "storage_document_hash": _hash("3"),
+            "encryption_context_hash": _hash("4"),
+            "object_lock_mode": "COMPLIANCE",
+            "retain_until": "2027-07-10T12:00:00Z",
+            "transport_root": _hash("5"),
+        }
+    ]
+    return {
+        "source_receipt_hash": _hash("6"),
+        "artifacts": artifacts,
+        "artifact_set_root": sha256_json(artifacts),
+    }
+
+
+def test_artifact_persistence_lineage_output_is_schema_and_receipt_bound():
+    output = _artifact_persistence_lineage_output()
+    assert attested_scoring_v2._validate_artifact_persistence_lineage_output_v2(
+        lineage={"result": output},
+        lineage_receipt={"output_root": sha256_json(output)},
+    ) == output
+
+
+def test_artifact_persistence_lineage_output_rejects_invalid_schema():
+    output = _artifact_persistence_lineage_output()
+    output["unexpected"] = True
+    with pytest.raises(AttestedScoringV2Error, match="output is invalid"):
+        attested_scoring_v2._validate_artifact_persistence_lineage_output_v2(
+            lineage={"result": output},
+            lineage_receipt={"output_root": sha256_json(output)},
+        )
+
+
+def test_artifact_persistence_lineage_output_rejects_receipt_mismatch():
+    output = _artifact_persistence_lineage_output()
+    with pytest.raises(AttestedScoringV2Error, match="differs from its receipt"):
+        attested_scoring_v2._validate_artifact_persistence_lineage_output_v2(
+            lineage={"result": output},
+            lineage_receipt={"output_root": _hash("f")},
+        )
+
+
 @pytest.fixture(autouse=True)
 def _checkpoint_runtime(monkeypatch):
     monkeypatch.setenv(
@@ -2277,6 +2325,10 @@ async def test_v2_bridge_persists_every_authenticated_provider_artifact_first(
         == result["receipt"]["job_id"]
     )
     assert result["artifact_persistence"][0]["status"] == "persisted"
+    assert result["artifact_persistence_output"]["artifacts"]
+    assert result["receipt"]["output_root"] == sha256_json(
+        result["artifact_persistence_output"]
+    )
     assert result["receipt"]["purpose"] == "leadpoet.artifact_persistence.v2"
     assert result["execution_receipt"]["purpose"] == "research_lab.benchmark.v2"
     assert (

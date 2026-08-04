@@ -86,12 +86,78 @@ OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2 = (
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ARTIFACT_PERSISTENCE_PURPOSE = "leadpoet.artifact_persistence.v2"
 _ARTIFACT_PERSISTENCE_PROVIDER = "aws_s3_object_lock"
+_ARTIFACT_PERSISTENCE_OUTPUT_FIELDS = frozenset(
+    {"source_receipt_hash", "artifacts", "artifact_set_root"}
+)
+_ARTIFACT_PERSISTENCE_ARTIFACT_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "plaintext_hash",
+        "ciphertext_hash",
+        "artifact_ref",
+        "storage_document_hash",
+        "encryption_context_hash",
+        "object_lock_mode",
+        "retain_until",
+        "transport_root",
+    }
+)
 
 _COORDINATOR_WEIGHT_INPUT_PURPOSES = {
     category: purpose
     for category, (role, purpose) in WEIGHT_INPUT_PURPOSES.items()
     if role == "gateway_coordinator"
 }
+
+
+def validate_artifact_persistence_output_v2(value: Any) -> dict[str, Any]:
+    """Validate the exact coordinator output committed by a persistence receipt."""
+
+    if not isinstance(value, Mapping) or set(value) != _ARTIFACT_PERSISTENCE_OUTPUT_FIELDS:
+        raise ValueError("artifact persistence output fields are invalid")
+    source_receipt_hash = str(value.get("source_receipt_hash") or "")
+    artifacts = value.get("artifacts")
+    if not _HASH_RE.fullmatch(source_receipt_hash) or not isinstance(artifacts, list):
+        raise ValueError("artifact persistence output is invalid")
+    normalized_artifacts = []
+    artifact_ids = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping) or set(artifact) != _ARTIFACT_PERSISTENCE_ARTIFACT_FIELDS:
+            raise ValueError("artifact persistence output artifact is invalid")
+        normalized = {key: artifact[key] for key in _ARTIFACT_PERSISTENCE_ARTIFACT_FIELDS}
+        if (
+            not all(
+                _HASH_RE.fullmatch(str(normalized[key] or ""))
+                for key in (
+                    "artifact_id",
+                    "plaintext_hash",
+                    "ciphertext_hash",
+                    "storage_document_hash",
+                    "encryption_context_hash",
+                    "transport_root",
+                )
+            )
+            or not all(
+                isinstance(normalized[key], str) and normalized[key]
+                for key in ("artifact_ref", "object_lock_mode", "retain_until")
+            )
+            or normalized["artifact_id"] in artifact_ids
+        ):
+            raise ValueError("artifact persistence output artifact is invalid")
+        artifact_ids.add(normalized["artifact_id"])
+        normalized_artifacts.append(normalized)
+    if (
+        not normalized_artifacts
+        or normalized_artifacts
+        != sorted(normalized_artifacts, key=lambda artifact: artifact["artifact_id"])
+        or value.get("artifact_set_root") != sha256_json(normalized_artifacts)
+    ):
+        raise ValueError("artifact persistence output artifact set is invalid")
+    return {
+        "source_receipt_hash": source_receipt_hash,
+        "artifacts": normalized_artifacts,
+        "artifact_set_root": str(value["artifact_set_root"]),
+    }
 
 
 def _validated_artifact_persistence_attempts(
@@ -977,7 +1043,7 @@ class CoordinatorExecutorV2:
             "artifact_set_root": sha256_json(output_artifacts),
         }
         return ExecutionResultV2(
-            output=output,
+            output=validate_artifact_persistence_output_v2(output),
             transport_attempts=tuple(transport_attempts),
             artifact_hashes=tuple(artifact_hashes),
         )

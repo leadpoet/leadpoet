@@ -29,6 +29,7 @@ from leadpoet_canonical.attested_v2 import (
 )
 from leadpoet_canonical.binding import create_binding_message
 from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
     build_application_signature_request_v2,
 )
 from leadpoet_canonical.weight_authority_v2 import (
@@ -733,6 +734,55 @@ def test_validator_authority_computes_and_signs_exact_canonical_weights():
         fixture["validator_boot"]["boot_identity_hash"]: True,
         fixture["gateway_boot"]["boot_identity_hash"]: True,
     }
+
+
+def test_validator_authority_rechecks_signed_gateway_measured_overlay():
+    fixture = _fixture()
+    authoritative = copy.deepcopy(fixture["request"]["calculation_snapshot"])
+    request = {
+        **fixture["request"],
+        "snapshot_authority_mode": GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+        "authoritative_calculation_snapshot": authoritative,
+        "authoritative_calculation_snapshot_hash": sha256_json(authoritative),
+        "normalized_source_categories": [],
+    }
+
+    value = fixture["authority"].compute(request)
+
+    finalized_authoritative = {
+        **authoritative,
+        "parent_receipt_hashes": sorted(
+            value["weight_snapshot"]["input_receipt_hashes"].values()
+        ),
+        "research_lab_allocation_receipt_hash": value["weight_snapshot"][
+            "input_receipt_hashes"
+        ]["research_lab_allocation"],
+    }
+    assert value["weight_snapshot"]["calculation_snapshot"] == (
+        finalized_authoritative
+    )
+    assert value["weight_result"] == compute_final_weights(
+        finalized_authoritative
+    )
+
+    forged = copy.deepcopy(request)
+    forged_authoritative = copy.deepcopy(authoritative)
+    forged_authoritative.update(
+        {
+            "banned_hotkeys": ["source-hotkey"],
+            "rolling_lead_count": 1,
+            "rolling_scores": [
+                {"hotkey": "source-hotkey", "score": -100000}
+            ],
+        }
+    )
+    forged["authoritative_calculation_snapshot"] = forged_authoritative
+    forged["authoritative_calculation_snapshot_hash"] = sha256_json(
+        forged_authoritative
+    )
+    forged["normalized_source_categories"] = ["bans", "sourcing_history"]
+    with pytest.raises(ValidatorWeightAuthorityV2Error):
+        fixture["authority"].compute(forged)
 
 
 def test_validator_authority_preserves_approved_historical_validator_ancestry():

@@ -16,10 +16,15 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_receipt_graph,
 )
+from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
+    GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2,
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
     WEIGHT_INPUT_PURPOSES,
     gateway_weight_input_value_documents_v2,
+    normalize_gateway_measured_weight_inputs_v2,
 )
 
 
@@ -116,7 +121,8 @@ def _compact_weight_ancestry(
             raise AttestedWeightInputsV2Error(
                 "%s measured input execution is absent" % category
             )
-        proof = execution.get("ancestry_compact_proof")
+        execution_proof = execution.get("execution_ancestry_compact_proof")
+        proof = execution_proof or execution.get("ancestry_compact_proof")
         if proof is None:
             return None
         if not isinstance(proof, Mapping):
@@ -134,7 +140,11 @@ def _compact_weight_ancestry(
             if isinstance(claim, Mapping)
             else ""
         )
-        graph = execution.get("receipt_graph")
+        graph = (
+            execution.get("execution_receipt_graph")
+            if execution_proof is not None
+            else execution.get("receipt_graph")
+        )
         if (
             not isinstance(graph, Mapping)
             or root_hash != str(graph.get("root_receipt_hash") or "")
@@ -199,10 +209,18 @@ async def build_gateway_weight_inputs_v2(
     load_sourcing_graphs: Any = load_sourcing_epoch_graphs_v2,
     execution_options: Mapping[str, Any] | None = None,
     coordinator_client_factory: Any = _coordinator_client,
+    snapshot_authority_mode: str | None = None,
 ) -> dict[str, Any]:
     """Produce every coordinator input receipt from measured source reads."""
 
     calculation = dict(calculation_snapshot)
+    normalized_mode = (
+        snapshot_authority_mode == GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    if snapshot_authority_mode is not None and not normalized_mode:
+        raise AttestedWeightInputsV2Error(
+            "weight input snapshot authority mode is invalid"
+        )
     epoch_id = calculation.get("epoch_id")
     if not isinstance(epoch_id, int) or isinstance(epoch_id, bool) or epoch_id < 0:
         raise AttestedWeightInputsV2Error("weight input epoch is invalid")
@@ -248,7 +266,16 @@ async def build_gateway_weight_inputs_v2(
         if category in _ALLOCATION_CATEGORIES:
             parents = (allocation_graph,)
         elif category == "sourcing_history":
-            parents = tuple(sourcing_graphs)
+            if normalized_mode:
+                if "bans" not in executions:
+                    raise AttestedWeightInputsV2Error(
+                        "sourcing requires measured bans first"
+                    )
+                parents = tuple(sourcing_graphs) + (
+                    executions["bans"]["receipt_graph"],
+                )
+            else:
+                parents = tuple(sourcing_graphs)
         elif category == "anomaly_adjustments":
             missing = [
                 source
@@ -274,6 +301,27 @@ async def build_gateway_weight_inputs_v2(
             "leaderboard_window_start": str(leaderboard_window_start),
             "leaderboard_window_end": str(leaderboard_window_end),
         }
+        if normalized_mode:
+            payload["snapshot_authority_mode"] = (
+                GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+            )
+            if category == "sourcing_history":
+                bans_document = executions.get("bans", {}).get("result")
+                bans_persistence_output = executions.get("bans", {}).get(
+                    "artifact_persistence_output"
+                )
+                if not isinstance(bans_document, Mapping):
+                    raise AttestedWeightInputsV2Error(
+                        "sourcing measured bans document is absent"
+                    )
+                if not isinstance(bans_persistence_output, Mapping):
+                    raise AttestedWeightInputsV2Error(
+                        "sourcing measured bans persistence output is absent"
+                    )
+                payload["bans_document"] = dict(bans_document)
+                payload["bans_persistence_output"] = dict(
+                    bans_persistence_output
+                )
         if category == "anomaly_adjustments":
             payload["upstream_documents"] = {
                 source: dict(executions[source]["result"])
@@ -323,14 +371,20 @@ async def build_gateway_weight_inputs_v2(
         root_hash = str(graph.get("root_receipt_hash") or "")
         receipt_hash = str(receipt.get("receipt_hash") or "")
         expected_role, _expected_purpose = WEIGHT_INPUT_PURPOSES[category]
+        matches_expected = canonical_json(document) == canonical_json(
+            expected_documents[category]
+        )
         if (
             root_receipt.get("receipt_hash") != root_hash
             or receipts_by_hash.get(receipt_hash) != receipt
             or receipt.get("role") != expected_role
             or receipt.get("purpose") != purpose
             or receipt.get("output_root") != sha256_json(document)
-            or canonical_json(document)
-            != canonical_json(expected_documents[category])
+            or (
+                (not normalized_mode)
+                or category not in GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2
+            )
+            and not matches_expected
         ):
             raise AttestedWeightInputsV2Error(
                 "%s measured input differs from calculation" % category
@@ -347,19 +401,77 @@ async def build_gateway_weight_inputs_v2(
                     "%s persistence lineage differs from measured input"
                     % category
                 )
+        if normalized_mode and category == "bans":
+            if (
+                root_hash == receipt_hash
+                or root_receipt.get("role") != "gateway_coordinator"
+                or root_receipt.get("purpose")
+                != "leadpoet.artifact_persistence.v2"
+                or int(root_receipt.get("epoch_id", -1)) != epoch_id
+            ):
+                raise AttestedWeightInputsV2Error(
+                    "bans requires terminal durable persistence receipt"
+                )
         executions[category] = dict(value)
 
-    # Every category except anomaly_adjustments has independent measured
-    # inputs. Run those jobs together so their mandatory encrypted artifact
-    # persistence does not consume the submission window serially.
-    # The anomaly job remains ordered after all of its receipt parents exist.
-    await asyncio.gather(
-        *(
-            execute_category(category, sequence)
-            for sequence, category in enumerate(independent_categories)
+    # The legacy branch intentionally retains its original concurrent ordering.
+    # In signed normalized mode bans are measured before sourcing replay, so the
+    # latter can verify the bans receipt and reproduce the historic per-epoch
+    # penalty without mutating the signed source records.
+    if normalized_mode:
+        pre_sourcing_categories = [
+            category
+            for category in independent_categories
+            if category != "sourcing_history"
+        ]
+        await asyncio.gather(
+            *(
+                execute_category(category, sequence)
+                for sequence, category in enumerate(pre_sourcing_categories)
+            )
         )
-    )
-    await execute_category("anomaly_adjustments", len(independent_categories))
+        await execute_category("sourcing_history", len(pre_sourcing_categories))
+        measured_documents = {
+            category: dict(executions[category]["result"])
+            for category in sorted(GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2)
+        }
+        try:
+            normalized = normalize_gateway_measured_weight_inputs_v2(
+                calculation_snapshot=calculation,
+                measured_documents=measured_documents,
+                gateway_authority_event_hash=allocation_hash,
+            )
+        except Exception as exc:
+            raise AttestedWeightInputsV2Error(
+                "measured gateway normalization failed"
+            ) from exc
+        calculation = dict(normalized["authoritative_calculation_snapshot"])
+        expected_documents = gateway_weight_input_value_documents_v2(
+            calculation_snapshot=calculation,
+            gateway_authority_event_hash=allocation_hash,
+        )
+        for category, execution in executions.items():
+            if canonical_json(execution["result"]) != canonical_json(
+                expected_documents[category]
+            ):
+                raise AttestedWeightInputsV2Error(
+                    "%s measured input differs from normalized calculation" % category
+                )
+        await execute_category(
+            "anomaly_adjustments", len(pre_sourcing_categories) + 1
+        )
+    else:
+        # Every category except anomaly_adjustments has independent measured
+        # inputs. Run those jobs together so their mandatory encrypted artifact
+        # persistence does not consume the submission window serially.
+        # The anomaly job remains ordered after all of its receipt parents exist.
+        await asyncio.gather(
+            *(
+                execute_category(category, sequence)
+                for sequence, category in enumerate(independent_categories)
+            )
+        )
+        await execute_category("anomaly_adjustments", len(independent_categories))
 
     all_graphs = [
         executions[category]["receipt_graph"]
@@ -384,10 +496,24 @@ async def build_gateway_weight_inputs_v2(
         input_receipt_hashes=input_hashes,
         receipt_set=receipt_set,
     )
-    return {
+    result = {
         "input_receipt_hashes": input_hashes,
         "gateway_authority_event_hash": allocation_hash,
         "upstream_receipt_set": receipt_set,
         "compact_ancestry": compact,
         "executions": executions,
     }
+    if normalized_mode:
+        result.update(
+            {
+                "snapshot_authority_mode": normalized["snapshot_authority_mode"],
+                "authoritative_calculation_snapshot": calculation,
+                "authoritative_calculation_snapshot_hash": normalized[
+                    "authoritative_calculation_snapshot_hash"
+                ],
+                "normalized_source_categories": normalized[
+                    "normalized_source_categories"
+                ],
+            }
+        )
+    return result

@@ -33,6 +33,7 @@ SERVE_AXON_EXTRINSIC_AUTHORIZATION_SCHEMA_VERSION = (
 )
 APPLICATION_SIGNATURE_SCHEMA_VERSION = "leadpoet.application_signature.v2"
 WEIGHT_INPUT_REQUEST_SCHEMA_VERSION = "leadpoet.weight_inputs_request.v2"
+GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2 = "gateway-measured-v2"
 WEIGHT_INPUT_REQUEST_PREFIX = "LEADPOET_WEIGHT_INPUTS_V2|"
 DISABLED_LEADERBOARD_WINDOW_V1 = "1970-01-01T00:00:00Z"
 WEIGHT_TRANSPORT_AUTHORIZATION_SCHEMA_VERSION = (
@@ -952,6 +953,7 @@ def build_weight_inputs_request_v2(
     allocation_hash: str,
     leaderboard_window_start: str,
     leaderboard_window_end: str,
+    snapshot_authority_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     hotkey = str(validator_hotkey or "")
     _require(bool(_HOTKEY_RE.fullmatch(hotkey)), "validator_hotkey is invalid")
@@ -975,12 +977,23 @@ def build_weight_inputs_request_v2(
         "leaderboard_window_start": window_start,
         "leaderboard_window_end": window_end,
     }
+    if snapshot_authority_mode is not None:
+        mode = str(snapshot_authority_mode or "")
+        _require(
+            mode == GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+            "snapshot_authority_mode is invalid",
+        )
+        # The selector is part of the signed request hash.  A legacy request
+        # deliberately omits it so N-1 validators retain their exact wire
+        # representation and cannot share a cache entry with the normalized
+        # measurement path.
+        body["snapshot_authority_mode"] = mode
     return {**body, "request_hash": sha256_json(body)}
 
 
 def validate_weight_inputs_request_v2(value: Mapping[str, Any]) -> Dict[str, Any]:
     _require(isinstance(value, Mapping), "weight input request is invalid")
-    expected_fields = {
+    legacy_fields = {
         "schema_version",
         "validator_hotkey",
         "netuid",
@@ -992,7 +1005,12 @@ def validate_weight_inputs_request_v2(value: Mapping[str, Any]) -> Dict[str, Any
         "leaderboard_window_end",
         "request_hash",
     }
-    _require(set(value) == expected_fields, "weight input request fields are invalid")
+    normalized_fields = legacy_fields | {"snapshot_authority_mode"}
+    actual_fields = set(value)
+    _require(
+        actual_fields in (legacy_fields, normalized_fields),
+        "weight input request fields are invalid",
+    )
     rebuilt = build_weight_inputs_request_v2(
         validator_hotkey=value["validator_hotkey"],
         netuid=value["netuid"],
@@ -1002,6 +1020,11 @@ def validate_weight_inputs_request_v2(value: Mapping[str, Any]) -> Dict[str, Any
         allocation_hash=value["allocation_hash"],
         leaderboard_window_start=value["leaderboard_window_start"],
         leaderboard_window_end=value["leaderboard_window_end"],
+        snapshot_authority_mode=(
+            value["snapshot_authority_mode"]
+            if actual_fields == normalized_fields
+            else None
+        ),
     )
     _require(dict(value) == rebuilt, "weight input request is not canonical")
     return rebuilt

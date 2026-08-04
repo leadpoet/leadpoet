@@ -8,6 +8,7 @@ import pytest
 from leadpoet_canonical.hotkey_authority_v2 import (
     APPLICATION_SIGNATURE_SCHEMA_VERSION,
     CHAIN_SIGNING_PROFILE_SCHEMA_VERSION,
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
     HotkeyAuthorityV2Error,
     MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
     build_application_signature_request_v2,
@@ -500,6 +501,49 @@ def test_weight_input_request_rejects_other_hotkeys_and_inverted_windows():
         classify_application_message_v2(
             weight_inputs_request_message_v2(request).encode("utf-8"),
             validator_hotkey=HOTKEY,
+        )
+
+
+def test_weight_input_request_signed_measured_mode_isolated_from_legacy():
+    legacy = build_weight_inputs_request_v2(
+        validator_hotkey=HOTKEY,
+        netuid=71,
+        epoch_id=23860,
+        block=8589630,
+        calculation_snapshot_hash="sha256:" + "1" * 64,
+        allocation_hash="sha256:" + "2" * 64,
+        leaderboard_window_start="2026-07-03T20:00:00Z",
+        leaderboard_window_end="2026-07-10T20:00:00Z",
+    )
+    normalized = build_weight_inputs_request_v2(
+        validator_hotkey=HOTKEY,
+        netuid=71,
+        epoch_id=23860,
+        block=8589630,
+        calculation_snapshot_hash="sha256:" + "1" * 64,
+        allocation_hash="sha256:" + "2" * 64,
+        leaderboard_window_start="2026-07-03T20:00:00Z",
+        leaderboard_window_end="2026-07-10T20:00:00Z",
+        snapshot_authority_mode=GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+    )
+
+    assert "snapshot_authority_mode" not in legacy
+    assert normalized["snapshot_authority_mode"] == (
+        GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    assert normalized["request_hash"] != legacy["request_hash"]
+    assert validate_weight_inputs_request_v2(normalized) == normalized
+    with pytest.raises(HotkeyAuthorityV2Error, match="mode is invalid"):
+        build_weight_inputs_request_v2(
+            validator_hotkey=HOTKEY,
+            netuid=71,
+            epoch_id=23860,
+            block=8589630,
+            calculation_snapshot_hash="sha256:" + "1" * 64,
+            allocation_hash="sha256:" + "2" * 64,
+            leaderboard_window_start="2026-07-03T20:00:00Z",
+            leaderboard_window_end="2026-07-10T20:00:00Z",
+            snapshot_authority_mode="untrusted-authority",
         )
 
 

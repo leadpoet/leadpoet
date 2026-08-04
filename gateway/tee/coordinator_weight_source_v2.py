@@ -5,17 +5,23 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Any, Dict, Mapping
 
+from gateway.tee.coordinator_executor_v2 import (
+    validate_artifact_persistence_output_v2,
+)
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.supabase_source_v2 import SupabaseSourceReaderV2
 from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_json,
+    validate_receipt_graph,
     validate_signed_execution_receipt,
 )
 from leadpoet_canonical.hotkey_authority_v2 import (
     DISABLED_LEADERBOARD_WINDOW_V1,
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
 )
 from leadpoet_canonical.weight_authority_v2 import (
+    GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2,
     WEIGHT_INPUT_PURPOSES,
     gateway_weight_input_value_documents_v2,
 )
@@ -80,11 +86,20 @@ class CoordinatorWeightSourceV2:
                 "weight source payload fields are invalid"
             )
         category = str(payload.get("category") or "")
-        expected_fields = (
-            required | {"upstream_documents"}
-            if category == "anomaly_adjustments"
-            else required
-        )
+        mode = payload.get("snapshot_authority_mode")
+        normalized_mode = mode == GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+        if mode is not None and not normalized_mode:
+            raise CoordinatorWeightSourceV2Error(
+                "weight source snapshot authority mode is invalid"
+            )
+        expected_fields = set(required)
+        if category == "anomaly_adjustments":
+            expected_fields.add("upstream_documents")
+        if normalized_mode:
+            expected_fields.add("snapshot_authority_mode")
+            if category == "sourcing_history":
+                expected_fields.add("bans_document")
+                expected_fields.add("bans_persistence_output")
         if set(payload) != expected_fields:
             raise CoordinatorWeightSourceV2Error(
                 "weight source payload fields are invalid"
@@ -142,6 +157,15 @@ class CoordinatorWeightSourceV2:
                 proposed=proposed,
                 calculation=calculation,
                 context=context,
+                bans_document=(
+                    payload.get("bans_document") if normalized_mode else None
+                ),
+                bans_persistence_output=(
+                    payload.get("bans_persistence_output")
+                    if normalized_mode
+                    else None
+                ),
+                require_bans_parent=normalized_mode,
             )
         elif category == "anomaly_adjustments":
             reconstructed = self._anomaly_document(
@@ -153,7 +177,10 @@ class CoordinatorWeightSourceV2:
             raise CoordinatorWeightSourceV2Error(
                 "weight source category has no measured producer"
             )
-        if not _same(reconstructed, proposed):
+        if not _same(reconstructed, proposed) and not (
+            normalized_mode
+            and category in GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2
+        ):
             raise CoordinatorWeightSourceV2Error(
                 "%s authenticated source differs from calculation snapshot"
                 % category
@@ -418,7 +445,7 @@ class CoordinatorWeightSourceV2:
                 "fulfillment_share": effective,
                 "fulfillment_rows": [
                     {"hotkey": hotkey, "share": share}
-                    for hotkey, share in effective_rows.items()
+                    for hotkey, share in sorted(effective_rows.items())
                 ],
                 "fulfillment_fetch_ok": True,
             },
@@ -509,6 +536,9 @@ class CoordinatorWeightSourceV2:
         proposed: Mapping[str, Any],
         calculation: Mapping[str, Any],
         context: ExecutionContextV2,
+        bans_document: Any = None,
+        bans_persistence_output: Any = None,
+        require_bans_parent: bool = False,
     ) -> Dict[str, Any]:
         current_epoch = int(context.epoch_id)
         start_epoch = max(0, current_epoch - 30)
@@ -522,6 +552,126 @@ class CoordinatorWeightSourceV2:
             )
         epochs = []
         source_receipt_hashes = []
+        ban_parent_root_hash = None
+        banned_hotkeys = ()
+        if require_bans_parent:
+            if not isinstance(bans_document, Mapping) or set(bans_document) != {
+                "schema_version",
+                "category",
+                "netuid",
+                "epoch_id",
+                "value",
+            }:
+                raise CoordinatorWeightSourceV2Error("sourcing bans document is invalid")
+            ban_value = bans_document.get("value")
+            if (
+                bans_document.get("category") != "bans"
+                or int(bans_document.get("epoch_id", -1)) != current_epoch
+                or bans_document.get("netuid") != proposed.get("netuid")
+                or not isinstance(ban_value, Mapping)
+                or set(ban_value) != {"banned_hotkeys", "banned_lookup_ok"}
+                or ban_value.get("banned_lookup_ok") is not True
+                or not isinstance(ban_value.get("banned_hotkeys"), list)
+            ):
+                raise CoordinatorWeightSourceV2Error("sourcing bans document is invalid")
+            banned_hotkeys = list(ban_value["banned_hotkeys"])
+            if (
+                any(not isinstance(hotkey, str) or not hotkey for hotkey in banned_hotkeys)
+                or banned_hotkeys != sorted(set(banned_hotkeys))
+            ):
+                raise CoordinatorWeightSourceV2Error("sourcing banned hotkeys are invalid")
+            try:
+                persistence_output = validate_artifact_persistence_output_v2(
+                    bans_persistence_output
+                )
+            except ValueError as exc:
+                raise CoordinatorWeightSourceV2Error(
+                    "sourcing bans persistence output is invalid"
+                ) from exc
+            bans_value_hash = sha256_json(bans_document["value"])
+            # The ban input itself is an ephemeral measurement.  Sourcing may
+            # consume it only through the terminal artifact-persistence
+            # receipt, which is the declared direct parent of this operation.
+            # Do not accept a direct ban root here: that would let a host-side
+            # execution result bypass the durable lineage that the coordinator
+            # established before publishing the measured input.
+            matched_bans = []
+            for graph in context.external_receipt_graphs:
+                root_hash = str(graph.get("root_receipt_hash") or "")
+                if root_hash not in context.parent_receipt_hashes:
+                    continue
+                receipts = {
+                    str(item.get("receipt_hash") or ""): item
+                    for item in graph.get("receipts") or ()
+                    if isinstance(item, Mapping)
+                }
+                root = receipts.get(root_hash)
+                if not isinstance(root, Mapping):
+                    continue
+                contains_bans_source = any(
+                    receipt.get("role") == "gateway_coordinator"
+                    and receipt.get("purpose") == "research_lab.ban_input.v2"
+                    for receipt in receipts.values()
+                )
+                is_terminal_persistence = (
+                    root.get("role") == "gateway_coordinator"
+                    and root.get("purpose")
+                    == "leadpoet.artifact_persistence.v2"
+                )
+                if not (contains_bans_source or is_terminal_persistence):
+                    continue
+                try:
+                    validate_receipt_graph(
+                        graph,
+                        required_purposes=(
+                            "research_lab.ban_input.v2",
+                            "leadpoet.artifact_persistence.v2",
+                        ),
+                    )
+                except Exception as exc:
+                    raise CoordinatorWeightSourceV2Error(
+                        "sourcing bans receipt graph is invalid"
+                    ) from exc
+                if (
+                    not is_terminal_persistence
+                    or int(root.get("epoch_id", -1)) != current_epoch
+                ):
+                    continue
+                direct_parent_hashes = tuple(
+                    str(value)
+                    for value in root.get("parent_receipt_hashes") or ()
+                )
+                candidates = [
+                    receipts[parent_hash]
+                    for parent_hash in direct_parent_hashes
+                    if parent_hash in receipts
+                    and receipts[parent_hash].get("role")
+                    == "gateway_coordinator"
+                    and receipts[parent_hash].get("purpose")
+                    == "research_lab.ban_input.v2"
+                ]
+                if len(candidates) != 1:
+                    continue
+                receipt = candidates[0]
+                if (
+                    int(receipt.get("epoch_id", -1)) == current_epoch
+                    and receipt.get("output_root") == sha256_json(bans_document)
+                    and direct_parent_hashes == (receipt.get("receipt_hash"),)
+                    and root.get("output_root") == sha256_json(persistence_output)
+                    and persistence_output["source_receipt_hash"]
+                    == receipt.get("receipt_hash")
+                    and sum(
+                        artifact["plaintext_hash"] == bans_value_hash
+                        for artifact in persistence_output["artifacts"]
+                    )
+                    == 1
+                ):
+                    matched_bans.append((root_hash, receipt))
+            if len(matched_bans) != 1:
+                raise CoordinatorWeightSourceV2Error(
+                    "sourcing requires one declared bans authority receipt"
+                )
+            ban_parent_root_hash = str(matched_bans[0][0])
         for row in rows:
             try:
                 source_doc = validate_sourcing_epoch_v2(row.get("source_doc"))
@@ -567,7 +717,10 @@ class CoordinatorWeightSourceV2:
                 )
             epochs.append(source_doc)
             source_receipt_hashes.append(receipt_hash)
-        if sorted(context.parent_receipt_hashes) != sorted(source_receipt_hashes):
+        expected_parent_hashes = list(source_receipt_hashes)
+        if ban_parent_root_hash is not None:
+            expected_parent_hashes.append(ban_parent_root_hash)
+        if sorted(context.parent_receipt_hashes) != sorted(expected_parent_hashes):
             raise CoordinatorWeightSourceV2Error(
                 "sourcing input parents differ from authenticated epoch receipts"
             )
@@ -575,6 +728,7 @@ class CoordinatorWeightSourceV2:
             scores, lead_count = rolling_sourcing_history_v2(
                 current_epoch=current_epoch,
                 epochs=epochs,
+                banned_hotkeys=banned_hotkeys,
             )
         except SourcingHistoryV2Error as exc:
             raise CoordinatorWeightSourceV2Error(

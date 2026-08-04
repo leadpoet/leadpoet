@@ -18,6 +18,7 @@ from leadpoet_canonical.attested_v2 import (
     EMPTY_TRANSPORT_ROOT,
     WEIGHT_ROLE,
     AttestedV2Error,
+    canonical_json,
     merkle_root,
     sha256_json,
     validate_receipt_graph,
@@ -26,6 +27,7 @@ from leadpoet_canonical.ancestry_checkpoint_v2 import (
     validate_ancestry_parent_authority_v2,
 )
 from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
     HotkeyAuthorityV2Error,
     build_application_signature_request_v2,
     encode_signed_extrinsic_v2,
@@ -97,6 +99,24 @@ VALIDATOR_WEIGHT_INPUT_CATEGORIES = frozenset(
 )
 GATEWAY_WEIGHT_INPUT_CATEGORIES = frozenset(WEIGHT_INPUT_PURPOSES) - (
     VALIDATOR_WEIGHT_INPUT_CATEGORIES
+)
+
+# These are the only gateway-measured values which may replace a signed
+# validator provisional snapshot.  Keeping the map here, next to the value
+# documents, makes it impossible for a caller to opt an unrelated field into
+# normalized authority by naming it in a request or response.
+GATEWAY_MEASURED_NORMALIZATION_FIELDS_V2 = {
+    "bans": ("banned_hotkeys", "banned_lookup_ok"),
+    "fulfillment_rewards": (
+        "fulfillment_share",
+        "fulfillment_rows",
+        "fulfillment_fetch_ok",
+    ),
+    "leaderboard": ("leaderboard_entries", "leaderboard_fetch_ok"),
+    "sourcing_history": ("rolling_lead_count", "rolling_scores"),
+}
+GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2 = frozenset(
+    GATEWAY_MEASURED_NORMALIZATION_FIELDS_V2
 )
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -401,6 +421,116 @@ def gateway_weight_input_value_documents_v2(
         "gateway weight input value categories are incomplete",
     )
     return documents
+
+
+def normalize_gateway_measured_weight_inputs_v2(
+    *,
+    calculation_snapshot: Mapping[str, Any],
+    measured_documents: Mapping[str, Mapping[str, Any]],
+    gateway_authority_event_hash: str,
+) -> Dict[str, Any]:
+    """Return the only calculation snapshot allowed by signed measured mode.
+
+    The validator signs a complete *provisional* snapshot before asking the
+    gateway to obtain its mutable inputs.  In ``gateway-measured-v2`` the
+    gateway may replace exactly the values in
+    :data:`GATEWAY_MEASURED_NORMALIZATION_FIELDS_V2`, and only when every
+    replacement is backed by a canonical measured value document for the same
+    netuid and epoch.  All remaining fields stay byte-for-byte anchored to the
+    signed provisional calculation.  The result is recomputed before it leaves
+    this boundary and its regenerated documents must equal the receipts that
+    supplied it.
+    """
+
+    if not isinstance(calculation_snapshot, Mapping):
+        raise WeightAuthorityV2Error("calculation_snapshot must be an object")
+    if not isinstance(measured_documents, Mapping) or set(measured_documents) != set(
+        GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2
+    ):
+        raise WeightAuthorityV2Error(
+            "gateway measured normalization categories are incomplete"
+        )
+
+    provisional = dict(calculation_snapshot)
+    # Validate the complete provisional schema first.  This ensures a malformed
+    # caller value cannot be hidden by a later overlay.
+    compute_final_weights(provisional)
+    expected_provisional = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=provisional,
+        gateway_authority_event_hash=gateway_authority_event_hash,
+    )
+    normalized = dict(provisional)
+    changed_categories = []
+
+    for category in sorted(GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2):
+        document = measured_documents.get(category)
+        if not isinstance(document, Mapping) or set(document) != {
+            "schema_version",
+            "category",
+            "netuid",
+            "epoch_id",
+            "value",
+        }:
+            raise WeightAuthorityV2Error(
+                "%s measured input document is invalid" % category
+            )
+        expected = expected_provisional[category]
+        if (
+            document.get("schema_version") != WEIGHT_INPUT_VALUE_SCHEMA_VERSION
+            or document.get("category") != category
+            or document.get("netuid") != expected["netuid"]
+            or document.get("epoch_id") != expected["epoch_id"]
+            or not isinstance(document.get("value"), Mapping)
+        ):
+            raise WeightAuthorityV2Error(
+                "%s measured input document does not bind the provisional epoch"
+                % category
+            )
+        observed_value = dict(document["value"])
+        expected_value = dict(expected["value"])
+        if set(observed_value) != set(expected_value):
+            raise WeightAuthorityV2Error(
+                "%s measured input value fields are invalid" % category
+            )
+        allowed_fields = GATEWAY_MEASURED_NORMALIZATION_FIELDS_V2[category]
+        for field, expected_value_item in expected_value.items():
+            if field not in allowed_fields and canonical_json(
+                observed_value[field]
+            ) != canonical_json(expected_value_item):
+                raise WeightAuthorityV2Error(
+                    "%s measured input changed an immutable field" % category
+                )
+        for field in allowed_fields:
+            if canonical_json(normalized[field]) != canonical_json(
+                observed_value[field]
+            ):
+                if category not in changed_categories:
+                    changed_categories.append(category)
+            normalized[field] = observed_value[field]
+
+    try:
+        compute_final_weights(normalized)
+    except Exception as exc:
+        raise WeightAuthorityV2Error(
+            "gateway measured normalization does not satisfy canonical computation"
+        ) from exc
+    authoritative_documents = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=normalized,
+        gateway_authority_event_hash=gateway_authority_event_hash,
+    )
+    for category in sorted(GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2):
+        if canonical_json(measured_documents[category]) != canonical_json(
+            authoritative_documents[category]
+        ):
+            raise WeightAuthorityV2Error(
+                "%s measured input differs from normalized calculation" % category
+            )
+    return {
+        "snapshot_authority_mode": GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+        "authoritative_calculation_snapshot": normalized,
+        "authoritative_calculation_snapshot_hash": sha256_json(normalized),
+        "normalized_source_categories": sorted(changed_categories),
+    }
 
 
 def weight_input_value_documents_v2(

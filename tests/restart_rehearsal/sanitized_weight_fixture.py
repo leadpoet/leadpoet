@@ -74,6 +74,11 @@ class SanitizedWeightFixture:
                 b"validator:" + candidate_sha.encode("ascii")
             ).digest()
         )
+        self.scoring_key = Ed25519PrivateKey.from_private_bytes(
+            hashlib.sha256(
+                b"scoring:" + candidate_sha.encode("ascii")
+            ).digest()
+        )
 
     @staticmethod
     def _public_key(key: Ed25519PrivateKey) -> str:
@@ -88,11 +93,13 @@ class SanitizedWeightFixture:
         release_identity: Mapping[str, Any] | None = None,
         boot_nonce_context: str | None = None,
     ) -> dict[str, Any]:
-        physical_role = (
-            "gateway_coordinator"
-            if role == COORDINATOR_ROLE
-            else "validator_weights"
-        )
+        physical_role = {
+            COORDINATOR_ROLE: "gateway_coordinator",
+            WEIGHT_ROLE: "validator_weights",
+            "gateway_scoring": "gateway_scoring",
+        }.get(role)
+        if physical_role is None:
+            raise ValueError("sanitized fixture role is unsupported")
         pcr0 = self.pcr0
         build_manifest_hash = HASH
         dependency_lock_hash = HASH_B
@@ -196,6 +203,7 @@ class SanitizedWeightFixture:
         output_root: str = HASH_B,
         parents: tuple[str, ...] | list[str] = (),
         sequence: int = 1,
+        epoch_id: int | None = None,
         transport_root: str = EMPTY_TRANSPORT_ROOT,
         artifact_root: str = EMPTY_ARTIFACT_ROOT,
     ) -> dict[str, Any]:
@@ -205,7 +213,7 @@ class SanitizedWeightFixture:
             role=role,
             purpose=purpose,
             job_id=job_id,
-            epoch_id=self.epoch_id,
+            epoch_id=self.epoch_id if epoch_id is None else epoch_id,
             sequence=sequence,
             commit_sha=str(boot["commit_sha"]),
             pcr0=str(boot["pcr0"]),
@@ -594,6 +602,126 @@ class SanitizedWeightFixture:
                 bytes.fromhex(result["weights_hash"])
             ).hex(),
             "receipt_graph": graph,
+        }
+
+    def signed_sourcing_epoch_graph_v2(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build one signed source epoch used by the measured-source adapter."""
+
+        from leadpoet_canonical.sourcing_history_v2 import (
+            build_sourcing_decision_v2,
+            build_sourcing_epoch_v2,
+        )
+
+        source_epoch = self.epoch_id - 1
+        decision = build_sourcing_decision_v2(
+            epoch_id=source_epoch,
+            sequence=0,
+            lead_id_hash=sha256_json({"source_epoch": source_epoch}),
+            miner_hotkey="source-hotkey",
+            decision="approve",
+            rep_score=7,
+            is_icp_multiplier=0,
+        )
+        source_doc = build_sourcing_epoch_v2(
+            epoch_id=source_epoch,
+            decisions=[decision],
+        )
+        boot = self._boot(
+            role="gateway_scoring",
+            key=self.scoring_key,
+            config_hash=HASH,
+            boot_nonce_context="gateway-measured-source",
+        )
+        receipt = self.receipt(
+            role="gateway_scoring",
+            purpose="qualification.sourcing_epoch.v2",
+            job_id=f"gateway-measured-source-{source_epoch}",
+            key=self.scoring_key,
+            boot=boot,
+            config_hash=HASH,
+            input_root=source_doc["decision_root"],
+            output_root=sha256_json(source_doc),
+            sequence=400,
+            epoch_id=source_epoch,
+        )
+        graph = build_receipt_graph(
+            root_receipt_hash=receipt["receipt_hash"],
+            boot_identities=[boot],
+            receipts=[receipt],
+            transport_attempts=[],
+        )
+        return graph, {
+            "epoch_id": source_epoch,
+            "epoch_hash": source_doc["epoch_hash"],
+            "receipt_hash": receipt["receipt_hash"],
+            "source_doc": source_doc,
+            "receipt_doc": receipt,
+        }
+
+    def gateway_measured_source_fixture_v2(self) -> dict[str, Any]:
+        """Return provisional state and production-policy-keyed measured rows."""
+
+        bundle = self.bundle()
+        allocation_receipt = next(
+            receipt
+            for receipt in bundle["receipt_graph"]["receipts"]
+            if receipt["purpose"] == "research_lab.allocation.v2"
+        )
+        coordinator_boot = next(
+            boot
+            for boot in bundle["receipt_graph"]["boot_identities"]
+            if boot["role"] == COORDINATOR_ROLE
+        )
+        allocation_graph = build_receipt_graph(
+            root_receipt_hash=allocation_receipt["receipt_hash"],
+            boot_identities=[coordinator_boot],
+            receipts=[allocation_receipt],
+            transport_attempts=[],
+        )
+        provisional = self.calculation_snapshot(
+            [allocation_receipt["receipt_hash"]],
+            allocation_receipt["receipt_hash"],
+        )
+        provisional["parent_receipt_hashes"] = [allocation_receipt["receipt_hash"]]
+        provisional["research_lab_allocation_receipt_hash"] = allocation_receipt[
+            "receipt_hash"
+        ]
+        provisional["config_hash"] = weight_config_hash(provisional)
+        source_graph, source_row = self.signed_sourcing_epoch_graph_v2()
+        return {
+            "provisional": provisional,
+            "allocation_graph": allocation_graph,
+            "sourcing_graphs": [source_graph],
+            "rows": {
+                "attested_receipt_by_hash": [
+                    {"receipt_doc": allocation_receipt},
+                    {"receipt_doc": source_row["receipt_doc"]},
+                ],
+                "research_lab_allocation_current": [
+                    {"allocation_doc": provisional["research_lab_allocation_doc"]}
+                ],
+                "banned_hotkeys": [{"hotkey": "source-hotkey"}],
+                "fulfillment_active_rewards": [
+                    {"miner_hotkey": "fulfillment-hotkey", "reward_pct": 0.6}
+                ],
+                "fulfillment_leaderboard_winners": [
+                    {"miner_hotkey": "fulfillment-hotkey", "reward_pct": 0.6}
+                    for _ in range(9)
+                ],
+                "sourcing_epoch_inputs": [source_row],
+            },
+            "expected_stale_facts": {
+                "bans": ["source-hotkey"],
+                "fulfillment_share": 0.6,
+                "sourcing": {
+                    "rolling_lead_count": 1,
+                    "rolling_scores": [
+                        {"hotkey": "source-hotkey", "score": -100000}
+                    ],
+                },
+            },
         }
 
     @staticmethod

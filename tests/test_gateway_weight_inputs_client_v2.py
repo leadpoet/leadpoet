@@ -6,9 +6,16 @@ import hashlib
 import pytest
 
 from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
     WEIGHT_INPUT_PURPOSES,
+)
+from leadpoet_canonical.weight_computation import (
+    WEIGHT_SNAPSHOT_SCHEMA_VERSION,
+    weight_config_hash,
 )
 from validator_tee.host import gateway_weight_inputs_v2 as client_module
 from validator_tee.host.gateway_weight_inputs_v2 import (
@@ -102,6 +109,52 @@ def _calculation():
     }
 
 
+def _full_calculation(**overrides):
+    value = {
+        "schema_version": WEIGHT_SNAPSHOT_SCHEMA_VERSION,
+        "netuid": 71,
+        "epoch_id": 100,
+        "block": 36099,
+        "commit_sha": "a" * 40,
+        "config_hash": "",
+        "parent_receipt_hashes": [],
+        "research_lab_allocation_receipt_hash": "",
+        "burn_target_uid": 0,
+        "expected_burn_target_hotkey": "burn",
+        "metagraph_hotkeys": ["burn", "miner"],
+        "banned_hotkeys": [],
+        "banned_lookup_ok": True,
+        "ff_enabled": True,
+        "base_burn_share": 0.0,
+        "champion_share": 0.0,
+        "champion_uid": None,
+        "effective_champion_share": 0.0,
+        "research_lab_fallback_share": 0.2,
+        "research_lab_allocation_doc": {
+            "lab_cap_percent": 20.0,
+            "unallocated_percent": 20.0,
+            "champion_allocations": [],
+            "queued_champion_allocations": [],
+            "reimbursement_allocations": [],
+            "source_add_allocations": [],
+        },
+        "leaderboard_bonus_share": 0.095,
+        "leaderboard_rank_shares": [0.05, 0.03, 0.015],
+        "leaderboard_entries": [],
+        "leaderboard_fetch_ok": True,
+        "fulfillment_share": 0.705,
+        "fulfillment_rows": [{"hotkey": "miner", "share": 0.705}],
+        "fulfillment_fetch_ok": True,
+        "rolling_lead_count": 0,
+        "rolling_scores": [],
+        "sourcing_floor_threshold": 125000,
+        "min_total_rep_for_distribution": 100,
+    }
+    value.update(overrides)
+    value["config_hash"] = weight_config_hash(value)
+    return value
+
+
 def _response(request):
     authority_hash = "sha256:" + "4" * 64
     allocation_parent = {
@@ -184,6 +237,71 @@ async def test_client_signs_exact_request_and_preserves_complete_receipt_set(mon
     assert len(client.messages) == 1
     assert set(result["input_receipt_hashes"]) == set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
     assert result["gateway_authority_event_hash"] == "sha256:" + "4" * 64
+
+
+@pytest.mark.asyncio
+async def test_client_reconstructs_signed_gateway_measured_authority(monkeypatch):
+    monkeypatch.setattr(client_module, "validate_boot_identity", lambda _value: None)
+    monkeypatch.setattr(
+        client_module, "validate_signed_execution_receipt", lambda _value: None
+    )
+    monkeypatch.setattr(client_module, "validate_transport_attempt", lambda _value: None)
+    monkeypatch.setattr(
+        client_module, "validate_host_operation_record", lambda _value: None
+    )
+    provisional = _full_calculation()
+    authoritative = _full_calculation(
+        banned_hotkeys=["banned"],
+        fulfillment_share=0.6,
+        fulfillment_rows=[{"hotkey": "miner", "share": 0.6}],
+        leaderboard_entries=[{"miner_hotkey": "miner", "wins": 1}],
+        rolling_lead_count=1,
+        rolling_scores=[{"hotkey": "banned", "score": -100000}],
+    )
+    observed = {}
+
+    async def post_json(_url, payload, _timeout):
+        observed.update(payload)
+        response = _response(payload["request"])
+        response.update(
+            {
+                "snapshot_authority_mode": (
+                    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+                ),
+                "authoritative_calculation_snapshot": authoritative,
+                "authoritative_calculation_snapshot_hash": sha256_json(authoritative),
+                "normalized_source_categories": [
+                    "bans",
+                    "fulfillment_rewards",
+                    "leaderboard",
+                    "sourcing_history",
+                ],
+            }
+        )
+        return response
+
+    result = await fetch_gateway_weight_inputs_v2(
+        gateway_url="https://gateway.example",
+        calculation_snapshot=provisional,
+        validator_hotkey=HOTKEY,
+        allocation_hash="sha256:" + "3" * 64,
+        leaderboard_window_start="2026-07-03T20:00:00Z",
+        leaderboard_window_end="2026-07-10T20:00:00Z",
+        client=FakeClient(),
+        post_json=post_json,
+        snapshot_authority_mode=GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+    )
+
+    assert observed["request"]["snapshot_authority_mode"] == (
+        GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    assert result["authoritative_calculation_snapshot"] == authoritative
+    assert result["normalized_source_categories"] == [
+        "bans",
+        "fulfillment_rewards",
+        "leaderboard",
+        "sourcing_history",
+    ]
 
 
 @pytest.mark.asyncio

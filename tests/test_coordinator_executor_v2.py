@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import pytest
 
 from gateway.tee.artifact_vault_v2 import (
@@ -15,6 +17,7 @@ from gateway.tee.coordinator_executor_v2 import (
     OP_RESEARCH_LAB_ALLOCATION,
     CoordinatorExecutorV2,
     coordinator_receipt_output_v2,
+    validate_artifact_persistence_output_v2,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
@@ -109,6 +112,83 @@ def _artifact_evidence(artifact_id, plaintext_hash, attempts):
         "transport_attempts": attempts,
         "persisted": True,
     }
+
+
+def _artifact_persistence_output():
+    artifacts = []
+    for character in ("a", "b"):
+        artifacts.append(
+            {
+                "artifact_id": "sha256:" + character * 64,
+                "plaintext_hash": "sha256:" + "1" * 64,
+                "ciphertext_hash": "sha256:" + "2" * 64,
+                "artifact_ref": f"s3://immutable/{character}.json",
+                "storage_document_hash": "sha256:" + "3" * 64,
+                "encryption_context_hash": "sha256:" + "4" * 64,
+                "object_lock_mode": "COMPLIANCE",
+                "retain_until": "2027-07-10T12:00:00Z",
+                "transport_root": "sha256:" + "5" * 64,
+            }
+        )
+    return {
+        "source_receipt_hash": "sha256:" + "6" * 64,
+        "artifacts": artifacts,
+        "artifact_set_root": sha256_json(artifacts),
+    }
+
+
+def test_artifact_persistence_output_validator_accepts_exact_executor_shape():
+    output = _artifact_persistence_output()
+    assert validate_artifact_persistence_output_v2(output) == output
+
+
+@pytest.mark.parametrize(
+    "field", ("source_receipt_hash", "artifacts", "artifact_set_root")
+)
+def test_artifact_persistence_output_validator_rejects_missing_or_extra_fields(
+    field,
+):
+    output = _artifact_persistence_output()
+    output.pop(field)
+    with pytest.raises(ValueError, match="fields are invalid"):
+        validate_artifact_persistence_output_v2(output)
+
+    output = _artifact_persistence_output()
+    output["unexpected"] = True
+    with pytest.raises(ValueError, match="fields are invalid"):
+        validate_artifact_persistence_output_v2(output)
+
+
+def test_artifact_persistence_output_validator_rejects_malformed_descriptor():
+    output = _artifact_persistence_output()
+    output["artifacts"][0].pop("transport_root")
+    output["artifact_set_root"] = sha256_json(output["artifacts"])
+    with pytest.raises(ValueError, match="artifact is invalid"):
+        validate_artifact_persistence_output_v2(output)
+
+
+def test_artifact_persistence_output_validator_rejects_duplicate_or_unsorted_ids():
+    output = _artifact_persistence_output()
+    output["artifacts"] = [
+        deepcopy(output["artifacts"][0]),
+        deepcopy(output["artifacts"][0]),
+    ]
+    output["artifact_set_root"] = sha256_json(output["artifacts"])
+    with pytest.raises(ValueError, match="artifact is invalid"):
+        validate_artifact_persistence_output_v2(output)
+
+    output = _artifact_persistence_output()
+    output["artifacts"].reverse()
+    output["artifact_set_root"] = sha256_json(output["artifacts"])
+    with pytest.raises(ValueError, match="artifact set is invalid"):
+        validate_artifact_persistence_output_v2(output)
+
+
+def test_artifact_persistence_output_validator_rejects_wrong_set_root():
+    output = _artifact_persistence_output()
+    output["artifact_set_root"] = "sha256:" + "f" * 64
+    with pytest.raises(ValueError, match="artifact set is invalid"):
+        validate_artifact_persistence_output_v2(output)
 
 
 def _weight_snapshot():

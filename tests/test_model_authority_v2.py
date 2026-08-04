@@ -265,6 +265,52 @@ async def test_catalog_snapshot_failed_load_is_not_cached(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_catalog_snapshot_failed_load_reaches_followers_and_allows_retry(
+    tmp_path,
+):
+    artifact = _artifact(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def load_catalog(*, epoch_id):
+        calls.append(epoch_id)
+        if len(calls) == 1:
+            started.set()
+            await release.wait()
+            raise RuntimeError("catalog unavailable")
+        return _catalog_outcome()
+
+    runner = AttestedPrivateModelRunnerV2(
+        artifact=artifact,
+        spec=DockerPrivateModelSpec(image_digest=artifact["image_digest"]),
+        model_kind="private",
+        worker_index=0,
+        epoch_id=24001,
+        catalog_snapshot_loader=load_catalog,
+    )
+    clone = runner.with_spec(runner.spec)
+    loads = [
+        asyncio.create_task(candidate._load_catalog_snapshot(epoch_id=24001))
+        for candidate in (runner, clone, runner, clone)
+    ]
+    await started.wait()
+    await asyncio.sleep(0)
+    release.set()
+
+    outcomes = await asyncio.gather(*loads, return_exceptions=True)
+    assert all(
+        isinstance(outcome, RuntimeError)
+        and str(outcome) == "catalog unavailable"
+        for outcome in outcomes
+    )
+    assert calls == [24001]
+
+    assert await clone._load_catalog_snapshot(epoch_id=24001) == _catalog_outcome()
+    assert calls == [24001, 24001]
+
+
+@pytest.mark.asyncio
 async def test_measured_execution_failure_preserves_private_runner_contract(
     tmp_path, monkeypatch
 ):

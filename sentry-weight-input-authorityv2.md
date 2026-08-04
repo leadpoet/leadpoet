@@ -377,3 +377,26 @@ Rollback, if separately authorized after deployment, must use all components
 on the previous full 40-character attested SHA. The observed `57819588...`
 release retains the original measured-input defect and is therefore only an
 emergency fail-closed availability rollback, not a durable resolution.
+
+## Post-freeze rehearsal harness remediation
+
+The first exact frozen-candidate `prepush` run supplied new failure evidence
+and therefore activated the scoped remediation path described above. The
+candidate behavior tests passed, but the release gate failed before exercising
+gateway and validator restart stages for two harness-only reasons:
+
+- The workflow component executed before Git trusted the read-only `/source`
+  mount, so every exact `git show` identity check failed with Git's dubious
+  ownership protection. The harness now trusts only `/source` before the early
+  workflow execution and no longer installs wildcard safe-directory trust.
+- Root-required rehearsal containers left declared temporary fixture, durable
+  state, and evidence bind mounts owned by root. The driver now runs a bounded,
+  offline sidecar after each such Docker action to return only those validated
+  task-temporary output roots to the invoking UID/GID, then proves host
+  traversal, readability, writability, and marker cleanup. Source, artifact,
+  and fixture-seed read-only mounts remain untouched.
+
+The original production change, exact-commit comparisons, fail-closed policy,
+container root execution, time budget, and protected manifests are unchanged.
+This addendum does not clear the release gate: a newly frozen candidate must
+pass the complete official `prepush` rehearsal before publication.

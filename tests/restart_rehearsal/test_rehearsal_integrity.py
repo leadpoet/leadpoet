@@ -4,6 +4,7 @@ import base64
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
+import inspect
 import importlib.util
 import json
 import os
@@ -3805,14 +3806,222 @@ def test_evidence_verifier_keeps_stdout_json_channel_clean() -> None:
     assert result.stdout == "VERIFIER_IMPORT_OK\n"
 
 
-def test_workflow_runs_before_command_adapters_are_installed() -> None:
+def test_workflow_configures_exact_source_before_early_exec() -> None:
     script = (
         Path(__file__).resolve().parent / "run_inside.sh"
     ).read_text(encoding="utf-8")
+    home = script.index('mkdir -p "${HOME:?HOME is required}"')
+    safe_source = script.index(
+        "git config --global --add safe.directory /source"
+    )
     workflow = script.index('if [ "$COMPONENT" = "workflow" ]; then')
     adapters = script.index("make_adapter()")
-    assert workflow < adapters
+    assert home < safe_source < workflow < adapters
     assert "/harness/production_workflow_runner.py" in script[workflow:adapters]
+    assert "safe.directory '*'" not in script
+
+
+def test_output_ownership_normalizer_is_bounded(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        rehearsal,
+        "_run",
+        lambda command: commands.append(list(command)),
+    )
+
+    rehearsal._normalize_rehearsal_output_ownership(
+        "rehearsal-image",
+        docker_platform="linux/amd64",
+        output_roots=(first, second),
+    )
+
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[:5] == [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        "linux/amd64",
+    ]
+    for expected in (
+        ("--network", "none"),
+        ("--cpus", "0.25"),
+        ("--memory", "64m"),
+        ("--pids-limit", "16"),
+        ("--security-opt", "no-new-privileges"),
+        ("--cap-drop", "ALL"),
+        ("--user", "0:0"),
+        ("--entrypoint", "/usr/bin/chown"),
+    ):
+        index = command.index(expected[0])
+        assert command[index + 1] == expected[1]
+    assert "--read-only" in command
+    assert [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--cap-add"
+    ] == ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+    assert f"type=bind,src={first.resolve()},dst=/host-output/0" in command
+    assert f"type=bind,src={second.resolve()},dst=/host-output/1" in command
+    assert command[-5:] == [
+        "-R",
+        "--",
+        f"{os.getuid()}:{os.getgid()}",
+        "/host-output/0",
+        "/host-output/1",
+    ]
+
+    with pytest.raises(ValueError, match="at least one"):
+        rehearsal._validated_rehearsal_output_roots(())
+    with pytest.raises(ValueError, match="system temporary"):
+        rehearsal._validated_rehearsal_output_roots(
+            (Path(rehearsal.tempfile.gettempdir()),)
+        )
+    with pytest.raises(ValueError, match="system temporary"):
+        rehearsal._validated_rehearsal_output_roots(
+            (Path(rehearsal.tempfile.gettempdir()).resolve().anchor,)
+        )
+    with pytest.raises(ValueError, match="repository paths"):
+        rehearsal._validated_rehearsal_output_roots((rehearsal.REPO_ROOT,))
+    with pytest.raises(ValueError, match="duplicate"):
+        rehearsal._validated_rehearsal_output_roots((first, first))
+    with pytest.raises(ValueError, match="does not exist"):
+        rehearsal._validated_rehearsal_output_roots((tmp_path / "absent",))
+    regular_file = tmp_path / "not-a-directory"
+    regular_file.write_text("not a root\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a directory"):
+        rehearsal._validated_rehearsal_output_roots((regular_file,))
+    source_snapshot = tmp_path / "leadpoet-restart-source-test" / "source"
+    source_snapshot.mkdir(parents=True)
+    with pytest.raises(ValueError, match="source snapshots"):
+        rehearsal._validated_rehearsal_output_roots((source_snapshot,))
+
+
+def test_output_ownership_normalizes_after_success_and_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    normalized: list[tuple[Path, ...]] = []
+    monkeypatch.setattr(
+        rehearsal,
+        "_normalize_rehearsal_output_ownership",
+        lambda _tag, *, docker_platform, output_roots: normalized.append(
+            tuple(output_roots)
+        ),
+    )
+
+    assert rehearsal._run_docker_action_with_output_ownership(
+        lambda: "ok",
+        tag="image",
+        docker_platform="linux/amd64",
+        output_roots=(output,),
+    ) == "ok"
+    assert normalized == [(output.resolve(),)]
+
+    action_error = subprocess.CalledProcessError(17, ["docker", "run"])
+
+    def fail_action() -> None:
+        raise action_error
+
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        rehearsal._run_docker_action_with_output_ownership(
+            fail_action,
+            tag="image",
+            docker_platform="linux/amd64",
+            output_roots=(output,),
+        )
+    assert caught.value is action_error
+    assert normalized == [(output.resolve(),), (output.resolve(),)]
+
+    ownership_error = PermissionError("root-owned output")
+
+    def fail_ownership(*_args, **_kwargs) -> None:
+        raise ownership_error
+
+    monkeypatch.setattr(
+        rehearsal,
+        "_normalize_rehearsal_output_ownership",
+        fail_ownership,
+    )
+    with pytest.raises(rehearsal.RehearsalOutputOwnershipError) as dual:
+        rehearsal._run_docker_action_with_output_ownership(
+            fail_action,
+            tag="image",
+            docker_platform="linux/amd64",
+            output_roots=(output,),
+        )
+    assert dual.value.action_error is action_error
+    assert dual.value.ownership_error is ownership_error
+    assert "action=" in str(dual.value) and "ownership=" in str(dual.value)
+
+
+def test_every_writable_rehearsal_mount_is_registered_for_normalization() -> None:
+    fixture = inspect.getsource(rehearsal._prepared_fixture_seed)
+    component = inspect.getsource(rehearsal._run_component)
+    workflow = inspect.getsource(rehearsal._run_workflow)
+    join = inspect.getsource(rehearsal._join_evidence)
+
+    assert "output_roots=(generated_state, generated_config)" in fixture
+    assert "output_roots=(evidence_root, durable_state_root)" in component
+    assert "output_roots=(evidence_root,)" in workflow
+    assert "output_roots=(evidence_root,)" in join
+    combined = "\n".join((fixture, component, workflow, join))
+    for read_only_root in (
+        "source_root",
+        "drand_artifact_root",
+        "fixture_seed_root",
+        "from_fixture_seed_root",
+        "durable_fixture_seed_root",
+    ):
+        assert f"output_roots=({read_only_root}" not in combined
+
+
+def test_host_output_access_probe_checks_nested_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "evidence"
+    nested = output / "local-services" / "epochs"
+    builder = output / "release-builder"
+    nested.mkdir(parents=True)
+    builder.mkdir()
+    (nested / "production-shaped.sqlite3").write_bytes(b"sqlite")
+    (builder / "release.json").write_text("{}\n", encoding="utf-8")
+
+    rehearsal._probe_rehearsal_output_access((output,))
+    assert not list(output.glob(".leadpoet-host-access-*"))
+
+    original_access = rehearsal.os.access
+    monkeypatch.setattr(
+        rehearsal.os,
+        "access",
+        lambda path, mode: (
+            False if Path(path) == nested else original_access(path, mode)
+        ),
+    )
+    with pytest.raises(PermissionError, match="not host-accessible"):
+        rehearsal._probe_rehearsal_output_access((output,))
+
+    unreadable = builder / "release.json"
+    monkeypatch.setattr(
+        rehearsal.os,
+        "access",
+        lambda path, mode: (
+            False if Path(path) == unreadable else original_access(path, mode)
+        ),
+    )
+    with pytest.raises(PermissionError, match="not host-readable"):
+        rehearsal._probe_rehearsal_output_access((output,))
 
 
 def test_workflow_uses_the_strict_exact_external_boundaries(

@@ -4036,6 +4036,11 @@ def test_workflow_uses_the_strict_exact_external_boundaries(
         captured["command"] = list(command)
 
     monkeypatch.setattr(rehearsal, "_run", run)
+    monkeypatch.setattr(
+        rehearsal,
+        "_run_docker_action_with_output_ownership",
+        lambda action, **_kwargs: action(),
+    )
     rehearsal._run_workflow(
         "rehearsal-image",
         source_root=tmp_path / "source",

@@ -4565,6 +4565,42 @@ print(",".join((
     }
 
 
+def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
+    """Keep measured sandbox failures inside the bounded baseline retry path."""
+
+    from gateway.research_lab.attested_scoring_v2 import AttestedScoringV2Error
+    from gateway.research_lab.model_authority_v2 import (
+        AttestedPrivateModelRunnerV2,
+        AttestedPrivateModelRunnerV2Error,
+    )
+    from gateway.research_lab.scoring_worker import _baseline_error_is_retryable
+    from research_lab.eval.private_runtime import PrivateModelRuntimeError
+
+    async def fail_measured_operation(**_kwargs: Any) -> Any:
+        raise AttestedScoringV2Error(
+            "V2 scoring failed closed: execution_modelsandboxv2error"
+        )
+
+    runner = object.__new__(AttestedPrivateModelRunnerV2)
+    runner._execute_operation = fail_measured_operation  # type: ignore[method-assign]
+    try:
+        asyncio.run(runner._invoke_operation(operation="run_icp"))
+    except AttestedPrivateModelRunnerV2Error as exc:
+        if not isinstance(exc, PrivateModelRuntimeError):
+            raise RuntimeError("measured sandbox failure left the runner contract")
+        if not isinstance(exc.__cause__, AttestedScoringV2Error):
+            raise RuntimeError("measured sandbox failure lost attested ancestry")
+        if not _baseline_error_is_retryable(str(exc)):
+            raise RuntimeError("measured sandbox failure bypassed bounded retry")
+    else:
+        raise RuntimeError("measured sandbox failure did not fail closed")
+    return {
+        "attested_ancestry_preserved": True,
+        "private_runner_contract_preserved": True,
+        "bounded_retry_selected": True,
+    }
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "signed-private-model-contract-transition": (
         _exercise_signed_private_model_contract_transition
@@ -4574,6 +4610,7 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "conditional-candidate-gate": _exercise_conditional_candidate_gate,
     "git-tree-replacement": _exercise_git_tree_replacement,
     "model-sandbox-scope-binding": _exercise_model_sandbox_scope_binding,
+    "rebenchmark-sandbox-retry": _exercise_rebenchmark_sandbox_retry_contract,
     "historical-metagraph-layouts": _exercise_historical_metagraph_layouts,
     "receipt-graph-aggregate-pagination": (
         _exercise_receipt_graph_aggregate_pagination
@@ -4999,6 +5036,23 @@ def main() -> int:
                 "model-sandbox-scope-binding",
                 {},
             ).get("model_sandbox_rootful_launcher_bound")
+            is True
+        ),
+        "rebenchmark_sandbox_failure_bounded_retry": (
+            behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("attested_ancestry_preserved")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("private_runner_contract_preserved")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("bounded_retry_selected")
             is True
         ),
         "chain_settlement_state_space_complete": (

@@ -22,7 +22,10 @@ import tempfile
 import threading
 from typing import Any, Mapping, Sequence
 
-from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
+from gateway.research_lab.attested_scoring_v2 import (
+    AttestedScoringV2Error,
+    execute_scoring_v2,
+)
 from gateway.research_lab.code_build import _extract_parent_image_source
 from gateway.research_lab.v2_authority import load_source_add_catalog_snapshot_v2
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
@@ -645,7 +648,7 @@ class AttestedPrivateModelRunnerV2:
             if cache_document
             else "live"
         )
-        result = await self._execute_operation(
+        result = await self._invoke_operation(
             operation="run_icp",
             input_doc={
                 "icp": canonical_icp,
@@ -695,7 +698,7 @@ class AttestedPrivateModelRunnerV2:
         """Run one ICP under an explicitly committed tree-evaluation tape mode."""
 
         canonical_icp = canonicalize_private_model_icp(icp)
-        result = await self._execute_operation(
+        result = await self._invoke_operation(
             operation="run_icp",
             input_doc={
                 "icp": canonical_icp,
@@ -750,7 +753,7 @@ class AttestedPrivateModelRunnerV2:
         except RuntimeError:
             return validate_sourcing_adapter_metadata(
                 asyncio.run(
-                    self._execute_operation(
+                    self._invoke_operation(
                         operation="metadata",
                         input_doc={},
                         provider_evidence_cache={},
@@ -769,6 +772,14 @@ class AttestedPrivateModelRunnerV2:
         raise AttestedPrivateModelRunnerV2Error(
             "synchronous model metadata cannot run on an active event loop"
         )
+
+    async def _invoke_operation(self, **kwargs: Any) -> Any:
+        """Keep measured bridge failures inside the model-runner contract."""
+
+        try:
+            return await self._execute_operation(**kwargs)
+        except AttestedScoringV2Error as exc:
+            raise AttestedPrivateModelRunnerV2Error(str(exc)) from exc
 
     async def _execute_operation(
         self,

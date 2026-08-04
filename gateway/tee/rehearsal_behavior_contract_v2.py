@@ -31,6 +31,7 @@ _PROFILE_EPOCH_COUNTS = {
 BEHAVIOR_SCENARIOS = (
     "signed-private-model-contract-transition",
     "model-sandbox-scope-binding",
+    "rebenchmark-sandbox-retry",
     "chain-settlement-state-space",
     "conditional-icp-policy",
     "conditional-candidate-gate",
@@ -58,6 +59,7 @@ BEHAVIORAL_INVARIANTS = (
     "protected_source_identity_exact",
     "signed_private_model_contract_transition_exact",
     "model_sandbox_final_provider_cost_scope_bound",
+    "rebenchmark_sandbox_failure_bounded_retry",
     "chain_settlement_state_space_complete",
     "conditional_icp_policy_config_bound",
     "conditional_candidate_advancement_exact",

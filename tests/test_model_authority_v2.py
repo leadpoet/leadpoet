@@ -6,7 +6,9 @@ import subprocess
 import pytest
 
 from gateway.research_lab import model_authority_v2
+from gateway.research_lab.attested_scoring_v2 import AttestedScoringV2Error
 from gateway.research_lab.model_authority_v2 import (
+    AttestedPrivateModelRunnerV2Error,
     AttestedPrivateModelRunnerV2,
     V2_PROVIDER_PROFILE_ENV,
 )
@@ -192,6 +194,49 @@ def _catalog_outcome(rows=()):
 async def _load_empty_catalog(*, epoch_id):
     assert epoch_id >= 0
     return _catalog_outcome()
+
+
+@pytest.mark.asyncio
+async def test_measured_execution_failure_preserves_private_runner_contract(
+    tmp_path, monkeypatch
+):
+    artifact = _artifact(tmp_path)
+    source_bundle = {
+        "schema_version": "leadpoet.private_source_bundle.v2",
+        "archive_sha256": "sha256:" + "2" * 64,
+        "source_tree_hash": artifact["model_artifact_hash"],
+        "archive_size_bytes": 1,
+        "archive_b64": "AA==",
+    }
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_source_bundle_for_artifact",
+        lambda *_args, **_kwargs: dict(source_bundle),
+    )
+
+    async def execute(**_kwargs):
+        raise AttestedScoringV2Error(
+            "V2 scoring failed closed: execution_modelsandboxv2error"
+        )
+
+    runner = AttestedPrivateModelRunnerV2(
+        artifact=artifact,
+        spec=DockerPrivateModelSpec(image_digest=artifact["image_digest"]),
+        model_kind="private",
+        worker_index=0,
+        epoch_id=24001,
+        execute=execute,
+        catalog_snapshot_loader=_load_empty_catalog,
+    )
+
+    with pytest.raises(
+        AttestedPrivateModelRunnerV2Error,
+        match="execution_modelsandboxv2error",
+    ):
+        await runner(
+            {"industry": "Software", "intent_signal": "Hiring"},
+            {"mode": "private_baseline"},
+        )
 
 
 def _ready_adapter_metadata() -> dict:

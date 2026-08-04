@@ -817,6 +817,10 @@ def test_stale_claim_recovery_preserves_operator_shards_but_lease_owner_gets_all
         # OOM / docker infra pressure retries.
         ("RuntimeError: container exit status 137", True),
         ("RuntimeError: Cannot connect to the Docker daemon", True),
+        (
+            "V2 scoring failed closed: execution_modelsandboxv2error",
+            True,
+        ),
         # Genuine auth / request errors stay permanent.
         ("HTTPError: HTTP Error 401: Unauthorized openrouter", False),
         ("HTTPError: HTTP Error 403: Forbidden", False),

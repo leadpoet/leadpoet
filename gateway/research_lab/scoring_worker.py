@@ -1078,6 +1078,7 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
     if any(
         marker in lowered
         for marker in (
+            "execution_modelsandboxv2error",
             "too many requests",
             "rate limit",
             "timed out",

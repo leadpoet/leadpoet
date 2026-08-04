@@ -153,8 +153,12 @@ def test_all_supported_http_clients_preserve_attested_transport_failure() -> Non
 
         asyncio.run(call_aiohttp())
         assert set(errors) == {"urllib", "requests", "httpx", "aiohttp"}
+        assert errors["urllib"][0] == "URLError"
+        assert errors["requests"][0] == "ConnectionError"
+        assert errors["httpx"][0] == "TransportError"
+        assert errors["aiohttp"][0] == "ClientConnectionError"
         assert all(
-            value == ["SandboxHTTPShimV2Error", "attested transport failure: timeout"]
+            "attested transport failure: timeout" in value[1]
             for value in errors.values()
         )
         print(json.dumps(errors, sort_keys=True))

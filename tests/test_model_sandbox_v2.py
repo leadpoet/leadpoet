@@ -36,10 +36,22 @@ from gateway.tee.sandbox_runtime_artifact import (
     build_rootfs_manifest,
     write_rootfs_manifest,
 )
-from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
+from gateway.tee.provider_client_v2 import (
+    BrokeredProviderTransportV2,
+    ProviderClientV2Error,
+)
+from gateway.tee.sandbox_http_shim_v2 import (
+    SOCKET_ENV,
+    SandboxHTTPShimV2Error,
+    execute as execute_sandbox_http,
+)
 from gateway.tee.source_bundle_v2 import build_source_bundle_v2
 from gateway.tee.source_add_runtime_v2 import build_source_add_runtime_catalog_v2
-from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
+from leadpoet_canonical.attested_v2 import (
+    build_transport_attempt,
+    sha256_bytes,
+    sha256_json,
+)
 from research_lab.eval import build_local_private_artifact_manifest
 from research_lab.eval.private_runtime import canonicalize_private_model_icp
 from research_lab.eval.provider_evidence_cache import (
@@ -172,6 +184,42 @@ def _request(tmp_path: Path):
             "result": catalog_result,
             "root_receipt_hash": "sha256:" + "c" * 64,
         },
+    }
+
+
+def _transport_failure_result(request):
+    attempt = build_transport_attempt(
+        request_id="f" * 32,
+        logical_operation_id=request["logical_operation_id"],
+        job_id=request["job_id"],
+        purpose=request["purpose"],
+        provider_id=request["provider_id"],
+        attempt_number=request["attempt_number"],
+        method=request["method"],
+        destination_host="example.com",
+        destination_port=443,
+        path_hash="sha256:" + "1" * 64,
+        nonsecret_headers_hash="sha256:" + "2" * 64,
+        body_hash="sha256:" + "3" * 64,
+        credential_ref_hash="sha256:" + "4" * 64,
+        retry_policy_hash=request["retry_policy_hash"],
+        timeout_ms=request["timeout_ms"],
+        started_at="2026-07-10T00:00:00Z",
+        terminal_status="transport_failure",
+        http_status=None,
+        response_hash=None,
+        request_artifact_hash="sha256:" + "5" * 64,
+        response_artifact_hash=None,
+        tls_peer_chain_hash=None,
+        tls_protocol=None,
+        failure_code="timeout",
+        completed_at="2026-07-10T00:00:01Z",
+    )
+    return {
+        "terminal_status": "transport_failure",
+        "failure_code": "timeout",
+        "encrypted_request_artifact_id": "sha256:" + "5" * 64,
+        "transport_attempt": attempt,
     }
 
 
@@ -1058,6 +1106,99 @@ def test_private_baseline_builds_exact_measured_provider_evidence_tape(tmp_path)
     assert result["generated_provider_evidence_cache"] == expected
     assert result["generated_provider_evidence_cache_hash"] == sha256_json(expected)
     assert result["output"] == []
+
+
+def test_model_sandbox_accepts_measured_transport_failure_after_model_fallback(
+    tmp_path, monkeypatch
+):
+    terminals = []
+    transport = BrokeredProviderTransportV2(_transport_failure_result)
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=lambda *_args, **_kwargs: None,
+    )
+
+    def run_model(*_args, **kwargs):
+        monkeypatch.setenv(
+            SOCKET_ENV,
+            str(kwargs["broker_root"] / "provider.sock"),
+        )
+        terminal = execute_sandbox_http(
+            method="GET",
+            url="https://example.com/optional-evidence",
+            headers={},
+            body=b"",
+            timeout_ms=1000,
+        )
+        assert terminal["terminal_status"] == "transport_failure"
+        return {"version": "fallback"}, []
+
+    sandbox._run = run_model
+    try:
+        result = sandbox.execute(
+            _request(tmp_path),
+            job_id="model-job-fallback",
+            purpose="research_lab.private_model_run.v2",
+            retry_policy_hashes={"public_web": "sha256:" + "6" * 64},
+            terminal_sink=lambda attempt: terminals.append(dict(attempt)),
+            artifact_sink=lambda _artifact: None,
+        )
+    finally:
+        transport.restore()
+
+    assert result["output"] == {"version": "fallback"}
+    assert [item["terminal_status"] for item in terminals] == [
+        "transport_failure"
+    ]
+
+
+def test_model_sandbox_still_rejects_missing_transport_terminal(
+    tmp_path, monkeypatch
+):
+    def omit_terminal(_request):
+        raise RuntimeError("coordinator omitted terminal")
+
+    transport = BrokeredProviderTransportV2(omit_terminal)
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=lambda *_args, **_kwargs: None,
+    )
+
+    def run_model(*_args, **kwargs):
+        monkeypatch.setenv(
+            SOCKET_ENV,
+            str(kwargs["broker_root"] / "provider.sock"),
+        )
+        with pytest.raises(SandboxHTTPShimV2Error, match="provider socket failed"):
+            execute_sandbox_http(
+                method="GET",
+                url="https://example.com/optional-evidence",
+                headers={},
+                body=b"",
+                timeout_ms=1000,
+            )
+        return {"version": "must-not-authorize"}, []
+
+    sandbox._run = run_model
+    try:
+        with pytest.raises(
+            ProviderClientV2Error,
+            match="missing a signed terminal record",
+        ):
+            sandbox.execute(
+                _request(tmp_path),
+                job_id="model-job-missing-terminal",
+                purpose="research_lab.private_model_run.v2",
+                retry_policy_hashes={"public_web": "sha256:" + "6" * 64},
+                terminal_sink=lambda _attempt: None,
+                artifact_sink=lambda _artifact: None,
+            )
+    finally:
+        transport.restore()
 
 
 def test_candidate_model_never_claims_to_generate_baseline_tape(tmp_path):

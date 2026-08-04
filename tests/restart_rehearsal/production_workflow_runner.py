@@ -4279,11 +4279,19 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
         MODEL_SANDBOX_SOURCE_DIRECTORY,
         MODEL_SANDBOX_VISIBLE_ROOT,
         RunscSandboxConfigV2,
+        RunscModelSandboxV2,
         _oci_config,
         _runsc_run_command,
         model_sandbox_job_cgroup_path,
         model_source_import_bootstrap,
         prepare_model_sandbox_cgroup_v2,
+    )
+    from gateway.tee.provider_client_v2 import (
+        BrokeredProviderTransportV2,
+        ProviderClientV2Error,
+    )
+    from gateway.tee.source_add_runtime_v2 import (
+        build_source_add_runtime_catalog_v2,
     )
     from research_lab.eval.private_runtime import (
         DockerPrivateModelSpec,
@@ -4340,6 +4348,78 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
     )
     if validated.get(PROVIDER_COST_EVALUATION_SCOPE_ENV) != final_scope:
         raise RuntimeError("final provider-cost scope was not bound to model sandbox")
+
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    retry_policy_hashes = {"public_web": "sha256:" + "4" * 64}
+    runtime_catalog = build_source_add_runtime_catalog_v2([])
+    measured_scope = RunscModelSandboxV2._create_provider_scope_v2(
+        transport,
+        job_id="rehearsal-model-signed-failure",
+        purpose="research_lab.private_model_run.v2",
+        retry_policy_hashes=retry_policy_hashes,
+        terminal_sink=lambda _attempt: None,
+        artifact_sink=lambda _artifact: None,
+        dynamic_provider_catalog=runtime_catalog,
+    )
+    measured_scope.record_intent("rehearsal-model-operation", 0)
+    measured_scope.record_terminal(
+        "rehearsal-model-operation",
+        0,
+        "transport_failure",
+    )
+    measured_scope.assert_accepted_result_is_complete()
+    incomplete_scope = RunscModelSandboxV2._create_provider_scope_v2(
+        transport,
+        job_id="rehearsal-model-missing-terminal",
+        purpose="research_lab.private_model_run.v2",
+        retry_policy_hashes=retry_policy_hashes,
+        terminal_sink=lambda _attempt: None,
+        artifact_sink=lambda _artifact: None,
+        dynamic_provider_catalog=runtime_catalog,
+    )
+    incomplete_scope.record_intent("rehearsal-missing-operation", 0)
+    try:
+        incomplete_scope.assert_accepted_result_is_complete()
+    except ProviderClientV2Error as exc:
+        if "missing a signed terminal record" not in str(exc):
+            raise
+    else:
+        raise RuntimeError("model sandbox authorized a missing provider terminal")
+    transport.restore()
+
+    client_error_probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import urllib.error, urllib.request",
+                    "import gateway.tee.sandbox_http_shim_v2 as shim",
+                    "shim.execute = lambda **_kwargs: "
+                    "{'terminal_status': 'transport_failure', "
+                    "'failure_code': 'timeout'}",
+                    "shim.install()",
+                    "try:",
+                    "    urllib.request.urlopen('https://example.com', timeout=1)",
+                    "except urllib.error.URLError as exc:",
+                    "    assert 'attested transport failure: timeout' in str(exc)",
+                    "else:",
+                    "    raise RuntimeError('transport failure was not client-native')",
+                )
+            ),
+        ],
+        cwd=SOURCE_ROOT,
+        env=dict(os.environ),
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    if client_error_probe.returncode != 0:
+        raise RuntimeError(
+            "model sandbox transport failure did not preserve client semantics: "
+            + str(client_error_probe.stderr or "")[-500:]
+        )
 
     with tempfile.TemporaryDirectory(
         prefix="leadpoet-rehearsal-model-import-"
@@ -4561,6 +4641,9 @@ print(",".join((
         "model_provider_broker_rootfs_path_bound": True,
         "model_sandbox_cgroup_delegated": True,
         "model_sandbox_rootful_launcher_bound": True,
+        "model_signed_transport_failure_fallback_bound": True,
+        "model_missing_transport_terminal_rejected": True,
+        "model_transport_failure_client_semantics_bound": True,
         "model_source_import_isolated": True,
         "preliminary_scope_rejected": True,
     }
@@ -5293,6 +5376,21 @@ def main() -> int:
                 "model-sandbox-scope-binding",
                 {},
             ).get("model_sandbox_rootful_launcher_bound")
+            is True
+            and behavior_evidence.get(
+                "model-sandbox-scope-binding",
+                {},
+            ).get("model_signed_transport_failure_fallback_bound")
+            is True
+            and behavior_evidence.get(
+                "model-sandbox-scope-binding",
+                {},
+            ).get("model_missing_transport_terminal_rejected")
+            is True
+            and behavior_evidence.get(
+                "model-sandbox-scope-binding",
+                {},
+            ).get("model_transport_failure_client_semantics_bound")
             is True
         ),
         "rebenchmark_sandbox_failure_bounded_retry": (

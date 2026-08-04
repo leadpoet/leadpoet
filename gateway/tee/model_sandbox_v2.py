@@ -1195,6 +1195,33 @@ class RunscModelSandboxV2:
         self._process_runner = process_runner
         self._utc_day_supplier = utc_day_supplier
 
+    @staticmethod
+    def _create_provider_scope_v2(
+        transport: BrokeredProviderTransportV2,
+        *,
+        job_id: str,
+        purpose: str,
+        retry_policy_hashes: Mapping[str, str],
+        terminal_sink: Callable[[Mapping[str, Any]], None],
+        artifact_sink: Callable[[str], None],
+        dynamic_provider_catalog: Mapping[str, Any],
+    ) -> Any:
+        """Bind model-owned fallback behavior to complete measured terminals."""
+
+        return transport.create_scope(
+            job_id=job_id,
+            purpose=purpose,
+            logical_operation_id=job_id,
+            retry_policy_hashes={
+                **dict(retry_policy_hashes),
+                **source_add_runtime_retry_hashes_v2(dynamic_provider_catalog),
+            },
+            terminal_sink=terminal_sink,
+            artifact_sink=artifact_sink,
+            allow_transport_failures=True,
+            dynamic_provider_catalog=dynamic_provider_catalog,
+        )
+
     def self_test(self) -> Dict[str, Any]:
         """Exercise the measured launcher and broker boundary before job intake."""
 
@@ -1446,16 +1473,11 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 raise ModelSandboxV2Error(
                     "model sandbox provider broker identity is unavailable"
                 ) from exc
-            provider_scope = self._transport.create_scope(
+            provider_scope = self._create_provider_scope_v2(
+                self._transport,
                 job_id=job_id,
                 purpose=purpose,
-                logical_operation_id=job_id,
-                retry_policy_hashes={
-                    **dict(retry_policy_hashes),
-                    **source_add_runtime_retry_hashes_v2(
-                        value["provider_runtime_catalog"]
-                    ),
-                },
+                retry_policy_hashes=retry_policy_hashes,
                 terminal_sink=terminal_sink,
                 artifact_sink=artifact_sink,
                 dynamic_provider_catalog=value["provider_runtime_catalog"],

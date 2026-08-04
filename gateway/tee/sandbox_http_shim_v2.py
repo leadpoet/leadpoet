@@ -272,6 +272,15 @@ def _result_body(result: Mapping[str, Any]) -> bytes:
         raise SandboxHTTPShimV2Error("provider response body is invalid") from exc
 
 
+def _transport_failure_message(result: Mapping[str, Any]) -> Optional[str]:
+    if result.get("terminal_status") in {
+        "authenticated_response",
+        "attested_local_response",
+    }:
+        return None
+    return "attested transport failure: %s" % result.get("failure_code")
+
+
 class _AiohttpContent:
     def __init__(self, body: bytes) -> None:
         self._body = body
@@ -406,6 +415,9 @@ def install() -> None:
                 body=bytes(body),
                 timeout_ms=_timeout_ms(timeout),
             )
+            transport_failure = _transport_failure_message(result)
+            if transport_failure is not None:
+                raise urllib.error.URLError(transport_failure)
             response_body = _result_body(result)
             message = Message()
             for name, value in dict(result.get("headers") or {}).items():
@@ -441,6 +453,12 @@ def install() -> None:
                     body=bytes(request.content),
                     timeout_ms=DEFAULT_TIMEOUT_MS,
                 )
+                transport_failure = _transport_failure_message(result)
+                if transport_failure is not None:
+                    raise httpx.TransportError(
+                        transport_failure,
+                        request=request,
+                    )
                 response_body = _result_body(result)
                 return httpx.Response(
                     status_code=int(result["http_status"]),
@@ -477,6 +495,12 @@ def install() -> None:
                     body=bytes(body),
                     timeout_ms=_timeout_ms(kwargs.get("timeout")),
                 )
+                transport_failure = _transport_failure_message(result)
+                if transport_failure is not None:
+                    raise requests.exceptions.ConnectionError(
+                        transport_failure,
+                        request=request,
+                    )
                 response_body = _result_body(result)
                 response = requests.Response()
                 response.status_code = int(result["http_status"])
@@ -513,6 +537,9 @@ def install() -> None:
                     body=body,
                     timeout_ms=_timeout_ms(kwargs.get("timeout")),
                 )
+                transport_failure = _transport_failure_message(result)
+                if transport_failure is not None:
+                    raise aiohttp.ClientConnectionError(transport_failure)
                 response = _AiohttpResponse(url=str(url), result=result)
                 raise_for_status = kwargs.get("raise_for_status")
                 if raise_for_status is None:

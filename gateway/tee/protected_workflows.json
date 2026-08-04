@@ -1217,7 +1217,7 @@
       "symbol": "MODEL_SANDBOX_VISIBLE_ROOT"
     },
     {
-      "ast_sha256": "sha256:fadd067219b7722b8ffdc8e82bd1ce313626a25bcb218107a0b3214dd15017dc",
+      "ast_sha256": "sha256:7bec425d8e14da14563da936cfaf25cf6f935c8beebbb44d861d38eece521fb3",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:8002d884f57d51cf05de7e82429568c0dea193812fc32c0f674ec2aac30b7cef",
+  "manifest_hash": "sha256:def540f6d91f0c455fbea4f07864e06e1f39ca41766f2f91fa5d8109d936b0a0",
   "protected_source_commit": "1803f3802b3667e2036a54fbf6ada14b7edfa206",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

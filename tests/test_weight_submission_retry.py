@@ -140,6 +140,31 @@ def test_primary_serializes_concurrent_weight_submission_triggers():
     assert calls == ["started"]
 
 
+def test_processed_epoch_reenters_submission_after_stale_snapshot_failure():
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    attempts = []
+
+    async def submit_locked():
+        attempts.append(object())
+        return len(attempts) == 2
+
+    validator._submit_weights_at_epoch_end_locked = submit_locked
+
+    async def run():
+        first = await validator.submit_weights_at_epoch_end()
+        second = await validator._check_weight_submission_for_processed_epoch(
+            100,
+            "stale_signed_snapshot",
+        )
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert first is False
+    assert second is True
+    assert len(attempts) == 2
+
+
 def test_primary_retries_false_tuples_until_true(monkeypatch, capsys):
     validator = _primary(
         [(False, "rejected-one"), (False, "rejected-two"), (True, "accepted")],

@@ -1668,6 +1668,34 @@ async def get_weight_inputs_v2(
     except HTTPException:
         raise
     except Exception as exc:
+        from gateway.research_lab.attested_weight_inputs_v2 import (
+            WeightInputSnapshotDriftV2Error,
+        )
+
+        if isinstance(exc, WeightInputSnapshotDriftV2Error):
+            code = failure_code_for_exception(
+                exc,
+                default="weight.bundle_divergence",
+            )
+            capture_failure(
+                code,
+                component="gateway",
+                stage="weight_input_reconstruction",
+                exception=exc,
+                terminal=True,
+                retryable=False,
+                fail_closed=True,
+                **telemetry,
+            )
+            logger.warning(
+                "authoritative_weight_inputs_v2_snapshot_stale epoch=%s type=%s",
+                request["epoch_id"],
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Authorized V2 weight input snapshot is stale",
+            ) from exc
         code = failure_code_for_exception(
             exc,
             default="authority.dependency_unreadable",

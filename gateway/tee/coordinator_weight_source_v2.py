@@ -390,6 +390,9 @@ class CoordinatorWeightSourceV2:
                     "active fulfillment reward hotkey is empty"
                 )
             per_miner[hotkey] = per_miner.get(hotkey, 0.0) + reward
+        per_miner = OrderedDict(
+            (hotkey, per_miner[hotkey]) for hotkey in sorted(per_miner)
+        )
         allocation_share = _allocation_share(calculation)
         pool = max(
             0.0,
@@ -418,7 +421,7 @@ class CoordinatorWeightSourceV2:
                 "fulfillment_share": effective,
                 "fulfillment_rows": [
                     {"hotkey": hotkey, "share": share}
-                    for hotkey, share in effective_rows.items()
+                    for hotkey, share in sorted(effective_rows.items())
                 ],
                 "fulfillment_fetch_ok": True,
             },
@@ -575,6 +578,7 @@ class CoordinatorWeightSourceV2:
             scores, lead_count = rolling_sourcing_history_v2(
                 current_epoch=current_epoch,
                 epochs=epochs,
+                banned_hotkeys=calculation["banned_hotkeys"],
             )
         except SourcingHistoryV2Error as exc:
             raise CoordinatorWeightSourceV2Error(

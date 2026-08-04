@@ -204,6 +204,69 @@ def test_fulfillment_rows_and_pool_cap_match_existing_formula_exactly():
     ]
 
 
+def test_fulfillment_rows_are_canonical_after_ordered_consensus_replay(
+    monkeypatch,
+):
+    from Leadpoet.utils import cloud_db
+    from neurons.validator import Validator
+
+    reader = FakeReader(
+        {
+            "fulfillment_active_rewards": [
+                {
+                    "consensus_id": "0001",
+                    "miner_hotkey": "miner-z",
+                    "reward_pct": 0.2,
+                    "reward_expires_epoch": 101,
+                },
+                {
+                    "consensus_id": "0002",
+                    "miner_hotkey": "miner-a",
+                    "reward_pct": 0.1,
+                    "reward_expires_epoch": 101,
+                },
+                {
+                    "consensus_id": "0003",
+                    "miner_hotkey": "miner-z",
+                    "reward_pct": 0.05,
+                    "reward_expires_epoch": 101,
+                },
+            ]
+        }
+    )
+    validator = object.__new__(Validator)
+    validator.wallet = object()
+    monkeypatch.setattr(
+        cloud_db,
+        "gateway_get_all_fulfillment_rewards",
+        lambda _wallet, _epoch: {"miner-a": 0.1, "miner-z": 0.25},
+    )
+    share, per_miner, fetch_ok = validator._get_fulfillment_emission_share(
+        100,
+        FULFILLMENT_POOL,
+        include_status=True,
+    )
+    assert fetch_ok is True
+
+    snapshot = _snapshot(
+        fulfillment_share=share,
+        fulfillment_rows=[
+            {"hotkey": hotkey, "share": value}
+            for hotkey, value in sorted(per_miner.items())
+        ],
+    )
+
+    document = CoordinatorWeightSourceV2(reader).resolve(
+        payload=_payload("fulfillment_rewards", snapshot=snapshot),
+        context=_context("research_lab.fulfillment_input.v2"),
+    )
+
+    assert document["value"]["fulfillment_rows"] == [
+        {"hotkey": "miner-a", "share": 0.1},
+        {"hotkey": "miner-z", "share": 0.25},
+    ]
+
+
 def test_leaderboard_reconstructs_wins_tiebreak_and_ban_filter():
     reader = FakeReader(
         {
@@ -338,6 +401,56 @@ def test_sourcing_history_is_rebuilt_only_from_signed_epoch_receipts():
         "rolling_lead_count": 2,
         "rolling_scores": [{"hotkey": "miner", "score": 10}],
     }
+
+
+def test_sourcing_history_replays_bans_without_rewriting_signed_epoch():
+    decisions = [
+        build_sourcing_decision_v2(
+            epoch_id=99,
+            sequence=0,
+            lead_id_hash=sha256_json({"lead": 0}),
+            miner_hotkey="miner",
+            decision="approve",
+            rep_score=10,
+            is_icp_multiplier=0,
+        )
+    ]
+    source_doc = build_sourcing_epoch_v2(epoch_id=99, decisions=decisions)
+    original = copy.deepcopy(source_doc)
+    receipt = _sourcing_epoch_receipt(source_doc)
+    reader = FakeReader(
+        {
+            "sourcing_epoch_inputs": [
+                {
+                    "epoch_id": 99,
+                    "epoch_hash": source_doc["epoch_hash"],
+                    "receipt_hash": receipt["receipt_hash"],
+                    "source_doc": source_doc,
+                    "receipt_doc": receipt,
+                },
+            ],
+            "attested_receipt_by_hash": [{"receipt_doc": receipt}],
+        }
+    )
+    snapshot = _snapshot(
+        banned_hotkeys=["miner"],
+        rolling_lead_count=1,
+        rolling_scores=[{"hotkey": "miner", "score": -100_000}],
+    )
+
+    document = CoordinatorWeightSourceV2(reader).resolve(
+        payload=_payload("sourcing_history", snapshot=snapshot),
+        context=_context(
+            "research_lab.sourcing_input.v2",
+            parents=(receipt["receipt_hash"],),
+        ),
+    )
+
+    assert document["value"] == {
+        "rolling_lead_count": 1,
+        "rolling_scores": [{"hotkey": "miner", "score": -100_000}],
+    }
+    assert source_doc == original
 
 
 def test_sourcing_history_rejects_undeclared_or_modified_epoch_receipt():

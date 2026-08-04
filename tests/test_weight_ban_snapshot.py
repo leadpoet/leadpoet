@@ -38,6 +38,50 @@ class _Supabase:
         return _Query(self._pages)
 
 
+class _RewardsQuery:
+    def __init__(self, pages):
+        self._pages = pages
+        self._range = (0, 999)
+        self.selected = None
+        self.ordered = None
+
+    def select(self, fields):
+        self.selected = fields
+        return self
+
+    @property
+    def not_(self):
+        return self
+
+    def is_(self, _field, _value):
+        return self
+
+    def gt(self, _field, _value):
+        return self
+
+    def order(self, field):
+        self.ordered = field
+        return self
+
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+
+    def execute(self):
+        page = self._range[0] // 1000
+        data = self._pages[page] if page < len(self._pages) else []
+        return SimpleNamespace(data=data)
+
+
+class _RewardsSupabase:
+    def __init__(self, pages):
+        self.query = _RewardsQuery(pages)
+
+    def table(self, name):
+        assert name == "fulfillment_score_consensus"
+        return self.query
+
+
 class _Response:
     def __init__(self, payload):
         self._payload = payload
@@ -60,6 +104,40 @@ def test_banned_hotkey_snapshot_is_sorted_unique_and_complete(monkeypatch):
         "banned_hotkeys": ["5A", "5B"],
         "banned_lookup_ok": True,
     }
+
+
+def test_active_rewards_use_consensus_order_and_return_sorted_hotkeys(monkeypatch):
+    supabase = _RewardsSupabase(
+        [[
+            {"consensus_id": "1", "miner_hotkey": "5B", "reward_pct": 0.2},
+            {"consensus_id": "2", "miner_hotkey": "5A", "reward_pct": 0.1},
+            {"consensus_id": "3", "miner_hotkey": "5B", "reward_pct": 0.05},
+        ]]
+    )
+    monkeypatch.setattr(fulfillment_api, "_get_supabase", lambda: supabase)
+
+    result = fulfillment_api._collect_active_rewards_sync(100)
+
+    assert result == {
+        "rewards": {"5A": 0.1, "5B": 0.25},
+        "total_active_rows": 3,
+    }
+    assert supabase.query.selected == (
+        "consensus_id, miner_hotkey, reward_pct, reward_expires_epoch"
+    )
+    assert supabase.query.ordered == "consensus_id"
+
+
+def test_active_rewards_fail_closed_at_pagination_limit(monkeypatch):
+    full_page = [
+        {"consensus_id": str(index), "miner_hotkey": "5A", "reward_pct": 0.0}
+        for index in range(1000)
+    ]
+    supabase = _RewardsSupabase([full_page] * 50)
+    monkeypatch.setattr(fulfillment_api, "_get_supabase", lambda: supabase)
+
+    with pytest.raises(RuntimeError, match="pagination limit"):
+        fulfillment_api._collect_active_rewards_sync(100)
 
 
 @pytest.mark.asyncio

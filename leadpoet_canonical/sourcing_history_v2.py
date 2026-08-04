@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Dict, Mapping, Sequence, Tuple
+from typing import Any, Collection, Dict, Mapping, Sequence, Tuple
 
 from leadpoet_canonical.attested_v2 import sha256_json
 
@@ -18,6 +18,7 @@ from leadpoet_canonical.attested_v2 import sha256_json
 SOURCING_DECISION_SCHEMA_VERSION = "leadpoet.sourcing_decision.v2"
 SOURCING_EPOCH_SCHEMA_VERSION = "leadpoet.sourcing_epoch.v2"
 SOURCING_ROLLING_WINDOW = 30
+SOURCING_BANNED_HOTKEY_PENALTY = -100_000
 LEGACY_ICP_MULTIPLIERS = frozenset({1.0, 1.5, 5.0})
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -217,12 +218,32 @@ def validate_sourcing_epoch_v2(value: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def rolling_sourcing_history_v2(
-    *, current_epoch: int, epochs: Sequence[Mapping[str, Any]], window: int = SOURCING_ROLLING_WINDOW
+    *,
+    current_epoch: int,
+    epochs: Sequence[Mapping[str, Any]],
+    window: int = SOURCING_ROLLING_WINDOW,
+    banned_hotkeys: Collection[str] = (),
 ) -> Tuple[Dict[str, float], int]:
     if not isinstance(current_epoch, int) or current_epoch < 0:
         raise SourcingHistoryV2Error("current_epoch is invalid")
     if not isinstance(window, int) or isinstance(window, bool) or window <= 0:
         raise SourcingHistoryV2Error("window is invalid")
+    if not isinstance(banned_hotkeys, (list, tuple, set, frozenset)):
+        raise SourcingHistoryV2Error("banned_hotkeys is invalid")
+    normalized_bans = []
+    for hotkey in banned_hotkeys:
+        if (
+            not isinstance(hotkey, str)
+            or not hotkey
+            or hotkey != hotkey.strip()
+            or len(hotkey) > 128
+            or any(char.isspace() for char in hotkey)
+        ):
+            raise SourcingHistoryV2Error("banned hotkey is invalid")
+        normalized_bans.append(hotkey)
+    if len(normalized_bans) != len(set(normalized_bans)):
+        raise SourcingHistoryV2Error("banned hotkey is duplicated")
+    banned = frozenset(normalized_bans)
     start_epoch = current_epoch - window
     end_epoch = current_epoch - 1
     scores = {}  # type: Dict[str, float]
@@ -237,6 +258,12 @@ def rolling_sourcing_history_v2(
         if not start_epoch <= epoch_id <= end_epoch:
             continue
         for row in epoch["miner_scores"]:
-            scores[row["hotkey"]] = scores.get(row["hotkey"], 0) + row["score"]
+            hotkey = row["hotkey"]
+            score = (
+                SOURCING_BANNED_HOTKEY_PENALTY
+                if hotkey in banned
+                else row["score"]
+            )
+            scores[hotkey] = scores.get(hotkey, 0) + score
         lead_count += epoch["approved_lead_count"]
     return scores, lead_count

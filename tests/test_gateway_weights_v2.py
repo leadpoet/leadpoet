@@ -1106,6 +1106,68 @@ async def test_weight_inputs_v2_failed_shared_load_does_not_poison_retry(
 
 
 @pytest.mark.asyncio
+async def test_weight_inputs_v2_returns_conflict_for_stale_signed_snapshot(
+    monkeypatch,
+):
+    from gateway.research_lab.attested_weight_inputs_v2 import (
+        WeightInputSnapshotDriftV2Error,
+    )
+
+    authorization = _weight_inputs_authorization()
+    _patch_epoch_authority(monkeypatch)
+
+    async def stale(**_kwargs):
+        raise WeightInputSnapshotDriftV2Error(
+            "bans measured input differs from calculation"
+        )
+
+    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(weights_api, "verify_wallet_signature", lambda *args: True)
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(weights_api, "_build_weight_inputs_v2_singleflight", stale)
+    monkeypatch.setattr(weights_api, "capture_failure", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_weight_inputs_v2(authorization, _request())
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Authorized V2 weight input snapshot is stale"
+
+
+@pytest.mark.asyncio
+async def test_weight_inputs_v2_keeps_receipt_corruption_as_hard_failure(monkeypatch):
+    from gateway.research_lab.attested_weight_inputs_v2 import (
+        AttestedWeightInputsV2Error,
+    )
+
+    authorization = _weight_inputs_authorization()
+    _patch_epoch_authority(monkeypatch)
+
+    async def corrupt(**_kwargs):
+        raise AttestedWeightInputsV2Error(
+            "bans measured input receipt is invalid"
+        )
+
+    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(weights_api, "verify_wallet_signature", lambda *args: True)
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(weights_api, "_build_weight_inputs_v2_singleflight", corrupt)
+    monkeypatch.setattr(weights_api, "capture_failure", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_weight_inputs_v2(authorization, _request())
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == (
+        "Authoritative V2 weight input reconstruction failed closed"
+    )
+
+
+@pytest.mark.asyncio
 async def test_weight_inputs_v2_rejects_tampered_snapshot_before_measured_reads(
     monkeypatch,
 ):

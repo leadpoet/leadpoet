@@ -6034,7 +6034,7 @@ class Validator(BaseValidatorNeuron):
                 fulfillment_share_value=fulfillment_share,
                 fulfillment_rows_value=[
                     {"hotkey": str(hotkey), "share": share}
-                    for hotkey, share in fulfillment_per_miner.items()
+                    for hotkey, share in sorted(fulfillment_per_miner.items())
                 ],
                 fulfillment_fetch_ok_value=fulfillment_fetch_ok,
                 leaderboard_entries_value=leaderboard_entries,

@@ -27,7 +27,7 @@
       "symbol": "get_compact_published_weights_v2"
     },
     {
-      "ast_sha256": "sha256:221f2772f3def021f0e33ae9fb892d8d3cb5f899e71663f4b9ab417a45f06a47",
+      "ast_sha256": "sha256:e298f8e841298f56155a3b51f447c92a87192ce6cbf6ab5d9a7bcdf663bb1aa0",
       "path": "gateway/api/weights.py",
       "symbol": "get_weight_inputs_v2"
     },
@@ -332,7 +332,7 @@
       "symbol": "_compact_weight_ancestry"
     },
     {
-      "ast_sha256": "sha256:da63615aa8f1899f4991e51ee8b5889991d58766c7e73ab7c16b47e2ced04c9d",
+      "ast_sha256": "sha256:91eb6c57b53c18090ed7844badc7302a624bdde789415094e7c5a50f59dc8d2b",
       "path": "gateway/research_lab/attested_weight_inputs_v2.py",
       "symbol": "build_gateway_weight_inputs_v2"
     },
@@ -1127,7 +1127,7 @@
       "symbol": "CoordinatorSourceAddProvenanceV2"
     },
     {
-      "ast_sha256": "sha256:e905b2afad9ec079af4bdefe16ce5479e93c58fbe75639c1c5313cf88ae96a2b",
+      "ast_sha256": "sha256:1306bad50d0efdb5d9e96c9170c2adaf08ae0f37cb828cd4e6e45aabdbcd91f6",
       "path": "gateway/tee/coordinator_weight_source_v2.py",
       "symbol": "CoordinatorWeightSourceV2"
     },
@@ -1547,7 +1547,7 @@
       "symbol": "validate_source_add_sealed_job_envelope_v2"
     },
     {
-      "ast_sha256": "sha256:d5975781917b70b3439cc313db097ca2947fb3007d579ddbd72f40c38f3a5317",
+      "ast_sha256": "sha256:c75fdbee330ea1cbd31270bd6fec1af1d6c58b903b059823dc02e4f227a36755",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "QUERY_POLICIES"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:42ff7fc330c6766939de73e22adc55275c1bf8f849dfd9de12b8ff5c04bd8a5b",
+  "manifest_hash": "sha256:f37e0e4c69c9a80e2ab8f75d0ab7cfd2f2ba362930b7e6d74619950251aea382",
   "protected_source_commit": "a0798fc6336838326bb4708789d24225cd1dcaef",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -6,6 +6,7 @@ import pytest
 from gateway.research_lab import attested_weight_inputs_v2
 from gateway.research_lab.attested_weight_inputs_v2 import (
     AttestedWeightInputsV2Error,
+    WeightInputSnapshotDriftV2Error,
     build_gateway_weight_inputs_v2,
 )
 from leadpoet_canonical.attested_v2 import sha256_json
@@ -356,8 +357,16 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mismatch_category,mismatch_kind,error_type,error_match",
+    (
+        ("bans", "document", WeightInputSnapshotDriftV2Error, "differs"),
+        ("champions", "document", AttestedWeightInputsV2Error, "differs"),
+        ("bans", "receipt", AttestedWeightInputsV2Error, "receipt is invalid"),
+    ),
+)
 async def test_gateway_weight_input_builder_rejects_measured_value_mismatch(
-    monkeypatch,
+    monkeypatch, mismatch_category, mismatch_kind, error_type, error_match,
 ):
     monkeypatch.setattr(
         attested_weight_inputs_v2,
@@ -365,18 +374,34 @@ async def test_gateway_weight_input_builder_rejects_measured_value_mismatch(
         lambda *_args, **_kwargs: (),
     )
 
+    snapshot = _snapshot()
+    allocation = _allocation_graph()
+    expected = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=snapshot,
+        gateway_authority_event_hash=allocation["root_receipt_hash"],
+    )
+
     async def execute(**kwargs):
         category = kwargs["payload"]["category"]
+        document = (
+            {"forged": True}
+            if category == mismatch_category and mismatch_kind == "document"
+            else expected[category]
+        )
         receipt_hash = sha256_json({"category": category})
         receipt = {
             "receipt_hash": receipt_hash,
             "role": WEIGHT_INPUT_PURPOSES[category][0],
             "purpose": WEIGHT_INPUT_PURPOSES[category][1],
-            "output_root": sha256_json({"forged": True}),
+            "output_root": (
+                sha256_json({"forged": True})
+                if category == mismatch_category and mismatch_kind == "receipt"
+                else sha256_json(document)
+            ),
         }
         return {
             "status": "succeeded",
-            "result": {"forged": True},
+            "result": document,
             "receipt": receipt,
             "receipt_graph": {
                 "root_receipt_hash": receipt_hash,
@@ -387,10 +412,10 @@ async def test_gateway_weight_input_builder_rejects_measured_value_mismatch(
             },
         }
 
-    with pytest.raises(AttestedWeightInputsV2Error, match="differs"):
+    with pytest.raises(error_type, match=error_match):
         await build_gateway_weight_inputs_v2(
-            calculation_snapshot=_snapshot(),
-            allocation_graph=_allocation_graph(),
+            calculation_snapshot=snapshot,
+            allocation_graph=allocation,
             leaderboard_window_start="2026-07-03T00:00:00Z",
             leaderboard_window_end="2026-07-10T00:00:00Z",
             execute=execute,

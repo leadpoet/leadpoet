@@ -1875,11 +1875,14 @@ def _collect_active_rewards_sync(current_epoch: int) -> dict:
 
     all_rows: List[dict] = []
     offset = 0
-    for _ in range(50):
+    for page_index in range(50):
         page = supabase.table("fulfillment_score_consensus") \
-            .select("miner_hotkey, reward_pct, reward_expires_epoch") \
+            .select(
+                "consensus_id, miner_hotkey, reward_pct, reward_expires_epoch"
+            ) \
             .not_.is_("reward_pct", "null") \
             .gt("reward_expires_epoch", current_epoch) \
+            .order("consensus_id") \
             .range(offset, offset + 999) \
             .execute()
         if not page.data:
@@ -1887,6 +1890,10 @@ def _collect_active_rewards_sync(current_epoch: int) -> dict:
         all_rows.extend(page.data)
         if len(page.data) < 1000:
             break
+        if page_index == 49:
+            raise RuntimeError(
+                "active fulfillment rewards exceed the pagination limit"
+            )
         offset += 1000
 
     per_miner: dict = {}
@@ -1895,7 +1902,13 @@ def _collect_active_rewards_sync(current_epoch: int) -> dict:
         pct = float(row["reward_pct"])
         per_miner[hk] = per_miner.get(hk, 0.0) + pct
 
-    return {"rewards": per_miner, "total_active_rows": len(all_rows)}
+    return {
+        "rewards": {
+            hotkey: per_miner[hotkey]
+            for hotkey in sorted(per_miner)
+        },
+        "total_active_rows": len(all_rows),
+    }
 
 
 def _collect_banned_hotkeys_sync() -> dict:

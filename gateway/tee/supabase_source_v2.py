@@ -80,9 +80,10 @@ QUERY_POLICIES = {
     "fulfillment_active_rewards": SupabaseQueryV2(
         policy_id="fulfillment_active_rewards",
         table="fulfillment_score_consensus",
-        select="miner_hotkey,reward_pct,reward_expires_epoch",
+        select="consensus_id,miner_hotkey,reward_pct,reward_expires_epoch",
         parameter_names=("epoch_id",),
         max_pages=50,
+        order="consensus_id.asc",
     ),
     "fulfillment_leaderboard_winners": SupabaseQueryV2(
         policy_id="fulfillment_leaderboard_winners",

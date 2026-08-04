@@ -437,3 +437,31 @@ async def test_client_does_not_retry_semantic_gateway_400():
         )
 
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_client_does_not_retry_stale_signed_snapshot_409():
+    calls = 0
+
+    async def post_json(_url, _payload, _timeout):
+        nonlocal calls
+        calls += 1
+        raise GatewayWeightInputsV2Error(
+            "gateway V2 weight input request failed with HTTP 409",
+            status_code=409,
+        )
+
+    with pytest.raises(GatewayWeightInputsV2Error, match="HTTP 409"):
+        await fetch_gateway_weight_inputs_v2(
+            gateway_url="https://gateway.example",
+            calculation_snapshot=_calculation(),
+            validator_hotkey=HOTKEY,
+            allocation_hash="sha256:" + "3" * 64,
+            leaderboard_window_start="2026-07-03T20:00:00Z",
+            leaderboard_window_end="2026-07-10T20:00:00Z",
+            client=FakeClient(),
+            post_json=post_json,
+            retry_delay_seconds=0,
+        )
+
+    assert calls == 1

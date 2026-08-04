@@ -122,3 +122,40 @@ def test_rolling_window_excludes_current_and_old_epochs_exactly():
     )
     assert scores == {"miner": 169}
     assert count == 2
+
+
+def test_rolling_ban_penalty_replays_validator_semantics_without_mutating_receipts():
+    epochs = [
+        build_sourcing_epoch_v2(
+            epoch_id=epoch,
+            decisions=[
+                _decision(0, "banned", "approve", score, 0, epoch=epoch),
+                _decision(1, "allowed", "approve", score, 0, epoch=epoch),
+            ],
+        )
+        for epoch, score in ((98, 4), (99, 6))
+    ]
+    original = copy.deepcopy(epochs)
+
+    scores, count = rolling_sourcing_history_v2(
+        current_epoch=100,
+        epochs=epochs,
+        banned_hotkeys=["banned", "absent"],
+    )
+
+    assert scores == {"banned": -200_000, "allowed": 10}
+    assert count == 4
+    assert epochs == original
+
+
+@pytest.mark.parametrize(
+    "banned_hotkeys",
+    ("miner", [1], [""], [" miner"], ["miner key"], ["miner", "miner"]),
+)
+def test_rolling_ban_penalty_rejects_noncanonical_hotkeys(banned_hotkeys):
+    with pytest.raises(SourcingHistoryV2Error, match="banned"):
+        rolling_sourcing_history_v2(
+            current_epoch=100,
+            epochs=[],
+            banned_hotkeys=banned_hotkeys,
+        )

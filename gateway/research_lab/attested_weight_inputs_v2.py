@@ -44,6 +44,10 @@ class AttestedWeightInputsV2Error(RuntimeError):
     """Gateway weight inputs are incomplete, conflicting, or unverifiable."""
 
 
+class WeightInputSnapshotDriftV2Error(AttestedWeightInputsV2Error):
+    """A signed provisional input changed before its measured reconstruction."""
+
+
 def _coordinator_client() -> TEEClient:
     """Return one connection owner for one concurrent coordinator job."""
 
@@ -329,10 +333,20 @@ async def build_gateway_weight_inputs_v2(
             or receipt.get("role") != expected_role
             or receipt.get("purpose") != purpose
             or receipt.get("output_root") != sha256_json(document)
-            or canonical_json(document)
-            != canonical_json(expected_documents[category])
         ):
             raise AttestedWeightInputsV2Error(
+                "%s measured input receipt is invalid" % category
+            )
+        if canonical_json(document) != canonical_json(
+            expected_documents[category]
+        ):
+            error_type = (
+                WeightInputSnapshotDriftV2Error
+                if category
+                in {"bans", "fulfillment_rewards", "leaderboard", "sourcing_history"}
+                else AttestedWeightInputsV2Error
+            )
+            raise error_type(
                 "%s measured input differs from calculation" % category
             )
         if root_hash != receipt_hash:

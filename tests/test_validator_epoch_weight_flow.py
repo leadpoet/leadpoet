@@ -87,6 +87,7 @@ def test_leaderboard_disable_uses_canonical_window_without_changing_snapshot_sch
 
     assert "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED" in submission
     assert "DISABLED_LEADERBOARD_WINDOW_V1" in submission
+    assert "sorted(fulfillment_per_miner.items())" in submission
     assert '"leaderboard_emissions_enabled"' not in snapshot
     assert "datetime.now(timezone.utc).isoformat()" not in submission
 

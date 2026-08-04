@@ -368,6 +368,23 @@ def test_typed_query_parameters_cannot_inject_postgrest_syntax():
     assert provider.requests == []
 
 
+def test_fulfillment_rewards_use_stable_consensus_order_across_pages():
+    provider = FakeProvider([{"rows": []}])
+
+    _read(
+        provider,
+        policy_id="fulfillment_active_rewards",
+        parameters={"epoch_id": 100},
+    )
+
+    query = parse_qsl(urlsplit(provider.requests[0]["url"]).query)
+    assert (
+        "select",
+        "consensus_id,miner_hotkey,reward_pct,reward_expires_epoch",
+    ) in query
+    assert ("order", "consensus_id.asc") in query
+
+
 def test_source_add_migration_reads_one_exact_measured_reward_reference():
     reward_ref = "source_add_reward:201a08f0d2b503bf"
     provider = FakeProvider([{"rows": [{"reward_ref": reward_ref}]}])

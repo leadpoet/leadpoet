@@ -478,11 +478,21 @@ PROTECTED_SYMBOLS = {
     ),
     "leadpoet_canonical/weight_authority_v2.py": (
         "gateway_weight_input_value_documents_v2",
+        "normalize_gateway_measured_weight_inputs_v2",
         "weight_input_value_documents_v2",
         "validate_weight_input_source_evidence_v2",
         "build_weight_snapshot_v2",
         "validate_published_weight_bundle_v2",
         "validate_weight_finalization_submission_v2",
+    ),
+    "leadpoet_canonical/hotkey_authority_v2.py": (
+        "GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2",
+        "build_weight_inputs_request_v2",
+        "validate_weight_inputs_request_v2",
+    ),
+    "leadpoet_canonical/sourcing_history_v2.py": (
+        "SOURCING_BANNED_HOTKEY_PENALTY_V2",
+        "rolling_sourcing_history_v2",
     ),
     "leadpoet_canonical/chain_source_v2.py": (
         "weights_storage_key",

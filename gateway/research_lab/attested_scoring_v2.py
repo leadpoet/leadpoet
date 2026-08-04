@@ -92,6 +92,30 @@ _GATEWAY_ANCESTRY_ISSUER_ROLES = (
 )
 
 
+def _validate_artifact_persistence_lineage_output_v2(
+    *,
+    lineage: Mapping[str, Any],
+    lineage_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return only a canonical persistence output bound to its signed receipt."""
+
+    from gateway.tee.coordinator_executor_v2 import (
+        validate_artifact_persistence_output_v2,
+    )
+
+    try:
+        output = validate_artifact_persistence_output_v2(lineage.get("result"))
+    except ValueError as exc:
+        raise AttestedScoringV2Error(
+            "V2 artifact persistence output is invalid"
+        ) from exc
+    if lineage_receipt.get("output_root") != sha256_json(output):
+        raise AttestedScoringV2Error(
+            "V2 artifact persistence output differs from its receipt"
+        )
+    return output
+
+
 def _env_flag(name: str) -> bool:
     return str(os.getenv(name, "") or "").strip().lower() in {
         "1",
@@ -1822,6 +1846,7 @@ async def execute_scoring_v2(
         require_boot_attestation_verification=True,
     )
     artifact_persistence = []
+    artifact_persistence_output = None
     reuse_persisted_artifacts = False
     if expected_artifact_hashes:
         from gateway.research_lab.attested_artifacts_v2 import (
@@ -2036,6 +2061,12 @@ async def execute_scoring_v2(
             raise AttestedScoringV2Error(
                 "V2 encrypted artifact lineage ancestry is invalid"
             )
+        artifact_persistence_output = (
+            _validate_artifact_persistence_lineage_output_v2(
+                lineage=lineage,
+                lineage_receipt=lineage_receipt,
+            )
+        )
         source_authority = build_certificate_parent_authority_v2(
             ancestry_compact_proof["certificate"],
             expected_lineage_id=ancestry_lineage_id,
@@ -2156,6 +2187,11 @@ async def execute_scoring_v2(
             ),
             "ancestry_checkpoint_persistence": dict(
                 lineage_checkpoint_persistence
+            ),
+            **(
+                {"artifact_persistence_output": artifact_persistence_output}
+                if artifact_persistence_output is not None
+                else {}
             ),
         }
     persistence, ancestry_checkpoint_persistence = (

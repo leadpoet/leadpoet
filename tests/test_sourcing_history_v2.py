@@ -122,3 +122,28 @@ def test_rolling_window_excludes_current_and_old_epochs_exactly():
     )
     assert scores == {"miner": 169}
     assert count == 2
+
+
+def test_ban_aware_replay_penalizes_present_rows_without_mutating_epochs():
+    epoch_10 = build_sourcing_epoch_v2(
+        epoch_id=10,
+        decisions=[_decision(0, "banned", "approve", 40, 0, epoch=10)],
+    )
+    epoch_11 = build_sourcing_epoch_v2(
+        epoch_id=11,
+        decisions=[_decision(0, "banned", "approve", 20, 0, epoch=11)],
+    )
+    original_10 = copy.deepcopy(epoch_10)
+    original_11 = copy.deepcopy(epoch_11)
+
+    scores, count = rolling_sourcing_history_v2(
+        current_epoch=12,
+        epochs=[epoch_10, epoch_11],
+        banned_hotkeys=["banned", "absent"],
+    )
+
+    assert scores == {"banned": -200_000}
+    assert "absent" not in scores
+    assert count == 2
+    assert epoch_10 == original_10
+    assert epoch_11 == original_11

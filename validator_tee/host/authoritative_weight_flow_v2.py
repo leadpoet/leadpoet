@@ -19,6 +19,7 @@ from leadpoet_canonical.compact_weight_authority_v2 import (
     compact_weight_bundle_hash_v2,
 )
 from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
     MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
     MAX_WEIGHT_TRANSPORT_WIRE_BYTES,
     build_weight_transport_authorization_v2,
@@ -34,7 +35,10 @@ from validator_tee.host.weight_authority_v2 import (
     build_compact_weight_submission_v2,
     build_stateful_epoch_evidence_v1,
 )
-from leadpoet_canonical.weight_computation import normalize_to_u16_with_uids_pure
+from leadpoet_canonical.weight_computation import (
+    compute_final_weights,
+    normalize_to_u16_with_uids_pure,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     build_weight_finalization_submission_v2,
     validate_published_weight_bundle_v2,
@@ -311,11 +315,34 @@ async def prepare_authoritative_weight_publication_v2(
     before_publish: Optional[Callable[[Mapping[str, Any]], Any]] = None,
     input_timeout_seconds: float = 90.0,
     publication_timeout_seconds: float = 600.0,
+    snapshot_authority_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build, publish, and return the only vector authorized for chain use."""
 
     enclave_client = client or ValidatorEnclaveClient()
     calculation = dict(calculation_snapshot)
+    normalized_mode = (
+        snapshot_authority_mode == GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    if snapshot_authority_mode is not None and not normalized_mode:
+        raise AuthoritativeWeightFlowV2Error(
+            "weight publication snapshot authority mode is invalid"
+        )
+    if normalized_mode:
+        # The caller's vector is only evidence about the signed provisional
+        # snapshot.  Prove that claim before allowing measured gateway values
+        # to replace the explicitly bounded mutable fields.
+        try:
+            provisional_result = compute_final_weights(calculation)
+            _verify_host_vector(
+                host_uids=host_uids,
+                host_weights=host_weights,
+                enclave_result=provisional_result,
+            )
+        except Exception as exc:
+            raise AuthoritativeWeightFlowV2Error(
+                "caller vector differs from canonical provisional calculation"
+            ) from exc
     try:
         gateway_endpoint = _gateway_endpoint(gateway_url)
     except Exception as exc:
@@ -330,6 +357,7 @@ async def prepare_authoritative_weight_publication_v2(
             leaderboard_window_end=leaderboard_window_end,
             client=enclave_client,
             timeout_seconds=input_timeout_seconds,
+            snapshot_authority_mode=snapshot_authority_mode,
         )
         weight_request = {
             "validator_hotkey": validator_hotkey,
@@ -339,6 +367,23 @@ async def prepare_authoritative_weight_publication_v2(
                 "gateway_authority_event_hash"
             ],
         }
+        if normalized_mode:
+            normalized_fields = {
+                "snapshot_authority_mode",
+                "authoritative_calculation_snapshot",
+                "authoritative_calculation_snapshot_hash",
+                "normalized_source_categories",
+            }
+            if not normalized_fields.issubset(set(gateway_inputs)):
+                raise AuthoritativeWeightFlowV2Error(
+                    "gateway normalized weight inputs are incomplete"
+                )
+            weight_request.update(
+                {
+                    field: gateway_inputs[field]
+                    for field in sorted(normalized_fields)
+                }
+            )
         if "upstream_ancestry_proofs" in gateway_inputs:
             weight_request.update(
                 {
@@ -358,11 +403,26 @@ async def prepare_authoritative_weight_publication_v2(
             enclave_client.compute_authoritative_weights_v2,
             weight_request,
         )
-        _verify_host_vector(
-            host_uids=host_uids,
-            host_weights=host_weights,
-            enclave_result=enclave_response["weight_result"],
-        )
+        if normalized_mode:
+            try:
+                authoritative_result = compute_final_weights(
+                    gateway_inputs["authoritative_calculation_snapshot"]
+                )
+                _verify_host_vector(
+                    host_uids=authoritative_result["uids"],
+                    host_weights=authoritative_result["weights"],
+                    enclave_result=enclave_response["weight_result"],
+                )
+            except Exception as exc:
+                raise AuthoritativeWeightFlowV2Error(
+                    "authoritative host and enclave vectors differ"
+                ) from exc
+        else:
+            _verify_host_vector(
+                host_uids=host_uids,
+                host_weights=host_weights,
+                enclave_result=enclave_response["weight_result"],
+            )
         boot = enclave_response["boot_identity"]
         compact = "receipt_graph_delta" in enclave_response
         graph = (

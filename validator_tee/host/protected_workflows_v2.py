@@ -113,6 +113,7 @@ PROTECTED_SYMBOLS = {
     ),
     "leadpoet_canonical/weight_authority_v2.py": (
         "gateway_weight_input_value_documents_v2",
+        "normalize_gateway_measured_weight_inputs_v2",
         "weight_input_value_documents_v2",
         "validate_weight_input_source_evidence_v2",
         "build_weight_snapshot_v2",
@@ -120,6 +121,9 @@ PROTECTED_SYMBOLS = {
         "validate_weight_finalization_submission_v2",
     ),
     "leadpoet_canonical/hotkey_authority_v2.py": (
+        "GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2",
+        "build_weight_inputs_request_v2",
+        "validate_weight_inputs_request_v2",
         "validate_chain_signing_profile",
         "chain_signing_profiles",
         "select_chain_signing_profile",
@@ -135,6 +139,10 @@ PROTECTED_SYMBOLS = {
         "classify_application_message_v2",
         "build_application_signature_request_v2",
         "validate_application_signature_request_v2",
+    ),
+    "leadpoet_canonical/sourcing_history_v2.py": (
+        "SOURCING_BANNED_HOTKEY_PENALTY_V2",
+        "rolling_sourcing_history_v2",
     ),
     "leadpoet_canonical/auditor_v2.py": (
         "verify_attested_weight_bundle_v2",

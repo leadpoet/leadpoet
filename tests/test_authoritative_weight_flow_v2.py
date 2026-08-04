@@ -9,8 +9,14 @@ import pytest
 
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
     validate_weight_transport_authorization_v2,
     weight_transport_authorization_message_v2,
+)
+from leadpoet_canonical.weight_computation import (
+    WEIGHT_SNAPSHOT_SCHEMA_VERSION,
+    compute_final_weights,
+    weight_config_hash,
 )
 from validator_tee.host import authoritative_weight_flow_v2 as flow_module
 from validator_tee.host.authoritative_weight_flow_v2 import (
@@ -325,6 +331,90 @@ class Client:
         }
 
 
+def _measured_calculation(**overrides):
+    value = {
+        "schema_version": WEIGHT_SNAPSHOT_SCHEMA_VERSION,
+        "netuid": 71,
+        "epoch_id": 100,
+        "block": 36099,
+        "commit_sha": "a" * 40,
+        "config_hash": "",
+        "parent_receipt_hashes": [],
+        "research_lab_allocation_receipt_hash": "",
+        "burn_target_uid": 0,
+        "expected_burn_target_hotkey": "burn",
+        "metagraph_hotkeys": ["burn", "miner"],
+        "banned_hotkeys": [],
+        "banned_lookup_ok": True,
+        "ff_enabled": True,
+        "base_burn_share": 0.0,
+        "champion_share": 0.0,
+        "champion_uid": None,
+        "effective_champion_share": 0.0,
+        "research_lab_fallback_share": 0.2,
+        "research_lab_allocation_doc": {
+            "lab_cap_percent": 20.0,
+            "unallocated_percent": 20.0,
+            "champion_allocations": [],
+            "queued_champion_allocations": [],
+            "reimbursement_allocations": [],
+            "source_add_allocations": [],
+        },
+        "leaderboard_bonus_share": 0.095,
+        "leaderboard_rank_shares": [0.05, 0.03, 0.015],
+        "leaderboard_entries": [],
+        "leaderboard_fetch_ok": True,
+        "fulfillment_share": 0.705,
+        "fulfillment_rows": [{"hotkey": "miner", "share": 0.705}],
+        "fulfillment_fetch_ok": True,
+        "rolling_lead_count": 0,
+        "rolling_scores": [],
+        "sourcing_floor_threshold": 125000,
+        "min_total_rep_for_distribution": 100,
+    }
+    value.update(overrides)
+    value["config_hash"] = weight_config_hash(value)
+    return value
+
+
+def _measured_gateway_inputs(authoritative):
+    return {
+        "input_receipt_hashes": {"research_lab_allocation": "sha256:" + "b" * 64},
+        "gateway_authority_event_hash": "sha256:" + "c" * 64,
+        "upstream_receipt_set": {"receipts": []},
+        "snapshot_authority_mode": GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+        "authoritative_calculation_snapshot": authoritative,
+        "authoritative_calculation_snapshot_hash": sha256_json(authoritative),
+        "normalized_source_categories": [
+            "bans",
+            "fulfillment_rewards",
+            "leaderboard",
+            "sourcing_history",
+        ],
+    }
+
+
+def _computed_response(client, request, calculation):
+    client.compute_requests.append(dict(request))
+    result = dict(compute_final_weights(calculation))
+    # The test publication acknowledgement is intentionally fixture-bound;
+    # vector verification uses the float/sparse values, not this transport id.
+    result["weights_hash"] = "4" * 64
+    return {
+        "weight_snapshot": {"snapshot": True},
+        "weight_result": result,
+        "weights_signature": "5" * 128,
+        "receipt_graph": {"root_receipt_hash": ROOT, "receipts": []},
+        "boot_identity": {
+            "signing_pubkey": "6" * 64,
+            "build_manifest_hash": "sha256:" + "7" * 64,
+            "commit_sha": "8" * 40,
+        },
+        "weight_authorization_id": "sha256:" + "9" * 64,
+        "source_artifacts": [],
+    }
+
+
 async def _inputs(**kwargs):
     assert kwargs["validator_hotkey"] == HOTKEY
     return {
@@ -458,6 +548,113 @@ async def test_flow_orders_inputs_compute_parent_binding_and_durable_publication
     assert result["uids"] == [0, 1]
     assert result["weight_submission_event_hash"] == EVENT
     assert order == ["journal", "post"]
+
+
+@pytest.mark.asyncio
+async def test_signed_measured_flow_checks_provisional_then_authoritative_vector(
+    monkeypatch,
+):
+    monkeypatch.setattr(flow_module, "build_authoritative_weight_bundle_v2", _bundle)
+    monkeypatch.setattr(
+        flow_module,
+        "validate_published_weight_bundle_v2",
+        _verified_bundle,
+    )
+    provisional = _measured_calculation()
+    authoritative = _measured_calculation(
+        banned_hotkeys=["banned"],
+        fulfillment_share=0.6,
+        fulfillment_rows=[{"hotkey": "miner", "share": 0.6}],
+        leaderboard_entries=[{"miner_hotkey": "miner", "wins": 1}],
+        rolling_lead_count=1,
+        rolling_scores=[{"hotkey": "banned", "score": -100000}],
+    )
+    provisional_result = compute_final_weights(provisional)
+    authoritative_result = compute_final_weights(authoritative)
+    client = Client()
+
+    def compute(request):
+        assert request["calculation_snapshot"] == provisional
+        assert request["authoritative_calculation_snapshot"] == authoritative
+        return _computed_response(client, request, authoritative)
+
+    client.compute_authoritative_weights_v2 = compute
+
+    async def inputs(**kwargs):
+        assert kwargs["snapshot_authority_mode"] == (
+            GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+        )
+        return _measured_gateway_inputs(authoritative)
+
+    async def post(*_args):
+        return _ack()
+
+    result = await prepare_authoritative_weight_publication_v2(
+        calculation_snapshot=provisional,
+        host_uids=provisional_result["uids"],
+        host_weights=provisional_result["weights"],
+        validator_hotkey=HOTKEY,
+        allocation_hash="sha256:" + "d" * 64,
+        leaderboard_window_start="2026-07-03T20:00:00Z",
+        leaderboard_window_end="2026-07-10T20:00:00Z",
+        gateway_url="https://gateway.example",
+        expected_chain="wss://entrypoint-finney.opentensor.ai:443",
+        client=client,
+        fetch_inputs=inputs,
+        post_json=post,
+        snapshot_authority_mode=GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+    )
+
+    assert client.compute_requests[0]["snapshot_authority_mode"] == (
+        GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    assert result["uids"] == authoritative_result["uids"]
+    assert result["weights"] == authoritative_result["weights"]
+
+
+@pytest.mark.asyncio
+async def test_signed_measured_flow_rejects_enclave_provisional_vector(monkeypatch):
+    monkeypatch.setattr(flow_module, "build_authoritative_weight_bundle_v2", _bundle)
+    provisional = _measured_calculation()
+    authoritative = _measured_calculation(
+        banned_hotkeys=["banned"],
+        fulfillment_share=0.6,
+        fulfillment_rows=[{"hotkey": "miner", "share": 0.6}],
+        leaderboard_entries=[{"miner_hotkey": "miner", "wins": 1}],
+        rolling_lead_count=1,
+        rolling_scores=[{"hotkey": "banned", "score": -100000}],
+    )
+    provisional_result = compute_final_weights(provisional)
+    client = Client()
+    client.compute_authoritative_weights_v2 = (
+        lambda request: _computed_response(client, request, provisional)
+    )
+
+    async def inputs(**_kwargs):
+        return _measured_gateway_inputs(authoritative)
+
+    async def post(*_args):
+        raise AssertionError("mismatched authoritative vector must not publish")
+
+    with pytest.raises(
+        AuthoritativeWeightFlowV2Error,
+        match="authoritative host and enclave vectors differ",
+    ):
+        await prepare_authoritative_weight_publication_v2(
+            calculation_snapshot=provisional,
+            host_uids=provisional_result["uids"],
+            host_weights=provisional_result["weights"],
+            validator_hotkey=HOTKEY,
+            allocation_hash="sha256:" + "d" * 64,
+            leaderboard_window_start="2026-07-03T20:00:00Z",
+            leaderboard_window_end="2026-07-10T20:00:00Z",
+            gateway_url="https://gateway.example",
+            expected_chain="wss://entrypoint-finney.opentensor.ai:443",
+            client=client,
+            fetch_inputs=inputs,
+            post_json=post,
+            snapshot_authority_mode=GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+        )
 
 
 @pytest.mark.asyncio

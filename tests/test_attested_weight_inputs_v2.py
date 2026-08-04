@@ -9,6 +9,9 @@ from gateway.research_lab.attested_weight_inputs_v2 import (
     build_gateway_weight_inputs_v2,
 )
 from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
     WEIGHT_INPUT_PURPOSES,
@@ -267,7 +270,7 @@ async def test_gateway_weight_input_builder_gives_each_live_job_one_client(
 
 
 @pytest.mark.asyncio
-async def test_gateway_weight_input_builder_uses_artifact_backed_execution_receipt(
+async def test_gateway_weight_input_builder_prefers_execution_proof_over_persistence_wrapper(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -294,6 +297,7 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
         persistence_hash = sha256_json({"persistence": category})
         execution_receipt = {
             "receipt_hash": execution_hash,
+            "job_id": "execution-%s" % category,
             "role": WEIGHT_INPUT_PURPOSES[category][0],
             "purpose": WEIGHT_INPUT_PURPOSES[category][1],
             "output_root": sha256_json(expected[category]),
@@ -313,12 +317,26 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
             "host_operations": [],
         }
         execution_graphs[category] = execution_graph
+        execution_proof = {
+            "certificate": {
+                "claim": {"output_root_receipt_hash": execution_hash}
+            },
+            "disclosed_receipts": [execution_receipt],
+        }
+        persistence_proof = {
+            "certificate": {
+                "claim": {"output_root_receipt_hash": persistence_hash}
+            },
+            "disclosed_receipts": [persistence_receipt],
+        }
         return {
             "status": "succeeded",
             "result": expected[category],
             "receipt": persistence_receipt,
             "execution_receipt": execution_receipt,
             "execution_receipt_graph": execution_graph,
+            "execution_ancestry_compact_proof": execution_proof,
+            "ancestry_compact_proof": persistence_proof,
             "receipt_graph": {
                 "root_receipt_hash": persistence_hash,
                 "boot_identities": [],
@@ -353,6 +371,170 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
         execution_graphs[category]
         for category in attested_weight_inputs_v2._ANOMALY_SOURCE_CATEGORIES
     )
+    assert {
+        category: proof["certificate"]["claim"]["output_root_receipt_hash"]
+        for category, proof in result["compact_ancestry"][
+            "upstream_ancestry_proofs"
+        ].items()
+    } == {
+        category: sha256_json({"execution": category})
+        for category in GATEWAY_WEIGHT_INPUT_CATEGORIES
+    }
+
+
+@pytest.mark.asyncio
+async def test_gateway_weight_input_builder_normalizes_only_signed_measured_fields(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: (),
+    )
+    provisional = _snapshot()
+    authoritative = _snapshot()
+    authoritative.update(
+        {
+            "banned_hotkeys": ["banned"],
+            "fulfillment_share": 0.6,
+            "fulfillment_rows": [{"hotkey": "miner", "share": 0.6}],
+            "leaderboard_entries": [{"miner_hotkey": "miner", "wins": 1}],
+            "rolling_lead_count": 1,
+            "rolling_scores": [{"hotkey": "banned", "score": -100000}],
+        }
+    )
+    authoritative["config_hash"] = weight_config_hash(authoritative)
+    allocation = _allocation_graph()
+    authority_hash = allocation["root_receipt_hash"]
+    provisional_documents = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=provisional,
+        gateway_authority_event_hash=authority_hash,
+    )
+    authoritative_documents = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=authoritative,
+        gateway_authority_event_hash=authority_hash,
+    )
+    calls = []
+
+    async def execute(**kwargs):
+        calls.append(kwargs)
+        category = kwargs["payload"]["category"]
+        document = (
+            authoritative_documents[category]
+            if category
+            in {
+                "bans",
+                "fulfillment_rewards",
+                "leaderboard",
+                "sourcing_history",
+                "anomaly_adjustments",
+            }
+            else provisional_documents[category]
+        )
+        receipt_hash = sha256_json({"normalized-category": category})
+        receipt = {
+            "receipt_hash": receipt_hash,
+            "role": WEIGHT_INPUT_PURPOSES[category][0],
+            "purpose": WEIGHT_INPUT_PURPOSES[category][1],
+            "epoch_id": provisional["epoch_id"],
+            "output_root": sha256_json(document),
+        }
+        if category == "bans":
+            persistence_hash = sha256_json({"normalized-persistence": category})
+            artifacts = [
+                {
+                    "artifact_id": "sha256:" + "a" * 64,
+                    "plaintext_hash": sha256_json(document["value"]),
+                    "ciphertext_hash": "sha256:" + "b" * 64,
+                    "artifact_ref": "s3://immutable/bans.json",
+                    "storage_document_hash": "sha256:" + "c" * 64,
+                    "encryption_context_hash": "sha256:" + "d" * 64,
+                    "object_lock_mode": "COMPLIANCE",
+                    "retain_until": "2027-07-10T20:00:00Z",
+                    "transport_root": "sha256:" + "e" * 64,
+                }
+            ]
+            persistence_output = {
+                "source_receipt_hash": receipt_hash,
+                "artifacts": artifacts,
+                "artifact_set_root": sha256_json(artifacts),
+            }
+            persistence_receipt = {
+                "receipt_hash": persistence_hash,
+                "role": "gateway_coordinator",
+                "purpose": "leadpoet.artifact_persistence.v2",
+                "epoch_id": provisional["epoch_id"],
+                "parent_receipt_hashes": [receipt_hash],
+                "output_root": sha256_json(persistence_output),
+            }
+            return {
+                "status": "succeeded",
+                "result": document,
+                "receipt": persistence_receipt,
+                "execution_receipt": receipt,
+                "artifact_persistence_output": persistence_output,
+                "execution_receipt_graph": {
+                    "root_receipt_hash": receipt_hash,
+                    "boot_identities": [],
+                    "receipts": [receipt],
+                    "transport_attempts": [],
+                    "host_operations": [],
+                },
+                "receipt_graph": {
+                    "root_receipt_hash": persistence_hash,
+                    "boot_identities": [],
+                    "receipts": [receipt, persistence_receipt],
+                    "transport_attempts": [],
+                    "host_operations": [],
+                },
+            }
+        return {
+            "status": "succeeded",
+            "result": document,
+            "receipt": receipt,
+            "receipt_graph": {
+                "root_receipt_hash": receipt_hash,
+                "boot_identities": [],
+                "receipts": [receipt],
+                "transport_attempts": [],
+                "host_operations": [],
+            },
+        }
+
+    result = await build_gateway_weight_inputs_v2(
+        calculation_snapshot=provisional,
+        allocation_graph=allocation,
+        leaderboard_window_start="2026-07-03T00:00:00Z",
+        leaderboard_window_end="2026-07-10T00:00:00Z",
+        execute=execute,
+        load_sourcing_graphs=lambda **_kwargs: _async_value([]),
+        snapshot_authority_mode=GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+    )
+
+    sourcing_call = next(
+        call for call in calls if call["payload"]["category"] == "sourcing_history"
+    )
+    assert sourcing_call["payload"]["bans_document"] == authoritative_documents["bans"]
+    assert sourcing_call["payload"]["bans_persistence_output"] == (
+        result["executions"]["bans"]["artifact_persistence_output"]
+    )
+    assert sourcing_call["parent_graphs"][0]["root_receipt_hash"] == sha256_json(
+        {"normalized-persistence": "bans"}
+    )
+    assert result["snapshot_authority_mode"] == (
+        GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    assert result["authoritative_calculation_snapshot"] == authoritative
+    assert result["normalized_source_categories"] == [
+        "bans",
+        "fulfillment_rewards",
+        "leaderboard",
+        "sourcing_history",
+    ]
+    assert result["executions"]["anomaly_adjustments"]["result"] == (
+        authoritative_documents["anomaly_adjustments"]
+    )
+    assert provisional["banned_hotkeys"] == []
 
 
 @pytest.mark.asyncio

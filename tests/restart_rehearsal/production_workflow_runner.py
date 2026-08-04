@@ -25,7 +25,10 @@ import time
 import traceback
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
+from urllib.parse import parse_qs, urlparse
 
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
@@ -35,25 +38,71 @@ if str(SOURCE_ROOT) not in sys.path:
 
 from leadpoet_canonical.attested_v2 import (  # noqa: E402
     EMPTY_HOST_OPERATION_ROOT,
+    build_checkpointed_receipt_graph,
     build_execution_receipt_body,
     build_receipt_graph,
+    build_transport_attempt,
+    canonical_json,
     create_signed_execution_receipt,
     merkle_root,
+    sha256_bytes,
     sha256_json,
+    transport_root,
+)
+from leadpoet_canonical.ancestry_checkpoint_v2 import (  # noqa: E402
+    derive_ancestry_lineage_id_v2,
+)
+from leadpoet_canonical.binding import create_binding_message  # noqa: E402
+from leadpoet_canonical.chain_source_v2 import ss58_encode_account_id  # noqa: E402
+from leadpoet_canonical.compact_auditor_authority_v2 import (  # noqa: E402
+    build_compact_published_weight_authority_v2,
+    verify_compact_published_weight_authority_v2,
+    verify_compact_weight_submission_v2,
+)
+from leadpoet_canonical.compact_weight_authority_v2 import (  # noqa: E402
+    build_checkpointed_weight_graph_from_compact_v2,
 )
 from leadpoet_canonical.auditor_v2 import (  # noqa: E402
     verify_attested_weight_authority_v2,
     verify_attested_weight_bundle_v2,
 )
 from leadpoet_canonical.hotkey_authority_v2 import (  # noqa: E402
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
     build_weight_extrinsic_authorization_v2,
     chain_signing_profiles,
     encode_signed_extrinsic_v2,
     signed_extrinsic_hash_v2,
+    weight_inputs_request_message_v2,
 )
 from leadpoet_canonical.weight_authority_v2 import (  # noqa: E402
+    GATEWAY_MEASURED_NORMALIZATION_FIELDS_V2,
+    GATEWAY_WEIGHT_INPUT_CATEGORIES,
     validate_published_weight_bundle_v2,
     validate_weight_finalization_submission_v2,
+)
+from gateway.research_lab.attested_weight_inputs_v2 import (  # noqa: E402
+    build_gateway_weight_inputs_v2,
+)
+from gateway.tee.coordinator_executor_v2 import (  # noqa: E402
+    COORDINATOR_OPERATIONS_V2,
+    OP_ATTEST_ARTIFACT_PERSISTENCE,
+    OP_ATTEST_WEIGHT_INPUT,
+    OP_ATTEST_WEIGHT_PUBLICATION,
+    CoordinatorExecutorV2,
+    coordinator_failed_parent_graph_policy_v2,
+)
+from gateway.tee.coordinator_weight_source_v2 import (  # noqa: E402
+    CoordinatorWeightSourceV2,
+)
+from gateway.tee.execution_job_manager_v2 import (  # noqa: E402
+    JOB_SCHEMA_VERSION,
+    PARENT_RECEIPT_GRAPH_SET_FIELD,
+    ExecutionJobManagerV2,
+    pack_parent_receipt_graph_set_v2,
+)
+from gateway.tee.supabase_source_v2 import (  # noqa: E402
+    QUERY_POLICIES,
+    SupabaseSourceReaderV2,
 )
 from local_services import (  # noqa: E402
     LocalBoundaryServices,
@@ -69,9 +118,18 @@ from sanitized_weight_fixture import (  # noqa: E402
 )
 from validator_tee.enclave.hotkey_authority_v2 import (  # noqa: E402
     _Sr25519Backend,
+    ValidatorHotkeyAuthorityV2,
+)
+from validator_tee.enclave.weight_authority_v2 import (  # noqa: E402
+    ValidatorWeightAuthorityV2,
+)
+from validator_tee.host.gateway_weight_inputs_v2 import (  # noqa: E402
+    GatewayWeightInputsV2Error,
+    fetch_gateway_weight_inputs_v2,
 )
 from validator_tee.host.weight_authority_v2 import (  # noqa: E402
     build_authoritative_weight_bundle_v2,
+    build_compact_weight_submission_v2,
 )
 from gateway.tee.rehearsal_behavior_contract_v2 import (  # noqa: E402
     build_rehearsal_behavior_contract_v2,
@@ -1288,11 +1346,784 @@ def _recompose_candidate_bundle(
     )
 
 
+def _verify_gateway_measured_boot_v2(
+    identity: Mapping[str, Any],
+    *,
+    expected_pcr0: str | None = None,
+    **_kwargs: Any,
+) -> dict[str, str]:
+    """Validate the sanitized attestation boundary without accepting a flag."""
+
+    boot = dict(identity)
+    if expected_pcr0 is not None and boot.get("pcr0") != expected_pcr0:
+        raise RuntimeError("gateway measured boot PCR0 differs")
+    try:
+        attestation = base64.b64decode(
+            str(boot["attestation_document_b64"]), validate=True
+        )
+    except Exception as exc:
+        raise RuntimeError("gateway measured boot attestation is invalid") from exc
+    if not attestation:
+        raise RuntimeError("gateway measured boot attestation is empty")
+    return {
+        "boot_identity_hash": str(boot["boot_identity_hash"]),
+        "pcr0": str(boot["pcr0"]),
+        "attestation_document_hash": sha256_bytes(attestation),
+    }
+
+
+def _gateway_measured_epoch_authority_v2(
+    *,
+    fixture: SanitizedWeightFixture,
+    calculation_snapshot: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Build one stateful cutover identity used by every local authority."""
+
+    calculation = dict(calculation_snapshot)
+    netuid = int(calculation["netuid"])
+    epoch_id = int(calculation["epoch_id"])
+    current_block = int(calculation["block"])
+    tempo = 360
+    last_epoch_block = current_block - (current_block % tempo)
+    epoch_block = current_block - last_epoch_block
+    cutover = {
+        "schema_version": "leadpoet.subnet_epoch_cutover.v1",
+        "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+        "network_genesis_hash": GENESIS_HASH,
+        "netuid": netuid,
+        "cutover_block": last_epoch_block,
+        "cutover_block_hash": "0x" + sha256_json(
+            {"kind": "gateway-measured-cutover", "block": last_epoch_block}
+        )[7:],
+        "first_subnet_epoch_index": epoch_id,
+        "first_settlement_epoch_id": epoch_id,
+        "last_legacy_epoch_id": max(0, epoch_id - 1),
+    }
+    cutover_mapping_hash = sha256_json(cutover)
+    epoch_ref = sha256_json(
+        {
+            "candidate_sha": fixture.candidate_sha,
+            "netuid": netuid,
+            "epoch_id": epoch_id,
+            "kind": "gateway-measured-stateful-epoch",
+        }
+    )
+    boundary = {
+        "schema_version": "leadpoet.subnet_epoch_snapshot.v1",
+        "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+        "network_genesis_hash": GENESIS_HASH,
+        "netuid": netuid,
+        "head_kind": "finalized",
+        "block_hash": "0x" + sha256_json(
+            {"kind": "gateway-measured-boundary", "block": last_epoch_block}
+        )[7:],
+        "current_block": last_epoch_block,
+        "last_epoch_block": last_epoch_block,
+        "pending_epoch_at": last_epoch_block + tempo,
+        "subnet_epoch_index": epoch_id,
+        "tempo": tempo,
+        "blocks_since_last_step": 0,
+        "observed_at": "2026-07-24T23:40:00Z",
+        "epoch_id": epoch_id,
+        "epoch_ref": epoch_ref,
+        "epoch_block": 0,
+        "next_epoch_block": last_epoch_block + tempo,
+        "blocks_remaining": tempo,
+        "settlement_epoch_id": epoch_id,
+        "cutover_mapping_hash": cutover_mapping_hash,
+    }
+    authority = {
+        **boundary,
+        "block_hash": "0x" + sha256_json(
+            {"kind": "gateway-measured-current", "block": current_block}
+        )[7:],
+        "current_block": current_block,
+        "blocks_since_last_step": epoch_block,
+        "observed_at": NOW,
+        "epoch_block": epoch_block,
+        "blocks_remaining": tempo - epoch_block,
+    }
+    lineage_id = derive_ancestry_lineage_id_v2(
+        cutover_mapping_hash=cutover_mapping_hash,
+        network_genesis_hash=GENESIS_HASH,
+        netuid=netuid,
+    )
+    return authority, boundary, lineage_id
+
+
+class _GatewayMeasuredChainSourceV2:
+    """Strict byte-derived local boundary for the finalized chain read."""
+
+    def __init__(
+        self,
+        *,
+        fixture: SanitizedWeightFixture,
+        calculation_snapshot: Mapping[str, Any],
+        epoch_authority: Mapping[str, Any],
+        epoch_boundary: Mapping[str, Any],
+    ) -> None:
+        self._fixture = fixture
+        self._calculation = dict(calculation_snapshot)
+        self._epoch_authority = dict(epoch_authority)
+        self._epoch_boundary = dict(epoch_boundary)
+
+    def _attempt(
+        self,
+        *,
+        job_id: str,
+        purpose: str,
+        operation: str,
+        response: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+        request_body = canonical_json(
+            {
+                "operation": operation,
+                "netuid": self._calculation["netuid"],
+                "epoch_id": self._calculation["epoch_id"],
+            }
+        ).encode("utf-8")
+        response_body = canonical_json(response).encode("utf-8")
+        request_hash = sha256_bytes(request_body)
+        response_hash = sha256_bytes(response_body)
+        attempt = build_transport_attempt(
+            request_id=sha256_json(
+                {"job_id": job_id, "operation": operation}
+            )[7:39],
+            logical_operation_id="gateway-measured-chain:%s:%s"
+            % (job_id, operation),
+            job_id=job_id,
+            purpose=purpose,
+            provider_id="bittensor_chain",
+            attempt_number=0,
+            method="POST",
+            destination_host="entrypoint-finney.opentensor.ai",
+            destination_port=443,
+            path_hash=sha256_json({"path": "/"}),
+            nonsecret_headers_hash=sha256_json({"accept": "application/json"}),
+            body_hash=request_hash,
+            credential_ref_hash=sha256_json({"credential": "none"}),
+            retry_policy_hash=sha256_json({"retry": "gateway-measured-chain"}),
+            timeout_ms=30000,
+            started_at=NOW,
+            terminal_status="authenticated_response",
+            http_status=200,
+            response_hash=response_hash,
+            request_artifact_hash=request_hash,
+            response_artifact_hash=response_hash,
+            tls_peer_chain_hash=sha256_json({"tls": "bittensor-chain"}),
+            tls_protocol="TLSv1.3",
+            failure_code=None,
+            completed_at=NOW,
+        )
+        return attempt, [
+            {
+                "artifact_hash": request_hash,
+                "kind": "chain_rpc_request",
+                "body_b64": base64.b64encode(request_body).decode("ascii"),
+            },
+            {
+                "artifact_hash": response_hash,
+                "kind": "chain_rpc_response",
+                "body_b64": base64.b64encode(response_body).decode("ascii"),
+            },
+        ]
+
+    def read_finalized_snapshot(
+        self, *, netuid: int, epoch_id: int
+    ) -> dict[str, Any]:
+        if (
+            netuid != int(self._calculation["netuid"])
+            or epoch_id != int(self._calculation["epoch_id"])
+        ):
+            raise RuntimeError("gateway measured chain request scope differs")
+        block = int(self._calculation["block"])
+        header = {
+            "block": block,
+            "state_root": sha256_json({"kind": "state-root", "block": block})[
+                7:
+            ],
+            "state_root_commitment": sha256_json(
+                {"kind": "state-root-commitment", "block": block}
+            ),
+            "parent_hash": sha256_json({"kind": "parent", "block": block})[7:],
+            "extrinsics_root": sha256_json(
+                {"kind": "extrinsics", "block": block}
+            )[7:],
+        }
+        metagraph = {
+            "netuid": netuid,
+            "block": block,
+            "owner_hotkey": self._calculation["expected_burn_target_hotkey"],
+            "hotkeys": list(self._calculation["metagraph_hotkeys"]),
+        }
+        jobs = {
+            "chain_state": "gateway-measured-chain-state:%d" % epoch_id,
+            "metagraph_state": "gateway-measured-metagraph-state:%d" % epoch_id,
+            "subnet_epoch_snapshot": "gateway-measured-epoch-current:%d"
+            % epoch_id,
+            "subnet_epoch_boundary": "gateway-measured-epoch-boundary:%d"
+            % epoch_id,
+        }
+        specifications = (
+            (
+                jobs["chain_state"],
+                "validator.chain_state.v2",
+                "chain-state",
+                header,
+            ),
+            (
+                jobs["metagraph_state"],
+                "validator.metagraph_state.v2",
+                "metagraph-state",
+                metagraph,
+            ),
+            (
+                jobs["subnet_epoch_boundary"],
+                "validator.subnet_epoch_snapshot.v2",
+                "epoch-boundary",
+                self._epoch_boundary,
+            ),
+            (
+                jobs["subnet_epoch_snapshot"],
+                "validator.subnet_epoch_snapshot.v2",
+                "epoch-current",
+                self._epoch_authority,
+            ),
+        )
+        attempts: list[dict[str, Any]] = []
+        artifacts: list[dict[str, str]] = []
+        for job_id, purpose, operation, response in specifications:
+            attempt, scoped_artifacts = self._attempt(
+                job_id=job_id,
+                purpose=purpose,
+                operation=operation,
+                response=response,
+            )
+            attempts.append(attempt)
+            artifacts.extend(scoped_artifacts)
+        return {
+            "finalized_block_hash": sha256_json(
+                {"kind": "finalized", "block": block}
+            )[7:],
+            "header": header,
+            "metagraph": metagraph,
+            "attempts": attempts,
+            "artifacts": artifacts,
+            "jobs": jobs,
+            "epoch_authority": dict(self._epoch_authority),
+            "epoch_boundary": dict(self._epoch_boundary),
+        }
+
+
+class _GatewayMeasuredDrandV2:
+    """Sanitized drand boundary retained for the production hotkey facade."""
+
+    def generate_commit(self, **kwargs: Any) -> tuple[bytes, int]:
+        return canonical_json(
+            {"kind": "gateway-measured-drand", "request": kwargs}
+        ).encode("utf-8"), 998877
+
+
+class _GatewayMeasuredHotkeyClientV2:
+    """Expose only the real application-signature API consumed by the host."""
+
+    def __init__(self, authority: ValidatorHotkeyAuthorityV2) -> None:
+        self._authority = authority
+
+    def sign_application_message_v2(self, message: bytes) -> dict[str, Any]:
+        return self._authority.sign_application_message(message_hex=message.hex())
+
+
+def _gateway_measured_release_lineage_v2(
+    *boots: Mapping[str, Any],
+) -> dict[str, Any]:
+    roles: dict[str, dict[str, str]] = {}
+    commit_sha = None
+    for boot_value in boots:
+        boot = dict(boot_value)
+        candidate = str(boot["commit_sha"])
+        if commit_sha is None:
+            commit_sha = candidate
+        elif commit_sha != candidate:
+            raise RuntimeError("gateway measured release lineage commit differs")
+        role = str(boot["physical_role"])
+        expectation = {
+            "commit_sha": candidate,
+            "build_manifest_hash": str(boot["build_manifest_hash"]),
+            "dependency_lock_hash": str(boot["dependency_lock_hash"]),
+            "pcr0": str(boot["pcr0"]),
+        }
+        previous = roles.get(role)
+        if previous is not None and previous != expectation:
+            raise RuntimeError("gateway measured release role differs")
+        roles[role] = expectation
+    if commit_sha is None:
+        raise RuntimeError("gateway measured release lineage is empty")
+    return {commit_sha: {"roles": roles}}
+
+
+def _gateway_measured_hotkey_authority_v2(
+    *,
+    fixture: SanitizedWeightFixture,
+    calculation_snapshot: Mapping[str, Any],
+    chain_source: _GatewayMeasuredChainSourceV2,
+) -> tuple[ValidatorHotkeyAuthorityV2, str, dict[str, Any], _Sr25519Backend]:
+    validator_boot = fixture._boot(
+        role="validator_weights",
+        key=fixture.weight_key,
+        config_hash=sha256_json(
+            {
+                "kind": "gateway-measured-validator",
+                "calculation_snapshot_hash": sha256_json(calculation_snapshot),
+            }
+        ),
+        boot_nonce_context="gateway-measured-validator",
+    )
+    sr25519 = _Sr25519Backend()
+    seed = hashlib.sha256(
+        b"gateway-measured-hotkey:" + fixture.candidate_sha.encode("ascii")
+    ).digest()
+    hotkey_public_key, _secret = sr25519.pair_from_seed(seed)
+    validator_hotkey = ss58_encode_account_id(hotkey_public_key)
+
+    def attest(*, user_data: bytes, public_key: bytes) -> bytes:
+        if not user_data or not public_key:
+            raise RuntimeError("gateway measured hotkey attestation input is empty")
+        return canonical_json(
+            {
+                "kind": "gateway-measured-hotkey-attestation",
+                "user_data_hash": sha256_bytes(user_data),
+                "recipient_public_key_hash": sha256_bytes(public_key),
+            }
+        ).encode("utf-8")
+
+    authority = ValidatorHotkeyAuthorityV2(
+        boot_identity_supplier=lambda: validator_boot,
+        validator_hotkey=validator_hotkey,
+        hotkey_public_key_hex=hotkey_public_key.hex(),
+        chain_profile=fixture.chain_profile(),
+        sign_receipt_digest=fixture.weight_key.sign,
+        attestation_supplier=attest,
+        drand_backend=_GatewayMeasuredDrandV2(),
+        chain_source=chain_source,
+        sr25519_backend=sr25519,
+        clock=lambda: datetime.fromisoformat(NOW.replace("Z", "+00:00")),
+    )
+    request = authority.recipient_request()
+    recipient_public_key = serialization.load_der_public_key(
+        base64.b64decode(request["recipient_public_key_der_b64"])
+    )
+    ciphertext = recipient_public_key.encrypt(
+        seed,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
+    authority.provision_seed(
+        ciphertext_for_recipient_b64=base64.b64encode(ciphertext).decode("ascii")
+    )
+    return authority, validator_hotkey, validator_boot, sr25519
+
+
+class _GatewayMeasuredCoordinatorAdapterV2:
+    """Strict local boundary around the production coordinator execution path."""
+
+    def __init__(
+        self,
+        *,
+        fixture: SanitizedWeightFixture,
+        source_fixture: Mapping[str, Any],
+        ancestry_lineage_id: str,
+    ) -> None:
+        self._fixture = fixture
+        self._rows = dict(source_fixture["rows"])
+        self._job_number = 0
+        self.lineage_id = str(ancestry_lineage_id)
+        self._boot = fixture._boot(
+            role="gateway_coordinator",
+            key=fixture.coordinator_key,
+            config_hash=sha256_json({"kind": "gateway-measured"}),
+            boot_nonce_context="gateway-measured",
+        )
+        reader = SupabaseSourceReaderV2(
+            execute_provider=self._read_supabase,
+            retry_policy_hash=sha256_json({"retry": "gateway-measured"}),
+            sleep=lambda _seconds: None,
+        )
+        source = CoordinatorWeightSourceV2(reader)
+
+        def resolve_weight_source(payload: Any, context: Any) -> dict[str, Any]:
+            try:
+                return source.resolve(payload=payload, context=context)
+            except Exception as exc:
+                self._source_failure = "%s: %s" % (
+                    type(exc).__name__,
+                    str(exc),
+                )
+                raise
+
+        self._source_failure: str | None = None
+        executor = CoordinatorExecutorV2(
+            weight_source_resolver=resolve_weight_source,
+            artifact_evidence_supplier=self._artifact_evidence,
+        )
+        self._manager = ExecutionJobManagerV2(
+            boot_identity_supplier=lambda: self._boot,
+            sign_digest=fixture.coordinator_key.sign,
+            operations=COORDINATOR_OPERATIONS_V2,
+            executor=executor,
+            worker_count=1,
+            configured_worker_count=0,
+            failed_parent_graph_policy=coordinator_failed_parent_graph_policy_v2,
+            ancestry_lineage_id=self.lineage_id,
+            ancestry_boot_attestation_verifier=_verify_gateway_measured_boot_v2,
+            ancestry_allowed_issuer_roles=(
+                "gateway_coordinator",
+                "validator_weights",
+            ),
+        )
+
+    @property
+    def boot_identity(self) -> dict[str, Any]:
+        return dict(self._boot)
+
+    def _read_supabase(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        parsed = urlparse(str(request["url"]))
+        logical_operation_id = str(request["logical_operation_id"])
+        parts = logical_operation_id.split(":")
+        if (
+            len(parts) != 5
+            or parts[0] != str(request["job_id"])
+            or parts[2] != "sha256"
+            or len(parts[3]) != 64
+            or not parts[4].startswith("page-")
+            or not parts[4][5:].isdigit()
+        ):
+            raise RuntimeError("sanitized Supabase logical operation is invalid")
+        policy_id = parts[1]
+        policy = QUERY_POLICIES.get(policy_id)
+        if (
+            policy is None
+            or policy.table != parsed.path.rsplit("/", 1)[-1]
+            or int(parts[4][5:]) >= policy.max_pages
+        ):
+            raise RuntimeError("sanitized Supabase policy is not declared")
+        rows = list(self._rows.get(policy_id, ()))
+        if policy_id == "attested_receipt_by_hash":
+            expected = parse_qs(parsed.query).get("receipt_hash", [""])[0]
+            rows = [
+                row for row in rows
+                if row["receipt_doc"]["receipt_hash"] == expected.removeprefix("eq.")
+            ]
+        body = canonical_json(rows).encode("utf-8")
+        request_id = sha256_json(
+            {"operation": request["logical_operation_id"], "attempt": request["attempt_number"]}
+        )[7:39]
+        attempt = build_transport_attempt(
+            request_id=request_id,
+            logical_operation_id=str(request["logical_operation_id"]),
+            job_id=str(request["job_id"]),
+            purpose=str(request["purpose"]),
+            provider_id="supabase",
+            attempt_number=int(request["attempt_number"]),
+            method="GET",
+            destination_host="qplwoislplkcegvdmbim.supabase.co",
+            destination_port=443,
+            path_hash=sha256_json({"path": parsed.path}),
+            nonsecret_headers_hash=sha256_json({"accept": "application/json"}),
+            body_hash=sha256_bytes(base64.b64decode(str(request["body_b64"]))),
+            credential_ref_hash=sha256_json({"credential": "supabase"}),
+            retry_policy_hash=str(request["retry_policy_hash"]),
+            timeout_ms=int(request["timeout_ms"]),
+            started_at=NOW,
+            terminal_status="authenticated_response",
+            http_status=200,
+            response_hash=sha256_bytes(body),
+            request_artifact_hash=sha256_json({"request": request_id}),
+            response_artifact_hash=sha256_bytes(body),
+            tls_peer_chain_hash=sha256_json({"tls": "supabase"}),
+            tls_protocol="TLSv1.3",
+            failure_code=None,
+            completed_at=NOW,
+        )
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": 200,
+            "body_b64": base64.b64encode(body).decode("ascii"),
+            "transport_attempt": attempt,
+        }
+
+    def _artifact_evidence(self, artifact_ids: Any, context: Any) -> list[dict[str, Any]]:
+        evidence = []
+        for ordinal, artifact_id in enumerate(sorted(set(artifact_ids))):
+            attempts = [
+                build_transport_attempt(
+                    request_id="%032x" % (self._job_number * 100 + ordinal * 2 + offset),
+                    logical_operation_id=f"{artifact_id}:{method.lower()}",
+                    job_id=context.job_id,
+                    purpose="leadpoet.artifact_persistence.v2",
+                    provider_id="aws_s3_object_lock",
+                    attempt_number=offset,
+                    method=method,
+                    destination_host="immutable.example.s3.us-east-1.amazonaws.com",
+                    destination_port=443,
+                    path_hash=sha256_json({"artifact_id": artifact_id}),
+                    nonsecret_headers_hash=sha256_json({"accept": "application/json"}),
+                    body_hash=sha256_bytes(b""),
+                    credential_ref_hash=sha256_json({"credential": "object-lock"}),
+                    retry_policy_hash=sha256_json({"retry": "object-lock"}),
+                    timeout_ms=30000,
+                    started_at=NOW,
+                    terminal_status="authenticated_response",
+                    http_status=200,
+                    response_hash=sha256_json({"artifact_id": artifact_id, "method": method}),
+                    request_artifact_hash=sha256_json({"artifact_id": artifact_id, "request": method}),
+                    response_artifact_hash=sha256_json({"artifact_id": artifact_id, "response": method}),
+                    tls_peer_chain_hash=sha256_json({"tls": "object-lock"}),
+                    tls_protocol="TLSv1.3",
+                    failure_code=None,
+                    completed_at=NOW,
+                )
+                for offset, method in enumerate(("GET", "HEAD"))
+            ]
+            evidence.append(
+                {
+                    "artifact_id": artifact_id,
+                    "plaintext_hash": artifact_id,
+                    "ciphertext_hash": sha256_json({"ciphertext": artifact_id}),
+                    "artifact_ref": f"s3://immutable/{artifact_id[7:]}.json",
+                    "storage_document_hash": sha256_json({"storage": artifact_id}),
+                    "encryption_context_hash": sha256_json({"context": artifact_id}),
+                    "object_lock_mode": "COMPLIANCE",
+                    "retain_until": "2027-07-25T00:00:00Z",
+                    "transport_root": transport_root(attempts),
+                    "transport_attempts": attempts,
+                    "persisted": True,
+                }
+            )
+        return evidence
+
+    @staticmethod
+    def _merge_graphs(root: Mapping[str, Any], graphs: tuple[Mapping[str, Any], ...]) -> dict[str, Any]:
+        fields = {
+            "boot_identities": "boot_identity_hash",
+            "receipts": "receipt_hash",
+            "transport_attempts": "attempt_hash",
+            "host_operations": None,
+        }
+        merged = {field: {} for field in fields}
+        for graph in graphs:
+            for field, key in fields.items():
+                for item in graph.get(field, ()):
+                    identity = sha256_json(item) if key is None else str(item[key])
+                    if identity in merged[field] and merged[field][identity] != item:
+                        raise RuntimeError("gateway measured graph identity conflicts")
+                    merged[field][identity] = dict(item)
+        return build_receipt_graph(
+            root_receipt_hash=str(root["receipt_hash"]),
+            boot_identities=list(merged["boot_identities"].values()),
+            receipts=list(merged["receipts"].values()),
+            transport_attempts=list(merged["transport_attempts"].values()),
+            host_operations=list(merged["host_operations"].values()),
+        )
+
+    def _run(self, *, operation: str, purpose: str, epoch_id: int, sequence: int, payload: Mapping[str, Any], parent_graphs: tuple[Mapping[str, Any], ...] = ()) -> dict[str, Any]:
+        self._job_number += 1
+        self._source_failure = None
+        wire_payload = dict(payload)
+        if parent_graphs:
+            wire_payload[PARENT_RECEIPT_GRAPH_SET_FIELD] = pack_parent_receipt_graph_set_v2(parent_graphs)
+        encoded = canonical_json(wire_payload).encode("utf-8")
+        job_id = f"gateway-measured-{self._fixture.epoch_id}-{self._job_number}"
+        self._manager.submit(
+            {
+                "schema_version": JOB_SCHEMA_VERSION,
+                "job_id": job_id,
+                "operation": operation,
+                "purpose": purpose,
+                "epoch_id": epoch_id,
+                "sequence": sequence,
+                "payload_sha256": sha256_bytes(encoded),
+                "payload_size_bytes": len(encoded),
+                "parent_receipt_hashes": [graph["root_receipt_hash"] for graph in parent_graphs],
+                "input_artifact_hashes": [],
+                "provider_credential_profile": "default",
+                "provider_credential_ref_hashes": {},
+            }
+        )
+        self._manager.put_chunk(
+            job_id=job_id,
+            offset=0,
+            data_b64=base64.b64encode(encoded).decode("ascii"),
+            chunk_sha256=sha256_bytes(encoded),
+        )
+        self._manager.seal(job_id)
+        deadline = time.monotonic() + 5.0
+        status = self._manager.status(job_id)
+        while status["state"] not in {"succeeded", "failed", "cancelled"}:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("gateway measured coordinator deadline elapsed")
+            time.sleep(0.001)
+            status = self._manager.status(job_id)
+        if status["state"] != "succeeded":
+            raise RuntimeError(
+                "gateway measured coordinator failed: %s%s"
+                % (
+                    canonical_json(status),
+                    (
+                        "; sanitized source failure: %s"
+                        % self._source_failure
+                        if self._source_failure
+                        else ""
+                    ),
+                )
+            )
+        part = self._manager.result_chunk(job_id=job_id)
+        result_bytes = base64.b64decode(part["data_b64"])
+        if not part["eof"] or sha256_bytes(result_bytes) != part["result_sha256"]:
+            raise RuntimeError("gateway measured result transport differs")
+        receipt = self._manager.receipt(job_id)
+        local_graph = {
+            "boot_identities": [self._boot],
+            "receipts": self._manager.receipts(job_id),
+            "transport_attempts": self._manager.transport_attempts(job_id),
+            "host_operations": self._manager.host_operations(job_id),
+        }
+        proof = self._manager.ancestry_compact_proof(job_id)
+        if any("ancestry_proof" in graph for graph in parent_graphs):
+            graph = build_checkpointed_receipt_graph(
+                root_receipt_hash=str(receipt["receipt_hash"]),
+                boot_identities=local_graph["boot_identities"],
+                receipts=local_graph["receipts"],
+                transport_attempts=local_graph["transport_attempts"],
+                host_operations=local_graph["host_operations"],
+                ancestry_lineage_id=self.lineage_id,
+                ancestry_proof=proof,
+                boot_attestation_verifier=_verify_gateway_measured_boot_v2,
+                require_boot_attestation_verification=True,
+            )
+        else:
+            graph = self._merge_graphs(receipt, parent_graphs + (local_graph,))
+        return {
+            "result": json.loads(result_bytes.decode("utf-8")),
+            "receipt": receipt,
+            "receipt_graph": graph,
+            "ancestry_compact_proof": proof,
+            "artifact_hashes": list(self._manager.artifact_hashes(job_id)),
+        }
+
+    async def execute(self, **kwargs: Any) -> dict[str, Any]:
+        direct = self._run(
+            operation=str(kwargs["operation"]),
+            purpose=str(kwargs["purpose"]),
+            epoch_id=int(kwargs["epoch_id"]),
+            sequence=int(kwargs["sequence"]),
+            payload=kwargs["payload"],
+            parent_graphs=tuple(kwargs.get("parent_graphs") or ()),
+        )
+        if kwargs["operation"] != OP_ATTEST_WEIGHT_INPUT:
+            return {"status": "succeeded", **direct, "execution_receipt": direct["receipt"]}
+        persisted = self._run(
+            operation=OP_ATTEST_ARTIFACT_PERSISTENCE,
+            purpose="leadpoet.artifact_persistence.v2",
+            epoch_id=int(kwargs["epoch_id"]),
+            sequence=10000 + int(kwargs["sequence"]),
+            payload={
+                "source_receipt_hash": direct["receipt"]["receipt_hash"],
+                "artifact_ids": direct["artifact_hashes"],
+                "artifact_plaintext_hashes": direct["artifact_hashes"],
+            },
+            parent_graphs=(direct["receipt_graph"],),
+        )
+        return {
+            "status": "succeeded",
+            "result": direct["result"],
+            "receipt": persisted["receipt"],
+            "execution_receipt": direct["receipt"],
+            "receipt_graph": self._merge_graphs(
+                persisted["receipt"], (direct["receipt_graph"], persisted["receipt_graph"])
+            ),
+            "execution_receipt_graph": direct["receipt_graph"],
+            "execution_ancestry_compact_proof": direct[
+                "ancestry_compact_proof"
+            ],
+            "ancestry_compact_proof": persisted["ancestry_compact_proof"],
+            "artifact_persistence_output": persisted["result"],
+        }
+
+    def assert_clean(self) -> None:
+        if self._manager.health()["active_job_ids"]:
+            raise RuntimeError("gateway measured coordinator retained active jobs")
+
+
+def _gateway_measured_coordinator_runtime_v2(
+    *, epoch_fixture: SanitizedWeightFixture
+) -> dict[str, Any]:
+    """Run measured inputs and retain only the real local authorities."""
+
+    source_fixture = epoch_fixture.gateway_measured_source_fixture_v2()
+    epoch_authority, epoch_boundary, lineage_id = _gateway_measured_epoch_authority_v2(
+        fixture=epoch_fixture,
+        calculation_snapshot=source_fixture["provisional"],
+    )
+    adapter = _GatewayMeasuredCoordinatorAdapterV2(
+        fixture=epoch_fixture,
+        source_fixture=source_fixture,
+        ancestry_lineage_id=lineage_id,
+    )
+
+    async def load_sourcing_graphs(*, current_epoch: int) -> list[dict[str, Any]]:
+        if current_epoch != epoch_fixture.epoch_id:
+            raise RuntimeError("gateway measured sourcing epoch scope differs")
+        return list(source_fixture["sourcing_graphs"])
+
+    async def build() -> dict[str, Any]:
+        return await build_gateway_weight_inputs_v2(
+            calculation_snapshot=source_fixture["provisional"],
+            allocation_graph=source_fixture["allocation_graph"],
+            leaderboard_window_start="2026-07-24T00:00:00Z",
+            leaderboard_window_end=NOW,
+            execute=adapter.execute,
+            load_sourcing_graphs=load_sourcing_graphs,
+            coordinator_client_factory=lambda: object(),
+            snapshot_authority_mode=GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+        )
+
+    try:
+        result = asyncio.run(build())
+    except Exception:
+        adapter.assert_clean()
+        raise
+    authoritative = result["authoritative_calculation_snapshot"]
+    expected_categories = sorted(
+        category
+        for category, fields in GATEWAY_MEASURED_NORMALIZATION_FIELDS_V2.items()
+        if any(
+            canonical_json(source_fixture["provisional"][field])
+            != canonical_json(authoritative[field])
+            for field in fields
+        )
+    )
+    if result["normalized_source_categories"] != expected_categories:
+        raise RuntimeError("gateway measured normalization categories differ")
+    return {
+        "adapter": adapter,
+        "source_fixture": source_fixture,
+        "result": result,
+        "epoch_authority": epoch_authority,
+        "epoch_boundary": epoch_boundary,
+        "lineage_id": lineage_id,
+    }
+
+
 def _run_independent_epoch_diagnostics(
     *,
     candidate_sha: str,
     epoch_id: int,
     stages: list[dict[str, Any]],
+    authority_diagnostic_evidence: dict[str, Any],
 ) -> None:
     """Exercise independent downstream contracts before the joined epoch."""
 
@@ -1306,6 +2137,11 @@ def _run_independent_epoch_diagnostics(
         stages=stages,
     )
     dependent_stages = (
+        "diagnostic:gateway-measured-coordinator",
+        "diagnostic:gateway-measured-client-enclave",
+        "diagnostic:gateway-measured-primary-compact",
+        "diagnostic:gateway-measured-audit-compact",
+        "diagnostic:gateway-measured-immutable-tamper",
         "diagnostic:host-bundle-composition",
         "diagnostic:primary-bundle-verification",
         "diagnostic:auditor-bundle-verification",
@@ -1320,6 +2156,517 @@ def _run_independent_epoch_diagnostics(
                 stages=stages,
             )
         return
+
+    runtime: dict[str, Any] | None = None
+    pipeline: dict[str, Any] = {}
+
+    def run_gateway_measured_coordinator() -> dict[str, Any]:
+        nonlocal runtime
+        runtime = _gateway_measured_coordinator_runtime_v2(
+            epoch_fixture=epoch_fixture
+        )
+        measured = runtime["result"]
+        bans_execution = measured["executions"]["bans"]
+        bans_persistence = bans_execution["receipt"]
+        return {
+            "lineage_id": runtime["lineage_id"],
+            "provisional_calculation_snapshot_hash": sha256_json(
+                runtime["source_fixture"]["provisional"]
+            ),
+            "authoritative_calculation_snapshot_hash": measured[
+                "authoritative_calculation_snapshot_hash"
+            ],
+            "input_receipt_hashes": dict(measured["input_receipt_hashes"]),
+            "normalized_source_categories": list(
+                measured["normalized_source_categories"]
+            ),
+            "expected_normalized_source_categories": sorted(
+                category
+                for category, fields in GATEWAY_MEASURED_NORMALIZATION_FIELDS_V2.items()
+                if any(
+                    canonical_json(runtime["source_fixture"]["provisional"][field])
+                    != canonical_json(
+                        measured["authoritative_calculation_snapshot"][field]
+                    )
+                    for field in fields
+                )
+            ),
+            "bans_execution_receipt_hash": bans_execution["execution_receipt"][
+                "receipt_hash"
+            ],
+            "bans_persistence_receipt_hash": bans_persistence["receipt_hash"],
+            "bans_persistence_purpose": bans_persistence["purpose"],
+            "bans_persistence_output_root": bans_persistence["output_root"],
+            "bans_persistence_output_hash": sha256_json(
+                bans_execution["artifact_persistence_output"]
+            ),
+        }
+
+    measured_passed, measured = _run_workflow_stage(
+        stage="diagnostic:gateway-measured-coordinator",
+        action=run_gateway_measured_coordinator,
+        stages=stages,
+    )
+    if measured_passed:
+        authority_diagnostic_evidence["gateway-measured-coordinator"] = measured
+    if not measured_passed or runtime is None:
+        for stage in (
+            "diagnostic:gateway-measured-client-enclave",
+            "diagnostic:gateway-measured-primary-compact",
+            "diagnostic:gateway-measured-audit-compact",
+            "diagnostic:gateway-measured-immutable-tamper",
+        ):
+            _mark_workflow_stage_unexercised(
+                stage=stage,
+                blocked_by=["diagnostic:gateway-measured-coordinator"],
+                stages=stages,
+            )
+    else:
+        source_fixture = runtime["source_fixture"]
+        gateway_result = runtime["result"]
+
+        def gateway_response(
+            payload: Mapping[str, Any], *, immutable_tamper: bool = False
+        ) -> dict[str, Any]:
+            request = dict(payload["request"])
+            calculation = dict(payload["calculation_snapshot"])
+            if (
+                sha256_json(calculation) != request["calculation_snapshot_hash"]
+                or calculation != source_fixture["provisional"]
+            ):
+                raise RuntimeError("gateway measured request calculation differs")
+            try:
+                signature = bytes.fromhex(str(payload["validator_hotkey_signature"]))
+            except ValueError as exc:
+                raise RuntimeError("gateway measured request signature is invalid") from exc
+            if not pipeline["sr25519"].verify(
+                signature,
+                weight_inputs_request_message_v2(request).encode("utf-8"),
+                pipeline["hotkey_authority"].hotkey_public_key,
+            ):
+                raise RuntimeError("gateway measured request signature differs")
+            reply = {
+                "request_hash": request["request_hash"],
+                "calculation_snapshot_hash": request["calculation_snapshot_hash"],
+                "input_receipt_hashes": dict(
+                    gateway_result["input_receipt_hashes"]
+                ),
+                "gateway_authority_event_hash": gateway_result[
+                    "gateway_authority_event_hash"
+                ],
+                "upstream_ancestry_proofs": dict(
+                    gateway_result["compact_ancestry"]["upstream_ancestry_proofs"]
+                ),
+                "upstream_transport_attempts": list(
+                    gateway_result["compact_ancestry"]["upstream_transport_attempts"]
+                ),
+                "snapshot_authority_mode": gateway_result[
+                    "snapshot_authority_mode"
+                ],
+                "authoritative_calculation_snapshot": dict(
+                    gateway_result["authoritative_calculation_snapshot"]
+                ),
+                "authoritative_calculation_snapshot_hash": gateway_result[
+                    "authoritative_calculation_snapshot_hash"
+                ],
+                "normalized_source_categories": list(
+                    gateway_result["normalized_source_categories"]
+                ),
+            }
+            if immutable_tamper:
+                authoritative = dict(reply["authoritative_calculation_snapshot"])
+                authoritative["burn_target_uid"] = (
+                    int(authoritative["burn_target_uid"]) + 1
+                )
+                reply["authoritative_calculation_snapshot"] = authoritative
+                reply["authoritative_calculation_snapshot_hash"] = sha256_json(
+                    authoritative
+                )
+            return reply
+
+        def run_gateway_measured_client_enclave() -> dict[str, Any]:
+            calculation = gateway_result["authoritative_calculation_snapshot"]
+            chain_source = _GatewayMeasuredChainSourceV2(
+                fixture=epoch_fixture,
+                calculation_snapshot=calculation,
+                epoch_authority=runtime["epoch_authority"],
+                epoch_boundary=runtime["epoch_boundary"],
+            )
+            hotkey_authority, validator_hotkey, validator_boot, sr25519 = (
+                _gateway_measured_hotkey_authority_v2(
+                    fixture=epoch_fixture,
+                    calculation_snapshot=calculation,
+                    chain_source=chain_source,
+                )
+            )
+            release_lineage = _gateway_measured_release_lineage_v2(
+                *gateway_result["upstream_receipt_set"]["boot_identities"],
+                runtime["adapter"].boot_identity,
+                validator_boot,
+            )
+            validator_authority = ValidatorWeightAuthorityV2(
+                boot_identity_supplier=lambda: validator_boot,
+                gateway_release_lineage_supplier=lambda: release_lineage,
+                sign_digest=epoch_fixture.weight_key.sign,
+                chain_source=chain_source,
+                boot_verifier=_verify_gateway_measured_boot_v2,
+                clock=lambda: datetime.fromisoformat(NOW.replace("Z", "+00:00")),
+            )
+            # The local gateway verifies this real request signature before
+            # ``fetch_gateway_weight_inputs_v2`` returns.
+            pipeline.update(
+                {
+                    "hotkey_authority": hotkey_authority,
+                    "sr25519": sr25519,
+                }
+            )
+
+            async def post_json(
+                endpoint: str, payload: Mapping[str, Any], timeout_seconds: float
+            ) -> dict[str, Any]:
+                if not endpoint.endswith("/weights/inputs/v2?ancestry=compact-v2"):
+                    raise RuntimeError("gateway measured endpoint differs")
+                if timeout_seconds <= 0:
+                    raise RuntimeError("gateway measured timeout is invalid")
+                return gateway_response(payload)
+
+            fetched = asyncio.run(
+                fetch_gateway_weight_inputs_v2(
+                    gateway_url="https://gateway.sanitized",
+                    calculation_snapshot=source_fixture["provisional"],
+                    validator_hotkey=validator_hotkey,
+                    allocation_hash=source_fixture["allocation_graph"][
+                        "root_receipt_hash"
+                    ],
+                    leaderboard_window_start="2026-07-24T00:00:00Z",
+                    leaderboard_window_end=NOW,
+                    client=_GatewayMeasuredHotkeyClientV2(hotkey_authority),
+                    post_json=post_json,
+                    max_attempts=1,
+                    snapshot_authority_mode=(
+                        GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+                    ),
+                )
+            )
+            request_fields = (
+                "input_receipt_hashes",
+                "gateway_authority_event_hash",
+                "upstream_ancestry_proofs",
+                "upstream_transport_attempts",
+                "snapshot_authority_mode",
+                "authoritative_calculation_snapshot",
+                "authoritative_calculation_snapshot_hash",
+                "normalized_source_categories",
+            )
+            enclave_response = validator_authority.compute(
+                {
+                    "validator_hotkey": validator_hotkey,
+                    "calculation_snapshot": source_fixture["provisional"],
+                    **{field: fetched[field] for field in request_fields},
+                }
+            )
+            observed_lineage = derive_ancestry_lineage_id_v2(
+                cutover_mapping_hash=enclave_response["epoch_authority"]["cutover_mapping_hash"],
+                network_genesis_hash=enclave_response["epoch_authority"]["network_genesis_hash"],
+                netuid=int(enclave_response["epoch_authority"]["netuid"]),
+            )
+            if observed_lineage != runtime["lineage_id"]:
+                raise RuntimeError("gateway measured validator lineage differs")
+            enclave_response["weight_authorization_id"] = (
+                hotkey_authority.register_weight_result(
+                    {
+                        field: enclave_response[field]
+                        for field in (
+                            "weight_snapshot",
+                            "weight_result",
+                            "weights_signature",
+                            "receipt_graph_delta",
+                            "ancestry_commitment",
+                            "boot_identity",
+                        )
+                    }
+                )
+            )
+            pipeline.update(
+                {
+                    "chain_source": chain_source,
+                    "enclave_response": enclave_response,
+                    "fetched": fetched,
+                    "hotkey_authority": hotkey_authority,
+                    "sr25519": sr25519,
+                    "validator_authority": validator_authority,
+                    "validator_boot": validator_boot,
+                    "validator_hotkey": validator_hotkey,
+                }
+            )
+            return {
+                "lineage_id": observed_lineage,
+                "request_hash": fetched["request_authorization"]["request_hash"],
+                "request_receipt_hash": fetched["request_authorization"]["receipt"][
+                    "receipt_hash"
+                ],
+                "weight_authorization_id": enclave_response[
+                    "weight_authorization_id"
+                ],
+                "weight_receipt_hash": enclave_response["receipt_graph_delta"][
+                    "root_receipt_hash"
+                ],
+            }
+
+        def run_gateway_measured_primary_compact() -> dict[str, Any]:
+            enclave_response = pipeline["enclave_response"]
+            boot = enclave_response["boot_identity"]
+            binding_message = create_binding_message(
+                netuid=int(enclave_response["weight_result"]["netuid"]),
+                chain=epoch_fixture.chain_profile()["chain_endpoint"],
+                enclave_pubkey=boot["signing_pubkey"],
+                validator_code_hash=boot["build_manifest_hash"],
+                version=boot["commit_sha"],
+            )
+            binding_signature = pipeline["hotkey_authority"].sign_application_message(
+                message_hex=binding_message.encode("utf-8").hex(),
+                parent_receipt_hash=enclave_response["receipt_graph_delta"][
+                    "root_receipt_hash"
+                ],
+            )
+            validator_proof = pipeline[
+                "validator_authority"
+            ].issue_validator_publication_ancestry_proof(
+                validator_receipt_delta=enclave_response["receipt_graph_delta"],
+                upstream_ancestry_proofs=enclave_response[
+                    "upstream_ancestry_proofs"
+                ],
+                binding_receipt=binding_signature["receipt"],
+                epoch_authority=enclave_response["epoch_authority"],
+            )
+            compact = build_compact_weight_submission_v2(
+                enclave_response=enclave_response,
+                validator_hotkey=pipeline["validator_hotkey"],
+                binding_message=binding_message,
+                binding_signature_result={
+                    **binding_signature,
+                    "validator_ancestry_proof": validator_proof,
+                },
+            )
+            primary = verify_compact_weight_submission_v2(
+                compact,
+                expected_lineage_id=runtime["lineage_id"],
+                expected_chain=epoch_fixture.chain_profile()["chain_endpoint"],
+                identity_cache=epoch_fixture.identity_cache(bundle),
+                boot_verifier=_verify_gateway_measured_boot_v2,
+            )
+            pipeline.update(
+                {
+                    "binding_signature": binding_signature,
+                    "compact": compact,
+                    "primary": primary,
+                    "validator_proof": validator_proof,
+                }
+            )
+            return {
+                "binding_receipt_hash": binding_signature["receipt"]["receipt_hash"],
+                "compact_submission_hash": primary["compact_submission_hash"],
+                "bundle_hash": primary["bundle_hash"],
+                "validator_ancestry_proof_hash": validator_proof["proof_hash"],
+                "weight_receipt_hash": primary["weight_receipt_hash"],
+            }
+
+        def run_gateway_measured_audit_compact() -> dict[str, Any]:
+            compact = pipeline["compact"]
+            primary = pipeline["primary"]
+            validator_parent_graph = build_checkpointed_weight_graph_from_compact_v2(
+                compact,
+                expected_lineage_id=runtime["lineage_id"],
+                boot_attestation_verifier=_verify_gateway_measured_boot_v2,
+            )
+            durable_readback_hash = sha256_json(
+                {
+                    "bundle_hash": primary["bundle_hash"],
+                    "compact_submission_hash": primary["compact_submission_hash"],
+                    "kind": "gateway-measured-durable-readback",
+                }
+            )
+            transparency_event_hash = sha256_json(
+                {
+                    "bundle_hash": primary["bundle_hash"],
+                    "root_receipt_hash": primary["root_receipt_hash"],
+                    "kind": "gateway-measured-transparency-event",
+                }
+            )
+            publication = asyncio.run(
+                runtime["adapter"].execute(
+                    operation=OP_ATTEST_WEIGHT_PUBLICATION,
+                    purpose="gateway.weights.publication.v2",
+                    epoch_id=epoch_id,
+                    sequence=50_000,
+                    payload={
+                        "bundle_hash": primary["bundle_hash"],
+                        "root_receipt_hash": primary["root_receipt_hash"],
+                        "durable_readback_hash": durable_readback_hash,
+                        "transparency_event_hash": transparency_event_hash,
+                    },
+                    parent_graphs=(validator_parent_graph,),
+                )
+            )
+            publication_doc = dict(publication["result"])
+            publication_receipt = publication["receipt"]
+            weight_submission_event_hash = sha256_json(
+                {
+                    "bundle_hash": primary["bundle_hash"],
+                    "publication_receipt_hash": publication_receipt["receipt_hash"],
+                    "transparency_event_hash": transparency_event_hash,
+                    "durable_readback_hash": durable_readback_hash,
+                }
+            )
+            public_authority = build_compact_published_weight_authority_v2(
+                authority_stage="published",
+                lineage_id=runtime["lineage_id"],
+                bundle_hash=primary["bundle_hash"],
+                compact_submission=compact,
+                publication={
+                    "weight_submission_event_hash": weight_submission_event_hash,
+                    "publication_receipt_hash": publication_receipt["receipt_hash"],
+                    "publication_doc": publication_doc,
+                    "ancestry_proof": publication["ancestry_compact_proof"],
+                },
+                finalization=None,
+            )
+            audit = verify_compact_published_weight_authority_v2(
+                public_authority,
+                identity_cache=epoch_fixture.identity_cache(bundle),
+                chain_signing_profile=None,
+                expected_lineage_id=runtime["lineage_id"],
+                expected_chain=epoch_fixture.chain_profile()["chain_endpoint"],
+                boot_verifier=_verify_gateway_measured_boot_v2,
+            )
+            pipeline.update(
+                {
+                    "publication": publication,
+                    "public_authority": public_authority,
+                    "audit": audit,
+                }
+            )
+            return {
+                "authority_hash": audit["authority_hash"],
+                "publication_receipt_hash": publication_receipt["receipt_hash"],
+                "weight_submission_event_hash": audit[
+                    "weight_submission_event_hash"
+                ],
+                "bundle_hash": audit["bundle_hash"],
+            }
+
+        def run_gateway_measured_immutable_tamper() -> dict[str, Any]:
+            async def tampered_post_json(
+                _endpoint: str, payload: Mapping[str, Any], _timeout: float
+            ) -> dict[str, Any]:
+                return gateway_response(payload, immutable_tamper=True)
+
+            try:
+                asyncio.run(
+                    fetch_gateway_weight_inputs_v2(
+                        gateway_url="https://gateway.sanitized",
+                        calculation_snapshot=source_fixture["provisional"],
+                        validator_hotkey=pipeline["validator_hotkey"],
+                        allocation_hash=source_fixture["allocation_graph"][
+                            "root_receipt_hash"
+                        ],
+                        leaderboard_window_start="2026-07-24T00:00:00Z",
+                        leaderboard_window_end=NOW,
+                        client=_GatewayMeasuredHotkeyClientV2(
+                            pipeline["hotkey_authority"]
+                        ),
+                        post_json=tampered_post_json,
+                        max_attempts=1,
+                        snapshot_authority_mode=(
+                            GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+                        ),
+                    )
+                )
+            except GatewayWeightInputsV2Error as exc:
+                return {
+                    "exception_type": type(exc).__name__,
+                    "exception_message_hash": sha256_bytes(
+                        str(exc).encode("utf-8")
+                    ),
+                }
+            raise RuntimeError("gateway measured immutable tamper was accepted")
+
+        try:
+            client_passed, client_evidence = _run_workflow_stage(
+                stage="diagnostic:gateway-measured-client-enclave",
+                action=run_gateway_measured_client_enclave,
+                stages=stages,
+            )
+            if client_passed:
+                authority_diagnostic_evidence[
+                    "gateway-measured-client-enclave"
+                ] = client_evidence
+                primary_compact_passed, primary_compact_evidence = (
+                    _run_workflow_stage(
+                        stage="diagnostic:gateway-measured-primary-compact",
+                        action=run_gateway_measured_primary_compact,
+                        stages=stages,
+                    )
+                )
+                if primary_compact_passed:
+                    authority_diagnostic_evidence[
+                        "gateway-measured-primary-compact"
+                    ] = primary_compact_evidence
+                    audit_compact_passed, audit_compact_evidence = (
+                        _run_workflow_stage(
+                            stage="diagnostic:gateway-measured-audit-compact",
+                            action=run_gateway_measured_audit_compact,
+                            stages=stages,
+                        )
+                    )
+                    if audit_compact_passed:
+                        authority_diagnostic_evidence[
+                            "gateway-measured-audit-compact"
+                        ] = audit_compact_evidence
+                        tamper_passed, tamper_evidence = _run_workflow_stage(
+                            stage="diagnostic:gateway-measured-immutable-tamper",
+                            action=run_gateway_measured_immutable_tamper,
+                            stages=stages,
+                        )
+                        if tamper_passed:
+                            authority_diagnostic_evidence[
+                                "gateway-measured-immutable-tamper"
+                            ] = tamper_evidence
+                    else:
+                        _mark_workflow_stage_unexercised(
+                            stage="diagnostic:gateway-measured-immutable-tamper",
+                            blocked_by=[
+                                "diagnostic:gateway-measured-audit-compact"
+                            ],
+                            stages=stages,
+                        )
+                else:
+                    for stage in (
+                        "diagnostic:gateway-measured-audit-compact",
+                        "diagnostic:gateway-measured-immutable-tamper",
+                    ):
+                        _mark_workflow_stage_unexercised(
+                            stage=stage,
+                            blocked_by=[
+                                "diagnostic:gateway-measured-primary-compact"
+                            ],
+                            stages=stages,
+                        )
+            else:
+                for stage in (
+                    "diagnostic:gateway-measured-primary-compact",
+                    "diagnostic:gateway-measured-audit-compact",
+                    "diagnostic:gateway-measured-immutable-tamper",
+                ):
+                    _mark_workflow_stage_unexercised(
+                        stage=stage,
+                        blocked_by=[
+                            "diagnostic:gateway-measured-client-enclave"
+                        ],
+                        stages=stages,
+                    )
+        finally:
+            runtime["adapter"].assert_clean()
 
     _run_workflow_stage(
         stage="diagnostic:host-bundle-composition",
@@ -4710,10 +6057,12 @@ def main() -> int:
         if passed:
             behavior_evidence[scenario] = result
 
+    authority_diagnostic_evidence: dict[str, Any] = {}
     _run_independent_epoch_diagnostics(
         candidate_sha=args.candidate_sha,
         epoch_id=30_000,
         stages=stages,
+        authority_diagnostic_evidence=authority_diagnostic_evidence,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -5232,6 +6581,63 @@ def main() -> int:
                 for epoch in epochs
             )
         ),
+        "gateway_measured_authority_exact": (
+            set(
+                authority_diagnostic_evidence.get(
+                    "gateway-measured-coordinator", {}
+                ).get("input_receipt_hashes", {})
+            )
+            == set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+            and authority_diagnostic_evidence.get(
+                "gateway-measured-coordinator", {}
+            ).get("provisional_calculation_snapshot_hash")
+            != authority_diagnostic_evidence.get(
+                "gateway-measured-coordinator", {}
+            ).get("authoritative_calculation_snapshot_hash")
+            and authority_diagnostic_evidence.get(
+                "gateway-measured-coordinator", {}
+            ).get("normalized_source_categories")
+            == authority_diagnostic_evidence.get(
+                "gateway-measured-coordinator", {}
+            ).get("expected_normalized_source_categories")
+            and authority_diagnostic_evidence.get(
+                "gateway-measured-coordinator", {}
+            ).get("bans_persistence_purpose")
+            == "leadpoet.artifact_persistence.v2"
+            and authority_diagnostic_evidence.get(
+                "gateway-measured-coordinator", {}
+            ).get("bans_persistence_output_root")
+            == authority_diagnostic_evidence.get(
+                "gateway-measured-coordinator", {}
+            ).get("bans_persistence_output_hash")
+            and authority_diagnostic_evidence.get(
+                "gateway-measured-client-enclave", {}
+            ).get("lineage_id")
+            == authority_diagnostic_evidence.get(
+                "gateway-measured-coordinator", {}
+            ).get("lineage_id")
+            and authority_diagnostic_evidence.get(
+                "gateway-measured-client-enclave", {}
+            ).get("weight_receipt_hash")
+            == authority_diagnostic_evidence.get(
+                "gateway-measured-primary-compact", {}
+            ).get("weight_receipt_hash")
+            and authority_diagnostic_evidence.get(
+                "gateway-measured-primary-compact", {}
+            ).get("bundle_hash")
+            == authority_diagnostic_evidence.get(
+                "gateway-measured-audit-compact", {}
+            ).get("bundle_hash")
+            and bool(
+                authority_diagnostic_evidence.get(
+                    "gateway-measured-audit-compact", {}
+                ).get("authority_hash")
+            )
+            and authority_diagnostic_evidence.get(
+                "gateway-measured-immutable-tamper", {}
+            ).get("exception_type")
+            == GatewayWeightInputsV2Error.__name__
+        ),
         "receipt_ancestry_verified": (
             epoch_authority_complete
             and all(
@@ -5338,6 +6744,7 @@ def main() -> int:
             else None
         ),
         "behavior_evidence": behavior_evidence,
+        "authority_diagnostic_evidence": authority_diagnostic_evidence,
         "behavioral_invariants": behavioral_invariants,
         "production_source_identities": identities,
         "epoch_count": len(epochs),

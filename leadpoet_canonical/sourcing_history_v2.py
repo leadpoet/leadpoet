@@ -19,6 +19,7 @@ SOURCING_DECISION_SCHEMA_VERSION = "leadpoet.sourcing_decision.v2"
 SOURCING_EPOCH_SCHEMA_VERSION = "leadpoet.sourcing_epoch.v2"
 SOURCING_ROLLING_WINDOW = 30
 LEGACY_ICP_MULTIPLIERS = frozenset({1.0, 1.5, 5.0})
+SOURCING_BANNED_HOTKEY_PENALTY_V2 = -100_000
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -217,7 +218,11 @@ def validate_sourcing_epoch_v2(value: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def rolling_sourcing_history_v2(
-    *, current_epoch: int, epochs: Sequence[Mapping[str, Any]], window: int = SOURCING_ROLLING_WINDOW
+    *,
+    current_epoch: int,
+    epochs: Sequence[Mapping[str, Any]],
+    window: int = SOURCING_ROLLING_WINDOW,
+    banned_hotkeys: Sequence[str] = (),
 ) -> Tuple[Dict[str, float], int]:
     if not isinstance(current_epoch, int) or current_epoch < 0:
         raise SourcingHistoryV2Error("current_epoch is invalid")
@@ -225,6 +230,14 @@ def rolling_sourcing_history_v2(
         raise SourcingHistoryV2Error("window is invalid")
     start_epoch = current_epoch - window
     end_epoch = current_epoch - 1
+    if not isinstance(banned_hotkeys, (list, tuple, set, frozenset)):
+        raise SourcingHistoryV2Error("banned_hotkeys are invalid")
+    banned = set()
+    for value in banned_hotkeys:
+        hotkey = str(value or "").strip()
+        if not hotkey or any(character.isspace() for character in hotkey):
+            raise SourcingHistoryV2Error("banned_hotkeys are invalid")
+        banned.add(hotkey)
     scores = {}  # type: Dict[str, float]
     lead_count = 0
     seen_epochs = set()
@@ -237,6 +250,16 @@ def rolling_sourcing_history_v2(
         if not start_epoch <= epoch_id <= end_epoch:
             continue
         for row in epoch["miner_scores"]:
-            scores[row["hotkey"]] = scores.get(row["hotkey"], 0) + row["score"]
+            hotkey = row["hotkey"]
+            # This mirrors the existing validator's persisted-history rewrite:
+            # each historic epoch that already contains a now-banned hotkey is
+            # treated as -100,000.  The raw signed epoch document remains
+            # immutable and a ban never invents an absent source row.
+            value = (
+                SOURCING_BANNED_HOTKEY_PENALTY_V2
+                if hotkey in banned
+                else row["score"]
+            )
+            scores[hotkey] = scores.get(hotkey, 0) + value
         lead_count += epoch["approved_lead_count"]
     return scores, lead_count

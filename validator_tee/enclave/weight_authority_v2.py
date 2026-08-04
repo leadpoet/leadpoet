@@ -34,11 +34,17 @@ from leadpoet_canonical.compact_weight_authority_v2 import (
     compact_gateway_frontier_receipt_hashes_v2,
     validate_compact_weight_ancestry_v2,
 )
+from leadpoet_canonical.hotkey_authority_v2 import (
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
+    GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2,
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
     VALIDATOR_WEIGHT_INPUT_CATEGORIES,
     WEIGHT_INPUT_PURPOSES,
     build_weight_snapshot_v2,
+    gateway_weight_input_value_documents_v2,
+    normalize_gateway_measured_weight_inputs_v2,
     validate_weight_input_source_evidence_v2,
     weight_input_value_documents_v2,
 )
@@ -102,13 +108,31 @@ class ValidatorWeightAuthorityV2:
             "upstream_ancestry_proofs",
             "upstream_transport_attempts",
         }
+        normalized_fields = {
+            "snapshot_authority_mode",
+            "authoritative_calculation_snapshot",
+            "authoritative_calculation_snapshot_hash",
+            "normalized_source_categories",
+        }
+        normalized_full_fields = full_fields | normalized_fields
+        normalized_compact_fields = compact_fields | normalized_fields
         request_fields = set(request) if isinstance(request, Mapping) else set()
         if (
             not isinstance(request, Mapping)
-            or request_fields not in (full_fields, compact_fields)
+            or request_fields
+            not in (
+                full_fields,
+                compact_fields,
+                normalized_full_fields,
+                normalized_compact_fields,
+            )
         ):
             raise ValidatorWeightAuthorityV2Error("weight authority request fields are invalid")
-        compact_transport = request_fields == compact_fields
+        compact_transport = request_fields in (compact_fields, normalized_compact_fields)
+        normalized_mode = request_fields in (
+            normalized_full_fields,
+            normalized_compact_fields,
+        )
         boot = dict(self._boot_identity_supplier())
         validate_boot_identity(boot)
         if boot.get("role") != "validator_weights":
@@ -118,7 +142,68 @@ class ValidatorWeightAuthorityV2:
             raise ValidatorWeightAuthorityV2Error(
                 "gateway weight input categories are incomplete"
             )
-        proposed_calculation = dict(request["calculation_snapshot"])
+        provisional_calculation = dict(request["calculation_snapshot"])
+        proposed_calculation = dict(provisional_calculation)
+        if normalized_mode:
+            if (
+                request.get("snapshot_authority_mode")
+                != GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+            ):
+                raise ValidatorWeightAuthorityV2Error(
+                    "weight authority normalized mode is invalid"
+                )
+            authoritative = request.get("authoritative_calculation_snapshot")
+            authoritative_hash = str(
+                request.get("authoritative_calculation_snapshot_hash") or ""
+            )
+            categories = request.get("normalized_source_categories")
+            if (
+                not isinstance(authoritative, Mapping)
+                or sha256_json(authoritative) != authoritative_hash
+                or not isinstance(categories, list)
+                or any(not isinstance(category, str) for category in categories)
+                or categories != sorted(set(categories))
+                or not set(categories).issubset(
+                    GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2
+                )
+            ):
+                raise ValidatorWeightAuthorityV2Error(
+                    "weight authority normalized response is invalid"
+                )
+            try:
+                measured_documents = {
+                    category: gateway_weight_input_value_documents_v2(
+                        calculation_snapshot=authoritative,
+                        gateway_authority_event_hash=str(
+                            request["gateway_authority_event_hash"]
+                        ),
+                    )[category]
+                    for category in sorted(
+                        GATEWAY_MEASURED_NORMALIZATION_CATEGORIES_V2
+                    )
+                }
+                normalized = normalize_gateway_measured_weight_inputs_v2(
+                    calculation_snapshot=provisional_calculation,
+                    measured_documents=measured_documents,
+                    gateway_authority_event_hash=str(
+                        request["gateway_authority_event_hash"]
+                    ),
+                )
+            except Exception as exc:
+                raise ValidatorWeightAuthorityV2Error(
+                    "weight authority normalized calculation is invalid"
+                ) from exc
+            if (
+                dict(authoritative)
+                != normalized["authoritative_calculation_snapshot"]
+                or authoritative_hash
+                != normalized["authoritative_calculation_snapshot_hash"]
+                or categories != normalized["normalized_source_categories"]
+            ):
+                raise ValidatorWeightAuthorityV2Error(
+                    "weight authority normalized calculation differs"
+                )
+            proposed_calculation = dict(authoritative)
         try:
             chain_snapshot = self._chain_source.read_finalized_snapshot(
                 netuid=int(proposed_calculation["netuid"]),
@@ -231,7 +316,7 @@ class ValidatorWeightAuthorityV2:
                     "weight input receipt role/purpose differs: %s" % category
                 )
             if int(receipt.get("epoch_id", -1)) != int(
-                request["calculation_snapshot"]["epoch_id"]
+                provisional_calculation["epoch_id"]
             ):
                 raise ValidatorWeightAuthorityV2Error(
                     "weight input receipt epoch differs: %s" % category

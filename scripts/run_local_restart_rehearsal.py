@@ -201,6 +201,210 @@ def _run(
     )
 
 
+class RehearsalOutputOwnershipError(RuntimeError):
+    """A Docker action and its bounded output-ownership repair both failed."""
+
+    def __init__(
+        self,
+        *,
+        action_error: BaseException,
+        ownership_error: BaseException,
+    ) -> None:
+        self.action_error = action_error
+        self.ownership_error = ownership_error
+        super().__init__(
+            "rehearsal Docker action failed and output ownership could not be "
+            f"restored: action={action_error!r}; ownership={ownership_error!r}"
+        )
+
+
+def _validated_rehearsal_output_roots(
+    output_roots: Sequence[Path],
+) -> tuple[Path, ...]:
+    """Resolve only task-owned temporary directories safe for recursive chown."""
+
+    temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    repository_root = REPO_ROOT.resolve(strict=True)
+    validated: list[Path] = []
+    seen: set[Path] = set()
+    for raw_root in output_roots:
+        root = Path(raw_root)
+        if root.is_symlink():
+            raise ValueError(f"rehearsal output root may not be a symlink: {root}")
+        try:
+            resolved = root.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise ValueError(
+                f"rehearsal output root does not exist: {root}"
+            ) from exc
+        if not resolved.is_dir():
+            raise ValueError(
+                f"rehearsal output root is not a directory: {resolved}"
+            )
+        if resolved == repository_root or repository_root in resolved.parents:
+            raise ValueError(
+                f"repository paths may not be ownership-normalized: {resolved}"
+            )
+        if resolved == temporary_root or temporary_root not in resolved.parents:
+            raise ValueError(
+                "rehearsal output ownership is restricted to a child of the "
+                f"system temporary directory: {resolved}"
+            )
+        if any(
+            parent.name.startswith("leadpoet-restart-source-")
+            for parent in (resolved, *resolved.parents)
+        ):
+            raise ValueError(
+                f"read-only source snapshots may not be ownership-normalized: {resolved}"
+            )
+        if resolved in seen:
+            raise ValueError(
+                f"duplicate rehearsal output root is not allowed: {resolved}"
+            )
+        seen.add(resolved)
+        validated.append(resolved)
+    if not validated:
+        raise ValueError("at least one rehearsal output root is required")
+    return tuple(validated)
+
+
+def _probe_rehearsal_output_access(output_roots: Sequence[Path]) -> None:
+    """Prove the invoking host user can traverse, read, and clean each tree."""
+
+    marker_suffix = f"{os.getpid()}-{time.time_ns()}"
+    for root in output_roots:
+        for directory, _dirnames, filenames in os.walk(root):
+            current = Path(directory)
+            if not os.access(current, os.R_OK | os.W_OK | os.X_OK):
+                raise PermissionError(
+                    f"rehearsal output directory is not host-accessible: {current}"
+                )
+            for filename in filenames:
+                path = current / filename
+                if path.is_file() and not os.access(path, os.R_OK):
+                    raise PermissionError(
+                        f"rehearsal output file is not host-readable: {path}"
+                    )
+        marker = root / f".leadpoet-host-access-{marker_suffix}"
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                marker,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            marker.unlink(missing_ok=True)
+
+
+def _normalize_rehearsal_output_ownership(
+    tag: str,
+    *,
+    docker_platform: str,
+    output_roots: Sequence[Path],
+) -> None:
+    """Return root-written bind outputs to the invoking POSIX user."""
+
+    roots = _validated_rehearsal_output_roots(output_roots)
+    destinations = [f"/host-output/{index}" for index in range(len(roots))]
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        docker_platform,
+        "--network",
+        "none",
+        "--read-only",
+        "--cpus",
+        "0.25",
+        "--memory",
+        "64m",
+        "--pids-limit",
+        "16",
+        "--security-opt",
+        "no-new-privileges",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "CHOWN",
+        "--cap-add",
+        "FOWNER",
+        "--cap-add",
+        "DAC_OVERRIDE",
+        "--user",
+        "0:0",
+    ]
+    for root, destination in zip(roots, destinations):
+        command.extend(
+            [
+                "--mount",
+                f"type=bind,src={root},dst={destination}",
+            ]
+        )
+    command.extend(
+        [
+            "--entrypoint",
+            "/usr/bin/chown",
+            tag,
+            "-R",
+            "--",
+            f"{os.getuid()}:{os.getgid()}",
+            *destinations,
+        ]
+    )
+    try:
+        _run(command)
+    except subprocess.CalledProcessError:
+        # Docker Desktop-backed mounts may not implement POSIX chown.  Access,
+        # not metadata appearance, is the cleanup contract on those mounts.
+        _probe_rehearsal_output_access(roots)
+        print(
+            "REHEARSAL_OUTPUT_CHOWN_UNAVAILABLE_HOST_ACCESS_VERIFIED "
+            + " ".join(str(root) for root in roots),
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    _probe_rehearsal_output_access(roots)
+
+
+def _run_docker_action_with_output_ownership(
+    action: Callable[[], Any],
+    *,
+    tag: str,
+    docker_platform: str,
+    output_roots: Sequence[Path],
+) -> Any:
+    """Run a root container, normalize declared outputs, then preserve failure."""
+
+    roots = _validated_rehearsal_output_roots(output_roots)
+    action_error: BaseException | None = None
+    result: Any = None
+    try:
+        result = action()
+    except BaseException as exc:
+        action_error = exc
+    try:
+        _normalize_rehearsal_output_ownership(
+            tag,
+            docker_platform=docker_platform,
+            output_roots=roots,
+        )
+    except BaseException as ownership_error:
+        if action_error is not None:
+            raise RehearsalOutputOwnershipError(
+                action_error=action_error,
+                ownership_error=ownership_error,
+            ) from ownership_error
+        raise
+    if action_error is not None:
+        raise action_error.with_traceback(action_error.__traceback__)
+    return result
+
+
 def _git_sha(value: str) -> str:
     result = _run(
         ["git", "rev-parse", "--verify", f"{value}^{{commit}}"],
@@ -613,7 +817,7 @@ def _run_component(
         f"REHEARSAL_GATEWAY_WORKER_FLEET_MODE={gateway_worker_fleet_mode}",
         tag,
     ]
-    try:
+    def run_container() -> None:
         with launcher_log.open("w", encoding="utf-8") as output:
             process = subprocess.Popen(
                 command,
@@ -640,6 +844,14 @@ def _run_component(
                 raise
         if returncode:
             raise subprocess.CalledProcessError(returncode, command)
+
+    try:
+        _run_docker_action_with_output_ownership(
+            run_container,
+            tag=tag,
+            docker_platform=docker_platform,
+            output_roots=(evidence_root, durable_state_root),
+        )
     except BaseException:
         _preserve_failure_evidence(
             evidence_root=evidence_root,
@@ -927,61 +1139,66 @@ def _prepared_fixture_seed(
         generated_state.mkdir()
         generated_config.mkdir()
         seed.mkdir()
-        _run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--platform",
-                docker_platform,
-                "--network",
-                "none",
-                "--cpus",
-                str(limits["cpus"]),
-                "--memory",
-                str(limits["memory"]),
-                "--pids-limit",
-                "2048",
-                "--security-opt",
-                "no-new-privileges",
-                "--tmpfs",
-                "/tmp:rw,exec,nosuid,size=2g",
-                "--mount",
-                f"type=bind,src={source_root},dst=/source,readonly",
-                "--mount",
-                (
-                    f"type=bind,src={drand_artifact_root},"
-                    "dst=/opt/leadpoet/drand-cabi-v2,readonly"
-                ),
-                "--mount",
-                (
-                    f"type=bind,src={generated_state},"
-                    "dst=/rehearsal-state"
-                ),
-                "--mount",
-                (
-                    f"type=bind,src={generated_config},"
-                    "dst=/fixture-config"
-                ),
-                "--env",
-                "REHEARSAL_COMPONENT=validator",
-                "--env",
-                f"REHEARSAL_CANDIDATE_SHA={candidate_sha}",
-                "--env",
-                "REHEARSAL_SCOPE=exact",
-                "--env",
-                "REHEARSAL_STATE_ROOT=/rehearsal-state",
-                "--env",
-                "PYTHONPATH=/source:/harness",
-                "--entrypoint",
-                "/usr/bin/python3.11",
-                tag,
-                "/harness/prepare_host_fixtures.py",
-                "--output-dir",
-                "/fixture-config",
-                "--candidate-sha",
-                candidate_sha,
-            ]
+        _run_docker_action_with_output_ownership(
+            lambda: _run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--platform",
+                    docker_platform,
+                    "--network",
+                    "none",
+                    "--cpus",
+                    str(limits["cpus"]),
+                    "--memory",
+                    str(limits["memory"]),
+                    "--pids-limit",
+                    "2048",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--tmpfs",
+                    "/tmp:rw,exec,nosuid,size=2g",
+                    "--mount",
+                    f"type=bind,src={source_root},dst=/source,readonly",
+                    "--mount",
+                    (
+                        f"type=bind,src={drand_artifact_root},"
+                        "dst=/opt/leadpoet/drand-cabi-v2,readonly"
+                    ),
+                    "--mount",
+                    (
+                        f"type=bind,src={generated_state},"
+                        "dst=/rehearsal-state"
+                    ),
+                    "--mount",
+                    (
+                        f"type=bind,src={generated_config},"
+                        "dst=/fixture-config"
+                    ),
+                    "--env",
+                    "REHEARSAL_COMPONENT=validator",
+                    "--env",
+                    f"REHEARSAL_CANDIDATE_SHA={candidate_sha}",
+                    "--env",
+                    "REHEARSAL_SCOPE=exact",
+                    "--env",
+                    "REHEARSAL_STATE_ROOT=/rehearsal-state",
+                    "--env",
+                    "PYTHONPATH=/source:/harness",
+                    "--entrypoint",
+                    "/usr/bin/python3.11",
+                    tag,
+                    "/harness/prepare_host_fixtures.py",
+                    "--output-dir",
+                    "/fixture-config",
+                    "--candidate-sha",
+                    candidate_sha,
+                ]
+            ),
+            tag=tag,
+            docker_platform=docker_platform,
+            output_roots=(generated_state, generated_config),
         )
         release_input = generated_state / "release-build-input.json"
         validator_app = generated_state / "validator-app"
@@ -1086,7 +1303,12 @@ def _run_workflow(
         tag,
     ]
     try:
-        _run(command)
+        _run_docker_action_with_output_ownership(
+            lambda: _run(command),
+            tag=tag,
+            docker_platform=docker_platform,
+            output_roots=(evidence_root,),
+        )
     except BaseException:
         _preserve_failure_evidence(
             evidence_root=evidence_root,
@@ -1144,9 +1366,14 @@ def _join_evidence(
             profile,
             "--output",
             f"/evidence/{output.name}",
-        ]
+    ]
     try:
-        _run(command)
+        _run_docker_action_with_output_ownership(
+            lambda: _run(command),
+            tag=tag,
+            docker_platform=docker_platform,
+            output_roots=(evidence_root,),
+        )
         if not output.is_file():
             raise SystemExit(
                 "joined restart rehearsal evidence was not produced"

@@ -162,6 +162,7 @@ from leadpoet_canonical.weight_computation import (
 )
 from leadpoet_canonical.hotkey_authority_v2 import (
     DISABLED_LEADERBOARD_WINDOW_V1,
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
 )
 from leadpoet_canonical.constants import (
     ALLOCATION_PREPARATION_BLOCK,
@@ -4460,6 +4461,9 @@ class Validator(BaseValidatorNeuron):
                     expected_chain=expected_chain,
                     client=self._validator_v2_client,
                     before_publish=journal.record_prepared,
+                    snapshot_authority_mode=(
+                        GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+                    ),
                 )
         except Exception as exc:
             code = _sentry_failure_code_for_exception(

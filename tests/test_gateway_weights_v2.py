@@ -12,6 +12,7 @@ from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_canonical.binding import create_binding_message
 from leadpoet_canonical.hotkey_authority_v2 import (
     DISABLED_LEADERBOARD_WINDOW_V1,
+    GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
     build_weight_inputs_request_v2,
 )
 from leadpoet_canonical.weight_authority_v2 import (
@@ -210,6 +211,7 @@ def _weight_inputs_authorization(
     *,
     leaderboard_window_start: str = "2026-07-03T20:00:00Z",
     leaderboard_window_end: str = "2026-07-10T20:00:00Z",
+    snapshot_authority_mode: str | None = None,
 ):
     calculation = {
         "netuid": 71,
@@ -228,6 +230,7 @@ def _weight_inputs_authorization(
         allocation_hash=calculation["research_lab_allocation_doc"]["allocation_hash"],
         leaderboard_window_start=leaderboard_window_start,
         leaderboard_window_end=leaderboard_window_end,
+        snapshot_authority_mode=snapshot_authority_mode,
     )
     return weights_api.WeightInputsV2Authorization(
         request=request,
@@ -809,6 +812,66 @@ async def test_weight_inputs_v2_authenticates_and_returns_complete_measured_set(
     )
     assert calls[1][1]["leaderboard_window_start"] == "2026-07-03T20:00:00Z"
     assert calls[1][1]["leaderboard_window_end"] == "2026-07-10T20:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_weight_inputs_v2_returns_normalized_authority_only_when_signed(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, attested_weight_inputs_v2
+
+    authorization = _weight_inputs_authorization(
+        snapshot_authority_mode=GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+    )
+    authoritative = dict(authorization.calculation_snapshot)
+    expected = {
+        "input_receipt_hashes": {"research_lab_allocation": "sha256:" + "7" * 64},
+        "gateway_authority_event_hash": "sha256:" + "6" * 64,
+        "upstream_receipt_set": {
+            "boot_identities": [],
+            "receipts": [],
+            "transport_attempts": [],
+            "host_operations": [],
+        },
+        "snapshot_authority_mode": GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2,
+        "authoritative_calculation_snapshot": authoritative,
+        "authoritative_calculation_snapshot_hash": sha256_json(authoritative),
+        "normalized_source_categories": [],
+    }
+    observed = {}
+    _patch_epoch_authority(monkeypatch)
+
+    async def load_graph(**_kwargs):
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def build_inputs(**kwargs):
+        observed.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(weights_api, "get_subtensor", lambda: _Subtensor())
+    monkeypatch.setattr(weights_api, "verify_wallet_signature", lambda *args: True)
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(
+        attested_v2_store, "load_business_artifact_graph_v2", load_graph
+    )
+    monkeypatch.setattr(
+        attested_weight_inputs_v2, "build_gateway_weight_inputs_v2", build_inputs
+    )
+
+    response = await weights_api.get_weight_inputs_v2(authorization, _request())
+    response_doc = json.loads(response.body)
+
+    assert observed["snapshot_authority_mode"] == (
+        GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    assert response_doc["snapshot_authority_mode"] == (
+        GATEWAY_MEASURED_SNAPSHOT_AUTHORITY_MODE_V2
+    )
+    assert response_doc["authoritative_calculation_snapshot"] == authoritative
+    assert response_doc["normalized_source_categories"] == []
 
 
 @pytest.mark.asyncio

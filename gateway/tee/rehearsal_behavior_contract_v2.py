@@ -46,6 +46,11 @@ BEHAVIOR_SCENARIOS = (
 
 AUTHORITY_DIAGNOSTICS = (
     "candidate-bundle-generation",
+    "gateway-measured-coordinator",
+    "gateway-measured-client-enclave",
+    "gateway-measured-primary-compact",
+    "gateway-measured-audit-compact",
+    "gateway-measured-immutable-tamper",
     "host-bundle-composition",
     "primary-bundle-verification",
     "auditor-bundle-verification",
@@ -71,6 +76,7 @@ BEHAVIORAL_INVARIANTS = (
     "current_frontier_release_recovery_verified",
     "validator_publication_release_recovery_verified",
     "canonical_vector_primary_auditor_equal",
+    "gateway_measured_authority_exact",
     "receipt_ancestry_verified",
     "sdk_signing_bridge_verified",
     "submission_finalized",

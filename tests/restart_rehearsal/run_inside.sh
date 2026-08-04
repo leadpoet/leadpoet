@@ -41,6 +41,8 @@ if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
   echo "ERROR: REHEARSAL_DURABLE_SCHEMA_SHA is required" >&2
   exit 2
 fi
+mkdir -p "${HOME:?HOME is required}"
+git config --global --add safe.directory /source
 if [ "$COMPONENT" = "workflow" ]; then
   case "$REHEARSAL_PROFILE" in
     prepush|release) ;;
@@ -151,7 +153,6 @@ ln -sf /harness/bin/python3 /home/ec2-user/venv311/bin/python3
 
 git config --global user.email "restart-rehearsal@leadpoet.invalid"
 git config --global user.name "Leadpoet Restart Rehearsal"
-git config --global --add safe.directory '*'
 
 git -C /source cat-file -e "$FROM_SHA^{commit}"
 git -C /source cat-file -e "$CANDIDATE_SHA^{commit}"

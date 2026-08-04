@@ -56,6 +56,7 @@ from leadpoet_canonical.weight_authority_v2 import (
     weight_input_output_roots_v2,
     weight_input_value_documents_v2,
     gateway_weight_input_value_documents_v2,
+    normalize_gateway_measured_weight_inputs_v2,
 )
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
@@ -494,6 +495,79 @@ def _bundle(*, category_purpose_override=None, category_output_override=None):
         "weights_signature": weight_key.sign(bytes.fromhex(result["weights_hash"])).hex(),
         "receipt_graph": graph,
     }
+
+
+def test_signed_gateway_normalizer_overlays_only_measured_dynamic_fields():
+    snapshot = _calculation_snapshot([], "")
+    authority_hash = sha256_json({"epoch": snapshot["epoch_id"]})
+    measured = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=snapshot,
+        gateway_authority_event_hash=authority_hash,
+    )
+    measured = {
+        category: copy.deepcopy(measured[category])
+        for category in (
+            "bans",
+            "fulfillment_rewards",
+            "leaderboard",
+            "sourcing_history",
+        )
+    }
+    measured["bans"]["value"] = {
+        "banned_hotkeys": ["source-hotkey"],
+        "banned_lookup_ok": True,
+    }
+    measured["fulfillment_rewards"]["value"] = {
+        "fulfillment_share": 0.6,
+        "fulfillment_rows": [
+            {"hotkey": "fulfillment-hotkey", "share": 0.5},
+            {"hotkey": "lab-hotkey", "share": 0.1},
+        ],
+        "fulfillment_fetch_ok": True,
+    }
+    measured["leaderboard"]["value"]["leaderboard_entries"] = [
+        {"miner_hotkey": "lab-hotkey", "wins": 1}
+    ]
+    measured["sourcing_history"]["value"] = {
+        "rolling_lead_count": 125_000,
+        "rolling_scores": [{"hotkey": "source-hotkey", "score": -100_000}],
+    }
+
+    normalized = normalize_gateway_measured_weight_inputs_v2(
+        calculation_snapshot=snapshot,
+        measured_documents=measured,
+        gateway_authority_event_hash=authority_hash,
+    )
+    authoritative = normalized["authoritative_calculation_snapshot"]
+    assert normalized["normalized_source_categories"] == [
+        "bans",
+        "fulfillment_rewards",
+        "leaderboard",
+        "sourcing_history",
+    ]
+    assert authoritative["research_lab_allocation_doc"] == snapshot[
+        "research_lab_allocation_doc"
+    ]
+    assert authoritative["banned_hotkeys"] == ["source-hotkey"]
+    assert authoritative["fulfillment_rows"] == measured["fulfillment_rewards"][
+        "value"
+    ]["fulfillment_rows"]
+    assert compute_final_weights(authoritative)["weights_hash"]
+    regenerated = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=authoritative,
+        gateway_authority_event_hash=authority_hash,
+    )
+    for category, document in measured.items():
+        assert regenerated[category] == document
+
+    tampered = copy.deepcopy(measured)
+    tampered["leaderboard"]["value"]["leaderboard_bonus_share"] = 0.1
+    with pytest.raises(WeightAuthorityV2Error, match="immutable field"):
+        normalize_gateway_measured_weight_inputs_v2(
+            calculation_snapshot=snapshot,
+            measured_documents=tampered,
+            gateway_authority_event_hash=authority_hash,
+        )
 
 
 def test_complete_v2_weight_authority_graph_validates():

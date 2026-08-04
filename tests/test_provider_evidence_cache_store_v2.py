@@ -15,6 +15,7 @@ from gateway.tee.provider_evidence_cache_store_v2 import (
     ProviderEvidenceCacheStoreV2Error,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+from gateway.tee.provider_client_v2 import _ExecutionScope
 from gateway.tee.provider_evidence_v2 import (
     REQUEST_SCHEMA_VERSION,
     ProviderEvidenceAuthorityV2,
@@ -78,6 +79,8 @@ class _Broker:
         self.rows = {}
         self.calls = []
         self.fail_reads = False
+        self.fail_posts = 0
+        self.commit_failed_posts = False
         self.provider_calls = 0
 
     def execute(self, request):
@@ -94,9 +97,17 @@ class _Broker:
         if request["method"] == "POST":
             row = json.loads(base64.b64decode(request["body_b64"]))
             key = (row["utc_day"], row["request_fingerprint"])
+            if self.fail_posts:
+                self.fail_posts -= 1
+                if self.commit_failed_posts:
+                    self.rows.setdefault(key, row)
+                return self._failure(request)
             self.rows.setdefault(key, row)
             return self._result(request, status=201, body=b"")
+        if self.fail_reads is True:
+            return self._failure(request)
         if self.fail_reads:
+            self.fail_reads -= 1
             return self._failure(request)
         query = parse_qs(urlsplit(request["url"]).query)
         day = query["utc_day"][0].split("eq.", 1)[1]
@@ -150,17 +161,41 @@ class _Broker:
 
     def _failure(self, request):
         ordinal = len(self.calls)
+        parsed = urlsplit(request["url"])
+        request_body = base64.b64decode(request["body_b64"])
+        request_artifact = "sha256:" + ("%064x" % (ordinal * 2))[-64:]
+        attempt = build_transport_attempt(
+            request_id=("%032x" % ordinal)[-32:],
+            logical_operation_id=request["logical_operation_id"],
+            job_id=request["job_id"],
+            purpose=request["purpose"],
+            provider_id=request["provider_id"],
+            attempt_number=request["attempt_number"],
+            method=request["method"],
+            destination_host=parsed.hostname,
+            destination_port=443,
+            path_hash=sha256_bytes(parsed.path.encode()),
+            nonsecret_headers_hash=sha256_json(request["headers"]),
+            body_hash=sha256_bytes(request_body),
+            credential_ref_hash=HASH,
+            retry_policy_hash=request["retry_policy_hash"],
+            timeout_ms=request["timeout_ms"],
+            started_at="2026-07-10T12:00:00Z",
+            terminal_status="transport_failure",
+            http_status=None,
+            response_hash=None,
+            request_artifact_hash=request_artifact,
+            response_artifact_hash=None,
+            tls_peer_chain_hash=None,
+            tls_protocol=None,
+            failure_code="unexpected_eof",
+            completed_at="2026-07-10T12:00:01Z",
+        )
         return {
             "terminal_status": "transport_failure",
-            "failure_code": "timeout",
-            "encrypted_request_artifact_id": (
-                "sha256:" + ("%064x" % (ordinal * 2))[-64:]
-            ),
-            "transport_attempt": {
-                "attempt_hash": "sha256:" + ("%064x" % (ordinal + 100))[-64:],
-                "terminal_status": "transport_failure",
-                "response_hash": None,
-            },
+            "failure_code": "unexpected_eof",
+            "encrypted_request_artifact_id": request_artifact,
+            "transport_attempt": attempt,
         }
 
 
@@ -263,6 +298,129 @@ def test_cache_store_miss_and_transport_failure_are_distinct() -> None:
         )
 
 
+def test_cache_store_retries_transient_read_under_same_operation() -> None:
+    broker = _Broker()
+    broker.fail_reads = 1
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+        sleeper=lambda _delay: None,
+    )
+
+    missing = store.load(
+        utc_day="2026-07-10",
+        request_fingerprint="3" * 64,
+        job_id="job",
+        purpose="research_lab.private_model_run.v2",
+    )
+
+    assert missing["found"] is False
+    assert [
+        item["attempt_number"] for item in missing["transport_attempts"]
+    ] == [0, 1]
+    assert [
+        item["terminal_status"] for item in missing["transport_attempts"]
+    ] == ["transport_failure", "authenticated_response"]
+    assert len(
+        {item["logical_operation_id"] for item in missing["transport_attempts"]}
+    ) == 1
+
+
+@pytest.mark.parametrize("committed_before_eof", (False, True))
+def test_cache_store_retries_transient_insert_under_same_operation(
+    committed_before_eof: bool,
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    identity = _identity(key)
+    broker = _Broker()
+    terminal = _recorded_terminal(broker, key, identity)
+    broker.fail_posts = 1
+    broker.commit_failed_posts = committed_before_eof
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+        sleeper=lambda _delay: None,
+    )
+
+    persisted = store.persist_recorded(
+        terminal,
+        utc_day="2026-07-10",
+        job_id="job",
+        purpose="research_lab.private_model_run.v2",
+    )
+
+    insert_calls = [
+        item
+        for item in broker.calls
+        if item["provider_id"] == "supabase" and item["method"] == "POST"
+    ]
+    assert [item["attempt_number"] for item in insert_calls] == [0, 1]
+    assert len({item["logical_operation_id"] for item in insert_calls}) == 1
+    insert_attempts = [
+        item
+        for item in persisted["transport_attempts"]
+        if item["logical_operation_id"].endswith(":insert")
+    ]
+    assert [item["terminal_status"] for item in insert_attempts] == [
+        "transport_failure",
+        "authenticated_response",
+    ]
+    scope = _ExecutionScope(
+        job_id="job",
+        purpose="research_lab.private_model_run.v2",
+        logical_operation_id="model-run",
+        retry_policy_hashes={"supabase": HASH},
+        default_timeout_ms=45_000,
+        terminal_sink=None,
+    )
+    for attempt in persisted["transport_attempts"]:
+        scope.record_intent(
+            attempt["logical_operation_id"],
+            attempt["attempt_number"],
+        )
+        scope.record_terminal(
+            attempt["logical_operation_id"],
+            attempt["attempt_number"],
+            attempt["terminal_status"],
+        )
+    scope.assert_accepted_result_is_complete()
+
+
+def test_cache_store_exhausted_insert_remains_fail_closed() -> None:
+    key = Ed25519PrivateKey.generate()
+    identity = _identity(key)
+    broker = _Broker()
+    terminal = _recorded_terminal(broker, key, identity)
+    broker.fail_posts = 3
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+        sleeper=lambda _delay: None,
+    )
+
+    with pytest.raises(
+        ProviderEvidenceCacheStoreV2Error,
+        match="authenticated insert failed",
+    ):
+        store.persist_recorded(
+            terminal,
+            utc_day="2026-07-10",
+            job_id="job",
+            purpose="research_lab.private_model_run.v2",
+        )
+
+    insert_calls = [
+        item
+        for item in broker.calls
+        if item["provider_id"] == "supabase" and item["method"] == "POST"
+    ]
+    assert [item["attempt_number"] for item in insert_calls] == [0, 1, 2]
+    assert not any(item["method"] == "GET" for item in broker.calls)
+
+
 def test_repeated_cache_reads_have_request_bound_transport_identities() -> None:
     broker = _DeduplicatingBroker()
     store = ProviderEvidenceCacheStoreV2(
@@ -289,7 +447,7 @@ def test_repeated_cache_reads_have_request_bound_transport_identities() -> None:
         for attempt in result["transport_attempts"]:
             context.record_transport(attempt)
 
-    assert [item["attempt_number"] for item in context.transport_attempts] == [0, 1]
+    assert [item["attempt_number"] for item in context.transport_attempts] == [0, 3]
     assert len({item["attempt_hash"] for item in context.transport_attempts}) == 2
 
 

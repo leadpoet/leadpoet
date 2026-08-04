@@ -12,6 +12,7 @@ import base64
 from datetime import date
 import json
 import re
+import time
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlencode
 
@@ -36,6 +37,8 @@ CACHE_ROW_SCHEMA_VERSION = "leadpoet.provider_evidence_cache_row.v2"
 CACHE_TABLE = "research_lab_provider_evidence_cache_v2"
 CACHE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
 CACHE_TIMEOUT_MS = 45_000
+CACHE_TRANSPORT_ATTEMPTS = 3
+CACHE_RETRY_DELAYS_SECONDS = (0.0, 0.05, 0.2)
 MAX_CACHE_RESPONSE_BYTES = 64 * 1024 * 1024
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -100,10 +103,12 @@ class ProviderEvidenceCacheStoreV2:
         broker: ProviderBrokerV2,
         vault: EncryptedArtifactVaultV2,
         source_boot_verifier: Callable[[Mapping[str, Any]], Any],
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._broker = broker
         self._vault = vault
         self._source_boot_verifier = source_boot_verifier
+        self._sleeper = sleeper
         retry_hash = str(broker.retry_policy_hashes.get("supabase") or "")
         self._retry_policy_hash = _hash(
             retry_hash,
@@ -165,7 +170,7 @@ class ProviderEvidenceCacheStoreV2:
             str(descriptor["artifact_id"]),
             str(exported["storage_document_hash"]),
         }
-        post_result = self._execute(
+        post_result, post_attempts, post_artifacts = self._execute_with_retry(
             method="POST",
             url="%s/rest/v1/%s" % (CACHE_ORIGIN, CACHE_TABLE),
             headers={
@@ -181,7 +186,12 @@ class ProviderEvidenceCacheStoreV2:
             job_id=cache_job_id,
             purpose=cache_purpose,
         )
-        self._collect_broker_evidence(post_result, attempts, artifacts)
+        attempts.extend(post_attempts)
+        artifacts.update(post_artifacts)
+        if not self._is_authenticated_success(post_result):
+            raise ProviderEvidenceCacheStoreV2Error(
+                "provider cache authenticated insert failed"
+            )
 
         rows, read_attempts, read_artifacts = self._read_rows(
             utc_day=normalized_day,
@@ -582,7 +592,7 @@ class ProviderEvidenceCacheStoreV2:
                 ("limit", "2"),
             ]
         )
-        result = self._execute(
+        result, attempts, artifacts = self._execute_with_retry(
             method="GET",
             url="%s/rest/v1/%s?%s" % (CACHE_ORIGIN, CACHE_TABLE, query),
             headers={"accept": "application/json"},
@@ -595,13 +605,7 @@ class ProviderEvidenceCacheStoreV2:
             purpose=purpose,
             attempt_number=attempt_number,
         )
-        attempts = []
-        artifacts = set()
-        self._collect_broker_evidence(result, attempts, artifacts)
-        if (
-            result.get("terminal_status") != "authenticated_response"
-            or not 200 <= int(result.get("http_status") or 0) < 300
-        ):
+        if not self._is_authenticated_success(result):
             raise ProviderEvidenceCacheStoreV2Error(
                 "provider cache authenticated read failed"
             )
@@ -654,6 +658,53 @@ class ProviderEvidenceCacheStoreV2:
                     "retry_policy_hash": self._retry_policy_hash,
                 }
             )
+        )
+
+    def _execute_with_retry(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        logical_operation_id: str,
+        job_id: str,
+        purpose: str,
+        attempt_number: int = 0,
+    ) -> tuple[Dict[str, Any], list[Dict[str, Any]], set[str]]:
+        """Retry only unauthenticated transport terminals under one identity."""
+
+        attempts: list[Dict[str, Any]] = []
+        artifacts: set[str] = set()
+        result: Dict[str, Any] = {}
+        base_attempt = attempt_number * CACHE_TRANSPORT_ATTEMPTS
+        for retry_ordinal in range(CACHE_TRANSPORT_ATTEMPTS):
+            if retry_ordinal:
+                self._sleeper(CACHE_RETRY_DELAYS_SECONDS[retry_ordinal])
+            result = self._execute(
+                method=method,
+                url=url,
+                headers=headers,
+                body=body,
+                logical_operation_id=logical_operation_id,
+                job_id=job_id,
+                purpose=purpose,
+                attempt_number=base_attempt + retry_ordinal,
+            )
+            self._collect_broker_evidence(result, attempts, artifacts)
+            if result.get("terminal_status") != "transport_failure":
+                break
+        return result, attempts, artifacts
+
+    @staticmethod
+    def _is_authenticated_success(result: Mapping[str, Any]) -> bool:
+        try:
+            status = int(result.get("http_status") or 0)
+        except (TypeError, ValueError):
+            return False
+        return (
+            result.get("terminal_status") == "authenticated_response"
+            and 200 <= status < 300
         )
 
     @staticmethod

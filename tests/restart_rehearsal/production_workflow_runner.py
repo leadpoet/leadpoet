@@ -4668,6 +4668,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             self.calls: list[dict[str, Any]] = []
             self.records: dict[tuple[str, int], dict[str, Any]] = {}
             self.retry_policy_hashes = retry_hashes
+            self.fail_first_supabase_transport = True
 
         @contextmanager
         def transient_terminal_transaction(self):
@@ -4703,6 +4704,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 {"provider": provider, "ordinal": ordinal, "kind": "request"}
             )
             response_hash = sha256_bytes(body)
+            transport_failure = (
+                provider == "supabase" and self.fail_first_supabase_transport
+            )
+            if transport_failure:
+                self.fail_first_supabase_transport = False
             attempt = build_transport_attempt(
                 request_id=("%032x" % ordinal)[-32:],
                 logical_operation_id=key[0],
@@ -4725,29 +4731,48 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 retry_policy_hash=str(request["retry_policy_hash"]),
                 timeout_ms=int(request["timeout_ms"]),
                 started_at=NOW,
-                terminal_status="authenticated_response",
-                http_status=200,
-                response_hash=response_hash,
+                terminal_status=(
+                    "transport_failure"
+                    if transport_failure
+                    else "authenticated_response"
+                ),
+                http_status=None if transport_failure else 200,
+                response_hash=None if transport_failure else response_hash,
                 request_artifact_hash=request_artifact_hash,
-                response_artifact_hash=response_hash,
-                tls_peer_chain_hash=sha256_json({"tls": provider}),
-                tls_protocol="TLSv1.3",
-                failure_code=None,
+                response_artifact_hash=(None if transport_failure else response_hash),
+                tls_peer_chain_hash=(
+                    None if transport_failure else sha256_json({"tls": provider})
+                ),
+                tls_protocol=None if transport_failure else "TLSv1.3",
+                failure_code="unexpected_eof" if transport_failure else None,
                 completed_at=NOW,
             )
-            result = {
-                "terminal_status": "authenticated_response",
-                "http_status": 200,
-                "headers": {"content-type": "application/json"},
-                "body_b64": base64.b64encode(body).decode("ascii"),
+            result: dict[str, Any] = {
+                "terminal_status": attempt["terminal_status"],
                 "encrypted_request_artifact_id": request_artifact_hash,
-                "encrypted_artifact_id": response_hash,
                 "transport_attempt": attempt,
-                "evidence_artifact_hashes": [
-                    request_artifact_hash,
-                    response_hash,
-                ],
+                "evidence_artifact_hashes": [request_artifact_hash],
             }
+            if transport_failure:
+                result.update(
+                    {
+                        "failure_code": "unexpected_eof",
+                        "failure_stage": "provider_transport",
+                    }
+                )
+            else:
+                result.update(
+                    {
+                        "http_status": 200,
+                        "headers": {"content-type": "application/json"},
+                        "body_b64": base64.b64encode(body).decode("ascii"),
+                        "encrypted_artifact_id": response_hash,
+                        "evidence_artifact_hashes": [
+                            request_artifact_hash,
+                            response_hash,
+                        ],
+                    }
+                )
             self.records[key] = dict(result)
             return result
 
@@ -4761,6 +4786,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         broker=boundary,
         vault=vault,
         source_boot_verifier=lambda _value: None,
+        sleeper=lambda _seconds: None,
     )
     signing_key = Ed25519PrivateKey.generate()
     boot_identity = {
@@ -4813,15 +4839,19 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         if item["provider_id"] == "supabase"
     ]
     if (
-        len(supabase_attempts) != 2
-        or [item["attempt_number"] for item in supabase_attempts] != [0, 1]
-        or len({item["attempt_hash"] for item in supabase_attempts}) != 2
+        len(supabase_attempts) != 3
+        or [item["attempt_number"] for item in supabase_attempts] != [0, 1, 3]
+        or [item["terminal_status"] for item in supabase_attempts]
+        != ["transport_failure", "authenticated_response", "authenticated_response"]
+        or len({item["attempt_hash"] for item in supabase_attempts}) != 3
+        or len({item["logical_operation_id"] for item in supabase_attempts}) != 1
     ):
         raise RuntimeError("repeated provider cache reads reused transport evidence")
     return {
         "nonterminal_polls_live": True,
         "request_bound_cache_attempts": True,
         "execution_receipt_transport_unique": True,
+        "transient_cache_transport_recovered": True,
     }
 
 
@@ -5297,6 +5327,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("execution_receipt_transport_unique")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("transient_cache_transport_recovered")
             is True
         ),
         "chain_settlement_state_space_complete": (

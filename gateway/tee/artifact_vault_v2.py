@@ -22,12 +22,12 @@ ARTIFACT_ENVELOPE_SCHEMA_VERSION = "leadpoet.encrypted_artifact.v2"
 ARTIFACT_MASTER_KEY_SLOT = "artifact_master_key"
 ARTIFACT_MASTER_KEY_HASH_DOMAIN = b"leadpoet-artifact-master-key-v2:"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
-# The measured topology permits ten concurrent scoring jobs. A normal ICP can
-# retain hundreds of request/response envelopes until its execution receipt is
-# available for host-side Object Lock persistence, so 2,048 entries could be
-# exhausted by healthy concurrency. Keep a generous count bound for small
-# envelopes and an independent encoded-byte bound for enclave memory safety.
-MAX_IN_MEMORY_ARTIFACTS = 16384
+# The measured topology permits ten concurrent scoring jobs. Production ICPs
+# can retain several thousand request/response/cache envelopes each until their
+# execution receipts make host-side Object Lock persistence attestable. Keep
+# the count bound above that measured concurrent working set; the independent
+# encoded-byte bound remains the authoritative enclave memory safety limit.
+MAX_IN_MEMORY_ARTIFACTS = 65536
 MAX_IN_MEMORY_ARTIFACT_BYTES = 1024 * 1024 * 1024
 TRANSIENT_EVICTION_MIN_AGE_SECONDS = 600.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

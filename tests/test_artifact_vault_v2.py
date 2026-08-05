@@ -141,27 +141,67 @@ def test_transient_envelope_can_be_released_after_durable_ciphertext_readback() 
     assert vault.decrypt_storage_document(storage_document) == b"hidden provider response"
 
 
-def test_measured_scoring_pool_fits_before_host_side_persistence() -> None:
+def test_measured_scoring_pool_crosses_old_ceiling_and_recovers_after_persistence() -> None:
     vault = _vault()
-    jobs = 10
-    envelopes_per_job = 600
+    jobs = 5
+    envelopes_per_job = 5000
+    first_artifacts = []
 
     for job_index in range(jobs):
         for artifact_index in range(envelopes_per_job):
-            vault.seal(
+            descriptor = vault.seal(
                 f"provider-{job_index}-{artifact_index}".encode(),
                 job_id=f"scoring-job-{job_index}",
                 purpose="research_lab.private_model_run.v2",
                 artifact_kind="provider_response",
             )
+            if artifact_index == 0:
+                first_artifacts.append(descriptor)
 
     capacity = vault.transient_capacity_state()
     assert capacity["transient_artifact_count"] == jobs * envelopes_per_job
+    assert capacity["transient_artifact_count"] > 16384
     assert capacity["transient_artifact_count"] < (
         artifact_vault_v2.MAX_IN_MEMORY_ARTIFACTS
     )
     assert capacity["transient_artifact_bytes"] < (
         artifact_vault_v2.MAX_IN_MEMORY_ARTIFACT_BYTES
+    )
+
+    with pytest.raises(RuntimeError, match="checkpoint failed"):
+        with vault.transient_artifact_transaction():
+            vault.seal(
+                b"failed checkpoint",
+                job_id="scoring-job-0",
+                purpose="research_lab.private_model_run.v2",
+                artifact_kind="provider_outcome_checkpoint",
+            )
+            raise RuntimeError("checkpoint failed")
+    assert vault.transient_capacity_state()["transient_artifact_count"] == (
+        jobs * envelopes_per_job
+    )
+
+    for descriptor in first_artifacts:
+        artifact_id = descriptor["artifact_id"]
+        vault.confirm_persistence(
+            artifact_id=artifact_id,
+            artifact_ref=f"s3://immutable-bucket/artifacts/{artifact_id}.json",
+            observed_storage_document=vault.export_ciphertext(artifact_id)[
+                "storage_document"
+            ],
+            response_headers=_headers(),
+            transport_attempts=_attempts(artifact_id),
+        )
+
+    recovered = vault.seal(
+        b"recovered checkpoint",
+        job_id="scoring-job-recovery",
+        purpose="research_lab.private_model_run.v2",
+        artifact_kind="provider_outcome_checkpoint",
+    )
+    assert recovered["persisted"] is False
+    assert vault.transient_capacity_state()["transient_artifact_count"] == (
+        jobs * envelopes_per_job - jobs + 1
     )
 
 

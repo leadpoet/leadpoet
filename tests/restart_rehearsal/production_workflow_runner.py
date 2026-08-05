@@ -5033,11 +5033,38 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         or len({item["logical_operation_id"] for item in supabase_attempts}) != 1
     ):
         raise RuntimeError("repeated provider cache reads reused transport evidence")
+
+    starting_capacity = vault.transient_capacity_state()
+    production_wave_jobs = 5
+    measured_envelopes_per_job = 5000
+    for job_index in range(production_wave_jobs):
+        for artifact_index in range(measured_envelopes_per_job):
+            vault.seal(
+                f"rebenchmark-{job_index}-{artifact_index}".encode(),
+                job_id=f"rehearsal:rebenchmark-wave:{job_index}",
+                purpose="research_lab.private_model_run.v2",
+                artifact_kind="provider_response",
+            )
+    capacity = vault.transient_capacity_state()
+    expected_count = (
+        starting_capacity["transient_artifact_count"]
+        + production_wave_jobs * measured_envelopes_per_job
+    )
+    if (
+        capacity["transient_artifact_count"] != expected_count
+        or capacity["transient_artifact_count"] <= 16384
+        or capacity["transient_artifact_count"]
+        >= capacity["maximum_transient_artifacts"]
+        or capacity["transient_artifact_bytes"]
+        >= capacity["maximum_transient_artifact_bytes"]
+    ):
+        raise RuntimeError("measured rebenchmark wave exhausted artifact capacity")
     return {
         "nonterminal_polls_live": True,
         "request_bound_cache_attempts": True,
         "execution_receipt_transport_unique": True,
         "transient_cache_transport_recovered": True,
+        "measured_concurrent_artifact_wave_bound": True,
     }
 
 
@@ -5563,6 +5590,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("transient_cache_transport_recovered")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("measured_concurrent_artifact_wave_bound")
             is True
         ),
         "chain_settlement_state_space_complete": (

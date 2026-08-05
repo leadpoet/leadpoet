@@ -4823,6 +4823,246 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     }
 
 
+def _exercise_fresh_weight_input_lineage() -> dict[str, Any]:
+    """Exercise fresh checkpoint lineage, replay, and fail-closed mismatch."""
+
+    import subprocess
+
+    from gateway.research_lab.attested_weight_inputs_v2 import (
+        AttestedWeightInputsV2Error,
+        build_gateway_weight_inputs_v2,
+    )
+    from leadpoet_canonical.ancestry_checkpoint_v2 import (
+        ANCESTRY_DELTA_SCHEMA_VERSION,
+        build_compact_ancestry_proof_from_delta_v2,
+        build_full_graph_parent_v2,
+        issue_ancestry_certificate_v2,
+    )
+    from leadpoet_canonical.attested_v2 import (
+        build_checkpointed_receipt_graph,
+        validate_receipt_graph,
+    )
+    from leadpoet_canonical.weight_authority_v2 import (
+        GATEWAY_WEIGHT_INPUT_CATEGORIES,
+        WEIGHT_INPUT_PURPOSES,
+        gateway_weight_input_value_documents_v2,
+    )
+
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(SOURCE_ROOT), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    fixture = SanitizedWeightFixture(
+        candidate_sha=candidate_sha,
+        epoch_id=30_000,
+    )
+    config_hash = sha256_json({"rehearsal": "fresh-weight-input-lineage"})
+    boot = fixture._boot(
+        role="gateway_coordinator",
+        key=fixture.coordinator_key,
+        config_hash=config_hash,
+    )
+    allocation_receipt = fixture.receipt(
+        role="gateway_coordinator",
+        purpose="research_lab.allocation.v2",
+        job_id="rehearsal-weight-input-allocation",
+        key=fixture.coordinator_key,
+        boot=boot,
+        config_hash=config_hash,
+        output_root=sha256_json({"allocation": 30_000}),
+        sequence=0,
+    )
+    allocation_graph = build_receipt_graph(
+        root_receipt_hash=allocation_receipt["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=(allocation_receipt,),
+        transport_attempts=(),
+    )
+    snapshot = fixture.calculation_snapshot(
+        [allocation_receipt["receipt_hash"]],
+        allocation_receipt["receipt_hash"],
+    )
+    expected_documents = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=snapshot,
+        gateway_authority_event_hash=allocation_receipt["receipt_hash"],
+    )
+    lineage_id = sha256_json({"lineage": "fresh-weight-input"})
+
+    def verify_boot(identity: Mapping[str, Any]) -> Mapping[str, Any]:
+        return identity
+
+    def outcome(
+        *,
+        category: str,
+        sequence: int,
+        fresh: bool,
+        mismatched_execution: bool = False,
+    ) -> dict[str, Any]:
+        role, purpose = WEIGHT_INPUT_PURPOSES[category]
+        document = expected_documents[category]
+        execution_receipt = fixture.receipt(
+            role=role,
+            purpose=purpose,
+            job_id=f"rehearsal-weight-input-{category}",
+            key=fixture.coordinator_key,
+            boot=boot,
+            config_hash=config_hash,
+            output_root=sha256_json(document),
+            sequence=100 + sequence,
+        )
+        execution_graph = build_receipt_graph(
+            root_receipt_hash=execution_receipt["receipt_hash"],
+            boot_identities=(boot,),
+            receipts=(execution_receipt,),
+            transport_attempts=(),
+        )
+        if not fresh:
+            return {
+                "status": "succeeded",
+                "result": document,
+                "receipt": execution_receipt,
+                "execution_receipt": execution_receipt,
+                "execution_receipt_graph": execution_graph,
+                "receipt_graph": execution_graph,
+            }
+
+        persistence_receipt = fixture.receipt(
+            role="gateway_coordinator",
+            purpose="leadpoet.artifact_persistence.v2",
+            job_id=f"rehearsal-weight-input-persistence-{category}",
+            key=fixture.coordinator_key,
+            boot=boot,
+            config_hash=config_hash,
+            output_root=sha256_json(
+                {"source_receipt_hash": execution_receipt["receipt_hash"]}
+            ),
+            parents=(execution_receipt["receipt_hash"],),
+            sequence=1_000 + sequence,
+        )
+        local_delta = {
+            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+            "root_receipt_hash": persistence_receipt["receipt_hash"],
+            "boot_identities": [boot],
+            "receipts": [persistence_receipt],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        certificate = issue_ancestry_certificate_v2(
+            local_delta=local_delta,
+            lineage_id=lineage_id,
+            certificate_sequence=0,
+            issuer_boot_identity=boot,
+            issued_at=NOW,
+            sign_digest=fixture.coordinator_key.sign,
+            boot_attestation_verifier=verify_boot,
+            allowed_issuer_roles=("gateway_coordinator",),
+            parent_full_graphs=(
+                build_full_graph_parent_v2(
+                    execution_graph,
+                    required_purposes=(purpose,),
+                ),
+            ),
+            required_purposes=("leadpoet.artifact_persistence.v2",),
+        )
+        proof = build_compact_ancestry_proof_from_delta_v2(
+            local_delta,
+            certificate,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=verify_boot,
+            allowed_issuer_roles=("gateway_coordinator",),
+        )
+        lineage_graph = build_checkpointed_receipt_graph(
+            root_receipt_hash=persistence_receipt["receipt_hash"],
+            boot_identities=(boot,),
+            receipts=(persistence_receipt,),
+            transport_attempts=(),
+            host_operations=(),
+            ancestry_lineage_id=lineage_id,
+            ancestry_proof=proof,
+            boot_attestation_verifier=verify_boot,
+            require_boot_attestation_verification=True,
+        )
+        validate_receipt_graph(
+            lineage_graph,
+            required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
+        )
+        exposed_execution_receipt = execution_receipt
+        if mismatched_execution:
+            exposed_execution_receipt = fixture.receipt(
+                role=role,
+                purpose=purpose,
+                job_id=f"rehearsal-weight-input-mismatch-{category}",
+                key=fixture.coordinator_key,
+                boot=boot,
+                config_hash=config_hash,
+                output_root=sha256_json(document),
+                sequence=2_000 + sequence,
+            )
+        return {
+            "status": "succeeded",
+            "result": document,
+            "receipt": persistence_receipt,
+            "execution_receipt": exposed_execution_receipt,
+            "execution_receipt_graph": execution_graph,
+            "receipt_graph": lineage_graph,
+        }
+
+    async def run(*, fresh: bool, mismatch_category: str | None = None):
+        async def execute(**kwargs):
+            category = str(kwargs["payload"]["category"])
+            return outcome(
+                category=category,
+                sequence=int(kwargs["sequence"]),
+                fresh=fresh,
+                mismatched_execution=category == mismatch_category,
+            )
+
+        return await build_gateway_weight_inputs_v2(
+            calculation_snapshot=snapshot,
+            allocation_graph=allocation_graph,
+            leaderboard_window_start="2026-07-24T00:00:00Z",
+            leaderboard_window_end="2026-07-25T00:00:00Z",
+            execute=execute,
+            load_sourcing_graphs=lambda **_kwargs: _async_value([]),
+            coordinator_client_factory=object,
+        )
+
+    async def _async_value(value):
+        return value
+
+    fresh = asyncio.run(run(fresh=True))
+    replay = asyncio.run(run(fresh=False))
+    if fresh["input_receipt_hashes"] != replay["input_receipt_hashes"]:
+        raise RuntimeError("fresh and replay input identities differ")
+    direct_hashes = set(fresh["input_receipt_hashes"].values())
+    receipt_hashes = {
+        str(item["receipt_hash"])
+        for item in fresh["upstream_receipt_set"]["receipts"]
+    }
+    if (
+        set(fresh["input_receipt_hashes"])
+        != set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+        or not direct_hashes.issubset(receipt_hashes)
+        or len(receipt_hashes) != 2 * len(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+    ):
+        raise RuntimeError("fresh weight input receipt persistence is incomplete")
+    try:
+        asyncio.run(run(fresh=True, mismatch_category="fulfillment_rewards"))
+    except AttestedWeightInputsV2Error as exc:
+        if "measured input receipt is invalid" not in str(exc):
+            raise
+    else:
+        raise RuntimeError("mismatched fresh execution receipt did not fail closed")
+    return {
+        "fresh_checkpoint_lineage_accepted": True,
+        "replay_identity_equal": True,
+        "direct_receipts_persisted": True,
+        "mismatched_execution_rejected": True,
+    }
+
+
 def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     """Prove repeated nonterminal polls retain unique measured evidence."""
 
@@ -5107,6 +5347,7 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "receipt-graph-transport-deduplication": (
         _exercise_receipt_graph_transport_deduplication
     ),
+    "fresh-weight-input-lineage": _exercise_fresh_weight_input_lineage,
     "research-lab-allocation-conservation": (
         _exercise_research_lab_allocation_conservation
     ),
@@ -5736,6 +5977,24 @@ def main() -> int:
                 "receipt-graph-transport-deduplication",
                 {},
             ).get("legacy_size_bytes", 0)
+        ),
+        "fresh_weight_input_lineage_verified": (
+            behavior_evidence.get(
+                "fresh-weight-input-lineage", {}
+            ).get("fresh_checkpoint_lineage_accepted")
+            is True
+            and behavior_evidence.get(
+                "fresh-weight-input-lineage", {}
+            ).get("replay_identity_equal")
+            is True
+            and behavior_evidence.get(
+                "fresh-weight-input-lineage", {}
+            ).get("direct_receipts_persisted")
+            is True
+            and behavior_evidence.get(
+                "fresh-weight-input-lineage", {}
+            ).get("mismatched_execution_rejected")
+            is True
         ),
         "research_lab_allocation_policy_config_bound": (
             "research-lab-allocation-conservation" in behavior_evidence

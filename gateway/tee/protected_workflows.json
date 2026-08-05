@@ -332,7 +332,7 @@
       "symbol": "_compact_weight_ancestry"
     },
     {
-      "ast_sha256": "sha256:91eb6c57b53c18090ed7844badc7302a624bdde789415094e7c5a50f59dc8d2b",
+      "ast_sha256": "sha256:4b7c059b948917ee547827511ae2400a49fc040284167bcbbb260f89c79e4386",
       "path": "gateway/research_lab/attested_weight_inputs_v2.py",
       "symbol": "build_gateway_weight_inputs_v2"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:48652081cca220a5c869c562faf98134358400c9cf6c637dd69c5213780bffeb",
+  "manifest_hash": "sha256:8379316a4aab83678f8e34a15cb3d5952fab2d3d4bf6d026efd0bc2502b49b15",
   "protected_source_commit": "1803f3802b3667e2036a54fbf6ada14b7edfa206",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -323,7 +323,7 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
             "receipt_graph": {
                 "root_receipt_hash": persistence_hash,
                 "boot_identities": [],
-                "receipts": [execution_receipt, persistence_receipt],
+                "receipts": [persistence_receipt],
                 "transport_attempts": [],
                 "host_operations": [],
             },
@@ -348,6 +348,10 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
     }
     assert {
         sha256_json({"persistence": category})
+        for category in GATEWAY_WEIGHT_INPUT_CATEGORIES
+    }.issubset(receipt_hashes)
+    assert {
+        sha256_json({"execution": category})
         for category in GATEWAY_WEIGHT_INPUT_CATEGORIES
     }.issubset(receipt_hashes)
     assert observed_anomaly_parents == tuple(

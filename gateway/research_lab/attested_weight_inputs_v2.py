@@ -306,11 +306,13 @@ async def build_gateway_weight_inputs_v2(
                 "%s measured input failed" % category
             )
         graph = value.get("receipt_graph")
+        execution_graph = value.get("execution_receipt_graph") or graph
         root_receipt = value.get("receipt")
         receipt = value.get("execution_receipt") or root_receipt
         document = value.get("result")
         if (
             not isinstance(graph, Mapping)
+            or not isinstance(execution_graph, Mapping)
             or not isinstance(root_receipt, Mapping)
             or not isinstance(receipt, Mapping)
             or not isinstance(document, Mapping)
@@ -319,16 +321,21 @@ async def build_gateway_weight_inputs_v2(
                 "%s measured input is incomplete" % category
             )
         validate_receipt_graph(graph, required_purposes={purpose})
+        validate_receipt_graph(execution_graph, required_purposes={purpose})
         receipts_by_hash = {
             str(item.get("receipt_hash") or ""): item
-            for item in graph.get("receipts") or ()
+            for item in execution_graph.get("receipts") or ()
             if isinstance(item, Mapping)
         }
         root_hash = str(graph.get("root_receipt_hash") or "")
+        execution_root_hash = str(
+            execution_graph.get("root_receipt_hash") or ""
+        )
         receipt_hash = str(receipt.get("receipt_hash") or "")
         expected_role, _expected_purpose = WEIGHT_INPUT_PURPOSES[category]
         if (
             root_receipt.get("receipt_hash") != root_hash
+            or execution_root_hash != receipt_hash
             or receipts_by_hash.get(receipt_hash) != receipt
             or receipt.get("role") != expected_role
             or receipt.get("purpose") != purpose
@@ -375,10 +382,13 @@ async def build_gateway_weight_inputs_v2(
     )
     await execute_category("anomaly_adjustments", len(independent_categories))
 
-    all_graphs = [
-        executions[category]["receipt_graph"]
-        for category in sorted(executions)
-    ]
+    all_graphs = []
+    for category in sorted(executions):
+        execution = executions[category]
+        execution_graph = execution.get("execution_receipt_graph")
+        if isinstance(execution_graph, Mapping):
+            all_graphs.append(execution_graph)
+        all_graphs.append(execution["receipt_graph"])
     receipt_set = _union_receipt_sets(all_graphs)
     input_hashes = {
         category: str(

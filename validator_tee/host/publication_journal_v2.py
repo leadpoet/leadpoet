@@ -427,7 +427,7 @@ def _validate_compact_publication_journal_v2(
 
 
 class AuthoritativeWeightPublicationJournalV2:
-    """Atomically retain exactly one unfinished V2 publication."""
+    """Atomically retain one active or most-recent finalized V2 publication."""
 
     def __init__(
         self,

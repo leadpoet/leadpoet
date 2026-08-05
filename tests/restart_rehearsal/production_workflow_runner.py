@@ -3610,6 +3610,7 @@ def _exercise_validator_publication_release_recovery() -> dict[str, Any]:
     """Prove an approved N-1 validator journal survives N activation."""
 
     import subprocess
+    import neurons.validator as validator_module
 
     from leadpoet_canonical.attested_v2 import sha256_json
     from validator_tee.enclave.hotkey_authority_v2 import (
@@ -3749,6 +3750,117 @@ def _exercise_validator_publication_release_recovery() -> dict[str, Any]:
         raise RuntimeError(
             "cross-release recovery was not constrained to signed finalization"
         )
+
+    event_hash = "sha256:" + "7" * 64
+    authorization_id = "sha256:" + "8" * 64
+
+    class _RecoveryJournal:
+        def __init__(self) -> None:
+            self.record = {
+                "weight_authorization_id": authorization_id,
+                "published_bundle": {
+                    "weight_result": {"epoch_id": current.epoch_id}
+                },
+                "publication": {
+                    "weight_submission_event_hash": event_hash
+                },
+                "extrinsic_signature_results": [
+                    {"durable_signed_extrinsic": True}
+                ],
+            }
+            self.scan = 0
+            self.cleared = False
+
+        def load(self):
+            return self.record
+
+        def replace_authorization(self, value):
+            self.record = {**self.record, "weight_authorization_id": value}
+            return self.record
+
+        def reserve_finalization_scan(self):
+            self.scan += 1
+            return "sha256:" + format(self.scan, "064x")
+
+        def clear(self, *, expected_event_hash):
+            if expected_event_hash != event_hash:
+                raise RuntimeError("rehearsal cleared another publication")
+            self.record = None
+            self.cleared = True
+
+    class _RecoveryClient:
+        def recover_weight_publication_v2(self, **_kwargs):
+            return {
+                "weight_authorization_id": authorization_id,
+                "signed_extrinsics": [
+                    {
+                        "authorization_hash": "sha256:" + "9" * 64,
+                        "extrinsic_hash": "0x" + "a" * 64,
+                        "extrinsic_hex": "00",
+                    }
+                ],
+                "finalization_only": True,
+            }
+
+        def confirm_weight_publication_v2(
+            self, _authorization_id, *, finalization_scan_id
+        ):
+            if not str(finalization_scan_id).startswith("sha256:"):
+                raise RuntimeError("finalization scan identity is invalid")
+            return {"finalized": True}
+
+    journal = _RecoveryJournal()
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    validator._weight_publication_journal_v2 = journal
+    validator._validator_v2_client = _RecoveryClient()
+    validator.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address=VALIDATOR_HOTKEY)
+    )
+    active_epoch = current.epoch_id
+
+    async def epoch_state():
+        return SimpleNamespace(workflow_epoch_id=active_epoch)
+
+    validator._get_epoch_state_async = epoch_state
+    validator._get_best_epoch_state_async = epoch_state
+    original_finalize = (
+        validator_module.finalize_authoritative_weight_publication_v2
+    )
+
+    async def finalize(**_kwargs):
+        return {
+            "acknowledgment": {
+                "weight_finalization_event_hash": "sha256:" + "b" * 64
+            }
+        }
+
+    validator_module.finalize_authoritative_weight_publication_v2 = finalize
+    try:
+        same_epoch = asyncio.run(
+            validator._recover_weight_publication_before_new_authority_v2(
+                epoch_id=current.epoch_id,
+                gateway_url="https://gateway.rehearsal.invalid",
+            )
+        )
+        if not same_epoch or journal.record is None or journal.cleared:
+            raise RuntimeError(
+                "same-epoch finalized publication did not survive restart"
+            )
+        active_epoch = current.epoch_id + 1
+        next_epoch = asyncio.run(
+            validator._recover_weight_publication_before_new_authority_v2(
+                epoch_id=active_epoch,
+                gateway_url="https://gateway.rehearsal.invalid",
+            )
+        )
+        if next_epoch or journal.record is not None or not journal.cleared:
+            raise RuntimeError(
+                "revalidated prior publication blocked the next epoch"
+            )
+    finally:
+        validator_module.finalize_authoritative_weight_publication_v2 = (
+            original_finalize
+        )
     return {
         "approved_n_minus_one_recovered": True,
         "nitro_attestation_rechecked": True,
@@ -3757,6 +3869,8 @@ def _exercise_validator_publication_release_recovery() -> dict[str, Any]:
         "cross_release_finalization_only": True,
         "unsigned_cross_release_rejected": True,
         "implicit_cross_release_rejected": True,
+        "same_epoch_finalized_journal_retained": True,
+        "next_epoch_finalized_journal_retired": True,
     }
 
 
@@ -6465,6 +6579,16 @@ def main() -> int:
                 "validator-publication-release-recovery",
                 {},
             ).get("implicit_cross_release_rejected")
+            is True
+            and behavior_evidence.get(
+                "validator-publication-release-recovery",
+                {},
+            ).get("same_epoch_finalized_journal_retained")
+            is True
+            and behavior_evidence.get(
+                "validator-publication-release-recovery",
+                {},
+            ).get("next_epoch_finalized_journal_retired")
             is True
         ),
         "canonical_vector_primary_auditor_equal": (

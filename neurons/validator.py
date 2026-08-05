@@ -4419,27 +4419,11 @@ class Validator(BaseValidatorNeuron):
                 "wss://entrypoint-finney.opentensor.ai:443",
             )
         ).strip()
-        recovery = await self._recover_weight_publication_journal_v2(
-            gateway_url=gateway_url
-        )
-        if recovery is not None:
-            if recovery.status == "finalized":
-                if int(recovery.epoch_id) == int(snapshot["epoch_id"]):
-                    return True
-                print(
-                    "   ✅ Recovered and finalized earlier authoritative V2 epoch "
-                    f"{recovery.epoch_id}"
-                )
-            elif int(recovery.epoch_id) == int(snapshot["epoch_id"]):
-                raise RuntimeError(
-                    "current authoritative V2 publication was quarantined "
-                    "without finalized-chain proof"
-                )
-            else:
-                bt.logging.critical(
-                    "weight_publication_prior_epoch_quarantined "
-                    f"epoch={recovery.epoch_id}; continuing current epoch"
-                )
+        if await self._recover_weight_publication_before_new_authority_v2(
+            epoch_id=int(snapshot["epoch_id"]),
+            gateway_url=gateway_url,
+        ):
+            return True
         journal = self._weight_publication_journal_v2
         try:
             with _sentry_stage(
@@ -4593,14 +4577,59 @@ class Validator(BaseValidatorNeuron):
             **telemetry,
         )
         self._last_authoritative_weight_finalization_v2 = finalization
-        journal.clear(
-            expected_event_hash=publication["weight_submission_event_hash"]
-        )
         print(
             "   ✅ Authoritative V2 finalized chain state persisted: "
             f"{finalization['acknowledgment']['weight_finalization_event_hash'][:20]}..."
         )
         return True
+
+    async def _recover_weight_publication_before_new_authority_v2(
+        self,
+        *,
+        epoch_id: int,
+        gateway_url: str,
+    ) -> bool:
+        """Recover retained authority before calculating another epoch bundle."""
+
+        journal = self._weight_publication_journal_v2
+        recovery = await self._recover_weight_publication_journal_v2(
+            gateway_url=gateway_url
+        )
+        if recovery is None:
+            return False
+        if recovery.status == "finalized":
+            if int(recovery.epoch_id) == int(epoch_id):
+                return True
+            retained = journal.load()
+            if retained is None:
+                raise RuntimeError(
+                    "finalized authoritative V2 recovery evidence vanished"
+                )
+            retained_publication = retained.get("publication")
+            if not isinstance(retained_publication, Mapping):
+                raise RuntimeError(
+                    "finalized authoritative V2 recovery lacks publication"
+                )
+            journal.clear(
+                expected_event_hash=str(
+                    retained_publication["weight_submission_event_hash"]
+                )
+            )
+            print(
+                "   ✅ Recovered and finalized earlier authoritative V2 epoch "
+                f"{recovery.epoch_id}"
+            )
+            return False
+        if int(recovery.epoch_id) == int(epoch_id):
+            raise RuntimeError(
+                "current authoritative V2 publication was quarantined "
+                "without finalized-chain proof"
+            )
+        bt.logging.critical(
+            "weight_publication_prior_epoch_quarantined "
+            f"epoch={recovery.epoch_id}; continuing current epoch"
+        )
+        return False
 
     async def _finalize_weight_publication_v2_with_retry(
         self,
@@ -4854,7 +4883,6 @@ class Validator(BaseValidatorNeuron):
                     client=self._validator_v2_client,
                 )
                 self._last_authoritative_weight_finalization_v2 = finalization
-                journal.clear(expected_event_hash=event_hash)
                 return _WeightPublicationRecoveryOutcome(
                     epoch_id=epoch_id,
                     status="finalized",
@@ -5178,6 +5206,30 @@ class Validator(BaseValidatorNeuron):
             current_block = epoch_state.current_block
             current_epoch = epoch_state.workflow_epoch_id
             blocks_into_epoch = epoch_state.epoch_block
+
+            if not hasattr(self, '_last_weight_submission_epoch'):
+                self._last_weight_submission_epoch = None
+
+            if self._last_weight_submission_epoch == current_epoch:
+                return True
+
+            submission_due = epoch_state.deadline_reached(
+                WEIGHT_SUBMISSION_BLOCK
+            )
+            if submission_due:
+                gateway_url = str(
+                    os.environ.get("VALIDATOR_V2_GATEWAY_URL") or ""
+                ).strip()
+                if (
+                    gateway_url
+                    and hasattr(self, "_weight_publication_journal_v2")
+                    and await self._recover_weight_publication_before_new_authority_v2(
+                        epoch_id=current_epoch,
+                        gateway_url=gateway_url,
+                    )
+                ):
+                    self._last_weight_submission_epoch = current_epoch
+                    return True
             
             if epoch_state.deadline_reached(ALLOCATION_PREPARATION_BLOCK):
                 prepared = await self._prepare_research_lab_allocation(
@@ -5194,20 +5246,8 @@ class Validator(BaseValidatorNeuron):
                         f"block {WEIGHT_SUBMISSION_BLOCK}"
                     )
 
-            if not epoch_state.deadline_reached(WEIGHT_SUBMISSION_BLOCK):
+            if not submission_due:
                 return False
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # CRITICAL: Check if we've already submitted weights for this epoch
-            # Prevents duplicate submissions (which would show 0 leads after clear)
-            # ═══════════════════════════════════════════════════════════════════
-            if not hasattr(self, '_last_weight_submission_epoch'):
-                self._last_weight_submission_epoch = None
-            
-            if self._last_weight_submission_epoch == current_epoch:
-                # Already submitted for this epoch - don't resubmit!
-                # This is the PRIMARY guard against duplicate submissions
-                return True
 
             research_lab_guard = await self._prepare_research_lab_allocation(
                 current_epoch,
@@ -6091,7 +6131,8 @@ class Validator(BaseValidatorNeuron):
                 
                 # Note: Don't clear weights immediately - keep until epoch transition
                 # This prevents wrong resubmission if validator restarts within the same epoch
-                # The _last_weight_submission_epoch guard prevents duplicates during normal operation
+                # The in-memory guard prevents repeats during normal operation;
+                # the signed publication journal protects same-epoch restarts.
                 # Old epoch data in the file doesn't interfere since we only look up current_epoch
                 
                 return True

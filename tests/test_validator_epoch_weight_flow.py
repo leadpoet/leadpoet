@@ -155,15 +155,12 @@ def test_allocation_preparation_precedes_weight_submission_window():
     snippet = _between(
         source,
         "async def _submit_weights_at_epoch_end_locked(self):",
-        "# ═══════════════════════════════════════════════════════════════════\n"
-        "            # CRITICAL: Check if we've already submitted weights for this epoch",
+        "research_lab_guard = await self._prepare_research_lab_allocation(",
     )
     preparation = snippet.index(
         "epoch_state.deadline_reached(ALLOCATION_PREPARATION_BLOCK)"
     )
-    submission = snippet.index(
-        "epoch_state.deadline_reached(WEIGHT_SUBMISSION_BLOCK)"
-    )
+    submission = snippet.index("if not submission_due:")
     assert preparation < submission
 
 

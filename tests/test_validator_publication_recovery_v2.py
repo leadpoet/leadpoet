@@ -88,6 +88,7 @@ class _Journal:
 
     def clear(self, *, expected_event_hash):
         self.calls.append(("clear", expected_event_hash))
+        self.record = None
 
     def quarantine(self, *, expected_epoch, reason):
         path = f"journal.quarantined.{expected_epoch}.{reason}"
@@ -304,7 +305,8 @@ async def test_prepared_crash_replays_gateway_then_uses_epoch_bounded_chain_call
     set_call = next(value for name, value in calls if name == "set")
     assert set_call["uids"] == [0, 1]
     assert set_call["weights"] == [0.8, 0.2]
-    assert journal.calls[-1] == ("clear", EVENT)
+    assert not any(name == "clear" for name, _value in journal.calls)
+    assert journal.record is not None
     assert validator.substrate_calls == []
 
 
@@ -378,7 +380,8 @@ async def test_signed_crash_rebroadcasts_only_exact_enclave_bytes_then_finalizes
     assert validator.substrate_calls == [
         ("author_submitExtrinsic", ["0xaabbcc"])
     ]
-    assert journal.calls[-1] == ("clear", EVENT)
+    assert not any(name == "clear" for name, _value in journal.calls)
+    assert journal.record is not None
 
 
 @pytest.mark.asyncio
@@ -416,7 +419,8 @@ async def test_cross_release_signed_recovery_only_proves_finalization(
     assert outcome.status == "finalized"
     assert client.calls[0][1]["allow_cross_release_finalization_only"] is True
     assert validator.substrate_calls == []
-    assert journal.calls[-1] == ("clear", EVENT)
+    assert not any(name == "clear" for name, _value in journal.calls)
+    assert journal.record is not None
 
 
 @pytest.mark.asyncio
@@ -473,7 +477,8 @@ async def test_compact_signed_recovery_preserves_ancestry_context_across_retry(
     assert validator.substrate_calls == [
         ("author_submitExtrinsic", ["0xaabbcc"])
     ]
-    assert journal.calls[-1] == ("clear", EVENT)
+    assert not any(name == "clear" for name, _value in journal.calls)
+    assert journal.record is not None
 
 
 @pytest.mark.asyncio
@@ -730,3 +735,178 @@ async def test_closed_signed_journal_does_not_block_next_epoch_preparation(
     assert journal.calls[-1][1][:2] == (100, "signed_recovery_unresolved")
     assert len(reached) == 1
     assert reached[0]["calculation_snapshot"]["epoch_id"] == 101
+
+
+@pytest.mark.asyncio
+async def test_same_epoch_restart_revalidates_retained_finalized_publication(
+    monkeypatch,
+):
+    recovered_extrinsic = {
+        "authorization_hash": "sha256:" + "4" * 64,
+        "extrinsic_hash": "0x" + "5" * 64,
+        "extrinsic_hex": "aabbcc",
+    }
+    journal = _Journal(
+        _record(published=True, signatures=[{"receipt": True}])
+    )
+    client = _Client(
+        signed_extrinsics=[recovered_extrinsic],
+        finalization_only=True,
+    )
+    validator = _validator(journal, client)
+    finalizations = []
+
+    async def finalize(**kwargs):
+        finalizations.append(kwargs)
+        return {"acknowledgment": {"weight_finalization_event_hash": EVENT}}
+
+    async def never_prepare(**_kwargs):
+        pytest.fail("same-epoch restart must not prepare a second authority")
+
+    monkeypatch.setattr(
+        validator_module,
+        "finalize_authoritative_weight_publication_v2",
+        finalize,
+    )
+    monkeypatch.setattr(
+        validator_module,
+        "prepare_authoritative_weight_publication_v2",
+        never_prepare,
+    )
+    monkeypatch.setenv("VALIDATOR_V2_GATEWAY_URL", "https://gateway.example")
+
+    result = await validator._authorize_and_set_weights_v2(
+        epoch_state=SimpleNamespace(subnet_epoch_index=50),
+        snapshot={"epoch_id": 100},
+        host_uids=[0, 1],
+        host_weights=[0.8, 0.2],
+        allocation_hash="sha256:" + "6" * 64,
+        leaderboard_window_start="2026-07-22T00:00:00Z",
+        leaderboard_window_end="2026-07-22T01:00:00Z",
+    )
+
+    assert result is True
+    assert len(finalizations) == 1
+    assert journal.record is not None
+    assert not any(name == "clear" for name, _value in journal.calls)
+    assert validator.substrate_calls == []
+
+
+@pytest.mark.asyncio
+async def test_same_epoch_restart_skips_allocation_before_recomputation(
+    monkeypatch,
+):
+    recovered_extrinsic = {
+        "authorization_hash": "sha256:" + "4" * 64,
+        "extrinsic_hash": "0x" + "5" * 64,
+        "extrinsic_hex": "aabbcc",
+    }
+    journal = _Journal(
+        _record(published=True, signatures=[{"receipt": True}])
+    )
+    client = _Client(
+        signed_extrinsics=[recovered_extrinsic],
+        finalization_only=True,
+    )
+    validator = _validator(journal, client)
+    validator.config = SimpleNamespace(
+        netuid=71,
+        neuron=SimpleNamespace(disable_set_weights=False),
+    )
+    validator._last_weight_submission_epoch = None
+
+    async def epoch_state():
+        return SimpleNamespace(
+            current_block=1000,
+            workflow_epoch_id=100,
+            epoch_block=300,
+            deadline_reached=lambda _deadline: True,
+        )
+
+    validator._get_epoch_state_async = epoch_state
+
+    async def finalize(**_kwargs):
+        return {"acknowledgment": {"weight_finalization_event_hash": EVENT}}
+
+    async def never_prepare(*_args, **_kwargs):
+        pytest.fail("retained same-epoch authority must skip allocation work")
+
+    monkeypatch.setattr(
+        validator_module,
+        "finalize_authoritative_weight_publication_v2",
+        finalize,
+    )
+    validator._prepare_research_lab_allocation = never_prepare
+    monkeypatch.setenv("VALIDATOR_V2_GATEWAY_URL", "https://gateway.example")
+
+    result = await validator._submit_weights_at_epoch_end_locked()
+
+    assert result is True
+    assert validator._last_weight_submission_epoch == 100
+    assert journal.record is not None
+    assert not any(name == "clear" for name, _value in journal.calls)
+
+
+@pytest.mark.asyncio
+async def test_next_epoch_retires_revalidated_finalized_publication(
+    monkeypatch,
+):
+    recovered_extrinsic = {
+        "authorization_hash": "sha256:" + "4" * 64,
+        "extrinsic_hash": "0x" + "5" * 64,
+        "extrinsic_hex": "aabbcc",
+    }
+    journal = _Journal(
+        _record(published=True, signatures=[{"receipt": True}])
+    )
+    client = _Client(
+        signed_extrinsics=[recovered_extrinsic],
+        finalization_only=True,
+    )
+    validator = _validator(journal, client)
+
+    async def closed_state():
+        return SimpleNamespace(workflow_epoch_id=101)
+
+    validator._get_epoch_state_async = closed_state
+    validator._get_best_epoch_state_async = closed_state
+    events = []
+
+    async def finalize(**_kwargs):
+        events.append("finalized")
+        return {"acknowledgment": {"weight_finalization_event_hash": EVENT}}
+
+    class NextEpochPreparationReached(RuntimeError):
+        pass
+
+    async def prepare(**kwargs):
+        events.append("prepared_next")
+        assert journal.record is None
+        assert kwargs["calculation_snapshot"]["epoch_id"] == 101
+        raise NextEpochPreparationReached
+
+    monkeypatch.setattr(
+        validator_module,
+        "finalize_authoritative_weight_publication_v2",
+        finalize,
+    )
+    monkeypatch.setattr(
+        validator_module,
+        "prepare_authoritative_weight_publication_v2",
+        prepare,
+    )
+    monkeypatch.setenv("VALIDATOR_V2_GATEWAY_URL", "https://gateway.example")
+
+    with pytest.raises(NextEpochPreparationReached):
+        await validator._authorize_and_set_weights_v2(
+            epoch_state=SimpleNamespace(subnet_epoch_index=51),
+            snapshot={"epoch_id": 101},
+            host_uids=[0, 1],
+            host_weights=[0.8, 0.2],
+            allocation_hash="sha256:" + "6" * 64,
+            leaderboard_window_start="2026-07-22T00:00:00Z",
+            leaderboard_window_end="2026-07-22T01:00:00Z",
+        )
+
+    assert events == ["finalized", "prepared_next"]
+    assert ("clear", EVENT) in journal.calls

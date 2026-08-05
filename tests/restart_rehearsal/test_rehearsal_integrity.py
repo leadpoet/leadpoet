@@ -4473,31 +4473,30 @@ def test_gateway_rehearsal_requires_both_paid_provider_preflights() -> None:
         },
         {
             "kind": "local-postgrest",
+            "operation": "provider_outcome_checkpoint_readback",
+            "status": "ok",
+            "row_count": 0,
+            "checkpoint_hashes": [],
+        },
+        {
+            "kind": "local-postgrest",
             "operation": "provider_outcome_checkpoint_appended",
             "status": "ok",
+            "method": "POST",
+            "target": "append_research_lab_provider_outcome_checkpoint_v2",
             "result_status": "inserted",
             "checkpoint_hash": "sha256:" + "1" * 64,
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_readback",
-            "status": "ok",
-            "row_count": 1,
-            "checkpoint_hashes": ["sha256:" + "1" * 64],
+            "sequence": 1,
         },
         {
             "kind": "local-postgrest",
             "operation": "provider_outcome_checkpoint_appended",
             "status": "ok",
+            "method": "POST",
+            "target": "append_research_lab_provider_outcome_checkpoint_v2",
             "result_status": "inserted",
             "checkpoint_hash": "sha256:" + "2" * 64,
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_readback",
-            "status": "ok",
-            "row_count": 1,
-            "checkpoint_hashes": ["sha256:" + "2" * 64],
+            "sequence": 2,
         },
     ]
     verify_gateway_provider_preflight(rows, transition="forward")
@@ -4511,10 +4510,25 @@ def test_gateway_rehearsal_requires_both_paid_provider_preflights() -> None:
     with pytest.raises(SystemExit, match="both authenticated provider"):
         verify_gateway_provider_preflight(failed, transition="forward")
     with pytest.raises(SystemExit, match="durably append both"):
-        verify_gateway_provider_preflight(rows[:2], transition="forward")
-    with pytest.raises(SystemExit, match="lacks exact durable readback"):
+        verify_gateway_provider_preflight(rows[:3], transition="forward")
+    with pytest.raises(SystemExit, match="restart recovery"):
         verify_gateway_provider_preflight(
-            [*rows[:3], *rows[4:]],
+            [*rows[:2], *rows[3:]],
+            transition="forward",
+        )
+    redundant_readback = [
+        *rows,
+        {
+            "kind": "local-postgrest",
+            "operation": "provider_outcome_checkpoint_readback",
+            "status": "ok",
+            "row_count": 1,
+            "checkpoint_hashes": ["sha256:" + "2" * 64],
+        },
+    ]
+    with pytest.raises(SystemExit, match="redundant checkpoint readback"):
+        verify_gateway_provider_preflight(
+            redundant_readback,
             transition="forward",
         )
     rejected = [

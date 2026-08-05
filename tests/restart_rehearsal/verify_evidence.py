@@ -1369,22 +1369,42 @@ def verify_gateway_provider_preflight(
             "gateway provider preflight did not durably append both "
             "provider outcomes"
         )
-    for append_ordinal, append_row in append_rows:
-        checkpoint_hash = str(append_row.get("checkpoint_hash") or "")
-        if not any(
-            read_ordinal > append_ordinal
-            and read_row.get("kind") == "local-postgrest"
-            and read_row.get("operation")
-            == "provider_outcome_checkpoint_readback"
-            and read_row.get("status") == "ok"
-            and read_row.get("row_count") == 1
-            and read_row.get("checkpoint_hashes") == [checkpoint_hash]
-            for read_ordinal, read_row in enumerate(rows)
+    for _append_ordinal, append_row in append_rows:
+        if (
+            append_row.get("method") != "POST"
+            or append_row.get("target")
+            != "append_research_lab_provider_outcome_checkpoint_v2"
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(append_row.get("checkpoint_hash") or ""),
+            )
+            or not isinstance(append_row.get("sequence"), int)
+            or isinstance(append_row.get("sequence"), bool)
+            or int(append_row["sequence"]) <= 0
         ):
             raise SystemExit(
-                "gateway provider preflight checkpoint lacks exact durable "
-                "readback"
+                "gateway provider preflight atomic checkpoint "
+                "acknowledgement is invalid"
             )
+    first_append_ordinal = append_rows[0][0]
+    readback_rows = [
+        (ordinal, row)
+        for ordinal, row in enumerate(rows)
+        if row.get("kind") == "local-postgrest"
+        and row.get("operation")
+        == "provider_outcome_checkpoint_readback"
+        and row.get("status") == "ok"
+    ]
+    if not any(ordinal < first_append_ordinal for ordinal, _row in readback_rows):
+        raise SystemExit(
+            "gateway provider preflight did not exercise checkpoint "
+            "restart recovery before appending"
+        )
+    if any(ordinal > first_append_ordinal for ordinal, _row in readback_rows):
+        raise SystemExit(
+            "gateway provider preflight issued a redundant checkpoint "
+            "readback after atomic append"
+        )
     if any(
         row.get("kind") == "local-postgrest"
         and row.get("status") == "rejected"

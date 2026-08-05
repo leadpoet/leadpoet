@@ -206,27 +206,12 @@ class ProviderOutcomeStoreV2:
                 )
             self._vault.release_transient(str(descriptor["artifact_id"]))
             return conflict_result
-        rows, read_attempts, read_artifacts = self._read_rows(
-            utc_day=utc_day,
-            sequence=sequence,
-            order_latest=False,
-            job_id=job_id,
-            purpose=purpose,
-            operation_suffix="readback",
-        )
-        attempts.extend(read_attempts)
-        transport_artifacts.update(read_artifacts)
-        if len(rows) != 1 or rows[0] != row:
-            if rows:
-                self._vault.release_transient(str(descriptor["artifact_id"]))
-                return {
-                    "status": "conflict",
-                    "transport_attempts": attempts,
-                    "evidence_artifact_hashes": sorted(transport_artifacts),
-                }
-            raise ProviderOutcomeStoreV2Error(
-                "provider outcome checkpoint durable readback differs"
-            )
+        # The append RPC verifies the exact encrypted row inside the same
+        # transaction before returning inserted/existing. Its authenticated,
+        # response-hash-bound terminal is therefore the durable commit proof;
+        # a second PostgREST GET would only serialize every provider outcome
+        # through an additional network round trip. Restart recovery still
+        # performs an independent read and decrypts the committed checkpoint.
         self._vault.release_transient(str(descriptor["artifact_id"]))
         return {
             "status": "persisted",

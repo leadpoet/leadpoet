@@ -380,14 +380,14 @@ def test_outcome_checkpoint_chain_is_monotonic_and_collision_fails_closed() -> N
     )
     assert conflict["status"] == "conflict"
     assert len(conflict["transport_attempts"]) == 1
-    assert len(broker.calls) == 6
+    assert len(broker.calls) == 4
     assert vault.job_artifacts(
         job_id="job-3",
         purpose="research_lab.company_score.v2",
     ) == ()
 
 
-def test_sequential_checkpoint_readbacks_have_request_bound_operation_ids() -> None:
+def test_sequential_checkpoint_appends_need_one_round_trip_each() -> None:
     broker = _TerminalCachingBroker()
     store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
     first_document = _document()
@@ -418,11 +418,30 @@ def test_sequential_checkpoint_readbacks_have_request_bound_operation_ids() -> N
     )
 
     assert second["status"] == "persisted"
-    read_calls = [call for call in broker.calls if call["method"] == "GET"]
-    assert len(read_calls) == 2
-    assert len({call["logical_operation_id"] for call in read_calls}) == 2
-    assert "sequence=eq.1" in read_calls[0]["url"]
-    assert "sequence=eq.2" in read_calls[1]["url"]
+    assert [call["method"] for call in broker.calls] == ["POST", "POST"]
+    assert len({call["logical_operation_id"] for call in broker.calls}) == 2
+    assert broker.calls[0]["logical_operation_id"].endswith(
+        ":provider-outcome:1:append"
+    )
+    assert broker.calls[1]["logical_operation_id"].endswith(
+        ":provider-outcome:2:append"
+    )
+
+
+def test_checkpoint_persist_does_not_depend_on_a_second_read() -> None:
+    broker = _Broker()
+    broker.fail_reads = True
+    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+
+    persisted = store.persist(
+        _document(),
+        previous_checkpoint_hash="",
+        job_id="job",
+        purpose="research_lab.company_score.v2",
+    )
+
+    assert persisted["status"] == "persisted"
+    assert [call["method"] for call in broker.calls] == ["POST"]
 
 
 def test_outcome_checkpoint_restores_authenticated_embedded_conflict_head() -> None:
@@ -507,7 +526,7 @@ def test_outcome_checkpoint_retries_ambiguous_append_without_duplication(
     assert persisted["transport_attempts"][0]["terminal_status"] == "transport_failure"
     assert persisted["transport_attempts"][0]["failure_code"] == "unexpected_eof"
     assert persisted["transport_attempts"][1]["terminal_status"] == "authenticated_response"
-    assert [call["method"] for call in broker.calls] == ["POST", "POST", "GET"]
+    assert [call["method"] for call in broker.calls] == ["POST", "POST"]
     assert [call["attempt_number"] for call in broker.calls[:2]] == [0, 1]
     assert len(broker.rows) == 1
 
@@ -558,7 +577,7 @@ def test_outcome_checkpoint_retries_authenticated_transient_append(
     )
 
     assert persisted["status"] == "persisted"
-    assert [call["method"] for call in broker.calls] == ["POST", "POST", "GET"]
+    assert [call["method"] for call in broker.calls] == ["POST", "POST"]
     assert [call["attempt_number"] for call in broker.calls[:2]] == [0, 1]
     assert [
         attempt["http_status"] for attempt in persisted["transport_attempts"][:2]

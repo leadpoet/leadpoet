@@ -5498,12 +5498,19 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         live_call=True,
         cost_event={},
     )
+    outcome_call_start = len(boundary.calls)
     outcome = outcome_store.persist(
         outcome_document,
         previous_checkpoint_hash="",
         job_id=context.job_id,
         purpose=context.purpose,
     )
+    persist_outcome_calls = boundary.calls[outcome_call_start:]
+    if [item["method"] for item in persist_outcome_calls] != ["POST", "POST"]:
+        raise RuntimeError(
+            "provider outcome append issued a redundant durable readback"
+        )
+    restore_call_start = len(boundary.calls)
     restarted_outcome_store = ProviderOutcomeStoreV2(
         broker=boundary,
         vault=vault,
@@ -5514,6 +5521,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         job_id=context.job_id,
         purpose=context.purpose,
     )
+    restore_outcome_calls = boundary.calls[restore_call_start:]
     append_attempts = [
         item
         for item in outcome["transport_attempts"]
@@ -5525,6 +5533,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         or [item["terminal_status"] for item in append_attempts]
         != ["transport_failure", "authenticated_response"]
         or len(boundary.outcome_rows) != 1
+        or [item["method"] for item in restore_outcome_calls] != ["GET"]
         or restored_outcome.get("checkpoint_hash") != outcome["checkpoint_hash"]
         or restored_outcome.get("state_document") != outcome_document
     ):

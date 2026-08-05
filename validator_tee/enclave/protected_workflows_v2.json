@@ -577,7 +577,7 @@
       "symbol": "Validator.__init__"
     },
     {
-      "ast_sha256": "sha256:c239545f80c82f50a63737a15976e9750b5a1a62d8dd1b016741fa96d9384e2f",
+      "ast_sha256": "sha256:a2ef59d8313296fb8585028a99fcb322825111211dde7f52f9e2dd13aeb4833d",
       "path": "neurons/validator.py",
       "symbol": "Validator._authorize_and_set_weights_v2"
     },
@@ -592,7 +592,7 @@
       "symbol": "Validator._publish_and_set_weights"
     },
     {
-      "ast_sha256": "sha256:ecf5d4cc817866f57ec2283b30aa69603a3606b2c217b39bd42e8383315b0ee2",
+      "ast_sha256": "sha256:829e1e4a2896865e26f3263b32fdc1a73f880cec118b37edc5498b5d04bddf87",
       "path": "neurons/validator.py",
       "symbol": "Validator._recover_weight_publication_journal_v2"
     },
@@ -607,7 +607,7 @@
       "symbol": "Validator._set_weights_until_epoch_end"
     },
     {
-      "ast_sha256": "sha256:975d315bc47ac5cd1f908746554e9adfab510fdf300aaa69f1f382b71fb10445",
+      "ast_sha256": "sha256:c86bc94ae685539cf1c6b9a3b8b0f8f6d217e4cc5d86e644b4405ed5ec20d431",
       "path": "neurons/validator.py",
       "symbol": "Validator._submit_weights_at_epoch_end_locked"
     },
@@ -807,7 +807,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:08db446dd4b77185deb6414e6e34c48179bbc617b33816e048d24f12354a2960",
-  "protected_source_commit": "5d90b4807cd57f4cb166773828c9c74e93b5ccb9",
+  "manifest_hash": "sha256:6840ad16e5a6863867cd02ec97e5782b947b2753ac0ac6bb7cd41a0abbc3a922",
+  "protected_source_commit": "c8210042b54dae9fddea00c410449b7ae71ba120",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

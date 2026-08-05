@@ -648,6 +648,8 @@ PROTECTED_SYMBOLS = {
     "gateway/tee/inter_enclave_tls.py": (
         "MAX_REPLAY_CACHE_BYTES",
         "MAX_REPLAY_CACHE_ENTRIES",
+        "MAX_RPC_DELIVERY_ATTEMPTS",
+        "RPC_DELIVERY_BACKOFF_SECONDS",
         "REPLAY_CACHE_TTL_SECONDS",
         "REPLAY_WAIT_SECONDS",
         "InterEnclaveTLSError",

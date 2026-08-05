@@ -255,17 +255,23 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(
     }
 
     original_send_frame = inter_enclave_tls._send_frame
-    dropped = {"value": False}
+    dropped = {
+        "job-replay": 0,
+        "job-replay-exhausted": 0,
+    }
 
     def _drop_first_terminal_response(connection, value):
         result = value.get("result") if isinstance(value, dict) else None
+        job_id = result.get("job_id") if isinstance(result, dict) else None
+        drop_limit = {
+            ("2" * 32, "job-replay"): 5,
+            ("7" * 32, "job-replay-exhausted"): 6,
+        }.get((value.get("channel_id"), job_id), 0)
         if (
-            not dropped["value"]
-            and value.get("channel_id") == "2" * 32
-            and isinstance(result, dict)
-            and result.get("job_id") == "job-replay"
+            job_id in dropped
+            and dropped[job_id] < drop_limit
         ):
-            dropped["value"] = True
+            dropped[job_id] += 1
             connection.shutdown(socket.SHUT_RDWR)
             connection.close()
             return
@@ -282,13 +288,26 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(
         params={"job_id": "job-replay"},
         channel_id="2" * 32,
     )
-    assert dropped["value"] is True
+    assert dropped["job-replay"] == 5
     assert replayed == {
         "method": "provider_execute",
         "job_id": "job-replay",
         "peer_role": "gateway_scoring",
     }
     assert handler_calls.count(("provider_execute", "job-replay")) == 1
+
+    with pytest.raises(
+        InterEnclaveTLSError,
+        match="inter-enclave transport failed after bounded replay",
+    ):
+        client.call(
+            target_physical_role="gateway_coordinator",
+            method="provider_execute",
+            params={"job_id": "job-replay-exhausted"},
+            channel_id="7" * 32,
+        )
+    assert handler_calls.count(("provider_execute", "job-replay-exhausted")) == 1
+    assert dropped["job-replay-exhausted"] == 6
 
     def concurrent_call(_index):
         return client.call(

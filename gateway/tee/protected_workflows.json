@@ -1142,7 +1142,7 @@
       "symbol": "AttestedPeerRegistry"
     },
     {
-      "ast_sha256": "sha256:8bdafb01fef69514c9f3e24bcad362947495405c69abf09b7984463dfd192bad",
+      "ast_sha256": "sha256:76742d51d4d387bcf15e43e624aec5cea513c56d8487b00a89fe1acf5a6d210b",
       "path": "gateway/tee/inter_enclave_tls.py",
       "symbol": "AttestedTLSRPCClient"
     },
@@ -1167,6 +1167,11 @@
       "symbol": "MAX_REPLAY_CACHE_ENTRIES"
     },
     {
+      "ast_sha256": "sha256:033e4b0b6c9dcdf63f0053b3d8a842eeed692da9141ae0affce59c3d07d913e7",
+      "path": "gateway/tee/inter_enclave_tls.py",
+      "symbol": "MAX_RPC_DELIVERY_ATTEMPTS"
+    },
+    {
       "ast_sha256": "sha256:ccaf13fa30274a2c7870d9e409de3a1f9d6a138d71db79e5b22a6fe7369f1d9c",
       "path": "gateway/tee/inter_enclave_tls.py",
       "symbol": "REPLAY_CACHE_TTL_SECONDS"
@@ -1175,6 +1180,11 @@
       "ast_sha256": "sha256:c1b95e6b862a75901d3e1806012ee85f4a5f2dec3c4244c3ccd8d11b25646fde",
       "path": "gateway/tee/inter_enclave_tls.py",
       "symbol": "REPLAY_WAIT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:21d2d50df3d90ff4f02f1d18a6d4b18bcf96d03c841e0a4cb1df695738593062",
+      "path": "gateway/tee/inter_enclave_tls.py",
+      "symbol": "RPC_DELIVERY_BACKOFF_SECONDS"
     },
     {
       "ast_sha256": "sha256:8f272862cd24eacd02f0b126615c4066dedc19ba6a6f0b14303ae5797c520130",
@@ -2597,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:4f44de237b22ef5db4deb3df4faea24dc8fbdb0da89b2c597c112452e8772900",
+  "manifest_hash": "sha256:6acb6c48bc5491e26ac6525174b6741456dee474b3a4637fc3eeb41a47c8aaf7",
   "protected_source_commit": "1803f3802b3667e2036a54fbf6ada14b7edfa206",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

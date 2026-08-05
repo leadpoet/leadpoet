@@ -26,7 +26,13 @@ from gateway.tee.provider_broker_v2 import (
     credential_reference_hash,
     expected_provider_credential_slots,
 )
-from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
+from gateway.tee.inter_enclave_tls import (
+    MAX_FRAME_BYTES,
+    MAX_RPC_DELIVERY_ATTEMPTS,
+    REPLAY_WAIT_SECONDS,
+    AttestedTLSRPCClient,
+    _RetryableInterEnclaveTransportError,
+)
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
 from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
 from gateway.tee.provider_semantics_v2 import (
@@ -654,6 +660,51 @@ def test_provider_outcome_state_survives_restart_and_persistence_is_fail_closed(
             )
         )
     assert restarted.provider_outcome_snapshot() == before_failure
+
+
+def test_inter_enclave_replay_preserves_one_provider_checkpoint_across_restart():
+    outcome_store = _OutcomeStore()
+    authority, broker, cache, artifacts = _authority(outcome_store=outcome_store)
+    request = _request(logical_operation_id="provider-operation-replayed-terminal")
+    client = object.__new__(AttestedTLSRPCClient)
+    delivery = {"attempts": 0, "result": None}
+
+    def _call_once(**_kwargs):
+        delivery["attempts"] += 1
+        if delivery["result"] is None:
+            delivery["result"] = authority.execute(request)
+        if delivery["attempts"] < MAX_RPC_DELIVERY_ATTEMPTS:
+            raise _RetryableInterEnclaveTransportError(
+                "simulated terminal response loss"
+            )
+        return delivery["result"]
+
+    client._call_once = _call_once
+    result = client.call(
+        target_physical_role="gateway_coordinator",
+        method="provider_execute",
+        params=request,
+        channel_id="9" * 32,
+    )
+
+    assert result["terminal_status"] == "authenticated_response"
+    assert delivery["attempts"] == MAX_RPC_DELIVERY_ATTEMPTS
+    assert len(broker.calls) == 1
+    assert cache.persist_count == 1
+    assert outcome_store.persist_count == 1
+
+    restarted, _broker, _cache, _artifacts = _authority(
+        broker=broker,
+        cache=cache,
+        artifacts=artifacts,
+        outcome_store=outcome_store,
+    )
+    replay = restarted.execute(
+        {**request, "logical_operation_id": "provider-operation-after-restart"}
+    )
+    assert replay["terminal_status"] == "attested_local_response"
+    assert len(broker.calls) == 1
+    assert outcome_store.persist_count == 2
 
 
 def test_provider_outcome_conflict_rebases_onto_durable_head() -> None:

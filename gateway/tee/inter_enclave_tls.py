@@ -39,6 +39,8 @@ MAX_REPLAY_CACHE_BYTES = 128 * 1024 * 1024
 MAX_REPLAY_CACHE_ENTRIES = 128
 REPLAY_CACHE_TTL_SECONDS = 300.0
 REPLAY_WAIT_SECONDS = 1800.0
+MAX_RPC_DELIVERY_ATTEMPTS = 6
+RPC_DELIVERY_BACKOFF_SECONDS = 0.05
 SCHEMA_VERSION = "leadpoet.inter_enclave_rpc.v2"
 _CHANNEL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -322,7 +324,7 @@ class AttestedTLSRPCClient:
         channel_id: str,
     ) -> Dict[str, Any]:
         last_error = None
-        for attempt in range(2):
+        for attempt in range(MAX_RPC_DELIVERY_ATTEMPTS):
             try:
                 return self._call_once(
                     target_physical_role=target_physical_role,
@@ -332,7 +334,13 @@ class AttestedTLSRPCClient:
                 )
             except _RetryableInterEnclaveTransportError as exc:
                 last_error = exc
-                if attempt == 0:
+                if attempt + 1 < MAX_RPC_DELIVERY_ATTEMPTS:
+                    time.sleep(
+                        min(
+                            RPC_DELIVERY_BACKOFF_SECONDS * (2**attempt),
+                            0.4,
+                        )
+                    )
                     continue
         raise InterEnclaveTLSError(
             "inter-enclave transport failed after bounded replay"

@@ -986,6 +986,19 @@ class ValidatorWeightAuthorityV2:
     ) -> Any:
         attempts = [dict(item) for item in chain_snapshot["attempts"]]
         jobs = dict(chain_snapshot["jobs"])
+        observation_scope = str(
+            chain_snapshot.get("observation_scope") or ""
+        ).lower()
+        if (
+            len(observation_scope) != 32
+            or any(
+                character not in "0123456789abcdef"
+                for character in observation_scope
+            )
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "chain observation scope is invalid"
+            )
         issued_at = _issued_at(self._clock)
         receipts = []
         hashes = {}
@@ -1157,14 +1170,15 @@ class ValidatorWeightAuthorityV2:
         )
         add(
             "burn_ownership",
-            job_id="burn-ownership:%d" % epoch_id,
+            job_id="burn-ownership:%d:%s" % (epoch_id, observation_scope),
             sequence=2,
             parent_hashes=(metagraph_receipt["receipt_hash"],),
             input_root=metagraph_receipt["output_root"],
         )
         add(
             "feature_flags",
-            job_id="weight-feature-flags:%d" % epoch_id,
+            job_id="weight-feature-flags:%d:%s"
+            % (epoch_id, observation_scope),
             sequence=3,
             parent_hashes=(),
             input_root=sha256_json(
@@ -1173,7 +1187,7 @@ class ValidatorWeightAuthorityV2:
         )
         add(
             "constants",
-            job_id="weight-constants:%d" % epoch_id,
+            job_id="weight-constants:%d:%s" % (epoch_id, observation_scope),
             sequence=4,
             parent_hashes=(),
             input_root=sha256_json(

@@ -1158,8 +1158,16 @@ class ValidatorChainSourceV2:
         }
 
     def read_finalized_snapshot(self, *, netuid: int, epoch_id: int) -> Dict[str, Any]:
-        chain_job = "chain-state:%d" % int(epoch_id)
-        metagraph_job = "metagraph-state:%d" % int(epoch_id)
+        # A weight calculation may be retried or recomputed more than once in
+        # one epoch.  Give every fresh observation its own enclave-generated
+        # evidence namespace so immutable transport attempts never alias a
+        # prior observation's logical-operation keys.
+        observation_scope = os.urandom(16).hex()
+        chain_job = "chain-state:%d:%s" % (int(epoch_id), observation_scope)
+        metagraph_job = "metagraph-state:%d:%s" % (
+            int(epoch_id),
+            observation_scope,
+        )
         all_attempts = []
         all_artifacts = []
 
@@ -1248,7 +1256,10 @@ class ValidatorChainSourceV2:
                 # every authenticated selector attempt part of the snapshot
                 # receipt instead of leaving valid transport evidence
                 # unclaimed in the final authority graph.
-                selector_job = "subnet-epoch-selector:%d" % int(epoch_id)
+                selector_job = "subnet-epoch-selector:%d:%s" % (
+                    int(epoch_id),
+                    observation_scope,
+                )
 
                 def selector_call(
                     storage_name: str,
@@ -1326,6 +1337,14 @@ class ValidatorChainSourceV2:
                     raise ValidatorChainSourceV2Error(
                         "requested settlement epoch is not current or just finalized"
                     )
+        snapshot_job = selector_job or (
+            "subnet-epoch-snapshot:%d:%d:%s"
+            % (int(epoch_id), int(header["block"]), observation_scope)
+        )
+        boundary_job = "subnet-epoch-boundary:%d:%s" % (
+            int(epoch_id),
+            observation_scope,
+        )
         stateful = self._read_stateful_epoch_authority(
             configuration=epoch_configuration,
             finalized_hash=finalized_hash,
@@ -1335,7 +1354,8 @@ class ValidatorChainSourceV2:
             chain_job=chain_job,
             request_id_start=next_request_id,
             historical_snapshot=historical_snapshot,
-            snapshot_job_override=selector_job,
+            snapshot_job_override=snapshot_job,
+            boundary_job_override=boundary_job,
         )
         epoch_authority = stateful["authority"]
         epoch_boundary = stateful["boundary_snapshot"]
@@ -1365,6 +1385,7 @@ class ValidatorChainSourceV2:
         if int(metagraph["block"]) != int(header["block"]):
             raise ValidatorChainSourceV2Error("metagraph and finalized block differ")
         return {
+            "observation_scope": observation_scope,
             "finalized_block_hash": finalized_hash,
             "header": header,
             "metagraph": metagraph,

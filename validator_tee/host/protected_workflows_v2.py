@@ -155,6 +155,7 @@ PROTECTED_SYMBOLS = {
     ),
     "validator_tee/enclave/weight_authority_v2.py": (
         "ValidatorWeightAuthorityV2.compute",
+        "ValidatorWeightAuthorityV2._validator_input_receipts",
         "ValidatorWeightAuthorityV2.issue_validator_publication_ancestry_proof",
         "ValidatorWeightAuthorityV2.issue_validator_finalization_ancestry_proof",
         "ValidatorWeightAuthorityV2.validate_compact_weight_recovery",

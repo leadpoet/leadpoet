@@ -17,6 +17,7 @@ from leadpoet_canonical.chain_source_v2 import (
     timelocked_weight_commits_storage_key,
 )
 from leadpoet_canonical.hotkey_authority_v2 import signed_extrinsic_hash_v2
+from validator_tee.enclave import chain_source_v2
 from validator_tee.enclave.chain_source_v2 import (
     EnclaveChainRpcTransportV2,
     FINALIZATION_RPC_PACING_SECONDS,
@@ -384,6 +385,44 @@ def test_finalized_source_uses_one_block_for_header_and_metagraph():
     assert len(result["metagraph"]["hotkeys"]) == 2
     metagraph_call = next(item for item in calls if item["method"] == "state_call")
     assert metagraph_call["params"][2] == FINALIZED_HASH
+
+
+def test_fresh_same_epoch_snapshots_use_disjoint_evidence_namespaces(monkeypatch):
+    scopes = iter((bytes.fromhex("01" * 16), bytes.fromhex("02" * 16)))
+    monkeypatch.setattr(chain_source_v2.os, "urandom", lambda _size: next(scopes))
+    _calls, rpc_call = _stateful_rpc()
+    source = ValidatorChainSourceV2(
+        rpc_call=rpc_call,
+        archive_rpc_call=_archive_adapter(rpc_call),
+        epoch_authority_supplier=lambda: {
+            "mode": "stateful_v1",
+            "cutover_manifest": _stateful_cutover(),
+        },
+    )
+
+    first = source.read_finalized_snapshot(
+        netuid=71,
+        epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+    )
+    second = source.read_finalized_snapshot(
+        netuid=71,
+        epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+    )
+
+    assert first["observation_scope"] == "01" * 16
+    assert second["observation_scope"] == "02" * 16
+    assert first["header"] == second["header"]
+    assert first["metagraph"] == second["metagraph"]
+    assert set(first["jobs"].values()).isdisjoint(second["jobs"].values())
+    first_operations = {
+        (item["logical_operation_id"], item["attempt_number"])
+        for item in first["attempts"]
+    }
+    second_operations = {
+        (item["logical_operation_id"], item["attempt_number"])
+        for item in second["attempts"]
+    }
+    assert first_operations.isdisjoint(second_operations)
 
 
 def test_stateful_storage_keys_and_fixed_width_decoding_match_sn71_vector():
@@ -848,8 +887,10 @@ def test_stateful_boundary_search_uses_index_transition_not_reset_anchor():
     assert result["epoch_boundary"]["current_block"] == boundary_block
     assert result["epoch_boundary"]["last_epoch_block"] == boundary_block
     assert result["epoch_boundary"]["subnet_epoch_index"] == current_index
-    selector_job = "subnet-epoch-selector:%d" % (first_settlement + 1)
-    assert result["jobs"]["subnet_epoch_snapshot"] == selector_job
+    selector_job = result["jobs"]["subnet_epoch_snapshot"]
+    assert selector_job.startswith(
+        "subnet-epoch-selector:%d:" % (first_settlement + 1)
+    )
     epoch_jobs = {
         result["jobs"]["subnet_epoch_snapshot"],
         result["jobs"]["subnet_epoch_boundary"],
@@ -1079,8 +1120,8 @@ def test_finalized_source_selects_just_finished_official_epoch():
     assert result["metagraph"]["block"] == target_block
     assert observed["finalized_hash"] == target_hash.removeprefix("0x")
     assert observed["historical_snapshot"] is True
-    assert observed["snapshot_job_override"] == (
-        "subnet-epoch-selector:%d" % STATEFUL_SETTLEMENT_EPOCH_ID
+    assert observed["snapshot_job_override"].startswith(
+        "subnet-epoch-selector:%d:" % STATEFUL_SETTLEMENT_EPOCH_ID
     )
     selector_attempts = [
         attempt

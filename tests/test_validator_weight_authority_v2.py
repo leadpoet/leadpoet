@@ -558,10 +558,13 @@ def _fixture(
         )
 
     class FakeChainSource:
+        observation_scope = "01" * 16
+
         def read_finalized_snapshot(self, *, netuid, epoch_id):
             assert netuid == 71
             assert epoch_id == 100
             value = {
+                "observation_scope": self.observation_scope,
                 "finalized_block_hash": "ab" * 32,
                 "header": {
                     "block": 36099,
@@ -725,6 +728,25 @@ def test_validator_authority_computes_and_signs_exact_canonical_weights():
     purposes = {item["purpose"] for item in value["receipt_graph"]["receipts"]}
     assert "validator.weight_snapshot.v2" in purposes
     assert "validator.weights.computed.v2" in purposes
+    local_jobs = {
+        item["purpose"]: item["job_id"]
+        for item in value["receipt_graph"]["receipts"]
+        if item["purpose"]
+        in {
+            "validator.burn_ownership.v2",
+            "validator.feature_flags.v2",
+            "validator.constants.v2",
+        }
+    }
+    assert set(local_jobs) == {
+        "validator.burn_ownership.v2",
+        "validator.feature_flags.v2",
+        "validator.constants.v2",
+    }
+    assert all(
+        job_id.endswith(":" + "01" * 16)
+        for job_id in local_jobs.values()
+    )
     assert set(fixture["verified_boots"]) == {
         fixture["validator_boot"]["boot_identity_hash"],
         fixture["gateway_boot"]["boot_identity_hash"],
@@ -733,6 +755,82 @@ def test_validator_authority_computes_and_signs_exact_canonical_weights():
         fixture["validator_boot"]["boot_identity_hash"]: True,
         fixture["gateway_boot"]["boot_identity_hash"]: True,
     }
+
+
+def test_validator_authority_rejects_invalid_chain_observation_scope():
+    fixture = _fixture()
+    original = fixture["chain_source"].read_finalized_snapshot
+
+    def invalid_scope(**kwargs):
+        value = original(**kwargs)
+        value["observation_scope"] = "epoch-only"
+        return value
+
+    fixture["chain_source"].read_finalized_snapshot = invalid_scope
+    with pytest.raises(
+        ValidatorWeightAuthorityV2Error,
+        match="chain observation scope is invalid",
+    ):
+        fixture["authority"].compute(fixture["request"])
+
+
+def test_same_epoch_recompute_scopes_local_receipts_without_changing_weights():
+    fixture = _fixture()
+    first = fixture["authority"].compute(fixture["request"])
+    fixture["chain_source"].observation_scope = "02" * 16
+    second = fixture["authority"].compute(fixture["request"])
+
+    assert {
+        key: value
+        for key, value in first["weight_result"].items()
+        if key != "snapshot_hash"
+    } == {
+        key: value
+        for key, value in second["weight_result"].items()
+        if key != "snapshot_hash"
+    }
+    assert first["weight_result"]["snapshot_hash"] != second["weight_result"][
+        "snapshot_hash"
+    ]
+    local_purposes = {
+        "validator.burn_ownership.v2",
+        "validator.feature_flags.v2",
+        "validator.constants.v2",
+    }
+    first_jobs = {
+        item["job_id"]
+        for item in first["receipt_graph"]["receipts"]
+        if item["purpose"] in local_purposes
+    }
+    second_jobs = {
+        item["job_id"]
+        for item in second["receipt_graph"]["receipts"]
+        if item["purpose"] in local_purposes
+    }
+    assert len(first_jobs) == len(second_jobs) == 3
+    assert first_jobs.isdisjoint(second_jobs)
+
+    persisted_receipts = {}
+    persisted_attempts = {}
+    for result in (first, second):
+        for receipt in result["receipt_graph"]["receipts"]:
+            key = (
+                receipt["role"],
+                receipt["purpose"],
+                receipt["job_id"],
+                receipt["epoch_id"],
+                receipt["input_root"],
+                receipt["config_hash"],
+            )
+            existing = persisted_receipts.setdefault(key, receipt["receipt_hash"])
+            assert existing == receipt["receipt_hash"]
+        for attempt in result["receipt_graph"]["transport_attempts"]:
+            key = (
+                attempt["logical_operation_id"],
+                attempt["attempt_number"],
+            )
+            existing = persisted_attempts.setdefault(key, attempt["attempt_hash"])
+            assert existing == attempt["attempt_hash"]
 
 
 def test_validator_authority_preserves_approved_historical_validator_ancestry():

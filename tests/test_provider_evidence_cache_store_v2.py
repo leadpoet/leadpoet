@@ -81,6 +81,10 @@ class _Broker:
         self.fail_reads = False
         self.fail_posts = 0
         self.commit_failed_posts = False
+        self.read_http_failure = None
+        self.read_http_failures = 0
+        self.post_http_failure = None
+        self.post_http_failures = 0
         self.provider_calls = 0
 
     def execute(self, request):
@@ -97,6 +101,14 @@ class _Broker:
         if request["method"] == "POST":
             row = json.loads(base64.b64decode(request["body_b64"]))
             key = (row["utc_day"], row["request_fingerprint"])
+            if self.post_http_failures:
+                self.post_http_failures -= 1
+                status, code = self.post_http_failure
+                return self._result(
+                    request,
+                    status=status,
+                    body=json.dumps({"code": code}).encode(),
+                )
             if self.fail_posts:
                 self.fail_posts -= 1
                 if self.commit_failed_posts:
@@ -109,6 +121,14 @@ class _Broker:
         if self.fail_reads:
             self.fail_reads -= 1
             return self._failure(request)
+        if self.read_http_failures:
+            self.read_http_failures -= 1
+            status, code = self.read_http_failure
+            return self._result(
+                request,
+                status=status,
+                body=json.dumps({"code": code}).encode(),
+            )
         query = parse_qs(urlsplit(request["url"]).query)
         day = query["utc_day"][0].split("eq.", 1)[1]
         fingerprint = query["request_fingerprint"][0].split("eq.", 1)[1]
@@ -327,6 +347,41 @@ def test_cache_store_retries_transient_read_under_same_operation() -> None:
     ) == 1
 
 
+@pytest.mark.parametrize(
+    ("http_status", "code"),
+    (
+        (503, "PGRST002"),
+        (504, "PGRST003"),
+    ),
+)
+def test_cache_store_retries_authenticated_transient_read(
+    http_status: int,
+    code: str,
+) -> None:
+    broker = _Broker()
+    broker.read_http_failure = (http_status, code)
+    broker.read_http_failures = 1
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+        sleeper=lambda _delay: None,
+    )
+
+    missing = store.load(
+        utc_day="2026-07-10",
+        request_fingerprint="4" * 64,
+        job_id="job",
+        purpose="research_lab.private_model_run.v2",
+    )
+
+    assert missing["found"] is False
+    assert [call["attempt_number"] for call in broker.calls] == [0, 1]
+    assert [
+        attempt["http_status"] for attempt in missing["transport_attempts"]
+    ] == [http_status, 200]
+
+
 @pytest.mark.parametrize("committed_before_eof", (False, True))
 def test_cache_store_retries_transient_insert_under_same_operation(
     committed_before_eof: bool,
@@ -386,6 +441,93 @@ def test_cache_store_retries_transient_insert_under_same_operation(
             attempt["terminal_status"],
         )
     scope.assert_accepted_result_is_complete()
+
+
+@pytest.mark.parametrize(
+    ("http_status", "code"),
+    (
+        (503, "PGRST002"),
+        (504, "PGRST003"),
+    ),
+)
+def test_cache_store_retries_authenticated_transient_insert(
+    http_status: int,
+    code: str,
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    identity = _identity(key)
+    broker = _Broker()
+    terminal = _recorded_terminal(broker, key, identity)
+    broker.post_http_failure = (http_status, code)
+    broker.post_http_failures = 1
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+        sleeper=lambda _delay: None,
+    )
+
+    persisted = store.persist_recorded(
+        terminal,
+        utc_day="2026-07-10",
+        job_id="job",
+        purpose="research_lab.private_model_run.v2",
+    )
+
+    insert_attempts = [
+        attempt
+        for attempt in persisted["transport_attempts"]
+        if attempt["logical_operation_id"].endswith(":insert")
+    ]
+    assert [attempt["attempt_number"] for attempt in insert_attempts] == [0, 1]
+    assert [attempt["http_status"] for attempt in insert_attempts] == [
+        http_status,
+        201,
+    ]
+
+
+def test_cache_store_authenticated_transient_exhaustion_remains_fail_closed() -> None:
+    broker = _Broker()
+    broker.read_http_failure = (503, "PGRST002")
+    broker.read_http_failures = 3
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+        sleeper=lambda _delay: None,
+    )
+
+    with pytest.raises(ProviderEvidenceCacheStoreV2Error, match="read failed"):
+        store.load(
+            utc_day="2026-07-10",
+            request_fingerprint="5" * 64,
+            job_id="job",
+            purpose="research_lab.private_model_run.v2",
+        )
+
+    assert [call["attempt_number"] for call in broker.calls] == [0, 1, 2]
+
+
+def test_cache_store_nontransient_response_is_not_retried() -> None:
+    broker = _Broker()
+    broker.read_http_failure = (401, "PGRST301")
+    broker.read_http_failures = 1
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+        sleeper=lambda _delay: None,
+    )
+
+    with pytest.raises(ProviderEvidenceCacheStoreV2Error, match="read failed"):
+        store.load(
+            utc_day="2026-07-10",
+            request_fingerprint="6" * 64,
+            job_id="job",
+            purpose="research_lab.private_model_run.v2",
+        )
+
+    assert len(broker.calls) == 1
 
 
 def test_cache_store_exhausted_insert_remains_fail_closed() -> None:

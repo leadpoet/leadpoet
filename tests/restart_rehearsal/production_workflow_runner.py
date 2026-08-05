@@ -5122,7 +5122,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             self.calls: list[dict[str, Any]] = []
             self.records: dict[tuple[str, int], dict[str, Any]] = {}
             self.retry_policy_hashes = retry_hashes
-            self.fail_first_supabase_transport = True
+            self.fail_first_cache_authenticated_transient = True
             self.fail_first_outcome_append_after_commit = True
             self.outcome_rows: dict[tuple[str, str, int], dict[str, Any]] = {}
 
@@ -5207,12 +5207,17 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 {"provider": provider, "ordinal": ordinal, "kind": "request"}
             )
             response_hash = sha256_bytes(body)
-            transport_failure = (
-                provider == "supabase" and self.fail_first_supabase_transport
+            authenticated_transient = (
+                provider == "supabase"
+                and "research_lab_provider_evidence_cache_v2" in str(request["url"])
+                and self.fail_first_cache_authenticated_transient
             )
-            if transport_failure:
-                self.fail_first_supabase_transport = False
-            elif (
+            if authenticated_transient:
+                self.fail_first_cache_authenticated_transient = False
+                body = canonical_json({"code": "PGRST002"}).encode()
+                response_hash = sha256_bytes(body)
+            transport_failure = False
+            if (
                 provider == "supabase"
                 and "/rpc/append_research_lab_provider_outcome_checkpoint_v2"
                 in str(request["url"])
@@ -5247,7 +5252,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                     if transport_failure
                     else "authenticated_response"
                 ),
-                http_status=None if transport_failure else 200,
+                http_status=(
+                    None
+                    if transport_failure
+                    else (503 if authenticated_transient else 200)
+                ),
                 response_hash=None if transport_failure else response_hash,
                 request_artifact_hash=request_artifact_hash,
                 response_artifact_hash=(None if transport_failure else response_hash),
@@ -5274,7 +5283,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             else:
                 result.update(
                     {
-                        "http_status": 200,
+                        "http_status": attempt["http_status"],
                         "headers": {"content-type": "application/json"},
                         "body_b64": base64.b64encode(body).decode("ascii"),
                         "encrypted_artifact_id": response_hash,
@@ -5353,7 +5362,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         len(supabase_attempts) != 3
         or [item["attempt_number"] for item in supabase_attempts] != [0, 1, 3]
         or [item["terminal_status"] for item in supabase_attempts]
-        != ["transport_failure", "authenticated_response", "authenticated_response"]
+        != ["authenticated_response"] * 3
+        or [item["http_status"] for item in supabase_attempts] != [503, 200, 200]
         or len({item["attempt_hash"] for item in supabase_attempts}) != 3
         or len({item["logical_operation_id"] for item in supabase_attempts}) != 1
     ):

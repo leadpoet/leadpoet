@@ -40,6 +40,7 @@ CACHE_TIMEOUT_MS = 45_000
 CACHE_TRANSPORT_ATTEMPTS = 3
 CACHE_RETRY_DELAYS_SECONDS = (0.0, 0.05, 0.2)
 MAX_CACHE_RESPONSE_BYTES = 64 * 1024 * 1024
+_TRANSIENT_POSTGREST_CODES = frozenset({"PGRST002", "PGRST003"})
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -672,7 +673,7 @@ class ProviderEvidenceCacheStoreV2:
         purpose: str,
         attempt_number: int = 0,
     ) -> tuple[Dict[str, Any], list[Dict[str, Any]], set[str]]:
-        """Retry only unauthenticated transport terminals under one identity."""
+        """Retry only measured transient terminals under one cache identity."""
 
         attempts: list[Dict[str, Any]] = []
         artifacts: set[str] = set()
@@ -692,9 +693,33 @@ class ProviderEvidenceCacheStoreV2:
                 attempt_number=base_attempt + retry_ordinal,
             )
             self._collect_broker_evidence(result, attempts, artifacts)
-            if result.get("terminal_status") != "transport_failure":
+            if not self._is_retryable_terminal(result):
                 break
         return result, attempts, artifacts
+
+    @staticmethod
+    def _is_retryable_terminal(result: Mapping[str, Any]) -> bool:
+        if result.get("terminal_status") == "transport_failure":
+            return True
+        if result.get("terminal_status") != "authenticated_response":
+            return False
+        try:
+            status = int(result.get("http_status") or 0)
+            body = base64.b64decode(
+                str(result.get("body_b64") or ""),
+                validate=True,
+            )
+            parsed = json.loads(body.decode("utf-8"))
+        except Exception:
+            return False
+        attempt = result.get("transport_attempt")
+        return (
+            status in {503, 504}
+            and isinstance(parsed, Mapping)
+            and str(parsed.get("code") or "") in _TRANSIENT_POSTGREST_CODES
+            and isinstance(attempt, Mapping)
+            and sha256_bytes(body) == str(attempt.get("response_hash") or "")
+        )
 
     @staticmethod
     def _is_authenticated_success(result: Mapping[str, Any]) -> bool:

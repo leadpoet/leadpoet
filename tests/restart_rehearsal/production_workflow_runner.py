@@ -4828,7 +4828,13 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
 
     from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
     from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
-    from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
+    from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES
+    from gateway.tee.provider_broker_v2 import (
+        MAX_RESPONSE_BODY_BYTES,
+        PROVIDER_BROKER_SCHEMA_VERSION,
+        PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
+        _provider_rpc_response_body_limit,
+    )
     from gateway.tee.provider_evidence_cache_store_v2 import (
         ProviderEvidenceCacheStoreV2,
     )
@@ -4839,6 +4845,18 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         sha256_bytes,
         sha256_json,
     )
+
+    if MAX_RESPONSE_BODY_BYTES != _provider_rpc_response_body_limit(
+        frame_bytes=MAX_FRAME_BYTES,
+        reserve_bytes=PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
+    ):
+        raise RuntimeError("provider response limit is not bound to the RPC frame")
+    encoded_response_bytes = 4 * ((MAX_RESPONSE_BODY_BYTES + 2) // 3)
+    if (
+        encoded_response_bytes + PROVIDER_RPC_RESPONSE_RESERVE_BYTES
+        > MAX_FRAME_BYTES
+    ):
+        raise RuntimeError("provider response can exceed the authenticated RPC frame")
 
     retry_hashes = {
         provider: sha256_json({"retry": provider})
@@ -5065,6 +5083,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "execution_receipt_transport_unique": True,
         "transient_cache_transport_recovered": True,
         "measured_concurrent_artifact_wave_bound": True,
+        "provider_rpc_frame_budget_bound": True,
     }
 
 
@@ -5595,6 +5614,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("measured_concurrent_artifact_wave_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("provider_rpc_frame_budget_bound")
             is True
         ),
         "chain_settlement_state_space_complete": (

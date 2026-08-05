@@ -22,9 +22,11 @@ from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
+    _provider_rpc_response_body_limit,
     credential_reference_hash,
     expected_provider_credential_slots,
 )
+from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
 from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
 from gateway.tee.provider_semantics_v2 import (
@@ -38,6 +40,7 @@ from gateway.tee.source_add_runtime_v2 import (
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
     build_transport_attempt,
+    canonical_json,
     sha256_bytes,
     sha256_json,
 )
@@ -711,6 +714,98 @@ def test_provider_outcome_busy_empty_head_backs_off_and_retries() -> None:
     assert outcome_store.attempt_numbers == [0, 1]
     assert len(sleeps) == 1
     assert 0.01 <= sleeps[0] <= 0.02
+
+
+def test_oversized_provider_response_is_signed_and_checkpointed_after_busy_retry(
+    monkeypatch,
+) -> None:
+    from gateway.tee import provider_broker_v2
+
+    frame_bytes = 64 * 1024
+    reserve_bytes = 8 * 1024
+    response_limit = _provider_rpc_response_body_limit(
+        frame_bytes=frame_bytes,
+        reserve_bytes=reserve_bytes,
+    )
+    assert (
+        4 * (((response_limit + 1) + 2) // 3) + reserve_bytes
+        > frame_bytes
+    )
+    monkeypatch.setattr(
+        provider_broker_v2,
+        "MAX_RESPONSE_BODY_BYTES",
+        response_limit,
+    )
+
+    class OversizedTransport:
+        def __call__(self, **_request):
+            return {
+                "http_status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": b"x" * (response_limit + 1),
+                "tls_peer_chain_hash": _hash("4"),
+                "tls_protocol": "TLSv1.3",
+            }
+
+    class BusyOnceOutcomeStore(_OutcomeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.busy = True
+            self.persist_attempts = 0
+
+        def persist(self, document, **kwargs):
+            self.persist_attempts += 1
+            if self.busy:
+                self.busy = False
+                return {
+                    "status": "busy",
+                    "transport_attempts": [],
+                    "evidence_artifact_hashes": [],
+                }
+            return super().persist(document, **kwargs)
+
+    credentials = {
+        "openrouter": "openrouter-secret",
+        "exa": "exa-secret",
+        "scrapingdog": "scrapingdog-secret",
+        "deepline": "deepline-secret",
+        "supabase_service_role": "supabase-service-role-secret",
+        "truelist": "truelist-secret",
+    }
+    broker_artifacts = _Artifacts()
+    broker = ProviderBrokerV2(
+        credential_ref_hashes={
+            name: credential_reference_hash(value)
+            for name, value in credentials.items()
+        },
+        retry_policy_hashes={
+            name: sha256_json({"retry": name}) for name in BUILTIN_PROVIDER_ROUTES
+        },
+        transport=OversizedTransport(),
+        artifact_sink=broker_artifacts.seal,
+        clock=lambda: "2026-07-10T00:00:00Z",
+    )
+    broker.provision_credentials(credentials)
+    outcome_store = BusyOnceOutcomeStore()
+    authority, _broker, _cache, _artifacts = _authority(
+        broker=broker,
+        outcome_store=outcome_store,
+    )
+
+    result = authority.execute(_request(job_id="job-oversized-response"))
+
+    assert result["terminal_status"] == "transport_failure"
+    assert result["failure_code"] == "response_too_large"
+    assert result["transport_attempt"]["failure_code"] == "response_too_large"
+    assert broker.health()["terminal_count"] == 1
+    assert len(broker_artifacts.values) == 1
+    assert outcome_store.persist_attempts == 2
+    assert outcome_store.persist_count == 1
+    assert len(
+        canonical_json(
+            {"result": result, "channel_id": "f" * 32}
+        ).encode("utf-8")
+    ) <= frame_bytes
 
 
 def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() -> None:

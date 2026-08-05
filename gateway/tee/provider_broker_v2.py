@@ -22,6 +22,7 @@ from gateway.tee.egress_policy import (
     normalize_destination,
     normalize_proxy_destination,
 )
+from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
     build_transport_attempt,
@@ -38,7 +39,25 @@ from gateway.tee.source_add_runtime_v2 import (
 
 PROVIDER_BROKER_SCHEMA_VERSION = "leadpoet.provider_broker.v2"
 MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
-MAX_RESPONSE_BODY_BYTES = 64 * 1024 * 1024
+PROVIDER_RPC_RESPONSE_RESERVE_BYTES = 8 * 1024 * 1024
+
+
+def _provider_rpc_response_body_limit(
+    *,
+    frame_bytes: int,
+    reserve_bytes: int,
+) -> int:
+    if frame_bytes <= reserve_bytes or reserve_bytes < 0:
+        raise ValueError("provider RPC response frame budget is invalid")
+    return ((frame_bytes - reserve_bytes) // 4) * 3
+
+
+# Provider bodies cross the authenticated RPC as base64. Reserve bounded room
+# for the terminal, artifact, cost, and checkpoint evidence added downstream.
+MAX_RESPONSE_BODY_BYTES = _provider_rpc_response_body_limit(
+    frame_bytes=MAX_FRAME_BYTES,
+    reserve_bytes=PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
+)
 MAX_TRANSPORT_RESPONSE_BODY_BYTES = 96 * 1024 * 1024
 MAX_DEDUPLICATION_RECORDS = 10000
 TERMINAL_RECORD_RETENTION_SECONDS = 3600.0

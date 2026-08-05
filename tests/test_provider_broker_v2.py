@@ -13,10 +13,12 @@ from gateway.tee.provider_broker_v2 import (
     HTTPXProviderTransport,
     MAX_RESPONSE_BODY_BYTES,
     MAX_TRANSPORT_RESPONSE_BODY_BYTES,
+    PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
     ProviderBrokerV2Error,
     _extract_tls_metadata,
+    _provider_rpc_response_body_limit,
     credential_reference_hash,
     credential_value_hash,
     expected_job_credential_slot_ref_hashes,
@@ -25,12 +27,30 @@ from gateway.tee.provider_broker_v2 import (
     provider_registry_document,
     provider_registry_hash,
 )
+from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES
 from leadpoet_canonical.attested_v2 import validate_transport_attempt
 from leadpoet_canonical.attested_v2 import sha256_bytes
 
 
 HASH = "sha256:" + "a" * 64
 NOW = "2026-07-10T20:00:00Z"
+
+
+def test_default_response_limit_fits_authenticated_rpc_frame_budget():
+    assert MAX_RESPONSE_BODY_BYTES == _provider_rpc_response_body_limit(
+        frame_bytes=MAX_FRAME_BYTES,
+        reserve_bytes=PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
+    )
+    encoded_body_bytes = 4 * ((MAX_RESPONSE_BODY_BYTES + 2) // 3)
+
+    assert encoded_body_bytes + PROVIDER_RPC_RESPONSE_RESERVE_BYTES <= (
+        MAX_FRAME_BYTES
+    )
+    assert (
+        4 * ((MAX_RESPONSE_BODY_BYTES + 3) // 3)
+        + PROVIDER_RPC_RESPONSE_RESERVE_BYTES
+        > MAX_FRAME_BYTES
+    )
 
 
 def test_tls_metadata_supports_python39_positional_only_peer_certificate():

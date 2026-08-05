@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import platform
@@ -40,6 +41,7 @@ from research_lab.eval import (
 from research_lab.eval.private_runtime import (
     _DOCKER_ADAPTER_BOOTSTRAP,
     _DOCKER_METADATA_BOOTSTRAP,
+    SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS,
     canonicalize_private_model_icp,
     context_with_runtime_options,
     parse_incontainer_trace_lines,
@@ -76,6 +78,7 @@ DEFAULT_REQUIREMENTS_LOCK_PATH = Path(
 )
 MAX_MODEL_INPUT_BYTES = 16 * 1024 * 1024
 MODEL_SANDBOX_TIMEOUT_SECONDS = 900
+MODEL_SANDBOX_TIMEOUT_GRACE_SECONDS = 3
 MAX_MODEL_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_EVIDENCE_CACHE_BYTES = 32 * 1024 * 1024
 MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT = "/app/gateway/_attested_runtime"
@@ -845,6 +848,31 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
             "root_receipt_hash": root_receipt_hash,
         },
     }
+
+
+def _model_sandbox_process_timeout_seconds(value: Mapping[str, Any]) -> int:
+    """Derive the bounded runsc deadline from the committed model allocation."""
+
+    if value.get("operation") != "run_icp":
+        return MODEL_SANDBOX_TIMEOUT_SECONDS
+    raw_input = value.get("input")
+    context = raw_input.get("context") if isinstance(raw_input, Mapping) else None
+    options = context.get("runtime_options") if isinstance(context, Mapping) else None
+    if not isinstance(options, Mapping):
+        return MODEL_SANDBOX_TIMEOUT_SECONDS
+    try:
+        runtime_cap = float(options.get("runtime_cap_seconds"))
+    except (TypeError, ValueError) as exc:
+        raise ModelSandboxV2Error(
+            "model sandbox runtime allocation is invalid"
+        ) from exc
+    if (
+        not math.isfinite(runtime_cap)
+        or runtime_cap < 10.0
+        or runtime_cap > SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS
+    ):
+        raise ModelSandboxV2Error("model sandbox runtime allocation is invalid")
+    return int(math.ceil(runtime_cap)) + MODEL_SANDBOX_TIMEOUT_GRACE_SECONDS
 
 
 def _normalize_source_permissions(root: Path) -> None:
@@ -2080,6 +2108,7 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             stdin_payload = {}
             bootstrap = model_source_import_bootstrap() + _DOCKER_METADATA_BOOTSTRAP
         encoded_input = canonical_json(stdin_payload)
+        process_timeout_seconds = _model_sandbox_process_timeout_seconds(value)
         bundle = tmp_root / "bundle"
         bundle.mkdir(mode=0o700)
         runsc_root = tmp_root / "runsc"
@@ -2167,7 +2196,7 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 input=encoded_input,
                 text=True,
                 capture_output=True,
-                timeout=MODEL_SANDBOX_TIMEOUT_SECONDS,
+                timeout=process_timeout_seconds,
                 env={
                     "HOME": str(tmp_root),
                     "PATH": "/usr/local/bin:/usr/bin:/bin",

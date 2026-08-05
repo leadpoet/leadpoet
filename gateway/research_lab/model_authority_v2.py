@@ -31,7 +31,6 @@ from gateway.research_lab.code_build import _extract_parent_image_source
 from gateway.research_lab.v2_authority import load_source_add_catalog_snapshot_v2
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.tee.model_sandbox_v2 import (
-    MODEL_SANDBOX_TIMEOUT_SECONDS,
     MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
     provider_evidence_tape_input_root,
 )
@@ -112,7 +111,7 @@ class AttestedPrivateModelRunnerV2Error(PrivateModelRuntimeError):
 def _has_retryable_attested_provider_transport_failure(
     error: AttestedScoringV2Error,
 ) -> bool:
-    """Recognize the model-scope finalizer from verified receipt evidence."""
+    """Recognize retryable model-scope failures from verified receipt evidence."""
 
     if "execution_providerclientv2error" not in str(error).lower():
         return False
@@ -122,11 +121,13 @@ def _has_retryable_attested_provider_transport_failure(
     attempts = authority.get("transport_attempts")
     if not isinstance(attempts, list):
         return False
-    latest: dict[str, tuple[int, str]] = {}
+    latest: dict[str, tuple[int, Mapping[str, Any]]] = {}
     for attempt in attempts:
         if not isinstance(attempt, Mapping):
             return False
         logical_operation_id = str(attempt.get("logical_operation_id") or "")
+        if isinstance(attempt.get("attempt_number"), bool):
+            return False
         try:
             attempt_number = int(attempt.get("attempt_number"))
         except (TypeError, ValueError):
@@ -135,11 +136,29 @@ def _has_retryable_attested_provider_transport_failure(
             return False
         current = latest.get(logical_operation_id)
         if current is None or attempt_number > current[0]:
-            latest[logical_operation_id] = (
-                attempt_number,
-                str(attempt.get("terminal_status") or ""),
-            )
-    return any(status == "transport_failure" for _attempt, status in latest.values())
+            latest[logical_operation_id] = (attempt_number, dict(attempt))
+    for _attempt_number, attempt in latest.values():
+        terminal_status = str(attempt.get("terminal_status") or "")
+        if terminal_status == "transport_failure":
+            return True
+        if terminal_status not in {
+            "authenticated_response",
+            "attested_local_response",
+        }:
+            continue
+        http_status = attempt.get("http_status")
+        if isinstance(http_status, bool):
+            continue
+        try:
+            status = int(http_status)
+        except (TypeError, ValueError):
+            continue
+        provider_id = str(attempt.get("provider_id") or "").strip().lower()
+        if status in {408, 429} or 500 <= status <= 599:
+            return True
+        if provider_id == "scrapingdog" and status == 400:
+            return True
+    return False
 
 
 def _run_private_source_git(
@@ -723,10 +742,7 @@ class AttestedPrivateModelRunnerV2:
                 "icp": canonical_icp,
                 "context": context_with_runtime_options(
                     context,
-                    outer_timeout_seconds=min(
-                        self.spec.timeout_seconds,
-                        MODEL_SANDBOX_TIMEOUT_SECONDS,
-                    ),
+                    outer_timeout_seconds=self.spec.timeout_seconds,
                 ),
             },
             provider_evidence_cache=cache_document,
@@ -773,10 +789,7 @@ class AttestedPrivateModelRunnerV2:
                 "icp": canonical_icp,
                 "context": context_with_runtime_options(
                     context,
-                    outer_timeout_seconds=min(
-                        self.spec.timeout_seconds,
-                        MODEL_SANDBOX_TIMEOUT_SECONDS,
-                    ),
+                    outer_timeout_seconds=self.spec.timeout_seconds,
                 ),
             },
             provider_evidence_cache=dict(provider_evidence_cache),

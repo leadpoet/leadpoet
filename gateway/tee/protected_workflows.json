@@ -122,7 +122,7 @@
       "symbol": "_select_committed_encrypted_artifacts"
     },
     {
-      "ast_sha256": "sha256:cc52f079cd4f3d24c287577b132137dd72142b1296db0de01b58f8875b0e93ee",
+      "ast_sha256": "sha256:f5cf9c400bcab95459a624783cf8ce67c56afb289e64ef15605b86d71325bf9f",
       "path": "gateway/research_lab/attested_artifacts_v2.py",
       "symbol": "persist_execution_transport_artifacts_v2"
     },
@@ -1217,7 +1217,7 @@
       "symbol": "MODEL_SANDBOX_VISIBLE_ROOT"
     },
     {
-      "ast_sha256": "sha256:7bec425d8e14da14563da936cfaf25cf6f935c8beebbb44d861d38eece521fb3",
+      "ast_sha256": "sha256:acace10cccd28c5412175edcc122056f3780c3f94ca7c93bc09e22adf269bd56",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
@@ -2597,7 +2597,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:def540f6d91f0c455fbea4f07864e06e1f39ca41766f2f91fa5d8109d936b0a0",
+  "manifest_hash": "sha256:48652081cca220a5c869c562faf98134358400c9cf6c637dd69c5213780bffeb",
   "protected_source_commit": "1803f3802b3667e2036a54fbf6ada14b7edfa206",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

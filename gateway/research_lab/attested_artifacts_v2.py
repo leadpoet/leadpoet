@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 import os
 import re
 from typing import Any, Mapping, Sequence
@@ -26,6 +25,27 @@ _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 class AttestedArtifactPersistenceV2Error(RuntimeError):
     """A required hidden request/response artifact was not durably retained."""
+
+
+def _validate_transport_artifact_commitments(
+    *,
+    expected_hashes: Sequence[str],
+    observed_hashes: Sequence[str],
+    committed_hashes: Sequence[str],
+) -> None:
+    """Require each distinct content commitment in the encrypted artifact vault."""
+
+    expected = {str(item or "") for item in expected_hashes}
+    observed = {str(item or "") for item in observed_hashes}
+    committed = {str(item or "") for item in committed_hashes}
+    if (
+        any(not _HASH_RE.fullmatch(item) for item in expected)
+        or not expected.issubset(observed)
+        or not observed.issubset(committed)
+    ):
+        raise AttestedArtifactPersistenceV2Error(
+            "coordinator artifacts differ from execution commitments"
+        )
 
 
 def _select_committed_encrypted_artifacts(
@@ -137,15 +157,11 @@ async def persist_execution_transport_artifacts_v2(
         for item in artifacts
         if isinstance(item, Mapping)
     )
-    expected_counts = Counter(expected_hashes)
-    observed_counts = Counter(observed_hashes)
-    if (
-        any(observed_counts[key] < count for key, count in expected_counts.items())
-        or not set(observed_hashes).issubset(set(committed_hashes))
-    ):
-        raise AttestedArtifactPersistenceV2Error(
-            "coordinator artifacts differ from execution commitments"
-        )
+    _validate_transport_artifact_commitments(
+        expected_hashes=expected_hashes,
+        observed_hashes=observed_hashes,
+        committed_hashes=committed_hashes,
+    )
     reuse_persisted_artifacts = bool(artifacts) and all(
         item.get("persisted") is True for item in artifacts
     )

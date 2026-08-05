@@ -26,6 +26,7 @@ from gateway.tee.model_sandbox_v2 import (
     ModelSandboxV2Error,
     RunscModelSandboxV2,
     RunscSandboxConfigV2,
+    _model_sandbox_process_timeout_seconds,
     _oci_config,
     _runsc_failure_evidence,
     _sandbox_visible_workspace,
@@ -105,6 +106,43 @@ def _runtime_receipt_stderr(stdin_payload: str) -> str:
         ],
     }
     return "sourcing_branch_receipt " + json.dumps(receipt) + "\n"
+
+
+def test_model_sandbox_process_timeout_uses_committed_runtime_allocation():
+    value = {
+        "operation": "run_icp",
+        "input": {
+            "context": {
+                "runtime_options": {"runtime_cap_seconds": 1500.0},
+            }
+        },
+    }
+
+    assert _model_sandbox_process_timeout_seconds(value) == 1503
+    assert (
+        _model_sandbox_process_timeout_seconds(
+            {"operation": "metadata", "input": {}}
+        )
+        == 900
+    )
+
+
+@pytest.mark.parametrize("runtime_cap", [float("inf"), 1500.1, 9.9, "invalid"])
+def test_model_sandbox_process_timeout_rejects_invalid_allocation(runtime_cap):
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="model sandbox runtime allocation is invalid",
+    ):
+        _model_sandbox_process_timeout_seconds(
+            {
+                "operation": "run_icp",
+                "input": {
+                    "context": {
+                        "runtime_options": {"runtime_cap_seconds": runtime_cap},
+                    }
+                },
+            }
+        )
 
 
 def _runtime(tmp_path: Path):

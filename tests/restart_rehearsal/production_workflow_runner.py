@@ -4652,12 +4652,23 @@ print(",".join((
 def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     """Keep measured sandbox failures inside the bounded baseline retry path."""
 
+    from gateway.research_lab.attested_artifacts_v2 import (
+        AttestedArtifactPersistenceV2Error,
+        _validate_transport_artifact_commitments,
+    )
     from gateway.research_lab.attested_scoring_v2 import AttestedScoringV2Error
     from gateway.research_lab.model_authority_v2 import (
         AttestedPrivateModelRunnerV2,
         AttestedPrivateModelRunnerV2Error,
     )
-    from gateway.research_lab.scoring_worker import _baseline_error_is_retryable
+    from gateway.research_lab.scoring_worker import (
+        _baseline_error_is_retryable,
+        _baseline_summary_checkpointable,
+    )
+    from gateway.tee.model_sandbox_v2 import (
+        ModelSandboxV2Error,
+        _model_sandbox_process_timeout_seconds,
+    )
     from research_lab.eval.private_runtime import PrivateModelRuntimeError
 
     failures = [
@@ -4676,6 +4687,20 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
                 ]
             },
         ),
+        AttestedScoringV2Error(
+            "V2 scoring failed closed: execution_providerclientv2error",
+            authority={
+                "transport_attempts": [
+                    {
+                        "logical_operation_id": "measured-scrapingdog-op",
+                        "attempt_number": 0,
+                        "provider_id": "scrapingdog",
+                        "terminal_status": "authenticated_response",
+                        "http_status": 400,
+                    }
+                ]
+            },
+        ),
     ]
 
     async def fail_measured_operation(**_kwargs: Any) -> Any:
@@ -4687,12 +4712,22 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     async def generic_provider_client_failure(**_kwargs: Any) -> Any:
         raise AttestedScoringV2Error(
             "V2 scoring failed closed: execution_providerclientv2error",
-            authority={"transport_attempts": []},
+            authority={
+                "transport_attempts": [
+                    {
+                        "logical_operation_id": "measured-public-web-op",
+                        "attempt_number": 0,
+                        "provider_id": "public_web",
+                        "terminal_status": "authenticated_response",
+                        "http_status": 403,
+                    }
+                ]
+            },
         )
 
     runner = object.__new__(AttestedPrivateModelRunnerV2)
     runner._execute_operation = fail_measured_operation  # type: ignore[method-assign]
-    for _expected_failure in range(2):
+    for _expected_failure in range(3):
         try:
             asyncio.run(runner._invoke_operation(operation="run_icp"))
         except AttestedPrivateModelRunnerV2Error as exc:
@@ -4712,11 +4747,79 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
             raise RuntimeError("generic provider contract failure became retryable")
     else:
         raise RuntimeError("generic provider contract failure did not fail closed")
+
+    sandbox_timeout = _model_sandbox_process_timeout_seconds(
+        {
+            "operation": "run_icp",
+            "input": {
+                "context": {
+                    "runtime_options": {"runtime_cap_seconds": 1500.0},
+                }
+            },
+        }
+    )
+    if sandbox_timeout != 1503:
+        raise RuntimeError("model sandbox ignored committed runtime allocation")
+    try:
+        _model_sandbox_process_timeout_seconds(
+            {
+                "operation": "run_icp",
+                "input": {
+                    "context": {
+                        "runtime_options": {"runtime_cap_seconds": 1500.1},
+                    }
+                },
+            }
+        )
+    except ModelSandboxV2Error:
+        pass
+    else:
+        raise RuntimeError("model sandbox accepted an oversized runtime allocation")
+
+    retry_failure = {
+        "icp_ref": "icp-retry",
+        "_runtime_error": "execution_providerclientv2error",
+        "diagnostics": {"sourcing_failed": True},
+    }
+    recovered_result = {
+        "icp_ref": "icp-retry",
+        "company_count": 1,
+        "score_breakdowns": [{"final_score": 1.0}],
+        "diagnostics": {"sourcing_failed": False},
+    }
+    if _baseline_summary_checkpointable(retry_failure):
+        raise RuntimeError("retryable failure became checkpoint eligible")
+    if not _baseline_summary_checkpointable(recovered_result):
+        raise RuntimeError("recovered ICP result remained checkpoint ineligible")
+
+    request_hash = "sha256:" + "1" * 64
+    response_hash = "sha256:" + "2" * 64
+    _validate_transport_artifact_commitments(
+        expected_hashes=(request_hash, response_hash, request_hash, response_hash),
+        observed_hashes=(request_hash, response_hash),
+        committed_hashes=(request_hash, response_hash),
+    )
+    missing_hash = "sha256:" + "3" * 64
+    try:
+        _validate_transport_artifact_commitments(
+            expected_hashes=(request_hash, response_hash, missing_hash),
+            observed_hashes=(request_hash, response_hash),
+            committed_hashes=(request_hash, response_hash, missing_hash),
+        )
+    except AttestedArtifactPersistenceV2Error:
+        pass
+    else:
+        raise RuntimeError("missing distinct transport artifact was accepted")
     return {
         "attested_ancestry_preserved": True,
         "private_runner_contract_preserved": True,
         "bounded_retry_selected": True,
         "generic_provider_contract_failure_terminal": True,
+        "configured_runtime_deadline_bound": True,
+        "signed_http_retry_selected": True,
+        "retry_checkpoint_recovery_bound": True,
+        "content_addressed_artifact_persistence_bound": True,
+        "missing_distinct_artifact_rejected": True,
     }
 
 
@@ -5408,6 +5511,36 @@ def main() -> int:
                 "rebenchmark-sandbox-retry",
                 {},
             ).get("bounded_retry_selected")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("generic_provider_contract_failure_terminal")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("configured_runtime_deadline_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("signed_http_retry_selected")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("retry_checkpoint_recovery_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("content_addressed_artifact_persistence_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("missing_distinct_artifact_rejected")
             is True
         ),
         "rebenchmark_provider_transport_evidence_unique": (

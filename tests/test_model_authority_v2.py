@@ -382,6 +382,85 @@ async def test_measured_execution_failure_preserves_private_runner_contract(
             ],
             False,
         ),
+        (
+            [
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": 0,
+                    "provider_id": "scrapingdog",
+                    "terminal_status": "authenticated_response",
+                    "http_status": 400,
+                }
+            ],
+            True,
+        ),
+        (
+            [
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": 0,
+                    "provider_id": "public_web",
+                    "terminal_status": "authenticated_response",
+                    "http_status": 403,
+                }
+            ],
+            False,
+        ),
+        (
+            [
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": 0,
+                    "provider_id": "exa",
+                    "terminal_status": "authenticated_response",
+                    "http_status": 429,
+                }
+            ],
+            True,
+        ),
+        (
+            [
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": 0,
+                    "provider_id": "public_web",
+                    "terminal_status": "authenticated_response",
+                    "http_status": 503,
+                }
+            ],
+            True,
+        ),
+        (
+            [
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": 0,
+                    "provider_id": "public_web",
+                    "terminal_status": "authenticated_response",
+                    "http_status": 503,
+                },
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": 1,
+                    "provider_id": "public_web",
+                    "terminal_status": "authenticated_response",
+                    "http_status": 200,
+                },
+            ],
+            False,
+        ),
+        (
+            [
+                {
+                    "logical_operation_id": "provider-op-a",
+                    "attempt_number": True,
+                    "provider_id": "public_web",
+                    "terminal_status": "authenticated_response",
+                    "http_status": 503,
+                }
+            ],
+            False,
+        ),
         ([], False),
     ],
 )
@@ -650,11 +729,11 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
                 ]["catalog_hash"],
                 "generated_provider_evidence_cache_hash": sha256_json({}),
                 "trace_entries_hash": sha256_json(
-                    [_runtime_receipt(897.0), {"provider": "exa"}]
+                    [_runtime_receipt(1500.0), {"provider": "exa"}]
                 ),
                 "output_hash": sha256_json(output),
                 "output": output,
-                "trace_entries": [_runtime_receipt(897.0), {"provider": "exa"}],
+                "trace_entries": [_runtime_receipt(1500.0), {"provider": "exa"}],
                 "generated_provider_evidence_cache": {},
             },
             "receipt": {"receipt_hash": "sha256:" + "4" * 64},
@@ -716,12 +795,12 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
         "evaluation_epoch": 24000,
         "run_id": "run-1",
         "runtime_options": {
-            "runtime_cap_seconds": 897.0,
+            "runtime_cap_seconds": 1500.0,
             "finalization_reserve_seconds": 5.0,
-            "agent_timeout_seconds": 892,
+            "agent_timeout_seconds": 900,
         },
     }
-    assert entries == [_runtime_receipt(897.0), {"provider": "exa"}]
+    assert entries == [_runtime_receipt(1500.0), {"provider": "exa"}]
     assert runner.attested_receipts() == [
         {"receipt_hash": "sha256:" + "4" * 64}
     ]

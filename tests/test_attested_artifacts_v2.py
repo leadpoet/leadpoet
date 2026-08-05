@@ -124,6 +124,8 @@ async def _exercise(
     source_failed: bool = False,
     child_status: str = "succeeded",
     policy_events: list | None = None,
+    duplicate_transport: bool = False,
+    missing_distinct: bool = False,
 ) -> dict:
     artifacts = _artifacts(persisted=replay)
     if partial:
@@ -148,6 +150,21 @@ async def _exercise(
             "terminal_status": "authenticated_response",
         }
     ]
+    if duplicate_transport:
+        transport_attempts.append(dict(transport_attempts[0]))
+    if missing_distinct:
+        committed.append(_hash("3"))
+        source_receipt["artifact_root"] = merkle_root(
+            committed,
+            domain="leadpoet-artifact-v2",
+        )
+        transport_attempts.append(
+            {
+                "request_artifact_hash": _hash("3"),
+                "response_artifact_hash": _hash("2"),
+                "terminal_status": "authenticated_response",
+            }
+        )
     persistence_job_ids = []
     durability_events = []
     source_proof = {"proof_hash": _hash("4")}
@@ -317,6 +334,33 @@ async def test_transport_artifacts_resume_after_partial_persistence(
     result = await _exercise(monkeypatch, replay=False, partial=True)
     assert len(result["artifacts"]) == 2
     assert all(item["status"] == "persisted" for item in result["artifacts"])
+
+
+@pytest.mark.asyncio
+async def test_transport_artifacts_deduplicate_repeated_plaintext_commitments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _exercise(
+        monkeypatch,
+        replay=False,
+        duplicate_transport=True,
+    )
+    assert len(result["artifacts"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_transport_artifacts_reject_missing_distinct_plaintext_commitment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(
+        attested_artifacts_v2.AttestedArtifactPersistenceV2Error,
+        match="coordinator artifacts differ from execution commitments",
+    ):
+        await _exercise(
+            monkeypatch,
+            replay=False,
+            missing_distinct=True,
+        )
 
 
 @pytest.mark.asyncio

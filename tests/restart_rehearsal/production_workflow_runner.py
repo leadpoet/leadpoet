@@ -22,6 +22,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from types import SimpleNamespace
@@ -5424,11 +5425,14 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "truelist": "rehearsal-truelist",
     }
 
-    def successful_transport(**_request: Any) -> dict[str, Any]:
+    successful_transport_calls: list[dict[str, Any]] = []
+
+    def successful_transport(**request: Any) -> dict[str, Any]:
+        successful_transport_calls.append(dict(request))
         return {
             "http_status": 200,
             "headers": {"content-type": "application/json"},
-            "body": b'{"ok":true}',
+            "body": b'{"costDollars":0.005,"results":[]}',
             "tls_peer_chain_hash": sha256_json({"tls": "rehearsal"}),
             "tls_protocol": "TLSv1.3",
         }
@@ -5447,6 +5451,108 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         clock=lambda: NOW,
     )
     terminal_broker.provision_credentials(broker_credentials)
+
+    cache_persist_entered = threading.Event()
+    release_cache_persist = threading.Event()
+
+    class CommitBlockingCache:
+        def load(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "found": False,
+                "payload": {},
+                "transport_attempts": [],
+                "evidence_artifact_hashes": [],
+            }
+
+        def persist_recorded(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            cache_persist_entered.set()
+            if not release_cache_persist.wait(timeout=2.0):
+                raise RuntimeError("provider cache commit fixture did not release")
+            return {
+                "transport_attempts": [],
+                "evidence_artifact_hashes": [],
+            }
+
+    shared_authority = ProviderSemanticsAuthorityV2(
+        broker=terminal_broker,
+        cache_store=CommitBlockingCache(),
+        artifact_sink=vault.seal,
+        artifact_transaction=vault.transient_artifact_transaction,
+        boot_identity_supplier=lambda: boot_identity,
+        sign_digest=signing_key.sign,
+        clock=lambda: NOW,
+        sleeper=lambda _seconds: None,
+        outcome_store=outcome_store,
+    )
+    shared_request = {
+        "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
+        "logical_operation_id": "rehearsal:shared-provider-owner",
+        "job_id": context.job_id,
+        "purpose": context.purpose,
+        "provider_id": "exa",
+        "attempt_number": 0,
+        "method": "POST",
+        "url": "https://api.exa.ai/search",
+        "headers": {"content-type": "application/json"},
+        "body_b64": base64.b64encode(b'{"query":"shared"}').decode("ascii"),
+        "timeout_ms": 1,
+        "retry_policy_hash": terminal_broker.retry_policy_hashes["exa"],
+    }
+    transport_count_before_shared = len(successful_transport_calls)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        owner = executor.submit(shared_authority.execute, shared_request)
+        if not cache_persist_entered.wait(timeout=2.0):
+            raise RuntimeError("provider cache commit boundary was not reached")
+        follower = executor.submit(
+            shared_authority.execute,
+            {
+                **shared_request,
+                "logical_operation_id": "rehearsal:shared-provider-follower",
+            },
+        )
+        time.sleep(0.02)
+        if owner.done() or follower.done():
+            raise RuntimeError("provider follower escaped the commit boundary")
+        release_cache_persist.set()
+        shared_results = [owner.result(timeout=2.0), follower.result(timeout=2.0)]
+    latest_shared_outcome = outcome_store.load_latest(
+        utc_day=NOW[:10],
+        job_id=context.job_id,
+        purpose=context.purpose,
+        operation_suffix="singleflight-readback",
+    )
+    if (
+        len(successful_transport_calls) != transport_count_before_shared + 1
+        or {item.get("evidence") for item in shared_results} != {"recorded", "hit"}
+        or not latest_shared_outcome.get("found")
+        or int(latest_shared_outcome["state_document"]["sequence"]) != 3
+    ):
+        raise RuntimeError(
+            "provider single-flight durable completion differed: "
+            + canonical_json(
+                {
+                    "transport_delta": (
+                        len(successful_transport_calls)
+                        - transport_count_before_shared
+                    ),
+                    "evidence": sorted(
+                        str(item.get("evidence") or "") for item in shared_results
+                    ),
+                    "outcome_found": bool(latest_shared_outcome.get("found")),
+                    "outcome_sequence": int(
+                        dict(latest_shared_outcome.get("state_document") or {}).get(
+                            "sequence", -1
+                        )
+                    ),
+                }
+            )
+        )
+    shared_release = terminal_broker.release_job_credentials(context.job_id)
+    if shared_release.get("released_terminal_count") != 1:
+        raise RuntimeError("provider single-flight terminal cleanup differed")
+    released_terminal_count_before_cleanup = terminal_broker.health()[
+        "released_terminal_count"
+    ]
 
     def execute_terminal(*, job_id: str, operation_id: str) -> dict[str, Any]:
         return terminal_broker.execute(
@@ -5496,7 +5602,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     )
     if (
         terminal_health["terminal_count"] != 1
-        or terminal_health["released_terminal_count"] != 12
+        or terminal_health["released_terminal_count"]
+        != released_terminal_count_before_cleanup + 12
         or replayed["transport_attempt"]["attempt_hash"]
         != retained["transport_attempt"]["attempt_hash"]
     ):
@@ -5568,6 +5675,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "completed_provider_job_state_released": True,
         "active_provider_job_state_isolated": True,
         "provider_recovery_checkpoint_bound": True,
+        "provider_singleflight_commit_bound": True,
         "provider_rpc_frame_budget_bound": True,
     }
 
@@ -6110,6 +6218,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("provider_rpc_frame_budget_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("provider_singleflight_commit_bound")
             is True
         ),
         "chain_settlement_state_space_complete": (

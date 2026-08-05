@@ -24,6 +24,7 @@ from gateway.tee.sandbox_provider_socket_v2 import (
     MAX_SANDBOX_PROVIDER_FRAME_BYTES,
     SANDBOX_PROVIDER_SCHEMA_VERSION,
 )
+from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
 from leadpoet_canonical.attested_v2 import canonical_json
 
 
@@ -229,7 +230,10 @@ def execute(
         raise SandboxHTTPShimV2Error("provider socket request exceeds limit")
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        connection.settimeout(max(1.0, timeout_ms / 1000.0 + 5.0))
+        # The response includes coordinator-side encrypted cache/checkpoint
+        # persistence.  Keep the provider's own timeout in the request, while
+        # allowing that measured operation to reach its signed terminal.
+        connection.settimeout(REPLAY_WAIT_SECONDS)
         connection.connect(socket_path)
         connection.sendall(len(encoded).to_bytes(4, "big") + encoded)
         size = int.from_bytes(_recv_exact(connection, 4), "big")

@@ -22,7 +22,7 @@ from gateway.tee.egress_policy import (
     normalize_destination,
     normalize_proxy_destination,
 )
-from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES
+from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
     build_transport_attempt,
@@ -1112,7 +1112,10 @@ class ProviderBrokerV2:
                 )
                 owns_attempt = True
         if not owns_attempt:
-            if not wait_event.wait(max(1.0, timeout_ms / 1000.0 + 5.0)):
+            # The owner does not publish this terminal until its surrounding
+            # artifact/checkpoint transaction commits.  That lifecycle can
+            # legitimately outlive the upstream HTTP timeout.
+            if not wait_event.wait(REPLAY_WAIT_SECONDS):
                 raise ProviderBrokerV2Error("duplicate provider attempt wait timed out")
             with self._lock:
                 completed = self._records.get(deduplication_key)

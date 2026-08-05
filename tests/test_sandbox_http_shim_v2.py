@@ -8,9 +8,55 @@ import subprocess
 import sys
 import textwrap
 
+from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
+from leadpoet_canonical.attested_v2 import canonical_json
 from research_lab.eval.provider_evidence_cache import (
     canonical_request_fingerprint,
 )
+
+
+def test_live_socket_waits_for_measured_operation_completion(monkeypatch) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    response = canonical_json(
+        {"result": {"terminal_status": "transport_failure"}}
+    ).encode("utf-8")
+    chunks = [len(response).to_bytes(4, "big"), response]
+    observed = {}
+
+    class Connection:
+        def settimeout(self, timeout):
+            observed["timeout"] = timeout
+
+        def connect(self, path):
+            observed["path"] = path
+
+        def sendall(self, payload):
+            observed["request"] = bytes(payload)
+
+        def recv(self, size):
+            chunk = chunks.pop(0)
+            assert len(chunk) == size
+            return chunk
+
+        def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setenv(shim.SOCKET_ENV, "/tmp/provider.sock")
+    monkeypatch.setattr(shim.socket, "socket", lambda *_args: Connection())
+
+    result = shim.execute(
+        method="GET",
+        url="https://api.exa.ai/search",
+        headers={},
+        body=b"",
+        timeout_ms=1,
+    )
+
+    assert result == {"terminal_status": "transport_failure"}
+    assert observed["timeout"] == REPLAY_WAIT_SECONDS
+    assert observed["path"] == "/tmp/provider.sock"
+    assert observed["closed"] is True
 
 
 def test_all_supported_http_clients_use_the_same_frozen_evidence(

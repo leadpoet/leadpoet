@@ -27,7 +27,7 @@ from gateway.tee.provider_broker_v2 import (
     provider_registry_document,
     provider_registry_hash,
 )
-from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES
+from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
 from leadpoet_canonical.attested_v2 import validate_transport_attempt
 from leadpoet_canonical.attested_v2 import sha256_bytes
 
@@ -865,6 +865,7 @@ def test_concurrent_duplicate_cannot_read_uncommitted_terminal_record(commit):
     owner_results = []
     waiter_results = []
     waiter_errors = []
+    observed_wait_timeouts = []
 
     class ObservedWaitEvent:
         def __init__(self):
@@ -872,6 +873,7 @@ def test_concurrent_duplicate_cannot_read_uncommitted_terminal_record(commit):
 
         def wait(self, timeout):
             waiter_entered.set()
+            observed_wait_timeouts.append(timeout)
             return self._event.wait(timeout)
 
         def set(self):
@@ -916,6 +918,7 @@ def test_concurrent_duplicate_cannot_read_uncommitted_terminal_record(commit):
 
     assert not owner.is_alive()
     assert not waiter.is_alive()
+    assert observed_wait_timeouts == [REPLAY_WAIT_SECONDS]
     assert len(owner_results) == 1
     if commit:
         assert len(waiter_results) == 1

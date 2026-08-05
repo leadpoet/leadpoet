@@ -26,7 +26,7 @@ from gateway.tee.provider_broker_v2 import (
     credential_reference_hash,
     expected_provider_credential_slots,
 )
-from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES
+from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
 from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
 from gateway.tee.provider_semantics_v2 import (
@@ -492,6 +492,8 @@ def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
     broker = _Broker()
     broker_entered = threading.Event()
     release_broker = threading.Event()
+    cache_persisted = threading.Event()
+    release_cache = threading.Event()
     original_execute = broker.execute
 
     def blocking_execute(request):
@@ -501,10 +503,18 @@ def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
 
     broker.execute = blocking_execute
     waiter_entered = threading.Event()
+    observed_wait_timeouts = []
+
+    class BlockingCache(_CacheStore):
+        def persist_recorded(self, *args, **kwargs):
+            cache_persisted.set()
+            assert release_cache.wait(timeout=2.0)
+            return super().persist_recorded(*args, **kwargs)
 
     class TrackingEvent(threading.Event):
         def wait(self, timeout=None):
             waiter_entered.set()
+            observed_wait_timeouts.append(timeout)
             return super().wait(timeout)
 
     monkeypatch.setattr(
@@ -512,7 +522,8 @@ def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
         "threading",
         SimpleNamespace(RLock=threading.RLock, Event=TrackingEvent),
     )
-    authority, _broker, cache, _artifacts = _authority(broker=broker)
+    cache = BlockingCache()
+    authority, _broker, cache, _artifacts = _authority(broker=broker, cache=cache)
     request = _request()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -524,6 +535,10 @@ def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
         )
         assert waiter_entered.wait(timeout=2.0)
         release_broker.set()
+        assert cache_persisted.wait(timeout=2.0)
+        assert not first.done()
+        assert not second.done()
+        release_cache.set()
         results = [first.result(timeout=2.0), second.result(timeout=2.0)]
 
     assert len(broker.calls) == 1
@@ -537,6 +552,7 @@ def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
     assert sum(bool(event["billable"]) for event in cost_events) == 1
     assert sum(float(event["cost_usd"]) for event in cost_events) == 0.005
     assert {result["evidence"] for result in results} == {"recorded", "hit"}
+    assert observed_wait_timeouts == [REPLAY_WAIT_SECONDS]
 
 
 def test_concurrent_preflights_measure_each_worker_profile_without_cache_replay(

@@ -32,6 +32,7 @@ from gateway.tee.provider_broker_v2 import (
     _nonsecret_headers,
     _sanitized_path,
 )
+from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
 from gateway.tee.provider_evidence_v2 import (
     create_signed_provider_evidence_record,
 )
@@ -274,7 +275,6 @@ class ProviderSemanticsAuthorityV2:
             if bypass_cache
             else (day, fingerprint)
         )
-        timeout_seconds = max(1.0, normalized["timeout_ms"] / 1000.0 + 5.0)
         while True:
             with self._lock:
                 self._roll_day(day)
@@ -292,7 +292,11 @@ class ProviderSemanticsAuthorityV2:
                     event = threading.Event()
                     self._inflight[cache_key] = event
                     break
-            if not event.wait(timeout_seconds):
+            # The owner includes encrypted cache readback and durable outcome
+            # work after the upstream HTTP call.  Wait on the same bounded
+            # completion contract as an exact inter-enclave replay, not the
+            # shorter provider network timeout.
+            if not event.wait(REPLAY_WAIT_SECONDS):
                 raise ProviderSemanticsV2Error(
                     "provider semantics single-flight wait timed out"
                 )

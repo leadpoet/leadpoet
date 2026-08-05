@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from gateway.tee.autoresearch_executor_v2 import AutoresearchExecutorV2
+from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
 from gateway.tee.provider_evidence_v2 import (
     REQUEST_SCHEMA_VERSION,
     ProviderEvidenceAuthorityV2,
@@ -13,8 +19,6 @@ from gateway.tee.provider_evidence_v2 import (
     create_signed_provider_evidence_record,
     validate_signed_provider_evidence_record,
 )
-from gateway.tee.autoresearch_executor_v2 import AutoresearchExecutorV2
-from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
     source_add_dynamic_retry_policy_hash,
@@ -143,6 +147,56 @@ def test_provider_evidence_records_once_then_replays_signed_source():
     assert hit["body_b64"] == live["body_b64"]
     validate_signed_provider_evidence_record(live["record"], boot_identity=identity)
     validate_signed_provider_evidence_record(hit["record"], boot_identity=identity)
+
+
+def test_provider_evidence_follower_waits_for_full_recorded_result(monkeypatch):
+    from gateway.tee import provider_evidence_v2 as evidence_module
+
+    key = Ed25519PrivateKey.generate()
+    identity = _identity(key)
+    broker = _Broker()
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+    waiter_entered = threading.Event()
+    observed_wait_timeouts = []
+    original_execute = broker.execute
+
+    def blocking_execute(request):
+        owner_entered.set()
+        assert release_owner.wait(timeout=2.0)
+        return original_execute(request)
+
+    broker.execute = blocking_execute
+
+    class TrackingEvent(threading.Event):
+        def wait(self, timeout=None):
+            waiter_entered.set()
+            observed_wait_timeouts.append(timeout)
+            return super().wait(timeout)
+
+    monkeypatch.setattr(
+        evidence_module,
+        "threading",
+        SimpleNamespace(RLock=threading.RLock, Event=TrackingEvent),
+    )
+    authority = ProviderEvidenceAuthorityV2(
+        broker=broker,
+        boot_identity_supplier=lambda: identity,
+        sign_digest=key.sign,
+        clock=lambda: "2026-07-10T00:00:00Z",
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(authority.resolve, _request())
+        assert owner_entered.wait(timeout=2.0)
+        second = executor.submit(authority.resolve, _request())
+        assert waiter_entered.wait(timeout=2.0)
+        release_owner.set()
+        results = [first.result(timeout=2.0), second.result(timeout=2.0)]
+
+    assert len(broker.calls) == 1
+    assert {result["evidence"] for result in results} == {"recorded", "hit"}
+    assert observed_wait_timeouts == [REPLAY_WAIT_SECONDS]
 
 
 def test_provider_evidence_replay_miss_never_calls_provider():

@@ -22,6 +22,7 @@ from gateway.tee.provider_broker_v2 import (
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
 )
+from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
 from gateway.tee.source_add_runtime_v2 import (
     source_add_dynamic_retry_policy_hash,
     validate_source_add_runtime_route_v2,
@@ -287,7 +288,7 @@ class ProviderEvidenceAuthorityV2:
                     event = threading.Event()
                     self._inflight[cache_key] = event
                     break
-            if not event.wait(normalized["timeout_seconds"] + 5):
+            if not event.wait(REPLAY_WAIT_SECONDS):
                 raise ProviderEvidenceV2Error(
                     "provider evidence single-flight wait timed out"
                 )

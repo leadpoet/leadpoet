@@ -55,6 +55,7 @@ from leadpoet_canonical.attested_v2 import (
     build_receipt_graph,
     canonical_json,
     EMPTY_ARTIFACT_ROOT,
+    EMPTY_TRANSPORT_ROOT,
     merkle_root,
     sha256_bytes,
     sha256_json,
@@ -1548,7 +1549,10 @@ async def execute_scoring_v2(
                 )
         raise
     else:
-        if leased_credentials:
+        if (
+            leased_credentials
+            or receipt.get("transport_root") != EMPTY_TRANSPORT_ROOT
+        ):
             released = await credential_coordinator_client.v2_release_job_credentials(
                 job_id
             )

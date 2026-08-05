@@ -5071,10 +5071,16 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES
     from gateway.tee.topology import COORDINATOR_ROLE, ROLE_SPECS, topology_document
     from gateway.tee.provider_broker_v2 import (
+        BUILTIN_PROVIDER_ROUTES,
         MAX_RESPONSE_BODY_BYTES,
         PROVIDER_BROKER_SCHEMA_VERSION,
         PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
+        ProviderBrokerV2,
+        credential_reference_hash,
         _provider_rpc_response_body_limit,
+    )
+    from gateway.research_lab.scoring_worker import (
+        _baseline_summary_checkpointable,
     )
     from gateway.tee.provider_evidence_cache_store_v2 import (
         ProviderEvidenceCacheStoreV2,
@@ -5293,6 +5299,113 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     ):
         raise RuntimeError("repeated provider cache reads reused transport evidence")
 
+    broker_credentials = {
+        "openrouter": "rehearsal-openrouter",
+        "exa": "rehearsal-exa",
+        "scrapingdog": "rehearsal-scrapingdog",
+        "deepline": "rehearsal-deepline",
+        "supabase_service_role": "rehearsal-supabase",
+        "truelist": "rehearsal-truelist",
+    }
+
+    def successful_transport(**_request: Any) -> dict[str, Any]:
+        return {
+            "http_status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": b'{"ok":true}',
+            "tls_peer_chain_hash": sha256_json({"tls": "rehearsal"}),
+            "tls_protocol": "TLSv1.3",
+        }
+
+    terminal_broker = ProviderBrokerV2(
+        credential_ref_hashes={
+            name: credential_reference_hash(value)
+            for name, value in broker_credentials.items()
+        },
+        retry_policy_hashes={
+            name: retry_hashes.get(name, sha256_json({"retry": name}))
+            for name in BUILTIN_PROVIDER_ROUTES
+        },
+        transport=successful_transport,
+        artifact_sink=vault.seal,
+        clock=lambda: NOW,
+    )
+    terminal_broker.provision_credentials(broker_credentials)
+
+    def execute_terminal(*, job_id: str, operation_id: str) -> dict[str, Any]:
+        return terminal_broker.execute(
+            {
+                "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
+                "logical_operation_id": operation_id,
+                "job_id": job_id,
+                "purpose": "leadpoet.artifact_persistence.v2",
+                "provider_id": "supabase",
+                "attempt_number": 0,
+                "method": "GET",
+                "url": (
+                    "https://qplwoislplkcegvdmbim.supabase.co/"
+                    "rest/v1/research_lab_attested_artifacts_v2"
+                ),
+                "headers": {},
+                "body_b64": "",
+                "timeout_ms": 30_000,
+                "retry_policy_hash": terminal_broker.retry_policy_hashes[
+                    "supabase"
+                ],
+            }
+        )
+
+    retained_job_id = "rehearsal:active-provider-job"
+    retained = execute_terminal(
+        job_id=retained_job_id,
+        operation_id="rehearsal:active-provider-operation",
+    )
+    for ordinal in range(12):
+        completed_job_id = f"rehearsal:completed-provider-job:{ordinal}"
+        execute_terminal(
+            job_id=completed_job_id,
+            operation_id=f"rehearsal:completed-provider-operation:{ordinal}",
+        )
+        released = terminal_broker.release_job_credentials(completed_job_id)
+        if (
+            released.get("job_id") != completed_job_id
+            or released.get("released_slot_count") != 0
+            or released.get("released_terminal_count") != 1
+        ):
+            raise RuntimeError("completed provider job release differed")
+    terminal_health = terminal_broker.health()
+    replayed = execute_terminal(
+        job_id=retained_job_id,
+        operation_id="rehearsal:active-provider-operation",
+    )
+    if (
+        terminal_health["terminal_count"] != 1
+        or terminal_health["released_terminal_count"] != 12
+        or replayed["transport_attempt"]["attempt_hash"]
+        != retained["transport_attempt"]["attempt_hash"]
+    ):
+        raise RuntimeError("completed provider cleanup affected active job state")
+    terminal_broker.release_job_credentials(retained_job_id)
+    if terminal_broker.health()["terminal_count"] != 0:
+        raise RuntimeError("provider terminal state remained after job release")
+
+    retry_failure = {
+        "icp_ref": "rehearsal-retry",
+        "_runtime_error": "execution_providerclientv2error",
+        "diagnostics": {"sourcing_failed": True},
+    }
+    recovered_result = {
+        "icp_ref": "rehearsal-retry",
+        "company_count": 1,
+        "score_breakdowns": [{"final_score": 1.0}],
+        "diagnostics": {"sourcing_failed": False},
+    }
+    if (
+        _baseline_summary_checkpointable(retry_failure)
+        or not _baseline_summary_checkpointable(recovered_result)
+    ):
+        raise RuntimeError("provider recovery checkpoint eligibility differed")
+
     starting_capacity = vault.transient_capacity_state()
     topology = topology_document()
     production_wave_jobs = int(topology["benchmark_concurrency"])
@@ -5335,6 +5448,9 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "execution_receipt_transport_unique": True,
         "transient_cache_transport_recovered": True,
         "measured_concurrent_artifact_wave_bound": True,
+        "completed_provider_job_state_released": True,
+        "active_provider_job_state_isolated": True,
+        "provider_recovery_checkpoint_bound": True,
         "provider_rpc_frame_budget_bound": True,
     }
 

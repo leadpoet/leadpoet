@@ -93,6 +93,14 @@ def _checkpoint_runtime(monkeypatch):
             "proof_hash": proof["proof_hash"],
         }
 
+    async def release_job_credentials(job_id):
+        return {
+            "status": "released",
+            "job_id": job_id,
+            "released_slot_count": 0,
+            "released_terminal_count": 0,
+        }
+
     monkeypatch.setattr(
         attested_v2_store,
         "load_ancestry_checkpoint_proofs_v2",
@@ -102,6 +110,11 @@ def _checkpoint_runtime(monkeypatch):
         attested_v2_store,
         "persist_ancestry_checkpoint_v2",
         persist_proof,
+    )
+    monkeypatch.setattr(
+        attested_scoring_v2.coordinator_tee_client,
+        "v2_release_job_credentials",
+        release_job_credentials,
     )
 
 
@@ -1689,6 +1702,81 @@ async def test_v2_bridge_leases_and_releases_attested_benchmark_profile():
         "echo": {"model_kind": "private"},
     }
     assert events == ["provision", "execute", "release"]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_releases_default_profile_transport_state():
+    release = _release()
+    released_job_ids = []
+
+    def executor(operation, payload, context):
+        for digest in (_hash("8"), _hash("9"), _hash("6")):
+            context.record_artifact(digest)
+        context.record_transport(_authenticated_attempt(context))
+        return {"operation": operation, "echo": payload}
+
+    class _CredentialClient:
+        async def v2_release_job_credentials(self, job_id):
+            released_job_ids.append(job_id)
+            return {
+                "status": "released",
+                "job_id": job_id,
+                "released_slot_count": 0,
+                "released_terminal_count": 1,
+            }
+
+    async def persist_graph(graph):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def persist_artifact(artifact_id, **kwargs):
+        return {
+            "status": "persisted",
+            "artifact_id": artifact_id,
+            "storage_document_hash": _hash("d"),
+            "artifact_kind": "provider_response",
+            "artifact_hash": _hash("c"),
+            "encryption_context_hash": _hash("e"),
+            "object_lock_mode": "COMPLIANCE",
+            "retain_until": "2027-07-10T12:00:00Z",
+            "transport_root": transport_root(
+                _storage_attempts_for_job(
+                    artifact_id,
+                    kwargs["attestation_job_id"],
+                )
+            ),
+        }
+
+    async def persist_sidecars(**_kwargs):
+        return {"artifact_link_count": 2, "transition_count": 0}
+
+    result = await execute_scoring_v2(
+        operation="run_model_sandbox_v2",
+        purpose="research_lab.private_model_run.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"model_kind": "private"},
+        worker_index=0,
+        credential_coordinator_client=_CredentialClient(),
+        release_manifest=release,
+        client=_Client(release, executor=executor),
+        artifact_coordinator_client=_ArtifactCoordinator(
+            release,
+            (_hash("8"), _hash("6")),
+        ),
+        persist_artifact=persist_artifact,
+        artifact_bucket="immutable-bucket",
+        persist_graph=persist_graph,
+        persist_sidecars=persist_sidecars,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+        allow_persistence_bound_artifact_descriptors=True,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["receipt"]["transport_root"] == transport_root(
+        result["receipt_graph"]["transport_attempts"]
+    )
+    assert released_job_ids == [result["execution_receipt"]["job_id"]]
 
 
 @pytest.mark.asyncio

@@ -5069,6 +5069,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
     from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
     from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES
+    from gateway.tee.topology import COORDINATOR_ROLE, ROLE_SPECS, topology_document
     from gateway.tee.provider_broker_v2 import (
         MAX_RESPONSE_BODY_BYTES,
         PROVIDER_BROKER_SCHEMA_VERSION,
@@ -5293,8 +5294,16 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         raise RuntimeError("repeated provider cache reads reused transport evidence")
 
     starting_capacity = vault.transient_capacity_state()
-    production_wave_jobs = 5
+    topology = topology_document()
+    production_wave_jobs = int(topology["benchmark_concurrency"])
+    coordinator_bytes = (
+        int(ROLE_SPECS[COORDINATOR_ROLE]["memory_mib"]) * 1024 * 1024
+    )
     measured_envelopes_per_job = 5000
+    measured_encoded_bytes_per_envelope = 64 * 1024
+    vault._record_memory_bytes = lambda _record: (
+        measured_encoded_bytes_per_envelope
+    )
     for job_index in range(production_wave_jobs):
         for artifact_index in range(measured_envelopes_per_job):
             vault.seal(
@@ -5313,8 +5322,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         or capacity["transient_artifact_count"] <= 16384
         or capacity["transient_artifact_count"]
         >= capacity["maximum_transient_artifacts"]
+        or capacity["transient_artifact_bytes"] <= 1024 * 1024 * 1024
         or capacity["transient_artifact_bytes"]
         >= capacity["maximum_transient_artifact_bytes"]
+        or capacity["maximum_transient_artifact_bytes"] > coordinator_bytes // 2
+        or capacity["active_artifact_job_count"] < production_wave_jobs
     ):
         raise RuntimeError("measured rebenchmark wave exhausted artifact capacity")
     return {

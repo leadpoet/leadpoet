@@ -20,12 +20,16 @@ class Clock:
     def __call__(self):
         return self.now
 
+    def monotonic(self):
+        return (self.now - START).total_seconds()
+
 
 def _vault(clock):
     return EncryptedArtifactVaultV2(
         master_key=b"k" * 32,
         boot_identity_hash=BOOT_HASH,
         clock=clock,
+        monotonic_clock=clock.monotonic,
     )
 
 
@@ -43,7 +47,7 @@ def test_full_vault_reclaims_only_oldest_stale_orphan(monkeypatch):
     clock = Clock()
     vault = _vault(clock)
     first = _seal(vault, "first")
-    clock.now += timedelta(seconds=601)
+    clock.now += timedelta(seconds=3601)
     second = _seal(vault, "second")
 
     third = _seal(vault, "third")
@@ -62,6 +66,7 @@ def test_full_vault_reclaims_only_oldest_stale_orphan(monkeypatch):
             vault_module.MAX_IN_MEMORY_ARTIFACT_BYTES
         ),
         "evicted_orphan_count": 1,
+        "active_artifact_job_count": 2,
     }
 
 
@@ -100,9 +105,46 @@ def test_full_vault_never_evicts_old_active_transaction(monkeypatch):
 
     with vault.transient_artifact_transaction():
         first = _seal(vault, "first")
-        clock.now += timedelta(seconds=601)
+        clock.now += timedelta(seconds=3601)
         with pytest.raises(ArtifactVaultV2Error, match="capacity is full"):
             _seal(vault, "second")
 
     assert vault.descriptor(first["artifact_id"])
     assert vault.transient_capacity_state()["evicted_orphan_count"] == 0
+
+
+def test_full_vault_protects_active_job_then_reclaims_abandoned_job(monkeypatch):
+    monkeypatch.setattr(vault_module, "MAX_IN_MEMORY_ARTIFACTS", 1)
+    clock = Clock()
+    vault = _vault(clock)
+    first = _seal(vault, "first")
+
+    clock.now += timedelta(seconds=601)
+    with pytest.raises(ArtifactVaultV2Error, match="capacity is full"):
+        _seal(vault, "second")
+    assert vault.descriptor(first["artifact_id"])
+
+    clock.now += timedelta(
+        seconds=vault_module.ACTIVE_JOB_ARTIFACT_LEASE_SECONDS
+    )
+    second = _seal(vault, "second")
+
+    with pytest.raises(ArtifactVaultV2Error, match="unavailable"):
+        vault.descriptor(first["artifact_id"])
+    assert vault.descriptor(second["artifact_id"])
+    assert vault.transient_capacity_state()["evicted_orphan_count"] == 1
+
+
+def test_artifact_export_renews_job_lease_during_persistence(monkeypatch):
+    monkeypatch.setattr(vault_module, "MAX_IN_MEMORY_ARTIFACTS", 1)
+    clock = Clock()
+    vault = _vault(clock)
+    first = _seal(vault, "first")
+
+    clock.now += timedelta(seconds=3500)
+    vault.export_ciphertext(first["artifact_id"])
+    clock.now += timedelta(seconds=1000)
+
+    with pytest.raises(ArtifactVaultV2Error, match="capacity is full"):
+        _seal(vault, "second")
+    assert vault.descriptor(first["artifact_id"])

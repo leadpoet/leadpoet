@@ -10,6 +10,7 @@ import json
 import re
 import secrets
 import threading
+import time
 from typing import Any, Dict, Mapping
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -26,10 +27,16 @@ MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 # can retain several thousand request/response/cache envelopes each until their
 # execution receipts make host-side Object Lock persistence attestable. Keep
 # the count bound above that measured concurrent working set; the independent
-# encoded-byte bound remains the authoritative enclave memory safety limit.
+# encoded-byte bound remains the authoritative enclave memory safety limit at
+# one quarter of the measured 8 GiB coordinator enclave.
 MAX_IN_MEMORY_ARTIFACTS = 65536
-MAX_IN_MEMORY_ARTIFACT_BYTES = 1024 * 1024 * 1024
+MAX_IN_MEMORY_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024
 TRANSIENT_EVICTION_MIN_AGE_SECONDS = 600.0
+# A measured model execution is capped below 30 minutes, then the parent may
+# need additional time to persist thousands of receipt-bound envelopes. Keep
+# active evidence protected for one bounded hour while allowing abandoned jobs
+# to become reclaimable without an enclave restart.
+ACTIVE_JOB_ARTIFACT_LEASE_SECONDS = 3600.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES = frozenset(
     {408, 429, 500, 502, 503, 504}
@@ -78,6 +85,7 @@ class EncryptedArtifactVaultV2:
         boot_identity_hash: str,
         retention_days: int = 365,
         clock: Any = lambda: datetime.now(timezone.utc),
+        monotonic_clock: Any = time.monotonic,
     ) -> None:
         if len(bytes(master_key)) != 32:
             raise ArtifactVaultV2Error("artifact master key must be 32 bytes")
@@ -88,9 +96,12 @@ class EncryptedArtifactVaultV2:
         self._boot_identity_hash = str(boot_identity_hash)
         self._retention_days = max(1, int(retention_days))
         self._clock = clock
+        self._monotonic_clock = monotonic_clock
         self._artifacts = {}  # type: Dict[str, Dict[str, Any]]
         self._persisted_artifacts = {}  # type: Dict[str, Dict[str, Any]]
         self._active_transaction_counts = {}  # type: Dict[str, int]
+        self._transient_counts_by_job = {}  # type: Dict[str, int]
+        self._active_job_deadlines = {}  # type: Dict[str, float]
         self._evicted_transient_count = 0
         self._transient_artifact_bytes = 0
         self._lock = threading.RLock()
@@ -189,7 +200,10 @@ class EncryptedArtifactVaultV2:
         with self._lock:
             existing = self._artifacts.get(artifact_id)
             if existing is not None:
+                self._renew_job_lease_locked(str(existing["job_id"]))
                 return self.descriptor(artifact_id)
+            if self._transient_counts_by_job.get(str(job_id), 0) > 0:
+                self._renew_job_lease_locked(str(job_id))
             record_bytes = int(record["_memory_bytes"])
             if (
                 len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS
@@ -205,6 +219,11 @@ class EncryptedArtifactVaultV2:
                     raise ArtifactVaultV2Error("artifact vault capacity is full")
             self._artifacts[artifact_id] = record
             self._transient_artifact_bytes += record_bytes
+            normalized_job_id = str(record["job_id"])
+            self._transient_counts_by_job[normalized_job_id] = (
+                self._transient_counts_by_job.get(normalized_job_id, 0) + 1
+            )
+            self._renew_job_lease_locked(normalized_job_id)
             for transaction in transactions:
                 transaction.add(artifact_id)
                 self._active_transaction_counts[artifact_id] = (
@@ -232,6 +251,30 @@ class EncryptedArtifactVaultV2:
                 self._transient_artifact_bytes
                 - int(record.get("_memory_bytes") or 0),
             )
+            job_id = str(record.get("job_id") or "")
+            remaining = self._transient_counts_by_job.get(job_id, 0) - 1
+            if remaining > 0:
+                self._transient_counts_by_job[job_id] = remaining
+            else:
+                self._transient_counts_by_job.pop(job_id, None)
+                self._active_job_deadlines.pop(job_id, None)
+
+    def _renew_job_lease_locked(self, job_id: str) -> None:
+        normalized_job_id = str(job_id or "")
+        if not normalized_job_id:
+            return
+        deadline = float(self._monotonic_clock()) + (
+            ACTIVE_JOB_ARTIFACT_LEASE_SECONDS
+        )
+        self._active_job_deadlines[normalized_job_id] = max(
+            deadline,
+            self._active_job_deadlines.get(normalized_job_id, 0.0),
+        )
+
+    def _prune_expired_job_leases_locked(self, now_monotonic: float) -> None:
+        for job_id, deadline in tuple(self._active_job_deadlines.items()):
+            if float(deadline) <= now_monotonic:
+                self._active_job_deadlines.pop(job_id, None)
 
     def _evict_stale_transients(
         self,
@@ -241,12 +284,19 @@ class EncryptedArtifactVaultV2:
     ) -> int:
         """Reclaim old orphan envelopes only when capacity blocks new work."""
 
+        now_monotonic = float(self._monotonic_clock())
+        self._prune_expired_job_leases_locked(now_monotonic)
+
         eligible = sorted(
             (
                 (record["_sealed_at"], artifact_id)
                 for artifact_id, record in self._artifacts.items()
                 if record["persistence"] is None
                 and self._active_transaction_counts.get(artifact_id, 0) == 0
+                and self._active_job_deadlines.get(
+                    str(record.get("job_id") or ""), 0.0
+                )
+                <= now_monotonic
                 and (now - record["_sealed_at"]).total_seconds()
                 >= TRANSIENT_EVICTION_MIN_AGE_SECONDS
             ),
@@ -271,12 +321,16 @@ class EncryptedArtifactVaultV2:
 
     def transient_capacity_state(self) -> Dict[str, int]:
         with self._lock:
+            self._prune_expired_job_leases_locked(
+                float(self._monotonic_clock())
+            )
             return {
                 "transient_artifact_count": len(self._artifacts),
                 "maximum_transient_artifacts": MAX_IN_MEMORY_ARTIFACTS,
                 "transient_artifact_bytes": self._transient_artifact_bytes,
                 "maximum_transient_artifact_bytes": MAX_IN_MEMORY_ARTIFACT_BYTES,
                 "evicted_orphan_count": self._evicted_transient_count,
+                "active_artifact_job_count": len(self._active_job_deadlines),
             }
 
     def descriptor(self, artifact_id: str) -> Dict[str, Any]:
@@ -306,6 +360,7 @@ class EncryptedArtifactVaultV2:
             record = self._artifacts.get(str(artifact_id or ""))
             if record is None:
                 raise ArtifactVaultV2Error("encrypted artifact is unavailable")
+            self._renew_job_lease_locked(str(record["job_id"]))
             document = {
                 "schema_version": ARTIFACT_ENVELOPE_SCHEMA_VERSION,
                 "artifact_id": record["artifact_id"],
@@ -566,6 +621,8 @@ class EncryptedArtifactVaultV2:
 
     def job_artifacts(self, *, job_id: str, purpose: str) -> tuple[Dict[str, Any], ...]:
         with self._lock:
+            if self._transient_counts_by_job.get(str(job_id), 0) > 0:
+                self._renew_job_lease_locked(str(job_id))
             ids = sorted(
                 artifact_id
                 for artifact_id, record in {

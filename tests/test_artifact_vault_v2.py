@@ -15,7 +15,9 @@ from gateway.tee.artifact_vault_v2 import (
     EncryptedArtifactVaultV2,
     artifact_master_key_reference_hash,
 )
+from gateway.tee.topology import COORDINATOR_ROLE, ROLE_SPECS, topology_document
 from leadpoet_canonical.attested_v2 import build_transport_attempt, sha256_json
+from research_lab.eval.private_runtime import SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS
 
 
 FIXED_NOW = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
@@ -38,6 +40,14 @@ def _sealed(vault: EncryptedArtifactVaultV2):
         job_id="job-1",
         purpose="research_lab.company_scoring.v2",
         artifact_kind="provider_response",
+    )
+
+
+def test_artifact_capacity_is_bounded_by_measured_coordinator_memory() -> None:
+    coordinator_bytes = int(ROLE_SPECS[COORDINATOR_ROLE]["memory_mib"]) * 1024 * 1024
+    assert artifact_vault_v2.MAX_IN_MEMORY_ARTIFACT_BYTES == coordinator_bytes // 4
+    assert artifact_vault_v2.ACTIVE_JOB_ARTIFACT_LEASE_SECONDS >= (
+        SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS + 120
     )
 
 
@@ -141,10 +151,18 @@ def test_transient_envelope_can_be_released_after_durable_ciphertext_readback() 
     assert vault.decrypt_storage_document(storage_document) == b"hidden provider response"
 
 
-def test_measured_scoring_pool_crosses_old_ceiling_and_recovers_after_persistence() -> None:
+def test_measured_scoring_pool_crosses_old_byte_ceiling_and_recovers_after_persistence(
+    monkeypatch,
+) -> None:
     vault = _vault()
-    jobs = 5
+    jobs = int(topology_document()["benchmark_concurrency"])
     envelopes_per_job = 5000
+    measured_encoded_bytes_per_envelope = 64 * 1024
+    monkeypatch.setattr(
+        vault,
+        "_record_memory_bytes",
+        lambda _record: measured_encoded_bytes_per_envelope,
+    )
     first_artifacts = []
 
     for job_index in range(jobs):
@@ -161,12 +179,14 @@ def test_measured_scoring_pool_crosses_old_ceiling_and_recovers_after_persistenc
     capacity = vault.transient_capacity_state()
     assert capacity["transient_artifact_count"] == jobs * envelopes_per_job
     assert capacity["transient_artifact_count"] > 16384
+    assert capacity["transient_artifact_bytes"] > 1024 * 1024 * 1024
     assert capacity["transient_artifact_count"] < (
         artifact_vault_v2.MAX_IN_MEMORY_ARTIFACTS
     )
     assert capacity["transient_artifact_bytes"] < (
         artifact_vault_v2.MAX_IN_MEMORY_ARTIFACT_BYTES
     )
+    assert capacity["active_artifact_job_count"] == jobs
 
     with pytest.raises(RuntimeError, match="checkpoint failed"):
         with vault.transient_artifact_transaction():

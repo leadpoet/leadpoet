@@ -5,7 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import re
-from typing import Any, Dict, Mapping
+import time
+from typing import Any, Callable, Dict, Mapping
 from urllib.parse import urlencode
 
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
@@ -25,6 +26,9 @@ CHECKPOINT_TABLE = "research_lab_provider_outcome_checkpoints_v2"
 CHECKPOINT_APPEND_RPC = "append_research_lab_provider_outcome_checkpoint_v2"
 CHECKPOINT_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
 CHECKPOINT_TIMEOUT_MS = 45_000
+CHECKPOINT_TRANSPORT_ATTEMPTS = 3
+CHECKPOINT_RETRY_DELAYS_SECONDS = (0.0, 0.05, 0.2)
+_TRANSIENT_POSTGREST_CODES = frozenset({"PGRST002", "PGRST003"})
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -57,9 +61,11 @@ class ProviderOutcomeStoreV2:
         *,
         broker: ProviderBrokerV2,
         vault: EncryptedArtifactVaultV2,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._broker = broker
         self._vault = vault
+        self._sleeper = sleeper
         self._retry_policy_hash = _hash(
             broker.retry_policy_hashes.get("supabase"),
             "provider outcome Supabase retry policy hash",
@@ -147,7 +153,7 @@ class ProviderOutcomeStoreV2:
             str(descriptor["artifact_id"]),
             str(exported["storage_document_hash"]),
         }
-        result = self._execute(
+        result, append_attempts, append_artifacts = self._execute_with_retry(
             method="POST",
             url="%s/rest/v1/rpc/%s" % (CHECKPOINT_ORIGIN, CHECKPOINT_APPEND_RPC),
             headers={
@@ -161,7 +167,8 @@ class ProviderOutcomeStoreV2:
             purpose=purpose,
             attempt_number=attempt_number,
         )
-        self._collect_evidence(result, attempts, transport_artifacts)
+        attempts.extend(append_attempts)
+        transport_artifacts.update(append_artifacts)
         append_result = self._append_result(
             result,
             expected_checkpoint_hash=payload["checkpoint_hash"],
@@ -589,7 +596,7 @@ class ProviderOutcomeStoreV2:
             CHECKPOINT_TABLE,
             urlencode(query_items),
         )
-        result = self._execute(
+        result, attempts, artifacts = self._execute_with_retry(
             method="GET",
             url=request_url,
             headers={"accept": "application/json"},
@@ -603,9 +610,6 @@ class ProviderOutcomeStoreV2:
             job_id=job_id,
             purpose=purpose,
         )
-        attempts: list[Dict[str, Any]] = []
-        artifacts: set[str] = set()
-        self._collect_evidence(result, attempts, artifacts)
         if (
             result.get("terminal_status") != "authenticated_response"
             or not 200 <= int(result.get("http_status") or 0) < 300
@@ -679,6 +683,66 @@ class ProviderOutcomeStoreV2:
                     "retry_policy_hash": self._retry_policy_hash,
                 }
             )
+        )
+
+    def _execute_with_retry(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        logical_operation_id: str,
+        job_id: str,
+        purpose: str,
+        attempt_number: int = 0,
+    ) -> tuple[Dict[str, Any], list[Dict[str, Any]], set[str]]:
+        """Retry only measured transient terminals under one checkpoint identity."""
+
+        attempts: list[Dict[str, Any]] = []
+        artifacts: set[str] = set()
+        result: Dict[str, Any] = {}
+        base_attempt = attempt_number * CHECKPOINT_TRANSPORT_ATTEMPTS
+        for retry_ordinal in range(CHECKPOINT_TRANSPORT_ATTEMPTS):
+            if retry_ordinal:
+                self._sleeper(CHECKPOINT_RETRY_DELAYS_SECONDS[retry_ordinal])
+            result = self._execute(
+                method=method,
+                url=url,
+                headers=headers,
+                body=body,
+                logical_operation_id=logical_operation_id,
+                job_id=job_id,
+                purpose=purpose,
+                attempt_number=base_attempt + retry_ordinal,
+            )
+            self._collect_evidence(result, attempts, artifacts)
+            if not self._is_retryable_terminal(result):
+                break
+        return result, attempts, artifacts
+
+    @staticmethod
+    def _is_retryable_terminal(result: Mapping[str, Any]) -> bool:
+        if result.get("terminal_status") == "transport_failure":
+            return True
+        if result.get("terminal_status") != "authenticated_response":
+            return False
+        try:
+            status = int(result.get("http_status") or 0)
+            body = base64.b64decode(
+                str(result.get("body_b64") or ""),
+                validate=True,
+            )
+            parsed = json.loads(body.decode("utf-8"))
+        except Exception:
+            return False
+        attempt = result.get("transport_attempt")
+        return (
+            status in {503, 504}
+            and isinstance(parsed, Mapping)
+            and str(parsed.get("code") or "") in _TRANSIENT_POSTGREST_CODES
+            and isinstance(attempt, Mapping)
+            and sha256_bytes(body) == str(attempt.get("response_hash") or "")
         )
 
     @staticmethod

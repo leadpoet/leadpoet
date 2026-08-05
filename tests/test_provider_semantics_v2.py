@@ -1062,7 +1062,7 @@ def test_provider_outcome_structured_conflict_rebases_without_head_read() -> Non
     )
 
 
-def test_real_outcome_store_busy_retry_uses_distinct_broker_attempts() -> None:
+def test_real_outcome_store_recovers_ambiguous_commit_without_provider_recall() -> None:
     class LocalProviderTransport:
         def __init__(self) -> None:
             self.calls = []
@@ -1080,31 +1080,24 @@ def test_real_outcome_store_busy_retry_uses_distinct_broker_attempts() -> None:
                     row = json.loads(request["body"].decode("utf-8"))[
                         "checkpoint_row"
                     ]
+                    row_key = (
+                        row["artifact_master_key_ref_hash"],
+                        row["utc_day"],
+                        int(row["sequence"]),
+                    )
+                    existing = self.rows.get(row_key)
+                    assert existing is None or existing == row
+                    self.rows[row_key] = row
                     if self.append_count == 1:
-                        body = json.dumps(
-                            {
-                                "status": "busy",
-                                "checkpoint_hash": row["checkpoint_hash"],
-                            },
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ).encode()
-                    else:
-                        self.rows[
-                            (
-                                row["artifact_master_key_ref_hash"],
-                                row["utc_day"],
-                                int(row["sequence"]),
-                            )
-                        ] = row
-                        body = json.dumps(
-                            {
-                                "status": "inserted",
-                                "checkpoint_hash": row["checkpoint_hash"],
-                            },
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ).encode()
+                        raise EOFError("connection closed after checkpoint commit")
+                    body = json.dumps(
+                        {
+                            "status": "existing" if existing is not None else "inserted",
+                            "checkpoint_hash": row["checkpoint_hash"],
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
                 else:
                     query = parse_qs(parsed.query)
                     day = query["utc_day"][0].split("eq.", 1)[1]
@@ -1168,7 +1161,11 @@ def test_real_outcome_store_busy_retry_uses_distinct_broker_attempts() -> None:
         clock=lambda: "2026-07-10T00:00:00Z",
     )
     broker.provision_credentials(credentials)
-    outcome_store = ProviderOutcomeStoreV2(broker=broker, vault=vault)
+    outcome_store = ProviderOutcomeStoreV2(
+        broker=broker,
+        vault=vault,
+        sleeper=lambda _delay: None,
+    )
     authority, _broker, _cache, _artifacts = _authority(
         broker=broker,
         artifacts=SimpleNamespace(seal=vault.seal),
@@ -1176,7 +1173,7 @@ def test_real_outcome_store_busy_retry_uses_distinct_broker_attempts() -> None:
         artifact_transaction=vault.transient_artifact_transaction,
     )
 
-    result = authority.execute(_request(job_id="job-real-busy-retry"))
+    result = authority.execute(_request(job_id="job-real-ambiguous-commit"))
 
     append_attempts = [
         attempt
@@ -1184,6 +1181,14 @@ def test_real_outcome_store_busy_retry_uses_distinct_broker_attempts() -> None:
         if str(attempt["logical_operation_id"]).endswith(":append")
     ]
     assert [attempt["attempt_number"] for attempt in append_attempts] == [0, 1]
+    assert [attempt["terminal_status"] for attempt in append_attempts] == [
+        "transport_failure",
+        "authenticated_response",
+    ]
+    assert result["terminal_status"] == "authenticated_response"
+    assert sum(
+        urlsplit(call["url"]).hostname == "api.exa.ai" for call in transport.calls
+    ) == 1
     assert transport.append_count == 2
     assert len(transport.rows) == 1
     assert authority.provider_outcome_snapshot()["provider_outcome_digest"][

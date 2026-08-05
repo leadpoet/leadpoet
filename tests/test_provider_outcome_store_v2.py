@@ -32,9 +32,11 @@ class _Broker:
         self.rows = {}
         self.calls = []
         self.fail_reads = False
+        self.fail_uncommitted_appends = 0
         self.fail_committed_appends = 0
         self.busy_appends = 0
         self.append_http_failure = None
+        self.append_http_failures = 0
         self.contention_contract = "current"
         self.tamper_next_response_hash = False
 
@@ -44,13 +46,20 @@ class _Broker:
         if request["method"] == "POST":
             payload = json.loads(base64.b64decode(request["body_b64"]))
             row = payload["checkpoint_row"]
-            if self.append_http_failure is not None:
+            if (
+                self.append_http_failure is not None
+                and self.append_http_failures > 0
+            ):
+                self.append_http_failures -= 1
                 status, code = self.append_http_failure
                 return self._result(
                     request,
                     status=status,
                     body=json.dumps({"code": code}).encode(),
                 )
+            if self.fail_uncommitted_appends > 0:
+                self.fail_uncommitted_appends -= 1
+                return self._failure(request, failure_code="unexpected_eof")
             if self.busy_appends > 0:
                 self.busy_appends -= 1
                 return self._result(
@@ -472,10 +481,20 @@ def test_outcome_checkpoint_rejects_embedded_head_from_another_key_lineage() -> 
     assert broker.calls[-1]["method"] == "POST"
 
 
-def test_outcome_checkpoint_accepts_ambiguous_committed_append() -> None:
+@pytest.mark.parametrize("committed_before_eof", (False, True))
+def test_outcome_checkpoint_retries_ambiguous_append_without_duplication(
+    committed_before_eof: bool,
+) -> None:
     broker = _Broker()
-    broker.fail_committed_appends = 1
-    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+    if committed_before_eof:
+        broker.fail_committed_appends = 1
+    else:
+        broker.fail_uncommitted_appends = 1
+    store = ProviderOutcomeStoreV2(
+        broker=broker,
+        vault=_vault(),
+        sleeper=lambda _delay: None,
+    )
 
     persisted = store.persist(
         _document(),
@@ -488,6 +507,9 @@ def test_outcome_checkpoint_accepts_ambiguous_committed_append() -> None:
     assert persisted["transport_attempts"][0]["terminal_status"] == "transport_failure"
     assert persisted["transport_attempts"][0]["failure_code"] == "unexpected_eof"
     assert persisted["transport_attempts"][1]["terminal_status"] == "authenticated_response"
+    assert [call["method"] for call in broker.calls] == ["POST", "POST", "GET"]
+    assert [call["attempt_number"] for call in broker.calls[:2]] == [0, 1]
+    assert len(broker.rows) == 1
 
 
 def test_outcome_checkpoint_busy_append_is_retryable_without_readback() -> None:
@@ -505,7 +527,7 @@ def test_outcome_checkpoint_busy_append_is_retryable_without_readback() -> None:
 
     assert busy["status"] == "busy"
     assert len(broker.calls) == 1
-    assert broker.calls[0]["attempt_number"] == 7
+    assert broker.calls[0]["attempt_number"] == 21
 
 
 @pytest.mark.parametrize(
@@ -515,19 +537,88 @@ def test_outcome_checkpoint_busy_append_is_retryable_without_readback() -> None:
         (504, "PGRST003"),
     ),
 )
-def test_outcome_checkpoint_authenticated_append_failure_does_not_read_back(
+def test_outcome_checkpoint_retries_authenticated_transient_append(
     http_status: int,
     code: str,
 ) -> None:
     broker = _Broker()
     broker.append_http_failure = (http_status, code)
-    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+    broker.append_http_failures = 1
+    store = ProviderOutcomeStoreV2(
+        broker=broker,
+        vault=_vault(),
+        sleeper=lambda _delay: None,
+    )
+
+    persisted = store.persist(
+        _document(),
+        previous_checkpoint_hash="",
+        job_id="job",
+        purpose="research_lab.company_score.v2",
+    )
+
+    assert persisted["status"] == "persisted"
+    assert [call["method"] for call in broker.calls] == ["POST", "POST", "GET"]
+    assert [call["attempt_number"] for call in broker.calls[:2]] == [0, 1]
+    assert [
+        attempt["http_status"] for attempt in persisted["transport_attempts"][:2]
+    ] == [http_status, 200]
+
+
+@pytest.mark.parametrize(
+    ("http_status", "code"),
+    (
+        (503, "PGRST002"),
+        (504, "PGRST003"),
+    ),
+)
+def test_outcome_checkpoint_transient_append_exhaustion_fails_closed(
+    http_status: int,
+    code: str,
+) -> None:
+    broker = _Broker()
+    broker.append_http_failure = (http_status, code)
+    broker.append_http_failures = 3
+    store = ProviderOutcomeStoreV2(
+        broker=broker,
+        vault=_vault(),
+        sleeper=lambda _delay: None,
+    )
 
     with pytest.raises(
         ProviderOutcomeStoreV2Error,
         match=(
             "provider outcome checkpoint authenticated append failed "
             rf"\(http_status={http_status} code={code}\)"
+        ),
+    ):
+        store.persist(
+            _document(),
+            previous_checkpoint_hash="",
+            job_id="job",
+            purpose="research_lab.company_score.v2",
+        )
+
+    assert [call["method"] for call in broker.calls] == ["POST"] * 3
+    assert [call["attempt_number"] for call in broker.calls] == [0, 1, 2]
+    assert broker.rows == {}
+
+
+def test_outcome_checkpoint_nontransient_append_failure_is_not_retried() -> None:
+    broker = _Broker()
+    broker.append_http_failure = (401, "PGRST301")
+    broker.append_http_failures = 1
+    store = ProviderOutcomeStoreV2(
+        broker=broker,
+        vault=_vault(),
+        sleeper=lambda _delay: None,
+    )
+
+    with pytest.raises(
+        ProviderOutcomeStoreV2Error,
+        match=(
+            "provider outcome checkpoint authenticated append failed "
+            r"\(http_status=401 code=PGRST301\)"
         ),
     ):
         store.persist(

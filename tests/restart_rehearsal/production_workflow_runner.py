@@ -5085,10 +5085,13 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     from gateway.tee.provider_evidence_cache_store_v2 import (
         ProviderEvidenceCacheStoreV2,
     )
+    from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
+    from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
     from gateway.tee.provider_semantics_v2 import ProviderSemanticsAuthorityV2
     from leadpoet_canonical.attested_v2 import (
         DIRECT_EGRESS_REF_HASH,
         build_transport_attempt,
+        canonical_json,
         sha256_bytes,
         sha256_json,
     )
@@ -5120,6 +5123,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             self.records: dict[tuple[str, int], dict[str, Any]] = {}
             self.retry_policy_hashes = retry_hashes
             self.fail_first_supabase_transport = True
+            self.fail_first_outcome_append_after_commit = True
+            self.outcome_rows: dict[tuple[str, str, int], dict[str, Any]] = {}
 
         @contextmanager
         def transient_terminal_transaction(self):
@@ -5143,7 +5148,54 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 return dict(self.records[key])
             provider = str(request["provider_id"])
             if provider == "supabase":
-                body = b"[]"
+                request_url = str(request["url"])
+                if "/rpc/append_research_lab_provider_outcome_checkpoint_v2" in request_url:
+                    checkpoint_row = json.loads(
+                        base64.b64decode(str(request["body_b64"]), validate=True)
+                    )["checkpoint_row"]
+                    row_key = (
+                        str(checkpoint_row["artifact_master_key_ref_hash"]),
+                        str(checkpoint_row["utc_day"]),
+                        int(checkpoint_row["sequence"]),
+                    )
+                    existing = self.outcome_rows.get(row_key)
+                    if existing is not None and existing != checkpoint_row:
+                        raise RuntimeError("checkpoint hash identified another row")
+                    self.outcome_rows[row_key] = dict(checkpoint_row)
+                    body = canonical_json(
+                        {
+                            "checkpoint_hash": checkpoint_row["checkpoint_hash"],
+                            "status": "existing" if existing is not None else "inserted",
+                        }
+                    ).encode()
+                elif "research_lab_provider_outcome_checkpoints_v2" in request_url:
+                    from urllib.parse import parse_qs, urlsplit
+
+                    query = parse_qs(urlsplit(request_url).query)
+                    day = query["utc_day"][0].split("eq.", 1)[1]
+                    key_hash = query["artifact_master_key_ref_hash"][0].split(
+                        "eq.", 1
+                    )[1]
+                    rows = [
+                        row
+                        for (row_key_hash, row_day, _sequence), row in self.outcome_rows.items()
+                        if row_key_hash == key_hash and row_day == day
+                    ]
+                    if "sequence" in query:
+                        sequence = int(query["sequence"][0].split("eq.", 1)[1])
+                        rows = [
+                            row for row in rows if int(row["sequence"]) == sequence
+                        ]
+                    if query.get("order") == ["sequence.desc"]:
+                        rows.sort(
+                            key=lambda row: int(row["sequence"]),
+                            reverse=True,
+                        )
+                    body = canonical_json(
+                        rows[: int(query.get("limit", ["2"])[0])]
+                    ).encode()
+                else:
+                    body = b"[]"
                 host = "fixture.supabase.co"
             elif provider == "exa":
                 body = b'{"status":"running","object":"agent_run"}'
@@ -5160,6 +5212,14 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             )
             if transport_failure:
                 self.fail_first_supabase_transport = False
+            elif (
+                provider == "supabase"
+                and "/rpc/append_research_lab_provider_outcome_checkpoint_v2"
+                in str(request["url"])
+                and self.fail_first_outcome_append_after_commit
+            ):
+                self.fail_first_outcome_append_after_commit = False
+                transport_failure = True
             attempt = build_transport_attempt(
                 request_id=("%032x" % ordinal)[-32:],
                 logical_operation_id=key[0],
@@ -5298,6 +5358,52 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         or len({item["logical_operation_id"] for item in supabase_attempts}) != 1
     ):
         raise RuntimeError("repeated provider cache reads reused transport evidence")
+
+    outcome_store = ProviderOutcomeStoreV2(
+        broker=boundary,
+        vault=vault,
+        sleeper=lambda _seconds: None,
+    )
+    outcome_ledger = ProviderOutcomeLedgerV2(clock=lambda: NOW)
+    outcome_document = outcome_ledger.record(
+        provider_id="deepline",
+        endpoint_class="/v1/search",
+        evidence="recorded",
+        status=200,
+        live_call=True,
+        cost_event={},
+    )
+    outcome = outcome_store.persist(
+        outcome_document,
+        previous_checkpoint_hash="",
+        job_id=context.job_id,
+        purpose=context.purpose,
+    )
+    restarted_outcome_store = ProviderOutcomeStoreV2(
+        broker=boundary,
+        vault=vault,
+        sleeper=lambda _seconds: None,
+    )
+    restored_outcome = restarted_outcome_store.load_latest(
+        utc_day=str(outcome_document["utc_day"]),
+        job_id=context.job_id,
+        purpose=context.purpose,
+    )
+    append_attempts = [
+        item
+        for item in outcome["transport_attempts"]
+        if str(item["logical_operation_id"]).endswith(":append")
+    ]
+    if (
+        outcome.get("status") != "persisted"
+        or [item["attempt_number"] for item in append_attempts] != [0, 1]
+        or [item["terminal_status"] for item in append_attempts]
+        != ["transport_failure", "authenticated_response"]
+        or len(boundary.outcome_rows) != 1
+        or restored_outcome.get("checkpoint_hash") != outcome["checkpoint_hash"]
+        or restored_outcome.get("state_document") != outcome_document
+    ):
+        raise RuntimeError("provider outcome transient recovery differed")
 
     broker_credentials = {
         "openrouter": "rehearsal-openrouter",
@@ -5447,6 +5553,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "request_bound_cache_attempts": True,
         "execution_receipt_transport_unique": True,
         "transient_cache_transport_recovered": True,
+        "transient_outcome_checkpoint_recovered": True,
         "measured_concurrent_artifact_wave_bound": True,
         "completed_provider_job_state_released": True,
         "active_provider_job_state_isolated": True,
@@ -5978,6 +6085,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("transient_cache_transport_recovered")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("transient_outcome_checkpoint_recovered")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

@@ -172,7 +172,7 @@
       "symbol": "_persist_graph_then_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:3b87240a16910cbf9396378e35d503bfc18a8c68377796041b4403ddeff690f2",
+      "ast_sha256": "sha256:22d6179327381526b2c28fb2567a726385b5c06985ed943599ec35fcacb01dd5",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "_resolve_parent_ancestry_transport_v2"
     },
@@ -287,7 +287,7 @@
       "symbol": "persist_allocation_settlement_frontier_v2"
     },
     {
-      "ast_sha256": "sha256:b0c4f8382f12cfeb00090b9105d07cbb47850622ad0a4167abada51b586b4fe9",
+      "ast_sha256": "sha256:bccbed415d99c27900f04807c897be7d49ddc1a46d6ca0a373eeb9927c860001",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "persist_ancestry_checkpoint_v2"
     },
@@ -1012,7 +1012,7 @@
       "symbol": "_bootstrap_one_graph"
     },
     {
-      "ast_sha256": "sha256:d9663be23c520e05b68603e8969422b138a76d886e55f6c249b2e070c88240b9",
+      "ast_sha256": "sha256:97f1bddbfcf230a057c14a1c4610389abbc3b8e3a7b0867fb2bbd303035ef9e3",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "_graph_root"
     },
@@ -1082,7 +1082,7 @@
       "symbol": "select_latest_allocation_source_row_v2"
     },
     {
-      "ast_sha256": "sha256:0cb843c77a1c65615d1c74f1717510712f7fd23ce0b9b13fc7fb6b5db898b91d",
+      "ast_sha256": "sha256:d952c2b8e580c9ce4d210fc0f12258c8565f03f29df75722144273d2562f02ee",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -1142,7 +1142,7 @@
       "symbol": "AttestedPeerRegistry"
     },
     {
-      "ast_sha256": "sha256:76742d51d4d387bcf15e43e624aec5cea513c56d8487b00a89fe1acf5a6d210b",
+      "ast_sha256": "sha256:8be2e317168773e40576082ac7ce0deb7869cdd278b9c0cb3cdfdbcf8bf40d9c",
       "path": "gateway/tee/inter_enclave_tls.py",
       "symbol": "AttestedTLSRPCClient"
     },
@@ -2607,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:6acb6c48bc5491e26ac6525174b6741456dee474b3a4637fc3eeb41a47c8aaf7",
+  "manifest_hash": "sha256:413334e9a1e75f799fe905470f24389991602469865b62936848d04f26a3f040",
   "protected_source_commit": "1803f3802b3667e2036a54fbf6ada14b7edfa206",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

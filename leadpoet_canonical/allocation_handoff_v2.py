@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 from leadpoet_canonical.attested_v2 import (
-    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
     sha256_json,
     validate_receipt_graph,
 )
@@ -107,7 +107,7 @@ def validate_allocation_handoff_v2(
         raise AllocationHandoffV2Error("allocation handoff netuid differs")
     parent_hashes = sorted(str(item) for item in root["parent_receipt_hashes"])
     checkpoint_parent_authorities = {}
-    if graph.get("schema_version") == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
+    if graph.get("schema_version") in CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS:
         proof = graph.get("ancestry_proof")
         certificate = (
             proof.get("certificate") if isinstance(proof, Mapping) else None

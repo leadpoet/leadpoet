@@ -21,8 +21,11 @@ from gateway.research_lab.store import (
 )
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
+    COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     RECEIPT_GRAPH_SCHEMA_VERSION,
     build_receipt_graph,
+    compact_checkpointed_receipt_graph,
     merkle_root,
     sha256_json,
     validate_boot_identity,
@@ -35,7 +38,6 @@ from leadpoet_canonical.attested_v2 import (
 )
 from leadpoet_canonical.ancestry_checkpoint_v2 import (
     validate_compact_ancestry_proof_v2,
-    validate_local_delta_against_certificate_v2,
 )
 from leadpoet_canonical.compact_auditor_authority_v2 import (
     validate_compact_published_weight_authority_shape_v2,
@@ -864,7 +866,7 @@ async def persist_ancestry_checkpoint_v2(
     if (
         not isinstance(checkpointed_graph, Mapping)
         or checkpointed_graph.get("schema_version")
-        != CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        not in CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS
         or checkpointed_graph.get("root_receipt_hash") != root_hash
         or checkpointed_graph.get("ancestry_lineage_id")
         != expected_lineage_id
@@ -886,21 +888,49 @@ async def persist_ancestry_checkpoint_v2(
         boot_attestation_verifier=boot_attestation_verifier,
         require_boot_attestation_verification=True,
     )
-    local_delta = {
-        "schema_version": "leadpoet.attested_ancestry_delta.v2",
-        "root_receipt_hash": checkpointed_graph["root_receipt_hash"],
-        "boot_identities": checkpointed_graph["boot_identities"],
-        "receipts": checkpointed_graph["receipts"],
-        "transport_attempts": checkpointed_graph["transport_attempts"],
-        "host_operations": checkpointed_graph["host_operations"],
-    }
-    validate_local_delta_against_certificate_v2(
-        local_delta,
-        row["certificate_doc"],
-        expected_lineage_id=expected_lineage_id,
-        boot_attestation_verifier=boot_attestation_verifier,
-        allowed_issuer_roles=allowed_issuer_roles,
-    )
+    if (
+        checkpointed_graph.get("schema_version")
+        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    ):
+        existing = await select_one(
+            ANCESTRY_CHECKPOINT_TABLE,
+            filters=(("root_receipt_hash", root_hash),),
+        )
+        existing_graph = (
+            existing.get("checkpoint_graph_doc")
+            if isinstance(existing, Mapping)
+            else None
+        )
+        existing_schema = (
+            existing_graph.get("schema_version")
+            if isinstance(existing_graph, Mapping)
+            else None
+        )
+        if existing_schema not in {
+            None,
+            CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+            COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+        }:
+            raise AttestedV2StoreError(
+                "ancestry checkpoint durable graph schema is invalid"
+            )
+        if (
+            existing_schema
+            != CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        ):
+            checkpointed_graph = compact_checkpointed_receipt_graph(
+                checkpointed_graph,
+                allowed_failed_receipt_hashes=failed_receipts,
+                boot_attestation_verifier=boot_attestation_verifier,
+                require_boot_attestation_verification=True,
+            )
+    if checkpointed_graph.get("schema_version") not in {
+        CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+        COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    }:
+        raise AttestedV2StoreError(
+            "ancestry checkpoint compact graph schema differs"
+        )
     row = {
         **row,
         "checkpoint_graph_hash": sha256_json(dict(checkpointed_graph)),

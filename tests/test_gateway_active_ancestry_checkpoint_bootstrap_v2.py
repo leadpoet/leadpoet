@@ -8,6 +8,7 @@ import pytest
 from gateway.tee import bootstrap_active_ancestry_checkpoints_v2 as bootstrap
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     RECEIPT_GRAPH_SCHEMA_VERSION,
 )
 
@@ -107,6 +108,7 @@ class _Harness:
         self.selection_count = 0
         self.selection_roots: list[str] | None = None
         self.tamper_readback = False
+        self.compact_persistence = False
 
     def current_root(self) -> str:
         if self.selection_roots is None:
@@ -154,6 +156,10 @@ class _Harness:
         self.persisted.append(root)
         self.proofs[root] = deepcopy(proof)
         self.bounded[root] = deepcopy(checkpointed_graph)
+        if self.compact_persistence:
+            self.bounded[root]["schema_version"] = (
+                COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+            )
         return {
             "root_receipt_hash": root,
             "proof_hash": proof["proof_hash"],
@@ -340,6 +346,25 @@ async def test_success_persists_only_selected_root_proof_and_reads_back(orchestr
         ),
         "selected_root_receipt_hashes": [HASH_B],
     }
+
+
+@pytest.mark.asyncio
+async def test_compact_persistence_is_accepted_during_stability_reselection(
+    orchestration,
+):
+    harness = _Harness([HASH_A], {HASH_A: _full_graph(HASH_A)})
+    harness.compact_persistence = True
+
+    result = await _run(harness)
+
+    assert result["status"] == "complete"
+    assert result["stability_rounds"] == 1
+    assert result["new_proof_count"] == 1
+    assert harness.persisted == [HASH_A]
+    assert len(harness.execute_calls) == 1
+    assert harness.bounded[HASH_A]["schema_version"] == (
+        COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    )
 
 
 @pytest.mark.asyncio

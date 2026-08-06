@@ -465,11 +465,12 @@ def _migration_schema_contract(
         "140-research-lab-allocation-frontier-historical-source.sql",
         "141-research-lab-allocation-frontier-source-contract.sql",
         "142-research-lab-source-catalog-result-replay.sql",
+        "143-research-lab-compact-ancestry-checkpoints.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
         not isinstance(applied_migrations, list)
-        or applied_migrations[-13:] != expected_final_migrations
+        or applied_migrations[-14:] != expected_final_migrations
     ):
         raise RuntimeError(
             "migration-backed final migration order differs from production"
@@ -1379,7 +1380,10 @@ class LocalPostgRESTState:
             or proof.get("proof_hash") != row["proof_hash"]
             or proof_certificate != certificate
             or graph.get("schema_version")
-            != "leadpoet.attested_checkpointed_receipt_graph.v3"
+            not in {
+                "leadpoet.attested_checkpointed_receipt_graph.v3",
+                "leadpoet.attested_checkpointed_receipt_graph.v4",
+            }
             or graph.get("root_receipt_hash") != root_hash
             or graph.get("ancestry_lineage_id") != lineage
             or graph_proof != proof
@@ -1408,6 +1412,70 @@ class LocalPostgRESTState:
                 raise ValueError(
                     "ancestry checkpoint issuer boot is not durable"
                 )
+            if (
+                graph.get("schema_version")
+                == "leadpoet.attested_checkpointed_receipt_graph.v4"
+            ):
+                projection = claim.get("local_delta_projection")
+                disclosed_receipts = proof.get("disclosed_receipts")
+                disclosed_boots = proof.get("disclosed_boot_identities")
+                if (
+                    not isinstance(projection, dict)
+                    or not isinstance(disclosed_receipts, list)
+                    or not isinstance(disclosed_boots, list)
+                    or graph.get("transport_attempts") != []
+                    or graph.get("host_operations") != []
+                    or graph.get("receipts") != disclosed_receipts
+                    or graph.get("boot_identities") != disclosed_boots
+                ):
+                    raise ValueError(
+                        "compact checkpoint disclosure contract is invalid"
+                    )
+                disclosed_receipt_hashes = {
+                    str(item.get("receipt_hash") or "")
+                    for item in disclosed_receipts
+                    if isinstance(item, dict)
+                }
+                disclosed_boot_hashes = {
+                    str(item.get("boot_identity_hash") or "")
+                    for item in disclosed_boots
+                    if isinstance(item, dict)
+                }
+                durable_attempts = self.rows.get(
+                    "research_lab_attested_receipt_transport_v2", []
+                )
+                durable_hosts = self.rows.get(
+                    "research_lab_attested_host_operations_v2", []
+                )
+                observed_counts = {
+                    "receipt_count": sum(
+                        stored.get("receipt_hash")
+                        in disclosed_receipt_hashes
+                        for stored in receipt_rows
+                    ),
+                    "boot_identity_count": sum(
+                        stored.get("boot_identity_hash")
+                        in disclosed_boot_hashes
+                        for stored in boot_rows
+                    ),
+                    "transport_attempt_count": sum(
+                        stored.get("receipt_hash")
+                        in disclosed_receipt_hashes
+                        for stored in durable_attempts
+                    ),
+                    "host_operation_count": sum(
+                        stored.get("receipt_hash")
+                        in disclosed_receipt_hashes
+                        for stored in durable_hosts
+                    ),
+                }
+                if any(
+                    projection.get(field) != observed
+                    for field, observed in observed_counts.items()
+                ):
+                    raise ValueError(
+                        "compact checkpoint raw sidecars are incomplete"
+                    )
             checkpoints = self.rows[checkpoint_table]
             activations = self.rows[activation_table]
             for parent in claim["parent_authorities"]:

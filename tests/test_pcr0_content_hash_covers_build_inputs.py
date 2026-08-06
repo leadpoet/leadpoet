@@ -234,6 +234,39 @@ def test_historical_cache_warming_prioritizes_deployed_runtime_commit():
     ]
 
 
+def test_historical_cache_warming_includes_recent_unmeasured_release_aliases():
+    recent = [
+        {
+            "hash": character * 40,
+            "timestamp": str(10 - index),
+            "message": "gateway-only release",
+            "date": "",
+        }
+        for index, character in enumerate(("f", "e", "d"))
+    ]
+    measured = [
+        {
+            "hash": "a" * 40,
+            "timestamp": "1",
+            "message": "validator measured-input change",
+            "date": "",
+        }
+    ]
+
+    selected = pcr0_builder._historical_commit_candidates(
+        measured,
+        recent,
+        unique_version_limit=2,
+    )
+
+    assert [commit["hash"] for commit in selected] == [
+        recent[0]["hash"],
+        recent[1]["hash"],
+        recent[2]["hash"],
+        measured[0]["hash"],
+    ]
+
+
 def test_cache_pruning_retains_deployed_runtime_commit(monkeypatch):
     deployed = "d" * 40
     monkeypatch.setattr(pcr0_builder, "PCR0_CACHE_SIZE", 2)

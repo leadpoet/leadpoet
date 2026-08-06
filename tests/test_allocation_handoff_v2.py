@@ -25,6 +25,7 @@ from leadpoet_canonical.attested_v2 import (
     build_checkpointed_receipt_graph,
     build_execution_receipt_body,
     build_receipt_graph,
+    compact_checkpointed_receipt_graph,
     create_boot_identity,
     create_signed_execution_receipt,
     sha256_json,
@@ -269,6 +270,17 @@ def test_allocation_handoff_binds_checkpoint_parent_metadata_without_expansion()
     document = _checkpoint_document()
 
     assert len(document["receipt_graph"]["receipts"]) == 1
+    assert validate_allocation_handoff_v2(document) == document
+
+
+def test_allocation_handoff_binds_compact_checkpoint_parent_metadata():
+    document = _checkpoint_document()
+    document["receipt_graph"] = compact_checkpointed_receipt_graph(
+        document["receipt_graph"]
+    )
+
+    assert document["receipt_graph"]["transport_attempts"] == []
+    assert document["receipt_graph"]["host_operations"] == []
     assert validate_allocation_handoff_v2(document) == document
 
 

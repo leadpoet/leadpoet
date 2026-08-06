@@ -34,11 +34,13 @@ from leadpoet_canonical.ancestry_checkpoint_v2 import (
     validate_local_delta_against_certificate_v2,
 )
 from leadpoet_canonical.attested_v2 import (
+    COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
     ROLE_PURPOSES,
     SCORING_ROLE,
+    AttestedV2Error,
     build_boot_identity_body,
     build_checkpointed_receipt_graph,
     build_execution_receipt_body,
@@ -47,6 +49,7 @@ from leadpoet_canonical.attested_v2 import (
     build_receipt_graph,
     build_transport_attempt,
     canonical_json,
+    compact_checkpointed_receipt_graph,
     create_boot_identity,
     create_signed_execution_receipt,
     create_signed_host_operation_request,
@@ -534,7 +537,42 @@ def test_legacy_bootstrap_issues_one_bounded_selected_root_proof_and_resumes(
         "output"
     ]["receipt_hash"]
     assert checkpointed_graph["receipts"] == [ancestry_fixture["output"]]
+    assert checkpointed_graph["transport_attempts"] == []
     assert checkpointed_graph["host_operations"] == [ancestry_fixture["host"]]
+    assert (
+        checkpointed_graph["ancestry_proof"]["certificate"]["claim"]
+        ["local_delta_projection"]["host_operation_count"]
+        == 1
+    )
+    compact_graph = compact_checkpointed_receipt_graph(
+        checkpointed_graph,
+        boot_attestation_verifier=_boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    assert (
+        compact_graph["schema_version"]
+        == COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    )
+    assert compact_graph["receipts"] == [ancestry_fixture["output"]]
+    assert compact_graph["boot_identities"] == [
+        ancestry_fixture["current_boot"]
+    ]
+    assert compact_graph["transport_attempts"] == []
+    assert compact_graph["host_operations"] == []
+    assert len(canonical_json(compact_graph)) < len(
+        canonical_json(checkpointed_graph)
+    )
+    tampered_compact = deepcopy(compact_graph)
+    tampered_compact["host_operations"] = [ancestry_fixture["host"]]
+    with pytest.raises(
+        AttestedV2Error,
+        match="compact checkpoint graph contains host-operation sidecars",
+    ):
+        compact_checkpointed_receipt_graph(
+            tampered_compact,
+            boot_attestation_verifier=_boot_verifier,
+            require_boot_attestation_verification=True,
+        )
     omitted_attempt = deepcopy(graph)
     omitted_attempt["transport_attempts"] = []
     with pytest.raises(AncestryCheckpointV2Error, match="attested validation"):
@@ -545,7 +583,6 @@ def test_legacy_bootstrap_issues_one_bounded_selected_root_proof_and_resumes(
             boot_attestation_verifier=_boot_verifier,
             allowed_issuer_roles=(SCORING_ROLE,),
         )
-
     intermediate_graph = build_receipt_graph(
         root_receipt_hash=ancestry_fixture["intermediate"]["receipt_hash"],
         boot_identities=[
@@ -598,6 +635,86 @@ def test_legacy_bootstrap_issues_one_bounded_selected_root_proof_and_resumes(
             ancestry_fixture["output"]["receipt_hash"],
         ]
     )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_persistence_compacts_after_full_graph_validation(
+    ancestry_fixture, monkeypatch
+):
+    from gateway.research_lab import attested_v2_store
+
+    delta = ancestry_fixture["delta"]
+    graph = build_checkpointed_receipt_graph(
+        root_receipt_hash=delta["root_receipt_hash"],
+        boot_identities=delta["boot_identities"],
+        receipts=delta["receipts"],
+        transport_attempts=delta["transport_attempts"],
+        host_operations=delta["host_operations"],
+        ancestry_lineage_id=LINEAGE_ID,
+        ancestry_proof=ancestry_fixture["proof"],
+        boot_attestation_verifier=_boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    durable = {}
+
+    async def select_one(table, *, filters):
+        assert table == attested_v2_store.ANCESTRY_CHECKPOINT_TABLE
+        assert filters == (("root_receipt_hash", delta["root_receipt_hash"]),)
+        return durable.get("row")
+
+    async def call_rpc(name, payload):
+        assert name == attested_v2_store.ANCESTRY_CHECKPOINT_RPC
+        row = dict(payload["checkpoint"])
+        if "row" in durable:
+            assert row == durable["row"]
+        else:
+            durable["row"] = row
+        return {
+            "status": "persisted",
+            "root_activated": True,
+            **{
+                field: row[field]
+                for field in (
+                    "root_receipt_hash",
+                    "certificate_hash",
+                    "proof_hash",
+                    "lineage_id",
+                    "certificate_sequence",
+                    "checkpoint_graph_hash",
+                )
+            },
+        }
+
+    monkeypatch.setattr(attested_v2_store, "select_one", select_one)
+    monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+
+    result = await attested_v2_store.persist_ancestry_checkpoint_v2(
+        proof=ancestry_fixture["proof"],
+        checkpointed_graph=graph,
+        expected_lineage_id=LINEAGE_ID,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+
+    stored_graph = durable["row"]["checkpoint_graph_doc"]
+    assert result["root_activated"] is True
+    assert (
+        stored_graph["schema_version"]
+        == COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    )
+    assert stored_graph["transport_attempts"] == []
+    assert stored_graph["host_operations"] == []
+    assert graph["transport_attempts"] == delta["transport_attempts"]
+    assert graph["host_operations"] == delta["host_operations"]
+
+    replay = await attested_v2_store.persist_ancestry_checkpoint_v2(
+        proof=ancestry_fixture["proof"],
+        checkpointed_graph=graph,
+        expected_lineage_id=LINEAGE_ID,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    assert replay == result
 
 
 def test_legacy_bootstrap_rejects_noncanonical_roots_and_incomplete_resume(

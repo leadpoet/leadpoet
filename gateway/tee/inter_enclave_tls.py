@@ -6,6 +6,7 @@ import base64
 from collections import OrderedDict
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import socket
@@ -41,6 +42,7 @@ REPLAY_CACHE_TTL_SECONDS = 300.0
 REPLAY_WAIT_SECONDS = 1800.0
 MAX_RPC_DELIVERY_ATTEMPTS = 6
 RPC_DELIVERY_BACKOFF_SECONDS = 0.05
+RPC_DELIVERY_ATTEMPT_TIMEOUT_SECONDS = 300.0
 SCHEMA_VERSION = "leadpoet.inter_enclave_rpc.v2"
 _CHANNEL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -291,6 +293,9 @@ class AttestedTLSRPCClient:
         peer_registry: AttestedPeerRegistry,
         tmpfs_root: Path = Path("/run/leadpoet-v2"),
         connector: Optional[Callable[[], Any]] = None,
+        delivery_attempt_timeout_seconds: float = (
+            RPC_DELIVERY_ATTEMPT_TIMEOUT_SECONDS
+        ),
     ) -> None:
         self.local_physical_role = local_physical_role
         self.local_boot_identity = dict(local_boot_identity)
@@ -301,11 +306,36 @@ class AttestedTLSRPCClient:
             directory=tmpfs_root / local_physical_role,
         )
         self._connector = connector
+        self._delivery_attempt_timeout_seconds = float(
+            delivery_attempt_timeout_seconds
+        )
+        if (
+            not math.isfinite(self._delivery_attempt_timeout_seconds)
+            or self._delivery_attempt_timeout_seconds <= 0
+            or self._delivery_attempt_timeout_seconds > REPLAY_WAIT_SECONDS
+        ):
+            raise InterEnclaveTLSError(
+                "inter-enclave delivery attempt timeout is invalid"
+            )
+
+    def _bound_delivery_attempt(self, connection: Any) -> Any:
+        try:
+            connection.settimeout(self._delivery_attempt_timeout_seconds)
+        except (AttributeError, OSError) as exc:
+            try:
+                connection.close()
+            except Exception:
+                pass
+            raise _RetryableInterEnclaveTransportError(
+                "inter-enclave delivery timeout could not be applied"
+            ) from exc
+        return connection
 
     def _connect_relay(self) -> Any:
         if self._connector is not None:
-            return self._connector()
+            return self._bound_delivery_attempt(self._connector())
         connection = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+        self._bound_delivery_attempt(connection)
         try:
             connection.connect((PARENT_CID, RELAY_PORT))
         except OSError as exc:

@@ -175,6 +175,9 @@ ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION = (
 SOURCE_CATALOG_RESULT_REPLAY_MIGRATION = (
     "142-research-lab-source-catalog-result-replay.sql"
 )
+COMPACT_ANCESTRY_CHECKPOINT_MIGRATION = (
+    "143-research-lab-compact-ancestry-checkpoints.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -209,6 +212,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION,
     SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
+    COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
 )
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
@@ -3998,6 +4002,36 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-142 source-catalog replay contract differs"
             )
+        database.apply_migration(
+            scripts / COMPACT_ANCESTRY_CHECKPOINT_MIGRATION
+        )
+        applied.append(COMPACT_ANCESTRY_CHECKPOINT_MIGRATION)
+        compact_checkpoint_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_compact_checkpoint_graph_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if compact_checkpoint_contract != {
+            "schema_version": (
+                "leadpoet.compact_checkpoint_graph_contract.v1"
+            ),
+            "checkpoint_graph_schema_version": (
+                "leadpoet.attested_checkpointed_receipt_graph.v4"
+            ),
+            "legacy_checkpoint_graph_schema_version": (
+                "leadpoet.attested_checkpointed_receipt_graph.v3"
+            ),
+            "new_row_constraint_enabled": True,
+            "historical_rows_append_only": True,
+            "sidecar_trigger_enabled": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-143 compact ancestry checkpoint contract differs"
+            )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,
@@ -4125,6 +4159,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post_139_allocation_frontier_bootstrap_contract_valid": True,
                 "post_141_allocation_frontier_source_contract_valid": True,
                 "post_142_source_catalog_replay_contract_valid": True,
+                "post_143_compact_checkpoint_contract_valid": True,
                 "provider_outcome_append_atomic": True,
                 "provider_outcome_contention_zero_rollback": True,
                 "provider_outcome_conflict_head_exact": True,

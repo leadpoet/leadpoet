@@ -51,6 +51,8 @@ from gateway.utils.tee_artifact_store_v2 import (
 from gateway.utils.tee_client import coordinator_tee_client, scoring_tee_client
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
+    COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     build_checkpointed_receipt_graph,
     build_receipt_graph,
     canonical_json,
@@ -219,7 +221,7 @@ async def _resolve_parent_ancestry_transport_v2(
             raise AttestedScoringV2Error("parent ancestry frontier is invalid")
         graph_by_root[root] = graph
         embedded = graph.get("ancestry_proof")
-        if graph.get("schema_version") == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
+        if graph.get("schema_version") in CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS:
             graph_allowed_failed = _failed_receipts_in_graph(
                 graph, allowed_failed_receipt_hashes
             )
@@ -298,6 +300,16 @@ async def _resolve_parent_ancestry_transport_v2(
                         "checkpointed parent graph differs from its proof"
                     )
                 transport_graphs.append(graph)
+            elif (
+                graph is not None
+                and graph.get("schema_version")
+                == COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+            ):
+                if graph.get("ancestry_proof") != normalized:
+                    raise AttestedScoringV2Error(
+                        "compact checkpointed parent graph differs from its proof"
+                    )
+                transport_proofs.append(normalized)
             elif graph is not None:
                 graph_allowed_failed = _failed_receipts_in_graph(
                     graph, allowed_failed_receipt_hashes

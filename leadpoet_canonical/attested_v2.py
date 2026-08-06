@@ -21,6 +21,15 @@ RECEIPT_GRAPH_SCHEMA_VERSION = "leadpoet.attested_receipt_graph.v2"
 CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION = (
     "leadpoet.attested_checkpointed_receipt_graph.v3"
 )
+COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION = (
+    "leadpoet.attested_checkpointed_receipt_graph.v4"
+)
+CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS = frozenset(
+    {
+        CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+        COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    }
+)
 TRANSITION_COMMAND_SCHEMA_VERSION = "leadpoet.signed_transition_command.v2"
 HOST_OPERATION_REQUEST_SCHEMA_VERSION = "leadpoet.host_operation_request.v2"
 HOST_OPERATION_TERMINAL_SCHEMA_VERSION = "leadpoet.host_operation_terminal.v2"
@@ -1298,6 +1307,59 @@ def build_checkpointed_receipt_graph(
     return graph
 
 
+def compact_checkpointed_receipt_graph(
+    graph: Mapping[str, Any],
+    *,
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+    boot_attestation_verifier: Optional[
+        Callable[[Mapping[str, Any]], Any]
+    ] = None,
+    require_boot_attestation_verification: bool = False,
+) -> Dict[str, Any]:
+    """Compact a fully validated operational graph for durable persistence."""
+
+    validate_receipt_graph(
+        graph,
+        allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
+        boot_attestation_verifier=boot_attestation_verifier,
+        require_boot_attestation_verification=(
+            require_boot_attestation_verification
+        ),
+    )
+    _require(
+        graph.get("schema_version")
+        in CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
+        "checkpointed receipt graph schema is invalid",
+    )
+    if (
+        graph.get("schema_version")
+        == COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    ):
+        return dict(graph)
+    proof = graph["ancestry_proof"]
+    compact = {
+        **dict(graph),
+        "schema_version": COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+        "boot_identities": [
+            dict(item) for item in proof.get("disclosed_boot_identities") or ()
+        ],
+        "receipts": [
+            dict(item) for item in proof.get("disclosed_receipts") or ()
+        ],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+    validate_receipt_graph(
+        compact,
+        allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
+        boot_attestation_verifier=boot_attestation_verifier,
+        require_boot_attestation_verification=(
+            require_boot_attestation_verification
+        ),
+    )
+    return compact
+
+
 def build_receipt_graph(
     *,
     root_receipt_hash: str,
@@ -1363,7 +1425,7 @@ def _validate_receipt_graph(
     if (
         isinstance(graph, Mapping)
         and graph.get("schema_version")
-        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        in CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS
     ):
         _validate_exact_fields(
             graph, _CHECKPOINTED_GRAPH_FIELDS, "checkpointed receipt graph"
@@ -1394,21 +1456,47 @@ def _validate_receipt_graph(
             required_receipt_hashes=(graph.get("root_receipt_hash"),),
             required_purposes=required_purposes,
         )
-        local_delta = {
-            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
-            "root_receipt_hash": graph.get("root_receipt_hash"),
-            "boot_identities": graph.get("boot_identities"),
-            "receipts": graph.get("receipts"),
-            "transport_attempts": graph.get("transport_attempts"),
-            "host_operations": graph.get("host_operations"),
-        }
-        projection = validate_local_delta_against_certificate_v2(
-            local_delta,
-            proof["certificate"],
-            expected_lineage_id=lineage_id,
-            boot_attestation_verifier=verifier,
-            allowed_issuer_roles=ROLE_PURPOSES,
-        )
+        if (
+            graph.get("schema_version")
+            == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        ):
+            local_delta = {
+                "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+                "root_receipt_hash": graph.get("root_receipt_hash"),
+                "boot_identities": graph.get("boot_identities"),
+                "receipts": graph.get("receipts"),
+                "transport_attempts": graph.get("transport_attempts"),
+                "host_operations": graph.get("host_operations"),
+            }
+            projection = validate_local_delta_against_certificate_v2(
+                local_delta,
+                proof["certificate"],
+                expected_lineage_id=lineage_id,
+                boot_attestation_verifier=verifier,
+                allowed_issuer_roles=ROLE_PURPOSES,
+            )
+        else:
+            _require(
+                graph.get("transport_attempts") == [],
+                "compact checkpoint graph contains transport sidecars",
+            )
+            _require(
+                graph.get("host_operations") == [],
+                "compact checkpoint graph contains host-operation sidecars",
+            )
+            _require(
+                canonical_json(graph.get("receipts"))
+                == canonical_json(proof["disclosed_receipts"]),
+                "compact checkpoint graph receipt disclosure differs",
+            )
+            _require(
+                canonical_json(graph.get("boot_identities"))
+                == canonical_json(proof["disclosed_boot_identities"]),
+                "compact checkpoint graph boot disclosure differs",
+            )
+            projection = proof["certificate"]["claim"][
+                "local_delta_projection"
+            ]
         failed = {
             str(item.get("receipt_hash") or "")
             for item in graph.get("receipts") or ()

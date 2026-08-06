@@ -45,13 +45,19 @@ from gateway.tee.scoring_executor_v2 import SCORING_OPERATIONS_V2
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
 )
+from gateway.tee.coordinator_allocation_source_v2 import (
+    _receipt_authority_graphs_from_context,
+    _receipt_graphs_by_declared_root,
+)
 from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     build_boot_identity_body,
     build_checkpointed_receipt_graph,
     build_receipt_graph,
     build_transport_attempt,
+    compact_checkpointed_receipt_graph,
     create_boot_identity,
     sha256_bytes,
     sha256_json,
@@ -903,6 +909,79 @@ async def test_v2_bridge_retains_checkpoint_parent_for_business_logic_and_extend
             ],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_reloads_compact_durable_checkpoint_as_parent_proof():
+    release = _release()
+
+    def executor(_operation, payload, context):
+        if payload["generation"] == 1:
+            return {"generation": 1}
+        assert context.external_receipt_graphs == []
+        assert len(context.external_ancestry_proofs) == 1
+        assert (
+            context.external_ancestry_proofs[0]["certificate"]["claim"][
+                "local_delta_projection"
+            ]["root_receipt_hash"]
+            == payload["parent_root"]
+        )
+        authority_graphs = _receipt_authority_graphs_from_context(context)
+        resolved = _receipt_graphs_by_declared_root(
+            authority_graphs,
+            context.parent_receipt_hashes,
+        )
+        assert list(resolved) == [payload["parent_root"]]
+        assert (
+            resolved[payload["parent_root"]]["schema_version"]
+            == COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        )
+        return {"generation": 2}
+
+    client = _Client(release, executor=executor)
+
+    async def persist(graph, **_kwargs):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    common = {
+        "operation": "benchmark_icp_score",
+        "purpose": "research_lab.benchmark.v2",
+        "worker_index": 0,
+        "release_manifest": release,
+        "client": client,
+        "persist_graph": persist,
+        "boot_verifier": lambda identity: identity,
+        "poll_seconds": 0.001,
+    }
+    first = await execute_scoring_v2(
+        **common,
+        epoch_id=12,
+        sequence=0,
+        payload={"generation": 1},
+    )
+    compact_parent = compact_checkpointed_receipt_graph(
+        first["receipt_graph"],
+        boot_attestation_verifier=lambda identity: identity,
+        require_boot_attestation_verification=True,
+    )
+    assert (
+        compact_parent["schema_version"]
+        == COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    )
+
+    second = await execute_scoring_v2(
+        **common,
+        epoch_id=13,
+        sequence=0,
+        payload={
+            "generation": 2,
+            "parent_root": compact_parent["root_receipt_hash"],
+        },
+        parent_graphs=(compact_parent,),
+        parent_ancestry_proofs=(first["ancestry_compact_proof"],),
+    )
+
+    assert second["result"] == {"generation": 2}
 
 
 @pytest.mark.asyncio

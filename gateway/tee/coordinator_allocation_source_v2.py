@@ -42,7 +42,8 @@ from gateway.tee.reward_executor_v2 import (
     source_add_reward_row_projection_v2,
 )
 from leadpoet_canonical.attested_v2 import (
-    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
+    COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     canonical_json,
     merkle_root,
     sha256_json,
@@ -105,7 +106,7 @@ def _receipt_subgraph_from_validated(
 ) -> dict[str, Any]:
     if (
         graph.get("schema_version")
-        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        in CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS
     ):
         if root_receipt_hash != str(graph.get("root_receipt_hash") or ""):
             raise CoordinatorAllocationSourceV2Error(
@@ -177,6 +178,57 @@ def _receipt_subgraph_from_validated(
         ],
     }
     return subgraph
+
+
+def _compact_checkpoint_graph_from_proof(
+    proof: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expose one already-verified compact parent through the graph contract."""
+
+    try:
+        claim = proof["certificate"]["claim"]
+        graph = {
+            "schema_version": COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+            "root_receipt_hash": claim["output_root_receipt_hash"],
+            "boot_identities": [
+                dict(item) for item in proof["disclosed_boot_identities"]
+            ],
+            "receipts": [dict(item) for item in proof["disclosed_receipts"]],
+            "transport_attempts": [],
+            "host_operations": [],
+            "ancestry_lineage_id": claim["lineage_id"],
+            "ancestry_proof": dict(proof),
+        }
+        validate_receipt_graph(graph)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CoordinatorAllocationSourceV2Error(
+            "compact allocation parent authority is invalid"
+        ) from exc
+    return graph
+
+
+def _receipt_authority_graphs_from_context(
+    context: ExecutionContextV2,
+) -> list[Mapping[str, Any]]:
+    """Combine full graphs with canonical views of verified compact proofs."""
+
+    graphs = list(context.external_receipt_graphs)
+    graph_roots = {
+        str(graph.get("root_receipt_hash") or "")
+        for graph in graphs
+        if isinstance(graph, Mapping)
+    }
+    proof_roots: set[str] = set()
+    for proof in context.external_ancestry_proofs:
+        graph = _compact_checkpoint_graph_from_proof(proof)
+        root = str(graph["root_receipt_hash"])
+        if root in graph_roots or root in proof_roots:
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation parent is supplied as both graph and proof"
+            )
+        proof_roots.add(root)
+        graphs.append(graph)
+    return graphs
 
 
 def _receipt_graphs_by_declared_root(
@@ -623,7 +675,7 @@ class CoordinatorAllocationSourceV2:
             )
 
         graphs = _receipt_graphs_by_declared_root(
-            context.external_receipt_graphs,
+            _receipt_authority_graphs_from_context(context),
             context.parent_receipt_hashes,
         )
 
@@ -1531,7 +1583,7 @@ class CoordinatorAllocationSourceV2:
             context,
         )
         graph_by_root = _receipt_graphs_by_declared_root(
-            context.external_receipt_graphs,
+            _receipt_authority_graphs_from_context(context),
             context.parent_receipt_hashes,
         )
         native = validate_finalized_allocation_authorities_v2(
@@ -1828,7 +1880,7 @@ class CoordinatorAllocationSourceV2:
             else []
         )
         graph_by_root = _receipt_graphs_by_declared_root(
-            context.external_receipt_graphs,
+            _receipt_authority_graphs_from_context(context),
             context.parent_receipt_hashes,
         )
         native = validate_finalized_allocation_authorities_v2(

@@ -46,7 +46,7 @@ from leadpoet_canonical.ancestry_checkpoint_v2 import (
     validate_ancestry_checkpoint_bootstrap_result_v2,
 )
 from leadpoet_canonical.attested_v2 import (
-    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
     RECEIPT_GRAPH_SCHEMA_VERSION,
     canonical_json,
 )
@@ -225,7 +225,7 @@ def _graph_root(graph: Mapping[str, Any]) -> str:
         )
     if graph.get("schema_version") not in {
         RECEIPT_GRAPH_SCHEMA_VERSION,
-        CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+        *CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
     }:
         raise ActiveAncestryCheckpointBootstrapV2Error(
             "active receipt graph schema is unsupported"

@@ -18,6 +18,10 @@ from gateway.tee.supabase_schema_preflight_v2 import (
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_NAME = "scripts/136-research-lab-ancestry-checkpoint-sidecars.sql"
 SQL = (ROOT / MIGRATION_NAME).read_text(encoding="utf-8")
+COMPACT_MIGRATION_NAME = (
+    "scripts/143-research-lab-compact-ancestry-checkpoints.sql"
+)
+COMPACT_SQL = (ROOT / COMPACT_MIGRATION_NAME).read_text(encoding="utf-8")
 TABLE = "research_lab_attested_ancestry_checkpoints_v2"
 COMPACT_WEIGHT_TABLE = "research_lab_compact_weight_authorities_v2"
 
@@ -227,6 +231,30 @@ def test_checkpoint_rpc_is_required_before_gateway_shutdown() -> None:
     ) in REQUIRED_SUPABASE_V2_RPCS
 
 
+def test_compact_checkpoint_migration_is_additive_and_preflight_required() -> None:
+    from gateway.tee.supabase_schema_preflight_v2 import REQUIRED_SUPABASE_V2_RPCS
+
+    assert COMPACT_SQL.lstrip().startswith(
+        "-- Compact operational ancestry checkpoints without duplicating raw sidecars."
+    )
+    assert re.search(r"\bBEGIN\s*;", COMPACT_SQL)
+    assert re.search(r"\bCOMMIT\s*;\s*$", COMPACT_SQL)
+    assert not re.search(r"^\s*UPDATE\s+", COMPACT_SQL, flags=re.MULTILINE)
+    assert not re.search(
+        r"^\s*DELETE\s+FROM\s+", COMPACT_SQL, flags=re.MULTILINE
+    )
+    assert "VALIDATE CONSTRAINT" not in COMPACT_SQL
+    assert "new_row_constraint_enabled" in COMPACT_SQL
+    assert "historical_rows_append_only" in COMPACT_SQL
+    assert "leadpoet.attested_checkpointed_receipt_graph.v3" in COMPACT_SQL
+    assert "leadpoet.attested_checkpointed_receipt_graph.v4" in COMPACT_SQL
+    assert "compact checkpoint raw sidecars are incomplete" in COMPACT_SQL
+    assert (
+        COMPACT_MIGRATION_NAME,
+        "research_lab_compact_checkpoint_graph_contract_v1",
+    ) in REQUIRED_SUPABASE_V2_RPCS
+
+
 def _sha(character: str) -> str:
     return "sha256:" + character * 64
 
@@ -331,6 +359,15 @@ CREATE TABLE public.research_lab_attested_execution_receipts_v2 (
 CREATE TABLE public.research_lab_attested_boot_identities_v2 (
     boot_identity_hash TEXT PRIMARY KEY
 );
+CREATE TABLE public.research_lab_attested_receipt_transport_v2 (
+    receipt_hash TEXT NOT NULL,
+    attempt_hash TEXT NOT NULL,
+    PRIMARY KEY (receipt_hash, attempt_hash)
+);
+CREATE TABLE public.research_lab_attested_host_operations_v2 (
+    request_hash TEXT PRIMARY KEY,
+    receipt_hash TEXT NOT NULL
+);
 CREATE FUNCTION public.prevent_research_lab_attested_v2_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -340,7 +377,7 @@ $$;
 """
     lineage = _sha("1")
     issuer = _sha("2")
-    root_a, root_b, root_c, root_d = (_sha(c) for c in "abcd")
+    root_a, root_b, root_c, root_d, root_e = (_sha(c) for c in "abcde")
     legacy_a, legacy_b = _sha("e"), _sha("f")
     checkpoint_a = _checkpoint(
         root=root_a,
@@ -460,11 +497,13 @@ $$;
         psql(setup_sql)
         psql(SQL)
         psql(SQL)  # Operators may safely rerun the migration.
+        psql(COMPACT_SQL)
+        psql(COMPACT_SQL)  # The compact contract is also idempotent.
         psql(
             "INSERT INTO public.research_lab_attested_boot_identities_v2 VALUES "
             "('%s'); INSERT INTO public.research_lab_attested_execution_receipts_v2 "
-            "VALUES ('%s'), ('%s'), ('%s'), ('%s');"
-            % (issuer, root_a, root_b, root_c, root_d)
+            "VALUES ('%s'), ('%s'), ('%s'), ('%s'), ('%s');"
+            % (issuer, root_a, root_b, root_c, root_d, root_e)
         )
 
         for checkpoint in (checkpoint_a, checkpoint_b):
@@ -501,6 +540,70 @@ $$;
             expect_success=False,
         )
         assert "checkpoint durable readback conflicts" in conflict.stderr
+
+        checkpoint_e = _checkpoint(
+            root=root_e,
+            lineage=lineage,
+            certificate_hash=_sha("e"),
+            proof_hash=_sha("f"),
+            graph_hash=_sha("0"),
+            issuer=issuer,
+            sequence=2,
+            parent_authorities=[],
+        )
+        projection = {
+            "receipt_count": 1,
+            "boot_identity_count": 1,
+            "transport_attempt_count": 0,
+            "host_operation_count": 0,
+        }
+        checkpoint_e["certificate_doc"]["claim"][
+            "local_delta_projection"
+        ] = projection
+        checkpoint_e["proof_doc"]["disclosed_receipts"] = [
+            {"receipt_hash": root_e}
+        ]
+        checkpoint_e["proof_doc"]["disclosed_boot_identities"] = [
+            {"boot_identity_hash": issuer}
+        ]
+        checkpoint_e["checkpoint_graph_doc"].update(
+            {
+                "schema_version": (
+                    "leadpoet.attested_checkpointed_receipt_graph.v4"
+                ),
+                "receipts": checkpoint_e["proof_doc"]["disclosed_receipts"],
+                "boot_identities": checkpoint_e["proof_doc"][
+                    "disclosed_boot_identities"
+                ],
+                "transport_attempts": [],
+                "host_operations": [],
+            }
+        )
+        compact = psql(
+            "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+            + "'%s'::jsonb);" % json.dumps(checkpoint_e).replace("'", "''")
+        )
+        assert '"root_activated": true' in compact.stdout
+
+        incomplete = json.loads(json.dumps(checkpoint_e))
+        incomplete["certificate_doc"]["claim"]["local_delta_projection"][
+            "transport_attempt_count"
+        ] = 1
+        incomplete["proof_doc"]["certificate"] = incomplete[
+            "certificate_doc"
+        ]
+        incomplete["checkpoint_graph_doc"]["ancestry_proof"] = incomplete[
+            "proof_doc"
+        ]
+        rejected_incomplete = psql(
+            "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+            + "'%s'::jsonb);" % json.dumps(incomplete).replace("'", "''"),
+            expect_success=False,
+        )
+        assert (
+            "compact checkpoint raw sidecars are incomplete"
+            in rejected_incomplete.stderr
+        )
     finally:
         subprocess.run(
             ["docker", "rm", "--force", container],

@@ -16,6 +16,7 @@ from gateway.tee import coordinator_allocation_source_v2 as allocation_source
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
     build_execution_receipt_body,
@@ -1249,11 +1250,21 @@ def test_declared_roots_are_reconstructed_from_one_compact_graph(monkeypatch):
     assert graphs[child_hash] == compact_graph
 
 
-def test_checkpointed_declared_root_preserves_certificate_bound_graph(monkeypatch):
+@pytest.mark.parametrize(
+    "schema_version",
+    (
+        CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+        COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    ),
+)
+def test_checkpointed_declared_root_preserves_certificate_bound_graph(
+    monkeypatch,
+    schema_version,
+):
     root = "sha256:" + "a" * 64
     external_parent = "sha256:" + "b" * 64
     graph = {
-        "schema_version": CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "root_receipt_hash": root,
         "boot_identities": [],
         "receipts": [
@@ -1289,6 +1300,24 @@ def test_checkpointed_declared_root_preserves_certificate_bound_graph(monkeypatc
             graph,
             root_receipt_hash=external_parent,
         )
+
+
+def test_allocation_parent_rejects_graph_and_proof_for_same_root(monkeypatch):
+    root = "sha256:" + "a" * 64
+    context = _context((root,))
+    context.external_receipt_graphs = [{"root_receipt_hash": root}]
+    context.external_ancestry_proofs = [{"proof": "placeholder"}]
+    monkeypatch.setattr(
+        allocation_source,
+        "_compact_checkpoint_graph_from_proof",
+        lambda _proof: {"root_receipt_hash": root},
+    )
+
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="supplied as both graph and proof",
+    ):
+        allocation_source._receipt_authority_graphs_from_context(context)
 
 
 def test_declared_root_lookup_indexes_each_graph_once(monkeypatch):

@@ -156,6 +156,44 @@ def test_rpc_request_binds_both_boots_and_topology():
         )
 
 
+def test_half_open_terminal_read_times_out_and_replays_same_channel(monkeypatch):
+    timeouts = []
+    calls = []
+
+    class HalfOpenConnection:
+        def settimeout(self, value):
+            timeouts.append(value)
+
+        def recv(self, _size):
+            raise socket.timeout("terminal remained half-open")
+
+        def close(self):
+            return None
+
+    client = object.__new__(AttestedTLSRPCClient)
+    client._connector = HalfOpenConnection
+    client._delivery_attempt_timeout_seconds = 0.01
+
+    def call_once(**kwargs):
+        calls.append(kwargs["channel_id"])
+        connection = client._connect_relay()
+        if len(calls) == 1:
+            inter_enclave_tls._recv_exact(connection, 4)
+        return {"status": "replayed"}
+
+    monkeypatch.setattr(client, "_call_once", call_once)
+    monkeypatch.setattr(inter_enclave_tls, "RPC_DELIVERY_BACKOFF_SECONDS", 0)
+
+    assert client.call(
+        target_physical_role="gateway_coordinator",
+        method="provider_execute",
+        params={"job_id": "job-half-open"},
+        channel_id="8" * 32,
+    ) == {"status": "replayed"}
+    assert calls == ["8" * 32, "8" * 32]
+    assert timeouts == [0.01, 0.01]
+
+
 def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(
     tmp_path,
     monkeypatch,

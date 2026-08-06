@@ -502,6 +502,30 @@ def _include_current_head_commit(
     return selected[:limit]
 
 
+def _historical_commit_candidates(
+    measured_commits: List[Dict],
+    recent_commits: List[Dict],
+    *,
+    unique_version_limit: int,
+    required_commits: Optional[List[Dict]] = None,
+) -> List[Dict]:
+    """Cover recent release SHAs plus older measured-input versions.
+
+    Several consecutive full-repository commits can produce the same EIF. Each
+    still needs an exact cache-key comparison so its commit can be registered as
+    an alias, while the number of distinct PCR0 versions remains bounded.
+    """
+
+    if unique_version_limit <= 0:
+        return []
+    return _include_current_head_commit(
+        [*recent_commits, *measured_commits],
+        recent_commits[:1],
+        unique_version_limit * 3,
+        required_commits=required_commits,
+    )
+
+
 async def _get_commit_metadata(repo_dir: str, commit_hash: str) -> Optional[Dict]:
     """Read one exact Git commit after proving it exists in the builder clone."""
     commit = str(commit_hash or "").strip().lower()
@@ -1715,12 +1739,17 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
             else:
                 required_commits.append(active_metadata)
 
-        commits = _include_current_head_commit(
+        recent_commits = await get_latest_commits(repo_dir, num_commits * 2)
+        commits = _historical_commit_candidates(
             commits,
-            await get_latest_commits(repo_dir, 1),
-            num_commits,
+            recent_commits,
+            unique_version_limit=num_commits,
             required_commits=required_commits,
         )
+        required_commit_hashes = {
+            str(item.get("hash") or "").strip().lower()
+            for item in [*required_commits, *recent_commits[:1]]
+        }
         
         if not commits:
             logger.warning("[PCR0] No commits found for historical build")
@@ -1741,7 +1770,7 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
         built_count = 0
         
         for i, commit in enumerate(commits):
-            commit_hash = commit["hash"]
+            commit_hash = str(commit["hash"]).strip().lower()
             commit_msg = commit["message"][:50]
             
             logger.info(f"[PCR0] [{i+1}/{len(commits)}] Processing commit {commit_hash[:8]}: {commit_msg}")
@@ -1794,6 +1823,17 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                         )
                     continue
 
+                if (
+                    len(_pcr0_cache) >= PCR0_CACHE_SIZE
+                    and commit_hash not in required_commit_hashes
+                ):
+                    logger.info(
+                        "[PCR0] Distinct-version cache is full; skipping older "
+                        "uncached measured inputs for %s",
+                        commit_hash[:8],
+                    )
+                    continue
+
                 # Build PCR0 for this version
                 logger.info(
                     f"[PCR0] Building PCR0 for {commit_hash[:8]} "
@@ -1816,6 +1856,7 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                             "built_at": datetime.utcnow().isoformat(),
                         }
                     built_count += 1
+                    _prune_pcr0_cache()
                     logger.info(
                         f"[PCR0] ✅ Cached PCR0 for {commit_hash[:8]}: "
                         f"{pcr0[:32]}..."
@@ -1834,11 +1875,6 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                 # acquire the host-wide lock before the next historical build.
                 await asyncio.sleep(1)
             
-            # Stop if we have enough
-            if len(_pcr0_cache) >= PCR0_CACHE_SIZE:
-                logger.info(f"[PCR0] Cache full ({PCR0_CACHE_SIZE} entries), stopping")
-                break
-        
         # Return to original HEAD
         proc = await asyncio.create_subprocess_exec(
             "git", "checkout", original_head,

@@ -778,6 +778,7 @@ def verify_migration_backed_database_contract(
         "post_139_allocation_frontier_bootstrap_contract_valid",
         "post_141_allocation_frontier_source_contract_valid",
         "post_142_source_catalog_replay_contract_valid",
+        "post_143_compact_checkpoint_contract_valid",
         "provider_outcome_append_atomic",
         "provider_outcome_contention_zero_rollback",
         "provider_outcome_conflict_head_exact",
@@ -1142,6 +1143,7 @@ def verify_migration_backed_database_contract(
         not in rpcs
         or "research_lab_ancestry_checkpoint_bootstrap_contract_v2" not in rpcs
         or "research_lab_allocation_frontier_bootstrap_contract_v2" not in rpcs
+        or "research_lab_compact_checkpoint_graph_contract_v1" not in rpcs
         or not required_git_tree_rpcs.issubset(rpcs)
     ):
         raise SystemExit(

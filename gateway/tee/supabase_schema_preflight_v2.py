@@ -548,6 +548,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/142-research-lab-source-catalog-result-replay.sql",
         "research_lab_source_catalog_replay_contract_v2",
     ),
+    (
+        "scripts/143-research-lab-compact-ancestry-checkpoints.sql",
+        "research_lab_compact_checkpoint_graph_contract_v1",
+    ),
 )
 
 

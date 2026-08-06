@@ -27,6 +27,7 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from leadpoet_canonical.attested_v2 import merkle_root
+from gateway.build_info import get_build_info
 from gateway.research_lab.bundles import build_research_lab_audit_bundle
 from gateway.research_lab.attested_scoring import (
     canonical_json_bytes as attested_canonical_json_bytes,
@@ -94,6 +95,7 @@ from gateway.research_lab.provider_profiles_v2 import (
 )
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
+from gateway.tee.execution_job_manager_v2 import MAX_EXTERNAL_RECEIPT_GRAPHS
 from gateway.tee.scoring_executor import configuration_hash as scoring_configuration_hash
 from gateway.research_lab.promotion import (
     CONFIRMATION_ATTEMPT_FAILED_REASON,
@@ -526,6 +528,60 @@ def _scoring_worker_source_hash() -> str:
     return "sha256:" + hashlib.sha256(source).hexdigest()
 
 
+_BASELINE_SCORING_PROGRESS_SCHEMA_VERSION = "2.0"
+_BASELINE_SCORING_PROGRESS_ARTIFACT_TYPE = (
+    "research_lab_private_baseline_scoring_progress"
+)
+_FULL_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _gateway_runtime_commit_sha() -> str:
+    """Return the exact release commit inherited by the scoring worker."""
+
+    candidates = (
+        os.getenv("ATTESTED_RUNTIME_COMMIT_SHA"),
+        os.getenv("GITHUB_SHA"),
+        os.getenv("GITHUB_COMMIT"),
+        get_build_info().get("git_commit"),
+    )
+    for candidate in candidates:
+        normalized = str(candidate or "").strip().lower()
+        if _FULL_GIT_COMMIT_RE.fullmatch(normalized):
+            return normalized
+    raise RuntimeError(
+        "private baseline checkpoint requires an exact gateway runtime commit"
+    )
+
+
+def _validate_baseline_checkpoint_runtime_identity(
+    *,
+    gateway_runtime_commit_sha: str,
+    scoring_configuration_hash_value: str,
+) -> tuple[str, str]:
+    commit = str(gateway_runtime_commit_sha or "").strip().lower()
+    config_hash = str(scoring_configuration_hash_value or "").strip().lower()
+    if not _FULL_GIT_COMMIT_RE.fullmatch(commit):
+        raise ValueError("baseline checkpoint gateway runtime commit is invalid")
+    if not _SHA256_RE.fullmatch(config_hash):
+        raise ValueError("baseline checkpoint scoring configuration hash is invalid")
+    return commit, config_hash
+
+
+def _validate_baseline_checkpoint_model_identity(
+    *,
+    repo_git_sha: str,
+    manifest_hash: str,
+) -> tuple[str, str]:
+    repo_commit = str(repo_git_sha or "").strip().lower()
+    normalized_manifest_hash = str(manifest_hash or "").strip().lower()
+    if not _FULL_GIT_COMMIT_RE.fullmatch(repo_commit):
+        raise ValueError("baseline checkpoint model repository commit is invalid")
+    if not _SHA256_RE.fullmatch(normalized_manifest_hash):
+        raise ValueError("baseline checkpoint model manifest hash is invalid")
+    return repo_commit, normalized_manifest_hash
+
+
 def _baseline_publication_retry_token_hash() -> str:
     token = str(os.getenv("RESEARCH_LAB_BASELINE_PUBLICATION_RETRY_TOKEN", "") or "").strip()
     return sha256_json({"retry_token": token}) if token else ""
@@ -731,6 +787,23 @@ def _attested_receipts_from(*sources: Any) -> list[dict[str, Any]]:
             receipt_hash = str(receipt.get("receipt_hash") or "")
             if receipt_hash:
                 receipts[receipt_hash] = dict(receipt)
+    return [receipts[key] for key in sorted(receipts)]
+
+
+def _attested_receipts_with_persisted_roots(
+    *sources: Any,
+    persisted_receipt_hashes: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    receipts = {
+        str(item["receipt_hash"]): dict(item)
+        for item in _attested_receipts_from(*sources)
+        if item.get("receipt_hash")
+    }
+    for raw_hash in persisted_receipt_hashes:
+        receipt_hash = str(raw_hash or "").strip().lower()
+        if not _SHA256_RE.fullmatch(receipt_hash):
+            raise RuntimeError("baseline checkpoint parent receipt hash is invalid")
+        receipts.setdefault(receipt_hash, {"receipt_hash": receipt_hash})
     return [receipts[key] for key in sorted(receipts)]
 
 
@@ -1694,10 +1767,26 @@ def _load_baseline_scoring_progress(
     benchmark_date: str,
     window_hash: str,
     private_model_artifact_hash: str,
-    repo_git_sha: str = "",
-    manifest_hash: str = "",
+    gateway_runtime_commit_sha: str,
+    scoring_configuration_hash_value: str,
+    repo_git_sha: str,
+    manifest_hash: str,
+    parent_receipt_hashes_out: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     import boto3  # type: ignore
+
+    expected_runtime_commit, expected_scoring_config_hash = (
+        _validate_baseline_checkpoint_runtime_identity(
+            gateway_runtime_commit_sha=gateway_runtime_commit_sha,
+            scoring_configuration_hash_value=scoring_configuration_hash_value,
+        )
+    )
+    expected_repo_commit, expected_manifest_hash = (
+        _validate_baseline_checkpoint_model_identity(
+            repo_git_sha=repo_git_sha,
+            manifest_hash=manifest_hash,
+        )
+    )
 
     try:
         body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
@@ -1706,7 +1795,20 @@ def _load_baseline_scoring_progress(
         return []
     if not isinstance(doc, Mapping):
         return []
-    checkpoint_status = str(doc.get("checkpoint_status") or "active")
+    if str(doc.get("schema_version") or "") != _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION:
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=schema_version_changed "
+            "checkpoint=%s current=%s",
+            str(doc.get("schema_version") or "missing")[:32],
+            _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION,
+        )
+        return []
+    if str(doc.get("artifact_type") or "") != _BASELINE_SCORING_PROGRESS_ARTIFACT_TYPE:
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=artifact_type_invalid"
+        )
+        return []
+    checkpoint_status = str(doc.get("checkpoint_status") or "")
     if checkpoint_status != "active":
         logger.warning(
             "research_lab_baseline_progress_rejected reason=checkpoint_%s",
@@ -1719,34 +1821,94 @@ def _load_baseline_scoring_progress(
         return []
     if str(doc.get("private_model_artifact_hash") or "") != str(private_model_artifact_hash):
         return []
-    # A benchmark checkpoint is only reusable by the EXACT model that wrote it:
-    # a mid-benchmark model change must rescore every ICP with the new model
-    # (cost recovery comes from the provider-call cache, never from old score
-    # rows). The artifact hash alone missed real change paths (active-row lag
-    # vs current.json, promotions), so the repo commit and manifest hash are
-    # bound too — any mismatch discards the checkpoint entirely.
-    if repo_git_sha and str(doc.get("repo_git_sha") or ""):
-        if str(doc.get("repo_git_sha")).lower() != str(repo_git_sha).lower():
-            logger.warning(
-                "research_lab_baseline_progress_rejected reason=repo_git_sha_changed "
-                "checkpoint=%s current=%s",
-                str(doc.get("repo_git_sha"))[:16], str(repo_git_sha)[:16])
-            return []
-    if manifest_hash and str(doc.get("manifest_hash") or ""):
-        if str(doc.get("manifest_hash")) != str(manifest_hash):
-            logger.warning(
-                "research_lab_baseline_progress_rejected reason=manifest_hash_changed "
-                "checkpoint=%s current=%s",
-                str(doc.get("manifest_hash"))[:24], str(manifest_hash)[:24])
-            return []
+    checkpoint_runtime_commit = str(
+        doc.get("gateway_runtime_commit_sha") or ""
+    ).strip().lower()
+    if checkpoint_runtime_commit != expected_runtime_commit:
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=gateway_runtime_changed "
+            "checkpoint=%s current=%s",
+            checkpoint_runtime_commit[:16] or "missing",
+            expected_runtime_commit[:16],
+        )
+        return []
+    checkpoint_scoring_config_hash = str(
+        doc.get("scoring_configuration_hash") or ""
+    ).strip().lower()
+    if checkpoint_scoring_config_hash != expected_scoring_config_hash:
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=scoring_configuration_changed "
+            "checkpoint=%s current=%s",
+            checkpoint_scoring_config_hash[:24] or "missing",
+            expected_scoring_config_hash[:24],
+        )
+        return []
+    raw_parent_receipt_hashes = doc.get("attested_parent_receipt_hashes")
+    if not isinstance(raw_parent_receipt_hashes, list):
+        logger.warning(
+            "research_lab_baseline_progress_rejected "
+            "reason=attested_parent_receipts_missing"
+        )
+        return []
+    parent_receipt_hashes = {
+        str(value or "").strip().lower() for value in raw_parent_receipt_hashes
+    }
+    if (
+        len(parent_receipt_hashes) != len(raw_parent_receipt_hashes)
+        or len(parent_receipt_hashes) > MAX_EXTERNAL_RECEIPT_GRAPHS
+        or any(not _SHA256_RE.fullmatch(value) for value in parent_receipt_hashes)
+    ):
+        logger.warning(
+            "research_lab_baseline_progress_rejected "
+            "reason=attested_parent_receipts_invalid"
+        )
+        return []
+    # A checkpoint is reusable only by the exact model, gateway release, and
+    # scoring configuration that wrote it. Receipt roots preserve the measured
+    # V2 ancestry across a same-release worker recycle; any identity mismatch
+    # discards the score rows and relies on the provider-call cache for recovery.
+    checkpoint_repo_commit = str(doc.get("repo_git_sha") or "").strip().lower()
+    if checkpoint_repo_commit != expected_repo_commit:
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=repo_git_sha_changed "
+            "checkpoint=%s current=%s",
+            checkpoint_repo_commit[:16] or "missing",
+            expected_repo_commit[:16],
+        )
+        return []
+    checkpoint_manifest_hash = str(doc.get("manifest_hash") or "").strip().lower()
+    if checkpoint_manifest_hash != expected_manifest_hash:
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=manifest_hash_changed "
+            "checkpoint=%s current=%s",
+            checkpoint_manifest_hash[:24] or "missing",
+            expected_manifest_hash[:24],
+        )
+        return []
     rows = doc.get("per_icp_results")
     if not isinstance(rows, list):
+        return []
+    completed_icp_count = doc.get("completed_icp_count")
+    if (
+        not isinstance(completed_icp_count, int)
+        or isinstance(completed_icp_count, bool)
+        or completed_icp_count != len(rows)
+    ):
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=completed_count_invalid"
+        )
         return []
     reusable_rows = [
         dict(row)
         for row in rows
         if isinstance(row, Mapping) and _baseline_summary_checkpointable(row)
     ]
+    if reusable_rows and not parent_receipt_hashes:
+        logger.warning(
+            "research_lab_baseline_progress_rejected "
+            "reason=attested_parent_receipts_empty"
+        )
+        return []
     rejected_count = len(rows) - len(reusable_rows)
     if rejected_count > 0:
         logger.warning(
@@ -1756,6 +1918,8 @@ def _load_baseline_scoring_progress(
             len(reusable_rows),
             rejected_count,
         )
+    if parent_receipt_hashes_out is not None:
+        parent_receipt_hashes_out.update(parent_receipt_hashes)
     return reusable_rows
 
 
@@ -1766,27 +1930,53 @@ def _store_baseline_scoring_progress(
     benchmark_date: str,
     window_hash: str,
     private_model_artifact_hash: str,
+    gateway_runtime_commit_sha: str,
+    scoring_configuration_hash_value: str,
     rows: list[dict[str, Any]],
+    attested_parent_receipt_hashes: Sequence[str],
     telemetry_index: Mapping[str, Any] | None = None,
-    repo_git_sha: str = "",
-    manifest_hash: str = "",
+    repo_git_sha: str,
+    manifest_hash: str,
 ) -> str:
     import boto3  # type: ignore
+
+    runtime_commit, scoring_config_hash = _validate_baseline_checkpoint_runtime_identity(
+        gateway_runtime_commit_sha=gateway_runtime_commit_sha,
+        scoring_configuration_hash_value=scoring_configuration_hash_value,
+    )
+    repo_commit, normalized_manifest_hash = (
+        _validate_baseline_checkpoint_model_identity(
+            repo_git_sha=repo_git_sha,
+            manifest_hash=manifest_hash,
+        )
+    )
+    parent_receipt_hashes = sorted(
+        {str(value or "").strip().lower() for value in attested_parent_receipt_hashes}
+    )
+    if any(not _SHA256_RE.fullmatch(value) for value in parent_receipt_hashes):
+        raise ValueError("baseline checkpoint parent receipt hash is invalid")
+    if len(parent_receipt_hashes) > MAX_EXTERNAL_RECEIPT_GRAPHS:
+        raise ValueError("baseline checkpoint parent receipt count exceeds V2 limit")
 
     safe_rows = [
         _baseline_progress_public_row(row)
         for row in rows
         if isinstance(row, Mapping) and _baseline_summary_checkpointable(row)
     ]
+    if safe_rows and not parent_receipt_hashes:
+        raise ValueError("baseline checkpoint parent receipt hashes are required")
     doc = {
-        "schema_version": "1.0",
-        "artifact_type": "research_lab_private_baseline_scoring_progress",
+        "schema_version": _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION,
+        "artifact_type": _BASELINE_SCORING_PROGRESS_ARTIFACT_TYPE,
         "checkpoint_status": "active",
         "benchmark_date": str(benchmark_date),
         "rolling_window_hash": str(window_hash),
         "private_model_artifact_hash": str(private_model_artifact_hash),
-        "repo_git_sha": str(repo_git_sha or ""),
-        "manifest_hash": str(manifest_hash or ""),
+        "gateway_runtime_commit_sha": runtime_commit,
+        "scoring_configuration_hash": scoring_config_hash,
+        "attested_parent_receipt_hashes": parent_receipt_hashes,
+        "repo_git_sha": repo_commit,
+        "manifest_hash": normalized_manifest_hash,
         "completed_icp_count": len(safe_rows),
         "per_icp_results": safe_rows,
     }
@@ -1808,14 +1998,27 @@ def _invalidate_baseline_scoring_progress(
     benchmark_date: str,
     window_hash: str,
     private_model_artifact_hash: str,
+    gateway_runtime_commit_sha: str,
+    scoring_configuration_hash_value: str,
     rows: list[dict[str, Any]],
     reason: str,
-    repo_git_sha: str = "",
-    manifest_hash: str = "",
+    repo_git_sha: str,
+    manifest_hash: str,
 ) -> str:
     """Make a conclusively invalid generation impossible to resume."""
 
     import boto3  # type: ignore
+
+    runtime_commit, scoring_config_hash = _validate_baseline_checkpoint_runtime_identity(
+        gateway_runtime_commit_sha=gateway_runtime_commit_sha,
+        scoring_configuration_hash_value=scoring_configuration_hash_value,
+    )
+    repo_commit, normalized_manifest_hash = (
+        _validate_baseline_checkpoint_model_identity(
+            repo_git_sha=repo_git_sha,
+            manifest_hash=manifest_hash,
+        )
+    )
 
     safe_rows = [
         _baseline_progress_public_row(row)
@@ -1823,15 +2026,17 @@ def _invalidate_baseline_scoring_progress(
         if isinstance(row, Mapping) and _baseline_summary_checkpointable(row)
     ]
     doc = {
-        "schema_version": "1.0",
-        "artifact_type": "research_lab_private_baseline_scoring_progress",
+        "schema_version": _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION,
+        "artifact_type": _BASELINE_SCORING_PROGRESS_ARTIFACT_TYPE,
         "checkpoint_status": "invalidated",
         "invalidation_reason": str(reason),
         "benchmark_date": str(benchmark_date),
         "rolling_window_hash": str(window_hash),
         "private_model_artifact_hash": str(private_model_artifact_hash),
-        "repo_git_sha": str(repo_git_sha or ""),
-        "manifest_hash": str(manifest_hash or ""),
+        "gateway_runtime_commit_sha": runtime_commit,
+        "scoring_configuration_hash": scoring_config_hash,
+        "repo_git_sha": repo_commit,
+        "manifest_hash": normalized_manifest_hash,
         "completed_icp_count": 0,
         "rejected_icp_count": len(safe_rows),
         "rejected_results_hash": canonical_hash(safe_rows),
@@ -11177,7 +11382,14 @@ class ResearchLabGatewayScoringWorker:
             if _per_icp_checkpoint_enabled()
             else None
         )
+        baseline_progress_runtime_commit_sha = ""
+        baseline_progress_scoring_configuration_hash = ""
+        baseline_progress_parent_receipt_hashes: set[str] = set()
         if baseline_progress_location is not None:
+            baseline_progress_runtime_commit_sha = _gateway_runtime_commit_sha()
+            baseline_progress_scoring_configuration_hash = (
+                scoring_configuration_hash()
+            )
             await self._ensure_private_baseline_repo_head_unchanged(
                 expected_git_sha=baseline_repo_main_sha,
                 benchmark_date=today,
@@ -11192,8 +11404,15 @@ class ResearchLabGatewayScoringWorker:
                 benchmark_date=today,
                 window_hash=window.window_hash,
                 private_model_artifact_hash=artifact.model_artifact_hash,
+                gateway_runtime_commit_sha=baseline_progress_runtime_commit_sha,
+                scoring_configuration_hash_value=(
+                    baseline_progress_scoring_configuration_hash
+                ),
                 repo_git_sha=baseline_repo_main_sha,
                 manifest_hash=str(artifact.manifest_hash or ""),
+                parent_receipt_hashes_out=(
+                    baseline_progress_parent_receipt_hashes
+                ),
             )
             if baseline_progress_rows:
                 logger.info(
@@ -11261,6 +11480,15 @@ class ResearchLabGatewayScoringWorker:
                     return False
                 by_ref[ref] = public_row
                 baseline_progress_rows[:] = list(by_ref.values())
+                baseline_progress_parent_receipt_hashes.update(
+                    str(receipt.get("receipt_hash") or "").strip().lower()
+                    for receipt in _attested_receipts_from(
+                        runner,
+                        retry_runner,
+                        scorer,
+                    )
+                    if receipt.get("receipt_hash")
+                )
                 telemetry_index = checkpoint_telemetry_index(
                     baseline_telemetry_session,
                     baseline_progress_rows,
@@ -11273,7 +11501,16 @@ class ResearchLabGatewayScoringWorker:
                     benchmark_date=today,
                     window_hash=window.window_hash,
                     private_model_artifact_hash=artifact.model_artifact_hash,
+                    gateway_runtime_commit_sha=(
+                        baseline_progress_runtime_commit_sha
+                    ),
+                    scoring_configuration_hash_value=(
+                        baseline_progress_scoring_configuration_hash
+                    ),
                     rows=baseline_progress_rows,
+                    attested_parent_receipt_hashes=sorted(
+                        baseline_progress_parent_receipt_hashes
+                    ),
                     telemetry_index=telemetry_index,
                     repo_git_sha=baseline_repo_main_sha,
                     manifest_hash=str(artifact.manifest_hash or ""),
@@ -11695,6 +11932,12 @@ class ResearchLabGatewayScoringWorker:
                         benchmark_date=today,
                         window_hash=window.window_hash,
                         private_model_artifact_hash=artifact.model_artifact_hash,
+                        gateway_runtime_commit_sha=(
+                            baseline_progress_runtime_commit_sha
+                        ),
+                        scoring_configuration_hash_value=(
+                            baseline_progress_scoring_configuration_hash
+                        ),
                         rows=per_icp_summaries,
                         reason="globally_all_zero",
                         repo_git_sha=baseline_repo_main_sha,
@@ -12088,10 +12331,13 @@ class ResearchLabGatewayScoringWorker:
             epoch_id=evaluation_epoch,
             build_payload=baseline_summary_payload,
             expected_result=baseline_summary_result,
-            parent_receipts=_attested_receipts_from(
+            parent_receipts=_attested_receipts_with_persisted_roots(
                 runner,
                 retry_runner,
                 scorer,
+                persisted_receipt_hashes=sorted(
+                    baseline_progress_parent_receipt_hashes
+                ),
             ),
         )
         bundle_hash = canonical_hash(score_summary_doc)

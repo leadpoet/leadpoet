@@ -5195,7 +5195,10 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         _provider_rpc_response_body_limit,
     )
     from gateway.research_lab.scoring_worker import (
+        _attested_receipts_with_persisted_roots,
+        _load_baseline_scoring_progress,
         _baseline_summary_checkpointable,
+        _store_baseline_scoring_progress,
     )
     from gateway.tee.provider_evidence_cache_store_v2 import (
         ProviderEvidenceCacheStoreV2,
@@ -5752,6 +5755,139 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     ):
         raise RuntimeError("provider recovery checkpoint eligibility differed")
 
+    from types import ModuleType
+
+    checkpoint_objects: dict[tuple[str, str], bytes] = {}
+
+    class CheckpointBody:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+    class CheckpointS3:
+        def put_object(self, **kwargs: Any) -> dict[str, Any]:
+            checkpoint_objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = bytes(
+                kwargs["Body"]
+            )
+            return {"ETag": '"rehearsal"'}
+
+        def get_object(self, **kwargs: Any) -> dict[str, Any]:
+            body = checkpoint_objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
+            return {"Body": CheckpointBody(body)}
+
+    checkpoint_s3 = CheckpointS3()
+    boto3_stub = ModuleType("boto3")
+    boto3_stub.client = lambda *_args, **_kwargs: checkpoint_s3  # type: ignore[attr-defined]
+    prior_boto3 = sys.modules.get("boto3")
+    sys.modules["boto3"] = boto3_stub
+    checkpoint_bucket = "strict-rehearsal-checkpoints"
+    checkpoint_key = "baseline/progress.json"
+    checkpoint_runtime_sha = "a" * 40
+    checkpoint_config_hash = "sha256:" + "b" * 64
+    checkpoint_repo_sha = "c" * 40
+    checkpoint_manifest_hash = "sha256:" + "d" * 64
+    checkpoint_receipt_hashes = [
+        "sha256:" + "e" * 64,
+        "sha256:" + "f" * 64,
+    ]
+    checkpoint_row = {
+        "icp_ref": "rehearsal-checkpoint-icp",
+        "icp_hash": "sha256:" + "0" * 64,
+        "score": 61.0,
+        "company_count": 1,
+        "diagnostics": {"sourcing_failed": False},
+    }
+    try:
+        _store_baseline_scoring_progress(
+            checkpoint_bucket,
+            checkpoint_key,
+            benchmark_date="2026-07-25",
+            window_hash="sha256:" + "1" * 64,
+            private_model_artifact_hash="sha256:" + "2" * 64,
+            gateway_runtime_commit_sha=checkpoint_runtime_sha,
+            scoring_configuration_hash_value=checkpoint_config_hash,
+            rows=[checkpoint_row],
+            attested_parent_receipt_hashes=checkpoint_receipt_hashes,
+            repo_git_sha=checkpoint_repo_sha,
+            manifest_hash=checkpoint_manifest_hash,
+        )
+
+        restored_receipt_hashes: set[str] = set()
+
+        def load_checkpoint(**overrides: Any) -> list[dict[str, Any]]:
+            values = {
+                "gateway_runtime_commit_sha": checkpoint_runtime_sha,
+                "scoring_configuration_hash_value": checkpoint_config_hash,
+                "repo_git_sha": checkpoint_repo_sha,
+                "manifest_hash": checkpoint_manifest_hash,
+                **overrides,
+            }
+            return _load_baseline_scoring_progress(
+                checkpoint_bucket,
+                checkpoint_key,
+                benchmark_date="2026-07-25",
+                window_hash="sha256:" + "1" * 64,
+                private_model_artifact_hash="sha256:" + "2" * 64,
+                parent_receipt_hashes_out=restored_receipt_hashes,
+                **values,
+            )
+
+        restored_rows = load_checkpoint()
+        if restored_rows != [checkpoint_row]:
+            raise RuntimeError("same-release baseline checkpoint did not resume")
+        if restored_receipt_hashes != set(checkpoint_receipt_hashes):
+            raise RuntimeError("baseline checkpoint receipt roots did not resume")
+        if load_checkpoint(gateway_runtime_commit_sha="9" * 40):
+            raise RuntimeError("cross-release baseline checkpoint was reused")
+        if load_checkpoint(scoring_configuration_hash_value="sha256:" + "8" * 64):
+            raise RuntimeError("cross-config baseline checkpoint was reused")
+        if load_checkpoint(repo_git_sha="7" * 40):
+            raise RuntimeError("cross-model-source baseline checkpoint was reused")
+        if load_checkpoint(manifest_hash="sha256:" + "6" * 64):
+            raise RuntimeError("cross-model-manifest baseline checkpoint was reused")
+
+        object_ref = (checkpoint_bucket, checkpoint_key)
+        valid_checkpoint_body = checkpoint_objects[object_ref]
+        malformed_checkpoint = json.loads(valid_checkpoint_body.decode("utf-8"))
+        malformed_checkpoint.pop("completed_icp_count")
+        checkpoint_objects[object_ref] = json.dumps(
+            malformed_checkpoint,
+            sort_keys=True,
+        ).encode("utf-8")
+        if load_checkpoint():
+            raise RuntimeError("malformed baseline checkpoint was reused")
+        checkpoint_objects[object_ref] = valid_checkpoint_body
+
+        class LiveReceiptSource:
+            @staticmethod
+            def attested_receipts() -> list[dict[str, Any]]:
+                return [
+                    {
+                        "receipt_hash": checkpoint_receipt_hashes[0],
+                        "status": "succeeded",
+                    }
+                ]
+
+        merged_receipts = _attested_receipts_with_persisted_roots(
+            LiveReceiptSource(),
+            persisted_receipt_hashes=sorted(restored_receipt_hashes),
+        )
+        if merged_receipts != [
+            {
+                "receipt_hash": checkpoint_receipt_hashes[0],
+                "status": "succeeded",
+            },
+            {"receipt_hash": checkpoint_receipt_hashes[1]},
+        ]:
+            raise RuntimeError("baseline checkpoint receipt roots merged incorrectly")
+    finally:
+        if prior_boto3 is None:
+            sys.modules.pop("boto3", None)
+        else:
+            sys.modules["boto3"] = prior_boto3
+
     starting_capacity = vault.transient_capacity_state()
     topology = topology_document()
     production_wave_jobs = int(topology["benchmark_concurrency"])
@@ -5798,6 +5934,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "completed_provider_job_state_released": True,
         "active_provider_job_state_isolated": True,
         "provider_recovery_checkpoint_bound": True,
+        "baseline_checkpoint_runtime_identity_bound": True,
+        "baseline_checkpoint_receipt_ancestry_restored": True,
         "provider_singleflight_commit_bound": True,
         "provider_rpc_frame_budget_bound": True,
     }
@@ -6346,6 +6484,16 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("provider_singleflight_commit_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("baseline_checkpoint_runtime_identity_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("baseline_checkpoint_receipt_ancestry_restored")
             is True
         ),
         "chain_settlement_state_space_complete": (

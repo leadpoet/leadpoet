@@ -5195,11 +5195,14 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         _provider_rpc_response_body_limit,
     )
     from gateway.research_lab.scoring_worker import (
+        BaselineMaintenancePause,
+        ResearchLabGatewayScoringWorker,
         _attested_receipts_with_persisted_roots,
         _load_baseline_scoring_progress,
         _baseline_summary_checkpointable,
         _store_baseline_scoring_progress,
     )
+    from gateway.research_lab import scoring_worker as scoring_worker_module
     from gateway.tee.provider_evidence_cache_store_v2 import (
         ProviderEvidenceCacheStoreV2,
     )
@@ -5882,6 +5885,140 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             {"receipt_hash": checkpoint_receipt_hashes[1]},
         ]:
             raise RuntimeError("baseline checkpoint receipt roots merged incorrectly")
+
+        async def exercise_pause_checkpoint_resume() -> None:
+            class RehearsalScoringWorker(ResearchLabGatewayScoringWorker):
+                async def _run_baseline_icp(
+                    self,
+                    *,
+                    item: Mapping[str, Any],
+                    item_index: int,
+                    **_kwargs: Any,
+                ) -> dict[str, Any]:
+                    called_indexes.append(item_index)
+                    return {
+                        "icp_ref": item["icp_ref"],
+                        "icp_hash": item["icp_hash"],
+                        "score": float(item_index),
+                        "company_count": 1,
+                        "sourced_count": 1,
+                        "diagnostics": {},
+                        "_item_index": item_index,
+                        "_retryable": False,
+                        "_nonempty": True,
+                        "_runtime_error": "",
+                        "_retry_backoff_seconds": 0.0,
+                    }
+
+            worker = object.__new__(RehearsalScoringWorker)
+            worker.worker_ref = "rehearsal-baseline-worker"
+            worker.config = SimpleNamespace(
+                private_baseline_concurrency=1,
+                private_baseline_retry_concurrency=1,
+                private_baseline_provider_retry_rounds=0,
+            )
+            window = SimpleNamespace(
+                benchmark_items=[
+                    {
+                        "icp_ref": "rehearsal-checkpoint-icp-1",
+                        "icp_hash": "sha256:" + "1" * 64,
+                    },
+                    {
+                        "icp_ref": "rehearsal-checkpoint-icp-2",
+                        "icp_hash": "sha256:" + "2" * 64,
+                    },
+                ]
+            )
+            called_indexes: list[int] = []
+            persisted_rows: dict[str, dict[str, Any]] = {}
+
+            async def checkpoint(row: dict[str, Any]) -> bool:
+                persisted_rows[str(row["icp_ref"])] = dict(row)
+                _store_baseline_scoring_progress(
+                    checkpoint_bucket,
+                    checkpoint_key,
+                    benchmark_date="2026-07-25",
+                    window_hash="sha256:" + "1" * 64,
+                    private_model_artifact_hash="sha256:" + "2" * 64,
+                    gateway_runtime_commit_sha=checkpoint_runtime_sha,
+                    scoring_configuration_hash_value=checkpoint_config_hash,
+                    rows=list(persisted_rows.values()),
+                    attested_parent_receipt_hashes=checkpoint_receipt_hashes,
+                    repo_git_sha=checkpoint_repo_sha,
+                    manifest_hash=checkpoint_manifest_hash,
+                )
+                return True
+
+            pause_states = iter(
+                (
+                    {"paused": False},
+                    {"paused": True, "reason": "operator:rehearsal-pause"},
+                )
+            )
+
+            async def paused_after_first_wave() -> dict[str, Any]:
+                return next(pause_states)
+
+            original_maintenance_reader = (
+                scoring_worker_module.get_scoring_maintenance_state
+            )
+            scoring_worker_module.get_scoring_maintenance_state = (
+                paused_after_first_wave
+            )
+            try:
+                try:
+                    await worker._run_baseline_batch_inner(
+                        runner=object(),
+                        retry_runner=object(),
+                        scorer=object(),
+                        window=window,
+                        run_start=time.time(),
+                        icp_checkpoint=checkpoint,
+                    )
+                except BaselineMaintenancePause as exc:
+                    if exc.completed_icps != 1 or exc.total_icps != 2:
+                        raise RuntimeError(
+                            "baseline pause reported the wrong checkpoint boundary"
+                        ) from exc
+                else:
+                    raise RuntimeError("baseline ignored the operator pause boundary")
+            finally:
+                scoring_worker_module.get_scoring_maintenance_state = (
+                    original_maintenance_reader
+                )
+
+            if called_indexes != [1]:
+                raise RuntimeError("baseline started work beyond the pause boundary")
+            resumed_rows = load_checkpoint()
+            if [row.get("icp_ref") for row in resumed_rows] != [
+                "rehearsal-checkpoint-icp-1"
+            ]:
+                raise RuntimeError("paused baseline checkpoint did not persist")
+
+            async def unpaused() -> dict[str, Any]:
+                return {"paused": False}
+
+            scoring_worker_module.get_scoring_maintenance_state = unpaused
+            try:
+                final_rows, retry_stats = await worker._run_baseline_batch_inner(
+                    runner=object(),
+                    retry_runner=object(),
+                    scorer=object(),
+                    window=window,
+                    run_start=time.time(),
+                    resume_results=resumed_rows,
+                    icp_checkpoint=checkpoint,
+                )
+            finally:
+                scoring_worker_module.get_scoring_maintenance_state = (
+                    original_maintenance_reader
+                )
+            if called_indexes != [1, 2]:
+                raise RuntimeError("baseline resume duplicated a completed ICP")
+            if len(final_rows) != 2 or retry_stats["unresolved"] != 0:
+                raise RuntimeError("baseline did not finish after checkpoint resume")
+
+        asyncio.run(exercise_pause_checkpoint_resume())
     finally:
         if prior_boto3 is None:
             sys.modules.pop("boto3", None)
@@ -5936,6 +6073,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_recovery_checkpoint_bound": True,
         "baseline_checkpoint_runtime_identity_bound": True,
         "baseline_checkpoint_receipt_ancestry_restored": True,
+        "baseline_pause_checkpoint_resume_complete": True,
         "provider_singleflight_commit_bound": True,
         "provider_rpc_frame_budget_bound": True,
     }
@@ -6494,6 +6632,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("baseline_checkpoint_receipt_ancestry_restored")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("baseline_pause_checkpoint_resume_complete")
             is True
         ),
         "chain_settlement_state_space_complete": (

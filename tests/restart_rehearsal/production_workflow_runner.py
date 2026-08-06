@@ -5609,6 +5609,266 @@ def _exercise_fresh_weight_input_lineage() -> dict[str, Any]:
     }
 
 
+def _exercise_stateful_compact_graph_readback() -> dict[str, Any]:
+    """Exercise V3 persistence followed by its canonical V4 readback."""
+
+    import copy
+    import subprocess
+
+    from Leadpoet.utils.subnet_epoch import (
+        SubnetEpochCutover,
+        SubnetEpochSnapshot,
+    )
+    from gateway.research_lab.stateful_epoch_authority_v1 import (
+        BOUNDARY_TABLE,
+        SNAPSHOT_TABLE,
+        StatefulEpochAuthorityStoreError,
+        persist_post_cutover_evidence_v1,
+    )
+    from gateway.tee.coordinator_epoch_cutover_v2 import SNAPSHOT_PURPOSE
+    from leadpoet_canonical.ancestry_checkpoint_v2 import (
+        ANCESTRY_DELTA_SCHEMA_VERSION,
+        build_compact_ancestry_proof_from_delta_v2,
+        issue_ancestry_certificate_v2,
+    )
+    from leadpoet_canonical.attested_v2 import (
+        WEIGHT_ROLE,
+        build_checkpointed_receipt_graph,
+        compact_checkpointed_receipt_graph,
+    )
+
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(SOURCE_ROOT), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    cutover = SubnetEpochCutover(
+        network_genesis_hash="0x" + "1" * 64,
+        netuid=71,
+        cutover_block=1_000,
+        cutover_block_hash="0x" + "2" * 64,
+        first_subnet_epoch_index=10,
+        first_settlement_epoch_id=101,
+        last_legacy_epoch_id=100,
+    )
+    boundary_snapshot = SubnetEpochSnapshot(
+        network_genesis_hash=cutover.network_genesis_hash,
+        netuid=cutover.netuid,
+        head_kind="finalized",
+        block_hash="0x" + "3" * 64,
+        current_block=1_360,
+        last_epoch_block=1_360,
+        pending_epoch_at=0,
+        subnet_epoch_index=11,
+        tempo=360,
+        blocks_since_last_step=0,
+        observed_at=NOW,
+    )
+    current_snapshot = SubnetEpochSnapshot(
+        network_genesis_hash=cutover.network_genesis_hash,
+        netuid=cutover.netuid,
+        head_kind="finalized",
+        block_hash="0x" + "4" * 64,
+        current_block=1_700,
+        last_epoch_block=1_360,
+        pending_epoch_at=0,
+        subnet_epoch_index=11,
+        tempo=360,
+        blocks_since_last_step=340,
+        observed_at=NOW,
+    )
+    boundary_doc = boundary_snapshot.to_dict(cutover=cutover)
+    current_doc = current_snapshot.to_dict(cutover=cutover)
+    epoch_id = int(current_doc["settlement_epoch_id"])
+    fixture = SanitizedWeightFixture(
+        candidate_sha=candidate_sha,
+        epoch_id=epoch_id,
+    )
+    config_hash = sha256_json({"rehearsal": "stateful-compact-readback"})
+    boot = fixture._boot(
+        role=WEIGHT_ROLE,
+        key=fixture.weight_key,
+        config_hash=config_hash,
+    )
+    boundary_receipt = fixture.receipt(
+        role=WEIGHT_ROLE,
+        purpose=SNAPSHOT_PURPOSE,
+        job_id=f"subnet-epoch-boundary:{epoch_id}",
+        key=fixture.weight_key,
+        boot=boot,
+        config_hash=config_hash,
+        output_root=sha256_json(boundary_doc),
+        sequence=0,
+    )
+    current_receipt = fixture.receipt(
+        role=WEIGHT_ROLE,
+        purpose=SNAPSHOT_PURPOSE,
+        job_id=f"subnet-epoch-current:{epoch_id}",
+        key=fixture.weight_key,
+        boot=boot,
+        config_hash=config_hash,
+        output_root=sha256_json(current_doc),
+        parents=(boundary_receipt["receipt_hash"],),
+        sequence=1,
+    )
+    delta = {
+        "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+        "root_receipt_hash": current_receipt["receipt_hash"],
+        "boot_identities": [boot],
+        "receipts": [boundary_receipt, current_receipt],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+    lineage_id = sha256_json(
+        {
+            "cutover_mapping_hash": cutover.mapping_hash,
+            "candidate_sha": candidate_sha,
+        }
+    )
+
+    def verify_boot(identity: Mapping[str, Any]) -> Mapping[str, Any]:
+        if identity.get("commit_sha") != candidate_sha:
+            raise RuntimeError("checkpoint boot commit differs")
+        return identity
+
+    certificate = issue_ancestry_certificate_v2(
+        local_delta=delta,
+        lineage_id=lineage_id,
+        certificate_sequence=0,
+        issuer_boot_identity=boot,
+        issued_at=NOW,
+        sign_digest=fixture.weight_key.sign,
+        boot_attestation_verifier=verify_boot,
+        allowed_issuer_roles=(WEIGHT_ROLE,),
+        required_purposes=(SNAPSHOT_PURPOSE,),
+    )
+    proof = build_compact_ancestry_proof_from_delta_v2(
+        delta,
+        certificate,
+        expected_lineage_id=lineage_id,
+        boot_attestation_verifier=verify_boot,
+        allowed_issuer_roles=(WEIGHT_ROLE,),
+    )
+    graph = build_checkpointed_receipt_graph(
+        root_receipt_hash=current_receipt["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=(boundary_receipt, current_receipt),
+        transport_attempts=(),
+        host_operations=(),
+        ancestry_lineage_id=lineage_id,
+        ancestry_proof=proof,
+        boot_attestation_verifier=verify_boot,
+        require_boot_attestation_verification=True,
+    )
+    compact_graph = compact_checkpointed_receipt_graph(
+        graph,
+        boot_attestation_verifier=verify_boot,
+        require_boot_attestation_verification=True,
+    )
+    evidence = {
+        "schema_version": "leadpoet.validator_subnet_epoch_evidence.v1",
+        "validator_hotkey": VALIDATOR_HOTKEY,
+        "bundle_hash": sha256_json({"bundle": epoch_id}),
+        "cutover_mapping_hash": cutover.mapping_hash,
+        "epoch_authority": current_doc,
+        "epoch_authority_hash": sha256_json(current_doc),
+        "epoch_authority_receipt_hash": current_receipt["receipt_hash"],
+        "epoch_boundary": boundary_doc,
+        "epoch_boundary_hash": sha256_json(boundary_doc),
+        "epoch_boundary_receipt_hash": boundary_receipt["receipt_hash"],
+        "receipt_graph": graph,
+    }
+    tables: dict[str, dict[str, dict[str, Any]]] = {
+        BOUNDARY_TABLE: {},
+        SNAPSHOT_TABLE: {},
+    }
+
+    async def persist_graph(value):
+        return {
+            "root_receipt_hash": value["root_receipt_hash"],
+            "graph_hash": sha256_json(dict(value)),
+        }
+
+    async def load_graph(_root):
+        return copy.deepcopy(compact_graph)
+
+    async def insert(table, row):
+        key_field = {
+            BOUNDARY_TABLE: "boundary_hash",
+            SNAPSHOT_TABLE: "snapshot_hash",
+        }[table]
+        key = str(row[key_field])
+        if key in tables[table]:
+            raise RuntimeError("23505 duplicate key unique constraint")
+        tables[table][key] = copy.deepcopy(dict(row))
+        return copy.deepcopy(dict(row))
+
+    async def select(table, *, filters):
+        field, value = filters[0]
+        for row in tables[table].values():
+            if row.get(field) == value:
+                return copy.deepcopy(row)
+        return None
+
+    durable = asyncio.run(
+        persist_post_cutover_evidence_v1(
+            evidence,
+            cutover=cutover.to_dict(),
+            persist_graph=persist_graph,
+            load_graph=load_graph,
+            insert=insert,
+            select=select,
+        )
+    )
+    if (
+        durable["receipt_graph_hash"] != sha256_json(graph)
+        or durable["boundary"]["boundary_hash"]
+        != evidence["epoch_boundary_hash"]
+        or durable["snapshot"]["snapshot_hash"]
+        != evidence["epoch_authority_hash"]
+    ):
+        raise RuntimeError("canonical compact readback changed stateful evidence")
+
+    tampered = copy.deepcopy(compact_graph)
+    tampered["receipts"] = []
+    attempted_insert = False
+
+    async def load_tampered(_root):
+        return copy.deepcopy(tampered)
+
+    async def reject_insert(_table, _row):
+        nonlocal attempted_insert
+        attempted_insert = True
+        raise RuntimeError("tampered graph reached stateful persistence")
+
+    try:
+        asyncio.run(
+            persist_post_cutover_evidence_v1(
+                evidence,
+                cutover=cutover.to_dict(),
+                persist_graph=persist_graph,
+                load_graph=load_tampered,
+                insert=reject_insert,
+                select=select,
+            )
+        )
+    except StatefulEpochAuthorityStoreError as exc:
+        if "receipt graph readback differs" not in str(exc):
+            raise
+    else:
+        raise RuntimeError("tampered compact graph readback was accepted")
+    if attempted_insert:
+        raise RuntimeError("tampered compact graph mutated stateful evidence")
+    return {
+        "checkpoint_v3_persisted": True,
+        "canonical_v4_readback_accepted": True,
+        "boundary_persisted": True,
+        "snapshot_persisted": True,
+        "tampered_v4_rejected_before_write": True,
+    }
+
+
 def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     """Prove repeated nonterminal polls retain unique measured evidence."""
 
@@ -6576,6 +6836,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
         _exercise_receipt_graph_transport_deduplication
     ),
     "fresh-weight-input-lineage": _exercise_fresh_weight_input_lineage,
+    "stateful-compact-graph-readback": (
+        _exercise_stateful_compact_graph_readback
+    ),
     "research-lab-allocation-conservation": (
         _exercise_research_lab_allocation_conservation
     ),
@@ -7293,6 +7556,28 @@ def main() -> int:
             and behavior_evidence.get(
                 "fresh-weight-input-lineage", {}
             ).get("mismatched_execution_rejected")
+            is True
+        ),
+        "stateful_compact_graph_readback_verified": (
+            behavior_evidence.get(
+                "stateful-compact-graph-readback", {}
+            ).get("checkpoint_v3_persisted")
+            is True
+            and behavior_evidence.get(
+                "stateful-compact-graph-readback", {}
+            ).get("canonical_v4_readback_accepted")
+            is True
+            and behavior_evidence.get(
+                "stateful-compact-graph-readback", {}
+            ).get("boundary_persisted")
+            is True
+            and behavior_evidence.get(
+                "stateful-compact-graph-readback", {}
+            ).get("snapshot_persisted")
+            is True
+            and behavior_evidence.get(
+                "stateful-compact-graph-readback", {}
+            ).get("tampered_v4_rejected_before_write")
             is True
         ),
         "research_lab_allocation_policy_config_bound": (

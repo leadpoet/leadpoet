@@ -6,6 +6,10 @@ from copy import deepcopy
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from gateway.research_lab.stateful_epoch_authority_v1 import (
+    StatefulEpochAuthorityStoreError,
+    _assert_graph_durable,
+)
 from leadpoet_canonical.ancestry_checkpoint_v2 import (
     ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION,
     ANCESTRY_DELTA_SCHEMA_VERSION,
@@ -56,6 +60,7 @@ from leadpoet_canonical.attested_v2 import (
     create_signed_host_operation_terminal,
     host_operation_root,
     sha256_bytes,
+    sha256_json,
     transport_root,
 )
 
@@ -635,6 +640,60 @@ def test_legacy_bootstrap_issues_one_bounded_selected_root_proof_and_resumes(
             ancestry_fixture["output"]["receipt_hash"],
         ]
     )
+
+
+@pytest.mark.asyncio
+async def test_stateful_graph_readback_accepts_only_exact_canonical_compaction(
+    ancestry_fixture,
+):
+    delta = ancestry_fixture["delta"]
+    graph = build_checkpointed_receipt_graph(
+        root_receipt_hash=delta["root_receipt_hash"],
+        boot_identities=delta["boot_identities"],
+        receipts=delta["receipts"],
+        transport_attempts=delta["transport_attempts"],
+        host_operations=delta["host_operations"],
+        ancestry_lineage_id=LINEAGE_ID,
+        ancestry_proof=ancestry_fixture["proof"],
+        boot_attestation_verifier=_boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    compact_graph = compact_checkpointed_receipt_graph(
+        graph,
+        boot_attestation_verifier=_boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+
+    async def persist(value):
+        return {
+            "root_receipt_hash": value["root_receipt_hash"],
+            "graph_hash": sha256_json(dict(value)),
+        }
+
+    async def load_exact(_root):
+        return deepcopy(compact_graph)
+
+    assert await _assert_graph_durable(
+        graph,
+        persist_graph=persist,
+        load_graph=load_exact,
+    ) == sha256_json(graph)
+
+    tampered = deepcopy(compact_graph)
+    tampered["receipts"] = []
+
+    async def load_tampered(_root):
+        return deepcopy(tampered)
+
+    with pytest.raises(
+        StatefulEpochAuthorityStoreError,
+        match="receipt graph readback differs",
+    ):
+        await _assert_graph_durable(
+            graph,
+            persist_graph=persist,
+            load_graph=load_tampered,
+        )
 
 
 @pytest.mark.asyncio

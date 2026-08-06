@@ -31,8 +31,11 @@ from gateway.tee.coordinator_epoch_cutover_v2 import (
     SNAPSHOT_PURPOSE,
 )
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     COORDINATOR_ROLE,
     WEIGHT_ROLE,
+    compact_checkpointed_receipt_graph,
     merkle_root,
     sha256_bytes,
     sha256_json,
@@ -952,22 +955,36 @@ async def _assert_graph_durable(
             "receipt graph persistence acknowledgment differs"
         )
     reloaded = await load_graph(str(graph["root_receipt_hash"]))
+    expected_readback = graph
+    if (
+        isinstance(reloaded, Mapping)
+        and graph.get("schema_version")
+        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        and reloaded.get("schema_version")
+        == COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    ):
+        try:
+            expected_readback = compact_checkpointed_receipt_graph(graph)
+        except Exception as exc:
+            raise StatefulEpochAuthorityStoreError(
+                "receipt graph canonical compaction failed"
+            ) from exc
     canonical_expected = {
-        **dict(graph),
+        **dict(expected_readback),
         "boot_identities": sorted(
-            graph["boot_identities"],
+            expected_readback["boot_identities"],
             key=lambda item: item["boot_identity_hash"],
         ),
         "receipts": sorted(
-            graph["receipts"],
+            expected_readback["receipts"],
             key=lambda item: item["receipt_hash"],
         ),
         "transport_attempts": sorted(
-            graph["transport_attempts"],
+            expected_readback["transport_attempts"],
             key=lambda item: item["attempt_hash"],
         ),
         "host_operations": sorted(
-            graph["host_operations"],
+            expected_readback["host_operations"],
             key=lambda item: item["request"]["request_hash"],
         ),
     }

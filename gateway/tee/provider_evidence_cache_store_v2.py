@@ -37,8 +37,10 @@ CACHE_ROW_SCHEMA_VERSION = "leadpoet.provider_evidence_cache_row.v2"
 CACHE_TABLE = "research_lab_provider_evidence_cache_v2"
 CACHE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
 CACHE_TIMEOUT_MS = 45_000
-CACHE_TRANSPORT_ATTEMPTS = 3
-CACHE_RETRY_DELAYS_SECONDS = (0.0, 0.05, 0.2)
+CACHE_TRANSPORT_ATTEMPTS = 5
+# Match provider-outcome persistence so a brief shared Supabase disturbance
+# does not turn an otherwise valid provider result into a failed model run.
+CACHE_RETRY_DELAYS_SECONDS = (0.0, 1.0, 2.0, 4.0, 8.0)
 MAX_CACHE_RESPONSE_BYTES = 64 * 1024 * 1024
 _TRANSIENT_POSTGREST_CODES = frozenset({"PGRST002", "PGRST003"})
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

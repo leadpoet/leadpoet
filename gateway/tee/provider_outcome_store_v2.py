@@ -26,8 +26,10 @@ CHECKPOINT_TABLE = "research_lab_provider_outcome_checkpoints_v2"
 CHECKPOINT_APPEND_RPC = "append_research_lab_provider_outcome_checkpoint_v2"
 CHECKPOINT_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
 CHECKPOINT_TIMEOUT_MS = 45_000
-CHECKPOINT_TRANSPORT_ATTEMPTS = 3
-CHECKPOINT_RETRY_DELAYS_SECONDS = (0.0, 0.05, 0.2)
+CHECKPOINT_TRANSPORT_ATTEMPTS = 5
+# Supabase pool saturation can outlast immediate retries. Keep one measured
+# identity, but spread the bounded attempts across a 15-second recovery window.
+CHECKPOINT_RETRY_DELAYS_SECONDS = (0.0, 1.0, 2.0, 4.0, 8.0)
 _TRANSIENT_POSTGREST_CODES = frozenset({"PGRST002", "PGRST003"})
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

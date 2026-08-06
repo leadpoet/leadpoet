@@ -6000,9 +6000,13 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     )
     from gateway.research_lab import scoring_worker as scoring_worker_module
     from gateway.tee.provider_evidence_cache_store_v2 import (
+        CACHE_TRANSPORT_ATTEMPTS,
         ProviderEvidenceCacheStoreV2,
     )
-    from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
+    from gateway.tee.provider_outcome_store_v2 import (
+        CHECKPOINT_TRANSPORT_ATTEMPTS,
+        ProviderOutcomeStoreV2,
+    )
     from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
     from gateway.tee.provider_semantics_v2 import ProviderSemanticsAuthorityV2
     from leadpoet_canonical.attested_v2 import (
@@ -6039,8 +6043,12 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             self.calls: list[dict[str, Any]] = []
             self.records: dict[tuple[str, int], dict[str, Any]] = {}
             self.retry_policy_hashes = retry_hashes
-            self.fail_first_cache_authenticated_transient = True
-            self.fail_first_outcome_append_after_commit = True
+            self.cache_authenticated_transients_remaining = (
+                CACHE_TRANSPORT_ATTEMPTS - 1
+            )
+            self.outcome_append_failures_after_commit_remaining = (
+                CHECKPOINT_TRANSPORT_ATTEMPTS - 1
+            )
             self.outcome_rows: dict[tuple[str, str, int], dict[str, Any]] = {}
 
         @contextmanager
@@ -6127,10 +6135,10 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             authenticated_transient = (
                 provider == "supabase"
                 and "research_lab_provider_evidence_cache_v2" in str(request["url"])
-                and self.fail_first_cache_authenticated_transient
+                and self.cache_authenticated_transients_remaining > 0
             )
             if authenticated_transient:
-                self.fail_first_cache_authenticated_transient = False
+                self.cache_authenticated_transients_remaining -= 1
                 body = canonical_json({"code": "PGRST002"}).encode()
                 response_hash = sha256_bytes(body)
             transport_failure = False
@@ -6138,9 +6146,9 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 provider == "supabase"
                 and "/rpc/append_research_lab_provider_outcome_checkpoint_v2"
                 in str(request["url"])
-                and self.fail_first_outcome_append_after_commit
+                and self.outcome_append_failures_after_commit_remaining > 0
             ):
-                self.fail_first_outcome_append_after_commit = False
+                self.outcome_append_failures_after_commit_remaining -= 1
                 transport_failure = True
             attempt = build_transport_attempt(
                 request_id=("%032x" % ordinal)[-32:],
@@ -6276,12 +6284,15 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         if item["provider_id"] == "supabase"
     ]
     if (
-        len(supabase_attempts) != 3
-        or [item["attempt_number"] for item in supabase_attempts] != [0, 1, 3]
+        len(supabase_attempts) != CACHE_TRANSPORT_ATTEMPTS + 1
+        or [item["attempt_number"] for item in supabase_attempts]
+        != list(range(CACHE_TRANSPORT_ATTEMPTS + 1))
         or [item["terminal_status"] for item in supabase_attempts]
-        != ["authenticated_response"] * 3
-        or [item["http_status"] for item in supabase_attempts] != [503, 200, 200]
-        or len({item["attempt_hash"] for item in supabase_attempts}) != 3
+        != ["authenticated_response"] * (CACHE_TRANSPORT_ATTEMPTS + 1)
+        or [item["http_status"] for item in supabase_attempts]
+        != [503] * (CACHE_TRANSPORT_ATTEMPTS - 1) + [200, 200]
+        or len({item["attempt_hash"] for item in supabase_attempts})
+        != CACHE_TRANSPORT_ATTEMPTS + 1
         or len({item["logical_operation_id"] for item in supabase_attempts}) != 1
     ):
         raise RuntimeError("repeated provider cache reads reused transport evidence")
@@ -6308,7 +6319,9 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         purpose=context.purpose,
     )
     persist_outcome_calls = boundary.calls[outcome_call_start:]
-    if [item["method"] for item in persist_outcome_calls] != ["POST", "POST"]:
+    if [item["method"] for item in persist_outcome_calls] != [
+        "POST"
+    ] * CHECKPOINT_TRANSPORT_ATTEMPTS:
         raise RuntimeError(
             "provider outcome append issued a redundant durable readback"
         )
@@ -6331,9 +6344,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     ]
     if (
         outcome.get("status") != "persisted"
-        or [item["attempt_number"] for item in append_attempts] != [0, 1]
+        or [item["attempt_number"] for item in append_attempts]
+        != list(range(CHECKPOINT_TRANSPORT_ATTEMPTS))
         or [item["terminal_status"] for item in append_attempts]
-        != ["transport_failure", "authenticated_response"]
+        != ["transport_failure"] * (CHECKPOINT_TRANSPORT_ATTEMPTS - 1)
+        + ["authenticated_response"]
         or len(boundary.outcome_rows) != 1
         or [item["method"] for item in restore_outcome_calls] != ["GET"]
         or restored_outcome.get("checkpoint_hash") != outcome["checkpoint_hash"]

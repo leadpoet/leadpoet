@@ -11,6 +11,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
 from gateway.tee.provider_evidence_cache_store_v2 import (
+    CACHE_RETRY_DELAYS_SECONDS,
+    CACHE_TRANSPORT_ATTEMPTS,
     ProviderEvidenceCacheStoreV2,
     ProviderEvidenceCacheStoreV2Error,
 )
@@ -297,6 +299,7 @@ def test_cache_store_miss_and_transport_failure_are_distinct() -> None:
         broker=broker,
         vault=_vault(),
         source_boot_verifier=lambda _value: None,
+        sleeper=lambda _delay: None,
     )
 
     missing = store.load(
@@ -380,6 +383,41 @@ def test_cache_store_retries_authenticated_transient_read(
     assert [
         attempt["http_status"] for attempt in missing["transport_attempts"]
     ] == [http_status, 200]
+
+
+@pytest.mark.parametrize("failure_kind", ("transport", "authenticated"))
+def test_cache_store_recovers_read_across_extended_transient_window(
+    failure_kind: str,
+) -> None:
+    broker = _Broker()
+    if failure_kind == "transport":
+        broker.fail_reads = CACHE_TRANSPORT_ATTEMPTS - 1
+    else:
+        broker.read_http_failure = (503, "PGRST002")
+        broker.read_http_failures = CACHE_TRANSPORT_ATTEMPTS - 1
+    sleeps = []
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+        sleeper=sleeps.append,
+    )
+
+    missing = store.load(
+        utc_day="2026-07-10",
+        request_fingerprint="7" * 64,
+        job_id="job",
+        purpose="research_lab.private_model_run.v2",
+    )
+
+    assert missing["found"] is False
+    assert [call["attempt_number"] for call in broker.calls] == list(
+        range(CACHE_TRANSPORT_ATTEMPTS)
+    )
+    assert sleeps == list(CACHE_RETRY_DELAYS_SECONDS[1:])
+    assert missing["transport_attempts"][-1]["terminal_status"] == (
+        "authenticated_response"
+    )
 
 
 @pytest.mark.parametrize("committed_before_eof", (False, True))
@@ -486,10 +524,51 @@ def test_cache_store_retries_authenticated_transient_insert(
     ]
 
 
+@pytest.mark.parametrize("failure_kind", ("transport", "authenticated"))
+def test_cache_store_recovers_insert_across_extended_transient_window(
+    failure_kind: str,
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    identity = _identity(key)
+    broker = _Broker()
+    terminal = _recorded_terminal(broker, key, identity)
+    if failure_kind == "transport":
+        broker.fail_posts = CACHE_TRANSPORT_ATTEMPTS - 1
+    else:
+        broker.post_http_failure = (503, "PGRST002")
+        broker.post_http_failures = CACHE_TRANSPORT_ATTEMPTS - 1
+    sleeps = []
+    store = ProviderEvidenceCacheStoreV2(
+        broker=broker,
+        vault=_vault(),
+        source_boot_verifier=lambda _value: None,
+        sleeper=sleeps.append,
+    )
+
+    persisted = store.persist_recorded(
+        terminal,
+        utc_day="2026-07-10",
+        job_id="job",
+        purpose="research_lab.private_model_run.v2",
+    )
+
+    insert_calls = [
+        item
+        for item in broker.calls
+        if item["provider_id"] == "supabase" and item["method"] == "POST"
+    ]
+    assert [item["attempt_number"] for item in insert_calls] == list(
+        range(CACHE_TRANSPORT_ATTEMPTS)
+    )
+    assert sleeps == list(CACHE_RETRY_DELAYS_SECONDS[1:])
+    assert persisted["cache_entry_hash"]
+    assert len(broker.rows) == 1
+
+
 def test_cache_store_authenticated_transient_exhaustion_remains_fail_closed() -> None:
     broker = _Broker()
     broker.read_http_failure = (503, "PGRST002")
-    broker.read_http_failures = 3
+    broker.read_http_failures = CACHE_TRANSPORT_ATTEMPTS
     store = ProviderEvidenceCacheStoreV2(
         broker=broker,
         vault=_vault(),
@@ -505,7 +584,9 @@ def test_cache_store_authenticated_transient_exhaustion_remains_fail_closed() ->
             purpose="research_lab.private_model_run.v2",
         )
 
-    assert [call["attempt_number"] for call in broker.calls] == [0, 1, 2]
+    assert [call["attempt_number"] for call in broker.calls] == list(
+        range(CACHE_TRANSPORT_ATTEMPTS)
+    )
 
 
 def test_cache_store_nontransient_response_is_not_retried() -> None:
@@ -535,7 +616,7 @@ def test_cache_store_exhausted_insert_remains_fail_closed() -> None:
     identity = _identity(key)
     broker = _Broker()
     terminal = _recorded_terminal(broker, key, identity)
-    broker.fail_posts = 3
+    broker.fail_posts = CACHE_TRANSPORT_ATTEMPTS
     store = ProviderEvidenceCacheStoreV2(
         broker=broker,
         vault=_vault(),
@@ -559,7 +640,9 @@ def test_cache_store_exhausted_insert_remains_fail_closed() -> None:
         for item in broker.calls
         if item["provider_id"] == "supabase" and item["method"] == "POST"
     ]
-    assert [item["attempt_number"] for item in insert_calls] == [0, 1, 2]
+    assert [item["attempt_number"] for item in insert_calls] == list(
+        range(CACHE_TRANSPORT_ATTEMPTS)
+    )
     assert not any(item["method"] == "GET" for item in broker.calls)
 
 
@@ -589,7 +672,10 @@ def test_repeated_cache_reads_have_request_bound_transport_identities() -> None:
         for attempt in result["transport_attempts"]:
             context.record_transport(attempt)
 
-    assert [item["attempt_number"] for item in context.transport_attempts] == [0, 3]
+    assert [item["attempt_number"] for item in context.transport_attempts] == [
+        0,
+        CACHE_TRANSPORT_ATTEMPTS,
+    ]
     assert len({item["attempt_hash"] for item in context.transport_attempts}) == 2
 
 

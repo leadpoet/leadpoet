@@ -9,6 +9,8 @@ import pytest
 
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
 from gateway.tee.provider_outcome_store_v2 import (
+    CHECKPOINT_RETRY_DELAYS_SECONDS,
+    CHECKPOINT_TRANSPORT_ATTEMPTS,
     ProviderOutcomeStoreV2,
     ProviderOutcomeStoreV2Error,
 )
@@ -546,7 +548,7 @@ def test_outcome_checkpoint_busy_append_is_retryable_without_readback() -> None:
 
     assert busy["status"] == "busy"
     assert len(broker.calls) == 1
-    assert broker.calls[0]["attempt_number"] == 21
+    assert broker.calls[0]["attempt_number"] == 7 * CHECKPOINT_TRANSPORT_ATTEMPTS
 
 
 @pytest.mark.parametrize(
@@ -584,6 +586,41 @@ def test_outcome_checkpoint_retries_authenticated_transient_append(
     ] == [http_status, 200]
 
 
+@pytest.mark.parametrize("failure_kind", ("transport", "authenticated"))
+def test_outcome_checkpoint_recovers_across_extended_transient_window(
+    failure_kind: str,
+) -> None:
+    broker = _Broker()
+    if failure_kind == "transport":
+        broker.fail_uncommitted_appends = CHECKPOINT_TRANSPORT_ATTEMPTS - 1
+    else:
+        broker.append_http_failure = (503, "PGRST002")
+        broker.append_http_failures = CHECKPOINT_TRANSPORT_ATTEMPTS - 1
+    sleeps = []
+    store = ProviderOutcomeStoreV2(
+        broker=broker,
+        vault=_vault(),
+        sleeper=sleeps.append,
+    )
+
+    persisted = store.persist(
+        _document(),
+        previous_checkpoint_hash="",
+        job_id="job",
+        purpose="research_lab.company_score.v2",
+    )
+
+    assert persisted["status"] == "persisted"
+    assert [call["attempt_number"] for call in broker.calls] == list(
+        range(CHECKPOINT_TRANSPORT_ATTEMPTS)
+    )
+    assert sleeps == list(CHECKPOINT_RETRY_DELAYS_SECONDS[1:])
+    assert persisted["transport_attempts"][-1]["terminal_status"] == (
+        "authenticated_response"
+    )
+    assert len(broker.rows) == 1
+
+
 @pytest.mark.parametrize(
     ("http_status", "code"),
     (
@@ -597,7 +634,7 @@ def test_outcome_checkpoint_transient_append_exhaustion_fails_closed(
 ) -> None:
     broker = _Broker()
     broker.append_http_failure = (http_status, code)
-    broker.append_http_failures = 3
+    broker.append_http_failures = CHECKPOINT_TRANSPORT_ATTEMPTS
     store = ProviderOutcomeStoreV2(
         broker=broker,
         vault=_vault(),
@@ -618,8 +655,12 @@ def test_outcome_checkpoint_transient_append_exhaustion_fails_closed(
             purpose="research_lab.company_score.v2",
         )
 
-    assert [call["method"] for call in broker.calls] == ["POST"] * 3
-    assert [call["attempt_number"] for call in broker.calls] == [0, 1, 2]
+    assert [call["method"] for call in broker.calls] == [
+        "POST"
+    ] * CHECKPOINT_TRANSPORT_ATTEMPTS
+    assert [call["attempt_number"] for call in broker.calls] == list(
+        range(CHECKPOINT_TRANSPORT_ATTEMPTS)
+    )
     assert broker.rows == {}
 
 
@@ -696,7 +737,11 @@ def test_outcome_checkpoint_rejects_uncommitted_append_response_bytes() -> None:
 
 def test_outcome_checkpoint_rejects_tampering_and_transport_failure() -> None:
     broker = _Broker()
-    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+    store = ProviderOutcomeStoreV2(
+        broker=broker,
+        vault=_vault(),
+        sleeper=lambda _delay: None,
+    )
     store.persist(
         _document(),
         previous_checkpoint_hash="",

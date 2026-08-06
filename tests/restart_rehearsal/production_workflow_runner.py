@@ -181,6 +181,80 @@ SIGNED_PRIVATE_MODEL_RELEASES = {
             "2d90daa8347daec34e8e7966eb6d208f47f52df2.sig.b64"
         ),
     },
+    "leadpoet-sourcing-wrapper-contract-v11": {
+        "build_id": "31069901085-1",
+        "compatibility_contract": {
+            "contract_id": "leadpoet-sourcing-wrapper-contract-v11",
+            "path": "sourcing_model/consumer_contract.json",
+            "sha256": (
+                "sha256:2cd4d09b99db1f0ac523c3e57f361afb7c7ff1413392bd9aa5dfcee9efb81c01"
+            ),
+        },
+        "component_registry_version": "sourcing-model-components:v2",
+        "config_hash": (
+            "sha256:9ae38ed373dbb9bafb4fc360d3003ad6cad9b101741932b7b9c6bc2c4bb28211"
+        ),
+        "consumer_parity_fixtures": {
+            "path": "sourcing_model/consumer_parity_fixtures.json",
+            "sha256": (
+                "sha256:8b0d23b1664b5539e790c988afcb558c2aa4cf0ff925af0f7dbe2f9bc900fce4"
+            ),
+        },
+        "facility_evidence_contract": {
+            "contract_id": "facility-evidence:v1",
+            "identity_policy": {
+                "policy_version": "facility-identity-proof:v2",
+                "sha256": (
+                    "6a96d24b31da117a4f6ab2e3fe1ed87d8173e1aefc0f49cf02e72aa82a031169"
+                ),
+            },
+            "path": "sourcing_model/facility_evidence_contract_v1.json",
+            "sha256": (
+                "sha256:7239d15f5db6b45c0c4f479b934d186bb1d569896e071f246162b27b6e0b9d99"
+            ),
+        },
+        "git_commit_sha": "74a29a984938e1a443bdd0d2eed2f41f737be1e6",
+        "image_digest": (
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+            "sourcing-model@sha256:cff5ce5f9e95e749ea242cd8377d4479f017c68e78eac49fe7bb957997f09eff"
+        ),
+        "intent_release_benchmark": {
+            "contract": {
+                "contract_id": "intent-release-contracts:v1",
+                "path": "sourcing_model/intent_release_contract_v1.json",
+                "sha256": (
+                    "sha256:6aad3eb1f43aaeec06cda69fcf4cb5ae4ab97f8de057cf7750967cbcb94bbf43"
+                ),
+            },
+            "policy": {
+                "path": "sourcing_model/intent_release_policy_v1.json",
+                "payload_sha256": (
+                    "sha256:53753b35b191bd5a6a61e27c634fcfdc97076bada8be7e41bb45ab14866f7075"
+                ),
+                "policy_id": "intent-release-policy:v1",
+                "sha256": (
+                    "sha256:81e0fc457d52652cc04fc12996dae32e96ef475534649c588d8a26f6aa3a1f80"
+                ),
+            },
+        },
+        "manifest_hash": (
+            "sha256:84b7f21f843c46a551e346693b2079bfee63fbc62f3a0e8db00339bb57d932e8"
+        ),
+        "manifest_uri": (
+            "s3://leadpoet-private-model-artifacts-493765492819/"
+            "research-lab/sourcing-model/"
+            "74a29a984938e1a443bdd0d2eed2f41f737be1e6.json"
+        ),
+        "model_artifact_hash": (
+            "sha256:641adf30cfb197276da018702688ab3378f69ec2e7f71b2245963f537c35aab3"
+        ),
+        "scoring_adapter_version": "qualification-company-scorer:v1",
+        "signature_ref": (
+            "s3://leadpoet-private-model-artifacts-493765492819/"
+            "research-lab/sourcing-model/"
+            "74a29a984938e1a443bdd0d2eed2f41f737be1e6.sig.b64"
+        ),
+    },
 }
 
 
@@ -252,7 +326,7 @@ def _require_equal(left: Any, right: Any, message: str) -> Any:
 
 
 def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
-    """Exercise the signed v7 -> v8 -> v7 production handoff contract."""
+    """Exercise the signed oldest -> newest -> oldest production handoff."""
 
     local_boundaries = sys.modules.get("sitecustomize")
     if local_boundaries is None or not hasattr(
@@ -347,7 +421,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     expected_ids = set(SIGNED_PRIVATE_MODEL_RELEASES)
     snapshots = reviewed_consumer_snapshots()
     if not expected_ids.issubset(snapshots):
-        raise RuntimeError("reviewed v7/v8 consumer snapshots are incomplete")
+        raise RuntimeError("reviewed consumer snapshots are incomplete")
     for contract_id, release in SIGNED_PRIVATE_MODEL_RELEASES.items():
         snapshot = snapshots[contract_id]
         _require_equal(
@@ -430,13 +504,15 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
 
         v7_id = "leadpoet-sourcing-wrapper-contract-v7"
         v8_id = "leadpoet-sourcing-wrapper-contract-v8"
+        new_id = "leadpoet-sourcing-wrapper-contract-v11"
+        release_ids = tuple(SIGNED_PRIVATE_MODEL_RELEASES)
         def expect_source_rejection(
             source_root: Path,
             *,
             asserted_contract_id: str,
             label: str,
         ) -> str:
-            release = SIGNED_PRIVATE_MODEL_RELEASES[v8_id]
+            release = SIGNED_PRIVATE_MODEL_RELEASES[new_id]
             fixture_id = hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
             prefix = (
                 "s3://leadpoet-private-model-artifacts-493765492819/"
@@ -461,45 +537,48 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
             )
 
         hybrid_source_rejections: dict[str, str] = {}
-        for contract_id, parity_id in ((v7_id, v8_id), (v8_id, v7_id)):
-            label = f"{contract_id}-with-{parity_id}"
-            hybrid_root = source_root_for_snapshot(
-                temporary_root,
-                contract_snapshot=snapshots[contract_id],
-                parity_snapshot=snapshots[parity_id],
-                name=label,
-            )
-            hybrid_source_rejections[label] = expect_source_rejection(
-                hybrid_root,
-                asserted_contract_id=contract_id,
-                label=label,
-            )
+        for contract_id in release_ids:
+            for parity_id in release_ids:
+                if contract_id == parity_id:
+                    continue
+                label = f"{contract_id}-with-{parity_id}"
+                hybrid_root = source_root_for_snapshot(
+                    temporary_root,
+                    contract_snapshot=snapshots[contract_id],
+                    parity_snapshot=snapshots[parity_id],
+                    name=label,
+                )
+                hybrid_source_rejections[label] = expect_source_rejection(
+                    hybrid_root,
+                    asserted_contract_id=contract_id,
+                    label=label,
+                )
 
-        exact_v8_root = temporary_root / v8_id
+        exact_new_root = temporary_root / new_id
         assertion_mismatch_rejection = expect_source_rejection(
-            exact_v8_root,
+            exact_new_root,
             asserted_contract_id=v7_id,
             label="consumer contract assertion mismatch",
         )
         unknown_source_rejection = expect_source_rejection(
-            exact_v8_root,
-            asserted_contract_id="leadpoet-sourcing-wrapper-contract-v9",
+            exact_new_root,
+            asserted_contract_id="leadpoet-sourcing-wrapper-contract-v12",
             label="unknown consumer contract assertion",
         )
 
         tampered_root = source_root_for_snapshot(
             temporary_root,
-            contract_snapshot=snapshots[v8_id],
-            parity_snapshot=snapshots[v8_id],
-            name="tampered-v8-contract",
+            contract_snapshot=snapshots[new_id],
+            parity_snapshot=snapshots[new_id],
+            name="tampered-new-contract",
         )
         tampered_contract_path = tampered_root / str(
-            snapshots[v8_id]["contract"]["canonical_path"]
+            snapshots[new_id]["contract"]["canonical_path"]
         )
         tampered_contract_path.write_bytes(tampered_contract_path.read_bytes() + b"\n")
         tampered_source_rejection = expect_source_rejection(
             tampered_root,
-            asserted_contract_id=v8_id,
+            asserted_contract_id=new_id,
             label="tampered source contract",
         )
 
@@ -514,9 +593,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     )
     extended_release = rehash_manifest(
         {
-            **SIGNED_PRIVATE_MODEL_RELEASES[
-                "leadpoet-sourcing-wrapper-contract-v8"
-            ],
+            **SIGNED_PRIVATE_MODEL_RELEASES[new_id],
             "git_commit_sha": "f" * 40,
             "manifest_uri": (
                 "s3://leadpoet-private-model-artifacts-493765492819/"
@@ -648,6 +725,8 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
 
     v7_id = "leadpoet-sourcing-wrapper-contract-v7"
     v8_id = "leadpoet-sourcing-wrapper-contract-v8"
+    new_id = "leadpoet-sourcing-wrapper-contract-v11"
+    release_ids = tuple(SIGNED_PRIVATE_MODEL_RELEASES)
     def active_row(contract_id: str) -> dict[str, Any]:
         release = SIGNED_PRIVATE_MODEL_RELEASES[contract_id]
         return {
@@ -715,19 +794,19 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         )
         lineage_checks["v7_active"] = str(v7_active.get("status") or "")
 
-        activate(v8_id)
-        lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[v8_id][
+        activate(new_id)
+        lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[new_id][
             "git_commit_sha"
         ]
-        v8_plan = asyncio.run(
+        new_plan = asyncio.run(
             promotion_module.sync_active_model_to_repo_head(
                 config,
                 dry_run=True,
                 wait_for_repo_head=False,
             )
         )
-        lineage_checks["v8_rebenchmark_plan"] = str(
-            v8_plan.get("status") or ""
+        lineage_checks["new_rebenchmark_plan"] = str(
+            new_plan.get("status") or ""
         )
 
         lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[v7_id][
@@ -763,21 +842,21 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
             pointer_source_mismatch_rejected = True
         else:
             raise RuntimeError(
-                "v8 pointer with v7 source did not fail closed"
+                "new pointer with old source did not fail closed"
             )
 
-        lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[v8_id][
+        lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[new_id][
             "git_commit_sha"
         ]
-        lineage_state["active"] = active_row(v8_id)
-        v8_active = asyncio.run(
+        lineage_state["active"] = active_row(new_id)
+        new_active = asyncio.run(
             promotion_module.sync_active_model_to_repo_head(
                 config,
                 dry_run=True,
                 wait_for_repo_head=False,
             )
         )
-        lineage_checks["v8_active"] = str(v8_active.get("status") or "")
+        lineage_checks["new_active"] = str(new_active.get("status") or "")
 
         activate(v7_id)
         lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[v7_id][
@@ -790,7 +869,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
                 wait_for_repo_head=False,
             )
         )
-        lineage_checks["v7_rollback_plan"] = str(
+        lineage_checks["old_rollback_plan"] = str(
             rollback_plan.get("status") or ""
         )
         lineage_state["active"] = active_row(v7_id)
@@ -801,7 +880,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
                 wait_for_repo_head=False,
             )
         )
-        lineage_checks["v7_rollback_active"] = str(
+        lineage_checks["old_rollback_active"] = str(
             rollback_active.get("status") or ""
         )
 
@@ -809,8 +888,8 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         # promotion path records active_version_created. Daily baseline sync
         # must not turn that same SHA into a generic repo-head release while
         # delayed current.json reconciliation is pending.
-        activate(v8_id, record_transition=False)
-        lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[v8_id][
+        activate(new_id, record_transition=False)
+        lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[new_id][
             "git_commit_sha"
         ]
         lineage_state["active"] = active_row(v7_id)
@@ -837,11 +916,11 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
 
     expected_lineage_checks = {
         "v7_active": "active_is_repo_head",
-        "v8_rebenchmark_plan": "would_sync_active_model_to_repo_head",
+        "new_rebenchmark_plan": "would_sync_active_model_to_repo_head",
         "pointer_source_mismatch": "repo_head_manifest_not_ready",
-        "v8_active": "active_is_repo_head",
-        "v7_rollback_plan": "would_sync_active_model_to_repo_head",
-        "v7_rollback_active": "active_is_repo_head",
+        "new_active": "active_is_repo_head",
+        "old_rollback_plan": "would_sync_active_model_to_repo_head",
+        "old_rollback_active": "active_is_repo_head",
         "candidate_owned_head_pending": "candidate_source_publication_pending",
     }
     _require_equal(
@@ -1103,36 +1182,39 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         raise RuntimeError("delayed manifest reconciliation did not precede baseline")
 
     hybrid_manifest_rejections: dict[str, str] = {}
-    for contract_id, parity_id in ((v7_id, v8_id), (v8_id, v7_id)):
-        label = f"{contract_id}-with-{parity_id}"
-        hybrid_manifest = json.loads(
-            json.dumps(SIGNED_PRIVATE_MODEL_RELEASES[contract_id])
-        )
-        hybrid_manifest["consumer_parity_fixtures"] = dict(
-            SIGNED_PRIVATE_MODEL_RELEASES[parity_id][
-                "consumer_parity_fixtures"
-            ]
-        )
-        hybrid_manifest["signature_ref"] = (
-            "s3://leadpoet-private-model-artifacts-493765492819/"
-            "research-lab/sourcing-model/rehearsal/"
-            + hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
-            + ".sig.b64"
-        )
-        hybrid_manifest = rehash_manifest(hybrid_manifest)
-        sign_and_install(hybrid_manifest)
-        hybrid_manifest_rejections[label] = expect_runtime_rejection(
-            lambda manifest=hybrid_manifest: (
-                verify_private_artifact_manifest_signature(
-                    manifest,
-                    key_id=PRIVATE_MODEL_SIGNING_KEY_ID,
-                )
-            ),
-            label=label,
-        )
+    for contract_id in release_ids:
+        for parity_id in release_ids:
+            if contract_id == parity_id:
+                continue
+            label = f"{contract_id}-with-{parity_id}"
+            hybrid_manifest = json.loads(
+                json.dumps(SIGNED_PRIVATE_MODEL_RELEASES[contract_id])
+            )
+            hybrid_manifest["consumer_parity_fixtures"] = dict(
+                SIGNED_PRIVATE_MODEL_RELEASES[parity_id][
+                    "consumer_parity_fixtures"
+                ]
+            )
+            hybrid_manifest["signature_ref"] = (
+                "s3://leadpoet-private-model-artifacts-493765492819/"
+                "research-lab/sourcing-model/rehearsal/"
+                + hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+                + ".sig.b64"
+            )
+            hybrid_manifest = rehash_manifest(hybrid_manifest)
+            sign_and_install(hybrid_manifest)
+            hybrid_manifest_rejections[label] = expect_runtime_rejection(
+                lambda manifest=hybrid_manifest: (
+                    verify_private_artifact_manifest_signature(
+                        manifest,
+                        key_id=PRIVATE_MODEL_SIGNING_KEY_ID,
+                    )
+                ),
+                label=label,
+            )
 
     unknown_manifest = json.loads(
-        json.dumps(SIGNED_PRIVATE_MODEL_RELEASES[v8_id])
+        json.dumps(SIGNED_PRIVATE_MODEL_RELEASES[new_id])
     )
     unknown_manifest["compatibility_contract"]["contract_id"] = (
         "leadpoet-sourcing-wrapper-contract-v9"
@@ -1151,7 +1233,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         label="unknown signed manifest contract",
     )
 
-    tampered_manifest = json.loads(json.dumps(SIGNED_PRIVATE_MODEL_RELEASES[v8_id]))
+    tampered_manifest = json.loads(json.dumps(SIGNED_PRIVATE_MODEL_RELEASES[new_id]))
     tampered_manifest["compatibility_contract"]["sha256"] = "sha256:" + "0" * 64
     tampered_manifest["signature_ref"] = (
         "s3://leadpoet-private-model-artifacts-493765492819/"
@@ -1168,7 +1250,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     )
 
     invalid_signature_manifest = json.loads(
-        json.dumps(SIGNED_PRIVATE_MODEL_RELEASES[v8_id])
+        json.dumps(SIGNED_PRIVATE_MODEL_RELEASES[new_id])
     )
     invalid_signature_manifest["signature_ref"] = (
         "s3://leadpoet-private-model-artifacts-493765492819/"
@@ -1220,10 +1302,10 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
             for item in value:
                 collect_provider_bindings(item)
 
-    v8_parity = json.loads(
-        Path(snapshots[v8_id]["parity_path"]).read_text(encoding="utf-8")
+    current_parity = json.loads(
+        Path(snapshots[new_id]["parity_path"]).read_text(encoding="utf-8")
     )
-    collect_provider_bindings(v8_parity)
+    collect_provider_bindings(current_parity)
     observed_provider_bindings = {
         tool_id: next(iter(values))
         for tool_id, values in provider_binding_values.items()
@@ -1232,23 +1314,25 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     _require_equal(
         {tool_id: len(values) for tool_id, values in provider_binding_values.items()},
         {tool_id: 1 for tool_id in expected_provider_bindings},
-        "v8 provider binding manifest projection is ambiguous",
+        "current provider binding manifest projection is ambiguous",
     )
     _require_equal(
         observed_provider_bindings,
         expected_provider_bindings,
-        "v8 provider binding manifest projection differs",
+        "current provider binding manifest projection differs",
     )
 
     return {
         "built_contracts": built_contracts,
         "contract_assertion_mismatch_rejected": bool(assertion_mismatch_rejection),
         "hybrid_manifests_rejected": (
-            len(hybrid_manifest_rejections) == 2
+            len(hybrid_manifest_rejections)
+            == len(release_ids) * (len(release_ids) - 1)
             and all(hybrid_manifest_rejections.values())
         ),
         "hybrid_sources_rejected": (
-            len(hybrid_source_rejections) == 2
+            len(hybrid_source_rejections)
+            == len(release_ids) * (len(release_ids) - 1)
             and all(hybrid_source_rejections.values())
         ),
         "invalid_signature_rejected": bool(invalid_signature_rejection),
@@ -1272,7 +1356,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         "signed_extensions_verified": signed_extensions_verified,
         "rollback_exact": (
             [item["contract_id"] for item in transitions]
-            == [v7_id, v8_id, v7_id]
+            == [v7_id, new_id, v7_id]
             and all(
                 item.get("scoring_model_authority_verified") is True
                 for item in transitions

@@ -60,8 +60,9 @@ candidate is deployed and attested.
 - [ ] Confirm no database migration is required. Contract, binding, and active
   model identities remain inside existing append-only, hash-bound JSON
   documents unless a separately reviewed physical query requires a column.
-- [ ] Exercise old -> new -> old contract activation and rebenchmarking with
-  the dual-compatible candidate before changing the live model pointer.
+- [ ] Exercise old -> newest-reviewed -> old contract activation and
+  rebenchmarking with the dual-compatible candidate before changing the live
+  model pointer.
 
 The safe forward order is Leadpoet candidate push and attestation, coordinated
 gateway/validator deployment, exact old-artifact weight verification, then an
@@ -150,7 +151,8 @@ It runs one exact forward transition and must prove:
   137.
 - [ ] Credential-envelope and provider preflight paths complete without
   plaintext fallback.
-- [ ] Signed private-model v7 -> v8 -> v7 transition, pointer/source alignment,
+- [ ] Signed private-model oldest -> newest-reviewed -> oldest transition,
+  pointer/source alignment,
   exact contract/parity pairing, and KMS verification complete; hybrid,
   unknown, and tampered artifacts fail closed.
 - [ ] Gateway builds one canonical bundle.

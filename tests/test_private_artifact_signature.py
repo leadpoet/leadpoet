@@ -227,12 +227,12 @@ def test_each_reviewed_contract_pair_verifies(contract_id: str) -> None:
     assert result["verified"] is True
 
 
-def test_v7_v8_v7_pointer_transition_remains_exact_and_rollback_safe() -> None:
+def test_oldest_newest_oldest_pointer_transition_remains_exact_and_rollback_safe() -> None:
     snapshots = reviewed_consumer_snapshots()
     v7 = next(item for item in snapshots if item.endswith("v7"))
-    v8 = next(item for item in snapshots if item.endswith("v8"))
+    v11 = next(item for item in snapshots if item.endswith("v11"))
 
-    for contract_id in (v7, v8, v7):
+    for contract_id in (v7, v11, v7):
         result = verify_private_artifact_manifest_signature(
             artifact_mapping(consumer_contract_id=contract_id),
             s3_client=FakeS3(),

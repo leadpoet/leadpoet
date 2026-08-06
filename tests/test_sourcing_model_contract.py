@@ -17,11 +17,14 @@ import pytest
 
 from research_lab.sourcing_model_contract_check import (
     CONTRACT_PATH,
+    CONTRACT_V11_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
+    PARITY_FIXTURE_V11_PATH,
     PARITY_FIXTURE_V7_PATH,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
+    reviewed_consumer_snapshots,
     verify_source_tree_contract,
 )
 
@@ -410,6 +413,28 @@ def test_exact_v7_and_v8_source_pairs_are_both_reviewed(tmp_path: Path) -> None:
         "contract_id"
     ].endswith("v7")
     assert verify_source_tree_contract(v7_root) == []
+
+
+def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
+    root = tmp_path / "v11"
+    contract = json.loads(CONTRACT_V11_PATH.read_text(encoding="utf-8"))
+    contract_path = root / contract["canonical_path"]
+    parity_path = root / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V11_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V11_PATH.read_bytes())
+
+    resolved = resolve_reviewed_consumer_snapshot(root)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v11"
+    )
+    assert set(reviewed_consumer_snapshots()) == {
+        "leadpoet-sourcing-wrapper-contract-v7",
+        "leadpoet-sourcing-wrapper-contract-v8",
+        "leadpoet-sourcing-wrapper-contract-v11",
+    }
 
 
 def test_mixed_reviewed_contract_and_parity_versions_fail_closed(

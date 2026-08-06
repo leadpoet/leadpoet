@@ -58,6 +58,7 @@ from research_lab.eval.private_runtime import (
     validate_sourcing_adapter_metadata,
     validate_sourcing_runtime_receipt_entries,
     canonicalize_private_model_icp,
+    publish_attested_receipt_hash,
     publish_incontainer_trace_entries,
 )
 from research_lab.eval.provider_costs import summarize_provider_cost_trace_entries
@@ -1225,6 +1226,7 @@ class AttestedPrivateModelRunnerV2:
                 for item in authorities
             ):
                 authorities.append(dict(outcome))
+        publish_attested_receipt_hash(receipt_hash)
         return result.get("output")
 
 

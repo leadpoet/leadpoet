@@ -5,6 +5,10 @@ import pytest
 from gateway.research_lab import attested_scoring
 from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 from research_lab.eval.evaluator import QualificationStyleCompanyScorer
+from research_lab.eval.private_runtime import (
+    begin_attested_receipt_hash_collection,
+    end_attested_receipt_hash_collection,
+)
 
 
 @pytest.mark.asyncio
@@ -45,17 +49,22 @@ async def test_research_lab_scorer_uses_v2_as_sole_provider_and_scorer(monkeypat
         execute,
     )
 
-    result = await scorer.score_with_breakdowns(
-        [{"company_name": "Example"}],
-        {"industry": "Software"},
-        False,
-    )
+    receipt_hashes, token = begin_attested_receipt_hash_collection()
+    try:
+        result = await scorer.score_with_breakdowns(
+            [{"company_name": "Example"}],
+            {"industry": "Software"},
+            False,
+        )
+    finally:
+        end_attested_receipt_hash_collection(token)
 
     assert result == [{"final_score": 23.0}]
     assert captured["epoch_id"] == 102
     assert captured["purpose"] == "research_lab.rebenchmark.v1"
     assert captured["provider_credential_profile"] == "benchmark_scorer"
     assert scorer.attested_receipts()[0]["receipt_hash"].startswith("sha256:")
+    assert receipt_hashes == {"sha256:" + "a" * 64}
 
 
 @pytest.mark.asyncio

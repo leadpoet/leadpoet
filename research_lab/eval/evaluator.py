@@ -36,6 +36,7 @@ from .private_runtime import (
     end_incontainer_trace_collection,
     ensure_private_model_outputs,
     incontainer_trace_capture_enabled,
+    publish_attested_receipt_hash,
     publish_incontainer_trace_entries,
 )
 from .provider_costs import summarize_provider_cost_trace_entries
@@ -2909,6 +2910,7 @@ class QualificationStyleCompanyScorer:
         receipt_hash = str(receipt["receipt_hash"])
         self._attested_outcome_count += 1
         self._last_attested_receipt_hash = receipt_hash
+        publish_attested_receipt_hash(receipt_hash)
         if any(item.get("receipt_hash") == receipt_hash for item in self._attested_receipts):
             return
         self._attested_receipts.append(dict(receipt))

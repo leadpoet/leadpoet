@@ -21,8 +21,10 @@ from leadpoet_canonical.attested_v2 import sha256_json
 from research_lab.eval import DockerPrivateModelSpec, build_local_private_artifact_manifest
 from research_lab.eval.private_runtime import (
     PROVIDER_COST_EVALUATION_SCOPE_ENV,
+    begin_attested_receipt_hash_collection,
     begin_incontainer_trace_collection,
     compute_private_source_tree_hash,
+    end_attested_receipt_hash_collection,
     end_incontainer_trace_collection,
 )
 from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
@@ -760,12 +762,14 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
         catalog_snapshot_loader=_load_empty_catalog,
     )
     entries, token = begin_incontainer_trace_collection()
+    receipt_hashes, receipt_token = begin_attested_receipt_hash_collection()
     try:
         result = await runner(
             icp,
             {"evaluation_epoch": 24000, "run_id": "run-1"},
         )
     finally:
+        end_attested_receipt_hash_collection(receipt_token)
         end_incontainer_trace_collection(token)
 
     assert result == [{"company_name": "Measured Co"}]
@@ -804,6 +808,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
     assert runner.attested_receipts() == [
         {"receipt_hash": "sha256:" + "4" * 64}
     ]
+    assert receipt_hashes == {"sha256:" + "4" * 64}
 
 
 def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypatch):

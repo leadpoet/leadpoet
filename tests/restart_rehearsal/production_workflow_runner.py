@@ -5513,11 +5513,15 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         _provider_rpc_response_body_limit,
     )
     from gateway.research_lab.scoring_worker import (
+        _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD,
         BaselineMaintenancePause,
         ResearchLabGatewayScoringWorker,
         _attested_receipts_with_persisted_roots,
-        _load_baseline_scoring_progress,
         _baseline_summary_checkpointable,
+        _load_baseline_scoring_progress,
+        _private_baseline_uses_batch_execution,
+        _record_baseline_attempt_parent_receipts,
+        _require_v2_baseline_receipt_capacity,
         _store_baseline_scoring_progress,
     )
     from gateway.research_lab import scoring_worker as scoring_worker_module
@@ -6076,6 +6080,45 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     ):
         raise RuntimeError("provider recovery checkpoint eligibility differed")
 
+    if not _private_baseline_uses_batch_execution(
+        SimpleNamespace(private_baseline_concurrency=1)
+    ):
+        raise RuntimeError("async concurrency-one baseline used the serial runner")
+    _require_v2_baseline_receipt_capacity(40)
+    try:
+        _require_v2_baseline_receipt_capacity(65)
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("oversized V2 rebenchmark receipt frontier was accepted")
+
+    exact_receipt_frontier: set[str] = set()
+    superseded_receipt_hashes: set[str] = set()
+    for item_index in range(40):
+        model_receipt_hash = f"sha256:{10_000 + item_index:064x}"
+        scorer_receipt_hash = f"sha256:{20_000 + item_index:064x}"
+        superseded_receipt_hashes.update(
+            {
+                f"sha256:{30_000 + item_index:064x}",
+                f"sha256:{40_000 + item_index:064x}",
+            }
+        )
+        _record_baseline_attempt_parent_receipts(
+            exact_receipt_frontier,
+            {
+                "icp_ref": f"rehearsal-icp-{item_index}",
+                _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [
+                    model_receipt_hash,
+                    scorer_receipt_hash,
+                ],
+            },
+        )
+    if (
+        len(exact_receipt_frontier) != 80
+        or exact_receipt_frontier.intersection(superseded_receipt_hashes)
+    ):
+        raise RuntimeError("V2 rebenchmark causal receipt frontier differed")
+
     from types import ModuleType
 
     checkpoint_objects: dict[tuple[str, str], bytes] = {}
@@ -6391,7 +6434,9 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_recovery_checkpoint_bound": True,
         "baseline_checkpoint_runtime_identity_bound": True,
         "baseline_checkpoint_receipt_ancestry_restored": True,
+        "baseline_exact_receipt_frontier_bound": True,
         "baseline_pause_checkpoint_resume_complete": True,
+        "baseline_v2_async_scheduler_bound": True,
         "provider_singleflight_commit_bound": True,
         "provider_rpc_frame_budget_bound": True,
     }

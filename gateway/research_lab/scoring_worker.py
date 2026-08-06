@@ -202,7 +202,9 @@ from research_lab.eval.evaluator import (
 from gateway.research_lab import global_icp_queue
 from research_lab.eval.private_runtime import (
     PROVIDER_COST_EVALUATION_SCOPE_ENV,
+    begin_attested_receipt_hash_collection,
     begin_incontainer_trace_collection,
+    end_attested_receipt_hash_collection,
     end_incontainer_trace_collection,
     incontainer_trace_capture_enabled,
 )
@@ -534,6 +536,58 @@ _BASELINE_SCORING_PROGRESS_ARTIFACT_TYPE = (
 )
 _FULL_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD = "_attested_parent_receipt_hashes"
+_V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP = 2
+
+
+def _private_baseline_uses_batch_execution(
+    config: ResearchLabGatewayConfig,
+) -> bool:
+    """Async model runners use a one-wide batch when concurrency is one."""
+
+    return int(config.private_baseline_concurrency) > 1 or inspect.iscoroutinefunction(
+        AttestedPrivateModelRunnerV2.__call__
+    )
+
+
+def _require_v2_baseline_receipt_capacity(total_icps: int) -> None:
+    required = int(total_icps) * _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
+    if required > MAX_EXTERNAL_RECEIPT_GRAPHS:
+        raise RuntimeError(
+            "configured private baseline ICP bank exceeds the bounded V2 "
+            f"receipt authority capacity: icps={int(total_icps)} "
+            f"required_receipts={required} limit={MAX_EXTERNAL_RECEIPT_GRAPHS}"
+        )
+
+
+def _record_baseline_attempt_parent_receipts(
+    destination: set[str],
+    row: Mapping[str, Any],
+    *,
+    require_complete: bool = True,
+) -> tuple[str, ...]:
+    raw_hashes = row.get(_BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD)
+    if not isinstance(raw_hashes, (list, tuple)):
+        raise RuntimeError("V2 baseline ICP is missing causal receipt roots")
+    normalized = tuple(
+        sorted(str(value or "").strip().lower() for value in raw_hashes)
+    )
+    invalid_count = (
+        len(normalized) != _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
+        if require_complete
+        else len(normalized) > _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
+    )
+    if (
+        invalid_count
+        or len(set(normalized)) != len(normalized)
+        or any(not _SHA256_RE.fullmatch(value) for value in normalized)
+    ):
+        raise RuntimeError("completed V2 baseline ICP causal receipt roots are invalid")
+    combined = destination.union(normalized)
+    if len(combined) > MAX_EXTERNAL_RECEIPT_GRAPHS:
+        raise RuntimeError("private baseline causal receipt frontier exceeds V2 limit")
+    destination.update(normalized)
+    return normalized
 
 
 def _gateway_runtime_commit_sha() -> str:
@@ -11339,6 +11393,7 @@ class ResearchLabGatewayScoringWorker:
             benchmark_date=today,
             rolling_window_hash=window.window_hash,
         )
+        batch_execution = _private_baseline_uses_batch_execution(self.config)
         baseline_telemetry_session: ScoringTelemetrySession | None = None
         if scoring_telemetry_enabled(self.config):
             telemetry_run = await allocate_scoring_run(
@@ -11355,7 +11410,7 @@ class ResearchLabGatewayScoringWorker:
                 worker_ref=self.worker_ref,
                 expected_icp_count=len(window.benchmark_items),
                 scheduler_type=(
-                    "fixed_wave" if self.config.private_baseline_concurrency > 1 else "serial"
+                    "fixed_wave" if batch_execution else "serial"
                 ),
                 minimum_run_attempt=benchmark_attempt,
                 benchmark_id=private_baseline_benchmark_id(
@@ -11466,6 +11521,11 @@ class ResearchLabGatewayScoringWorker:
         async def _checkpoint_completed_baseline_icp(row: Mapping[str, Any]) -> bool:
             if not _baseline_summary_checkpointable(row):
                 return False
+            if not legacy_v1_enabled():
+                _record_baseline_attempt_parent_receipts(
+                    baseline_progress_parent_receipt_hashes,
+                    row,
+                )
             if baseline_progress_location is None:
                 if baseline_telemetry_session is not None:
                     await baseline_telemetry_session.complete_result(
@@ -11484,15 +11544,6 @@ class ResearchLabGatewayScoringWorker:
                     return False
                 by_ref[ref] = public_row
                 baseline_progress_rows[:] = list(by_ref.values())
-                baseline_progress_parent_receipt_hashes.update(
-                    str(receipt.get("receipt_hash") or "").strip().lower()
-                    for receipt in _attested_receipts_from(
-                        runner,
-                        retry_runner,
-                        scorer,
-                    )
-                    if receipt.get("receipt_hash")
-                )
                 telemetry_index = checkpoint_telemetry_index(
                     baseline_telemetry_session,
                     baseline_progress_rows,
@@ -11633,8 +11684,9 @@ class ResearchLabGatewayScoringWorker:
                     }
                 )
             total_icps = len(window.benchmark_items)
-            parallel_mode = self.config.private_baseline_concurrency > 1
-            if parallel_mode:
+            if batch_execution and not legacy_v1_enabled():
+                _require_v2_baseline_receipt_capacity(total_icps)
+            if batch_execution:
                 retry_runner = AttestedPrivateModelRunnerV2(
                     artifact=artifact,
                     spec=DockerPrivateModelSpec(
@@ -11679,15 +11731,28 @@ class ResearchLabGatewayScoringWorker:
                 retried_total = int(retry_stats.get("retried") or 0)
                 recovered_total = int(retry_stats.get("recovered") or 0)
                 for item_summary in batch_summaries:
+                    if (
+                        not legacy_v1_enabled()
+                        and _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD
+                        in item_summary
+                    ):
+                        _record_baseline_attempt_parent_receipts(
+                            baseline_progress_parent_receipt_hashes,
+                            item_summary,
+                            require_complete=_baseline_summary_checkpointable(
+                                item_summary
+                            ),
+                        )
                     if item_summary.pop("_nonempty", False):
                         nonempty_output_count += 1
                     item_summary.pop("_item_index", None)
                     item_summary.pop("_retryable", None)
                     item_summary.pop("_runtime_error", None)
                     item_summary.pop("_retry_backoff_seconds", None)
+                    item_summary.pop(_BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD, None)
                     per_icp_summaries.append(item_summary)
             baseline_resume_by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
-            for item_index, item in enumerate([] if parallel_mode else window.benchmark_items, start=1):
+            for item_index, item in enumerate([] if batch_execution else window.benchmark_items, start=1):
                 item_start = time.time()
                 label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
                 resumed_summary = baseline_resume_by_ref.get(label)
@@ -12331,14 +12396,15 @@ class ResearchLabGatewayScoringWorker:
         visibility_split = baseline_summary_result["visibility_split"]
         category_assignment = baseline_summary_result.get("category_assignment")
         noise_budget = baseline_summary_result["daily_noise_budget"]
+        baseline_receipt_sources: tuple[Any, ...] = ()
+        if legacy_v1_enabled():
+            baseline_receipt_sources = (runner, retry_runner, scorer)
         attested_baseline_outcome = await compare_attested_baseline_score_summary(
             epoch_id=evaluation_epoch,
             build_payload=baseline_summary_payload,
             expected_result=baseline_summary_result,
             parent_receipts=_attested_receipts_with_persisted_roots(
-                runner,
-                retry_runner,
-                scorer,
+                *baseline_receipt_sources,
                 persisted_receipt_hashes=sorted(
                     baseline_progress_parent_receipt_hashes
                 ),
@@ -12704,8 +12770,8 @@ class ResearchLabGatewayScoringWorker:
 
         The returned summary carries underscore-prefixed orchestration fields
         (_item_index, _retryable, _nonempty, _runtime_error,
-        _retry_backoff_seconds) that MUST be popped before the summary enters
-        score_summary_doc.
+        _retry_backoff_seconds, _attested_parent_receipt_hashes) that MUST be
+        popped before the summary enters score_summary_doc.
         """
         loop = asyncio.get_running_loop()
         item_start = time.time()
@@ -12742,6 +12808,7 @@ class ResearchLabGatewayScoringWorker:
         scorer_error = ""
         retryable = False
         retry_backoff_seconds = 0.0
+        attempt_receipt_hashes: set[str] = set()
         # In-container trace collection (§9.1): install a per-task collector so
         # the runner's stderr trace markers are published instead of dropped.
         # run_in_executor does NOT copy contextvars (asyncio.to_thread does), so
@@ -12751,6 +12818,9 @@ class ResearchLabGatewayScoringWorker:
         trace_token: contextvars.Token | None = None
         if trace_context is not None and incontainer_trace_capture_enabled():
             trace_entries, trace_token = begin_incontainer_trace_collection()
+        model_receipt_hashes, model_receipt_token = (
+            begin_attested_receipt_hash_collection()
+        )
         try:
             if inspect.iscoroutinefunction(getattr(runner, "__call__", None)):
                 raw_outputs = await runner(item["icp"], {"mode": mode_label})
@@ -12760,11 +12830,10 @@ class ResearchLabGatewayScoringWorker:
                     item["icp"],
                     {"mode": mode_label},
                 )
-                if trace_token is not None:
-                    runner_call = functools.partial(
-                        contextvars.copy_context().run,
-                        runner_call,
-                    )
+                runner_call = functools.partial(
+                    contextvars.copy_context().run,
+                    runner_call,
+                )
                 raw_outputs = await loop.run_in_executor(executor, runner_call)
             outputs = ensure_private_model_outputs(
                 raw_outputs,
@@ -12802,6 +12871,8 @@ class ResearchLabGatewayScoringWorker:
         finally:
             if trace_token is not None:
                 end_incontainer_trace_collection(trace_token)
+            end_attested_receipt_hash_collection(model_receipt_token)
+            attempt_receipt_hashes.update(model_receipt_hashes)
         item_elapsed = time.time() - item_start
         if telemetry_session is not None and not runtime_error:
             await telemetry_session.lifecycle(
@@ -12824,6 +12895,9 @@ class ResearchLabGatewayScoringWorker:
                         "retry_round": retry_round,
                     },
                 )
+            scorer_receipt_hashes, scorer_receipt_token = (
+                begin_attested_receipt_hash_collection()
+            )
             try:
                 score_breakdowns = await self._score_baseline_outputs(
                     scorer=scorer,
@@ -12851,6 +12925,9 @@ class ResearchLabGatewayScoringWorker:
                         ),
                     )
                 )
+            finally:
+                end_attested_receipt_hash_collection(scorer_receipt_token)
+                attempt_receipt_hashes.update(scorer_receipt_hashes)
         scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
         # Shared flag-aware per-ICP score (see the isolation-path comment):
         # capped mode divides by the ICP's requested company count.
@@ -12925,6 +13002,9 @@ class ResearchLabGatewayScoringWorker:
         item_summary["_nonempty"] = bool(outputs)
         item_summary["_runtime_error"] = runtime_error or scorer_error
         item_summary["_retry_backoff_seconds"] = retry_backoff_seconds
+        item_summary[_BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD] = sorted(
+            attempt_receipt_hashes
+        )
         if telemetry_session is not None and (runtime_error or scorer_error):
             await telemetry_session.lifecycle(
                 "attempt_failed",

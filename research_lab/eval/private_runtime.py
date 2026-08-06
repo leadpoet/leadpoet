@@ -1480,6 +1480,15 @@ _INCONTAINER_TRACE_COLLECTOR: contextvars.ContextVar[list[dict[str, Any]] | None
     default=None,
 )
 
+# Successful V2 model and scorer calls publish only their receipt hashes into
+# this task-local sidecar. Baseline retries share runner/scorer objects across
+# concurrent ICPs, so reading those objects' process-wide receipt histories
+# cannot identify which receipts actually produced one durable ICP result.
+_ATTESTED_RECEIPT_HASH_COLLECTOR: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
+    "research_lab_attested_receipt_hash_collector",
+    default=None,
+)
+
 
 def begin_incontainer_trace_collection() -> tuple[list[dict[str, Any]], contextvars.Token]:
     """Install an in-container trace collector for the current context."""
@@ -1498,6 +1507,27 @@ def publish_incontainer_trace_entries(entries: Sequence[Mapping[str, Any]]) -> N
     if collector is None:
         return
     collector.extend(dict(entry) for entry in entries if isinstance(entry, Mapping))
+
+
+def begin_attested_receipt_hash_collection() -> tuple[set[str], contextvars.Token]:
+    """Install a successful-receipt collector for the current scoring attempt."""
+
+    receipt_hashes: set[str] = set()
+    token = _ATTESTED_RECEIPT_HASH_COLLECTOR.set(receipt_hashes)
+    return receipt_hashes, token
+
+
+def end_attested_receipt_hash_collection(token: contextvars.Token) -> None:
+    _ATTESTED_RECEIPT_HASH_COLLECTOR.reset(token)
+
+
+def publish_attested_receipt_hash(receipt_hash: str) -> None:
+    """Publish one successful V2 receipt to the current attempt, if present."""
+
+    collector = _ATTESTED_RECEIPT_HASH_COLLECTOR.get()
+    if collector is None:
+        return
+    collector.add(str(receipt_hash or "").strip().lower())
 
 
 def parse_incontainer_trace_lines(stderr: str) -> list[dict[str, Any]]:

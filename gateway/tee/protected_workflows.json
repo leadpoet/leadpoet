@@ -1132,7 +1132,7 @@
       "symbol": "CoordinatorWeightSourceV2"
     },
     {
-      "ast_sha256": "sha256:cca4983424a151aa80ffe375c6d4b2ef3e6ead0f4ebfc7b0fc2e0b0ac65ecb23",
+      "ast_sha256": "sha256:4e67bf654cb46e0ff990514f49a0ee38b568b30c0d4bd37e525ff78af1ae2ec0",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
     },
@@ -1317,7 +1317,7 @@
       "symbol": "HTTPXProviderTransport"
     },
     {
-      "ast_sha256": "sha256:ef47a42b1f22a2da899fc51968ec24869ecb0a0f9c32e4f49b2aedcd997661f4",
+      "ast_sha256": "sha256:04f4e6d36ae67951c963ba00e8b43612b3a0d00e77a82e90ed90c40e19493af7",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -1332,7 +1332,7 @@
       "symbol": "provider_registry_document"
     },
     {
-      "ast_sha256": "sha256:c03767a57f4f76ef852b5e6cf4611af1dead5a917d1e52287889159fd8e3d52e",
+      "ast_sha256": "sha256:95cf49bd86edb14f95377beb7d35c0a4609531ad033db6861c48b8d7b3e160e2",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
     },
@@ -2607,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:07cb0ff9d66c15fc3c56d0413d3dc1328db85c483c9df27574b4546d0216eec2",
+  "manifest_hash": "sha256:0013edc5754d3231b0dcce962075e13bee0f8fbb9d3407d9d4be092900be70f5",
   "protected_source_commit": "1803f3802b3667e2036a54fbf6ada14b7edfa206",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

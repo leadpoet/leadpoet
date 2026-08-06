@@ -823,6 +823,60 @@ class ProviderBrokerV2:
                 or normalized_slot in self._credentials
             )
 
+    def transport_reference_hashes(
+        self,
+        request: Mapping[str, Any],
+    ) -> Dict[str, str]:
+        """Resolve the measured credential and proxy refs for one job request."""
+
+        provider_id = str(request.get("provider_id") or "")
+        parsed = urlsplit(str(request.get("url") or ""))
+        method = str(request.get("method") or "").upper()
+        route, _dynamic_route = self._route(
+            provider_id,
+            parsed,
+            method=method,
+            dynamic_route=request.get("dynamic_route"),
+        )
+        if route.allowed_methods and method not in route.allowed_methods:
+            raise ProviderBrokerV2Error(
+                "provider method differs from measured route"
+            )
+        job_id = str(request.get("job_id") or "")
+        credential_ref_hash = sha256_bytes(
+            ("leadpoet-no-credential:" + provider_id).encode("ascii")
+        )
+        with self._lock:
+            if route.credential_slot:
+                lease = self._job_credentials.get(
+                    (job_id, route.credential_slot)
+                )
+                if lease is not None:
+                    credential_ref_hash = str(lease["credential_ref_hash"])
+                elif (
+                    route.job_scoped_only
+                    or route.credential_slot not in self._credentials
+                ):
+                    raise ProviderBrokerV2Error(
+                        "provider credential slot is not provisioned"
+                    )
+                else:
+                    credential_ref_hash = self.credential_ref_hashes[
+                        route.credential_slot
+                    ]
+            proxy_lease = self._job_credentials.get(
+                (job_id, EGRESS_PROXY_CREDENTIAL_SLOT)
+            )
+            egress_proxy_ref_hash = (
+                str(proxy_lease["credential_ref_hash"])
+                if proxy_lease is not None
+                else DIRECT_EGRESS_REF_HASH
+            )
+        return {
+            "credential_ref_hash": credential_ref_hash,
+            "egress_proxy_ref_hash": egress_proxy_ref_hash,
+        }
+
     def use_job_credential(
         self,
         *,

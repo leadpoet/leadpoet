@@ -164,6 +164,23 @@ def test_execution_context_freezes_one_terminal_transport_snapshot():
         )
 
 
+def test_execution_context_freezes_one_artifact_snapshot():
+    context = ExecutionContextV2(
+        job_id="score-job-1",
+        purpose="research_lab.candidate_score.v2",
+        epoch_id=24_000,
+    )
+    context.record_artifact(HASH)
+
+    assert context.freeze_artifact_hashes() == (HASH,)
+    assert context.freeze_artifact_hashes() == (HASH,)
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="execution artifact arrived after execution was finalized",
+    ):
+        context.record_artifact(HASH_B)
+
+
 def test_job_receipt_and_ancestry_use_same_frozen_transport_snapshot():
     release_late_attempt = threading.Event()
     late_attempt_finished = threading.Event()
@@ -212,6 +229,44 @@ def test_job_receipt_and_ancestry_use_same_frozen_transport_snapshot():
         ancestry_proof=manager.ancestry_compact_proof("score-job-1"),
         boot_attestation_verifier=lambda identity: identity,
         require_boot_attestation_verification=True,
+    )
+
+
+def test_job_receipt_uses_same_frozen_artifact_snapshot():
+    release_late_artifact = threading.Event()
+    late_artifact_finished = threading.Event()
+    late_errors = []
+    late_thread = None
+    late_hash = "sha256:" + "c" * 64
+
+    def _executor(_operation, payload, context):
+        nonlocal late_thread
+        context.record_artifact(HASH)
+
+        def append_late():
+            release_late_artifact.wait(timeout=2)
+            try:
+                context.record_artifact(late_hash)
+            except Exception as exc:
+                late_errors.append(exc)
+            finally:
+                late_artifact_finished.set()
+
+        late_thread = threading.Thread(target=append_late)
+        late_thread.start()
+        return {"score": payload["input"]}
+
+    manager, _boot = _manager(_executor, checkpoint_lineage=True)
+    assert _run(manager, _payload())["state"] == "succeeded"
+    release_late_artifact.set()
+    assert late_artifact_finished.wait(timeout=1)
+    late_thread.join(timeout=1)
+
+    assert len(late_errors) == 1
+    assert "after execution was finalized" in str(late_errors[0])
+    assert manager.artifact_hashes("score-job-1") == (HASH_B, HASH)
+    assert manager.receipt("score-job-1")["artifact_root"] == merkle_root(
+        [HASH_B, HASH], domain="leadpoet-artifact-v2"
     )
 
 

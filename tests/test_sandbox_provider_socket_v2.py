@@ -10,6 +10,7 @@ import time
 import pytest
 
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
+from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.sandbox_http_shim_v2 import execute
 from gateway.tee.sandbox_provider_socket_v2 import (
     SandboxProviderSocketServerV2,
@@ -190,5 +191,66 @@ def test_sandbox_socket_close_fails_closed_when_handlers_do_not_drain(tmp_path):
     while server._handlers and time.monotonic() < deadline:
         time.sleep(0.01)
     assert server._handlers == set()
+    client.close()
+    transport.restore()
+
+
+def test_timed_out_handler_cannot_mutate_frozen_execution_artifacts(tmp_path):
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    scope = transport.create_scope(
+        job_id="model-job-drain",
+        purpose="research_lab.private_model_run.v2",
+        logical_operation_id="model-job-drain",
+        retry_policy_hashes={},
+    )
+    context = ExecutionContextV2(
+        job_id=scope.job_id,
+        purpose=scope.purpose,
+        epoch_id=1,
+    )
+    socket_path = Path("/tmp") / (
+        "lp-sandbox-freeze-%s.sock"
+        % hashlib.sha256(str(tmp_path).encode()).hexdigest()[:16]
+    )
+    server = SandboxProviderSocketServerV2(
+        socket_path=socket_path,
+        transport=transport,
+        execution_scope=scope,
+        drain_timeout_seconds=0.05,
+    )
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    late_errors = []
+
+    def append_late(connection):
+        started.set()
+        release.wait(timeout=2)
+        try:
+            context.record_artifact(_hash("9"))
+        except Exception as exc:
+            late_errors.append(exc)
+        finally:
+            connection.close()
+            finished.set()
+
+    server._handle = append_late
+    server.start()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(str(socket_path))
+    assert started.wait(timeout=1)
+
+    with pytest.raises(
+        SandboxProviderSocketV2Error,
+        match="provider request handlers did not drain",
+    ):
+        server.close()
+    assert context.freeze_artifact_hashes() == ()
+    release.set()
+    assert finished.wait(timeout=1)
+
+    assert len(late_errors) == 1
+    assert "after execution was finalized" in str(late_errors[0])
+    assert context.freeze_artifact_hashes() == ()
     client.close()
     transport.restore()

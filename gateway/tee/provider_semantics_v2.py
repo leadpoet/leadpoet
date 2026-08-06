@@ -41,7 +41,6 @@ from gateway.tee.source_add_runtime_v2 import (
     validate_source_add_runtime_route_v2,
 )
 from leadpoet_canonical.attested_v2 import (
-    DIRECT_EGRESS_REF_HASH,
     build_transport_attempt,
     canonical_json,
     sha256_bytes,
@@ -177,6 +176,15 @@ class ProviderSemanticsAuthorityV2:
         if not callable(terminal_transaction):
             raise ProviderSemanticsV2Error(
                 "provider broker terminal transaction is required"
+            )
+        transport_reference_hashes = getattr(
+            broker,
+            "transport_reference_hashes",
+            None,
+        )
+        if not callable(transport_reference_hashes):
+            raise ProviderSemanticsV2Error(
+                "provider broker transport reference resolver is required"
             )
         self._broker = broker
         self._cache_store = cache_store
@@ -906,7 +914,18 @@ class ProviderSemanticsAuthorityV2:
                 artifact_kind="provider_response",
             )
         )
-        source = dict(source_attempt or {})
+        current_refs = dict(self._broker.transport_reference_hashes(normalized))
+        credential_ref_hash = str(current_refs.get("credential_ref_hash") or "")
+        egress_proxy_ref_hash = str(
+            current_refs.get("egress_proxy_ref_hash") or ""
+        )
+        if (
+            not _HASH_RE.fullmatch(credential_ref_hash)
+            or not _HASH_RE.fullmatch(egress_proxy_ref_hash)
+        ):
+            raise ProviderSemanticsV2Error(
+                "attested local response transport references are invalid"
+            )
         attempt = build_transport_attempt(
             request_id=secrets.token_hex(16),
             logical_operation_id=normalized["logical_operation_id"],
@@ -924,15 +943,8 @@ class ProviderSemanticsAuthorityV2:
             body_hash=sha256_bytes(
                 base64.b64decode(normalized["body_b64"], validate=True)
             ),
-            credential_ref_hash=str(
-                source.get("credential_ref_hash")
-                or sha256_bytes(
-                    ("leadpoet-attested-local-response:" + evidence).encode("utf-8")
-                )
-            ),
-            egress_proxy_ref_hash=str(
-                source.get("egress_proxy_ref_hash") or DIRECT_EGRESS_REF_HASH
-            ),
+            credential_ref_hash=credential_ref_hash,
+            egress_proxy_ref_hash=egress_proxy_ref_hash,
             retry_policy_hash=normalized["retry_policy_hash"],
             timeout_ms=normalized["timeout_ms"],
             started_at=self._clock(),

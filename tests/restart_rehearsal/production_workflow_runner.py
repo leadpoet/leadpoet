@@ -5984,6 +5984,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
         ProviderBrokerV2,
         credential_reference_hash,
+        credential_value_hash,
         _provider_rpc_response_body_limit,
     )
     from gateway.research_lab.scoring_worker import (
@@ -6061,6 +6062,16 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         def credential_available(self, *, job_id: str, slot: str) -> bool:
             del job_id
             return slot in credential_hashes
+
+        def transport_reference_hashes(
+            self,
+            request: Mapping[str, Any],
+        ) -> dict[str, str]:
+            provider = str(request["provider_id"])
+            return {
+                "credential_ref_hash": credential_hashes[provider],
+                "egress_proxy_ref_hash": DIRECT_EGRESS_REF_HASH,
+            }
 
         def execute(self, request: Mapping[str, Any]) -> dict[str, Any]:
             request = dict(request)
@@ -6552,6 +6563,70 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     if terminal_broker.health()["terminal_count"] != 0:
         raise RuntimeError("provider terminal state remained after job release")
 
+    cross_worker_authority = ProviderSemanticsAuthorityV2(
+        broker=terminal_broker,
+        cache_store=CommitBlockingCache(),
+        artifact_sink=vault.seal,
+        artifact_transaction=vault.transient_artifact_transaction,
+        boot_identity_supplier=lambda: boot_identity,
+        sign_digest=signing_key.sign,
+        clock=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+    worker_a = "rehearsal:rebenchmark-worker-a"
+    worker_b = "rehearsal:rebenchmark-worker-b"
+    proxy_a = "https://worker-a:secret@proxy-a.example.com:443"
+    proxy_b = "https://worker-b:secret@proxy-b.example.com:443"
+    proxy_a_ref = credential_value_hash(proxy_a)
+    proxy_b_ref = credential_value_hash(proxy_b)
+    for job_id, proxy, proxy_ref in (
+        (worker_a, proxy_a, proxy_a_ref),
+        (worker_b, proxy_b, proxy_b_ref),
+    ):
+        terminal_broker.provision_job_credential(
+            job_id=job_id,
+            slot="egress_proxy",
+            credential=proxy,
+            credential_value_hash_expected=proxy_ref,
+        )
+    cross_worker_request = {
+        **shared_request,
+        "logical_operation_id": "rehearsal:cross-worker-source",
+        "job_id": worker_a,
+        "body_b64": base64.b64encode(b'{"query":"cross-worker"}').decode(
+            "ascii"
+        ),
+    }
+    source_result = cross_worker_authority.execute(cross_worker_request)
+    replay_result = cross_worker_authority.execute(
+        {
+            **cross_worker_request,
+            "logical_operation_id": "rehearsal:cross-worker-replay",
+            "job_id": worker_b,
+        }
+    )
+    worker_b_context = ExecutionContextV2(
+        job_id=worker_b,
+        purpose=context.purpose,
+        epoch_id=1,
+        provider_credential_ref_hashes={
+            "exa": credential_reference_hash(broker_credentials["exa"]),
+            "egress_proxy": proxy_b_ref,
+        },
+    )
+    worker_b_context.record_transport(replay_result["transport_attempt"])
+    if (
+        source_result.get("evidence") != "recorded"
+        or replay_result.get("evidence") != "hit"
+        or replay_result["transport_attempt"]["egress_proxy_ref_hash"]
+        != proxy_b_ref
+        or replay_result["source_record"]["transport_attempt_hash"]
+        != source_result["transport_attempt"]["attempt_hash"]
+    ):
+        raise RuntimeError("cross-worker provider cache profile binding differed")
+    terminal_broker.release_job_credentials(worker_a)
+    terminal_broker.release_job_credentials(worker_b)
+
     retry_failure = {
         "icp_ref": "rehearsal-retry",
         "_runtime_error": "execution_providerclientv2error",
@@ -6927,6 +7002,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "baseline_pause_checkpoint_resume_complete": True,
         "baseline_v2_async_scheduler_bound": True,
         "provider_singleflight_commit_bound": True,
+        "provider_cross_worker_cache_profile_bound": True,
         "provider_rpc_frame_budget_bound": True,
     }
 

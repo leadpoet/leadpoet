@@ -218,6 +218,15 @@ class ExecutionContextV2:
         default_factory=tuple,
         repr=False,
     )
+    _artifact_lock: Any = field(
+        default_factory=threading.RLock,
+        repr=False,
+    )
+    _artifacts_frozen: bool = field(default=False, repr=False)
+    _frozen_artifact_hashes: tuple = field(
+        default_factory=tuple,
+        repr=False,
+    )
     _external_receipt_lock: Any = field(
         default_factory=threading.RLock,
         repr=False,
@@ -284,8 +293,22 @@ class ExecutionContextV2:
         digest = str(artifact_hash or "").lower()
         if not _HASH_RE.fullmatch(digest):
             raise ExecutionJobV2Error("execution artifact hash is invalid")
-        if digest not in self.artifact_hashes:
-            self.artifact_hashes.append(digest)
+        with self._artifact_lock:
+            if self._artifacts_frozen:
+                raise ExecutionJobV2Error(
+                    "execution artifact arrived after execution was finalized"
+                )
+            if digest not in self.artifact_hashes:
+                self.artifact_hashes.append(digest)
+
+    def freeze_artifact_hashes(self) -> tuple[str, ...]:
+        """Return the one immutable artifact commitment snapshot for this job."""
+
+        with self._artifact_lock:
+            if not self._artifacts_frozen:
+                self._frozen_artifact_hashes = tuple(self.artifact_hashes)
+                self._artifacts_frozen = True
+            return tuple(self._frozen_artifact_hashes)
 
     def record_external_receipt_graph(
         self,
@@ -1829,7 +1852,7 @@ class ExecutionJobManagerV2:
                 root_parents.extend(context.external_ancestry_roots())
             root_manifest["parent_receipt_hashes"] = sorted(set(root_parents))
             transport_attempts = context.freeze_transport_attempts()
-            artifact_hashes = tuple(context.artifact_hashes)
+            artifact_hashes = context.freeze_artifact_hashes()
             host_operation_records = tuple(context.host_operation_records())
             receipt = self._receipt(
                 manifest=root_manifest,
@@ -1929,7 +1952,7 @@ class ExecutionJobManagerV2:
                 {"status": "failed", "failure_code": failure_code}
             )
             failure_transport_attempts = context.freeze_transport_attempts()
-            failure_artifact_hashes = tuple(context.artifact_hashes)
+            failure_artifact_hashes = context.freeze_artifact_hashes()
             try:
                 failure_manifest = dict(manifest)
                 failure_parent_roots = (

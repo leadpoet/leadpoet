@@ -219,6 +219,8 @@ class _Broker:
                 "deepline",
             )
         }
+        self.local_credential_ref_hash = _hash("3")
+        self.local_egress_proxy_ref_hash = DIRECT_EGRESS_REF_HASH
 
     @contextmanager
     def transient_terminal_transaction(self):
@@ -230,6 +232,13 @@ class _Broker:
 
     def credential_available(self, *, job_id, slot):
         return slot in self.available_credentials
+
+    def transport_reference_hashes(self, request):
+        del request
+        return {
+            "credential_ref_hash": self.local_credential_ref_hash,
+            "egress_proxy_ref_hash": self.local_egress_proxy_ref_hash,
+        }
 
     def execute(self, request):
         request = dict(request)
@@ -490,6 +499,43 @@ def test_live_record_then_cache_hit_preserves_existing_fingerprint_and_costs():
     assert digest["providers"]["exa"]["live_call_count"] == 1
     assert digest["providers"]["exa"]["cache_hit_count"] == 1
     assert digest["providers"]["exa"]["measured_spend_microusd"] == 5000
+
+
+def test_cross_worker_cache_hit_uses_current_job_transport_profile():
+    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+
+    authority, broker, _cache, _artifacts = _authority()
+    live = authority.execute(
+        _request(job_id="rebenchmark-worker-a", logical_operation_id="source-a")
+    )
+    worker_b_credential_ref = _hash("8")
+    worker_b_proxy_ref = _hash("9")
+    broker.local_credential_ref_hash = worker_b_credential_ref
+    broker.local_egress_proxy_ref_hash = worker_b_proxy_ref
+    replay = authority.execute(
+        _request(job_id="rebenchmark-worker-b", logical_operation_id="replay-b")
+    )
+
+    context = ExecutionContextV2(
+        job_id="rebenchmark-worker-b",
+        purpose="research_lab.company_score.v2",
+        epoch_id=1,
+        provider_credential_ref_hashes={
+            "exa": worker_b_credential_ref,
+            "egress_proxy": worker_b_proxy_ref,
+        },
+    )
+    context.record_transport(replay["transport_attempt"])
+
+    assert (
+        replay["transport_attempt"]["credential_ref_hash"]
+        == worker_b_credential_ref
+    )
+    assert replay["transport_attempt"]["egress_proxy_ref_hash"] == worker_b_proxy_ref
+    assert (
+        replay["source_record"]["transport_attempt_hash"]
+        == live["transport_attempt"]["attempt_hash"]
+    )
 
 
 def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):

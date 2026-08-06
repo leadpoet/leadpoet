@@ -1003,9 +1003,16 @@ def test_job_scoped_proxy_is_bound_to_transport_receipt(proxy_url):
     )
 
     result = broker.execute(_request())
+    references = broker.transport_reference_hashes(_request())
 
     assert transport.calls[0]["upstream_proxy_url"] == proxy_url
     assert result["transport_attempt"]["egress_proxy_ref_hash"] == proxy_hash
+    assert references == {
+        "credential_ref_hash": result["transport_attempt"][
+            "credential_ref_hash"
+        ],
+        "egress_proxy_ref_hash": proxy_hash,
+    }
     validate_transport_attempt(result["transport_attempt"])
     assert proxy_url not in str(result)
 

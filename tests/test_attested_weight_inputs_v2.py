@@ -268,7 +268,7 @@ async def test_gateway_weight_input_builder_gives_each_live_job_one_client(
 
 
 @pytest.mark.asyncio
-async def test_gateway_weight_input_builder_uses_artifact_backed_execution_receipt(
+async def test_gateway_weight_input_builder_prefers_execution_proof_over_persistence_wrapper(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -295,6 +295,7 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
         persistence_hash = sha256_json({"persistence": category})
         execution_receipt = {
             "receipt_hash": execution_hash,
+            "job_id": "execution-%s" % category,
             "role": WEIGHT_INPUT_PURPOSES[category][0],
             "purpose": WEIGHT_INPUT_PURPOSES[category][1],
             "output_root": sha256_json(expected[category]),
@@ -314,12 +315,26 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
             "host_operations": [],
         }
         execution_graphs[category] = execution_graph
+        execution_proof = {
+            "certificate": {
+                "claim": {"output_root_receipt_hash": execution_hash}
+            },
+            "disclosed_receipts": [execution_receipt],
+        }
+        persistence_proof = {
+            "certificate": {
+                "claim": {"output_root_receipt_hash": persistence_hash}
+            },
+            "disclosed_receipts": [persistence_receipt],
+        }
         return {
             "status": "succeeded",
             "result": expected[category],
             "receipt": persistence_receipt,
             "execution_receipt": execution_receipt,
             "execution_receipt_graph": execution_graph,
+            "execution_ancestry_compact_proof": execution_proof,
+            "ancestry_compact_proof": persistence_proof,
             "receipt_graph": {
                 "root_receipt_hash": persistence_hash,
                 "boot_identities": [],
@@ -358,6 +373,15 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
         execution_graphs[category]
         for category in attested_weight_inputs_v2._ANOMALY_SOURCE_CATEGORIES
     )
+    assert {
+        category: proof["certificate"]["claim"]["output_root_receipt_hash"]
+        for category, proof in result["compact_ancestry"][
+            "upstream_ancestry_proofs"
+        ].items()
+    } == {
+        category: sha256_json({"execution": category})
+        for category in GATEWAY_WEIGHT_INPUT_CATEGORIES
+    }
 
 
 @pytest.mark.asyncio

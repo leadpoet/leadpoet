@@ -120,7 +120,12 @@ def _compact_weight_ancestry(
             raise AttestedWeightInputsV2Error(
                 "%s measured input execution is absent" % category
             )
-        proof = execution.get("ancestry_compact_proof")
+        execution_proof = execution.get("execution_ancestry_compact_proof")
+        proof = (
+            execution_proof
+            if execution_proof is not None
+            else execution.get("ancestry_compact_proof")
+        )
         if proof is None:
             return None
         if not isinstance(proof, Mapping):
@@ -138,7 +143,11 @@ def _compact_weight_ancestry(
             if isinstance(claim, Mapping)
             else ""
         )
-        graph = execution.get("receipt_graph")
+        graph = (
+            execution.get("execution_receipt_graph")
+            if execution_proof is not None
+            else execution.get("receipt_graph")
+        )
         if (
             not isinstance(graph, Mapping)
             or root_hash != str(graph.get("root_receipt_hash") or "")

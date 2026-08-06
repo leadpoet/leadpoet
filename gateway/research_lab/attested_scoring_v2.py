@@ -1274,6 +1274,9 @@ async def execute_scoring_v2(
                     operation,
                     replay_result,
                 )
+            # The job ID commits the logical payload and direct parent roots.
+            # input_root commits only the selected transport representation;
+            # an equivalent compact proof and full graph intentionally differ.
             if (
                 replay_graph.get("root_receipt_hash")
                 != replay_receipt.get("receipt_hash")
@@ -1282,7 +1285,6 @@ async def execute_scoring_v2(
                 or replay_receipt.get("job_id") != job_id
                 or replay_receipt.get("epoch_id") != epoch_id
                 or replay_receipt.get("sequence") != sequence
-                or replay_receipt.get("input_root") != payload_hash
                 or replay_receipt.get("parent_receipt_hashes") != parent_roots
                 or replay_receipt.get("output_root")
                 != sha256_bytes(_canonical_bytes(dict(projected_replay)))

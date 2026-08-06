@@ -1432,6 +1432,106 @@ async def test_v2_bridge_replays_exact_durable_coordinator_result_without_resubm
 
 
 @pytest.mark.asyncio
+async def test_v2_bridge_replays_logical_job_across_equivalent_parent_transport():
+    release = _release()
+
+    async def persist(graph, **_kwargs):
+        validate_receipt_graph(graph)
+        return {
+            "root_receipt_hash": graph["root_receipt_hash"],
+            "graph_hash": sha256_json(graph),
+        }
+
+    parent = await execute_scoring_v2(
+        operation="benchmark_icp_score",
+        purpose="research_lab.benchmark.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"generation": 1},
+        worker_index=0,
+        release_manifest=release,
+        client=_Client(release),
+        persist_graph=persist,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+    )
+    parent_graph = parent["receipt_graph"]
+    legacy_parent = build_receipt_graph(
+        root_receipt_hash=parent_graph["root_receipt_hash"],
+        boot_identities=parent_graph["boot_identities"],
+        receipts=parent_graph["receipts"],
+        transport_attempts=parent_graph["transport_attempts"],
+        host_operations=parent_graph["host_operations"],
+    )
+    captured = {}
+
+    async def load_missing(**_kwargs):
+        return None
+
+    async def persist_result(**kwargs):
+        captured.update(kwargs)
+        return _execution_result_storage_row_v2(**kwargs)
+
+    common = {
+        "operation": "attest_weight_input",
+        "purpose": "research_lab.champion_input.v2",
+        "epoch_id": 13,
+        "sequence": 1,
+        "payload": {"category": "champions"},
+        "parent_graphs": (legacy_parent,),
+        "worker_index": 0,
+        "provider_profile_loader": lambda *args, **kwargs: {
+            "profile": "default",
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        },
+        "release_manifest": release,
+        "persist_graph": persist,
+        "boot_verifier": lambda identity: identity,
+        "poll_seconds": 0.001,
+        "operation_registry": COORDINATOR_OPERATIONS_V2,
+        "physical_role_override": "gateway_coordinator",
+        "expected_service_role": "gateway_coordinator",
+        "rpc_namespace": "coordinator_v2",
+        "receipt_output_projector": coordinator_receipt_output_v2,
+    }
+    fresh = await execute_scoring_v2(
+        **common,
+        client=_CoordinatorClient(release),
+        load_replayable_result=load_missing,
+        persist_replayable_result=persist_result,
+    )
+
+    async def load_replay(**kwargs):
+        assert kwargs["job_id"] == fresh["execution_receipt"]["job_id"]
+        return {
+            "row": {"release_hash": release["release_hash"]},
+            "result": captured["result"],
+            "receipt": captured["receipt"],
+            "receipt_graph": fresh["execution_receipt_graph"],
+            "artifact_hashes": captured["artifact_hashes"],
+        }
+
+    replay_client = _CoordinatorClient(release)
+
+    async def reject_submit(_manifest):
+        raise AssertionError("equivalent ancestry transport must replay")
+
+    replay_client.coordinator_v2_submit_job = reject_submit
+    replayed = await execute_scoring_v2(
+        **common,
+        parent_ancestry_proofs=(parent["ancestry_compact_proof"],),
+        client=replay_client,
+        load_replayable_result=load_replay,
+        persist_replayable_result=persist_result,
+    )
+
+    assert replayed["replay_status"] == "durable_exact"
+    assert replayed["execution_receipt"] == fresh["execution_receipt"]
+    assert replayed["result"] == fresh["result"]
+
+
+@pytest.mark.asyncio
 async def test_v2_bridge_replays_source_catalog_snapshot_after_runner_restart():
     release = _release()
     runtime_catalog = build_source_add_runtime_catalog_v2([])

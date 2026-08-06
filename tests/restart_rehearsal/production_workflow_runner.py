@@ -5268,7 +5268,6 @@ def _exercise_fresh_weight_input_lineage() -> dict[str, Any]:
     from leadpoet_canonical.ancestry_checkpoint_v2 import (
         ANCESTRY_DELTA_SCHEMA_VERSION,
         build_compact_ancestry_proof_from_delta_v2,
-        build_full_graph_parent_v2,
         issue_ancestry_certificate_v2,
     )
     from leadpoet_canonical.attested_v2 import (
@@ -5351,6 +5350,32 @@ def _exercise_fresh_weight_input_lineage() -> dict[str, Any]:
             receipts=(execution_receipt,),
             transport_attempts=(),
         )
+        execution_delta = {
+            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+            "root_receipt_hash": execution_receipt["receipt_hash"],
+            "boot_identities": [boot],
+            "receipts": [execution_receipt],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        execution_certificate = issue_ancestry_certificate_v2(
+            local_delta=execution_delta,
+            lineage_id=lineage_id,
+            certificate_sequence=0,
+            issuer_boot_identity=boot,
+            issued_at=NOW,
+            sign_digest=fixture.coordinator_key.sign,
+            boot_attestation_verifier=verify_boot,
+            allowed_issuer_roles=("gateway_coordinator",),
+            required_purposes=(purpose,),
+        )
+        execution_proof = build_compact_ancestry_proof_from_delta_v2(
+            execution_delta,
+            execution_certificate,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=verify_boot,
+            allowed_issuer_roles=("gateway_coordinator",),
+        )
         if not fresh:
             return {
                 "status": "succeeded",
@@ -5359,6 +5384,8 @@ def _exercise_fresh_weight_input_lineage() -> dict[str, Any]:
                 "execution_receipt": execution_receipt,
                 "execution_receipt_graph": execution_graph,
                 "receipt_graph": execution_graph,
+                "execution_ancestry_compact_proof": execution_proof,
+                "ancestry_compact_proof": execution_proof,
             }
 
         persistence_receipt = fixture.receipt(
@@ -5385,17 +5412,14 @@ def _exercise_fresh_weight_input_lineage() -> dict[str, Any]:
         certificate = issue_ancestry_certificate_v2(
             local_delta=local_delta,
             lineage_id=lineage_id,
-            certificate_sequence=0,
+            certificate_sequence=1,
             issuer_boot_identity=boot,
             issued_at=NOW,
             sign_digest=fixture.coordinator_key.sign,
             boot_attestation_verifier=verify_boot,
             allowed_issuer_roles=("gateway_coordinator",),
-            parent_full_graphs=(
-                build_full_graph_parent_v2(
-                    execution_graph,
-                    required_purposes=(purpose,),
-                ),
+            parent_proof_disclosures=(
+                (execution_proof, execution_receipt["receipt_hash"]),
             ),
             required_purposes=("leadpoet.artifact_persistence.v2",),
         )
@@ -5439,6 +5463,8 @@ def _exercise_fresh_weight_input_lineage() -> dict[str, Any]:
             "receipt": persistence_receipt,
             "execution_receipt": exposed_execution_receipt,
             "execution_receipt_graph": execution_graph,
+            "execution_ancestry_compact_proof": execution_proof,
+            "ancestry_compact_proof": proof,
             "receipt_graph": lineage_graph,
         }
 
@@ -5469,6 +5495,17 @@ def _exercise_fresh_weight_input_lineage() -> dict[str, Any]:
     replay = asyncio.run(run(fresh=False))
     if fresh["input_receipt_hashes"] != replay["input_receipt_hashes"]:
         raise RuntimeError("fresh and replay input identities differ")
+    compact = fresh.get("compact_ancestry")
+    if not isinstance(compact, Mapping):
+        raise RuntimeError("fresh execution compact ancestry is absent")
+    proof_roots = {
+        category: str(
+            proof["certificate"]["claim"]["output_root_receipt_hash"]
+        )
+        for category, proof in compact["upstream_ancestry_proofs"].items()
+    }
+    if proof_roots != fresh["input_receipt_hashes"]:
+        raise RuntimeError("fresh compact ancestry does not bind direct inputs")
     direct_hashes = set(fresh["input_receipt_hashes"].values())
     receipt_hashes = {
         str(item["receipt_hash"])
@@ -5490,6 +5527,7 @@ def _exercise_fresh_weight_input_lineage() -> dict[str, Any]:
         raise RuntimeError("mismatched fresh execution receipt did not fail closed")
     return {
         "fresh_checkpoint_lineage_accepted": True,
+        "direct_execution_proof_selected": True,
         "replay_identity_equal": True,
         "direct_receipts_persisted": True,
         "mismatched_execution_rejected": True,
@@ -7159,6 +7197,10 @@ def main() -> int:
             behavior_evidence.get(
                 "fresh-weight-input-lineage", {}
             ).get("fresh_checkpoint_lineage_accepted")
+            is True
+            and behavior_evidence.get(
+                "fresh-weight-input-lineage", {}
+            ).get("direct_execution_proof_selected")
             is True
             and behavior_evidence.get(
                 "fresh-weight-input-lineage", {}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
@@ -31,9 +32,31 @@ class PrivateModelArtifactManifest:
     build_id: str = ""
     compatibility_contract: Mapping[str, str] | None = None
     consumer_parity_fixtures: Mapping[str, str] | None = None
+    signed_extensions: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "PrivateModelArtifactManifest":
+        if "signed_extensions" in data:
+            raise ValueError("signed_extensions is a reserved manifest field")
+        known_fields = {
+            "model_artifact_hash",
+            "git_commit_sha",
+            "image_digest",
+            "config_hash",
+            "component_registry_version",
+            "scoring_adapter_version",
+            "manifest_uri",
+            "manifest_hash",
+            "signature_ref",
+            "build_id",
+            "compatibility_contract",
+            "consumer_parity_fixtures",
+        }
+        signed_extensions = {
+            str(key): deepcopy(value)
+            for key, value in data.items()
+            if str(key) not in known_fields
+        }
         return cls(
             model_artifact_hash=str(data["model_artifact_hash"]),
             git_commit_sha=str(data["git_commit_sha"]),
@@ -67,14 +90,25 @@ class PrivateModelArtifactManifest:
                 )
                 else None
             ),
+            signed_extensions=signed_extensions or None,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = asdict(self)
+        signed_extensions = data.pop("signed_extensions", None) or {}
+        normalized = {
             key: value
-            for key, value in asdict(self).items()
+            for key, value in data.items()
             if value is not None
         }
+        overlap = set(normalized).intersection(signed_extensions)
+        if overlap:
+            raise ValueError(
+                "signed manifest extension conflicts with a reserved field: "
+                + ",".join(sorted(overlap))
+            )
+        normalized.update(signed_extensions)
+        return normalized
 
     def hash_payload(self) -> dict[str, Any]:
         payload = self.to_dict()

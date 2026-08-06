@@ -147,6 +147,72 @@ def test_kms_verifies_the_final_manifest_hash() -> None:
     ]
 
 
+def test_signed_manifest_extensions_round_trip_without_hash_drift() -> None:
+    intent_release_benchmark = {
+        "contract": {
+            "contract_id": "intent-release-contracts:v1",
+            "path": "sourcing_model/intent_release_contract_v1.json",
+            "sha256": "sha256:" + "5" * 64,
+        },
+        "policy": {
+            "policy_id": "intent-release-policy:v1",
+            "path": "sourcing_model/intent_release_policy_v1.json",
+            "sha256": "sha256:" + "6" * 64,
+            "payload_sha256": "sha256:" + "7" * 64,
+        },
+    }
+    facility_evidence_contract = {
+        "contract_id": "facility-evidence:v1",
+        "path": "sourcing_model/facility_evidence_contract_v1.json",
+        "sha256": "sha256:" + "8" * 64,
+        "identity_policy": {
+            "policy_version": "facility-identity-proof:v2",
+            "sha256": "9" * 64,
+        },
+    }
+    value = artifact_mapping(
+        intent_release_benchmark=intent_release_benchmark,
+        facility_evidence_contract=facility_evidence_contract,
+    )
+
+    manifest = PrivateModelArtifactManifest.from_mapping(value)
+
+    assert manifest.to_dict() == value
+    assert validate_private_model_artifact_manifest(manifest) == []
+
+
+def test_signed_model_contract_section_tampering_fails_hash_validation() -> None:
+    value = artifact_mapping(
+        intent_release_benchmark={
+            "contract": {
+                "contract_id": "intent-release-contracts:v1",
+                "sha256": "sha256:" + "5" * 64,
+            }
+        }
+    )
+    value["intent_release_benchmark"]["contract"]["sha256"] = (
+        "sha256:" + "6" * 64
+    )
+
+    errors = validate_private_model_artifact_manifest(
+        PrivateModelArtifactManifest.from_mapping(value)
+    )
+
+    assert errors == ["manifest_hash_mismatch"]
+
+
+def test_signed_manifest_extensions_remain_subject_to_secret_scanning() -> None:
+    value = artifact_mapping(
+        future_contract={"raw_secret": "must-not-enter-a-signed-manifest"}
+    )
+
+    errors = validate_private_model_artifact_manifest(
+        PrivateModelArtifactManifest.from_mapping(value)
+    )
+
+    assert errors == ["artifact_manifest_contains_raw_secret_material"]
+
+
 @pytest.mark.parametrize(
     "contract_id",
     tuple(sorted(reviewed_consumer_snapshots())),

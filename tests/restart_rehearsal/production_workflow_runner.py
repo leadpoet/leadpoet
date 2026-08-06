@@ -512,6 +512,80 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         private_repo_branch="leadpoet-lab",
         private_repo_url="https://example.invalid/Sourcing_model.git",
     )
+    extended_release = rehash_manifest(
+        {
+            **SIGNED_PRIVATE_MODEL_RELEASES[
+                "leadpoet-sourcing-wrapper-contract-v8"
+            ],
+            "git_commit_sha": "f" * 40,
+            "manifest_uri": (
+                "s3://leadpoet-private-model-artifacts-493765492819/"
+                "research-lab/sourcing-model/rehearsal/signed-extensions.json"
+            ),
+            "signature_ref": (
+                "s3://leadpoet-private-model-artifacts-493765492819/"
+                "research-lab/sourcing-model/rehearsal/signed-extensions.sig.b64"
+            ),
+            "intent_release_benchmark": {
+                "contract": {
+                    "contract_id": "intent-release-contracts:v1",
+                    "sha256": "sha256:" + "5" * 64,
+                },
+                "policy": {
+                    "policy_id": "intent-release-policy:v1",
+                    "sha256": "sha256:" + "6" * 64,
+                },
+            },
+            "facility_evidence_contract": {
+                "contract_id": "facility-evidence:v1",
+                "sha256": "sha256:" + "7" * 64,
+            },
+        }
+    )
+    install(
+        str(extended_release["manifest_uri"]),
+        _canonical(extended_release) + b"\n",
+    )
+    sign_and_install(extended_release)
+    install(
+        PRIVATE_MODEL_BRANCH_POINTER_URI,
+        _canonical(extended_release) + b"\n",
+    )
+    extended_artifact, extended_status = asyncio.run(
+        _load_repo_head_current_manifest(
+            config,
+            repo_main_sha=str(extended_release["git_commit_sha"]),
+            wait_for_repo_head=False,
+            wait_timeout_seconds=0,
+            poll_seconds=1,
+        )
+    )
+    extended_authority = AttestedPrivateModelRunnerV2(
+        artifact=extended_artifact,
+        spec=DockerPrivateModelSpec(
+            image_digest=extended_artifact.image_digest,
+            pull_before_run=False,
+        ),
+        model_kind="private",
+        worker_index=0,
+        epoch_id=30_000,
+    )
+    extended_version_doc = promotion_module._private_model_version_doc(
+        artifact=extended_artifact,
+        activation_source="rehearsal_signed_extensions",
+    )
+    signed_extensions_verified = bool(
+        extended_status.get("status") == "current_json_matches_repo_head"
+        and extended_artifact.to_dict() == extended_release
+        and extended_authority.artifact.manifest_hash
+        == extended_release["manifest_hash"]
+        and extended_version_doc.get("private_model_manifest_hash")
+        == extended_release["manifest_hash"]
+    )
+    if not signed_extensions_verified:
+        raise RuntimeError(
+            "signed manifest extensions did not survive model authority and persistence"
+        )
     transitions: list[dict[str, Any]] = []
 
     def activate(
@@ -1195,6 +1269,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         ),
         "pointer_source_mismatch_rejected": (pointer_source_mismatch_rejected),
         "provider_bindings": observed_provider_bindings,
+        "signed_extensions_verified": signed_extensions_verified,
         "rollback_exact": (
             [item["contract_id"] for item in transitions]
             == [v7_id, v8_id, v7_id]
@@ -6902,6 +6977,11 @@ def main() -> int:
                 "signed-private-model-contract-transition",
                 {},
             ).get("manifest_reconcile_precedes_baseline")
+            is True
+            and behavior_evidence.get(
+                "signed-private-model-contract-transition",
+                {},
+            ).get("signed_extensions_verified")
             is True
         ),
         "delayed_private_source_manifest_recovery_verified": (

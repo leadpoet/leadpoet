@@ -4381,8 +4381,8 @@ def test_candidate_owned_guard_probe_does_not_mutate_rollback_transition_ledger(
 ) -> None:
     source = Path(production_workflow_runner.__file__).read_text(encoding="utf-8")
 
-    assert source.count("activate(v8_id)\n") == 1
-    assert source.count("activate(v8_id, record_transition=False)\n") == 1
+    assert source.count("activate(new_id)\n") == 1
+    assert source.count("activate(new_id, record_transition=False)\n") == 1
     assert "if record_transition:\n            transitions.append(" in source
 
 

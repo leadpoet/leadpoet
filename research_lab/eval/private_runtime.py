@@ -85,6 +85,8 @@ PROVIDER_COST_EVALUATION_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_EVALUATION_SCOP
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
 SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS = 1500.0
 SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
+# Match the adapter's result/receipt finalization window before sandbox kill.
+SOURCING_MODEL_MAX_FINALIZATION_RESERVE_SECONDS = 60.0
 EXPECTED_SOURCING_ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v3"
 EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
 EXPECTED_ROUTING_COMPILER_VERSION = "routing-compiler-v2"
@@ -1036,7 +1038,10 @@ def context_with_runtime_options(
 
     outer = max(10.0, float(outer_timeout_seconds))
     cap = min(SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS, max(10.0, outer - 3.0))
-    reserve = min(5.0, max(2.0, cap * 0.1))
+    reserve = min(
+        SOURCING_MODEL_MAX_FINALIZATION_RESERVE_SECONDS,
+        max(2.0, cap * 0.1),
+    )
     incoming = dict((context or {}).get("runtime_options") or {})
     requested_agent = incoming.get("agent_timeout_seconds")
     try:

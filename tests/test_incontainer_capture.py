@@ -135,8 +135,8 @@ def test_runtime_context_is_clamped_inside_outer_timeout() -> None:
     options = context["runtime_options"]
     assert options == {
         "runtime_cap_seconds": 57.0,
-        "finalization_reserve_seconds": 5.0,
-        "agent_timeout_seconds": 52,
+        "finalization_reserve_seconds": 5.7,
+        "agent_timeout_seconds": 51,
     }
 
 
@@ -147,7 +147,7 @@ def test_runtime_context_respects_model_maxima_for_long_outer_timeout() -> None:
     )
     assert context["runtime_options"] == {
         "runtime_cap_seconds": 1500.0,
-        "finalization_reserve_seconds": 5.0,
+        "finalization_reserve_seconds": 60.0,
         "agent_timeout_seconds": 900,
     }
 

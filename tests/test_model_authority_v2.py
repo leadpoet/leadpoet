@@ -800,7 +800,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
         "run_id": "run-1",
         "runtime_options": {
             "runtime_cap_seconds": 1500.0,
-            "finalization_reserve_seconds": 5.0,
+            "finalization_reserve_seconds": 60.0,
             "agent_timeout_seconds": 900,
         },
     }

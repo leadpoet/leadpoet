@@ -5261,7 +5261,10 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
         ModelSandboxV2Error,
         _model_sandbox_process_timeout_seconds,
     )
-    from research_lab.eval.private_runtime import PrivateModelRuntimeError
+    from research_lab.eval.private_runtime import (
+        PrivateModelRuntimeError,
+        context_with_runtime_options,
+    )
 
     failures = [
         AttestedScoringV2Error(
@@ -5352,6 +5355,19 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     )
     if sandbox_timeout != 1503:
         raise RuntimeError("model sandbox ignored committed runtime allocation")
+    runtime_options = context_with_runtime_options(
+        {},
+        outer_timeout_seconds=1800,
+    )["runtime_options"]
+    runtime_cap = float(runtime_options["runtime_cap_seconds"])
+    finalization_reserve = float(
+        runtime_options["finalization_reserve_seconds"]
+    )
+    finalization_window = sandbox_timeout - (runtime_cap - finalization_reserve)
+    if finalization_reserve != 60.0 or finalization_window < 60.0:
+        raise RuntimeError(
+            "model runtime lacks committed result-finalization headroom"
+        )
     try:
         _model_sandbox_process_timeout_seconds(
             {
@@ -5408,6 +5424,7 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
         "bounded_retry_selected": True,
         "generic_provider_contract_failure_terminal": True,
         "configured_runtime_deadline_bound": True,
+        "configured_runtime_finalization_reserve_bound": True,
         "signed_http_retry_selected": True,
         "retry_checkpoint_recovery_bound": True,
         "content_addressed_artifact_persistence_bound": True,
@@ -7425,6 +7442,11 @@ def main() -> int:
                 "rebenchmark-sandbox-retry",
                 {},
             ).get("configured_runtime_deadline_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("configured_runtime_finalization_reserve_bound")
             is True
             and behavior_evidence.get(
                 "rebenchmark-sandbox-retry",

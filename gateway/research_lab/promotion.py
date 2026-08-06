@@ -44,6 +44,7 @@ from gateway.research_lab.store import (
     create_scoring_category_result,
     create_scoring_dispatch_event,
     insert_row,
+    select_all,
     select_many,
     select_one,
 )
@@ -93,10 +94,13 @@ DEFAULT_REPO_HEAD_MANIFEST_POLL_SECONDS = 15
 DEFAULT_REPO_HEAD_GIT_TIMEOUT_SECONDS = 20
 
 PRIVATE_SOURCE_PUSH_FAILED_REASON = "private_source_push_failed"
+SOURCE_PUSHED_MANIFEST_PENDING_REASON = "source_pushed_manifest_pending"
 PRIVATE_SOURCE_PUSH_RETRY_SECONDS_ENV = "RESEARCH_LAB_PRIVATE_SOURCE_PUSH_RETRY_SECONDS"
 PRIVATE_SOURCE_PUSH_RECONCILE_LIMIT_ENV = "RESEARCH_LAB_PRIVATE_SOURCE_PUSH_RECONCILE_LIMIT"
 DEFAULT_PRIVATE_SOURCE_PUSH_RETRY_SECONDS = 300
 DEFAULT_PRIVATE_SOURCE_PUSH_RECONCILE_LIMIT = 1
+PRIVATE_SOURCE_PUSH_RECONCILE_MAX_EVENT_ROWS = 50000
+PRIVATE_SOURCE_OWNERSHIP_COMPLETION_CHUNK_SIZE = 100
 
 # Historical confirmation re-run support remains for reading old events, but
 # automatic promotion is score-only against the stored daily baseline.
@@ -843,6 +847,103 @@ async def _load_repo_head_current_manifest(
         await asyncio.sleep(poll_seconds)
 
 
+async def _pending_candidate_source_publication_for_repo_head(
+    repo_main_sha: str,
+) -> dict[str, str] | None:
+    """Return candidate ownership when repo head has not completed activation.
+
+    A candidate source push is durable before the signed ``current.json`` may
+    become visible. Generic repo-head synchronization must not claim that
+    commit while the candidate-owned promotion path still owes its benchmark,
+    lineage, and reward bridge.
+    """
+
+    commit_rows = await select_all(
+        "research_lab_private_repo_commit_events",
+        columns=(
+            "commit_event_id,commit_status,git_commit_sha,candidate_id,"
+            "score_bundle_id,created_at"
+        ),
+        filters=(("git_commit_sha", repo_main_sha),),
+        order_by=(
+            ("created_at", True),
+            ("commit_event_id", True),
+        ),
+        batch_size=1000,
+        max_rows=PRIVATE_SOURCE_PUSH_RECONCILE_MAX_EVENT_ROWS,
+    )
+    owners: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in commit_rows:
+        if str(row.get("commit_status") or "") not in {"committed", "pushed"}:
+            continue
+        candidate_id = str(row.get("candidate_id") or "")
+        score_bundle_id = str(row.get("score_bundle_id") or "")
+        if not candidate_id:
+            continue
+        owner_key = (candidate_id, score_bundle_id)
+        if owner_key in seen:
+            continue
+        seen.add(owner_key)
+        owners.append(
+            {
+                "candidate_id": candidate_id,
+                "score_bundle_id": score_bundle_id,
+                "commit_event_id": str(row.get("commit_event_id") or ""),
+                "git_commit_sha": str(row.get("git_commit_sha") or ""),
+            }
+        )
+    if not owners:
+        return None
+    completed_rows: list[dict[str, Any]] = []
+    owner_candidate_ids = sorted({owner["candidate_id"] for owner in owners})
+    for start in range(
+        0,
+        len(owner_candidate_ids),
+        PRIVATE_SOURCE_OWNERSHIP_COMPLETION_CHUNK_SIZE,
+    ):
+        candidate_chunk = owner_candidate_ids[
+            start : start + PRIVATE_SOURCE_OWNERSHIP_COMPLETION_CHUNK_SIZE
+        ]
+        completed_rows.extend(
+            await select_all(
+                "research_lab_candidate_promotion_events",
+                columns=(
+                    "promotion_event_id,candidate_id,source_score_bundle_id,"
+                    "event_type,private_model_version_id,created_at"
+                ),
+                filters=(
+                    ("event_type", "active_version_created"),
+                    ("candidate_id", "in", candidate_chunk),
+                ),
+                order_by=(
+                    ("created_at", True),
+                    ("promotion_event_id", True),
+                ),
+                batch_size=1000,
+                max_rows=PRIVATE_SOURCE_PUSH_RECONCILE_MAX_EVENT_ROWS,
+            )
+        )
+    completed_keys = {
+        (
+            str(row.get("candidate_id") or ""),
+            str(row.get("source_score_bundle_id") or ""),
+        )
+        for row in completed_rows
+        if str(row.get("event_type") or "") == "active_version_created"
+        and row.get("candidate_id")
+    }
+    completed_candidates = {candidate_id for candidate_id, _ in completed_keys}
+    for owner in owners:
+        owner_key = (owner["candidate_id"], owner["score_bundle_id"])
+        if owner_key in completed_keys:
+            continue
+        if not owner["score_bundle_id"] and owner["candidate_id"] in completed_candidates:
+            continue
+        return owner
+    return None
+
+
 async def sync_active_model_to_repo_head(
     config: ResearchLabGatewayConfig,
     *,
@@ -979,6 +1080,45 @@ async def sync_active_model_to_repo_head(
             "dry_run": dry_run,
             "status": "active_is_repo_head",
             **planned,
+        }
+    try:
+        pending_candidate = await _pending_candidate_source_publication_for_repo_head(
+            repo_main_sha
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_repo_head_candidate_ownership_unavailable "
+            "repo_main=%s error=%s",
+            repo_main_sha[:12],
+            _safe_text(str(exc))[:200],
+        )
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "candidate_source_ownership_unavailable",
+            **planned,
+            "benchmark_blocked_reason": "candidate_source_ownership_unavailable",
+            "error": _safe_text(str(exc))[:200],
+        }
+    if pending_candidate is not None:
+        logger.warning(
+            "research_lab_repo_head_candidate_publication_pending "
+            "repo_main=%s candidate=%s score_bundle=%s",
+            repo_main_sha[:12],
+            _short_ref(pending_candidate.get("candidate_id")),
+            _short_ref(pending_candidate.get("score_bundle_id")),
+        )
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "candidate_source_publication_pending",
+            **planned,
+            "benchmark_blocked_reason": "candidate_source_publication_pending",
+            "candidate_id": pending_candidate["candidate_id"],
+            "score_bundle_id": pending_candidate["score_bundle_id"],
+            "source_commit_event_id": pending_candidate["commit_event_id"],
         }
     if dry_run:
         return {
@@ -3346,17 +3486,18 @@ async def reconcile_failed_private_source_pushes(
     retry_after_seconds: int | None = None,
     dry_run: bool = True,
 ) -> dict[str, Any]:
-    """Retry candidates stranded after ``private_source_push_failed``.
+    """Retry candidates stranded after a private-source publication interruption.
 
     A candidate can clear the promotion threshold, write ``promotion_passed``,
-    then lose the private-source push to a restart/network/deploy interruption.
-    The candidate remains ``scored`` and economically valid, but without this
-    reconciler it never reaches ``active_version_created`` and therefore never
-    gets its champion reward. This re-drives the normal promotion path from
-    append-only events. It is intentionally idempotent: already-promoted or
-    already-rewarded candidates are skipped/finalized, successful source pushes
-    become ``already_applied`` on replay, and stale parents fall back to the
-    existing stale-parent result instead of being blindly paid.
+    then either lose the private-source push or outlive the wait for the signed
+    branch manifest. The candidate remains ``scored`` and economically valid,
+    but without this reconciler it never reaches ``active_version_created`` and
+    therefore never gets its champion reward. This re-drives the normal
+    promotion path from append-only events. It is intentionally idempotent:
+    already-promoted or already-rewarded candidates are skipped/finalized,
+    successful source pushes become ``already_applied`` on replay, and stale
+    parents fall back to the existing stale-parent result instead of being
+    blindly paid.
     """
 
     retry_seconds = (
@@ -3370,36 +3511,109 @@ async def reconcile_failed_private_source_pushes(
         "promotion_event_id,candidate_id,source_score_bundle_id,event_type,"
         "promotion_status,event_doc,created_at"
     )
-    if wanted is None:
-        failed_events = await select_many(
-            "research_lab_candidate_promotion_events",
-            columns=event_columns,
-            filters=(("event_type", "promotion_failed"),),
-            order_by=(("created_at", True),),
-            limit=500,
+    recoverable_event_contracts = (
+        ("promotion_failed", PRIVATE_SOURCE_PUSH_FAILED_REASON),
+        ("promotion_checked", SOURCE_PUSHED_MANIFEST_PENDING_REASON),
+    )
+    failed_events: list[dict[str, Any]] = []
+
+    async def load_recovery_events(
+        event_type: str,
+        event_reason: str,
+        *,
+        candidate_id: str | None,
+    ) -> list[dict[str, Any]]:
+        base_filters: tuple[tuple[str, Any], ...] = (
+            ("event_type", event_type),
         )
-    else:
-        failed_events = []
-        for candidate_id in wanted:
-            failed_events.extend(
-                await select_many(
+        if candidate_id:
+            base_filters += (("candidate_id", candidate_id),)
+        async def query_rows(filters: tuple[tuple[str, Any], ...]) -> list[dict[str, Any]]:
+            if candidate_id:
+                return await select_many(
                     "research_lab_candidate_promotion_events",
                     columns=event_columns,
-                    filters=(
-                        ("event_type", "promotion_failed"),
-                        ("candidate_id", candidate_id),
-                    ),
+                    filters=filters,
                     order_by=(("created_at", True),),
                     limit=50,
                 )
+            return await select_all(
+                "research_lab_candidate_promotion_events",
+                columns=event_columns,
+                filters=filters,
+                order_by=(
+                    ("created_at", True),
+                    ("promotion_event_id", True),
+                ),
+                batch_size=1000,
+                max_rows=PRIVATE_SOURCE_PUSH_RECONCILE_MAX_EVENT_ROWS,
             )
-        failed_events.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+
+        try:
+            rows = await query_rows(
+                (*base_filters, ("event_doc->>reason", event_reason))
+            )
+        except Exception as exc:  # noqa: BLE001 - bounded legacy PostgREST fallback
+            logger.warning(
+                "research_lab_private_source_reconcile_json_filter_failed "
+                "event_type=%s reason=%s error=%s",
+                event_type,
+                event_reason,
+                _safe_text(str(exc))[:200],
+            )
+            rows = await query_rows(base_filters)
+        return [
+            row
+            for row in rows
+            if str(_promotion_event_doc(row).get("reason") or "") == event_reason
+        ]
+
+    candidate_scope = sorted(wanted) if wanted is not None else [None]
+    for candidate_id in candidate_scope:
+        for event_type, event_reason in recoverable_event_contracts:
+            failed_events.extend(
+                await load_recovery_events(
+                    event_type,
+                    event_reason,
+                    candidate_id=candidate_id,
+                )
+            )
+    failed_events.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    rewarded_event_rows = (
+        await select_all(
+            "research_lab_candidate_promotion_events",
+            columns=(
+                "promotion_event_id,candidate_id,source_score_bundle_id,event_type"
+            ),
+            filters=(("event_type", "champion_reward_created"),),
+            order_by=(
+                ("created_at", True),
+                ("promotion_event_id", True),
+            ),
+            batch_size=1000,
+            max_rows=PRIVATE_SOURCE_PUSH_RECONCILE_MAX_EVENT_ROWS,
+        )
+        if failed_events
+        else []
+    )
+    rewarded_keys = {
+        (
+            str(row.get("candidate_id") or ""),
+            str(row.get("source_score_bundle_id") or ""),
+        )
+        for row in rewarded_event_rows
+        if row.get("candidate_id")
+        and str(row.get("event_type") or "") == "champion_reward_created"
+    }
     controller = ResearchLabPromotionController(config, worker_ref=worker_ref)
     seen: set[tuple[str, str]] = set()
     results: list[dict[str, Any]] = []
+    attempted_recoveries = 0
     for event in failed_events:
         doc = _promotion_event_doc(event)
-        if str(doc.get("reason") or "") != PRIVATE_SOURCE_PUSH_FAILED_REASON:
+        event_type = str(event.get("event_type") or "")
+        event_reason = str(doc.get("reason") or "")
+        if (event_type, event_reason) not in set(recoverable_event_contracts):
             continue
         candidate_id = str(event.get("candidate_id") or "")
         score_bundle_id = str(event.get("source_score_bundle_id") or "")
@@ -3411,13 +3625,15 @@ async def reconcile_failed_private_source_pushes(
         if key in seen:
             continue
         seen.add(key)
-        if len(results) >= max_results:
+        if attempted_recoveries >= max_results:
             break
 
         entry: dict[str, Any] = {
             "candidate_id": candidate_id,
             "score_bundle_id": score_bundle_id,
             "failed_promotion_event_id": str(event.get("promotion_event_id") or ""),
+            "recovery_event_type": event_type,
+            "recovery_reason": event_reason,
             "dry_run": dry_run,
         }
         age_seconds = _event_age_seconds(event.get("created_at"))
@@ -3427,6 +3643,11 @@ async def reconcile_failed_private_source_pushes(
             entry["status"] = "retry_backoff"
             entry["retry_after_seconds"] = retry_seconds
             entry["seconds_until_retry"] = round(retry_seconds - age_seconds, 3)
+            results.append(entry)
+            continue
+
+        if (candidate_id, score_bundle_id) in rewarded_keys:
+            entry["status"] = "already_rewarded"
             results.append(entry)
             continue
 
@@ -3472,6 +3693,8 @@ async def reconcile_failed_private_source_pushes(
                 elif not _candidate_already_marked_stale_parent(candidate):
                     entry["status"] = "would_mark_stale_parent_needs_rescore"
                     entry["stale_parent_rebase_eligible"] = True
+                if entry.get("stale_parent_rebase_eligible"):
+                    attempted_recoveries += 1
                 results.append(entry)
                 continue
             if candidate:
@@ -3485,6 +3708,7 @@ async def reconcile_failed_private_source_pushes(
                 entry.update(marker)
                 if marker.get("stale_parent_rebase_eligible"):
                     entry["status"] = "stale_parent_needs_rescore"
+                    attempted_recoveries += 1
                 elif marker.get("status"):
                     entry["status"] = str(marker.get("status") or "")
             results.append(entry)
@@ -3499,6 +3723,7 @@ async def reconcile_failed_private_source_pushes(
             )
             if dry_run:
                 entry["status"] = "would_finalize_existing_promotion"
+                attempted_recoveries += 1
                 results.append(entry)
                 continue
 
@@ -3528,8 +3753,10 @@ async def reconcile_failed_private_source_pushes(
         entry["score_bundle_id"] = score_bundle_id
         if dry_run:
             entry["status"] = "would_retry_private_source_push"
+            attempted_recoveries += 1
             results.append(entry)
             continue
+        attempted_recoveries += 1
         try:
             promotion_result = await controller.process_scored_candidate(
                 candidate=candidate,
@@ -3587,6 +3814,7 @@ async def reconcile_failed_private_source_pushes(
         "dry_run": dry_run,
         "retry_after_seconds": retry_seconds,
         "found_failed": len(results),
+        "attempted_recoveries": attempted_recoveries,
         "retried": retried,
         "finalized": finalized,
         "results": results,

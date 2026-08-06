@@ -3919,7 +3919,7 @@ class ResearchLabGatewayScoringWorker:
         self._scorer_trace_recorder = _ScorerTraceRecorder(config)
         self._confirmation_trace_scope: dict[str, Any] | None = None
         self._worker_started_at = datetime.now(timezone.utc)
-        self._last_private_source_push_reconcile_at = 0.0
+        self._last_private_source_push_reconcile_at = float("-inf")
         self._stale_parent_overdue_warning_keys: set[str] = set()
         self._active_baseline_context: dict[str, Any] | None = None
         self._baseline_publication_failure_logged_key: str | None = None
@@ -4081,55 +4081,6 @@ class ResearchLabGatewayScoringWorker:
                 "preflight": preflight.get("verdicts"),
             }
 
-        baseline_result = None
-        if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():
-            baseline_result = await self._run_private_baseline_contained()
-        elif self.config.private_baseline_rebenchmark_enabled and not self._baseline_skip_logged:
-            logger.info(
-                format_worker_block(
-                    "RESEARCH LAB PRIVATE BASELINE SKIPPED",
-                    (
-                        ("Worker", self.worker_ref),
-                        ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
-                        ("Owner worker index", 1),
-                        ("Proxy ref", self.proxy_ref_hash),
-                    ),
-                )
-            )
-            self._baseline_skip_logged = True
-        if (
-            isinstance(baseline_result, Mapping)
-            and str(baseline_result.get("status") or "")
-            in {"baseline_checkpoint_recycle", "baseline_maintenance_paused"}
-        ):
-            baseline_status = str(baseline_result["status"])
-            return {
-                "processed": True,
-                "status": baseline_status,
-                "candidate_ids": [],
-                "baseline": baseline_result,
-                "confirmation": None,
-                "private_source_reconcile": None,
-                "candidate_claim_capacity": {"available": False},
-                "candidate_start_gate": None,
-                "recycle_requested": baseline_status == "baseline_checkpoint_recycle",
-            }
-
-        # §5.2-2: run at most one pending confirmation measurement per pass.
-        # Any worker may pick these up (leased per candidate via
-        # confirmation_rerun_started events). Best-effort: a confirmation
-        # failure must never take down the scoring pass.
-        confirmation_result: dict[str, Any] | None = None
-        if promotion_confirmation_rerun_enabled():
-            try:
-                confirmation_result = await self._maybe_run_pending_confirmation()
-            except Exception as exc:  # noqa: BLE001 - never fail the worker pass
-                logger.warning(
-                    "research_lab_confirmation_pass_failed worker_ref=%s error=%s",
-                    self.worker_ref,
-                    _short_error(exc),
-                )
-
         private_source_reconcile_result: dict[str, Any] | None = None
         if self.config.scoring_worker_index == 0 and self.config.auto_promotion_enabled:
             interval = max(1, private_source_push_retry_seconds())
@@ -4173,6 +4124,59 @@ class ResearchLabGatewayScoringWorker:
                             ",".join(compact_ref(candidate_id) for candidate_id in stale_rebase_ids),
                             _short_error(exc),
                         )
+
+        # Complete a candidate-owned source publication before baseline startup
+        # can synchronize the same branch head as a generic repo-head release.
+        # This preserves the original benchmark, lineage, and reward bridge when
+        # current.json became available after the initial promotion wait expired.
+        baseline_result = None
+        if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():
+            baseline_result = await self._run_private_baseline_contained()
+        elif self.config.private_baseline_rebenchmark_enabled and not self._baseline_skip_logged:
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE SKIPPED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
+                        ("Owner worker index", 1),
+                        ("Proxy ref", self.proxy_ref_hash),
+                    ),
+                )
+            )
+            self._baseline_skip_logged = True
+        if (
+            isinstance(baseline_result, Mapping)
+            and str(baseline_result.get("status") or "")
+            in {"baseline_checkpoint_recycle", "baseline_maintenance_paused"}
+        ):
+            baseline_status = str(baseline_result["status"])
+            return {
+                "processed": True,
+                "status": baseline_status,
+                "candidate_ids": [],
+                "baseline": baseline_result,
+                "confirmation": None,
+                "private_source_reconcile": private_source_reconcile_result,
+                "candidate_claim_capacity": {"available": False},
+                "candidate_start_gate": None,
+                "recycle_requested": baseline_status == "baseline_checkpoint_recycle",
+            }
+
+        # §5.2-2: run at most one pending confirmation measurement per pass.
+        # Any worker may pick these up (leased per candidate via
+        # confirmation_rerun_started events). Best-effort: a confirmation
+        # failure must never take down the scoring pass.
+        confirmation_result: dict[str, Any] | None = None
+        if promotion_confirmation_rerun_enabled():
+            try:
+                confirmation_result = await self._maybe_run_pending_confirmation()
+            except Exception as exc:  # noqa: BLE001 - never fail the worker pass
+                logger.warning(
+                    "research_lab_confirmation_pass_failed worker_ref=%s error=%s",
+                    self.worker_ref,
+                    _short_error(exc),
+                )
 
         processed: list[str] = []
         claim_capacity: dict[str, Any] = {"available": True}

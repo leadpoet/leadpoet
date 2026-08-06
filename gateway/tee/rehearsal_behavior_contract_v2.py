@@ -60,6 +60,7 @@ BEHAVIORAL_INVARIANTS = (
     "candidate_identity_exact",
     "protected_source_identity_exact",
     "signed_private_model_contract_transition_exact",
+    "delayed_private_source_manifest_recovery_verified",
     "model_sandbox_final_provider_cost_scope_bound",
     "rebenchmark_sandbox_failure_bounded_retry",
     "rebenchmark_provider_transport_evidence_unique",

@@ -129,6 +129,8 @@ async def test_scoring_worker_does_not_claim_after_midpass_baseline_pause(monkey
         production_writes_enabled=True,
         evaluation_bundles_enabled=True,
         scoring_worker_require_proxy=False,
+        scoring_worker_index=0,
+        auto_promotion_enabled=False,
         private_baseline_rebenchmark_enabled=True,
     )
     worker.worker_ref = "scoring-test"

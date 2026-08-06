@@ -215,12 +215,12 @@ async def main() -> int:
             expected_detail=None,
         )
         await run_case(
-            "required proxy missing blocks",
+            "sealed proxy fleet uses bound worker capacity",
             queue_rows=[],
             ticket_rows=[],
             miner_hotkey="hotkey-new",
             config=_config(require_proxy=True),
-            expected_detail="too many autoresearch loops right now, try again later",
+            expected_detail=None,
             proxy_count=0,
         )
         await run_case(

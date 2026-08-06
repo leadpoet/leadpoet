@@ -493,6 +493,8 @@ class FakeStore:
     select_many_results: dict[str, Any] = field(default_factory=dict)
     select_one_results: dict[str, Any] = field(default_factory=dict)
     select_many_calls: list[tuple[str, tuple]] = field(default_factory=list)
+    select_all_calls: list[tuple[str, tuple]] = field(default_factory=list)
+    select_all_order_by_calls: list[tuple[str, tuple]] = field(default_factory=list)
     version_writes: list[dict[str, Any]] = field(default_factory=list)
     version_event_writes: list[dict[str, Any]] = field(default_factory=list)
     promotion_event_writes: list[dict[str, Any]] = field(default_factory=list)
@@ -505,6 +507,20 @@ class FakeStore:
 
     async def select_many(self, table: str, **kwargs: Any) -> list[dict[str, Any]]:
         self.select_many_calls.append((table, tuple(kwargs.get("filters") or ())))
+        result = self.select_many_results.get(self._select_many_key(table, kwargs))
+        if result is None:
+            result = self.select_many_results.get(table, [])
+        if isinstance(result, Exception):
+            raise result
+        if callable(result):
+            result = result(kwargs)
+        return list(result)
+
+    async def select_all(self, table: str, **kwargs: Any) -> list[dict[str, Any]]:
+        self.select_all_calls.append((table, tuple(kwargs.get("filters") or ())))
+        self.select_all_order_by_calls.append(
+            (table, tuple(kwargs.get("order_by") or ()))
+        )
         result = self.select_many_results.get(self._select_many_key(table, kwargs))
         if result is None:
             result = self.select_many_results.get(table, [])
@@ -589,6 +605,7 @@ class FakeStore:
 def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
     fake = FakeStore()
     monkeypatch.setattr(promotion, "select_many", fake.select_many)
+    monkeypatch.setattr(promotion, "select_all", fake.select_all)
     monkeypatch.setattr(promotion, "select_one", fake.select_one)
     monkeypatch.setattr(promotion, "create_private_model_version", fake.create_private_model_version)
     monkeypatch.setattr(promotion, "create_private_model_version_event", fake.create_private_model_version_event)
@@ -1088,6 +1105,263 @@ async def test_repo_head_sync_registers_current_json_with_db_safe_doc(store, mon
     assert version_doc["current_json_manifest_uri"] == current_artifact.manifest_uri
     assert version_doc["image_ref_hash"].startswith("sha256:")
     assert "image_digest" not in json.dumps(version_doc, sort_keys=True, default=str)
+
+
+async def test_repo_head_sync_defers_candidate_owned_commit_until_activation_completes(
+    store, monkeypatch
+):
+    current_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="e" * 40,
+    )
+    previous_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "8" * 64,
+        git_commit_sha="d" * 40,
+    )
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [
+        {
+            **_active_row(previous_artifact),
+            "git_commit_sha": previous_artifact.git_commit_sha,
+        }
+    ]
+    store.select_many_results["research_lab_private_repo_commit_events"] = [
+        {
+            "commit_event_id": "commit-event-pending",
+            "commit_status": "pushed",
+            "git_commit_sha": current_artifact.git_commit_sha,
+            "candidate_id": "candidate:pending",
+            "score_bundle_id": "score-bundle:pending",
+            "created_at": "2026-08-05T00:00:00+00:00",
+        }
+    ]
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        lambda **_kwargs: current_artifact.git_commit_sha,
+    )
+
+    async def _manifest(*_args: Any, **_kwargs: Any):
+        return current_artifact, {"status": "manifest_ready"}
+
+    monkeypatch.setattr(promotion, "_load_repo_head_current_manifest", _manifest)
+
+    result = await sync_active_model_to_repo_head(
+        _controller_config(
+            private_repo_url="git@example.invalid/private.git",
+            private_repo_branch="",
+        ),
+        actor_ref="test",
+        dry_run=False,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "candidate_source_publication_pending"
+    assert result["candidate_id"] == "candidate:pending"
+    assert result["score_bundle_id"] == "score-bundle:pending"
+    assert result["repo_main_sha"] == current_artifact.git_commit_sha
+    assert store.version_event_writes == []
+    assert store.version_writes == []
+
+
+async def test_repo_head_sync_allows_completed_candidate_owned_commit(store, monkeypatch):
+    current_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="e" * 40,
+    )
+    previous_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "8" * 64,
+        git_commit_sha="d" * 40,
+    )
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [
+        {
+            **_active_row(previous_artifact),
+            "git_commit_sha": previous_artifact.git_commit_sha,
+        }
+    ]
+    store.select_many_results["research_lab_private_repo_commit_events"] = [
+        {
+            "commit_event_id": "commit-event-complete",
+            "commit_status": "pushed",
+            "git_commit_sha": current_artifact.git_commit_sha,
+            "candidate_id": "candidate:complete",
+            "score_bundle_id": "score-bundle:complete",
+            "created_at": "2026-08-05T00:00:00+00:00",
+        }
+    ]
+    store.select_many_results[
+        "research_lab_candidate_promotion_events:active_version_created"
+    ] = [
+        {
+            "promotion_event_id": "promotion-complete",
+            "candidate_id": "candidate:complete",
+            "source_score_bundle_id": "score-bundle:complete",
+            "event_type": "active_version_created",
+        }
+    ]
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        lambda **_kwargs: current_artifact.git_commit_sha,
+    )
+
+    async def _manifest(*_args: Any, **_kwargs: Any):
+        return current_artifact, {"status": "manifest_ready"}
+
+    monkeypatch.setattr(promotion, "_load_repo_head_current_manifest", _manifest)
+
+    result = await sync_active_model_to_repo_head(
+        _controller_config(
+            private_repo_url="git@example.invalid/private.git",
+            private_repo_branch="",
+        ),
+        actor_ref="test",
+        dry_run=False,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "synced_active_model_to_repo_head"
+    assert len(store.version_writes) == 1
+
+
+async def test_repo_head_sync_fails_closed_when_candidate_ownership_is_unavailable(
+    store, monkeypatch
+):
+    current_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="e" * 40,
+    )
+    previous_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "8" * 64,
+        git_commit_sha="d" * 40,
+    )
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [
+        {
+            **_active_row(previous_artifact),
+            "git_commit_sha": previous_artifact.git_commit_sha,
+        }
+    ]
+    store.select_many_results["research_lab_private_repo_commit_events"] = RuntimeError(
+        "temporary ownership read failure"
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        lambda **_kwargs: current_artifact.git_commit_sha,
+    )
+
+    async def _manifest(*_args: Any, **_kwargs: Any):
+        return current_artifact, {"status": "manifest_ready"}
+
+    monkeypatch.setattr(promotion, "_load_repo_head_current_manifest", _manifest)
+
+    result = await sync_active_model_to_repo_head(
+        _controller_config(
+            private_repo_url="git@example.invalid/private.git",
+            private_repo_branch="",
+        ),
+        actor_ref="test",
+        dry_run=False,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "candidate_source_ownership_unavailable"
+    assert "temporary ownership read failure" in result["error"]
+    assert store.version_event_writes == []
+    assert store.version_writes == []
+
+
+async def test_candidate_source_ownership_scan_crosses_prior_page_ceiling(store):
+    repo_sha = "e" * 40
+    completed_count = 125
+    store.select_many_results["research_lab_private_repo_commit_events"] = [
+        {
+            "commit_event_id": f"commit-event-{index:03d}",
+            "commit_status": "pushed",
+            "git_commit_sha": repo_sha,
+            "candidate_id": f"candidate:{index:03d}",
+            "score_bundle_id": f"score-bundle:{index:03d}",
+            "created_at": f"2026-08-05T00:00:00.{index:06d}+00:00",
+        }
+        for index in range(completed_count + 1)
+    ]
+    completed_rows = [
+        {
+            "promotion_event_id": f"promotion-event-{index:03d}",
+            "candidate_id": f"candidate:{index:03d}",
+            "source_score_bundle_id": f"score-bundle:{index:03d}",
+            "event_type": "active_version_created",
+            "created_at": f"2026-08-05T00:01:00.{index:06d}+00:00",
+        }
+        for index in range(completed_count)
+    ]
+
+    def completed_rows_for_chunk(kwargs: Mapping[str, Any]) -> list[dict[str, Any]]:
+        candidate_ids = next(
+            set(spec[2])
+            for spec in kwargs.get("filters") or ()
+            if len(spec) == 3 and spec[:2] == ("candidate_id", "in")
+        )
+        return [
+            row for row in completed_rows if row["candidate_id"] in candidate_ids
+        ]
+
+    store.select_many_results[
+        "research_lab_candidate_promotion_events:active_version_created"
+    ] = completed_rows_for_chunk
+
+    pending = await promotion._pending_candidate_source_publication_for_repo_head(
+        repo_sha
+    )
+
+    assert pending == {
+        "candidate_id": "candidate:125",
+        "score_bundle_id": "score-bundle:125",
+        "commit_event_id": "commit-event-125",
+        "git_commit_sha": repo_sha,
+    }
+    paginated_orders = [
+        order_by
+        for table, order_by in store.select_all_order_by_calls
+        if table
+        in {
+            "research_lab_private_repo_commit_events",
+            "research_lab_candidate_promotion_events",
+        }
+    ]
+    assert paginated_orders == [
+        (("created_at", True), ("commit_event_id", True)),
+        (("created_at", True), ("promotion_event_id", True)),
+        (("created_at", True), ("promotion_event_id", True)),
+    ]
+    completion_filters = [
+        filters
+        for table, filters in store.select_all_calls
+        if table == "research_lab_candidate_promotion_events"
+    ]
+    assert completion_filters == [
+        (
+            ("event_type", "active_version_created"),
+            (
+                "candidate_id",
+                "in",
+                [f"candidate:{index:03d}" for index in range(100)],
+            ),
+        ),
+        (
+            ("event_type", "active_version_created"),
+            (
+                "candidate_id",
+                "in",
+                [f"candidate:{index:03d}" for index in range(100, completed_count + 1)],
+            ),
+        ),
+    ]
 
 
 async def test_private_source_upgrade_defaults_to_leadpoet_lab(store, monkeypatch):
@@ -2471,6 +2745,29 @@ def _failed_private_source_push_rows(store: FakeStore, *, created_at: str = "202
     }
 
 
+def _pending_private_source_manifest_rows(
+    store: FakeStore,
+    *,
+    created_at: str = "2026-07-01T00:00:00+00:00",
+) -> None:
+    _failed_private_source_push_rows(store, created_at=created_at)
+    store.select_many_results["research_lab_candidate_promotion_events:promotion_failed"] = []
+    store.select_many_results["research_lab_candidate_promotion_events:promotion_checked"] = [
+        {
+            "promotion_event_id": "pe-manifest-pending",
+            "candidate_id": "cand-1",
+            "source_score_bundle_id": "sb-1",
+            "event_type": "promotion_checked",
+            "promotion_status": "checked",
+            "event_doc": {
+                "reason": "source_pushed_manifest_pending",
+                "candidate_status_preserved": "scored",
+            },
+            "created_at": created_at,
+        }
+    ]
+
+
 async def test_private_source_push_reconciler_dry_run_plans_retry(store):
     _failed_private_source_push_rows(store)
 
@@ -2483,7 +2780,13 @@ async def test_private_source_push_reconciler_dry_run_plans_retry(store):
 
     assert result["ok"] is True
     assert result["found_failed"] == 1
+    assert result["attempted_recoveries"] == 1
     assert result["results"][0]["status"] == "would_retry_private_source_push"
+    assert any(
+        ("event_doc->>reason", "private_source_push_failed") in filters
+        for table, filters in store.select_all_calls
+        if table == "research_lab_candidate_promotion_events"
+    )
     assert store.promotion_event_writes == []
     assert store.version_writes == []
     assert store.reward_obligation_writes == []
@@ -2502,7 +2805,11 @@ async def test_private_source_push_reconciler_candidate_filter_queries_candidate
 
     assert (
         "research_lab_candidate_promotion_events",
-        (("event_type", "promotion_failed"), ("candidate_id", "cand-1")),
+        (
+            ("event_type", "promotion_failed"),
+            ("candidate_id", "cand-1"),
+            ("event_doc->>reason", "private_source_push_failed"),
+        ),
     ) in store.select_many_calls
 
 
@@ -2533,6 +2840,288 @@ async def test_private_source_push_reconciler_applies_retry_through_promotion_pa
     assert result["results"][0]["status"] == "merged"
     assert calls[0]["candidate"]["candidate_id"] == "cand-1"
     assert calls[0]["score_bundle_row"]["score_bundle_id"] == "sb-1"
+
+
+async def test_private_source_manifest_pending_reconciles_through_promotion_path(
+    store,
+    monkeypatch,
+):
+    _pending_private_source_manifest_rows(store)
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "status": "merged",
+            "private_model_version_id": "pmv-1",
+            "champion_reward_status": "created",
+            "champion_reward_id": "cr-1",
+        }
+
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "process_scored_candidate",
+        _fake_process,
+    )
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=0,
+    )
+
+    assert result["retried"] == 1
+    assert result["finalized"] == 1
+    assert result["results"][0]["status"] == "merged"
+    assert result["results"][0]["recovery_event_type"] == "promotion_checked"
+    assert result["results"][0]["recovery_reason"] == "source_pushed_manifest_pending"
+    assert calls[0]["candidate"]["candidate_id"] == "cand-1"
+    assert calls[0]["score_bundle_row"]["score_bundle_id"] == "sb-1"
+
+
+async def test_private_source_reconciler_ignores_unrelated_checked_events(
+    store,
+    monkeypatch,
+):
+    _pending_private_source_manifest_rows(store)
+    store.select_many_results["research_lab_candidate_promotion_events:promotion_checked"][0][
+        "event_doc"
+    ]["reason"] = "threshold_checked"
+
+    async def _unexpected_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("unrelated promotion_checked event must not be replayed")
+
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "process_scored_candidate",
+        _unexpected_process,
+    )
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=0,
+    )
+
+    assert result["found_failed"] == 0
+    assert result["results"] == []
+    assert not any(
+        ("event_type", "champion_reward_created") in filters
+        for table, filters in store.select_all_calls
+        if table == "research_lab_candidate_promotion_events"
+    )
+
+
+async def test_private_source_manifest_reason_filter_prevents_event_window_starvation(
+    store,
+    monkeypatch,
+):
+    _pending_private_source_manifest_rows(store)
+    pending_row = dict(
+        store.select_many_results[
+            "research_lab_candidate_promotion_events:promotion_checked"
+        ][0]
+    )
+    unrelated_rows = [
+        {
+            **pending_row,
+            "promotion_event_id": f"pe-unrelated-{index}",
+            "candidate_id": f"cand-unrelated-{index}",
+            "source_score_bundle_id": f"sb-unrelated-{index}",
+            "event_doc": {"reason": "threshold_checked"},
+        }
+        for index in range(500)
+    ]
+
+    def checked_rows(kwargs: Mapping[str, Any]) -> list[dict[str, Any]]:
+        filters = tuple(kwargs.get("filters") or ())
+        if (
+            "event_doc->>reason",
+            "source_pushed_manifest_pending",
+        ) in filters:
+            return [pending_row]
+        return unrelated_rows
+
+    store.select_many_results[
+        "research_lab_candidate_promotion_events:promotion_checked"
+    ] = checked_rows
+    calls: list[str] = []
+
+    async def _fake_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(str(kwargs["candidate"]["candidate_id"]))
+        return {"status": "merged"}
+
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "process_scored_candidate",
+        _fake_process,
+    )
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=0,
+    )
+
+    assert result["finalized"] == 1
+    assert calls == ["cand-1"]
+
+
+async def test_private_source_manifest_reconciler_json_filter_fallback(
+    store,
+    monkeypatch,
+):
+    _pending_private_source_manifest_rows(store)
+    pending_rows = list(
+        store.select_many_results[
+            "research_lab_candidate_promotion_events:promotion_checked"
+        ]
+    )
+
+    def checked_rows(kwargs: Mapping[str, Any]) -> list[dict[str, Any]]:
+        if any(
+            field == "event_doc->>reason"
+            for field, _value in tuple(kwargs.get("filters") or ())
+        ):
+            raise RuntimeError("json path filter unavailable")
+        return pending_rows
+
+    store.select_many_results[
+        "research_lab_candidate_promotion_events:promotion_checked"
+    ] = checked_rows
+    calls: list[str] = []
+
+    async def _fake_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(str(kwargs["candidate"]["candidate_id"]))
+        return {"status": "merged"}
+
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "process_scored_candidate",
+        _fake_process,
+    )
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=0,
+    )
+
+    assert result["finalized"] == 1
+    assert calls == ["cand-1"]
+    checked_queries = [
+        filters
+        for table, filters in (*store.select_many_calls, *store.select_all_calls)
+        if table == "research_lab_candidate_promotion_events"
+        and ("event_type", "promotion_checked") in filters
+    ]
+    assert any(("event_doc->>reason", "source_pushed_manifest_pending") in filters for filters in checked_queries)
+    assert any(("event_doc->>reason", "source_pushed_manifest_pending") not in filters for filters in checked_queries)
+
+
+async def test_private_source_manifest_reconcile_crosses_terminal_event_pages(
+    store,
+    monkeypatch,
+):
+    _pending_private_source_manifest_rows(store)
+    target = dict(
+        store.select_many_results[
+            "research_lab_candidate_promotion_events:promotion_checked"
+        ][0]
+    )
+    resolved = [
+        {
+            **target,
+            "promotion_event_id": f"pe-resolved-{index}",
+            "candidate_id": f"cand-resolved-{index}",
+            "source_score_bundle_id": f"sb-resolved-{index}",
+        }
+        for index in range(1_001)
+    ]
+    store.select_many_results[
+        "research_lab_candidate_promotion_events:promotion_checked"
+    ] = [*resolved, target]
+    store.select_many_results[
+        "research_lab_candidate_promotion_events:champion_reward_created"
+    ] = [
+        {
+            "candidate_id": row["candidate_id"],
+            "source_score_bundle_id": row["source_score_bundle_id"],
+            "event_type": "champion_reward_created",
+        }
+        for row in resolved
+    ]
+
+    candidate_history_calls: list[str] = []
+    def candidate_events(kwargs: Mapping[str, Any]) -> list[dict[str, Any]]:
+        filters = tuple(kwargs.get("filters") or ())
+        candidate_filter = next(
+            (value for field, value in filters if field == "candidate_id"),
+            "",
+        )
+        candidate_history_calls.append(str(candidate_filter))
+        return []
+
+    store.select_many_results[
+        "research_lab_candidate_promotion_events"
+    ] = candidate_events
+    calls: list[str] = []
+
+    async def _fake_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(str(kwargs["candidate"]["candidate_id"]))
+        return {"status": "merged"}
+
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "process_scored_candidate",
+        _fake_process,
+    )
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=0,
+        limit=1,
+    )
+
+    assert result["attempted_recoveries"] == 1
+    assert result["finalized"] == 1
+    assert calls == ["cand-1"]
+    assert candidate_history_calls == ["cand-1"]
+    assert len(result["results"]) == 1_002
+    assert all(
+        row["status"] == "already_rewarded"
+        for row in result["results"][:-1]
+    )
+    assert result["results"][-1]["status"] == "merged"
+
+
+async def test_private_source_reconcile_pages_use_unique_event_order(store):
+    _pending_private_source_manifest_rows(store)
+
+    await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=True,
+        retry_after_seconds=0,
+    )
+
+    paginated_orders = [
+        order_by
+        for table, order_by in store.select_all_order_by_calls
+        if table == "research_lab_candidate_promotion_events"
+    ]
+    assert paginated_orders
+    assert all(
+        order_by
+        == (("created_at", True), ("promotion_event_id", True))
+        for order_by in paginated_orders
+    )
 
 
 async def test_private_source_push_reconciler_marks_fresh_stale_parent_for_rebase(store, monkeypatch):

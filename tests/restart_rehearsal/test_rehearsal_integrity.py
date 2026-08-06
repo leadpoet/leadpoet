@@ -3650,6 +3650,9 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "signed_private_model_contract_transition_exact" in set(
         behavior_contract["required_invariant_ids"]
     )
+    assert "delayed_private_source_manifest_recovery_verified" in set(
+        behavior_contract["required_invariant_ids"]
+    )
     assert "proxy-authorization:" in tls_proxy_service
     assert "ssl.PROTOCOL_TLS_SERVER" in tls_proxy_service
     assert '"openrouter.ai:443"' in tls_proxy_service
@@ -4372,6 +4375,15 @@ def test_candidate_behavior_scenarios_follow_nondefault_policy(
         str(last_field): 6
         for last_field in historical_layouts["accepted_layouts"]
     }
+
+
+def test_candidate_owned_guard_probe_does_not_mutate_rollback_transition_ledger(
+) -> None:
+    source = Path(production_workflow_runner.__file__).read_text(encoding="utf-8")
+
+    assert source.count("activate(v8_id)\n") == 1
+    assert source.count("activate(v8_id, record_transition=False)\n") == 1
+    assert "if record_transition:\n            transitions.append(" in source
 
 
 def test_historical_layout_scenario_follows_candidate_policy(

@@ -25,6 +25,79 @@ from gateway.research_lab.promotion import (
 )
 
 
+@pytest.mark.asyncio
+async def test_source_manifest_reconcile_precedes_baseline_repo_head_sync(monkeypatch):
+    calls: list[str] = []
+    reconcile_result = {
+        "ok": True,
+        "retried": 1,
+        "finalized": 1,
+        "results": [{"candidate_id": "candidate:pending"}],
+    }
+
+    async def maintenance_state():
+        return {"paused": False, "reason": ""}
+
+    async def preflight(self, state):
+        assert state["paused"] is False
+        return {"proceed": True, "verdicts": []}
+
+    async def reconcile(config, *, worker_ref, dry_run):
+        assert config.auto_promotion_enabled is True
+        assert worker_ref == "ordering-worker"
+        assert dry_run is False
+        calls.append("reconcile")
+        return reconcile_result
+
+    async def baseline(self):
+        calls.append("baseline")
+        return {"status": "baseline_checkpoint_recycle"}
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(sw, "reconcile_failed_private_source_pushes", reconcile)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_lease_held_recovery_and_preflight",
+        preflight,
+    )
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_private_baseline_contained",
+        baseline,
+    )
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_is_private_baseline_owner",
+        lambda self: True,
+    )
+
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_enabled=True,
+        production_writes_enabled=True,
+        evaluation_bundles_enabled=True,
+        scoring_worker_require_proxy=False,
+        scoring_worker_index=0,
+        auto_promotion_enabled=True,
+        private_baseline_rebenchmark_enabled=True,
+    )
+    worker.proxy_url = ""
+    worker.worker_ref = "ordering-worker"
+    worker._last_private_source_push_reconcile_at = float("-inf")
+
+    result = await worker.run_once()
+
+    assert calls == ["reconcile", "baseline"]
+    assert result["status"] == "baseline_checkpoint_recycle"
+    assert result["private_source_reconcile"] == reconcile_result
+
+
+def test_private_source_reconcile_is_due_on_first_worker_pass():
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+
+    assert worker._last_private_source_push_reconcile_at == float("-inf")
+
+
 EVENT_DOC_BANNED_RE = re.compile(
     r"(sk-or-|openrouter_api_key|raw_openrouter_key|raw_secret|service_role|"
     r"private_repo|judge_prompt|hidden_icp|icp_plaintext|\.dkr\.ecr\.|"

@@ -319,14 +319,17 @@ async def _test_candidate_claim_skips_retry_cooldowns() -> None:
     ]
     events: list[dict[str, Any]] = []
     assigned_hash = "sha256:" + "3" * 64
-    original_select_many = scoring_mod.select_many
+    original_call_rpc = scoring_mod.call_rpc
     original_select_one = scoring_mod.select_one
     original_create_event = scoring_mod.create_candidate_evaluation_event
     original_project = scoring_mod.safe_project_public_loop_activity
 
-    async def fake_select_many(table: str, **kwargs: Any) -> list[dict[str, Any]]:
-        assert table == "research_lab_candidate_evaluation_current"
-        return [dict(row) for row in rows]
+    async def fake_call_rpc(function_name: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+        assert function_name == "claim_next_research_lab_candidate"
+        assert params["p_holder_ref"] == "scorer-test"
+        assert params["p_baseline_not_ready_retry_seconds"] == 900
+        assert params["p_retryable_failure_retry_seconds"] == 300
+        return [dict(rows[1])]
 
     async def fake_select_one(table: str, **kwargs: Any) -> dict[str, Any] | None:
         candidate_id = kwargs.get("filters", (("", ""),))[0][1]
@@ -345,8 +348,11 @@ async def _test_candidate_claim_skips_retry_cooldowns() -> None:
     async def fake_project(*args: Any, **kwargs: Any) -> None:
         return None
 
+    async def fake_start_gate() -> dict[str, Any]:
+        return {"available": True}
+
     try:
-        scoring_mod.select_many = fake_select_many  # type: ignore[assignment]
+        scoring_mod.call_rpc = fake_call_rpc  # type: ignore[assignment]
         scoring_mod.select_one = fake_select_one  # type: ignore[assignment]
         scoring_mod.create_candidate_evaluation_event = fake_create_event  # type: ignore[assignment]
         scoring_mod.safe_project_public_loop_activity = fake_project  # type: ignore[assignment]
@@ -355,12 +361,13 @@ async def _test_candidate_claim_skips_retry_cooldowns() -> None:
             scoring_worker_retryable_failure_retry_seconds=300,
         )
         worker = scoring_mod.ResearchLabGatewayScoringWorker(config, worker_ref="scorer-test")
+        worker._candidate_scoring_start_gate = fake_start_gate  # type: ignore[method-assign]
         claimed = await worker._claim_next_candidate()
         assert claimed is not None
         assert claimed["candidate_id"] == "candidate:" + "2" * 64
         assert events[0]["event_type"] == "assigned"
     finally:
-        scoring_mod.select_many = original_select_many  # type: ignore[assignment]
+        scoring_mod.call_rpc = original_call_rpc  # type: ignore[assignment]
         scoring_mod.select_one = original_select_one  # type: ignore[assignment]
         scoring_mod.create_candidate_evaluation_event = original_create_event  # type: ignore[assignment]
         scoring_mod.safe_project_public_loop_activity = original_project  # type: ignore[assignment]

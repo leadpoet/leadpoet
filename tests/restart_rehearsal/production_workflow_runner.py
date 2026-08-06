@@ -514,7 +514,11 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     )
     transitions: list[dict[str, Any]] = []
 
-    def activate(contract_id: str) -> Any:
+    def activate(
+        contract_id: str,
+        *,
+        record_transition: bool = True,
+    ) -> Any:
         release = SIGNED_PRIVATE_MODEL_RELEASES[contract_id]
         install(PRIVATE_MODEL_BRANCH_POINTER_URI, _canonical(release) + b"\n")
         loaded = load_private_artifact_manifest(PRIVATE_MODEL_BRANCH_POINTER_URI)
@@ -555,16 +559,17 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
             raise RuntimeError(
                 f"{contract_id} scoring model authority differs"
             )
-        transitions.append(
-            {
-                "contract_id": contract_id,
-                "git_commit_sha": release["git_commit_sha"],
-                "image_digest": release["image_digest"],
-                "manifest_hash": release["manifest_hash"],
-                "scoring_model_authority_verified": True,
-                "signature_verified": True,
-            }
-        )
+        if record_transition:
+            transitions.append(
+                {
+                    "contract_id": contract_id,
+                    "git_commit_sha": release["git_commit_sha"],
+                    "image_digest": release["image_digest"],
+                    "manifest_hash": release["manifest_hash"],
+                    "scoring_model_authority_verified": True,
+                    "signature_verified": True,
+                }
+            )
         return artifact
 
     v7_id = "leadpoet-sourcing-wrapper-contract-v7"
@@ -592,11 +597,38 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     original_head_resolver = promotion_module._resolve_private_repo_head_sha
     original_active_rows = promotion_module._active_private_model_version_rows
     original_sync_enabled = promotion_module.repo_head_sync_enabled
+    original_lineage_select_all = promotion_module.select_all
+    candidate_owned_head_enabled = False
+
+    async def lineage_select_all(
+        table: str,
+        **_kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        if table == "research_lab_private_repo_commit_events":
+            if not candidate_owned_head_enabled:
+                return []
+            return [
+                {
+                    "commit_event_id": "rehearsal-candidate-source-push",
+                    "commit_status": "pushed",
+                    "git_commit_sha": lineage_state["repo_head"],
+                    "candidate_id": "rehearsal-candidate",
+                    "score_bundle_id": "rehearsal-score-bundle",
+                    "created_at": NOW,
+                }
+            ]
+        if table == "research_lab_candidate_promotion_events":
+            return []
+        raise RuntimeError(
+            f"unexpected durable lineage table in rehearsal: {table}"
+        )
+
     promotion_module._resolve_private_repo_head_sha = (
         lambda **_kwargs: str(lineage_state["repo_head"])
     )
     promotion_module._active_private_model_version_rows = active_rows
     promotion_module.repo_head_sync_enabled = lambda: True
+    promotion_module.select_all = lineage_select_all
     lineage_checks: dict[str, str] = {}
     try:
         activate(v7_id)
@@ -698,6 +730,27 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         lineage_checks["v7_rollback_active"] = str(
             rollback_active.get("status") or ""
         )
+
+        # A candidate push owns its exact source SHA until the normal
+        # promotion path records active_version_created. Daily baseline sync
+        # must not turn that same SHA into a generic repo-head release while
+        # delayed current.json reconciliation is pending.
+        activate(v8_id, record_transition=False)
+        lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[v8_id][
+            "git_commit_sha"
+        ]
+        lineage_state["active"] = active_row(v7_id)
+        candidate_owned_head_enabled = True
+        candidate_owned_plan = asyncio.run(
+            promotion_module.sync_active_model_to_repo_head(
+                config,
+                dry_run=True,
+                wait_for_repo_head=False,
+            )
+        )
+        lineage_checks["candidate_owned_head_pending"] = str(
+            candidate_owned_plan.get("status") or ""
+        )
     finally:
         promotion_module._resolve_private_repo_head_sha = (
             original_head_resolver
@@ -706,6 +759,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
             original_active_rows
         )
         promotion_module.repo_head_sync_enabled = original_sync_enabled
+        promotion_module.select_all = original_lineage_select_all
 
     expected_lineage_checks = {
         "v7_active": "active_is_repo_head",
@@ -714,12 +768,265 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         "v8_active": "active_is_repo_head",
         "v7_rollback_plan": "would_sync_active_model_to_repo_head",
         "v7_rollback_active": "active_is_repo_head",
+        "candidate_owned_head_pending": "candidate_source_publication_pending",
     }
     _require_equal(
         lineage_checks,
         expected_lineage_checks,
         "active lineage or rebenchmark transition differs",
     )
+
+    pending_event = {
+        "promotion_event_id": "rehearsal-manifest-pending",
+        "candidate_id": "rehearsal-candidate",
+        "source_score_bundle_id": "rehearsal-score-bundle",
+        "event_type": "promotion_checked",
+        "promotion_status": "checked",
+        "event_doc": {"reason": "source_pushed_manifest_pending"},
+        "created_at": "2026-07-25T00:00:00+00:00",
+    }
+    pending_candidate = {
+        "candidate_id": "rehearsal-candidate",
+        "current_score_bundle_id": "rehearsal-score-bundle",
+    }
+    resolved_pending_event_count = 1_001
+    resolved_pending_events = [
+        {
+            **pending_event,
+            "promotion_event_id": f"rehearsal-manifest-already-recovered-{index}",
+            "candidate_id": f"rehearsal-resolved-candidate-{index}",
+            "source_score_bundle_id": f"rehearsal-resolved-score-bundle-{index}",
+            "created_at": "2026-07-26T00:00:00+00:00",
+        }
+        for index in range(resolved_pending_event_count)
+    ]
+    pending_bundle = {
+        "score_bundle_id": "rehearsal-score-bundle",
+        "score_bundle_doc": {
+            "candidate_artifact_hash": "sha256:" + "c" * 64,
+            "parent_artifact_hash": "sha256:" + "a" * 64,
+            "icp_set_hash": "sha256:" + "3" * 64,
+            "evaluation_epoch": 30_000,
+            "score_bundle_hash": "sha256:" + "5" * 64,
+            "aggregates": {},
+        },
+    }
+    original_select_all = promotion_module.select_all
+    original_select_many = promotion_module.select_many
+    original_select_one = promotion_module.select_one
+    original_process_scored = (
+        promotion_module.ResearchLabPromotionController.process_scored_candidate
+    )
+
+    async def pending_select_many(
+        table: str,
+        *,
+        filters: Any,
+        **_kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        if table != "research_lab_candidate_promotion_events":
+            return []
+        normalized = dict(filters)
+        event_type = str(normalized.get("event_type") or "")
+        if event_type:
+            return []
+        candidate_id = str(normalized.get("candidate_id") or "")
+        if candidate_id.startswith("rehearsal-resolved-candidate-"):
+            raise RuntimeError(
+                "terminal manifest recovery performed an N+1 candidate read"
+            )
+        if normalized.get("candidate_id") == "rehearsal-candidate":
+            return [dict(pending_event)]
+        return []
+
+    async def pending_select_all(
+        table: str,
+        *,
+        filters: Any,
+        **_kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        if table != "research_lab_candidate_promotion_events":
+            return []
+        normalized = dict(filters)
+        event_type = str(normalized.get("event_type") or "")
+        if event_type == "champion_reward_created":
+            return [
+                {
+                    "candidate_id": event["candidate_id"],
+                    "source_score_bundle_id": event["source_score_bundle_id"],
+                    "event_type": "champion_reward_created",
+                }
+                for event in resolved_pending_events
+            ]
+        if event_type != "promotion_checked":
+            return []
+        if str(normalized.get("event_doc->>reason") or "") != (
+            "source_pushed_manifest_pending"
+        ):
+            return []
+        return [
+            *(dict(event) for event in resolved_pending_events),
+            dict(pending_event),
+        ]
+
+    async def pending_select_one(
+        table: str,
+        *,
+        filters: Any,
+        **_kwargs: Any,
+    ) -> dict[str, Any] | None:
+        normalized = dict(filters)
+        if (
+            table == "research_lab_candidate_evaluation_current"
+            and normalized.get("candidate_id") == "rehearsal-candidate"
+        ):
+            return dict(pending_candidate)
+        if (
+            table == "research_evaluation_score_bundle_current"
+            and normalized.get("score_bundle_id") == "rehearsal-score-bundle"
+        ):
+            return dict(pending_bundle)
+        return None
+
+    async def pending_process_scored(
+        _self: Any,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        return {"status": "merged"}
+
+    try:
+        promotion_module.select_all = pending_select_all
+        promotion_module.select_many = pending_select_many
+        promotion_module.select_one = pending_select_one
+        promotion_module.ResearchLabPromotionController.process_scored_candidate = (
+            pending_process_scored
+        )
+        pending_reconcile = asyncio.run(
+            promotion_module.reconcile_failed_private_source_pushes(
+                config,
+                worker_ref="rehearsal-worker",
+                retry_after_seconds=0,
+                dry_run=False,
+            )
+        )
+    finally:
+        promotion_module.select_all = original_select_all
+        promotion_module.select_many = original_select_many
+        promotion_module.select_one = original_select_one
+        promotion_module.ResearchLabPromotionController.process_scored_candidate = (
+            original_process_scored
+        )
+    manifest_pending_reconciled = bool(
+        pending_reconcile.get("finalized") == 1
+        and pending_reconcile.get("results")
+        and len(pending_reconcile["results"])
+        == resolved_pending_event_count + 1
+        and all(
+            item.get("status") == "already_rewarded"
+            for item in pending_reconcile["results"][:-1]
+        )
+        and pending_reconcile["results"][-1].get("status") == "merged"
+        and pending_reconcile["results"][-1].get("recovery_event_type")
+        == "promotion_checked"
+        and pending_reconcile["results"][-1].get("recovery_reason")
+        == "source_pushed_manifest_pending"
+        and pending_reconcile.get("attempted_recoveries") == 1
+    )
+    if not manifest_pending_reconciled:
+        raise RuntimeError("delayed signed manifest was not reconciled")
+
+    from gateway.research_lab import scoring_worker as scoring_worker_module
+
+    scoring_order: list[str] = []
+    original_maintenance_state = scoring_worker_module.get_scoring_maintenance_state
+    original_worker_reconcile = (
+        scoring_worker_module.reconcile_failed_private_source_pushes
+    )
+    original_worker_preflight = (
+        scoring_worker_module.ResearchLabGatewayScoringWorker._run_lease_held_recovery_and_preflight
+    )
+    original_worker_baseline = (
+        scoring_worker_module.ResearchLabGatewayScoringWorker._run_private_baseline_contained
+    )
+    original_baseline_owner = (
+        scoring_worker_module.ResearchLabGatewayScoringWorker._is_private_baseline_owner
+    )
+
+    async def scoring_maintenance_state() -> dict[str, Any]:
+        return {"paused": False, "reason": ""}
+
+    async def scoring_preflight(_self: Any, _state: Any) -> dict[str, Any]:
+        return {"proceed": True, "verdicts": []}
+
+    async def scoring_reconcile(
+        _config: Any,
+        *,
+        worker_ref: str,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        if worker_ref != "rehearsal-ordering-worker" or dry_run is not False:
+            raise RuntimeError("scoring reconciliation invocation differs")
+        scoring_order.append("reconcile")
+        return {"ok": True, "retried": 1, "finalized": 1, "results": []}
+
+    async def scoring_baseline(_self: Any) -> dict[str, Any]:
+        scoring_order.append("baseline")
+        return {"status": "baseline_checkpoint_recycle"}
+
+    try:
+        scoring_worker_module.get_scoring_maintenance_state = (
+            scoring_maintenance_state
+        )
+        scoring_worker_module.reconcile_failed_private_source_pushes = (
+            scoring_reconcile
+        )
+        scoring_worker_module.ResearchLabGatewayScoringWorker._run_lease_held_recovery_and_preflight = (
+            scoring_preflight
+        )
+        scoring_worker_module.ResearchLabGatewayScoringWorker._run_private_baseline_contained = (
+            scoring_baseline
+        )
+        scoring_worker_module.ResearchLabGatewayScoringWorker._is_private_baseline_owner = (
+            lambda _self: True
+        )
+        ordering_worker = object.__new__(
+            scoring_worker_module.ResearchLabGatewayScoringWorker
+        )
+        ordering_worker.config = SimpleNamespace(
+            scoring_worker_enabled=True,
+            production_writes_enabled=True,
+            evaluation_bundles_enabled=True,
+            scoring_worker_require_proxy=False,
+            scoring_worker_index=0,
+            auto_promotion_enabled=True,
+            private_baseline_rebenchmark_enabled=True,
+        )
+        ordering_worker.proxy_url = ""
+        ordering_worker.worker_ref = "rehearsal-ordering-worker"
+        ordering_worker._last_private_source_push_reconcile_at = float("-inf")
+        ordering_result = asyncio.run(ordering_worker.run_once())
+    finally:
+        scoring_worker_module.get_scoring_maintenance_state = (
+            original_maintenance_state
+        )
+        scoring_worker_module.reconcile_failed_private_source_pushes = (
+            original_worker_reconcile
+        )
+        scoring_worker_module.ResearchLabGatewayScoringWorker._run_lease_held_recovery_and_preflight = (
+            original_worker_preflight
+        )
+        scoring_worker_module.ResearchLabGatewayScoringWorker._run_private_baseline_contained = (
+            original_worker_baseline
+        )
+        scoring_worker_module.ResearchLabGatewayScoringWorker._is_private_baseline_owner = (
+            original_baseline_owner
+        )
+    manifest_reconcile_precedes_baseline = bool(
+        scoring_order == ["reconcile", "baseline"]
+        and ordering_result.get("status") == "baseline_checkpoint_recycle"
+    )
+    if not manifest_reconcile_precedes_baseline:
+        raise RuntimeError("delayed manifest reconciliation did not precede baseline")
 
     hybrid_manifest_rejections: dict[str, str] = {}
     for contract_id, parity_id in ((v7_id, v8_id), (v8_id, v7_id)):
@@ -874,6 +1181,17 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         "lineage_rebenchmark_checks": lineage_checks,
         "lineage_rebenchmark_verified": (
             lineage_checks == expected_lineage_checks
+        ),
+        "manifest_pending_reconciled": manifest_pending_reconciled,
+        "manifest_reconcile_crosses_terminal_events": (
+            manifest_pending_reconciled
+        ),
+        "manifest_reconcile_precedes_baseline": (
+            manifest_reconcile_precedes_baseline
+        ),
+        "candidate_owned_repo_head_sync_blocked": (
+            lineage_checks.get("candidate_owned_head_pending")
+            == "candidate_source_publication_pending"
         ),
         "pointer_source_mismatch_rejected": (pointer_source_mismatch_rejected),
         "provider_bindings": observed_provider_bindings,
@@ -6486,6 +6804,43 @@ def main() -> int:
                 "signed-private-model-contract-transition",
                 {},
             ).get("lineage_rebenchmark_verified")
+            is True
+            and behavior_evidence.get(
+                "signed-private-model-contract-transition",
+                {},
+            ).get("manifest_pending_reconciled")
+            is True
+            and behavior_evidence.get(
+                "signed-private-model-contract-transition",
+                {},
+            ).get("manifest_reconcile_crosses_terminal_events")
+            is True
+            and behavior_evidence.get(
+                "signed-private-model-contract-transition",
+                {},
+            ).get("manifest_reconcile_precedes_baseline")
+            is True
+        ),
+        "delayed_private_source_manifest_recovery_verified": (
+            behavior_evidence.get(
+                "signed-private-model-contract-transition",
+                {},
+            ).get("manifest_pending_reconciled")
+            is True
+            and behavior_evidence.get(
+                "signed-private-model-contract-transition",
+                {},
+            ).get("manifest_reconcile_crosses_terminal_events")
+            is True
+            and behavior_evidence.get(
+                "signed-private-model-contract-transition",
+                {},
+            ).get("manifest_reconcile_precedes_baseline")
+            is True
+            and behavior_evidence.get(
+                "signed-private-model-contract-transition",
+                {},
+            ).get("candidate_owned_repo_head_sync_blocked")
             is True
         ),
         "model_sandbox_final_provider_cost_scope_bound": (

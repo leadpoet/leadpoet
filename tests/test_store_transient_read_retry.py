@@ -178,6 +178,69 @@ def test_select_one_rebuilds_retry_with_generator_filters(monkeypatch):
     assert observed_filters == [(0, "id", 7), (1, "id", 7)]
 
 
+def test_select_all_crosses_postgrest_page_with_identical_query(monkeypatch):
+    rows = [{"id": index} for index in range(1_001)]
+    ranges = []
+    filters = []
+    orders = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+
+    class _Query:
+        def __init__(self):
+            self.start = 0
+            self.end = -1
+
+        def select(self, columns):
+            assert columns == "id"
+            return self
+
+        def eq(self, field, value):
+            filters.append((field, value))
+            return self
+
+        def order(self, field, *, desc):
+            orders.append((field, desc))
+            return self
+
+        def range(self, start, end):
+            self.start = start
+            self.end = end
+            ranges.append((start, end))
+            return self
+
+        def execute(self):
+            return _Response(rows[self.start : self.end + 1])
+
+    class _Client:
+        def table(self, table):
+            assert table == "events"
+            return _Query()
+
+    monkeypatch.setattr(store, "get_write_client", lambda: _Client())
+
+    result = asyncio.run(
+        store.select_all(
+            "events",
+            columns="id",
+            filters=(("event_type", "promotion_checked"),),
+            order_by=(("created_at", True),),
+            batch_size=1_000,
+            max_rows=2_000,
+        )
+    )
+
+    assert result == rows
+    assert ranges == [(0, 999), (1_000, 1_999)]
+    assert filters == [
+        ("event_type", "promotion_checked"),
+        ("event_type", "promotion_checked"),
+    ]
+    assert orders == [("created_at", True), ("created_at", True)]
+
+
 def test_json_null_filter_uses_postgrest_is_operator():
     calls = []
 

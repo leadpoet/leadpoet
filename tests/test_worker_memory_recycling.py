@@ -147,7 +147,10 @@ async def test_hosted_worker_recycles_between_passes_above_rss_limit(
         lambda **_kwargs: 4096,
     )
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(
+        logging.WARNING,
+        logger="gateway.research_lab.worker",
+    ):
         await worker.run_forever()
 
     assert "research_lab_hosted_worker_recycle" in caplog.text

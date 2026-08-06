@@ -244,6 +244,13 @@ async def test_parallel_baseline_recycles_only_after_checkpointed_wave(monkeypat
         checkpointed.append(int(row["_item_index"]))
         return True
 
+    async def maintenance_state():
+        return {"paused": False}
+
+    monkeypatch.setattr(
+        "gateway.research_lab.scoring_worker.get_scoring_maintenance_state",
+        maintenance_state,
+    )
     monkeypatch.setattr(ResearchLabGatewayScoringWorker, "_run_baseline_icp", run_icp)
     monkeypatch.setattr(
         "gateway.research_lab.scoring_worker._baseline_checkpoint_recycle_pressure",
@@ -323,6 +330,13 @@ async def test_parallel_baseline_resumes_across_recycles_without_duplicate_icps(
         }
         return True
 
+    async def maintenance_state():
+        return {"paused": False}
+
+    monkeypatch.setattr(
+        "gateway.research_lab.scoring_worker.get_scoring_maintenance_state",
+        maintenance_state,
+    )
     monkeypatch.setattr(ResearchLabGatewayScoringWorker, "_run_baseline_icp", run_icp)
     monkeypatch.setattr(
         "gateway.research_lab.scoring_worker._baseline_checkpoint_recycle_pressure",

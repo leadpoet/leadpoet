@@ -967,6 +967,28 @@ def _scoring_maintenance_lease_ttl_seconds() -> int:
         return 180
 
 
+def _operator_scoring_pause_active(state: Mapping[str, Any]) -> bool:
+    """True for durable operator pauses, including fail-closed read failures."""
+
+    return bool(state.get("paused")) and not str(
+        state.get("reason") or ""
+    ).startswith(PREFLIGHT_REASON_PREFIX)
+
+
+async def _enforce_baseline_wave_maintenance_boundary(
+    *,
+    completed_icps: int,
+    total_icps: int,
+) -> None:
+    state = await get_scoring_maintenance_state()
+    if _operator_scoring_pause_active(state):
+        raise BaselineMaintenancePause(
+            completed_icps=completed_icps,
+            total_icps=total_icps,
+            maintenance_state=state,
+        )
+
+
 def _idle_backoff_max_seconds(base_poll: float) -> float:
     """Cap for idle exponential backoff of candidate polling (default 60s)."""
     try:
@@ -1146,6 +1168,25 @@ class BaselineCheckpointRecycle(RuntimeError):
             f"completed_icps={self.completed_icps}/{self.total_icps} "
             f"rss_mb={self.pressure.get('rss_mb')} "
             f"available_memory_mb={self.pressure.get('available_memory_mb')}"
+        )
+
+
+class BaselineMaintenancePause(RuntimeError):
+    """Stop a baseline at a settled wave after an operator scoring pause."""
+
+    def __init__(
+        self,
+        *,
+        completed_icps: int,
+        total_icps: int,
+        maintenance_state: Mapping[str, Any],
+    ) -> None:
+        self.completed_icps = int(completed_icps)
+        self.total_icps = int(total_icps)
+        self.maintenance_state = dict(maintenance_state)
+        super().__init__(
+            "private baseline stopped at maintenance boundary: "
+            f"completed_icps={self.completed_icps}/{self.total_icps}"
         )
 
 
@@ -3820,9 +3861,7 @@ class ResearchLabGatewayScoringWorker:
                     "status": "scoring_worker_proxy_required",
                 }
         maintenance_state = await get_scoring_maintenance_state()
-        if bool(maintenance_state.get("paused")) and not str(
-            maintenance_state.get("reason") or ""
-        ).startswith(PREFLIGHT_REASON_PREFIX):
+        if _operator_scoring_pause_active(maintenance_state):
             # Operator/manual pauses stop the pass outright. A pause carrying
             # the preflight marker instead falls through to the preflight gate
             # below, which auto-resumes once providers recover.
@@ -3856,18 +3895,19 @@ class ResearchLabGatewayScoringWorker:
         if (
             isinstance(baseline_result, Mapping)
             and str(baseline_result.get("status") or "")
-            == "baseline_checkpoint_recycle"
+            in {"baseline_checkpoint_recycle", "baseline_maintenance_paused"}
         ):
+            baseline_status = str(baseline_result["status"])
             return {
                 "processed": True,
-                "status": "baseline_checkpoint_recycle",
+                "status": baseline_status,
                 "candidate_ids": [],
                 "baseline": baseline_result,
                 "confirmation": None,
                 "private_source_reconcile": None,
                 "candidate_claim_capacity": {"available": False},
                 "candidate_start_gate": None,
-                "recycle_requested": True,
+                "recycle_requested": baseline_status == "baseline_checkpoint_recycle",
             }
 
         # §5.2-2: run at most one pending confirmation measurement per pass.
@@ -11694,6 +11734,90 @@ class ResearchLabGatewayScoringWorker:
                 health_gate_enforced=bool(self.config.baseline_health_gate_enforced),
                 max_day_jump=_baseline_max_day_jump_points(),
             )
+        except BaselineMaintenancePause as exc:
+            await _stop_baseline_telemetry_heartbeat()
+            event_doc = {
+                "benchmark_date": today,
+                "benchmark_attempt": benchmark_attempt,
+                "selected_icp_count": len(window.item_refs),
+                "completed_icp_count": exc.completed_icps,
+                "private_model_manifest_hash": artifact.manifest_hash,
+                "failure_phase": "maintenance_pause",
+                "terminal_no_automatic_retry": False,
+                "scoring_worker_source_hash": _scoring_worker_source_hash(),
+                "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
+                "elapsed_seconds": round(time.time() - start, 3),
+            }
+            try:
+                await create_scoring_dispatch_event(
+                    dispatch_type="private_baseline_rebenchmark",
+                    dispatch_status="failed",
+                    worker_ref=self.worker_ref,
+                    proxy_ref_hash=self.proxy_ref_hash,
+                    rolling_window_hash=window.window_hash,
+                    scoring_id=(
+                        baseline_telemetry_session.run.scoring_id
+                        if baseline_telemetry_session is not None
+                        and baseline_telemetry_session.run is not None
+                        else None
+                    ),
+                    scoring_run_id=(
+                        baseline_telemetry_session.run.scoring_run_id
+                        if baseline_telemetry_session is not None
+                        and baseline_telemetry_session.run is not None
+                        else None
+                    ),
+                    event_doc=event_doc,
+                )
+            except Exception as dispatch_exc:  # noqa: BLE001 - pause remains durable
+                logger.exception(
+                    "research_lab_baseline_maintenance_pause_dispatch_failed "
+                    "benchmark_date=%s completed_icps=%s error=%s",
+                    today,
+                    exc.completed_icps,
+                    _short_error(dispatch_exc),
+                )
+            if baseline_telemetry_session is not None:
+                try:
+                    await baseline_telemetry_session.cancel_active(
+                        failure_category="baseline_maintenance_paused",
+                        error=exc,
+                    )
+                    await emit_run_event(
+                        baseline_telemetry_session.run,
+                        "cancelled",
+                        failure_category="baseline_maintenance_paused",
+                        error=exc,
+                        telemetry_degraded=baseline_telemetry_session.degraded,
+                    )
+                except Exception as telemetry_exc:  # noqa: BLE001 - pause remains durable
+                    logger.exception(
+                        "research_lab_baseline_maintenance_pause_telemetry_failed "
+                        "benchmark_date=%s completed_icps=%s error=%s",
+                        today,
+                        exc.completed_icps,
+                        _short_error(telemetry_exc),
+                    )
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE MAINTENANCE PAUSED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Benchmark date", today),
+                        ("Rolling window", compact_ref(window.window_hash)),
+                        ("Completed ICPs", f"{exc.completed_icps}/{exc.total_icps}"),
+                        ("Action", "preserving durable checkpoints until scoring resumes"),
+                    ),
+                )
+            )
+            return {
+                "status": "baseline_maintenance_paused",
+                "benchmark_date": today,
+                "rolling_window_hash": window.window_hash,
+                "benchmark_attempt": benchmark_attempt,
+                "completed_icp_count": exc.completed_icps,
+                "selected_icp_count": exc.total_icps,
+            }
         except BaselineCheckpointRecycle as exc:
             await _stop_baseline_telemetry_heartbeat()
             event_doc = {
@@ -12717,6 +12841,14 @@ class ResearchLabGatewayScoringWorker:
         total_icps = len(items)
         resumed_by_ref = _progress_rows_by_icp_ref(resume_results)
         results: dict[int, dict[str, Any]] = {}
+
+        def completed_checkpoint_count() -> int:
+            return sum(
+                1
+                for entry in results.values()
+                if _baseline_summary_checkpointable(entry)
+            )
+
         run_items: list[tuple[int, Mapping[str, Any]]] = []
         for item_index, item in items:
             ref = _benchmark_item_ref_for_progress(item)
@@ -12783,12 +12915,12 @@ class ResearchLabGatewayScoringWorker:
             # high-water process can exit before it starves the gateway host.
             # Settle each wave before raising because blocking Docker waits
             # cannot be cancelled safely.
-            first_pass_wave_width = (
-                concurrency
-                if checkpoint_recycle_enabled
-                else max(1, len(run_items))
-            )
+            first_pass_wave_width = max(1, concurrency)
             for wave_start in range(0, len(run_items), first_pass_wave_width):
+                await _enforce_baseline_wave_maintenance_boundary(
+                    completed_icps=completed_checkpoint_count(),
+                    total_icps=total_icps,
+                )
                 wave = run_items[wave_start : wave_start + first_pass_wave_width]
                 settled = await asyncio.gather(
                     *(run_one(item_index, item) for item_index, item in wave),
@@ -12819,6 +12951,11 @@ class ResearchLabGatewayScoringWorker:
                             ),
                             total_icps=total_icps,
                         )
+
+            await _enforce_baseline_wave_maintenance_boundary(
+                completed_icps=completed_checkpoint_count(),
+                total_icps=total_icps,
+            )
 
             retried_total = 0
             recovered_total = 0
@@ -12883,12 +13020,15 @@ class ResearchLabGatewayScoringWorker:
                                 retry_checkpointed_indexes.add(item_index)
                         return entry
 
-                retry_width = (
-                    self.config.private_baseline_retry_concurrency
-                    if checkpoint_recycle_enabled
-                    else max(1, len(pending))
+                retry_width = max(
+                    1,
+                    self.config.private_baseline_retry_concurrency,
                 )
                 for wave_start in range(0, len(pending), retry_width):
+                    await _enforce_baseline_wave_maintenance_boundary(
+                        completed_icps=completed_checkpoint_count(),
+                        total_icps=total_icps,
+                    )
                     wave_indexes = pending[wave_start : wave_start + retry_width]
                     retried = await asyncio.gather(
                         *(retry_one(item_index) for item_index in wave_indexes),
@@ -12937,6 +13077,10 @@ class ResearchLabGatewayScoringWorker:
                                 ),
                                 total_icps=total_icps,
                             )
+            await _enforce_baseline_wave_maintenance_boundary(
+                completed_icps=completed_checkpoint_count(),
+                total_icps=total_icps,
+            )
             unresolved = sorted(
                 item_index
                 for item_index, entry in results.items()

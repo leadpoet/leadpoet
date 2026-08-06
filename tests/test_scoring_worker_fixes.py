@@ -1329,6 +1329,10 @@ async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
     async def checkpoint(row):  # noqa: ANN001
         checkpointed.append(row["icp_ref"])
 
+    async def maintenance_state():
+        return {"paused": False}
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
     monkeypatch.setattr(
         sw.ResearchLabGatewayScoringWorker,
         "_run_baseline_icp",
@@ -1361,6 +1365,150 @@ async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
     assert [row["icp_ref"] for row in rows] == ["icp-a", "icp-b"]
     assert [row["score"] for row in rows] == [7.0, 2.0]
     assert stats == {"retried": 0, "recovered": 0, "unresolved": 0}
+
+
+@pytest.mark.asyncio
+async def test_private_baseline_operator_pause_stops_before_next_wave(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=1,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=0,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[
+            {"icp_ref": "icp-a", "icp_hash": "hash-a"},
+            {"icp_ref": "icp-b", "icp_hash": "hash-b"},
+        ]
+    )
+    maintenance_states = iter(
+        (
+            {"paused": False},
+            {"paused": True, "reason": "operator_pause"},
+        )
+    )
+    called: list[int] = []
+    checkpointed: list[int] = []
+
+    async def maintenance_state():
+        return next(maintenance_states)
+
+    async def run_icp(self, *, item, item_index, **_kwargs):  # noqa: ANN001
+        called.append(item_index)
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": float(item_index),
+            "company_count": 1,
+            "sourced_count": 1,
+            "diagnostics": {},
+            "_item_index": item_index,
+            "_retryable": False,
+            "_nonempty": True,
+            "_runtime_error": "",
+            "_retry_backoff_seconds": 0.0,
+        }
+
+    async def checkpoint(row):  # noqa: ANN001
+        checkpointed.append(int(row["_item_index"]))
+        return True
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        run_icp,
+    )
+
+    with pytest.raises(sw.BaselineMaintenancePause) as raised:
+        await worker._run_baseline_batch_inner(
+            runner=object(),
+            retry_runner=object(),
+            scorer=object(),
+            window=window,
+            run_start=0.0,
+            icp_checkpoint=checkpoint,
+        )
+
+    assert called == [1]
+    assert checkpointed == [1]
+    assert raised.value.completed_icps == 1
+    assert raised.value.total_icps == 2
+
+
+@pytest.mark.asyncio
+async def test_private_baseline_operator_pause_stops_before_retry(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=1,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=1,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[{"icp_ref": "icp-a", "icp_hash": "hash-a"}]
+    )
+    maintenance_states = iter(
+        (
+            {"paused": False},
+            {"paused": True, "reason": "operator_pause"},
+        )
+    )
+    called = 0
+
+    async def maintenance_state():
+        return next(maintenance_states)
+
+    async def run_icp(self, *, item, item_index, **_kwargs):  # noqa: ANN001
+        nonlocal called
+        called += 1
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": 0.0,
+            "company_count": 0,
+            "sourced_count": 0,
+            "diagnostics": {},
+            "_item_index": item_index,
+            "_retryable": True,
+            "_nonempty": False,
+            "_runtime_error": "HTTP 500",
+            "_retry_backoff_seconds": 0.0,
+        }
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        run_icp,
+    )
+
+    with pytest.raises(sw.BaselineMaintenancePause):
+        await worker._run_baseline_batch_inner(
+            runner=object(),
+            retry_runner=object(),
+            scorer=object(),
+            window=window,
+            run_start=0.0,
+        )
+
+    assert called == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_preflight_pause_does_not_interrupt_active_wave(monkeypatch):
+    async def maintenance_state():
+        return {
+            "paused": True,
+            "reason": sw.PREFLIGHT_REASON_PREFIX + "temporary",
+        }
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    await sw._enforce_baseline_wave_maintenance_boundary(
+        completed_icps=0,
+        total_icps=40,
+    )
 
 
 @pytest.mark.asyncio
@@ -1518,6 +1666,10 @@ async def test_private_baseline_retry_round_uses_fresh_cost_scope(monkeypatch):
             "_retry_backoff_seconds": 0.0,
         }
 
+    async def maintenance_state():
+        return {"paused": False}
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
     monkeypatch.setattr(
         sw.ResearchLabGatewayScoringWorker,
         "_run_baseline_icp",

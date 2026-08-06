@@ -104,6 +104,53 @@ async def test_scoring_worker_accepts_bound_encrypted_proxy_profile(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_scoring_worker_does_not_claim_after_midpass_baseline_pause(monkeypatch):
+    states = iter(
+        (
+            {"paused": False},
+            {"paused": True, "reason": "operator_pause"},
+        )
+    )
+
+    async def maintenance_state():
+        return next(states)
+
+    async def preflight(_state):
+        return {"proceed": True}
+
+    async def baseline():
+        return {"status": "baseline_maintenance_paused"}
+
+    worker = object.__new__(
+        scoring_worker_module.ResearchLabGatewayScoringWorker
+    )
+    worker.config = SimpleNamespace(
+        scoring_worker_enabled=True,
+        production_writes_enabled=True,
+        evaluation_bundles_enabled=True,
+        scoring_worker_require_proxy=False,
+        private_baseline_rebenchmark_enabled=True,
+    )
+    worker.worker_ref = "scoring-test"
+    worker.proxy_url = ""
+    worker._is_private_baseline_owner = lambda: True
+    worker._run_lease_held_recovery_and_preflight = preflight
+    worker._run_private_baseline_contained = baseline
+
+    monkeypatch.setattr(
+        scoring_worker_module,
+        "get_scoring_maintenance_state",
+        maintenance_state,
+    )
+
+    result = await worker.run_once()
+
+    assert result["status"] == "baseline_maintenance_paused"
+    assert result["candidate_ids"] == []
+    assert result["recycle_requested"] is False
+
+
+@pytest.mark.asyncio
 async def test_scoring_worker_fails_closed_without_encrypted_proxy_profile(
     monkeypatch,
 ):

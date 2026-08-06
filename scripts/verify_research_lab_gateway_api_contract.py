@@ -65,14 +65,34 @@ def _config_from_env(
 
 def main() -> int:
     now = int(time.time())
-    defaults = ResearchLabGatewayConfig.from_env()
+    live_flag_names = set(ResearchLabGatewayConfig().live_mutation_flags())
+    default_contract_names = live_flag_names | {
+        "RESEARCH_LAB_GATEWAY_API_ENABLED",
+        "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED",
+        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED",
+        "RESEARCH_LAB_ALLOWED_ISLANDS",
+        "SUBTENSOR_NETWORK",
+        "NETUID",
+    }
+    defaults = _config_from_env(
+        set_values={"BITTENSOR_NETWORK": "local", "BITTENSOR_NETUID": "0"},
+        unset_values=default_contract_names,
+    )
     errors = []
     if defaults.api_enabled:
         errors.append("gateway API must default disabled")
     if defaults.production_writes_enabled:
         errors.append("production writes must default disabled")
-    if any(defaults.live_mutation_flags().values()):
-        errors.append("live mutation flags must default false")
+    expected_non_prod_live_flags = {
+        name: name
+        in {
+            "RESEARCH_LAB_CROWNING_ENABLED",
+            "RESEARCH_LAB_AUTO_PROMOTION_ENABLED",
+        }
+        for name in live_flag_names
+    }
+    if defaults.live_mutation_flags() != expected_non_prod_live_flags:
+        errors.append("non-production live mutation defaults diverged from policy")
     if defaults.evaluation_bundles_enabled:
         errors.append("evaluation bundle writes must default disabled")
     if defaults.loop_topups_enabled:
@@ -81,15 +101,12 @@ def main() -> int:
         errors.append("Research Lab launch must default to generalist-only research area")
     prod_defaults = _config_from_env(
         set_values={"BITTENSOR_NETWORK": "finney", "BITTENSOR_NETUID": "71"},
-        unset_values={
-            "RESEARCH_LAB_REIMBURSEMENTS_ENABLED",
-            "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED",
-        },
+        unset_values=default_contract_names,
     )
     if prod_defaults.reimbursements_enabled:
         errors.append("Research Lab reimbursements must be explicit opt-in even on production subnet")
-    if prod_defaults.weight_mutation_enabled:
-        errors.append("Research Lab weight mutation must be explicit opt-in even on production subnet")
+    if not prod_defaults.weight_mutation_enabled:
+        errors.append("Research Lab weight mutation must default on for the production subnet")
     payment_text = (ROOT / "gateway" / "qualification" / "api" / "payment.py").read_text(encoding="utf-8")
     helper_text = (ROOT / "gateway" / "qualification" / "utils" / "helpers.py").read_text(encoding="utf-8")
     for marker in ("fallback TAO", "taostats.io/api/price", "return 500.0", "return 400.0"):
@@ -432,7 +449,10 @@ def main() -> int:
         for error in errors:
             print(f"ERROR: {error}")
         return 1
-    print("Research Lab gateway API contract verified: routes mounted, flags default false, models round-trip, raw key rejected.")
+    print(
+        "Research Lab gateway API contract verified: routes mounted, "
+        "environment-independent flag policy, models round-trip, raw key rejected."
+    )
     return 0
 
 

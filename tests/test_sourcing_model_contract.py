@@ -18,9 +18,11 @@ import pytest
 from research_lab.sourcing_model_contract_check import (
     CONTRACT_PATH,
     CONTRACT_V11_PATH,
+    CONTRACT_V12_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
     PARITY_FIXTURE_V11_PATH,
+    PARITY_FIXTURE_V12_PATH,
     PARITY_FIXTURE_V7_PATH,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
@@ -434,7 +436,63 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
         "leadpoet-sourcing-wrapper-contract-v7",
         "leadpoet-sourcing-wrapper-contract-v8",
         "leadpoet-sourcing-wrapper-contract-v11",
+        "leadpoet-sourcing-wrapper-contract-v12",
     }
+
+
+def test_exact_v12_contact_contract_and_parity_pair_is_reviewed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "v12"
+    contract = json.loads(CONTRACT_V12_PATH.read_text(encoding="utf-8"))
+    parity = json.loads(PARITY_FIXTURE_V12_PATH.read_text(encoding="utf-8"))
+    contract_path = root / contract["canonical_path"]
+    parity_path = root / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V12_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V12_PATH.read_bytes())
+
+    resolved = resolve_reviewed_consumer_snapshot(root)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v12"
+    )
+    contact_cases = parity["contact_acquisition_parity_cases"]
+    assert {case["fulfillment_mode"] for case in contact_cases} == {
+        "company_only",
+        "contact_optional",
+        "contact_required",
+    }
+    projected_plans = [
+        item["contact_acquisition_plan"]
+        for item in parity["expected_contact_acquisition_projections"]
+    ]
+    assert next(
+        plan for plan in projected_plans
+        if plan["fulfillment_mode"] == "company_only"
+    )["binding_requests"] == []
+    optional = next(
+        plan for plan in projected_plans
+        if plan["fulfillment_mode"] == "contact_optional"
+        and len(plan["ordered_tool_ids"]) == 3
+    )
+    assert [request["tool_id"] for request in optional["binding_requests"]] == (
+        optional["ordered_tool_ids"]
+    )
+    assert all(
+        request["roles_any_of"] == ["VP Sales", "Founder"]
+        for request in optional["binding_requests"]
+    )
+    rendered = json.dumps(optional, sort_keys=True).casefold()
+    for private_field in (
+        "credential",
+        "endpoint",
+        "personal_email",
+        "phone_number",
+        "raw_provider",
+    ):
+        assert private_field not in rendered
 
 
 def test_mixed_reviewed_contract_and_parity_versions_fail_closed(

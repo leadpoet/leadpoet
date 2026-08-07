@@ -151,6 +151,30 @@ enclave, model-lineage, canonical-bundle, settlement, or fail-closed checks.
 `STOP` revokes the exception at the next safe atomic boundary. Every other
 skill and workflow remains under the default production-write prohibition.
 
+### Explicit local autoresearch authorization
+
+Only a newest-turn explicit instruction to run or start
+`$overnight-autoresearch-testing-local` activates this separate exception. An
+implicit trigger, diagnosis request, skill-creation request, or general
+authorization does not.
+
+While active and until the user says `STOP`, Codex may use the skill's fixed
+in-memory bridge to read only its allowlisted gateway secret groups, make
+budget-bound live OpenRouter validation and generation calls, create disposable
+local databases, containers, hotkeys, gateways, workers, Git trees,
+checkpoints, and candidates, and push tested permanent product or rehearsal
+fixes under normal repository, test, epoch, and attestation rules.
+
+This exception is local-only. It never permits production Supabase writes,
+production restarts or process manipulation, chain writes, production wallets,
+secret rotation or disclosure, candidate publication or promotion,
+model-pointer or branch mutation, fabricated provider output, or bypassing
+attestation, PCR0, exact-commit, encrypted-credential, model-lineage, Git-tree,
+receipt, archive, settlement, or fail-closed checks. Production access remains
+read-only and all test state must be disposable. Secret values may exist only
+in the bridge/orchestrator process memory and encrypted production request
+path, never files, arguments, logs, ledgers, or chat.
+
 ## Deployment timing
 
 Except for the push-now override, before a runtime, restart, release, manifest,

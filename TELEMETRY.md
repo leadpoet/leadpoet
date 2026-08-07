@@ -16,6 +16,60 @@ full contract.
 No bodies, query strings, headers, DB statements, model I/O, prompts, or
 completions. Health/liveness routes are suppressed entirely.
 
+## Service map
+
+One service reports telemetry: **`leadpoet-gateway`**. By design it emits a
+single `SERVER` span per HTTP request and nothing else — so it makes no
+instrumented outgoing (client) calls, and it reports **no environment**
+(`deployment.environment.name` is unset; the resource is a fixed attribute
+dict with a constant service name, never an env value).
+
+| service | incoming (server spans, `kind = 2`) | outgoing (client spans, `kind = 3`) | environments |
+|---|---|---|---|
+| `leadpoet-gateway` | HTTP routes across the families below | none — server spans only | none reported |
+
+**Incoming route families** (span name is `<method> <route-template>`; the
+list is the live surface observed over the trailing 7 days, grouped by area):
+
+- **Fulfillment** — `/fulfillment/results/{request_id}`,
+  `/fulfillment/requests/active`, `/fulfillment/scoring`,
+  `/fulfillment/leaderboard`, `/fulfillment/rewards/active`,
+  `/fulfillment/banned-hotkeys`, `/fulfillment/excluded-now/{request_id}`.
+- **Research Lab** — `/research-lab/source-adapters`, `/research-lab/status`,
+  `/research-lab/public/loops`, `/research-lab/public/loops/{ticket_id}`,
+  `/research-lab/public/loops/summary`,
+  `/research-lab/benchmarks/public/latest`,
+  `/research-lab/allocations/attested/{epoch}`,
+  `/research-lab/allocations/live/{epoch}`, `/research-lab/openrouter-keys`,
+  `/research-lab/openrouter-keys/credential-recipient`,
+  `/research-lab/tickets`, `/research-lab/loop-start`,
+  `/research-lab/reports/*`, `/research-lab/engine/issues`.
+- **Weights (v2)** — `/weights/v2/published/{netuid}/{epoch_id}`,
+  `/weights/v2/published-compact/{netuid}/{epoch_id}`,
+  `/weights/v2/release-evidence/{commit_sha}`,
+  `/weights/v2/latest/{netuid}/{epoch_id}`, `/weights/current/{netuid}`,
+  `/weights/inputs/v2`, `/weights/submit/v2`, `/weights/submit/compact/v2`,
+  `/weights/finalize/v2`, `/weights/finalize/compact/v2`,
+  `/weights/subnet-epoch/boundary/v1`.
+- **Attestation** — `/attestation/deploy-readiness`,
+  `/attestation/document`, `/attestation/health`, `/attest`,
+  `/attest/health`.
+- **Qualification** — `/qualification/model/presign`,
+  `/qualification/leaderboard`,
+  `/qualification/model/rate-limit/{miner_hotkey}`.
+- **Epoch** — `/epoch/state`, `/epoch/current`, `/epoch/{epoch_id}/leads`.
+- **Meta / root** — `/`, `/build-info`, `/health/v2-authority`, `/metrics`.
+- **Unresolved** — any path that matches no registered route exports the
+  fixed `/_unmatched` template (never the concrete path).
+
+The map has two sources that agree here: the routes the gateway registers in
+code and the server spans that actually arrive. Regenerate this section from
+live telemetry (server/client span names by `service_name`) whenever the doc
+is touched. Note: PR #41 wires standalone-collector *host metrics* for the
+gateway, but no gateway metrics are arriving at the OnePatch store yet — the
+only metrics present are OnePatch's own internal ones — so metrics are
+intentionally absent from this map until they land.
+
 ## Enabling (gateway host only)
 
 ```bash

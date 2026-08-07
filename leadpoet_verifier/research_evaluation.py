@@ -771,6 +771,16 @@ def verify_research_evaluation_score_bundle(
             per_icp_results,
             leads_per_icp_normalizer=int(aggregates.get("leads_per_icp_normalizer", DEFAULT_LEADS_PER_ICP_NORMALIZER)),
             lcb_z=float(aggregates.get("lcb_z", DEFAULT_LCB_Z)),
+            # Forward the FP-penalty policy params (recorded in the aggregates,
+            # like the two above) so the recompute reproduces the penalized
+            # per-ICP scores. Without these the recompute produced un-penalized
+            # scores + fp_penalty_points=0.0, so once the FP-penalty knob is
+            # enabled EVERY bundle failed verification and no candidate could be
+            # promoted.
+            fp_penalty_points=float(aggregates.get("fp_penalty_points", 0.0) or 0.0),
+            fp_unverified_primary_penalty_points=float(
+                aggregates.get("fp_unverified_primary_penalty_points", 0.0) or 0.0
+            ),
         )
         total_cost_usd = round(float(aggregates.get("total_cost_usd", 0.0) or 0.0), 6)
         recomputed_aggregates = {**recomputed_aggregates, "total_cost_usd": total_cost_usd}

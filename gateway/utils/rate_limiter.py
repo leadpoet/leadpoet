@@ -45,6 +45,12 @@ def _get_supabase():
 # Structure: {miner_hotkey: {submissions: int, rejections: int, reset_at: datetime, last_submission_time: datetime}}
 # Cache is loaded from Supabase on first use, then kept in sync
 _rate_limit_cache: Dict[str, Dict] = {}
+
+# Strong references to in-flight Supabase-sync tasks. asyncio only holds a weak
+# reference to a bare create_task(), so an un-referenced task can be
+# garbage-collected before it runs, silently dropping a rejection-count persist
+# (which later reloads a stale lower count and grants a miner extra allowance).
+_pending_sync_tasks: set = set()
 _cache_lock = threading.Lock()
 _cache_loaded = False  # Track if we've loaded from Supabase yet
 
@@ -629,9 +635,12 @@ def mark_submission_failed(miner_hotkey: str) -> Dict:
         # Increment ONLY rejections (submissions was already incremented in reserve_submission_slot)
         entry["rejections"] += 1
         
-        # Sync to Supabase (async, non-blocking)
+        # Sync to Supabase (async, non-blocking). Retain a strong reference so
+        # the task can't be GC'd before completion; drop it when done.
         try:
-            asyncio.create_task(_sync_to_supabase_async(miner_hotkey, entry))
+            _sync_task = asyncio.create_task(_sync_to_supabase_async(miner_hotkey, entry))
+            _pending_sync_tasks.add(_sync_task)
+            _sync_task.add_done_callback(_pending_sync_tasks.discard)
         except RuntimeError:
             print(f"⚠️  No event loop - Supabase sync deferred for {miner_hotkey[:10]}...")
         

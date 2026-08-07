@@ -5801,6 +5801,12 @@ class Validator(BaseValidatorNeuron):
             unused_fulfillment = 0.0 if ff_enabled else effective_fulfillment_pool
             try:
                 if ff_enabled:
+                    # Offload to a thread: _get_fulfillment_emission_share does a
+                    # blocking requests.get with retry/sleep backoffs (worst case
+                    # ~139s). Left on the event loop it froze the whole validator
+                    # (including block_file_updater) during the weight-submission
+                    # window, risking a missed submission — matching the wrapped
+                    # sibling gateway calls elsewhere in this function.
                     fulfillment_share, fulfillment_per_miner, fulfillment_fetch_ok = (
                         await asyncio.to_thread(
                             self._get_fulfillment_emission_share,

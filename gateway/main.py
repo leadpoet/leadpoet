@@ -427,11 +427,20 @@ async def lifespan(app: FastAPI):
 
             async def _hotkey_bucket_cleanup_loop():
                 from gateway.utils.hotkey_bucket import ALL_BUCKETS, RECENT_NONCES
+                import logging as _bucket_logging
                 while True:
                     await asyncio.sleep(300)
-                    for bucket in ALL_BUCKETS:
-                        bucket.prune()
-                    RECENT_NONCES.prune()
+                    # Guard the loop body: an unhandled raise here would kill the
+                    # task permanently, so nonce/rate-limit buckets would stop
+                    # being pruned and grow unbounded. Log and continue instead.
+                    try:
+                        for bucket in ALL_BUCKETS:
+                            bucket.prune()
+                        RECENT_NONCES.prune()
+                    except Exception as _prune_err:
+                        _bucket_logging.getLogger(__name__).warning(
+                            "hotkey_bucket_cleanup_prune_failed: %s", _prune_err
+                        )
 
             hotkey_bucket_cleanup_task = asyncio.create_task(_hotkey_bucket_cleanup_loop())
             print("✅ Hotkey bucket cleanup task started")

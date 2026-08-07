@@ -21,7 +21,13 @@ async def _fetch_request_scores(request_id: str) -> List[dict]:
     supabase = _get_supabase()
     out: List[dict] = []
     offset = 0
-    for _ in range(20):
+    # Hard safety bound so a runaway can never loop forever, set well above any
+    # realistic per-request score count (validators x leads). The old cap of 20
+    # pages (20k rows) stopped silently; if we ever exhaust the bound while still
+    # getting full pages, consensus below would be computed on truncated scores
+    # that feed fulfillment weights, so surface it loudly instead.
+    max_pages = 200
+    for _ in range(max_pages):
         page = await asyncio.to_thread(
             lambda o=offset: supabase.table("fulfillment_scores")
             .select("*")
@@ -35,6 +41,12 @@ async def _fetch_request_scores(request_id: str) -> List[dict]:
         if len(page.data) < 1000:
             break
         offset += 1000
+    else:
+        logger.warning(
+            "fulfillment_scores_page_cap_hit request_id=%s pages=%d rows=%d "
+            "consensus may be computed on truncated scores feeding weights",
+            request_id, max_pages, len(out),
+        )
     return out
 
 
@@ -162,7 +174,14 @@ async def compute_fulfillment_consensus(request_id: str) -> List[dict]:
         weighted_scores = []
         for vs in validator_scores:
             hotkey = vs["validator_hotkey"]
-            meta = metagraph_data.get(hotkey, {"v_trust": 1.0, "stake": 1.0})
+            # Fail closed for a validator absent from a successful metagraph
+            # fetch: giving an unknown validator full 1.0*1.0 weight let a
+            # low-/zero-trust validator carry equal weight in the stake-weighted
+            # gate. A truly-registered validator is in the snapshot; an absent
+            # one gets ~its real (low) weight of 0 and is caught by the
+            # zero-weight fallback below. (The whole-fetch-failure path populates
+            # all hotkeys at 1.0, so this default only hits genuine absences.)
+            meta = metagraph_data.get(hotkey, {"v_trust": 0.0, "stake": 0.0})
             v_trust = float(meta.get("v_trust", 0.0))
             stake = float(meta.get("stake", 0.0))
             weight = v_trust * stake

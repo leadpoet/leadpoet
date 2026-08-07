@@ -576,8 +576,20 @@ class ResearchLabWorkerSupervisor:
                     flush=True,
                 )
                 self._ready_children.discard(key)
-                self.children[key] = self._start_child(fleet, index)
-                self._ready_children.add(key)
+                # Guard the restart: _start_child does os.pipe()/Popen, which can
+                # raise OSError exactly under the fd/memory pressure that just
+                # killed the worker. An unhandled raise here would kill the
+                # monitor thread and leave every worker dead with no supervisor.
+                # Log and leave the dead child in place so the next poll retries.
+                try:
+                    self.children[key] = self._start_child(fleet, index)
+                    self._ready_children.add(key)
+                except Exception as _restart_err:
+                    print(
+                        f"   ⚠️  research_lab_worker_restart_failed {fleet.kind} "
+                        f"worker {index + 1}: {_restart_err}; retrying next poll",
+                        flush=True,
+                    )
             if emit_telemetry:
                 last_telemetry = time.monotonic()
                 if telemetry:

@@ -289,23 +289,30 @@ def _load_previously_delivered_companies(supabase, client_company: str) -> List[
         return []
 
     winner_keys: List[tuple] = []
+    # Chunk request_ids: a single .in_() over all fulfilled_ids builds a URL that
+    # PostgREST rejects with a bare 400 once a client has more than ~100 fulfilled
+    # requests. That 400 is caught below and returns [], so excluded_companies
+    # under-populates and the same company can be re-requested and paid twice.
+    _REQ_CHUNK = 100
     try:
-        offset = 0
-        for _ in range(20):
-            page = supabase.table("fulfillment_score_consensus") \
-                .select("submission_id,lead_id") \
-                .in_("request_id", fulfilled_ids) \
-                .eq("is_winner", True) \
-                .range(offset, offset + 999) \
-                .execute()
-            if not page.data:
-                break
-            winner_keys.extend(
-                (r["submission_id"], r["lead_id"]) for r in page.data
-            )
-            if len(page.data) < 1000:
-                break
-            offset += 1000
+        for _c in range(0, len(fulfilled_ids), _REQ_CHUNK):
+            chunk = fulfilled_ids[_c:_c + _REQ_CHUNK]
+            offset = 0
+            for _ in range(20):
+                page = supabase.table("fulfillment_score_consensus") \
+                    .select("submission_id,lead_id") \
+                    .in_("request_id", chunk) \
+                    .eq("is_winner", True) \
+                    .range(offset, offset + 999) \
+                    .execute()
+                if not page.data:
+                    break
+                winner_keys.extend(
+                    (r["submission_id"], r["lead_id"]) for r in page.data
+                )
+                if len(page.data) < 1000:
+                    break
+                offset += 1000
     except Exception as e:
         logger.warning(
             f"_load_previously_delivered_companies: failed to fetch winners: "

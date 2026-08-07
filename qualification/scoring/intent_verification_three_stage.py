@@ -2122,6 +2122,18 @@ async def verify_three_stage(
 
     contents = await _fetch_sd_then_exa(row["claimed_source_urls"])
     if not (contents.get("results") or []):
+        # Every bounded scrape tier + Wayback + Exa returned no usable content.
+        # _scrape_sd_hardened documents this as "verifier infrastructure could
+        # not reach the URL — NOT miner fabrication", yet the signal is rejected
+        # here, indistinguishable from real fabrication. Keep the reject (letting
+        # unverifiable evidence through would admit fabrication), but log it so a
+        # provider outage (ScrapingDog rate-limit, Exa/Wayback down) is
+        # detectable instead of silently penalizing genuine signals as fake.
+        logger.warning(
+            "intent_evidence_fetch_failed urls=%s statuses=%s — signal rejected on "
+            "evidence-fetch outage, not proven fabrication",
+            row.get("claimed_source_urls"), contents.get("statuses"),
+        )
         return {
             "client_ready": False,
             "decision": "reject",

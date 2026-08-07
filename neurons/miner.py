@@ -281,8 +281,8 @@ class Miner(BaseMinerNeuron):
                                 print(f"⏭️  Skipping duplicate person+company: {business_name}")
                                 print(f"      LinkedIn: {linkedin_url[:50]}...")
                                 print(f"      Company: {company_linkedin_url[:50]}...")
-                            duplicate_count += 1
-                            continue
+                                duplicate_count += 1
+                                continue
                         
                         # Step 1: Get presigned URLs (gateway logs SUBMISSION_REQUEST with committed hash)
                         presign_result = gateway_get_presigned_url(self.wallet, lead)
@@ -814,8 +814,12 @@ class Miner(BaseMinerNeuron):
                         print(f"   ✅ Reveal successful for {rid[:8]}!")
                         revealed.append(rid)
                     except Exception as e:
-                        print(f"   ❌ Reveal failed for {rid[:8]}: {e}")
-                        revealed.append(rid)
+                        # Do NOT drop the request on a transient reveal failure.
+                        # Appending to `revealed` here removed it from pending
+                        # (below) exactly like success, so a single timeout/5xx
+                        # permanently forfeited a valid fulfillment reward with no
+                        # retry. Leave it pending so the next poll retries.
+                        print(f"   ❌ Reveal failed for {rid[:8]}: {e}; leaving pending to retry")
 
                 for rid in revealed:
                     self._remove_pending_fulfillment(rid)

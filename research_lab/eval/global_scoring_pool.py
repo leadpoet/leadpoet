@@ -76,15 +76,27 @@ class GlobalScoringSlotPool:
         return f"{os.getpid()}:{self._counter}"
 
     def _live_slots(self, slots: list[dict], wall_now: float) -> list[dict]:
+        # A slot is stale only when its owner is gone. A live owner must be kept
+        # even past the lease: a candidate run can legitimately hold a slot
+        # longer than lease_seconds (no heartbeat refreshes `ts`), and evicting a
+        # live owner on age alone lets another process re-claim the same slot and
+        # over-subscribe past `size`, defeating the OOM guard the pool exists for.
+        # A generous absolute cap still bounds a slot leaked by PID reuse.
+        hard_cap = self.lease_seconds * 4
         kept: list[dict] = []
         for slot in slots:
             pid = int(slot.get("pid") or 0)
             ts = float(slot.get("ts") or 0.0)
-            if wall_now - ts > self.lease_seconds:
+            age = wall_now - ts
+            if pid:
+                # Known owner: keep while alive (within the hard cap); a dead
+                # owner is reclaimed immediately rather than waiting out the lease.
+                if _pid_alive(pid) and age <= hard_cap:
+                    kept.append(slot)
                 continue
-            if pid and not _pid_alive(pid):
-                continue
-            kept.append(slot)
+            # Legacy slot with no recorded owner: fall back to the lease age.
+            if age <= self.lease_seconds:
+                kept.append(slot)
         return kept
 
     def _try_claim(self, token: str) -> bool:

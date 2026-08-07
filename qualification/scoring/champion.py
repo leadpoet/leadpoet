@@ -397,7 +397,10 @@ async def run_champion_selection(
     if challengers_beating_threshold:
         # Highest scoring challenger wins
         new_champion_model = challengers_beating_threshold[0]
-        margin = (new_champion_model.total_score - champion_score) / champion_score * 100
+        # Use the zero-guarded helper: a re-benchmarked champion can legitimately
+        # score 0.0 on the current set (documented zero-ICP failure mode), which
+        # would make an inline division crash and abort champion promotion.
+        margin = calculate_margin(new_champion_model.total_score, champion_score)
         
         logger.info(
             f"Challenger {new_champion_model.model_id} beats threshold with "
@@ -440,7 +443,7 @@ async def run_champion_selection(
             None
         )
         if best_challenger:
-            best_margin = (best_challenger.total_score - champion_score) / champion_score * 100
+            best_margin = calculate_margin(best_challenger.total_score, champion_score)
             reason = f"Best challenger at {best_margin:.1f}% (need +{CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS:.0f} points)"
         else:
             reason = "No challengers"
@@ -726,7 +729,7 @@ async def log_champion_selected(
     # Calculate margin if there was a previous champion
     margin = None
     if previous_champion:
-        margin = (champion.score - previous_champion.score) / previous_champion.score * 100
+        margin = calculate_margin(champion.score, previous_champion.score)
     
     log_payload = {
         "event_type": "CHAMPION_SELECTED",

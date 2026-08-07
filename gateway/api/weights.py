@@ -3106,7 +3106,7 @@ async def get_transparency_events_range(
     
     if boot_id:
         query = query.eq("boot_id", boot_id)
-    
+
     result = await asyncio.to_thread(query.execute)
     
     events = result.data[:limit] if result.data else []

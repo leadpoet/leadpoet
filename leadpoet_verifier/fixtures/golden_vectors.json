@@ -1699,6 +1699,8 @@
         "fp_penalty_points": 0.0,
         "fp_unverified_primary_penalty_points": 0.0,
         "lcb_z": 1.96,
+        "fp_penalty_points": 0.0,
+        "fp_unverified_primary_penalty_points": 0.0,
         "per_icp_results": [
           {
             "icp_ref": "icp:a",

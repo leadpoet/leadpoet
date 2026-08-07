@@ -2577,7 +2577,7 @@
       "symbol": "validate_source_add_reward_record"
     },
     {
-      "ast_sha256": "sha256:b46447b9a4714108e65fce976007a21650e8252ac27879ef61913a0928a0c753",
+      "ast_sha256": "sha256:074bc5ae0f078ec5ffa0937ffc673cc66e1ee57a2f3dde7b1670539b391009f3",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "REVIEWED_CONSUMER_SNAPSHOT_SPECS"
     },
@@ -2607,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:cb60c430c531394d51af780f8e42712aa239e6f4ecc43fe6d433e15abe0663f2",
+  "manifest_hash": "sha256:584380e0e25b9f0c8a8140a642fa5f5acb987c7f62556d0684599e913d7db9d7",
   "protected_source_commit": "1803f3802b3667e2036a54fbf6ada14b7edfa206",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

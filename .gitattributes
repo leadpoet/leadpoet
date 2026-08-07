@@ -1,0 +1,3 @@
+# These files are signed and compared byte-for-byte across consumers.
+research_lab/sourcing_model_contract*.json -text
+research_lab/sourcing_model_parity_fixtures*.json -text

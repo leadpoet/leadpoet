@@ -258,7 +258,7 @@ def test_research_lab_reward_allocation_defaults(clean_env):
     assert config.lab_champion_min_alpha_percent == pytest.approx(7.0)
     assert config.lab_champion_extra_alpha_percent_per_point == pytest.approx(0.3)
     assert config.lab_champion_max_alpha_percent == pytest.approx(15.0)
-    assert config.provider_cost_cap_usd_per_icp == pytest.approx(1.0)
+    assert config.provider_cost_cap_usd_per_icp == pytest.approx(5.0)
 
 
 def test_hybrid_window_and_public_split_defaults(clean_env):

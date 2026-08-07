@@ -1900,6 +1900,10 @@ import urllib.error
 import urllib.request
 
 _research_lab_original_urlopen = urllib.request.urlopen
+_research_lab_trusted_v2_transport = (
+    getattr(_research_lab_original_urlopen, "__module__", "")
+    == "gateway.tee.sandbox_http_shim_v2"
+)
 
 # Provider evidence cache: when the runner supplies a recorded baseline
 # request->response cache, an identical provider request always replays the
@@ -1969,6 +1973,21 @@ _research_lab_proxy_routes = (
     ("openrouter.ai", "/or"),
     ("code.deepline.com", "/deepline"),
 )
+
+def _research_lab_uses_evidence_transport(proxied_url, target):
+    if proxied_url is not None:
+        return True
+    if not _research_lab_trusted_v2_transport:
+        return False
+    try:
+        import urllib.parse as _urlparse
+        host = (_urlparse.urlsplit(str(target or "")).hostname or "").lower()
+        return any(
+            host == provider_host
+            for provider_host, _route in _research_lab_proxy_routes
+        )
+    except Exception:
+        return False
 
 def _research_lab_proxy_rewrite(url):
     # Provider URL -> host proxy route, or None when not a provider call.
@@ -2470,7 +2489,7 @@ def _research_lab_urlopen(req, *args, **kwargs):
         response = _research_lab_original_urlopen(req, *args, **kwargs)
     except Exception as exc:
         _research_lab_in_urlopen.active = False
-        if _proxied_url is not None:
+        if _research_lab_uses_evidence_transport(_proxied_url, target):
             _research_lab_emit_evidence_marker(getattr(exc, "headers", None), method, target, request_body)
         _research_lab_emit_provider_error(_research_lab_http_error_details(exc), target)
         _research_lab_emit_trace(
@@ -2486,7 +2505,7 @@ def _research_lab_urlopen(req, *args, **kwargs):
         )
         raise
     _research_lab_in_urlopen.active = False
-    if _proxied_url is not None:
+    if _research_lab_uses_evidence_transport(_proxied_url, target):
         _research_lab_emit_evidence_marker(getattr(response, "headers", None), method, target, request_body)
     if _research_lab_evidence_record:
         _record_status = getattr(response, "status", None) or getattr(response, "code", None)
@@ -2613,7 +2632,7 @@ def _research_lab_patch_httpx():
             try:
                 response = _research_lab_original_httpx_send(self, request, *args, **kwargs)
             except Exception as exc:
-                if _proxied_url is not None:
+                if _research_lab_uses_evidence_transport(_proxied_url, getattr(request, "url", "")):
                     _research_lab_emit_evidence_marker(getattr(getattr(exc, "response", None), "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
@@ -2632,7 +2651,7 @@ def _research_lab_patch_httpx():
                 )
                 raise
             response_body, response_incomplete = _research_lab_httpx_response_body(response)
-            if _proxied_url is not None:
+            if _research_lab_uses_evidence_transport(_proxied_url, getattr(request, "url", "")):
                 _research_lab_emit_evidence_marker(getattr(response, "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
             _research_lab_emit_trace(
                 getattr(request, "method", ""),
@@ -2666,7 +2685,7 @@ def _research_lab_patch_httpx():
             try:
                 response = await _research_lab_original_httpx_async_send(self, request, *args, **kwargs)
             except Exception as exc:
-                if _proxied_url is not None:
+                if _research_lab_uses_evidence_transport(_proxied_url, getattr(request, "url", "")):
                     _research_lab_emit_evidence_marker(getattr(getattr(exc, "response", None), "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
@@ -2685,7 +2704,7 @@ def _research_lab_patch_httpx():
                 )
                 raise
             response_body, response_incomplete = _research_lab_httpx_response_body(response)
-            if _proxied_url is not None:
+            if _research_lab_uses_evidence_transport(_proxied_url, getattr(request, "url", "")):
                 _research_lab_emit_evidence_marker(getattr(response, "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
             _research_lab_emit_trace(
                 getattr(request, "method", ""),
@@ -2751,7 +2770,7 @@ def _research_lab_patch_requests():
             try:
                 response = _research_lab_original_requests_send(self, request, *args, **kwargs)
             except Exception as exc:
-                if _proxied_url is not None:
+                if _research_lab_uses_evidence_transport(_proxied_url, getattr(request, "url", "")):
                     _research_lab_emit_evidence_marker(getattr(getattr(exc, "response", None), "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
@@ -2780,7 +2799,7 @@ def _research_lab_patch_requests():
                 except Exception:
                     response_body = None
                     response_incomplete = True
-            if _proxied_url is not None:
+            if _research_lab_uses_evidence_transport(_proxied_url, getattr(request, "url", "")):
                 _research_lab_emit_evidence_marker(getattr(response, "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
             _research_lab_emit_trace(
                 getattr(request, "method", ""),
@@ -2847,7 +2866,7 @@ def _research_lab_patch_aiohttp():
             try:
                 response = await _research_lab_original_aiohttp_request(self, method, str_or_url, *args, **kwargs)
             except Exception as exc:
-                if _proxied_url is not None:
+                if _research_lab_uses_evidence_transport(_proxied_url, str_or_url):
                     _research_lab_emit_evidence_marker(getattr(exc, "headers", None), method, str_or_url, request_body)
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
@@ -2869,7 +2888,7 @@ def _research_lab_patch_aiohttp():
             # it here would consume the model's stream; the ClientResponse.read
             # hook below emits a paired phase="response_body" entry once the
             # model itself reads it.
-            if _proxied_url is not None:
+            if _research_lab_uses_evidence_transport(_proxied_url, str_or_url):
                 _research_lab_emit_evidence_marker(getattr(response, "headers", None), method, str_or_url, request_body)
             _research_lab_emit_trace(
                 method,

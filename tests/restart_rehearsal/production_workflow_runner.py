@@ -5321,6 +5321,7 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
         )
 
     runner = object.__new__(AttestedPrivateModelRunnerV2)
+    runner.spec = SimpleNamespace(timeout_seconds=1800)
     runner._execute_operation = fail_measured_operation  # type: ignore[method-assign]
     for _expected_failure in range(3):
         try:

@@ -675,6 +675,114 @@ print("BLOCKED_PROBE_DONE")
     assert private_runtime.PROVIDER_ERROR_MARKER in completed.stderr
 
 
+def test_trusted_v2_transport_cost_receipt_reaches_trace(tmp_path):
+    trusted_transport = r"""
+import base64
+import io
+import json
+import urllib.error
+import urllib.request
+
+class _TrustedResponse:
+    def __init__(self, event):
+        body = b'{}'
+        self.status = 200
+        self.code = 200
+        self.headers = {
+            "Content-Length": str(len(body)),
+            "X-Research-Lab-Provider-Cost-Event": base64.b64encode(
+                json.dumps(event).encode("utf-8")
+            ).decode("ascii"),
+        }
+        self._body = body
+
+    def peek(self):
+        return self._body
+
+    def read(self, *args):
+        return self._body
+
+def _trusted_urlopen(request, *args, **kwargs):
+    url = getattr(request, "full_url", str(request))
+    if "scrapingdog" in url:
+        event = {
+            "provider": "scrapingdog",
+            "billable": False,
+            "cost_usd": "0",
+            "status_code": 402,
+            "cap_usd": "5.00",
+            "cap_blocked": True,
+        }
+        response = _TrustedResponse(event)
+        raise urllib.error.HTTPError(
+            url, 402, "cost cap blocked", response.headers, io.BytesIO(b"cap")
+        )
+    return _TrustedResponse({
+        "provider": "exa",
+        "billable": True,
+        "cost_usd": "0.125",
+        "status_code": 200,
+        "cap_usd": "5.00",
+    })
+
+_trusted_urlopen.__module__ = "gateway.tee.sandbox_http_shim_v2"
+urllib.request.urlopen = _trusted_urlopen
+"""
+    probe = r"""
+import urllib.request
+
+urllib.request.urlopen("https://api.exa.ai/search")
+try:
+    urllib.request.urlopen("https://api.scrapingdog.com/scrape")
+except urllib.error.HTTPError:
+    pass
+urllib.request.urlopen("https://example.com/not-a-provider")
+print("TRUSTED_COST_PROBE_DONE")
+"""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            trusted_transport
+            + private_runtime._PROVIDER_DIAGNOSTICS_BOOTSTRAP
+            + probe,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=tmp_path,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "TRUSTED_COST_PROBE_DONE" in completed.stdout
+    entries = [
+        json.loads(line.split(" ", 1)[1])
+        for line in completed.stderr.splitlines()
+        if line.startswith("research_lab_private_runtime_trace ")
+    ]
+    cost_events = [
+        entry["provider_cost_event"]
+        for entry in entries
+        if "provider_cost_event" in entry
+    ]
+    assert cost_events == [
+        {
+            "billable": True,
+            "cap_usd": "5.00",
+            "cost_usd": "0.125",
+            "provider": "exa",
+            "status_code": 200,
+        },
+        {
+            "billable": False,
+            "cap_blocked": True,
+            "cap_usd": "5.00",
+            "cost_usd": "0",
+            "provider": "scrapingdog",
+            "status_code": 402,
+        },
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Bug #8 — capped top-5 scoring + LLM-scored company cap
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -476,6 +477,7 @@ async def test_provider_client_failure_marks_only_latest_attested_transport_fail
         )
 
     runner = object.__new__(AttestedPrivateModelRunnerV2)
+    runner.spec = SimpleNamespace(timeout_seconds=1800)
     runner._execute_operation = fail_measured_operation
     with pytest.raises(AttestedPrivateModelRunnerV2Error) as captured:
         await runner._invoke_operation(operation="run_icp")
@@ -483,6 +485,34 @@ async def test_provider_client_failure_marks_only_latest_attested_transport_fail
     marker = model_authority_v2.RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER
     assert (marker in str(captured.value)) is marked
     assert isinstance(captured.value.__cause__, AttestedScoringV2Error)
+
+
+async def test_measured_model_invocation_timeout_cancels_complete_operation(monkeypatch):
+    cancelled = asyncio.Event()
+
+    async def never_complete(**_kwargs):
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    runner = object.__new__(AttestedPrivateModelRunnerV2)
+    runner.spec = SimpleNamespace(timeout_seconds=1800)
+    runner._execute_operation = never_complete
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_model_invocation_timeout_seconds",
+        lambda _timeout: 0.01,
+    )
+
+    with pytest.raises(
+        AttestedPrivateModelRunnerV2Error,
+        match="measured model invocation timed out",
+    ) as captured:
+        await runner._invoke_operation(operation="run_icp")
+
+    assert cancelled.is_set()
+    assert isinstance(captured.value.__cause__, asyncio.TimeoutError)
 
 
 def _ready_adapter_metadata() -> dict:

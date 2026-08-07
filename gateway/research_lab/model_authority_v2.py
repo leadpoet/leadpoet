@@ -77,6 +77,8 @@ PROVIDER_EVIDENCE_TAPE_ARTIFACT_KIND = "provider_evidence_tape_v2"
 RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER = (
     "retryable_attested_provider_transport_failure"
 )
+_MODEL_INVOCATION_TIMEOUT_OVERHEAD_SECONDS = 120.0
+_MODEL_INVOCATION_TIMEOUT_MULTIPLIER = 1.5
 _CREDENTIAL_ENV_NAMES = frozenset(
     {
         "DEEPLINE_API_KEY",
@@ -107,6 +109,14 @@ _HOST_ONLY_ENV_NAMES = frozenset(
 
 class AttestedPrivateModelRunnerV2Error(PrivateModelRuntimeError):
     """The measured model result or one of its commitments is invalid."""
+
+
+def _model_invocation_timeout_seconds(model_timeout_seconds: float) -> float:
+    model_timeout = max(1.0, float(model_timeout_seconds))
+    return max(
+        model_timeout + _MODEL_INVOCATION_TIMEOUT_OVERHEAD_SECONDS,
+        model_timeout * _MODEL_INVOCATION_TIMEOUT_MULTIPLIER,
+    )
 
 
 def _has_retryable_attested_provider_transport_failure(
@@ -860,7 +870,16 @@ class AttestedPrivateModelRunnerV2:
         """Keep measured bridge failures inside the model-runner contract."""
 
         try:
-            return await self._execute_operation(**kwargs)
+            return await asyncio.wait_for(
+                self._execute_operation(**kwargs),
+                timeout=_model_invocation_timeout_seconds(
+                    self.spec.timeout_seconds
+                ),
+            )
+        except asyncio.TimeoutError as exc:
+            raise AttestedPrivateModelRunnerV2Error(
+                "measured model invocation timed out"
+            ) from exc
         except AttestedScoringV2Error as exc:
             message = str(exc)
             if _has_retryable_attested_provider_transport_failure(exc):

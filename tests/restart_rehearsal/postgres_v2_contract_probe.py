@@ -4236,6 +4236,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-143 compact ancestry checkpoint contract differs"
             )
+        database.apply_migration(
+            scripts / PROVIDER_PERSISTENCE_BATCH_MIGRATION
+        )
+        applied.append(PROVIDER_PERSISTENCE_BATCH_MIGRATION)
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,

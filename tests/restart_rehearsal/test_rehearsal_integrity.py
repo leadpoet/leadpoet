@@ -3254,6 +3254,193 @@ def test_local_gateway_kms_boundary_unwraps_job_credential_in_candidate(
     }
 
 
+def test_local_gateway_kms_boundary_unwraps_boot_credential_in_candidate(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from gateway.tee.kms_recipient_v2 import KMSRecipientV2
+    from gateway.tee.provider_broker_v2 import credential_reference_hash
+    from leadpoet_canonical.attested_v2 import canonical_json
+
+    role = "gateway_coordinator"
+    release_role = {
+        "build_identity_hash": "sha256:" + "1" * 64,
+        "commit_sha": COMMIT,
+        "pcr0": pcr0(COMMIT),
+    }
+    (tmp_path / "release-build-input.json").write_text(
+        json.dumps(
+            {
+                "commit_sha": COMMIT,
+                "gateway_roles": {role: release_role},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    monkeypatch.setenv("REHEARSAL_COMPONENT", "gateway")
+
+    def attestation_supplier(
+        *,
+        user_data: bytes,
+        signing_pubkey: bytes,
+    ) -> bytes:
+        return canonical_json(
+            {
+                "schema_version": "leadpoet.local_nitro_document.v1",
+                "pcr0": release_role["pcr0"],
+                "public_key_b64": base64.b64encode(signing_pubkey).decode(
+                    "ascii"
+                ),
+                "user_data_b64": base64.b64encode(user_data).decode("ascii"),
+                "nonce_b64": "",
+            }
+        ).encode("ascii")
+
+    slot = "openrouter"
+    credential = "sanitized-boot-credential"
+    recipient_authority = KMSRecipientV2(
+        boot_identity_supplier=lambda: {
+            "boot_identity_hash": "sha256:" + "3" * 64,
+        },
+        expected_credential_ref_hashes={
+            slot: credential_reference_hash(credential),
+        },
+        attestation_supplier=attestation_supplier,
+    )
+    recipient = recipient_authority.recipient_request(slot)
+    kms = rehearsal_sitecustomize._LocalKMS()
+    key_id = "arn:aws:kms:us-east-1:111122223333:key/rehearsal"
+    context = {
+        "leadpoet:purpose": "gateway-boot-credential-v2",
+        "leadpoet:slot": slot,
+    }
+    encrypted = kms.encrypt(
+        KeyId=key_id,
+        Plaintext=credential.encode("utf-8"),
+        EncryptionContext=context,
+    )
+    decrypted = kms.decrypt(
+        CiphertextBlob=encrypted["CiphertextBlob"],
+        EncryptionContext=context,
+        Recipient={
+            "KeyEncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+            "AttestationDocument": base64.b64decode(
+                recipient["attestation_document_b64"],
+                validate=True,
+            ),
+        },
+    )
+
+    assert decrypted["KeyId"] == key_id
+    assert recipient_authority.unwrap_credential(
+        slot=slot,
+        ciphertext_for_recipient_b64=base64.b64encode(
+            decrypted["CiphertextForRecipient"]
+        ).decode("ascii"),
+    ) == credential
+
+
+def test_local_nitro_boundary_preserves_optional_recipient_key_binding(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from gateway.tee.kms_recipient_v2 import KMSRecipientV2
+    from leadpoet_canonical import credential_recipient_v2
+    from leadpoet_canonical.attested_v2 import canonical_json
+
+    pcr0_value = pcr0(COMMIT)
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    boot = {
+        "boot_identity_hash": "sha256:" + "3" * 64,
+        "pcr0": pcr0_value,
+    }
+
+    def attestation_supplier(
+        *,
+        user_data: bytes,
+        signing_pubkey: bytes,
+    ) -> bytes:
+        return canonical_json(
+            {
+                "schema_version": "leadpoet.local_nitro_document.v1",
+                "pcr0": pcr0_value,
+                "public_key_b64": base64.b64encode(signing_pubkey).decode(
+                    "ascii"
+                ),
+                "user_data_b64": base64.b64encode(user_data).decode("ascii"),
+                "nonce_b64": "",
+            }
+        ).encode("ascii")
+
+    recipient_authority = KMSRecipientV2(
+        boot_identity_supplier=lambda: dict(boot),
+        expected_credential_ref_hashes={
+            "openrouter": "sha256:" + "4" * 64,
+        },
+        attestation_supplier=attestation_supplier,
+    )
+    miner_hotkey = "5" + "M" * 47
+    recipient = recipient_authority.openrouter_ingress_recipient_request(
+        miner_hotkey=miner_hotkey,
+        credential_kind="runtime",
+    )
+    monkeypatch.setattr(
+        credential_recipient_v2,
+        "verify_nitro_attestation_full",
+        rehearsal_sitecustomize._local_verify_nitro_attestation_full,
+    )
+
+    encrypted = (
+        credential_recipient_v2.verify_and_encrypt_openrouter_credential_v2(
+            recipient,
+            "sanitized-local-recipient-credential",
+            miner_hotkey=miner_hotkey,
+            credential_kind="runtime",
+            verified_coordinator_boot_identity=boot,
+        )
+    )
+
+    assert encrypted["request_id"] == recipient["request_id"]
+    assert base64.b64decode(encrypted["ciphertext_b64"], validate=True)
+
+    tampered = dict(recipient)
+    attestation = json.loads(
+        base64.b64decode(
+            tampered["attestation_document_b64"], validate=True
+        )
+    )
+    attestation["public_key_b64"] = base64.b64encode(
+        b"different-attested-key"
+    ).decode("ascii")
+    tampered["attestation_document_b64"] = base64.b64encode(
+        canonical_json(attestation).encode("utf-8")
+    ).decode("ascii")
+    with pytest.raises(
+        credential_recipient_v2.CredentialRecipientV2Error,
+        match="not bound",
+    ):
+        credential_recipient_v2.verify_and_encrypt_openrouter_credential_v2(
+            tampered,
+            "sanitized-local-recipient-credential",
+            miner_hotkey=miner_hotkey,
+            credential_kind="runtime",
+            verified_coordinator_boot_identity=boot,
+        )
+
+
 def test_local_vsock_listener_enforces_the_production_contract(
     tmp_path,
     monkeypatch,
@@ -4915,6 +5102,162 @@ def test_rehearsal_scoring_provider_calls_cross_the_coordinator_process() -> Non
     assert '"provider_execute"' in handler
     assert '"provider_probe_resolve"' in handler
 
+
+def test_rehearsal_routes_credential_ingress_to_candidate_runtime(
+    monkeypatch,
+) -> None:
+    class CandidateRuntime:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def handle_v2_runtime_rpc(
+            self,
+            method: str,
+            params: dict[str, object],
+        ) -> dict[str, object]:
+            self.calls.append((method, dict(params)))
+            return {"result": {"method": method, "status": "candidate"}}
+
+    runtime = CandidateRuntime()
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_release_input",
+        lambda: {"gateway_roles": {"gateway_coordinator": {}}},
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_enclave_state",
+        lambda _mutate=None: (
+            {
+                "roles": {
+                    "gateway_coordinator": {
+                        "config_hash": "sha256:" + "1" * 64,
+                    }
+                }
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_runtime_objects",
+        lambda _role, _state: {"tee_service": runtime},
+    )
+    requests = {
+        "v2_get_source_add_ingress_recipient": {
+            "miner_hotkey": "miner",
+            "adapter_ref": "source_add:test",
+            "credential_ref": "encrypted_ref:source_add:" + "2" * 32,
+        },
+        "v2_seal_source_add_ingress_credential": {
+            "request_id": "sha256:" + "3" * 64,
+            "ciphertext_b64": "Y2lwaGVydGV4dA==",
+        },
+        "v2_get_openrouter_ingress_recipient": {
+            "miner_hotkey": "miner",
+            "credential_kind": "runtime",
+        },
+        "v2_seal_openrouter_ingress_credential": {
+            "request_id": "sha256:" + "4" * 64,
+            "ciphertext_b64": "Y2lwaGVydGV4dA==",
+        },
+    }
+
+    for method, params in requests.items():
+        assert rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            "gateway_coordinator",
+            method,
+            params,
+        ) == {"method": method, "status": "candidate"}
+
+    assert runtime.calls == list(requests.items())
+
+
+def test_rehearsal_routes_provider_boot_credentials_to_candidate_runtime(
+    monkeypatch,
+) -> None:
+    class CandidateRuntime:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def handle_v2_runtime_rpc(
+            self,
+            method: str,
+            params: dict[str, object],
+        ) -> dict[str, object]:
+            self.calls.append((method, dict(params)))
+            return {
+                "result": {
+                    "credential_slots": ["openrouter"],
+                    "method": method,
+                    "status": "provisioning",
+                }
+            }
+
+    runtime = CandidateRuntime()
+    state = {
+        "roles": {
+            "gateway_coordinator": {
+                "config_hash": "sha256:" + "1" * 64,
+                "configuration": {
+                    "artifact_master_key_ref_hash": "sha256:" + "2" * 64,
+                    "provider_ref_hashes": {
+                        "openrouter": "sha256:" + "3" * 64,
+                    },
+                },
+            }
+        },
+        "provisioned_slots": ["artifact_master_key"],
+    }
+
+    def enclave_state(mutate=None):
+        if mutate is not None:
+            mutate(state)
+        return state, None
+
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_release_input",
+        lambda: {"gateway_roles": {"gateway_coordinator": {}}},
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_enclave_state",
+        enclave_state,
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_runtime_objects",
+        lambda _role, _state: {"tee_service": runtime},
+    )
+
+    recipient = rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+        "gateway_coordinator",
+        "v2_get_kms_recipient",
+        {"credential_slot": "openrouter"},
+    )
+    provision = rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+        "gateway_coordinator",
+        "v2_provision_encrypted_secret",
+        {
+            "credential_slot": "openrouter",
+            "ciphertext_for_recipient_b64": "Y2lwaGVydGV4dA==",
+        },
+    )
+
+    assert recipient["method"] == "v2_get_kms_recipient"
+    assert provision["method"] == "v2_provision_encrypted_secret"
+    assert state["provisioned_slots"] == ["artifact_master_key", "openrouter"]
+    assert runtime.calls == [
+        ("v2_get_kms_recipient", {"credential_slot": "openrouter"}),
+        (
+            "v2_provision_encrypted_secret",
+            {
+                "credential_slot": "openrouter",
+                "ciphertext_for_recipient_b64": "Y2lwaGVydGV4dA==",
+            },
+        ),
+    ]
 
 def test_rehearsal_driver_must_match_frozen_harness_commit(
     monkeypatch,

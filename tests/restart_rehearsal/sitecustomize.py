@@ -1048,7 +1048,7 @@ def _local_verify_nitro_attestation_full(
     *,
     attestation_b64: str,
     expected_pcr0: str,
-    expected_pubkey: str,
+    expected_pubkey: Optional[str],
     expected_purpose: str,
     role: str,
     certificate_validity_at_attestation_time: bool = False,
@@ -1089,6 +1089,34 @@ def _local_verify_nitro_attestation_full(
         expected_schema = "leadpoet.local_validator_nitro.v1"
         expected_role = "validator"
         extra_valid = nonce == b""
+    elif schema == "leadpoet.local_nitro_document.v1":
+        if set(document) != {
+            "schema_version",
+            "pcr0",
+            "public_key_b64",
+            "user_data_b64",
+            "nonce_b64",
+        }:
+            return False, {"error": "local gateway Nitro fields differ"}
+        try:
+            user_data = json.loads(
+                base64.b64decode(
+                    str(document["user_data_b64"]), validate=True
+                )
+            )
+            enclave_pubkey = base64.b64decode(
+                str(document["public_key_b64"]), validate=True
+            ).hex()
+            nonce = base64.b64decode(
+                str(document["nonce_b64"]), validate=True
+            )
+        except Exception as exc:
+            return False, {
+                "error": f"local gateway Nitro encoding differs: {exc}"
+            }
+        expected_schema = "leadpoet.local_nitro_document.v1"
+        expected_role = "gateway"
+        extra_valid = nonce == b""
     elif schema == "leadpoet.local_nitro_attestation.v1":
         if set(document) != {
             "schema_version",
@@ -1107,7 +1135,10 @@ def _local_verify_nitro_attestation_full(
     valid = (
         document.get("schema_version") == expected_schema
         and document.get("pcr0") == expected_pcr0
-        and enclave_pubkey == expected_pubkey
+        and (
+            expected_pubkey is None
+            or enclave_pubkey == expected_pubkey
+        )
         and isinstance(user_data, dict)
         and user_data.get("purpose") == expected_purpose
         and role == expected_role
@@ -1122,11 +1153,14 @@ def _local_verify_nitro_attestation_full(
     )
     if not valid:
         return False, {"error": "local Nitro claim differs"}
-    return True, {
+    result = {
         "pcr0": document["pcr0"],
         "enclave_pubkey": enclave_pubkey,
         "user_data": user_data,
     }
+    if schema == "leadpoet.local_nitro_document.v1":
+        result["attestation_public_key"] = enclave_pubkey
+    return True, result
 
 
 def _configured_credential_ref(
@@ -1823,7 +1857,10 @@ def _gateway_runtime_objects(
             ArtifactPersistenceVerifierV2,
         )
         from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
-        from gateway.tee.provider_broker_v2 import ProviderBrokerV2
+        from gateway.tee.provider_broker_v2 import (
+            ProviderBrokerV2,
+            credential_reference_hash,
+        )
 
         nsm_lib, tee_service = _gateway_enclave_runtime_modules()
         runtime = _LocalRuntimeIdentity(role=role, role_state=role_state)
@@ -1885,16 +1922,19 @@ def _gateway_runtime_objects(
             artifact_sink=vault.seal,
             clock=lambda: "2026-07-25T00:00:00Z",
         )
-        broker.provision_credentials(
-            {
-                "supabase_service_role": "rehearsal-secret",
-                "openrouter": "rehearsal-openrouter",
-                "exa": "rehearsal-exa",
-                "scrapingdog": "rehearsal-scrapingdog",
-                "deepline": "rehearsal-deepline",
-                "truelist": "rehearsal-truelist",
-            }
-        )
+        rehearsal_credentials = {
+            "supabase_service_role": "rehearsal-secret",
+            "openrouter": "rehearsal-openrouter",
+            "exa": "rehearsal-exa",
+            "scrapingdog": "rehearsal-scrapingdog",
+            "deepline": "rehearsal-deepline",
+            "truelist": "rehearsal-truelist",
+        }
+        if {
+            slot: credential_reference_hash(value)
+            for slot, value in rehearsal_credentials.items()
+        } == configuration["provider_ref_hashes"]:
+            broker.provision_credentials(rehearsal_credentials)
         persistence = ArtifactPersistenceVerifierV2(
             vault=vault,
             policy=configuration["encrypted_artifact_policy"],
@@ -2284,6 +2324,10 @@ def _handle_gateway_enclave_rpc(
         "v2_provision_job_sealed_source_add_secret",
         "v2_provision_job_sealed_openrouter_secret",
         "v2_release_job_credentials",
+        "v2_get_source_add_ingress_recipient",
+        "v2_seal_source_add_ingress_credential",
+        "v2_get_openrouter_ingress_recipient",
+        "v2_seal_openrouter_ingress_credential",
     }:
         objects = _gateway_runtime_objects(role, role_state)
         return _unwrap_candidate_rpc(
@@ -2345,6 +2389,13 @@ def _handle_gateway_enclave_rpc(
             raise ValueError("local enclave KMS recipient request differs")
         slot = str(params["credential_slot"])
         credential_ref = _configured_credential_ref(role_state, slot)
+        if slot != "artifact_master_key":
+            objects = _gateway_runtime_objects(role, role_state)
+            return _unwrap_candidate_rpc(
+                objects["tee_service"].handle_v2_runtime_rpc(
+                    method, dict(params)
+                )
+            )
         attestation = json.dumps(
             {
                 "schema_version": "leadpoet.local_kms_recipient.v1",
@@ -2384,6 +2435,21 @@ def _handle_gateway_enclave_rpc(
             raise ValueError("local enclave KMS provision request differs")
         slot = str(params["credential_slot"])
         _configured_credential_ref(role_state, slot)
+        if slot != "artifact_master_key":
+            objects = _gateway_runtime_objects(role, role_state)
+            result = _unwrap_candidate_rpc(
+                objects["tee_service"].handle_v2_runtime_rpc(
+                    method, dict(params)
+                )
+            )
+
+            def provision_provider(state_value: dict[str, Any]) -> None:
+                slots = set(state_value.get("provisioned_slots") or [])
+                slots.add(slot)
+                state_value["provisioned_slots"] = sorted(slots)
+
+            _gateway_enclave_state(provision_provider)
+            return result
         ciphertext = base64.b64decode(
             str(params["ciphertext_for_recipient_b64"]), validate=True
         )
@@ -3361,22 +3427,28 @@ class _LocalKMS:
                 raise ValueError(
                     "local job KMS recipient document is invalid"
                 ) from exc
+            expected_purposes = {
+                "leadpoet.kms_recipient.v2": (
+                    "leadpoet.provider_credential_unseal.v2"
+                ),
+                "leadpoet.kms_job_recipient.v2": (
+                    "leadpoet.job_provider_credential_unseal.v2"
+                ),
+            }
             if (
                 set(user_data) != {
                     "schema_version",
                     "purpose",
                     "claim_hash",
                 }
-                or user_data.get("schema_version")
-                != "leadpoet.kms_job_recipient.v2"
-                or user_data.get("purpose")
-                != "leadpoet.job_provider_credential_unseal.v2"
+                or expected_purposes.get(user_data.get("schema_version"))
+                != user_data.get("purpose")
                 or not re.fullmatch(
                     r"sha256:[0-9a-f]{64}",
                     str(user_data.get("claim_hash") or ""),
                 )
             ):
-                raise ValueError("local job KMS recipient claim differs")
+                raise ValueError("local KMS recipient claim differs")
             _external_event(
                 "aws_kms",
                 "decrypt",

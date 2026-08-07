@@ -691,8 +691,12 @@ def _provider_persistence_batch_contract(
             "sequence": sequence,
             "checkpoint_hash": checkpoint_hash,
             "previous_checkpoint_hash": previous_hash,
-            "state_document_hash": "sha256:" + suffix * 64,
-            "checkpoint_artifact_id": "sha256:" + str(sequence % 10) * 64,
+            "state_document_hash": sha256_json(
+                {"provider_persistence_batch_state": suffix}
+            ),
+            "checkpoint_artifact_id": sha256_json(
+                {"provider_persistence_batch_artifact": sequence}
+            ),
             "encrypted_checkpoint_doc": {
                 "schema_version": "leadpoet.encrypted_artifact.v2",
                 "fixture": "batch-%d" % sequence,
@@ -702,7 +706,9 @@ def _provider_persistence_batch_contract(
     batch = []
     previous = ""
     for sequence, suffix in enumerate(("1", "2", "3", "4", "5"), start=1):
-        checkpoint_hash = "sha256:" + suffix * 64
+        checkpoint_hash = sha256_json(
+            {"provider_persistence_batch_checkpoint": sequence}
+        )
         batch.append(
             checkpoint_row(sequence, checkpoint_hash, previous, suffix)
         )
@@ -752,7 +758,7 @@ def _provider_persistence_batch_contract(
     stale = [
         checkpoint_row(
             7,
-            "sha256:" + "6" * 64,
+            sha256_json({"provider_persistence_batch_checkpoint": 7}),
             batch[-1]["checkpoint_hash"],
             "6",
         )

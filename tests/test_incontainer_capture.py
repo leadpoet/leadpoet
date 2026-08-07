@@ -590,6 +590,62 @@ def test_bootstrap_emits_single_line_markers_on_success_and_failure():
     assert private_runtime.PROVIDER_ERROR_MARKER in completed.stderr
 
 
+def test_bootstrap_captures_buffered_v2_aiohttp_response_for_replay():
+    response_body = b'{"choices":[{"message":{"content":"measured reply"}}]}'
+    script = (
+        "import base64\n"
+        "import gateway.tee.sandbox_http_shim_v2 as shim\n"
+        f"_body = base64.b64decode({base64.b64encode(response_body).decode('ascii')!r})\n"
+        "shim.execute = lambda **_kwargs: {\n"
+        "    'terminal_status': 'authenticated_response',\n"
+        "    'http_status': 200,\n"
+        "    'headers': {'content-type': 'application/json'},\n"
+        "    'body_b64': base64.b64encode(_body).decode('ascii'),\n"
+        "}\n"
+        "shim.install()\n"
+        + private_runtime._PROVIDER_DIAGNOSTICS_BOOTSTRAP
+        + r"""
+import asyncio
+import aiohttp
+
+async def _run():
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json={"model": "m", "messages": []},
+        ) as response:
+            assert await response.read() == _body
+
+asyncio.run(_run())
+print("SHIMMED_AIOHTTP_TRACE_DONE")
+"""
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=dict(os.environ),
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "SHIMMED_AIOHTTP_TRACE_DONE" in completed.stdout
+
+    entries = _entries(completed.stderr)
+    call = _entry_for(entries, "openrouter.ai", phase="call")
+    assert call["response_status"] == 200
+    assert base64.b64decode(call["response_body_b64"]) == response_body
+    assert call["response_byte_len"] == len(response_body)
+    assert call["truncated"] is False
+
+    from research_lab.eval.provider_evidence_cache import (
+        build_evidence_cache_from_trace_entries,
+    )
+
+    cache = build_evidence_cache_from_trace_entries(entries)
+    assert len(cache) == 1
+    assert base64.b64decode(next(iter(cache.values()))["body_b64"]) == response_body
+
+
 REDACTION_PROBE = r"""
 import httpx
 

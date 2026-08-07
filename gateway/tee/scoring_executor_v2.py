@@ -258,10 +258,17 @@ class ScoringExecutorV2:
                     str(payload.get("provider_evidence_cache_ref") or ""),
                     cache_hash,
                 )
-                matching_tapes = [
-                    receipt
+                disclosed_receipt_sets = [
+                    graph.get("receipts") or ()
                     for graph in context.external_receipt_graphs
-                    for receipt in graph.get("receipts") or ()
+                ] + [
+                    proof.get("disclosed_receipts") or ()
+                    for proof in context.external_ancestry_proofs
+                ]
+                matching_tapes = {
+                    sha256_json(dict(receipt)): dict(receipt)
+                    for receipts in disclosed_receipt_sets
+                    for receipt in receipts
                     if isinstance(receipt, Mapping)
                     and receipt.get("role") == "gateway_scoring"
                     and receipt.get("purpose")
@@ -269,7 +276,7 @@ class ScoringExecutorV2:
                     and receipt.get("status") == "succeeded"
                     and receipt.get("input_root") == expected_tape_input_root
                     and receipt.get("output_root") == cache_hash
-                ]
+                }
                 if len(matching_tapes) != 1:
                     raise ValueError(
                         "provider evidence cache has no unique measured tape ancestry"

@@ -818,25 +818,36 @@ async def test_v2_model_cache_requires_exact_tape_ancestry():
     try:
         with pytest.raises(ValueError, match="measured tape ancestry"):
             await executor(OP_RUN_MODEL_SANDBOX_V2, payload, context)
-        context.external_receipt_graphs = [
-            catalog_graph,
-            {
-                "receipts": [
-                    {
-                        "role": "gateway_scoring",
-                        "purpose": "research_lab.provider_evidence_tape.v2",
-                        "status": "succeeded",
-                        "input_root": provider_evidence_tape_input_root(
-                            cache_ref,
-                            cache_hash,
-                        ),
-                        "output_root": cache_hash,
-                    }
-                ]
-            }
+        tape_receipt = {
+            "receipt_hash": "sha256:" + "d" * 64,
+            "role": "gateway_scoring",
+            "purpose": "research_lab.provider_evidence_tape.v2",
+            "status": "succeeded",
+            "input_root": provider_evidence_tape_input_root(
+                cache_ref,
+                cache_hash,
+            ),
+            "output_root": cache_hash,
+        }
+        context.external_receipt_graphs = []
+        context.external_ancestry_proofs = [
+            {"disclosed_receipts": [*catalog_graph["receipts"], tape_receipt]},
+            # Overlapping compact authorities may disclose the same signed
+            # receipt. It remains one authority, not an ambiguity.
+            {"disclosed_receipts": [tape_receipt]},
         ]
         result = await executor(OP_RUN_MODEL_SANDBOX_V2, payload, context)
         assert result.output["output"] == []
+        context.external_ancestry_proofs.append(
+            {
+                "disclosed_receipts": [
+                    {**tape_receipt, "receipt_hash": "sha256:" + "e" * 64}
+                ]
+            }
+        )
+        with pytest.raises(ValueError, match="measured tape ancestry"):
+            await executor(OP_RUN_MODEL_SANDBOX_V2, payload, context)
+        context.external_ancestry_proofs.pop()
         changed = {**cache_doc, "entries": {"f" * 64: {"status": 500}}}
         with pytest.raises(ValueError, match="measured tape ancestry"):
             await executor(

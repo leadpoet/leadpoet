@@ -2884,10 +2884,16 @@ def _research_lab_patch_aiohttp():
                     response_capture_incomplete=True,
                 )
                 raise
-            # The response body has not been read at this boundary and reading
-            # it here would consume the model's stream; the ClientResponse.read
-            # hook below emits a paired phase="response_body" entry once the
-            # model itself reads it.
+            # A real ClientResponse is still streaming here, but the measured
+            # V2 transport returns an aiohttp-compatible response whose body is
+            # already buffered. Capture that immutable buffer without reading
+            # the response. Otherwise the shim response bypasses
+            # ClientResponse.read and its successful body never becomes
+            # replayable provider evidence.
+            response_body = getattr(response, "_body", None)
+            if not isinstance(response_body, (bytes, bytearray)):
+                response_body = None
+            response_incomplete = response_body is None
             if _research_lab_uses_evidence_transport(_proxied_url, str_or_url):
                 _research_lab_emit_evidence_marker(getattr(response, "headers", None), method, str_or_url, request_body)
             _research_lab_emit_trace(
@@ -2895,11 +2901,11 @@ def _research_lab_patch_aiohttp():
                 str_or_url,
                 request_body,
                 getattr(response, "status", None),
-                None,
+                response_body,
                 "success",
                 "",
                 request_capture_incomplete=request_incomplete,
-                response_capture_incomplete=True,
+                response_capture_incomplete=response_incomplete,
             )
             return response
 

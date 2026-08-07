@@ -355,6 +355,46 @@ def test_preflight_scope_can_return_a_signed_transport_failure_terminal():
         router.restore()
 
 
+@pytest.mark.parametrize(
+    ("failure_code", "expected_type", "retryable"),
+    [
+        ("timeout", httpx.ReadTimeout, True),
+        ("connection_refused", httpx.ConnectError, True),
+        ("dns_failure", httpx.ConnectError, True),
+        ("proxy_failure", httpx.ConnectError, True),
+        ("tls_failure", httpx.ConnectError, True),
+        ("connection_reset", httpx.ReadError, True),
+        ("host_dropped", httpx.ReadError, True),
+        ("malformed_reply", httpx.ReadError, True),
+        ("unexpected_eof", httpx.ReadError, True),
+        ("cancelled", httpx.TransportError, False),
+        ("certificate_invalid", httpx.TransportError, False),
+        ("plaintext_forbidden", httpx.TransportError, False),
+        ("policy_denied", httpx.TransportError, False),
+        ("response_too_large", httpx.TransportError, False),
+    ],
+)
+def test_httpx_failure_preserves_retry_semantics(
+    failure_code, expected_type, retryable
+):
+    router, _ = _router(Transport())
+    router._execute_request = lambda **_kwargs: {
+        "terminal_status": "transport_failure",
+        "failure_code": failure_code,
+    }
+    try:
+        request = httpx.Request("GET", "https://openrouter.ai/api/v1/models")
+        with pytest.raises(expected_type) as error:
+            router._httpx_response(request)
+        assert isinstance(
+            error.value,
+            (httpx.TimeoutException, httpx.NetworkError),
+        ) is retryable
+        assert str(error.value) == "attested transport failure: %s" % failure_code
+    finally:
+        router.restore()
+
+
 def test_caught_broker_rejection_without_terminal_cannot_authorize_result():
     router = BrokeredProviderTransportV2(
         lambda _request: (_ for _ in ()).throw(RuntimeError("broker rejected"))
@@ -401,6 +441,63 @@ def test_retry_that_ends_in_authenticated_response_can_authorize_result():
         assert [row["transport_attempt"]["terminal_status"] for row in observed] == [
             "transport_failure",
             "authenticated_response",
+        ]
+    finally:
+        router.restore()
+
+
+@pytest.mark.asyncio
+async def test_source_style_httpx_retry_advances_signed_attempt_number():
+    class RetryTransport(Transport):
+        def __call__(self, **request):
+            self.calls.append(request)
+            if len(self.calls) == 1:
+                raise RuntimeError("malformed reply")
+            return {
+                "http_status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": b'{"ok":true}',
+                "tls_peer_chain_hash": "sha256:" + "b" * 64,
+                "tls_protocol": "TLSv1.3",
+            }
+
+    transport = RetryTransport()
+    router, observed = _router(transport)
+    terminal_attempts = []
+    try:
+        with router.scope(
+            job_id="job-1",
+            purpose="research_lab.provider_evidence.v2",
+            logical_operation_id="score-icp-1",
+            retry_policy_hashes={
+                provider: HASH for provider in BUILTIN_PROVIDER_ROUTES
+            },
+            terminal_sink=terminal_attempts.append,
+        ):
+            async with httpx.AsyncClient(trust_env=False) as client:
+                for attempt in range(3):
+                    try:
+                        response = await client.get(
+                            "https://openrouter.ai/api/v1/models"
+                        )
+                        break
+                    except (httpx.TimeoutException, httpx.NetworkError):
+                        if attempt == 2:  # pragma: no cover - regression guard
+                            raise
+
+        assert response.status_code == 200
+        assert [row["attempt_number"] for row in terminal_attempts] == [0, 1]
+        assert [row["terminal_status"] for row in terminal_attempts] == [
+            "transport_failure",
+            "authenticated_response",
+        ]
+        assert [row["failure_code"] for row in terminal_attempts] == [
+            "malformed_reply",
+            None,
+        ]
+        assert [row["transport_attempt"]["attempt_number"] for row in observed] == [
+            0,
+            1,
         ]
     finally:
         router.restore()

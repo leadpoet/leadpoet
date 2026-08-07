@@ -36,6 +36,23 @@ _ACCEPTED_RESPONSE_TERMINALS = frozenset(
     {"authenticated_response", "attested_local_response"}
 )
 
+_HTTPX_CONNECT_FAILURE_CODES = frozenset(
+    {
+        "connection_refused",
+        "dns_failure",
+        "proxy_failure",
+        "tls_failure",
+    }
+)
+_HTTPX_READ_FAILURE_CODES = frozenset(
+    {
+        "connection_reset",
+        "host_dropped",
+        "malformed_reply",
+        "unexpected_eof",
+    }
+)
+
 
 class _BrokeredAiohttpContent:
     """Small StreamReader-compatible view over an authenticated response body."""
@@ -990,10 +1007,15 @@ class BrokeredProviderTransportV2:
             body=body,
         )
         if result.get("terminal_status") not in _ACCEPTED_RESPONSE_TERMINALS:
-            raise httpx.TransportError(
-                "attested transport failure: %s" % result.get("failure_code"),
-                request=request,
-            )
+            failure_code = str(result.get("failure_code") or "")
+            message = "attested transport failure: %s" % failure_code
+            if failure_code == "timeout":
+                raise httpx.ReadTimeout(message, request=request)
+            if failure_code in _HTTPX_CONNECT_FAILURE_CODES:
+                raise httpx.ConnectError(message, request=request)
+            if failure_code in _HTTPX_READ_FAILURE_CODES:
+                raise httpx.ReadError(message, request=request)
+            raise httpx.TransportError(message, request=request)
         return httpx.Response(
             status_code=int(result["http_status"]),
             headers=dict(result.get("headers") or {}),

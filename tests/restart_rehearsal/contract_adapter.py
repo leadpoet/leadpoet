@@ -1905,6 +1905,20 @@ def _python_script(argv: list[str]) -> int | None:
         return 0
     if name in {"gateway_git_deploy.py", "write_gateway_build_info.py"}:
         return None
+    if name == "scoped_shutdown_v2.py":
+        # Executed for real inside the rehearsal: the module only signals
+        # processes whose cwd is under the --root trees the rehearsal passes,
+        # so it terminates the rehearsal's own long-lived processes and can
+        # never reach outside the sandbox. Recorded so rehearsal evidence
+        # names the scoped-shutdown stage explicitly.
+        _event(
+            "python-script",
+            argv,
+            status="real",
+            script=name,
+            operation="scoped_process_shutdown",
+        )
+        return None
     return None
 
 

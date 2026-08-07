@@ -2350,17 +2350,24 @@ GATEWAY_DESTRUCTIVE_PHASE_STARTED=1
 export GATEWAY_DESTRUCTIVE_PHASE_STARTED
 sudo systemctl stop leadpoet-tee-egress-forwarder.service 2>/dev/null || true
 sudo systemctl reset-failed leadpoet-tee-egress-forwarder.service 2>/dev/null || true
-pkill -9 -f "python3 main.py" 2>/dev/null || true
-pkill -9 -f "python3 -u main.py" 2>/dev/null || true
-pkill -9 -f "python3 -u -m gateway.main" 2>/dev/null || true
-pkill -9 -f "uvicorn" 2>/dev/null || true
-pkill -9 -f "gateway/research_lab/worker_process.py" 2>/dev/null || true
-pkill -9 -f "run_research_lab_hosted_worker" 2>/dev/null || true
-pkill -9 -f "run_research_lab_scoring_worker" 2>/dev/null || true
-pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
-pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
-pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
-pkill -9 -f "gateway.utils.tee_egress_forwarder" 2>/dev/null || true
+# Identity-scoped shutdown (gateway/tee/scoped_shutdown_v2.py). The previous
+# global `pkill -9 -f <pattern>` lines killed by argv substring across the
+# whole host; on this shared CI/production host that is how a CI fixture run
+# SIGKILLed the live gateway on 2026-08-02 (14 hours of missed weight
+# publication). The scoped shutdown only signals processes whose cwd is under
+# the managed roots below, SIGTERM before SIGKILL, and re-verifies process
+# identity before every signal. It fails closed: no name-pattern fallback.
+GATEWAY_SCOPED_SHUTDOWN_ARGS="--root $LEADPOET_REPO_ROOT"
+if [ -n "${GATEWAY_RESTART_CONTROLLER_CURRENT:-}" ] && \
+   [ -d "$GATEWAY_RESTART_CONTROLLER_CURRENT" ]; then
+  GATEWAY_SCOPED_SHUTDOWN_ARGS="$GATEWAY_SCOPED_SHUTDOWN_ARGS --root $GATEWAY_RESTART_CONTROLLER_CURRENT"
+fi
+"$GATEWAY_PYTHON_BIN" "$LEADPOET_REPO_ROOT/gateway/tee/scoped_shutdown_v2.py" \
+  $GATEWAY_SCOPED_SHUTDOWN_ARGS \
+  --terminate-timeout-seconds 10 || {
+  echo "ERROR: scoped gateway shutdown failed; refusing global pkill fallback" >&2
+  exit 1
+}
 stop_research_lab_private_model_containers
 
 echo "Stopping stuck private-model Docker builds or pip installs"

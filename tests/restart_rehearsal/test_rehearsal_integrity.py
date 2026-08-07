@@ -61,6 +61,7 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     DisposablePostgres,
     EXPECTED_APPLIED_MIGRATIONS,
     EXPECTED_FINALIZED_VIEW_COLUMNS,
+    EXPECTED_POSTGRES_CONTRACT_CHECKS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX,
     PROVIDER_OUTCOME_APPEND_MIGRATION,
     PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
@@ -102,6 +103,26 @@ from gateway.research_lab.git_tree_models import (
 
 COMMIT = "1" * 40
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
+
+
+def _provider_persistence_batch_fixture() -> dict[str, Any]:
+    return {
+        "batch_size": 5,
+        "durable_count": 5,
+        "batch_replay_exact": True,
+        "batch_conflict_head_exact": True,
+        "cache_put_exact": True,
+        "cache_replay_exact": True,
+        "schema": {
+            "schema_version": (
+                "leadpoet.provider_persistence_batch_contract.v1"
+            ),
+            "cache_put": "atomic_exact_row",
+            "outcome_append": "atomic_contiguous_batch",
+            "outcome_batch_max": 32,
+            "conflict_head_checkpoint_row": "encrypted_or_null",
+        },
+    }
 
 
 def _receipt_graph_seed_contract() -> tuple[
@@ -1050,25 +1071,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     contract = {
         "schema_version": "leadpoet.restart_rehearsal.postgres_contract.v1",
         "candidate_sha": COMMIT,
-        "applied_migrations": [
-            *MIGRATIONS_BEFORE_TRANSPORT_FIX,
-            TRANSPORT_FIX_MIGRATION,
-            TRANSPORT_TERMINAL_MIGRATION,
-            PROVIDER_OUTCOME_APPEND_MIGRATION,
-            PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
-            CHAMPION_LIFETIME_CREDIT_MIGRATION,
-            PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
-            PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
-            ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
-            ANCESTRY_CHECKPOINT_MIGRATION,
-            ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
-            ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
-            ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION,
-            ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION,
-            ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION,
-            SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
-            COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
-        ],
+        "applied_migrations": list(EXPECTED_APPLIED_MIGRATIONS),
         "relations": relations,
         "rpcs": [
             "research_lab_acquire_maintenance_lease",
@@ -1077,6 +1080,9 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "append_research_lab_provider_outcome_checkpoint_v2",
             "research_lab_provider_outcome_contention_contract_v2",
             "research_lab_provider_outcome_contention_contract_v3",
+            "put_research_lab_provider_evidence_cache_v2",
+            "append_research_lab_provider_outcome_checkpoints_v2",
+            "research_lab_provider_persistence_batch_contract_v1",
             "persist_research_lab_chain_realized_lifetime_settlement_v2",
             "research_lab_champion_lifetime_credit_contract_v1",
             "research_lab_active_model_replay_contract_v2",
@@ -1098,32 +1104,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "invalid_ttl_rejected": True,
         },
         "checks": {
-            "maintenance_lease_contract_valid": True,
-            "pre_128_transport_rejected": True,
-            "post_128_transport_persisted": True,
-            "pre_129_attested_local_transport_rejected": True,
-            "post_129_attested_local_transport_persisted": True,
-            "transport_terminal_contract_valid": True,
-            "pre_133_provider_outcome_contract_rejected": True,
-            "post_133_provider_outcome_contract_valid": True,
-            "pre_134_provider_outcome_head_contract_rejected": True,
-            "post_134_provider_outcome_head_contract_valid": True,
-            "post_135_active_model_replay_contract_valid": True,
-            "post_136_ancestry_checkpoint_contract_valid": True,
-            "post_137_allocation_settlement_frontier_contract_valid": True,
-            "post_138_ancestry_checkpoint_bootstrap_purpose_valid": True,
-            "post_139_allocation_frontier_bootstrap_contract_valid": True,
-            "post_141_allocation_frontier_source_contract_valid": True,
-            "post_142_source_catalog_replay_contract_valid": True,
-            "post_143_compact_checkpoint_contract_valid": True,
-            "provider_outcome_append_atomic": True,
-            "provider_outcome_contention_zero_rollback": True,
-            "provider_outcome_conflict_head_exact": True,
-            "pre_132_lifetime_credit_rejected": True,
-            "post_132_lifetime_credit_persisted": True,
-            "lifetime_credit_rpc_idempotent": True,
-            "grandfathered_credit_unchanged": True,
-            "lifetime_credit_contract_valid": True,
+            name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS
         },
         "provider_outcome_contention_contract": {
             "schema_version": (
@@ -1150,6 +1131,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "durable_head_conflict_verified": True,
             "empty_head_conflict_verified": True,
         },
+        "provider_persistence_batch": _provider_persistence_batch_fixture(),
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
                 {
@@ -1340,6 +1322,9 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_allocation_frontier_historical_source_contract_v1",
             "research_lab_source_catalog_replay_contract_v2",
             "research_lab_compact_checkpoint_graph_contract_v1",
+            "put_research_lab_provider_evidence_cache_v2",
+            "append_research_lab_provider_outcome_checkpoints_v2",
+            "research_lab_provider_persistence_batch_contract_v1",
             "create_research_lab_autoresearch_tree",
             "plan_research_lab_autoresearch_tree_node",
             "append_research_lab_autoresearch_tree_event",
@@ -1359,47 +1344,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "invalid_ttl_rejected": True,
         },
         "checks": {
-            "maintenance_lease_contract_valid": True,
-            "pre_128_transport_rejected": True,
-            "post_128_transport_persisted": True,
-            "transport_contract_valid": True,
-            "pre_129_attested_local_transport_rejected": True,
-            "post_129_attested_local_transport_persisted": True,
-            "transport_terminal_contract_valid": True,
-            "pre_133_provider_outcome_contract_rejected": True,
-            "post_133_provider_outcome_contract_valid": True,
-            "pre_134_provider_outcome_head_contract_rejected": True,
-            "post_134_provider_outcome_head_contract_valid": True,
-            "post_135_active_model_replay_contract_valid": True,
-            "post_136_ancestry_checkpoint_contract_valid": True,
-            "post_137_allocation_settlement_frontier_contract_valid": True,
-            "post_138_ancestry_checkpoint_bootstrap_purpose_valid": True,
-            "post_139_allocation_frontier_bootstrap_contract_valid": True,
-            "post_141_allocation_frontier_source_contract_valid": True,
-            "post_142_source_catalog_replay_contract_valid": True,
-            "post_143_compact_checkpoint_contract_valid": True,
-            "provider_outcome_append_atomic": True,
-            "provider_outcome_contention_zero_rollback": True,
-            "provider_outcome_conflict_head_exact": True,
-            "pre_132_lifetime_credit_rejected": True,
-            "post_132_lifetime_credit_persisted": True,
-            "lifetime_credit_rpc_idempotent": True,
-            "grandfathered_credit_unchanged": True,
-            "lifetime_credit_contract_valid": True,
-            "finalized_view_projection_exact": True,
-            "finalized_view_seed_available": True,
-            "historical_compute_schema_migrations_applied": True,
-            "git_tree_autoresearch_schema_migrations_applied": True,
-            "git_tree_autoresearch_persistence_contract_valid": True,
-            "git_tree_stale_root_rejected_atomically": True,
-            "git_tree_replacement_and_restart_replay_valid": True,
-            "historical_compute_finalized_authority_seed_available": True,
-            "historical_compute_allocation_conserved": True,
-            "historical_compute_release_identity_bound": True,
-            "settlement_authority_parsed": True,
-            "measured_settlement_receipt_projection_exact": True,
-            "tampered_weight_receipt_rejected": True,
-            "required_schema_migrations_declared": True,
+            name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS
         },
         "provider_outcome_contention_contract": {
             "schema_version": (
@@ -1426,6 +1371,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "durable_head_conflict_verified": True,
             "empty_head_conflict_verified": True,
         },
+        "provider_persistence_batch": _provider_persistence_batch_fixture(),
         "allocation_settlement_frontier": {
             "frontier_hash": "sha256:" + "a" * 64,
             "source_receipt_hash": "sha256:" + "b" * 64,

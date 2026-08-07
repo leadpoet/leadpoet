@@ -1358,7 +1358,10 @@ def verify_gateway_provider_preflight(
         for ordinal, row in enumerate(rows)
         if row.get("kind") == "local-postgrest"
         and row.get("operation")
-        == "provider_outcome_checkpoint_appended"
+        in {
+            "provider_outcome_checkpoint_appended",
+            "provider_outcome_checkpoint_batch_appended",
+        }
         and row.get("status") == "ok"
         and row.get("result_status") in {"inserted", "existing"}
     ]
@@ -1366,27 +1369,67 @@ def verify_gateway_provider_preflight(
         str(row.get("checkpoint_hash") or "")
         for _ordinal, row in append_rows
     }
-    if len(append_rows) < 2 or len(checkpoint_hashes) < 2:
+    appended_sequence_count = sum(
+        (
+            int(row.get("checkpoint_count") or 0)
+            if row.get("operation")
+            == "provider_outcome_checkpoint_batch_appended"
+            else 1
+        )
+        for _ordinal, row in append_rows
+    )
+    if not append_rows or appended_sequence_count < 2 or not checkpoint_hashes:
         raise SystemExit(
             "gateway provider preflight did not durably append both "
             "provider outcomes"
         )
     for _append_ordinal, append_row in append_rows:
+        batch = (
+            append_row.get("operation")
+            == "provider_outcome_checkpoint_batch_appended"
+        )
         if (
             append_row.get("method") != "POST"
             or append_row.get("target")
-            != "append_research_lab_provider_outcome_checkpoint_v2"
+            != (
+                "append_research_lab_provider_outcome_checkpoints_v2"
+                if batch
+                else "append_research_lab_provider_outcome_checkpoint_v2"
+            )
             or not re.fullmatch(
                 r"sha256:[0-9a-f]{64}",
                 str(append_row.get("checkpoint_hash") or ""),
             )
-            or not isinstance(append_row.get("sequence"), int)
-            or isinstance(append_row.get("sequence"), bool)
-            or int(append_row["sequence"]) <= 0
         ):
             raise SystemExit(
                 "gateway provider preflight atomic checkpoint "
                 "acknowledgement is invalid"
+            )
+        if batch:
+            sequences = append_row.get("sequences")
+            if (
+                not isinstance(sequences, list)
+                or len(sequences)
+                != int(append_row.get("checkpoint_count") or 0)
+                or not sequences
+                or any(
+                    not isinstance(sequence, int)
+                    or isinstance(sequence, bool)
+                    or sequence <= 0
+                    for sequence in sequences
+                )
+            ):
+                raise SystemExit(
+                    "gateway provider preflight batch checkpoint "
+                    "acknowledgement is invalid"
+                )
+        elif (
+            not isinstance(append_row.get("sequence"), int)
+            or isinstance(append_row.get("sequence"), bool)
+            or int(append_row["sequence"]) <= 0
+        ):
+            raise SystemExit(
+                "gateway provider preflight checkpoint sequence is invalid"
             )
     first_append_ordinal = append_rows[0][0]
     readback_rows = [

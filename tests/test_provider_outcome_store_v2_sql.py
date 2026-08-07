@@ -9,6 +9,9 @@ CONTENTION_STATUS_SQL = Path(
 HEAD_CONTENTION_SQL = Path(
     "scripts/134-research-lab-provider-outcome-head-contention.sql"
 )
+PERSISTENCE_BATCH_SQL = Path(
+    "scripts/144-research-lab-provider-persistence-batches.sql"
+)
 
 
 def test_provider_outcome_checkpoint_migration_is_append_only_and_private() -> None:
@@ -90,5 +93,23 @@ def test_provider_outcome_conflict_returns_authenticated_encrypted_head() -> Non
     assert "RAISE EXCEPTION 'provider outcome checkpoint fields are invalid'" in text
     assert "RAISE EXCEPTION 'provider outcome checkpoint identity is invalid'" in text
     assert "RAISE EXCEPTION 'provider outcome checkpoint durable insert differs'" in text
+    assert "UPDATE public.research_lab_provider_outcome_checkpoints_v2" not in text
+    assert "DELETE FROM public.research_lab_provider_outcome_checkpoints_v2" not in text
+
+
+def test_provider_outcome_batch_append_is_atomic_bounded_and_private() -> None:
+    text = PERSISTENCE_BATCH_SQL.read_text()
+    assert "append_research_lab_provider_outcome_checkpoints_v2" in text
+    assert "row_count < 1 OR row_count > 32" in text
+    assert "pg_try_advisory_xact_lock" in text
+    assert "provider outcome checkpoint batch is partially durable" in text
+    assert "provider outcome checkpoint batch lineage is invalid" in text
+    assert "'head_checkpoint_row', current_row" in text
+    assert "'checkpoint_count', row_count" in text
+    assert "research_lab_provider_persistence_batch_contract_v1" in text
+    assert "'outcome_append', 'atomic_contiguous_batch'" in text
+    assert "GRANT EXECUTE" in text
+    assert "TO service_role" in text
+    assert "FROM PUBLIC, anon, authenticated" in text
     assert "UPDATE public.research_lab_provider_outcome_checkpoints_v2" not in text
     assert "DELETE FROM public.research_lab_provider_outcome_checkpoints_v2" not in text

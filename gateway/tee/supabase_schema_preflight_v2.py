@@ -509,6 +509,18 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_provider_outcome_contention_contract_v3",
     ),
     (
+        "scripts/144-research-lab-provider-persistence-batches.sql",
+        "put_research_lab_provider_evidence_cache_v2",
+    ),
+    (
+        "scripts/144-research-lab-provider-persistence-batches.sql",
+        "append_research_lab_provider_outcome_checkpoints_v2",
+    ),
+    (
+        "scripts/144-research-lab-provider-persistence-batches.sql",
+        "research_lab_provider_persistence_batch_contract_v1",
+    ),
+    (
         "scripts/132-research-lab-champion-lifetime-credit.sql",
         "persist_research_lab_chain_realized_lifetime_settlement_v2",
     ),

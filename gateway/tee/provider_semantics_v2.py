@@ -86,6 +86,7 @@ _PROVIDER_PREFLIGHT_PURPOSE = "research_lab.provider_preflight.v2"
 _OUTCOME_APPEND_CONFLICT_ATTEMPTS = 64
 _OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS = 0.01
 _OUTCOME_CONFLICT_BACKOFF_MAX_SECONDS = 0.25
+_OUTCOME_CHECKPOINT_BATCH_MAX = 32
 TREE_PROVIDER_CALL_CAP_HEADER = "X-Research-Lab-Tree-Provider-Call-Cap"
 _LEGACY_PROVIDER_IDS = {
     "openrouter": "or",
@@ -200,6 +201,11 @@ class ProviderSemanticsAuthorityV2:
         self._sleep = sleeper
         self._outcome_store = outcome_store
         self._outcome_persist_lock = threading.RLock()
+        self._outcome_batch_condition = threading.Condition(
+            self._outcome_persist_lock
+        )
+        self._outcome_pending: list[Dict[str, Any]] = []
+        self._outcome_flushing = False
         self._outcome_checkpoint_hash = ""
         self._outcome_checkpoint_day = ""
         self._outcome_restore_attempts: list[Dict[str, Any]] = []
@@ -237,6 +243,7 @@ class ProviderSemanticsAuthorityV2:
         self._tree_live_calls: Dict[tuple[str, str], int] = {}
         self._cache_day = ""
         self._lock = threading.RLock()
+        self._semantic_owner_state = threading.local()
 
     def health(self) -> Dict[str, Any]:
         broker = self._broker.health()
@@ -253,47 +260,60 @@ class ProviderSemanticsAuthorityV2:
 
     def execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
         try:
-            with self._terminal_transaction(), self._artifact_transaction():
-                result = dict(self._execute(request))
-                persistence = self._record_provider_outcome(request, result)
-                if persistence:
-                    result["additional_transport_attempts"] = [
-                        *[
-                            dict(item)
-                            for item in result.get("additional_transport_attempts")
-                            or ()
-                        ],
-                        *[dict(item) for item in persistence["transport_attempts"]],
-                    ]
-                    result["evidence_artifact_hashes"] = sorted(
-                        {
+            try:
+                with self._terminal_transaction(), self._artifact_transaction():
+                    result = dict(self._execute(request))
+                    persistence = self._record_provider_outcome(request, result)
+                    if persistence:
+                        result["additional_transport_attempts"] = [
                             *[
-                                str(item)
-                                for item in result.get("evidence_artifact_hashes")
+                                dict(item)
+                                for item in result.get(
+                                    "additional_transport_attempts"
+                                )
                                 or ()
                             ],
                             *[
-                                str(item)
-                                for item in persistence["evidence_artifact_hashes"]
+                                dict(item)
+                                for item in persistence["transport_attempts"]
                             ],
-                        }
-                    )
-                return result
-        except Exception as exc:
-            # The model may catch a provider transport failure and retry. Give
-            # that exact request a measured failure terminal so a later
-            # successful attempt can authorize the scope without accepting an
-            # incomplete intent. The failed transaction above remains rolled
-            # back and no provider response is exposed by this terminal.
-            logger.warning(
-                "provider_semantics_fail_closed_terminal "
-                "job_id=%s provider_id=%s error_type=%s",
-                str(request.get("job_id") or "")[:256],
-                str(request.get("provider_id") or "")[:128],
-                type(exc).__name__,
-            )
-            with self._terminal_transaction(), self._artifact_transaction():
-                return self._fail_closed_terminal(request, exc=exc)
+                        ]
+                        result["evidence_artifact_hashes"] = sorted(
+                            {
+                                *[
+                                    str(item)
+                                    for item in result.get(
+                                        "evidence_artifact_hashes"
+                                    )
+                                    or ()
+                                ],
+                                *[
+                                    str(item)
+                                    for item in persistence[
+                                        "evidence_artifact_hashes"
+                                    ]
+                                ],
+                            }
+                        )
+                    return result
+            except Exception as exc:
+                # The model may catch a provider transport failure and retry.
+                # Give that exact request a measured failure terminal so a
+                # later successful attempt can authorize the scope without
+                # accepting an incomplete intent.
+                logger.warning(
+                    "provider_semantics_fail_closed_terminal "
+                    "job_id=%s provider_id=%s error_type=%s",
+                    str(request.get("job_id") or "")[:256],
+                    str(request.get("provider_id") or "")[:128],
+                    type(exc).__name__,
+                )
+                with self._terminal_transaction(), self._artifact_transaction():
+                    return self._fail_closed_terminal(request, exc=exc)
+        finally:
+            # Exact semantic replays are not released until the terminal,
+            # encrypted cache work, and durable provider outcome all commit.
+            self._release_semantic_owner()
 
     def _fail_closed_terminal(
         self,
@@ -424,6 +444,11 @@ class ProviderSemanticsAuthorityV2:
                 if event is None:
                     event = threading.Event()
                     self._inflight[cache_key] = event
+                    if getattr(self._semantic_owner_state, "owner", None) is not None:
+                        raise ProviderSemanticsV2Error(
+                            "provider semantics owner state is already active"
+                        )
+                    self._semantic_owner_state.owner = (cache_key, event)
                     break
             # The owner includes encrypted cache readback and durable outcome
             # work after the upstream HTTP call.  Wait on the same bounded
@@ -623,10 +648,23 @@ class ProviderSemanticsAuthorityV2:
                 cache_recording_enabled=not bypass_cache,
             )
         finally:
+            # execute() releases the owner after the surrounding terminal and
+            # artifact transactions commit or roll back.
+            pass
+
+    def _release_semantic_owner(self) -> None:
+        owner = getattr(self._semantic_owner_state, "owner", None)
+        if owner is None:
+            return
+        cache_key, owner_event = owner
+        try:
             with self._lock:
-                event = self._inflight.pop(cache_key, None)
-                if event is not None:
+                event = self._inflight.get(cache_key)
+                if event is owner_event:
+                    self._inflight.pop(cache_key, None)
                     event.set()
+        finally:
+            del self._semantic_owner_state.owner
 
     def provider_outcome_snapshot(self) -> Dict[str, Any]:
         return self._outcome_ledger.snapshot()
@@ -708,117 +746,254 @@ class ProviderSemanticsAuthorityV2:
             ),
             "cost_event": cost_event,
         }
-        with self._outcome_persist_lock:
-            if self._outcome_store is None:
+        if self._outcome_store is None:
+            with self._outcome_persist_lock:
                 self._outcome_ledger.record(**record_arguments)
-                return None
-            job_id = str(request.get("job_id") or "")
-            purpose = str(request.get("purpose") or "")
-            attempts: list[Dict[str, Any]] = []
-            artifacts: set[str] = set()
-            base_document = self._outcome_ledger.state_document()
-            for conflict_attempt in range(_OUTCOME_APPEND_CONFLICT_ATTEMPTS):
-                document = self._outcome_ledger.record(**record_arguments)
-                utc_day = str(document["utc_day"])
-                previous = (
-                    self._outcome_checkpoint_hash
-                    if self._outcome_checkpoint_day == utc_day
-                    else ""
-                )
-                try:
-                    persisted = dict(
-                        self._outcome_store.persist(
-                            document,
-                            previous_checkpoint_hash=previous,
-                            job_id=job_id,
-                            purpose=purpose,
-                            attempt_number=conflict_attempt,
-                        )
-                    )
-                except Exception:
-                    self._outcome_ledger.restore(base_document)
-                    raise
-                attempts.extend(
-                    dict(item)
-                    for item in persisted.get("transport_attempts") or ()
-                )
-                artifacts.update(
-                    str(item)
-                    for item in persisted.get("evidence_artifact_hashes") or ()
-                )
-                status = str(persisted.get("status") or "persisted")
-                if status == "persisted":
-                    self._outcome_checkpoint_hash = str(
-                        persisted["checkpoint_hash"]
-                    )
-                    self._outcome_checkpoint_day = utc_day
-                    return {
-                        **persisted,
-                        "transport_attempts": attempts,
-                        "evidence_artifact_hashes": sorted(artifacts),
-                    }
-                if status not in {"busy", "conflict"}:
-                    self._outcome_ledger.restore(base_document)
+            return None
+        return self._enqueue_provider_outcome(
+            record_arguments=record_arguments,
+            job_id=str(request.get("job_id") or ""),
+            purpose=str(request.get("purpose") or ""),
+        )
+
+    def _enqueue_provider_outcome(
+        self,
+        *,
+        record_arguments: Mapping[str, Any],
+        job_id: str,
+        purpose: str,
+    ) -> Dict[str, Any]:
+        pending: Dict[str, Any] = {
+            "record_arguments": dict(record_arguments),
+            "job_id": str(job_id),
+            "purpose": str(purpose),
+            "done": False,
+            "result": None,
+            "error": None,
+        }
+        with self._outcome_batch_condition:
+            self._outcome_pending.append(pending)
+            leader = not self._outcome_flushing
+            if leader:
+                self._outcome_flushing = True
+        if leader:
+            self._flush_provider_outcomes()
+
+        deadline = time.monotonic() + REPLAY_WAIT_SECONDS
+        with self._outcome_batch_condition:
+            while not pending["done"]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._outcome_batch_condition.wait(
+                    remaining
+                ):
                     raise ProviderSemanticsV2Error(
-                        "provider outcome checkpoint status is invalid"
+                        "provider outcome checkpoint batch wait timed out"
                     )
-                self._outcome_ledger.restore(base_document)
-                if conflict_attempt + 1 >= _OUTCOME_APPEND_CONFLICT_ATTEMPTS:
-                    break
-                self._sleep(
-                    _outcome_conflict_backoff_seconds(
-                        job_id=job_id,
-                        purpose=purpose,
-                        conflict_attempt=conflict_attempt,
-                    )
-                )
-                if status == "busy":
-                    continue
-                head_document = persisted.get("head_state_document")
-                head_checkpoint_hash = str(
-                    persisted.get("head_checkpoint_hash") or ""
-                )
-                if isinstance(head_document, Mapping) and head_checkpoint_hash:
-                    base_document = self._outcome_ledger.restore(head_document)
-                    self._outcome_checkpoint_hash = head_checkpoint_hash
-                    self._outcome_checkpoint_day = utc_day
-                    continue
-                try:
-                    restored = dict(
-                        self._outcome_store.load_latest(
-                            utc_day=utc_day,
-                            job_id=job_id,
-                            purpose=purpose,
-                            operation_suffix=(
-                                "reconcile-%d-%d"
-                                % (int(document["sequence"]), conflict_attempt)
-                            ),
-                        )
-                    )
-                except Exception:
-                    self._outcome_ledger.restore(base_document)
-                    raise
-                attempts.extend(
-                    dict(item)
-                    for item in restored.get("transport_attempts") or ()
-                )
-                artifacts.update(
-                    str(item)
-                    for item in restored.get("evidence_artifact_hashes") or ()
-                )
-                if not restored.get("found"):
-                    continue
-                base_document = self._outcome_ledger.restore(
-                    restored["state_document"]
-                )
-                self._outcome_checkpoint_hash = str(
-                    restored["checkpoint_hash"]
-                )
-                self._outcome_checkpoint_day = utc_day
-            self._outcome_ledger.restore(base_document)
+            if pending["error"] is not None:
+                raise pending["error"]
+            result = pending["result"]
+        if not isinstance(result, Mapping):
             raise ProviderSemanticsV2Error(
-                "provider outcome checkpoint contention did not converge"
+                "provider outcome checkpoint batch result is invalid"
             )
+        return dict(result)
+
+    def _flush_provider_outcomes(self) -> None:
+        while True:
+            with self._outcome_batch_condition:
+                if not self._outcome_pending:
+                    self._outcome_flushing = False
+                    self._outcome_batch_condition.notify_all()
+                    return
+                supports_batch = callable(
+                    getattr(self._outcome_store, "persist_batch", None)
+                )
+                batch_size = _OUTCOME_CHECKPOINT_BATCH_MAX if supports_batch else 1
+                first = self._outcome_pending[0]
+                scope = (first["job_id"], first["purpose"])
+                batch = []
+                remaining = []
+                for item in self._outcome_pending:
+                    if (
+                        len(batch) < batch_size
+                        and (item["job_id"], item["purpose"]) == scope
+                    ):
+                        batch.append(item)
+                    else:
+                        remaining.append(item)
+                self._outcome_pending = remaining
+            try:
+                result = self._persist_provider_outcome_batch(batch)
+            except BaseException as exc:
+                # One exhausted measured persistence attempt is systemic for
+                # the shared daily lineage. Fail every queued caller together
+                # instead of starting an identical retry storm per request.
+                with self._outcome_batch_condition:
+                    failed = [*batch, *self._outcome_pending]
+                    self._outcome_pending.clear()
+                    self._outcome_flushing = False
+                    for item in failed:
+                        item["error"] = exc
+                        item["done"] = True
+                    self._outcome_batch_condition.notify_all()
+                return
+            with self._outcome_batch_condition:
+                # One measured Supabase operation commits the entire batch.
+                # Publish that transport/evidence terminal once to the shared
+                # execution scope; repeating it on every provider result would
+                # make the job reject a duplicated transport-attempt hash.
+                for index, item in enumerate(batch):
+                    item["result"] = (
+                        dict(result)
+                        if index == 0
+                        else {
+                            **result,
+                            "transport_attempts": [],
+                            "evidence_artifact_hashes": [],
+                        }
+                    )
+                    item["done"] = True
+                self._outcome_batch_condition.notify_all()
+
+    def _persist_provider_outcome_batch(
+        self,
+        batch: list[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not batch or len(batch) > _OUTCOME_CHECKPOINT_BATCH_MAX:
+            raise ProviderSemanticsV2Error(
+                "provider outcome checkpoint batch size is invalid"
+            )
+        batch_timestamp = str(self._clock() or "")
+        batch_day = batch_timestamp[:10]
+        base_document = self._outcome_ledger.state_document()
+        base_checkpoint_hash = (
+            self._outcome_checkpoint_hash
+            if self._outcome_checkpoint_day == batch_day
+            else ""
+        )
+        attempts: list[Dict[str, Any]] = []
+        artifacts: set[str] = set()
+        first_job_id = str(batch[0]["job_id"])
+        first_purpose = str(batch[0]["purpose"])
+
+        for conflict_attempt in range(_OUTCOME_APPEND_CONFLICT_ATTEMPTS):
+            if str(base_document.get("utc_day") or "") == batch_day:
+                candidate = ProviderOutcomeLedgerV2(
+                    clock=lambda: batch_timestamp,
+                    initial_document=base_document,
+                )
+            else:
+                candidate = ProviderOutcomeLedgerV2(
+                    clock=lambda: batch_timestamp,
+                )
+            documents = [
+                candidate.record(**dict(item["record_arguments"]))
+                for item in batch
+            ]
+            transitions = [
+                {
+                    "document": document,
+                    "job_id": str(item["job_id"]),
+                    "purpose": str(item["purpose"]),
+                }
+                for item, document in zip(batch, documents)
+            ]
+            persist_batch = getattr(self._outcome_store, "persist_batch", None)
+            if callable(persist_batch):
+                persisted = dict(
+                    persist_batch(
+                        transitions,
+                        previous_checkpoint_hash=base_checkpoint_hash,
+                        job_id=first_job_id,
+                        purpose=first_purpose,
+                        attempt_number=conflict_attempt,
+                    )
+                )
+            else:
+                persisted = dict(
+                    self._outcome_store.persist(
+                        documents[0],
+                        previous_checkpoint_hash=base_checkpoint_hash,
+                        job_id=first_job_id,
+                        purpose=first_purpose,
+                        attempt_number=conflict_attempt,
+                    )
+                )
+            attempts.extend(
+                dict(item)
+                for item in persisted.get("transport_attempts") or ()
+            )
+            artifacts.update(
+                str(item)
+                for item in persisted.get("evidence_artifact_hashes") or ()
+            )
+            status = str(persisted.get("status") or "persisted")
+            if status == "persisted":
+                final_document = documents[-1]
+                self._outcome_ledger.restore(final_document)
+                self._outcome_checkpoint_hash = str(
+                    persisted["checkpoint_hash"]
+                )
+                self._outcome_checkpoint_day = batch_day
+                return {
+                    **persisted,
+                    "transport_attempts": attempts,
+                    "evidence_artifact_hashes": sorted(artifacts),
+                }
+            if status not in {"busy", "conflict"}:
+                raise ProviderSemanticsV2Error(
+                    "provider outcome checkpoint status is invalid"
+                )
+            if conflict_attempt + 1 >= _OUTCOME_APPEND_CONFLICT_ATTEMPTS:
+                break
+            self._sleep(
+                _outcome_conflict_backoff_seconds(
+                    job_id=first_job_id,
+                    purpose=first_purpose,
+                    conflict_attempt=conflict_attempt,
+                )
+            )
+            if status == "busy":
+                continue
+            head_document = persisted.get("head_state_document")
+            head_checkpoint_hash = str(
+                persisted.get("head_checkpoint_hash") or ""
+            )
+            if isinstance(head_document, Mapping) and head_checkpoint_hash:
+                base_document = dict(head_document)
+                base_checkpoint_hash = head_checkpoint_hash
+                continue
+            restored = dict(
+                self._outcome_store.load_latest(
+                    utc_day=batch_day,
+                    job_id=first_job_id,
+                    purpose=first_purpose,
+                    operation_suffix=(
+                        "batch-reconcile-%d-%d"
+                        % (int(documents[-1]["sequence"]), conflict_attempt)
+                    ),
+                )
+            )
+            attempts.extend(
+                dict(item)
+                for item in restored.get("transport_attempts") or ()
+            )
+            artifacts.update(
+                str(item)
+                for item in restored.get("evidence_artifact_hashes") or ()
+            )
+            if restored.get("found"):
+                base_document = dict(restored["state_document"])
+                base_checkpoint_hash = str(restored["checkpoint_hash"])
+        self._outcome_ledger.restore(base_document)
+        if base_checkpoint_hash:
+            self._outcome_checkpoint_hash = base_checkpoint_hash
+            self._outcome_checkpoint_day = str(
+                base_document.get("utc_day") or ""
+            )
+        raise ProviderSemanticsV2Error(
+            "provider outcome checkpoint contention did not converge"
+        )
 
     def _live(
         self,

@@ -178,6 +178,9 @@ SOURCE_CATALOG_RESULT_REPLAY_MIGRATION = (
 COMPACT_ANCESTRY_CHECKPOINT_MIGRATION = (
     "143-research-lab-compact-ancestry-checkpoints.sql"
 )
+PROVIDER_PERSISTENCE_BATCH_MIGRATION = (
+    "144-research-lab-provider-persistence-batches.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -213,6 +216,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION,
     SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
     COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
+    PROVIDER_PERSISTENCE_BATCH_MIGRATION,
 )
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
@@ -643,6 +647,206 @@ def _provider_outcome_append_sql(row: Mapping[str, Any]) -> str:
         "SELECT public.append_research_lab_provider_outcome_checkpoint_v2("
         "$leadpoet$%s$leadpoet$::jsonb)::text;\n" % payload
     )
+
+
+def _provider_outcome_batch_append_sql(
+    rows: Sequence[Mapping[str, Any]],
+) -> str:
+    payload = json.dumps(list(rows), sort_keys=True, separators=(",", ":"))
+    if "$leadpoet$" in payload:
+        raise PostgresContractProbeError(
+            "provider outcome checkpoint batch JSON delimiter collision"
+        )
+    return (
+        "SELECT public.append_research_lab_provider_outcome_checkpoints_v2("
+        "$leadpoet$%s$leadpoet$::jsonb)::text;\n" % payload
+    )
+
+
+def _provider_cache_put_sql(row: Mapping[str, Any]) -> str:
+    payload = json.dumps(dict(row), sort_keys=True, separators=(",", ":"))
+    if "$leadpoet$" in payload:
+        raise PostgresContractProbeError(
+            "provider evidence cache JSON delimiter collision"
+        )
+    return (
+        "SELECT public.put_research_lab_provider_evidence_cache_v2("
+        "$leadpoet$%s$leadpoet$::jsonb)::text;\n" % payload
+    )
+
+
+def _provider_persistence_batch_contract(
+    database: DisposablePostgres,
+) -> dict[str, Any]:
+    def checkpoint_row(
+        sequence: int,
+        checkpoint_hash: str,
+        previous_hash: str,
+        suffix: str,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "leadpoet.provider_outcome_checkpoint_row.v2",
+            "artifact_master_key_ref_hash": "sha256:" + "8" * 64,
+            "utc_day": "2026-07-11",
+            "sequence": sequence,
+            "checkpoint_hash": checkpoint_hash,
+            "previous_checkpoint_hash": previous_hash,
+            "state_document_hash": "sha256:" + suffix * 64,
+            "checkpoint_artifact_id": "sha256:" + str(sequence % 10) * 64,
+            "encrypted_checkpoint_doc": {
+                "schema_version": "leadpoet.encrypted_artifact.v2",
+                "fixture": "batch-%d" % sequence,
+            },
+        }
+
+    batch = []
+    previous = ""
+    for sequence, suffix in enumerate(("1", "2", "3", "4", "5"), start=1):
+        checkpoint_hash = "sha256:" + suffix * 64
+        batch.append(
+            checkpoint_row(sequence, checkpoint_hash, previous, suffix)
+        )
+        previous = checkpoint_hash
+    inserted = json.loads(
+        database.psql(
+            _provider_outcome_batch_append_sql(batch),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    expected_inserted = {
+        "status": "inserted",
+        "checkpoint_hash": batch[-1]["checkpoint_hash"],
+        "checkpoint_count": len(batch),
+    }
+    if inserted != expected_inserted:
+        raise PostgresContractProbeError(
+            "provider outcome batch insert result differs"
+        )
+    replayed = json.loads(
+        database.psql(
+            _provider_outcome_batch_append_sql(batch),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if replayed != {**expected_inserted, "status": "existing"}:
+        raise PostgresContractProbeError(
+            "provider outcome batch replay result differs"
+        )
+    durable_count = int(
+        database.psql(
+            """
+            SELECT pg_catalog.count(*)
+            FROM public.research_lab_provider_outcome_checkpoints_v2
+            WHERE artifact_master_key_ref_hash =
+                  'sha256:8888888888888888888888888888888888888888888888888888888888888888'
+              AND utc_day = DATE '2026-07-11';
+            """,
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if durable_count != len(batch):
+        raise PostgresContractProbeError(
+            "provider outcome batch durable row count differs"
+        )
+
+    stale = [
+        checkpoint_row(
+            7,
+            "sha256:" + "6" * 64,
+            batch[-1]["checkpoint_hash"],
+            "6",
+        )
+    ]
+    conflict = json.loads(
+        database.psql(
+            _provider_outcome_batch_append_sql(stale),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if (
+        conflict.get("status") != "conflict"
+        or conflict.get("checkpoint_hash") != stale[-1]["checkpoint_hash"]
+        or conflict.get("checkpoint_count") != 1
+        or conflict.get("head_checkpoint_row") != batch[-1]
+    ):
+        raise PostgresContractProbeError(
+            "provider outcome batch conflict head differs"
+        )
+
+    encrypted_cache_doc = {
+        "schema_version": "leadpoet.encrypted_artifact.v2",
+        "artifact_id": "sha256:" + "a" * 64,
+        "plaintext_hash": "sha256:" + "b" * 64,
+        "ciphertext_hash": "sha256:" + "c" * 64,
+        "nonce_b64": "bm9uY2U=",
+        "aad_b64": "YWFk",
+        "encryption_context_hash": "sha256:" + "d" * 64,
+        "ciphertext_b64": "Y2lwaGVydGV4dA==",
+        "object_lock_mode": "COMPLIANCE",
+        "retain_until": "2026-08-10T12:00:00Z",
+    }
+    cache_row = {
+        "schema_version": "leadpoet.provider_evidence_cache_row.v2",
+        "artifact_master_key_ref_hash": "sha256:" + "e" * 64,
+        "utc_day": "2026-07-11",
+        "request_fingerprint": "f" * 64,
+        "cache_entry_hash": "sha256:" + "0" * 64,
+        "cache_artifact_id": encrypted_cache_doc["artifact_id"],
+        "source_record_hash": "sha256:" + "1" * 64,
+        "source_boot_identity_hash": "sha256:" + "2" * 64,
+        "response_body_hash": "sha256:" + "3" * 64,
+        "encrypted_cache_doc": encrypted_cache_doc,
+    }
+    cache_inserted = json.loads(
+        database.psql(
+            _provider_cache_put_sql(cache_row),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if cache_inserted != {
+        "status": "inserted",
+        "cache_entry_hash": cache_row["cache_entry_hash"],
+        "cache_row": cache_row,
+    }:
+        raise PostgresContractProbeError(
+            "provider cache atomic put result differs"
+        )
+    cache_replayed = json.loads(
+        database.psql(
+            _provider_cache_put_sql(cache_row),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if cache_replayed != {**cache_inserted, "status": "existing"}:
+        raise PostgresContractProbeError(
+            "provider cache atomic replay result differs"
+        )
+
+    schema = json.loads(
+        database.psql(
+            "SELECT public.research_lab_provider_persistence_batch_contract_v1()::text;",
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if schema != {
+        "schema_version": "leadpoet.provider_persistence_batch_contract.v1",
+        "cache_put": "atomic_exact_row",
+        "outcome_append": "atomic_contiguous_batch",
+        "outcome_batch_max": 32,
+        "conflict_head_checkpoint_row": "encrypted_or_null",
+    }:
+        raise PostgresContractProbeError(
+            "provider persistence batch schema differs"
+        )
+    return {
+        "batch_size": len(batch),
+        "durable_count": durable_count,
+        "batch_replay_exact": True,
+        "batch_conflict_head_exact": True,
+        "cache_put_exact": True,
+        "cache_replay_exact": True,
+        "schema": schema,
+    }
 
 
 def _provider_outcome_append_contract(
@@ -4071,6 +4275,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post-139 allocation frontier bootstrap schema is incomplete"
             )
         provider_outcome_append = _provider_outcome_append_contract(database)
+        provider_persistence_batch = _provider_persistence_batch_contract(
+            database
+        )
         historical_compute_seed_rows = (
             _historical_compute_allocation_seed_rows(
                 database=database,
@@ -4160,7 +4367,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post_141_allocation_frontier_source_contract_valid": True,
                 "post_142_source_catalog_replay_contract_valid": True,
                 "post_143_compact_checkpoint_contract_valid": True,
+                "post_144_provider_persistence_batch_contract_valid": True,
                 "provider_outcome_append_atomic": True,
+                "provider_outcome_batch_append_atomic": True,
+                "provider_evidence_cache_put_atomic": True,
                 "provider_outcome_contention_zero_rollback": True,
                 "provider_outcome_conflict_head_exact": True,
                 "pre_132_lifetime_credit_rejected": True,
@@ -4198,6 +4408,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "git_tree_autoresearch": git_tree_contract,
             "provider_outcome_append": provider_outcome_append,
+            "provider_persistence_batch": provider_persistence_batch,
             "provider_outcome_contention_contract": head_contention_contract,
             "required_schema_declarations": declaration_counts,
         }

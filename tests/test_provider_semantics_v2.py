@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 import threading
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlsplit
@@ -196,6 +197,83 @@ class _OutcomeStore:
             "checkpoint_hash": self.checkpoint_hash,
             "state_document_hash": document["document_hash"],
             "transport_attempts": [],
+            "evidence_artifact_hashes": [self.checkpoint_hash],
+        }
+
+
+class _BatchOutcomeStore(_OutcomeStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_calls = []
+        self.first_batch_entered = threading.Event()
+        self.release_first_batch = threading.Event()
+
+    def persist_batch(
+        self,
+        transitions,
+        *,
+        previous_checkpoint_hash,
+        job_id,
+        purpose,
+        attempt_number=0,
+    ):
+        del attempt_number
+        call_index = len(self.batch_calls)
+        self.batch_calls.append(
+            {
+                "size": len(transitions),
+                "job_id": job_id,
+                "purpose": purpose,
+            }
+        )
+        if call_index == 0:
+            self.first_batch_entered.set()
+            assert self.release_first_batch.wait(timeout=3.0)
+        assert all(item["job_id"] == job_id for item in transitions)
+        assert all(item["purpose"] == purpose for item in transitions)
+        expected_sequence = (
+            int(self.document["sequence"]) + 1
+            if self.document is not None
+            else 1
+        )
+        if (
+            previous_checkpoint_hash != self.checkpoint_hash
+            or int(transitions[0]["document"]["sequence"])
+            != expected_sequence
+        ):
+            return {
+                "status": "conflict",
+                "head_checkpoint_hash": self.checkpoint_hash,
+                "head_state_document": dict(self.document or {}),
+                "transport_attempts": [],
+                "evidence_artifact_hashes": [],
+            }
+        for offset, transition in enumerate(transitions):
+            assert int(transition["document"]["sequence"]) == (
+                expected_sequence + offset
+            )
+        self.persist_count += len(transitions)
+        self.document = dict(transitions[-1]["document"])
+        self.checkpoint_hash = sha256_json(
+            {
+                "sequence": self.document["sequence"],
+                "state": self.document["document_hash"],
+                "previous": previous_checkpoint_hash,
+            }
+        )
+        operation_hash = sha256_json(
+            {
+                "batch": len(self.batch_calls),
+                "job_id": job_id,
+                "size": len(transitions),
+            }
+        )
+        return {
+            "status": "persisted",
+            "checkpoint_hash": self.checkpoint_hash,
+            "state_document_hash": self.document["document_hash"],
+            "checkpoint_count": len(transitions),
+            "transport_attempts": [{"attempt_hash": operation_hash}],
             "evidence_artifact_hashes": [self.checkpoint_hash],
         }
 
@@ -575,7 +653,12 @@ def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
     monkeypatch.setattr(
         semantics_module,
         "threading",
-        SimpleNamespace(RLock=threading.RLock, Event=TrackingEvent),
+        SimpleNamespace(
+            RLock=threading.RLock,
+            Condition=threading.Condition,
+            Event=TrackingEvent,
+            local=threading.local,
+        ),
     )
     cache = BlockingCache()
     authority, _broker, cache, _artifacts = _authority(broker=broker, cache=cache)
@@ -608,6 +691,63 @@ def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
     assert sum(float(event["cost_usd"]) for event in cost_events) == 0.005
     assert {result["evidence"] for result in results} == {"recorded", "hit"}
     assert observed_wait_timeouts == [REPLAY_WAIT_SECONDS]
+
+
+def test_concurrent_outcomes_batch_by_execution_scope_without_duplicate_evidence():
+    outcome_store = _BatchOutcomeStore()
+    authority, broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store,
+    )
+    job_ids = ["batch-job-a"] * 12 + ["batch-job-b"] * 8
+
+    with ThreadPoolExecutor(max_workers=len(job_ids)) as executor:
+        futures = [
+            executor.submit(
+                authority.execute,
+                _request(
+                    logical_operation_id="batch-operation-%d" % index,
+                    job_id=job_id,
+                    body=(
+                        '{"query":"batch-%d"}' % index
+                    ).encode("utf-8"),
+                ),
+            )
+            for index, job_id in enumerate(job_ids)
+        ]
+        assert outcome_store.first_batch_entered.wait(timeout=2.0)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with authority._outcome_batch_condition:
+                queued = len(authority._outcome_pending)
+            if queued == len(job_ids) - 1:
+                break
+            time.sleep(0.005)
+        assert queued == len(job_ids) - 1
+        outcome_store.release_first_batch.set()
+        results = [future.result(timeout=3.0) for future in futures]
+
+    assert len(broker.calls) == len(job_ids)
+    assert outcome_store.persist_count == len(job_ids)
+    assert sum(item["size"] for item in outcome_store.batch_calls) == len(job_ids)
+    assert len(outcome_store.batch_calls) == 3
+    assert all(item["size"] <= 32 for item in outcome_store.batch_calls)
+    assert all(
+        item["job_id"] in {"batch-job-a", "batch-job-b"}
+        and item["purpose"] == "research_lab.company_score.v2"
+        for item in outcome_store.batch_calls
+    )
+    persisted_attempts = [
+        attempt
+        for result in results
+        for attempt in result.get("additional_transport_attempts") or ()
+    ]
+    assert len(persisted_attempts) == len(outcome_store.batch_calls)
+    assert len(
+        {attempt["attempt_hash"] for attempt in persisted_attempts}
+    ) == len(persisted_attempts)
+    assert authority.provider_outcome_snapshot()["provider_outcome_digest"][
+        "sidecar_sequence"
+    ] == len(job_ids)
 
 
 def test_concurrent_preflights_measure_each_worker_profile_without_cache_replay(
@@ -1245,9 +1385,11 @@ def test_real_outcome_store_recovers_ambiguous_commit_without_provider_recall() 
             elif parsed.hostname == "qplwoislplkcegvdmbim.supabase.co":
                 if request["method"] == "POST":
                     self.append_count += 1
-                    row = json.loads(request["body"].decode("utf-8"))[
-                        "checkpoint_row"
+                    rows = json.loads(request["body"].decode("utf-8"))[
+                        "checkpoint_rows"
                     ]
+                    assert len(rows) == 1
+                    row = rows[0]
                     row_key = (
                         row["artifact_master_key_ref_hash"],
                         row["utc_day"],
@@ -1262,6 +1404,7 @@ def test_real_outcome_store_recovers_ambiguous_commit_without_provider_recall() 
                         {
                             "status": "existing" if existing is not None else "inserted",
                             "checkpoint_hash": row["checkpoint_hash"],
+                            "checkpoint_count": 1,
                         },
                         sort_keys=True,
                         separators=(",", ":"),
@@ -1346,7 +1489,7 @@ def test_real_outcome_store_recovers_ambiguous_commit_without_provider_recall() 
     append_attempts = [
         attempt
         for attempt in result["additional_transport_attempts"]
-        if str(attempt["logical_operation_id"]).endswith(":append")
+        if str(attempt["logical_operation_id"]).endswith(":append-batch")
     ]
     assert [attempt["attempt_number"] for attempt in append_attempts] == [0, 1]
     assert [attempt["terminal_status"] for attempt in append_attempts] == [

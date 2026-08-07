@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 SQL_PATH = Path("scripts/89-research-lab-provider-evidence-cache-v2.sql")
+BATCH_SQL_PATH = Path("scripts/144-research-lab-provider-persistence-batches.sql")
 
 
 def test_provider_evidence_cache_migration_is_append_only_and_private() -> None:
@@ -26,3 +27,18 @@ def test_provider_evidence_cache_migration_is_append_only_and_private() -> None:
     assert sql.index("ENABLE ROW LEVEL SECURITY") < sql.index(
         "CREATE INDEX IF NOT EXISTS"
     )
+
+
+def test_provider_evidence_cache_atomic_put_returns_exact_durable_row() -> None:
+    sql = BATCH_SQL_PATH.read_text(encoding="utf-8")
+    assert "put_research_lab_provider_evidence_cache_v2" in sql
+    assert "pg_advisory_xact_lock" in sql
+    assert "'cache_row', durable_row" in sql
+    assert "provider evidence cache identity identifies another row" in sql
+    assert "provider evidence cache durable insert differs" in sql
+    assert "'cache_put', 'atomic_exact_row'" in sql
+    assert "GRANT EXECUTE" in sql
+    assert "TO service_role" in sql
+    assert "FROM PUBLIC, anon, authenticated" in sql
+    assert "UPDATE public.research_lab_provider_evidence_cache_v2" not in sql
+    assert "DELETE FROM public.research_lab_provider_evidence_cache_v2" not in sql

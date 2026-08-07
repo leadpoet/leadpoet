@@ -6051,6 +6051,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 CHECKPOINT_TRANSPORT_ATTEMPTS - 1
             )
             self.outcome_rows: dict[tuple[str, str, int], dict[str, Any]] = {}
+            self.cache_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
 
         @contextmanager
         def transient_terminal_transaction(self):
@@ -6085,7 +6086,30 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             provider = str(request["provider_id"])
             if provider == "supabase":
                 request_url = str(request["url"])
-                if "/rpc/append_research_lab_provider_outcome_checkpoint_v2" in request_url:
+                if "/rpc/append_research_lab_provider_outcome_checkpoints_v2" in request_url:
+                    checkpoint_rows = json.loads(
+                        base64.b64decode(str(request["body_b64"]), validate=True)
+                    )["checkpoint_rows"]
+                    for checkpoint_row in checkpoint_rows:
+                        row_key = (
+                            str(checkpoint_row["artifact_master_key_ref_hash"]),
+                            str(checkpoint_row["utc_day"]),
+                            int(checkpoint_row["sequence"]),
+                        )
+                        existing = self.outcome_rows.get(row_key)
+                        if existing is not None and existing != checkpoint_row:
+                            raise RuntimeError(
+                                "checkpoint batch identified another row"
+                            )
+                        self.outcome_rows[row_key] = dict(checkpoint_row)
+                    body = canonical_json(
+                        {
+                            "checkpoint_hash": checkpoint_rows[-1]["checkpoint_hash"],
+                            "checkpoint_count": len(checkpoint_rows),
+                            "status": "inserted",
+                        }
+                    ).encode()
+                elif "/rpc/append_research_lab_provider_outcome_checkpoint_v2" in request_url:
                     checkpoint_row = json.loads(
                         base64.b64decode(str(request["body_b64"]), validate=True)
                     )["checkpoint_row"]
@@ -6102,6 +6126,26 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                         {
                             "checkpoint_hash": checkpoint_row["checkpoint_hash"],
                             "status": "existing" if existing is not None else "inserted",
+                        }
+                    ).encode()
+                elif "/rpc/put_research_lab_provider_evidence_cache_v2" in request_url:
+                    cache_row = json.loads(
+                        base64.b64decode(str(request["body_b64"]), validate=True)
+                    )["cache_row"]
+                    row_key = (
+                        str(cache_row["artifact_master_key_ref_hash"]),
+                        str(cache_row["utc_day"]),
+                        str(cache_row["request_fingerprint"]),
+                    )
+                    existing = self.cache_rows.get(row_key)
+                    if existing is not None and existing != cache_row:
+                        raise RuntimeError("cache identity identified another row")
+                    self.cache_rows.setdefault(row_key, dict(cache_row))
+                    body = canonical_json(
+                        {
+                            "status": "existing" if existing is not None else "inserted",
+                            "cache_entry_hash": cache_row["cache_entry_hash"],
+                            "cache_row": self.cache_rows[row_key],
                         }
                     ).encode()
                 elif "research_lab_provider_outcome_checkpoints_v2" in request_url:
@@ -6134,7 +6178,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                     body = b"[]"
                 host = "fixture.supabase.co"
             elif provider == "exa":
-                body = b'{"status":"running","object":"agent_run"}'
+                body = (
+                    b'{"costDollars":0.005,"results":[]}'
+                    if str(request["url"]).endswith("/search")
+                    else b'{"status":"running","object":"agent_run"}'
+                )
                 host = "api.exa.ai"
             else:
                 raise RuntimeError("provider evidence probe crossed an undeclared route")
@@ -6155,8 +6203,12 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             transport_failure = False
             if (
                 provider == "supabase"
-                and "/rpc/append_research_lab_provider_outcome_checkpoint_v2"
-                in str(request["url"])
+                and (
+                    "/rpc/append_research_lab_provider_outcome_checkpoints_v2"
+                    in str(request["url"])
+                    or "/rpc/append_research_lab_provider_outcome_checkpoint_v2"
+                    in str(request["url"])
+                )
                 and self.outcome_append_failures_after_commit_remaining > 0
             ):
                 self.outcome_append_failures_after_commit_remaining -= 1
@@ -6308,6 +6360,38 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     ):
         raise RuntimeError("repeated provider cache reads reused transport evidence")
 
+    cache_call_start = len(boundary.calls)
+    recorded_request = {
+        **request,
+        "logical_operation_id": "rehearsal:exa-search-cache-put",
+        "method": "POST",
+        "url": "https://api.exa.ai/search",
+        "headers": {"X-Research-Lab-Cost-Scope": "rehearsal-cache-put"},
+        "body_b64": base64.b64encode(b'{"query":"rehearsal"}').decode(),
+    }
+    recorded = authority.execute(recorded_request)
+    replayed = authority.execute(
+        {
+            **recorded_request,
+            "logical_operation_id": "rehearsal:exa-search-cache-replay",
+        }
+    )
+    cache_calls = boundary.calls[cache_call_start:]
+    cache_put_calls = [
+        call
+        for call in cache_calls
+        if "/rpc/put_research_lab_provider_evidence_cache_v2"
+        in str(call["url"])
+    ]
+    if (
+        recorded.get("evidence") != "recorded"
+        or replayed.get("evidence") != "hit"
+        or len(cache_put_calls) != 1
+        or len(boundary.cache_rows) != 1
+        or sum(call["provider_id"] == "exa" for call in cache_calls) != 1
+    ):
+        raise RuntimeError("atomic provider cache put/replay differed")
+
     outcome_store = ProviderOutcomeStoreV2(
         broker=boundary,
         vault=vault,
@@ -6366,6 +6450,44 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         or restored_outcome.get("state_document") != outcome_document
     ):
         raise RuntimeError("provider outcome transient recovery differed")
+
+    batch_documents = []
+    for provider_id in ("exa", "scrapingdog", "exa"):
+        batch_documents.append(
+            outcome_ledger.record(
+                provider_id=provider_id,
+                endpoint_class="/batch",
+                evidence="recorded",
+                status=200,
+                live_call=True,
+                cost_event={},
+            )
+        )
+    batch_call_start = len(boundary.calls)
+    batch_outcome = outcome_store.persist_batch(
+        [
+            {
+                "document": document,
+                "job_id": context.job_id,
+                "purpose": context.purpose,
+            }
+            for document in batch_documents
+        ],
+        previous_checkpoint_hash=outcome["checkpoint_hash"],
+        job_id=context.job_id,
+        purpose=context.purpose,
+    )
+    batch_calls = boundary.calls[batch_call_start:]
+    if (
+        batch_outcome.get("status") != "persisted"
+        or batch_outcome.get("checkpoint_count") != len(batch_documents)
+        or len(batch_calls) != 1
+        or not str(batch_calls[0]["url"]).endswith(
+            "/rpc/append_research_lab_provider_outcome_checkpoints_v2"
+        )
+        or len(boundary.outcome_rows) != 4
+    ):
+        raise RuntimeError("provider outcome atomic batch append differed")
 
     broker_credentials = {
         "openrouter": "rehearsal-openrouter",
@@ -6476,7 +6598,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         len(successful_transport_calls) != transport_count_before_shared + 1
         or {item.get("evidence") for item in shared_results} != {"recorded", "hit"}
         or not latest_shared_outcome.get("found")
-        or int(latest_shared_outcome["state_document"]["sequence"]) != 3
+        or int(latest_shared_outcome["state_document"]["sequence"])
+        != len(boundary.outcome_rows)
     ):
         raise RuntimeError(
             "provider single-flight durable completion differed: "
@@ -6992,6 +7115,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "execution_receipt_transport_unique": True,
         "transient_cache_transport_recovered": True,
         "transient_outcome_checkpoint_recovered": True,
+        "atomic_provider_cache_put_replayed": True,
+        "atomic_provider_outcome_batch_persisted": True,
         "measured_concurrent_artifact_wave_bound": True,
         "completed_provider_job_state_released": True,
         "active_provider_job_state_isolated": True,

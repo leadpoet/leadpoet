@@ -24,9 +24,11 @@ CHECKPOINT_SCHEMA_VERSION = "leadpoet.provider_outcome_checkpoint.v2"
 CHECKPOINT_ROW_SCHEMA_VERSION = "leadpoet.provider_outcome_checkpoint_row.v2"
 CHECKPOINT_TABLE = "research_lab_provider_outcome_checkpoints_v2"
 CHECKPOINT_APPEND_RPC = "append_research_lab_provider_outcome_checkpoint_v2"
+CHECKPOINT_BATCH_APPEND_RPC = "append_research_lab_provider_outcome_checkpoints_v2"
 CHECKPOINT_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
 CHECKPOINT_TIMEOUT_MS = 45_000
 CHECKPOINT_TRANSPORT_ATTEMPTS = 5
+MAX_CHECKPOINT_BATCH_SIZE = 32
 # Supabase pool saturation can outlast immediate retries. Keep one measured
 # identity, but spread the bounded attempts across a 15-second recovery window.
 CHECKPOINT_RETRY_DELAYS_SECONDS = (0.0, 1.0, 2.0, 4.0, 8.0)
@@ -90,6 +92,226 @@ class ProviderOutcomeStoreV2:
                 purpose=purpose,
                 attempt_number=attempt_number,
             )
+
+    def persist_batch(
+        self,
+        transitions: list[Mapping[str, Any]],
+        *,
+        previous_checkpoint_hash: str,
+        job_id: str,
+        purpose: str,
+        attempt_number: int = 0,
+    ) -> Dict[str, Any]:
+        """Atomically persist a bounded sequence of exact checkpoint rows."""
+
+        with self._vault.transient_artifact_transaction():
+            return self._persist_batch(
+                transitions,
+                previous_checkpoint_hash=previous_checkpoint_hash,
+                job_id=job_id,
+                purpose=purpose,
+                attempt_number=attempt_number,
+            )
+
+    def _persist_batch(
+        self,
+        transitions: list[Mapping[str, Any]],
+        *,
+        previous_checkpoint_hash: str,
+        job_id: str,
+        purpose: str,
+        attempt_number: int,
+    ) -> Dict[str, Any]:
+        if (
+            not isinstance(transitions, list)
+            or not 1 <= len(transitions) <= MAX_CHECKPOINT_BATCH_SIZE
+        ):
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint batch size is invalid"
+            )
+        if (
+            isinstance(attempt_number, bool)
+            or not isinstance(attempt_number, int)
+            or attempt_number < 0
+        ):
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint attempt number is invalid"
+            )
+        previous_hash = _hash(
+            previous_checkpoint_hash,
+            "previous provider outcome checkpoint hash",
+            optional=True,
+        )
+        payloads: list[Dict[str, Any]] = []
+        rows: list[Dict[str, Any]] = []
+        descriptor_ids: list[str] = []
+        committed_artifacts: set[str] = set()
+        expected_day = ""
+        expected_sequence: int | None = None
+
+        for transition in transitions:
+            if not isinstance(transition, Mapping) or set(transition) != {
+                "document",
+                "job_id",
+                "purpose",
+            }:
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint batch transition is invalid"
+                )
+            if (
+                str(transition["job_id"]) != str(job_id)
+                or str(transition["purpose"]) != str(purpose)
+            ):
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint batch execution scope differs"
+                )
+            document = transition["document"]
+            if not isinstance(document, Mapping):
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint batch document is invalid"
+                )
+            utc_day = _day(document.get("utc_day"))
+            normalized_document = validate_provider_outcome_state_document_v2(
+                document,
+                expected_utc_day=utc_day,
+            )
+            sequence = int(normalized_document["sequence"])
+            if sequence <= 0:
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint sequence must be positive"
+                )
+            if expected_day and utc_day != expected_day:
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint batch crosses UTC days"
+                )
+            if expected_sequence is not None and sequence != expected_sequence:
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint batch sequence is not contiguous"
+                )
+            expected_day = utc_day
+            expected_sequence = sequence + 1
+            payload_body = {
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "utc_day": utc_day,
+                "sequence": sequence,
+                "previous_checkpoint_hash": previous_hash,
+                "state_document": normalized_document,
+            }
+            payload = {
+                **payload_body,
+                "checkpoint_hash": sha256_json(payload_body),
+            }
+            payload_bytes = canonical_json(payload).encode("utf-8")
+            descriptor = self._vault.seal(
+                payload_bytes,
+                job_id=str(transition["job_id"]),
+                purpose=str(transition["purpose"]),
+                artifact_kind="provider_outcome_checkpoint",
+            )
+            descriptor_id = str(descriptor["artifact_id"])
+            exported = self._vault.export_ciphertext(descriptor_id)
+            row = self._row(
+                payload=payload,
+                artifact_id=descriptor_id,
+                storage_document=exported["storage_document"],
+            )
+            payloads.append(payload)
+            rows.append(row)
+            descriptor_ids.append(descriptor_id)
+            committed_artifacts.update(
+                {
+                    payload["checkpoint_hash"],
+                    normalized_document["document_hash"],
+                    descriptor_id,
+                    str(exported["storage_document_hash"]),
+                }
+            )
+            previous_hash = str(payload["checkpoint_hash"])
+
+        final_payload = payloads[-1]
+        attempts: list[Dict[str, Any]] = []
+        transport_artifacts: set[str] = set()
+        result, append_attempts, append_artifacts = self._execute_with_retry(
+            method="POST",
+            url="%s/rest/v1/rpc/%s"
+            % (CHECKPOINT_ORIGIN, CHECKPOINT_BATCH_APPEND_RPC),
+            headers={
+                "accept": "application/json",
+                "content-type": "application/json",
+            },
+            body=canonical_json({"checkpoint_rows": rows}).encode("utf-8"),
+            logical_operation_id=(
+                "%s:provider-outcome:%d-%d:append-batch"
+                % (
+                    job_id,
+                    int(payloads[0]["sequence"]),
+                    int(final_payload["sequence"]),
+                )
+            ),
+            job_id=job_id,
+            purpose=purpose,
+            attempt_number=attempt_number,
+        )
+        attempts.extend(append_attempts)
+        transport_artifacts.update(append_artifacts)
+        append_result = self._batch_append_result(
+            result,
+            expected_checkpoint_hash=str(final_payload["checkpoint_hash"]),
+            expected_checkpoint_count=len(payloads),
+        )
+        append_status = str(append_result["status"])
+        if append_status == "ambiguous":
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint batch append lacks an authenticated terminal"
+            )
+        if append_status == "busy":
+            for descriptor_id in descriptor_ids:
+                self._vault.release_transient(descriptor_id)
+            return {
+                "status": "busy",
+                "transport_attempts": attempts,
+                "evidence_artifact_hashes": sorted(transport_artifacts),
+            }
+        if append_status == "conflict":
+            conflict_result: Dict[str, Any] = {
+                "status": "conflict",
+                "transport_attempts": attempts,
+                "evidence_artifact_hashes": sorted(transport_artifacts),
+            }
+            head_row = append_result.get("head_checkpoint_row")
+            if isinstance(head_row, Mapping):
+                restored = self._restore_row(
+                    head_row,
+                    expected_utc_day=expected_day,
+                    attempts=attempts,
+                    artifacts=transport_artifacts,
+                )
+                conflict_result.update(
+                    {
+                        "head_checkpoint_hash": restored["checkpoint_hash"],
+                        "head_state_document": restored["state_document"],
+                        "evidence_artifact_hashes": restored[
+                            "evidence_artifact_hashes"
+                        ],
+                    }
+                )
+            for descriptor_id in descriptor_ids:
+                self._vault.release_transient(descriptor_id)
+            return conflict_result
+        for descriptor_id in descriptor_ids:
+            self._vault.release_transient(descriptor_id)
+        return {
+            "status": "persisted",
+            "checkpoint_hash": str(final_payload["checkpoint_hash"]),
+            "state_document_hash": str(
+                final_payload["state_document"]["document_hash"]
+            ),
+            "checkpoint_count": len(payloads),
+            "transport_attempts": attempts,
+            "evidence_artifact_hashes": sorted(
+                transport_artifacts | committed_artifacts
+            ),
+        }
 
     def _persist(
         self,
@@ -419,6 +641,94 @@ class ProviderOutcomeStoreV2:
             if head_row is not None and not isinstance(head_row, Mapping):
                 raise ProviderOutcomeStoreV2Error(
                     "provider outcome checkpoint conflict head is invalid"
+                )
+            append_result["head_checkpoint_row"] = head_row
+        return append_result
+
+    @staticmethod
+    def _batch_append_result(
+        result: Mapping[str, Any],
+        *,
+        expected_checkpoint_hash: str,
+        expected_checkpoint_count: int,
+    ) -> Dict[str, Any]:
+        if result.get("terminal_status") != "authenticated_response":
+            return {"status": "ambiguous"}
+        try:
+            http_status = int(result.get("http_status") or 0)
+            body = base64.b64decode(
+                str(result.get("body_b64") or ""),
+                validate=True,
+            )
+            parsed = json.loads(body.decode("utf-8"))
+        except Exception as exc:
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint batch append response is invalid"
+            ) from exc
+        attempt = result.get("transport_attempt")
+        if (
+            not isinstance(attempt, Mapping)
+            or sha256_bytes(body) != str(attempt.get("response_hash") or "")
+            or not isinstance(parsed, Mapping)
+        ):
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint batch response commitments differ"
+            )
+        if not 200 <= http_status < 300:
+            code = str(parsed.get("code") or "none")
+            if code == "40001":
+                message = str(parsed.get("message") or "").strip().lower()
+                if message == "provider outcome checkpoint batch append is busy":
+                    return {"status": "busy"}
+                return {"status": "conflict"}
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint batch authenticated append failed "
+                "(http_status=%d code=%s)" % (http_status, code)
+            )
+        measured_status = str(parsed.get("status") or "").strip().lower()
+        if measured_status not in {
+            "inserted",
+            "existing",
+            "busy",
+            "conflict",
+        }:
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint batch append status is invalid"
+            )
+        expected_fields = {
+            "status",
+            "checkpoint_hash",
+            "checkpoint_count",
+        }
+        if measured_status == "conflict" and "head_checkpoint_row" in parsed:
+            expected_fields.add("head_checkpoint_row")
+        if set(parsed) != expected_fields:
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint batch result fields are invalid"
+            )
+        measured_checkpoint_hash = _hash(
+            parsed.get("checkpoint_hash"),
+            "batch append checkpoint hash",
+        )
+        try:
+            measured_count = int(parsed.get("checkpoint_count"))
+        except (TypeError, ValueError) as exc:
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint batch count is invalid"
+            ) from exc
+        if (
+            measured_checkpoint_hash != expected_checkpoint_hash
+            or measured_count != expected_checkpoint_count
+        ):
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint batch append result differs"
+            )
+        append_result: Dict[str, Any] = {"status": measured_status}
+        if "head_checkpoint_row" in parsed:
+            head_row = parsed.get("head_checkpoint_row")
+            if head_row is not None and not isinstance(head_row, Mapping):
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint batch conflict head is invalid"
                 )
             append_result["head_checkpoint_row"] = head_row
         return append_result

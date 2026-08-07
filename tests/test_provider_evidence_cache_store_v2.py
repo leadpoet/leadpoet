@@ -101,7 +101,11 @@ class _Broker:
             )
         assert provider_id == "supabase"
         if request["method"] == "POST":
-            row = json.loads(base64.b64decode(request["body_b64"]))
+            payload = json.loads(base64.b64decode(request["body_b64"]))
+            assert urlsplit(request["url"]).path.endswith(
+                "/rpc/put_research_lab_provider_evidence_cache_v2"
+            )
+            row = payload["cache_row"]
             key = (row["utc_day"], row["request_fingerprint"])
             if self.post_http_failures:
                 self.post_http_failures -= 1
@@ -116,8 +120,18 @@ class _Broker:
                 if self.commit_failed_posts:
                     self.rows.setdefault(key, row)
                 return self._failure(request)
+            existing = key in self.rows
             self.rows.setdefault(key, row)
-            return self._result(request, status=201, body=b"")
+            body = json.dumps(
+                {
+                    "status": "existing" if existing else "inserted",
+                    "cache_entry_hash": row["cache_entry_hash"],
+                    "cache_row": self.rows[key],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            return self._result(request, status=200, body=body)
         if self.fail_reads is True:
             return self._failure(request)
         if self.fail_reads:
@@ -454,7 +468,7 @@ def test_cache_store_retries_transient_insert_under_same_operation(
     insert_attempts = [
         item
         for item in persisted["transport_attempts"]
-        if item["logical_operation_id"].endswith(":insert")
+        if item["logical_operation_id"].endswith(":put")
     ]
     assert [item["terminal_status"] for item in insert_attempts] == [
         "transport_failure",
@@ -515,12 +529,12 @@ def test_cache_store_retries_authenticated_transient_insert(
     insert_attempts = [
         attempt
         for attempt in persisted["transport_attempts"]
-        if attempt["logical_operation_id"].endswith(":insert")
+        if attempt["logical_operation_id"].endswith(":put")
     ]
     assert [attempt["attempt_number"] for attempt in insert_attempts] == [0, 1]
     assert [attempt["http_status"] for attempt in insert_attempts] == [
         http_status,
-        201,
+        200,
     ]
 
 
@@ -626,7 +640,7 @@ def test_cache_store_exhausted_insert_remains_fail_closed() -> None:
 
     with pytest.raises(
         ProviderEvidenceCacheStoreV2Error,
-        match="authenticated insert failed",
+        match="authenticated put failed",
     ):
         store.persist_recorded(
             terminal,

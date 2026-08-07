@@ -35,6 +35,7 @@ from leadpoet_canonical.attested_v2 import (
 CACHE_PAYLOAD_SCHEMA_VERSION = "leadpoet.provider_evidence_cache_payload.v2"
 CACHE_ROW_SCHEMA_VERSION = "leadpoet.provider_evidence_cache_row.v2"
 CACHE_TABLE = "research_lab_provider_evidence_cache_v2"
+CACHE_PUT_RPC = "put_research_lab_provider_evidence_cache_v2"
 CACHE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
 CACHE_TIMEOUT_MS = 45_000
 CACHE_TRANSPORT_ATTEMPTS = 5
@@ -173,39 +174,28 @@ class ProviderEvidenceCacheStoreV2:
             str(descriptor["artifact_id"]),
             str(exported["storage_document_hash"]),
         }
-        post_result, post_attempts, post_artifacts = self._execute_with_retry(
+        put_result, put_attempts, put_artifacts = self._execute_with_retry(
             method="POST",
-            url="%s/rest/v1/%s" % (CACHE_ORIGIN, CACHE_TABLE),
+            url="%s/rest/v1/rpc/%s" % (CACHE_ORIGIN, CACHE_PUT_RPC),
             headers={
                 "accept": "application/json",
                 "content-type": "application/json",
-                "prefer": "resolution=ignore-duplicates,return=minimal",
             },
-            body=canonical_json(row).encode("utf-8"),
+            body=canonical_json({"cache_row": row}).encode("utf-8"),
             logical_operation_id=(
-                "%s:provider-evidence-cache:%s:insert"
+                "%s:provider-evidence-cache:%s:put"
                 % (cache_job_id, payload["request_fingerprint"][:16])
             ),
             job_id=cache_job_id,
             purpose=cache_purpose,
         )
-        attempts.extend(post_attempts)
-        artifacts.update(post_artifacts)
-        if not self._is_authenticated_success(post_result):
-            raise ProviderEvidenceCacheStoreV2Error(
-                "provider cache authenticated insert failed"
-            )
-
-        rows, read_attempts, read_artifacts = self._read_rows(
-            utc_day=normalized_day,
-            request_fingerprint=payload["request_fingerprint"],
-            job_id=cache_job_id,
-            purpose=cache_purpose,
-            operation_suffix="readback",
+        attempts.extend(put_attempts)
+        artifacts.update(put_artifacts)
+        durable_row = self._put_result(
+            put_result,
+            expected_cache_entry_hash=cache_entry_hash,
         )
-        attempts.extend(read_attempts)
-        artifacts.update(read_artifacts)
-        if len(rows) != 1 or rows[0] != row:
+        if durable_row != row:
             raise ProviderEvidenceCacheStoreV2Error(
                 "provider cache durable readback differs"
             )
@@ -216,6 +206,53 @@ class ProviderEvidenceCacheStoreV2:
             "transport_attempts": attempts,
             "evidence_artifact_hashes": sorted(artifacts),
         }
+
+    @staticmethod
+    def _put_result(
+        result: Mapping[str, Any],
+        *,
+        expected_cache_entry_hash: str,
+    ) -> Dict[str, Any]:
+        if result.get("terminal_status") != "authenticated_response":
+            raise ProviderEvidenceCacheStoreV2Error(
+                "provider cache authenticated put failed"
+            )
+        try:
+            http_status = int(result.get("http_status") or 0)
+            body = base64.b64decode(
+                str(result.get("body_b64") or ""),
+                validate=True,
+            )
+            parsed = json.loads(body.decode("utf-8"))
+        except Exception as exc:
+            raise ProviderEvidenceCacheStoreV2Error(
+                "provider cache put response is invalid"
+            ) from exc
+        attempt = result.get("transport_attempt")
+        if (
+            not 200 <= http_status < 300
+            or not isinstance(attempt, Mapping)
+            or sha256_bytes(body) != str(attempt.get("response_hash") or "")
+            or not isinstance(parsed, Mapping)
+            or set(parsed) != {"status", "cache_entry_hash", "cache_row"}
+            or str(parsed.get("status") or "") not in {"inserted", "existing"}
+        ):
+            raise ProviderEvidenceCacheStoreV2Error(
+                "provider cache put response commitments differ"
+            )
+        cache_entry_hash = _hash(
+            parsed.get("cache_entry_hash"),
+            "provider cache put entry hash",
+        )
+        cache_row = parsed.get("cache_row")
+        if (
+            cache_entry_hash != expected_cache_entry_hash
+            or not isinstance(cache_row, Mapping)
+        ):
+            raise ProviderEvidenceCacheStoreV2Error(
+                "provider cache put result differs"
+            )
+        return dict(cache_row)
 
     def load(
         self,

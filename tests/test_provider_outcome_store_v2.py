@@ -47,6 +47,104 @@ class _Broker:
         assert request["provider_id"] == "supabase"
         if request["method"] == "POST":
             payload = json.loads(base64.b64decode(request["body_b64"]))
+            if "checkpoint_rows" in payload:
+                rows = payload["checkpoint_rows"]
+                assert 1 <= len(rows) <= 32
+                final_row = rows[-1]
+                if (
+                    self.append_http_failure is not None
+                    and self.append_http_failures > 0
+                ):
+                    self.append_http_failures -= 1
+                    status, code = self.append_http_failure
+                    return self._result(
+                        request,
+                        status=status,
+                        body=json.dumps({"code": code}).encode(),
+                    )
+                if self.fail_uncommitted_appends > 0:
+                    self.fail_uncommitted_appends -= 1
+                    return self._failure(request, failure_code="unexpected_eof")
+                if self.busy_appends > 0:
+                    self.busy_appends -= 1
+                    return self._batch_result(
+                        request,
+                        row=final_row,
+                        count=len(rows),
+                        status="busy",
+                    )
+                existing = [
+                    next(
+                        (
+                            item
+                            for item in self.rows.values()
+                            if item["checkpoint_hash"] == row["checkpoint_hash"]
+                        ),
+                        None,
+                    )
+                    for row in rows
+                ]
+                if all(item is not None for item in existing):
+                    assert all(
+                        durable == proposed
+                        for durable, proposed in zip(existing, rows)
+                    )
+                    return self._batch_result(
+                        request,
+                        row=final_row,
+                        count=len(rows),
+                        status="existing",
+                    )
+                assert not any(item is not None for item in existing)
+                lineage = (
+                    rows[0]["artifact_master_key_ref_hash"],
+                    rows[0]["utc_day"],
+                )
+                current = sorted(
+                    (
+                        item
+                        for (key_hash, day, _sequence), item in self.rows.items()
+                        if (key_hash, day) == lineage
+                    ),
+                    key=lambda item: int(item["sequence"]),
+                    reverse=True,
+                )
+                expected_sequence = int(current[0]["sequence"]) + 1 if current else 1
+                expected_previous = current[0]["checkpoint_hash"] if current else ""
+                if (
+                    int(rows[0]["sequence"]) != expected_sequence
+                    or rows[0]["previous_checkpoint_hash"] != expected_previous
+                ):
+                    extra = {}
+                    if self.contention_contract == "embedded":
+                        extra["head_checkpoint_row"] = current[0] if current else None
+                    return self._batch_result(
+                        request,
+                        row=final_row,
+                        count=len(rows),
+                        status="conflict",
+                        **extra,
+                    )
+                for previous, row in zip(rows, rows[1:]):
+                    assert int(row["sequence"]) == int(previous["sequence"]) + 1
+                    assert row["previous_checkpoint_hash"] == previous["checkpoint_hash"]
+                for row in rows:
+                    self.rows[
+                        (
+                            row["artifact_master_key_ref_hash"],
+                            row["utc_day"],
+                            int(row["sequence"]),
+                        )
+                    ] = row
+                if self.fail_committed_appends > 0:
+                    self.fail_committed_appends -= 1
+                    return self._failure(request, failure_code="unexpected_eof")
+                return self._batch_result(
+                    request,
+                    row=final_row,
+                    count=len(rows),
+                    status="inserted",
+                )
             row = payload["checkpoint_row"]
             if (
                 self.append_http_failure is not None
@@ -189,6 +287,32 @@ class _Broker:
             body=json.dumps(rows, sort_keys=True, separators=(",", ":")).encode(),
         )
 
+    def _batch_result(
+        self,
+        request,
+        *,
+        row,
+        count,
+        status,
+        head_checkpoint_row=None,
+    ):
+        body = {
+            "status": status,
+            "checkpoint_hash": row["checkpoint_hash"],
+            "checkpoint_count": count,
+        }
+        if status == "conflict":
+            body["head_checkpoint_row"] = head_checkpoint_row
+        return self._result(
+            request,
+            status=200,
+            body=json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        )
+
     def _result(self, request, *, status, body):
         ordinal = len(self.calls)
         parsed = urlsplit(request["url"])
@@ -305,6 +429,36 @@ def _document(clock_value="2026-07-10T12:00:00Z"):
     )
 
 
+def _documents(count: int):
+    ledger = ProviderOutcomeLedgerV2(
+        clock=lambda: "2026-07-10T12:00:00Z"
+    )
+    documents = []
+    for index in range(count):
+        documents.append(
+            ledger.record(
+                provider_id="exa" if index % 2 == 0 else "scrapingdog",
+                endpoint_class="/search" if index % 2 == 0 else "/account",
+                evidence="recorded",
+                status=200,
+                live_call=True,
+                cost_event={},
+            )
+        )
+    return documents
+
+
+def _transitions(count: int, *, job_id: str = "batch-job"):
+    return [
+        {
+            "document": document,
+            "job_id": job_id,
+            "purpose": "research_lab.private_model_run.v2",
+        }
+        for document in _documents(count)
+    ]
+
+
 def test_outcome_checkpoint_reopens_after_coordinator_restart() -> None:
     broker = _Broker()
     first = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
@@ -330,6 +484,88 @@ def test_outcome_checkpoint_reopens_after_coordinator_restart() -> None:
     assert restored["state_document"]["sequence"] == 1
     assert restored["state_document"]["providers"]["exa"]["call_count"] == 1
     assert len(restored["transport_attempts"]) == 1
+
+
+def test_outcome_checkpoint_batch_commits_exact_chain_in_one_round_trip() -> None:
+    broker = _Broker()
+    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+
+    persisted = store.persist_batch(
+        _transitions(8),
+        previous_checkpoint_hash="",
+        job_id="batch-job",
+        purpose="research_lab.private_model_run.v2",
+    )
+    restored = store.load_latest(
+        utc_day="2026-07-10",
+        job_id="restore",
+        purpose="research_lab.provider_outcome_state.v2",
+    )
+
+    assert persisted["status"] == "persisted"
+    assert persisted["checkpoint_count"] == 8
+    assert restored["checkpoint_hash"] == persisted["checkpoint_hash"]
+    assert restored["state_document"]["sequence"] == 8
+    assert [call["method"] for call in broker.calls] == ["POST", "GET"]
+    rows = sorted(broker.rows.values(), key=lambda row: int(row["sequence"]))
+    assert [int(row["sequence"]) for row in rows] == list(range(1, 9))
+    assert rows[0]["previous_checkpoint_hash"] == ""
+    assert all(
+        row["previous_checkpoint_hash"] == previous["checkpoint_hash"]
+        for previous, row in zip(rows, rows[1:])
+    )
+
+
+@pytest.mark.parametrize("committed_before_eof", (False, True))
+def test_outcome_checkpoint_batch_retries_without_partial_or_duplicate_rows(
+    committed_before_eof: bool,
+) -> None:
+    broker = _Broker()
+    if committed_before_eof:
+        broker.fail_committed_appends = 1
+    else:
+        broker.fail_uncommitted_appends = 1
+    store = ProviderOutcomeStoreV2(
+        broker=broker,
+        vault=_vault(),
+        sleeper=lambda _delay: None,
+    )
+
+    persisted = store.persist_batch(
+        _transitions(5),
+        previous_checkpoint_hash="",
+        job_id="batch-job",
+        purpose="research_lab.private_model_run.v2",
+    )
+
+    assert persisted["status"] == "persisted"
+    assert persisted["checkpoint_count"] == 5
+    assert len(broker.rows) == 5
+    assert [call["attempt_number"] for call in broker.calls] == [0, 1]
+    assert [
+        attempt["terminal_status"]
+        for attempt in persisted["transport_attempts"]
+    ] == ["transport_failure", "authenticated_response"]
+
+
+def test_outcome_checkpoint_batch_rejects_mixed_execution_scopes() -> None:
+    broker = _Broker()
+    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+    transitions = _transitions(2)
+    transitions[1] = {**transitions[1], "job_id": "another-job"}
+
+    with pytest.raises(
+        ProviderOutcomeStoreV2Error,
+        match="batch execution scope differs",
+    ):
+        store.persist_batch(
+            transitions,
+            previous_checkpoint_hash="",
+            job_id="batch-job",
+            purpose="research_lab.private_model_run.v2",
+        )
+
+    assert broker.calls == []
 
 
 def test_outcome_checkpoint_chain_is_monotonic_and_collision_fails_closed() -> None:

@@ -33,9 +33,15 @@ with redirect_stdout(sys.stderr):
     )
     from leadpoet_canonical.attested_v2 import sha256_json
     if __package__:
-        from .postgres_v2_contract_probe import EXPECTED_APPLIED_MIGRATIONS
+        from .postgres_v2_contract_probe import (
+            EXPECTED_APPLIED_MIGRATIONS,
+            EXPECTED_POSTGRES_CONTRACT_CHECKS,
+        )
     else:
-        from postgres_v2_contract_probe import EXPECTED_APPLIED_MIGRATIONS
+        from postgres_v2_contract_probe import (
+            EXPECTED_APPLIED_MIGRATIONS,
+            EXPECTED_POSTGRES_CONTRACT_CHECKS,
+        )
 
 
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
@@ -759,49 +765,7 @@ def verify_migration_backed_database_contract(
             "migration-backed PostgreSQL contract evidence is missing"
         )
     document = json.loads(path.read_text(encoding="utf-8"))
-    required_checks = {
-        "maintenance_lease_contract_valid",
-        "pre_128_transport_rejected",
-        "post_128_transport_persisted",
-        "transport_contract_valid",
-        "pre_129_attested_local_transport_rejected",
-        "post_129_attested_local_transport_persisted",
-        "transport_terminal_contract_valid",
-        "pre_133_provider_outcome_contract_rejected",
-        "post_133_provider_outcome_contract_valid",
-        "pre_134_provider_outcome_head_contract_rejected",
-        "post_134_provider_outcome_head_contract_valid",
-        "post_135_active_model_replay_contract_valid",
-        "post_136_ancestry_checkpoint_contract_valid",
-        "post_137_allocation_settlement_frontier_contract_valid",
-        "post_138_ancestry_checkpoint_bootstrap_purpose_valid",
-        "post_139_allocation_frontier_bootstrap_contract_valid",
-        "post_141_allocation_frontier_source_contract_valid",
-        "post_142_source_catalog_replay_contract_valid",
-        "post_143_compact_checkpoint_contract_valid",
-        "provider_outcome_append_atomic",
-        "provider_outcome_contention_zero_rollback",
-        "provider_outcome_conflict_head_exact",
-        "pre_132_lifetime_credit_rejected",
-        "post_132_lifetime_credit_persisted",
-        "lifetime_credit_rpc_idempotent",
-        "grandfathered_credit_unchanged",
-        "lifetime_credit_contract_valid",
-        "finalized_view_projection_exact",
-        "finalized_view_seed_available",
-        "historical_compute_schema_migrations_applied",
-        "git_tree_autoresearch_schema_migrations_applied",
-        "git_tree_autoresearch_persistence_contract_valid",
-        "git_tree_stale_root_rejected_atomically",
-        "git_tree_replacement_and_restart_replay_valid",
-        "historical_compute_finalized_authority_seed_available",
-        "historical_compute_allocation_conserved",
-        "historical_compute_release_identity_bound",
-        "settlement_authority_parsed",
-        "measured_settlement_receipt_projection_exact",
-        "tampered_weight_receipt_rejected",
-        "required_schema_migrations_declared",
-    }
+    required_checks = set(EXPECTED_POSTGRES_CONTRACT_CHECKS)
     checks = document.get("checks")
     applied_migrations = document.get("applied_migrations")
     if (
@@ -826,6 +790,26 @@ def verify_migration_backed_database_contract(
     }:
         raise SystemExit(
             "migration-backed provider outcome contract evidence is missing"
+        )
+    if document.get("provider_persistence_batch") != {
+        "batch_size": 5,
+        "durable_count": 5,
+        "batch_replay_exact": True,
+        "batch_conflict_head_exact": True,
+        "cache_put_exact": True,
+        "cache_replay_exact": True,
+        "schema": {
+            "schema_version": (
+                "leadpoet.provider_persistence_batch_contract.v1"
+            ),
+            "cache_put": "atomic_exact_row",
+            "outcome_append": "atomic_contiguous_batch",
+            "outcome_batch_max": 32,
+            "conflict_head_checkpoint_row": "encrypted_or_null",
+        },
+    }:
+        raise SystemExit(
+            "migration-backed provider persistence batch evidence is missing"
         )
     if document.get("maintenance_lease") != {
         "schema_version": "leadpoet.maintenance_lease_contract.v1",

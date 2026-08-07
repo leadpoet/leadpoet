@@ -1102,7 +1102,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:6a8701f85baec4969d70bed93747087b3637a27d9c8c75d837d55f6ff4580f91",
+      "ast_sha256": "sha256:a7eb0b4bda87bf9734c93b40c1da1c4f2a6c5108341c969d04149861721c08b2",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -2607,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:bdedbeaaf5984e85d968f9fc68064005245c93859432f124f47ccf0678ee1e77",
+  "manifest_hash": "sha256:d212b54371781edc279e07021a1bff279835c0e032188204f7155a1522987e91",
   "protected_source_commit": "1803f3802b3667e2036a54fbf6ada14b7edfa206",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

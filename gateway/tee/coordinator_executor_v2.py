@@ -86,6 +86,8 @@ OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2 = (
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ARTIFACT_PERSISTENCE_PURPOSE = "leadpoet.artifact_persistence.v2"
 _ARTIFACT_PERSISTENCE_PROVIDER = "aws_s3_object_lock"
+_PROVIDER_CREDENTIAL_REFS_FIELD = "_v2_provider_credential_ref_hashes"
+_PROVIDER_CREDENTIAL_PROFILE_FIELD = "_v2_provider_credential_profile"
 
 _COORDINATOR_WEIGHT_INPUT_PURPOSES = {
     category: purpose
@@ -431,6 +433,34 @@ class CoordinatorExecutorV2:
     ) -> ExecutionResultV2:
         if operation not in COORDINATOR_OPERATIONS_V2:
             raise ValueError("unsupported V2 coordinator operation")
+        payload = dict(payload)
+        credential_profile = payload.pop(
+            _PROVIDER_CREDENTIAL_PROFILE_FIELD,
+            None,
+        )
+        if credential_profile is None:
+            credential_profile = "default"
+        if credential_profile != context.provider_credential_profile:
+            raise ValueError(
+                "V2 provider credential profile differs from job manifest"
+            )
+        if credential_profile != "default":
+            raise ValueError(
+                "V2 provider credential profile is not allowed for coordinator"
+            )
+        credential_refs = payload.pop(_PROVIDER_CREDENTIAL_REFS_FIELD, None)
+        if credential_refs is None and context.provider_credential_ref_hashes:
+            raise ValueError("V2 provider credential profile is missing")
+        if credential_refs is None:
+            credential_refs = {}
+        if not isinstance(credential_refs, Mapping):
+            raise ValueError("V2 provider credential profile is invalid")
+        if dict(credential_refs) != dict(
+            context.provider_credential_ref_hashes
+        ):
+            raise ValueError(
+                "V2 provider credential profile differs from job manifest"
+            )
         if operation == OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2:
             return self._ancestry_checkpoint_bootstrap(payload, context)
         if operation == ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION:

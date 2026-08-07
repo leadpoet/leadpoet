@@ -176,6 +176,10 @@ class ProviderOutcomeStoreV2:
             expected_checkpoint_hash=payload["checkpoint_hash"],
         )
         append_status = str(append_result["status"])
+        if append_status == "ambiguous":
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint append lacks an authenticated terminal"
+            )
         if append_status == "busy":
             self._vault.release_transient(str(descriptor["artifact_id"]))
             return {

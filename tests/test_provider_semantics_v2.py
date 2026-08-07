@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 import threading
+import urllib.error
+import urllib.request
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -26,6 +28,7 @@ from gateway.tee.provider_broker_v2 import (
     credential_reference_hash,
     expected_provider_credential_slots,
 )
+from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
 from gateway.tee.inter_enclave_tls import (
     MAX_FRAME_BYTES,
     MAX_RPC_DELIVERY_ATTEMPTS,
@@ -698,14 +701,68 @@ def test_provider_outcome_state_survives_restart_and_persistence_is_fail_closed(
 
     before_failure = restarted.provider_outcome_snapshot()
     outcome_store.fail_persist = True
-    with pytest.raises(RuntimeError, match="persistence failed"):
-        restarted.execute(
-            _request(
-                logical_operation_id="provider-operation-persistence-failure",
-                body=b'{"query":"new"}',
-            )
+    failed = restarted.execute(
+        _request(
+            logical_operation_id="provider-operation-persistence-failure",
+            body=b'{"query":"new"}',
         )
+    )
+    assert failed["terminal_status"] == "transport_failure"
+    assert failed["failure_stage"] == "provider_semantics"
     assert restarted.provider_outcome_snapshot() == before_failure
+
+
+def test_model_retry_after_semantics_failure_has_one_terminal_per_intent():
+    class FailOnceOutcomeStore(_OutcomeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failures_remaining = 1
+
+        def persist(self, *args, **kwargs):
+            if self.failures_remaining:
+                self.failures_remaining -= 1
+                raise RuntimeError("outcome persistence failed")
+            return super().persist(*args, **kwargs)
+
+    outcome_store = FailOnceOutcomeStore()
+    authority, broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store,
+    )
+    terminals = []
+    router = BrokeredProviderTransportV2(
+        authority.execute,
+        terminal_sink=lambda attempt: terminals.append(dict(attempt)),
+    )
+    try:
+        with router.scope(
+            job_id="job-provider-semantics",
+            purpose="research_lab.company_score.v2",
+            logical_operation_id="model-operation",
+            retry_policy_hashes={
+                provider: sha256_json({"retry": provider})
+                for provider in BUILTIN_PROVIDER_ROUTES
+            },
+        ):
+            request = urllib.request.Request(
+                "https://api.exa.ai/search",
+                data=b'{"query":"example"}',
+                method="POST",
+            )
+            with pytest.raises(urllib.error.URLError, match="unexpected_eof"):
+                urllib.request.urlopen(request, timeout=30)
+            response = urllib.request.urlopen(request, timeout=30)
+            assert response.status == 200
+    finally:
+        router.restore()
+
+    assert [item["attempt_number"] for item in terminals] == [0, 1]
+    assert [item["terminal_status"] for item in terminals] == [
+        "transport_failure",
+        "attested_local_response",
+    ]
+    assert len({item["logical_operation_id"] for item in terminals}) == 1
+    assert sum(call["provider_id"] == "exa" for call in broker.calls) == 1
+    assert outcome_store.persist_count == 1
 
 
 def test_inter_enclave_replay_preserves_one_provider_checkpoint_across_restart():
@@ -968,12 +1025,10 @@ def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() ->
         sleeper=sleeps.append,
     )
 
-    with pytest.raises(
-        ProviderSemanticsV2Error,
-        match="provider outcome checkpoint contention did not converge",
-    ):
-        authority.execute(_request(job_id="job-persistent-contention"))
+    failed = authority.execute(_request(job_id="job-persistent-contention"))
 
+    assert failed["terminal_status"] == "transport_failure"
+    assert failed["failure_error_type"] == "ProviderSemanticsV2Error"
     assert outcome_store.persist_attempts == 64
     assert outcome_store.load_attempts == 1  # startup restore only
     assert len(sleeps) == 63
@@ -1320,14 +1375,14 @@ def test_provider_outcome_rollback_preserves_original_error_across_midnight() ->
 
     timestamps[0] = "2026-07-11T00:00:01Z"
     outcome_store.fail_persist = True
-    with pytest.raises(RuntimeError, match="outcome persistence failed"):
-        authority.execute(
-            _request(
-                logical_operation_id="provider-operation-next-day",
-                body=b'{"query":"next-day"}',
-            )
+    failed = authority.execute(
+        _request(
+            logical_operation_id="provider-operation-next-day",
+            body=b'{"query":"next-day"}',
         )
+    )
 
+    assert failed["terminal_status"] == "transport_failure"
     restored = authority._outcome_ledger.state_document()
     assert restored["utc_day"] == "2026-07-10"
     assert restored["sequence"] == 1
@@ -1365,13 +1420,17 @@ def test_failed_outcome_persistence_removes_uncommitted_job_artifacts():
         outcome_store=FailingOutcomeStore(),
         artifact_transaction=vault.transient_artifact_transaction,
     )
-    with pytest.raises(RuntimeError, match="outcome persistence failed"):
-        authority.execute(_request())
+    failed = authority.execute(_request())
 
-    assert vault.job_artifacts(
+    assert failed["terminal_status"] == "transport_failure"
+    retained = vault.job_artifacts(
         job_id="job-provider-semantics",
         purpose="research_lab.company_score.v2",
-    ) == ()
+    )
+    assert [item["artifact_id"] for item in retained] == [
+        failed["encrypted_request_artifact_id"]
+    ]
+    assert [item["artifact_kind"] for item in retained] == ["provider_request"]
 
 
 def test_preflight_retry_recreates_terminal_record_and_encrypted_artifacts():
@@ -1440,14 +1499,20 @@ def test_preflight_retry_recreates_terminal_record_and_encrypted_artifacts():
         purpose="research_lab.provider_preflight.v2",
     )
 
-    with pytest.raises(RuntimeError, match="outcome persistence failed"):
-        authority.execute(request)
+    failed = authority.execute(request)
 
+    assert failed["terminal_status"] == "transport_failure"
     assert broker.health()["terminal_count"] == 0
-    assert vault.job_artifacts(
+    first_artifacts = vault.job_artifacts(
         job_id=request["job_id"],
         purpose=request["purpose"],
-    ) == ()
+    )
+    assert [item["artifact_id"] for item in first_artifacts] == [
+        failed["encrypted_request_artifact_id"]
+    ]
+    assert [item["artifact_kind"] for item in first_artifacts] == [
+        "provider_request"
+    ]
 
     result = authority.execute(request)
 
@@ -1459,7 +1524,7 @@ def test_preflight_retry_recreates_terminal_record_and_encrypted_artifacts():
             job_id=request["job_id"],
             purpose=request["purpose"],
         )
-    ) == 2
+    ) == 3
 
 
 def test_terminal_record_commits_only_after_artifact_transaction_exit():
@@ -1493,6 +1558,10 @@ def test_terminal_record_commits_only_after_artifact_transaction_exit():
         authority.execute(_request())
 
     assert events == [
+        "terminal_enter",
+        "artifact_enter",
+        "artifact_commit_failed",
+        "terminal_rollback",
         "terminal_enter",
         "artifact_enter",
         "artifact_commit_failed",

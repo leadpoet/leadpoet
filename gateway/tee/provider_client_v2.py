@@ -747,6 +747,7 @@ class BrokeredProviderTransportV2:
             attempt["job_id"] != scope.job_id
             or attempt["purpose"] != scope.purpose
             or attempt["provider_id"] != provider_id
+            or attempt["logical_operation_id"] != logical_operation_id
             or attempt["attempt_number"] != attempt_number
         ):
             raise ProviderClientV2Error("coordinator terminal record binding mismatch")

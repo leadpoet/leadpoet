@@ -79,6 +79,9 @@ _REQUEST_FIELDS = {
 }
 _OPTIONAL_REQUEST_FIELDS = {"dynamic_route"}
 _LOCAL_RESPONSE_SCHEMA_VERSION = "leadpoet.attested_local_provider_response.v2"
+_FAIL_CLOSED_REQUEST_SCHEMA_VERSION = (
+    "leadpoet.provider_semantics_fail_closed_request.v2"
+)
 _PROVIDER_PREFLIGHT_PURPOSE = "research_lab.provider_preflight.v2"
 _OUTCOME_APPEND_CONFLICT_ATTEMPTS = 64
 _OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS = 0.01
@@ -249,30 +252,152 @@ class ProviderSemanticsAuthorityV2:
             }
 
     def execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
-        with self._terminal_transaction(), self._artifact_transaction():
-            result = dict(self._execute(request))
-            persistence = self._record_provider_outcome(request, result)
-            if persistence:
-                result["additional_transport_attempts"] = [
-                    *[
-                        dict(item)
-                        for item in result.get("additional_transport_attempts") or ()
-                    ],
-                    *[dict(item) for item in persistence["transport_attempts"]],
-                ]
-                result["evidence_artifact_hashes"] = sorted(
-                    {
+        try:
+            with self._terminal_transaction(), self._artifact_transaction():
+                result = dict(self._execute(request))
+                persistence = self._record_provider_outcome(request, result)
+                if persistence:
+                    result["additional_transport_attempts"] = [
                         *[
-                            str(item)
-                            for item in result.get("evidence_artifact_hashes") or ()
+                            dict(item)
+                            for item in result.get("additional_transport_attempts")
+                            or ()
                         ],
-                        *[
-                            str(item)
-                            for item in persistence["evidence_artifact_hashes"]
-                        ],
-                    }
-                )
-            return result
+                        *[dict(item) for item in persistence["transport_attempts"]],
+                    ]
+                    result["evidence_artifact_hashes"] = sorted(
+                        {
+                            *[
+                                str(item)
+                                for item in result.get("evidence_artifact_hashes")
+                                or ()
+                            ],
+                            *[
+                                str(item)
+                                for item in persistence["evidence_artifact_hashes"]
+                            ],
+                        }
+                    )
+                return result
+        except Exception as exc:
+            # The model may catch a provider transport failure and retry. Give
+            # that exact request a measured failure terminal so a later
+            # successful attempt can authorize the scope without accepting an
+            # incomplete intent. The failed transaction above remains rolled
+            # back and no provider response is exposed by this terminal.
+            logger.warning(
+                "provider_semantics_fail_closed_terminal "
+                "job_id=%s provider_id=%s error_type=%s",
+                str(request.get("job_id") or "")[:256],
+                str(request.get("provider_id") or "")[:128],
+                type(exc).__name__,
+            )
+            with self._terminal_transaction(), self._artifact_transaction():
+                return self._fail_closed_terminal(request, exc=exc)
+
+    def _fail_closed_terminal(
+        self,
+        request: Mapping[str, Any],
+        *,
+        exc: BaseException,
+    ) -> Dict[str, Any]:
+        normalized, body, parsed, _fingerprint = self._request(request)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ProviderSemanticsV2Error(
+                "provider semantics failure request is not HTTPS"
+            ) from exc
+        references = dict(self._broker.transport_reference_hashes(normalized))
+        credential_ref_hash = str(references.get("credential_ref_hash") or "")
+        egress_proxy_ref_hash = str(
+            references.get("egress_proxy_ref_hash") or ""
+        )
+        if (
+            not _HASH_RE.fullmatch(credential_ref_hash)
+            or not _HASH_RE.fullmatch(egress_proxy_ref_hash)
+        ):
+            raise ProviderSemanticsV2Error(
+                "provider semantics failure transport references are invalid"
+            ) from exc
+        request_doc = {
+            "schema_version": _FAIL_CLOSED_REQUEST_SCHEMA_VERSION,
+            "logical_operation_id": normalized["logical_operation_id"],
+            "job_id": normalized["job_id"],
+            "purpose": normalized["purpose"],
+            "provider_id": normalized["provider_id"],
+            "attempt_number": normalized["attempt_number"],
+            "method": normalized["method"],
+            "destination_host": str(parsed.hostname).lower(),
+            "path_hash": sha256_bytes(
+                _sanitized_path(parsed).encode("utf-8")
+            ),
+            "nonsecret_headers_hash": sha256_json(
+                _nonsecret_headers(normalized["headers"])
+            ),
+            "body_hash": sha256_bytes(body),
+            "retry_policy_hash": normalized["retry_policy_hash"],
+            "timeout_ms": normalized["timeout_ms"],
+            "failure_stage": "provider_semantics",
+            "failure_error_type": type(exc).__name__[:128],
+        }
+        request_bytes = canonical_json(request_doc).encode("utf-8")
+        request_artifact = dict(
+            self._artifact_sink(
+                request_bytes,
+                job_id=normalized["job_id"],
+                purpose=normalized["purpose"],
+                artifact_kind="provider_request",
+            )
+        )
+        request_artifact_hash = sha256_bytes(request_bytes)
+        if request_artifact.get("plaintext_hash") != request_artifact_hash:
+            raise ProviderSemanticsV2Error(
+                "provider semantics failure request artifact differs"
+            ) from exc
+        request_artifact_id = str(request_artifact.get("artifact_id") or "")
+        if not _HASH_RE.fullmatch(request_artifact_id):
+            raise ProviderSemanticsV2Error(
+                "provider semantics failure request artifact is invalid"
+            ) from exc
+        started_at = self._clock()
+        attempt = build_transport_attempt(
+            request_id=secrets.token_hex(16),
+            logical_operation_id=normalized["logical_operation_id"],
+            job_id=normalized["job_id"],
+            purpose=normalized["purpose"],
+            provider_id=normalized["provider_id"],
+            attempt_number=normalized["attempt_number"],
+            method=normalized["method"],
+            destination_host=str(parsed.hostname),
+            destination_port=parsed.port or 443,
+            path_hash=request_doc["path_hash"],
+            nonsecret_headers_hash=request_doc["nonsecret_headers_hash"],
+            body_hash=request_doc["body_hash"],
+            credential_ref_hash=credential_ref_hash,
+            egress_proxy_ref_hash=egress_proxy_ref_hash,
+            retry_policy_hash=normalized["retry_policy_hash"],
+            timeout_ms=normalized["timeout_ms"],
+            started_at=started_at,
+            terminal_status="transport_failure",
+            http_status=None,
+            response_hash=None,
+            request_artifact_hash=request_artifact_hash,
+            response_artifact_hash=None,
+            tls_peer_chain_hash=None,
+            tls_protocol=None,
+            failure_code="unexpected_eof",
+            completed_at=self._clock(),
+        )
+        return {
+            "terminal_status": "transport_failure",
+            "failure_code": "unexpected_eof",
+            "failure_stage": "provider_semantics",
+            "failure_error_type": type(exc).__name__[:128],
+            "encrypted_request_artifact_id": request_artifact_id,
+            "transport_attempt": attempt,
+            "evidence_artifact_hashes": sorted(
+                _descriptor_hashes(request_artifact)
+            ),
+        }
 
     def _execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
         normalized, original_body, parsed, fingerprint = self._request(request)

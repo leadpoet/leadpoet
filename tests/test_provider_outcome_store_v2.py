@@ -664,6 +664,35 @@ def test_outcome_checkpoint_transient_append_exhaustion_fails_closed(
     assert broker.rows == {}
 
 
+def test_outcome_checkpoint_transport_exhaustion_never_becomes_persisted() -> None:
+    broker = _Broker()
+    broker.fail_uncommitted_appends = CHECKPOINT_TRANSPORT_ATTEMPTS
+    store = ProviderOutcomeStoreV2(
+        broker=broker,
+        vault=_vault(),
+        sleeper=lambda _delay: None,
+    )
+
+    with pytest.raises(
+        ProviderOutcomeStoreV2Error,
+        match="append lacks an authenticated terminal",
+    ):
+        store.persist(
+            _document(),
+            previous_checkpoint_hash="",
+            job_id="job",
+            purpose="research_lab.company_score.v2",
+        )
+
+    assert [call["method"] for call in broker.calls] == [
+        "POST"
+    ] * CHECKPOINT_TRANSPORT_ATTEMPTS
+    assert [call["attempt_number"] for call in broker.calls] == list(
+        range(CHECKPOINT_TRANSPORT_ATTEMPTS)
+    )
+    assert broker.rows == {}
+
+
 def test_outcome_checkpoint_nontransient_append_failure_is_not_retried() -> None:
     broker = _Broker()
     broker.append_http_failure = (401, "PGRST301")

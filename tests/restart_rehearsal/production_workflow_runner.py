@@ -6622,6 +6622,61 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 }
             )
         )
+
+    openrouter_body = canonical_json(
+        {
+            "messages": [{"content": "redacted", "role": "user"}],
+            "model": "example/model",
+        }
+    ).encode("utf-8")
+    openrouter_call_start = len(successful_transport_calls)
+    openrouter_job_id = "rehearsal:openrouter-framing-job"
+    openrouter_result = shared_authority.execute(
+        {
+            "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
+            "logical_operation_id": "rehearsal:openrouter-framing",
+            "job_id": openrouter_job_id,
+            "purpose": context.purpose,
+            "provider_id": "openrouter",
+            "attempt_number": 0,
+            "method": "POST",
+            "url": "https://openrouter.ai/api/v1/chat/completions",
+            "headers": {
+                "content-length": str(len(openrouter_body)),
+                "content-type": "application/json",
+                "transfer-encoding": "chunked",
+            },
+            "body_b64": base64.b64encode(openrouter_body).decode("ascii"),
+            "timeout_ms": 30_000,
+            "retry_policy_hash": terminal_broker.retry_policy_hashes[
+                "openrouter"
+            ],
+        }
+    )
+    openrouter_calls = successful_transport_calls[openrouter_call_start:]
+    if len(openrouter_calls) != 1:
+        raise RuntimeError("OpenRouter framing rehearsal issued extra transport calls")
+    openrouter_upstream = openrouter_calls[0]
+    openrouter_headers = {
+        str(name).lower(): str(value)
+        for name, value in dict(openrouter_upstream["headers"]).items()
+    }
+    openrouter_upstream_body = bytes(openrouter_upstream["body"])
+    if (
+        openrouter_result.get("terminal_status") != "authenticated_response"
+        or openrouter_upstream_body == openrouter_body
+        or json.loads(openrouter_upstream_body)["usage"]["include"] is not True
+        or openrouter_headers.get("content-type") != "application/json"
+        or "content-length" in openrouter_headers
+        or "transfer-encoding" in openrouter_headers
+    ):
+        raise RuntimeError("OpenRouter body rewrite retained stale framing")
+    openrouter_release = terminal_broker.release_job_credentials(
+        openrouter_job_id
+    )
+    if openrouter_release.get("released_terminal_count") != 1:
+        raise RuntimeError("OpenRouter framing terminal cleanup differed")
+
     shared_release = terminal_broker.release_job_credentials(context.job_id)
     if shared_release.get("released_terminal_count") != 1:
         raise RuntimeError("provider single-flight terminal cleanup differed")
@@ -7130,6 +7185,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_singleflight_commit_bound": True,
         "provider_cross_worker_cache_profile_bound": True,
         "provider_rpc_frame_budget_bound": True,
+        "openrouter_body_framing_recomputed": True,
     }
 
 
@@ -7721,6 +7777,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("provider_rpc_frame_budget_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("openrouter_body_framing_recomputed")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

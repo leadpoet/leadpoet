@@ -1847,6 +1847,45 @@ def test_openrouter_reconciliation_uses_management_then_runtime_and_exact_cost()
     assert event["completion_tokens"] == 4
 
 
+def test_openrouter_usage_metadata_rewrite_drops_stale_framing_headers():
+    authority, broker, _cache, _artifacts = _authority()
+    request_body = json.dumps(
+        {
+            "model": "example/model",
+            "messages": [{"role": "user", "content": "redacted"}],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    authority.execute(
+        _request(
+            provider="openrouter",
+            url="https://openrouter.ai/api/v1/chat/completions",
+            body=request_body,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": str(len(request_body)),
+                "Transfer-Encoding": "chunked",
+                "X-Research-Lab-Cost-Scope": "openrouter-framing",
+                "X-Research-Lab-Cost-Cap-Usd": "0.50",
+            },
+        )
+    )
+
+    upstream = broker.calls[0]
+    upstream_headers = {
+        str(name).lower(): str(value)
+        for name, value in upstream["headers"].items()
+    }
+    upstream_body = base64.b64decode(upstream["body_b64"], validate=True)
+    assert upstream_body != request_body
+    assert json.loads(upstream_body)["usage"]["include"] is True
+    assert upstream_headers["content-type"] == "application/json"
+    assert "content-length" not in upstream_headers
+    assert "transfer-encoding" not in upstream_headers
+
+
 def test_transport_failure_is_committed_as_error_not_provider_response():
     authority, broker, _cache, _artifacts = _authority()
     broker.queued["exa"] = [(0, b"", "transport_failure")]

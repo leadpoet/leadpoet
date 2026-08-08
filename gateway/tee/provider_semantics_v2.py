@@ -1021,6 +1021,12 @@ class ProviderSemanticsAuthorityV2:
         if provider == "or" and _openrouter_chat_completion_path(normalized["url"]):
             upstream_body = _openrouter_request_with_usage_metadata(original_body)
             request["body_b64"] = base64.b64encode(upstream_body).decode("ascii")
+            if upstream_body != original_body:
+                request["headers"] = {
+                    name: value
+                    for name, value in request["headers"].items()
+                    if name.lower() not in {"content-length", "transfer-encoding"}
+                }
         result = dict(self._broker.execute(request))
         broker_artifacts = list(result.get("evidence_artifact_hashes") or [])
         additional_attempts = list(lookup_attempts)

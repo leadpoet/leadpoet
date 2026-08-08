@@ -77,6 +77,8 @@ def test_tls_metadata_supports_python39_positional_only_peer_certificate():
 
 
 def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch):
+    client_options = []
+
     class TLS:
         def getpeercert(self, binary_form=False, /):
             assert binary_form is True
@@ -120,8 +122,8 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
             return False
 
     class Client:
-        def __init__(self, **_kwargs):
-            pass
+        def __init__(self, **kwargs):
+            client_options.append(dict(kwargs))
 
         def __enter__(self):
             return self
@@ -158,6 +160,7 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         "tls_peer_chain_hash": sha256_bytes(b"peer-certificate"),
         "tls_protocol": "TLSv1.3",
     }
+    assert client_options[-1]["http2"] is True
 
     artifact_transport = HTTPXProviderTransport(
         response_body_ceiling_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES

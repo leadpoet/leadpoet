@@ -488,6 +488,7 @@ class HTTPXProviderTransport:
             proxy=httpx.Proxy(self.proxy_url, headers=proxy_headers),
             verify=verify_path,
             trust_env=False,
+            http2=True,
             timeout=max(0.001, timeout_ms / 1000.0),
             follow_redirects=False,
         ) as client:

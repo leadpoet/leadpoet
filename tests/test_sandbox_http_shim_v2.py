@@ -101,7 +101,14 @@ def test_all_supported_http_clients_use_the_same_frozen_evidence(
         original_execute = shim.execute
 
         def guarded_execute(**kwargs):
-            calls.append((kwargs["method"], kwargs["url"], bytes(kwargs["body"])))
+            calls.append(
+                (
+                    kwargs["method"],
+                    kwargs["url"],
+                    bytes(kwargs["body"]),
+                    kwargs["timeout_ms"],
+                )
+            )
             return original_execute(**kwargs)
 
         def forbidden_socket(*args, **kwargs):
@@ -113,14 +120,20 @@ def test_all_supported_http_clients_use_the_same_frozen_evidence(
         )
         shim.install()
 
-        with urllib.request.urlopen(url, timeout=1) as response:
+        with urllib.request.urlopen(url, timeout=2) as response:
             urllib_doc = json.loads(response.read().decode("utf-8"))
-        requests_doc = requests.get(url, timeout=1).json()
-        httpx_doc = httpx.get(url, timeout=1).json()
+        requests_doc = requests.get(url, timeout=(3, 5)).json()
+        httpx_doc = httpx.get(
+            url,
+            timeout=httpx.Timeout(180, connect=7),
+        ).json()
 
         async def aiohttp_request():
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=1) as response:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=11),
+                ) as response:
                     return await response.json()
 
         aiohttp_doc = asyncio.run(aiohttp_request())
@@ -129,7 +142,12 @@ def test_all_supported_http_clients_use_the_same_frozen_evidence(
         assert requests_doc == expected
         assert httpx_doc == expected
         assert aiohttp_doc == expected
-        assert calls == [("GET", url, b"")] * 4
+        assert calls == [
+            ("GET", url, b"", 2_000),
+            ("GET", url, b"", 5_000),
+            ("GET", url, b"", 180_000),
+            ("GET", url, b"", 11_000),
+        ]
         print(json.dumps({{"clients": 4, "fingerprint": {fingerprint!r}}}))
         """
     )

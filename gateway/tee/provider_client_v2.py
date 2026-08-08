@@ -261,9 +261,16 @@ def _timeout_ms(value: Any, default_ms: int) -> int:
     try:
         if value is None:
             return int(default_ms)
-        if hasattr(value, "total"):
+        if isinstance(value, Mapping):
+            values = [
+                float(item)
+                for item in value.values()
+                if item is not None
+            ]
+            value = max(values) if values else default_ms / 1000.0
+        elif hasattr(value, "total") and value.total is not None:
             value = value.total
-        if isinstance(value, tuple):
+        elif isinstance(value, tuple):
             values = [float(item) for item in value if item is not None]
             value = max(values) if values else default_ms / 1000.0
         return max(1, int(float(value) * 1000))
@@ -996,6 +1003,7 @@ class BrokeredProviderTransportV2:
     def _httpx_response(self, request: Any) -> Any:
         import httpx
 
+        scope = self._scope.get()
         try:
             body = bytes(request.content)
         except Exception as exc:
@@ -1005,6 +1013,10 @@ class BrokeredProviderTransportV2:
             url=str(request.url),
             headers=dict(request.headers),
             body=body,
+            timeout_ms=_timeout_ms(
+                dict(getattr(request, "extensions", {}) or {}).get("timeout"),
+                scope.default_timeout_ms if scope is not None else 30000,
+            ),
         )
         if result.get("terminal_status") not in _ACCEPTED_RESPONSE_TERMINALS:
             failure_code = str(result.get("failure_code") or "")

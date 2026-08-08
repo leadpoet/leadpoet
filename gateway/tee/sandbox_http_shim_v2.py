@@ -255,8 +255,20 @@ def _timeout_ms(value: Any) -> int:
     try:
         if value is None:
             return DEFAULT_TIMEOUT_MS
-        if hasattr(value, "connect"):
+        if isinstance(value, Mapping):
+            values = [
+                float(item)
+                for item in value.values()
+                if item is not None
+            ]
+            value = max(values) if values else DEFAULT_TIMEOUT_MS / 1000.0
+        elif hasattr(value, "total") and value.total is not None:
+            value = value.total
+        elif hasattr(value, "connect"):
             value = value.connect
+        elif isinstance(value, tuple):
+            values = [float(item) for item in value if item is not None]
+            value = max(values) if values else DEFAULT_TIMEOUT_MS / 1000.0
         return max(1, int(float(value) * 1000))
     except Exception:
         return DEFAULT_TIMEOUT_MS
@@ -455,7 +467,11 @@ def install() -> None:
                     url=str(request.url),
                     headers=dict(request.headers),
                     body=bytes(request.content),
-                    timeout_ms=DEFAULT_TIMEOUT_MS,
+                    timeout_ms=_timeout_ms(
+                        dict(getattr(request, "extensions", {}) or {}).get(
+                            "timeout"
+                        )
+                    ),
                 )
                 transport_failure = _transport_failure_message(result)
                 if transport_failure is not None:

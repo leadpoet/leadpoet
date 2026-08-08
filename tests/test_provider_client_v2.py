@@ -104,11 +104,13 @@ def test_httpx_request_uses_coordinator_and_preserves_response_shape():
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={"Authorization": "Bearer runner-placeholder"},
                     json={"model": "model-1"},
+                    timeout=httpx.Timeout(180, connect=7),
                 )
         assert response.status_code == 200
         assert response.json() == {"ok": True}
         assert observed[0]["transport_attempt"]["terminal_status"] == "authenticated_response"
         assert transport.calls[0]["headers"]["Authorization"] == "Bearer openrouter-secret"
+        assert transport.calls[0]["timeout_ms"] == 180_000
         assert "runner-placeholder" not in str(observed)
     finally:
         router.restore()

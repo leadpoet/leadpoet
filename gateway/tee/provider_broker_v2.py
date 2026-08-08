@@ -378,6 +378,13 @@ def _nonsecret_headers(headers: Mapping[str, Any]) -> Dict[str, str]:
     return dict(sorted(output.items()))
 
 
+def _decoded_response_headers(headers: Mapping[str, Any]) -> Dict[str, str]:
+    output = _nonsecret_headers(headers)
+    for name in ("content-encoding", "content-length", "transfer-encoding"):
+        output.pop(name, None)
+    return output
+
+
 def _sanitized_path(parsed: Any) -> str:
     query = [
         (name, value)
@@ -506,7 +513,7 @@ class HTTPXProviderTransport:
                 response_body = b"".join(chunks)
                 return {
                     "http_status": int(response.status_code),
-                    "headers": _nonsecret_headers(response.headers),
+                    "headers": _decoded_response_headers(response.headers),
                     "body": response_body,
                     "tls_peer_chain_hash": tls_peer_chain_hash,
                     "tls_protocol": tls_protocol,

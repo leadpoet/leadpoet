@@ -96,7 +96,12 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
     class Response:
         def __init__(self):
             self.status_code = 200
-            self.headers = {"content-type": "application/json"}
+            self.headers = {
+                "content-encoding": "gzip",
+                "content-length": "31",
+                "content-type": "application/json",
+                "transfer-encoding": "chunked",
+            }
             self.stream = Stream()
             self.extensions = {"network_stream": self.stream}
 

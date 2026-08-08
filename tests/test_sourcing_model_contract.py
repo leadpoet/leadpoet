@@ -19,10 +19,12 @@ from research_lab.sourcing_model_contract_check import (
     CONTRACT_PATH,
     CONTRACT_V11_PATH,
     CONTRACT_V12_PATH,
+    CONTRACT_V13_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
     PARITY_FIXTURE_V11_PATH,
     PARITY_FIXTURE_V12_PATH,
+    PARITY_FIXTURE_V13_PATH,
     PARITY_FIXTURE_V7_PATH,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
@@ -437,6 +439,7 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
         "leadpoet-sourcing-wrapper-contract-v8",
         "leadpoet-sourcing-wrapper-contract-v11",
         "leadpoet-sourcing-wrapper-contract-v12",
+        "leadpoet-sourcing-wrapper-contract-v13",
     }
 
 
@@ -493,6 +496,41 @@ def test_exact_v12_contact_contract_and_parity_pair_is_reviewed(
         "raw_provider",
     ):
         assert private_field not in rendered
+
+
+def test_exact_v13_contact_verification_contract_and_parity_pair_is_reviewed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "v13"
+    contract = json.loads(CONTRACT_V13_PATH.read_text(encoding="utf-8"))
+    parity = json.loads(PARITY_FIXTURE_V13_PATH.read_text(encoding="utf-8"))
+    contract_path = root / contract["canonical_path"]
+    parity_path = root / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V13_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V13_PATH.read_bytes())
+
+    resolved = resolve_reviewed_consumer_snapshot(root)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v13"
+    )
+    verification_cases = parity["contact_verification_parity_cases"]
+    assert verification_cases
+    assert len(parity["expected_contact_verification_projections"]) == len(
+        verification_cases
+    )
+    decisions = [
+        item["contact_verification_decision"]
+        for item in parity["expected_contact_verification_projections"]
+    ]
+    assert {decision["status"] for decision in decisions} == {
+        "accepted",
+        "rejected",
+        "unresolved",
+    }
+    assert all(decision["contract_id"] == "contact-verification:v1" for decision in decisions)
 
 
 def test_mixed_reviewed_contract_and_parity_versions_fail_closed(

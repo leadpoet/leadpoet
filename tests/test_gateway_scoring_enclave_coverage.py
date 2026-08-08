@@ -113,20 +113,24 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_contract.json",
         "research_lab/sourcing_model_contract_v11.json",
         "research_lab/sourcing_model_contract_v12.json",
+        "research_lab/sourcing_model_contract_v13.json",
         "research_lab/sourcing_model_contract_v7.json",
         "research_lab/sourcing_model_parity_fixtures.json",
         "research_lab/sourcing_model_parity_fixtures_v11.json",
         "research_lab/sourcing_model_parity_fixtures_v12.json",
+        "research_lab/sourcing_model_parity_fixtures_v13.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
     } <= set(MEASURED_DATA_PATHS)
     contract_data_paths = {
         "research_lab/sourcing_model_contract.json",
         "research_lab/sourcing_model_contract_v11.json",
         "research_lab/sourcing_model_contract_v12.json",
+        "research_lab/sourcing_model_contract_v13.json",
         "research_lab/sourcing_model_contract_v7.json",
         "research_lab/sourcing_model_parity_fixtures.json",
         "research_lab/sourcing_model_parity_fixtures_v11.json",
         "research_lab/sourcing_model_parity_fixtures_v12.json",
+        "research_lab/sourcing_model_parity_fixtures_v13.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
     }
     for role_manifest in manifest["role_manifests"].values():
@@ -168,6 +172,9 @@ def test_gateway_code_hash_includes_verifier_runtime_data():
         "_attested_runtime/research_lab/sourcing_model_contract_v12.json" in files
     )
     assert (
+        "_attested_runtime/research_lab/sourcing_model_contract_v13.json" in files
+    )
+    assert (
         "_attested_runtime/research_lab/sourcing_model_parity_fixtures.json"
         in files
     )
@@ -181,6 +188,10 @@ def test_gateway_code_hash_includes_verifier_runtime_data():
     )
     assert (
         "_attested_runtime/research_lab/sourcing_model_parity_fixtures_v12.json"
+        in files
+    )
+    assert (
+        "_attested_runtime/research_lab/sourcing_model_parity_fixtures_v13.json"
         in files
     )
 

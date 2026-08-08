@@ -506,7 +506,9 @@ async def score_company_autoresearch_intent_v2(
 
     try:
         co_verified, co_reason = await verify_company_exists(
-            company.company_name, company.company_website
+            company.company_name,
+            company.company_website,
+            require_https_transport=True,
         )
     except Exception as e:
         logger.error(f"Autoresearch company verification raised: {e}")
@@ -532,6 +534,12 @@ async def score_company_autoresearch_intent_v2(
             all_fabricated,
             signal_results,
         ) = await score_company_autoresearch_intent_signal(company, icp)
+        if _intent_verifier_unavailable(signal_results):
+            return _zero_company_breakdown(
+                "Intent verification unavailable: verifier provider error",
+                intent_signals_detail=signal_results,
+                verifier_gate_receipts=gate_receipts or None,
+            )
         if all_fabricated:
             # A real company whose submitted evidence URL was weak dies here
             # as a false negative. Before finalizing the zero, ask for
@@ -548,6 +556,12 @@ async def score_company_autoresearch_intent_v2(
                     all_fabricated,
                     signal_results,
                 ) = repaired
+                if _intent_verifier_unavailable(signal_results):
+                    return _zero_company_breakdown(
+                        "Intent verification unavailable: verifier provider error",
+                        intent_signals_detail=signal_results,
+                        verifier_gate_receipts=gate_receipts or None,
+                    )
         if all_fabricated:
             logger.warning(
                 f"❌ ALL AUTORESEARCH INTENT SIGNALS FABRICATED for company "
@@ -1206,6 +1220,24 @@ async def score_company_autoresearch_intent_signal(
         )
         final_total = 0.0
     return raw_total, final_total, avg_decay, max_confidence, all_fabricated, signal_results
+
+
+def _intent_verifier_unavailable(signal_results: List[dict]) -> bool:
+    """Whether any signal lacks a content verdict because its verifier failed."""
+
+    for result in signal_results:
+        if not isinstance(result, dict):
+            continue
+        verdict = result.get("judge_verdict")
+        if not isinstance(verdict, dict):
+            continue
+        if (
+            verdict.get("decision") == "rejected_verifier_error"
+            or verdict.get("error_class")
+            or verdict.get("pipeline_decision") == "unavailable"
+        ):
+            return True
+    return False
 
 
 def required_intent_satisfied(signal_results: List[dict]) -> bool:

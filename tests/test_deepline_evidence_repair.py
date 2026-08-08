@@ -156,3 +156,62 @@ def test_hook_disabled_is_no_op(monkeypatch):
     assert asyncio.run(
         lead_scorer._attempt_autoresearch_evidence_repair(_company(), _icp())
     ) is None
+
+
+def test_verifier_outage_is_unavailable_not_fabricated(monkeypatch):
+    async def prechecks(*args, **kwargs):
+        return True, ""
+
+    async def company_exists(*args, **kwargs):
+        assert kwargs["require_https_transport"] is True
+        return True, "verified"
+
+    async def reverify(*args, **kwargs):
+        return True, "verified"
+
+    async def scorer(*args, **kwargs):
+        return (
+            0.0,
+            0.0,
+            0.0,
+            0,
+            True,
+            [
+                {
+                    "raw": 0.0,
+                    "after_decay": 0.0,
+                    "matched_icp_signal": 0,
+                    "judge_verdict": {
+                        "decision": "rejected_verifier_error",
+                        "pipeline_decision": "unavailable",
+                    },
+                }
+            ],
+        )
+
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(
+        lead_scorer, "_run_autoresearch_binary_fit_checks", lambda *_: (True, "")
+    )
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", company_exists)
+    monkeypatch.setattr(lead_scorer, "_llm_reverify_company", reverify)
+    monkeypatch.setattr(
+        lead_scorer, "score_company_autoresearch_intent_signal", scorer
+    )
+    result = asyncio.run(
+        lead_scorer.score_company_autoresearch_intent_v2(
+            company=_company(),
+            icp=_icp(),
+            run_cost_usd=0.0,
+            run_time_seconds=0.0,
+            seen_companies=set(),
+            is_reference_model=True,
+        )
+    )
+    assert result.final_score == 0.0
+    assert result.failure_reason == (
+        "Intent verification unavailable: verifier provider error"
+    )
+    assert result.intent_signals_detail[0]["judge_verdict"]["decision"] == (
+        "rejected_verifier_error"
+    )

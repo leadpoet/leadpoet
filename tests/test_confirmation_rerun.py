@@ -1263,6 +1263,60 @@ async def test_run_baseline_icp_mode_label_reaches_runner():
     assert sw._baseline_summary_checkpointable(summary) is False
 
 
+async def test_run_baseline_icp_retries_verifier_infrastructure_failure():
+    worker = _worker()
+    import concurrent.futures
+
+    def runner(_icp: Any, _ctx: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return [{"company_name": "co", "employee_count": "51-200"}]
+
+    class UnavailableScorer:
+        async def score_with_breakdowns(self, *args: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "final_score": 0.0,
+                    "failure_reason": "Intent fabrication detected",
+                    "intent_signals_detail": [
+                        {
+                            "matched_icp_signal": 0,
+                            "after_decay": 0.0,
+                            "judge_verdict": {
+                                "decision": "rejected_verifier_error",
+                                "pipeline_decision": "unavailable",
+                            },
+                        }
+                    ],
+                }
+            ]
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        summary = await worker._run_baseline_icp(
+            runner=runner,
+            scorer=UnavailableScorer(),
+            item={
+                "icp": {"max_companies": 1, "intent_signals": ["hiring"]},
+                "icp_ref": "icp:unavailable",
+                "icp_hash": "h",
+                "set_id": 1,
+                "day_index": 1,
+                "day_rank": 1,
+            },
+            item_index=1,
+            total_icps=1,
+            run_start=0.0,
+            executor=executor,
+        )
+    finally:
+        executor.shutdown(wait=False)
+    assert summary["_retryable"] is True
+    assert summary["_runtime_error"] == (
+        "retryable scorer verification infrastructure failure"
+    )
+    assert "scorer_provider_error" in summary["diagnostics"]["failure_categories"]
+    assert sw._baseline_summary_checkpointable(summary) is False
+
+
 # ---------------------------------------------------------------------------
 # Baseline any-worker lease confirm
 # ---------------------------------------------------------------------------

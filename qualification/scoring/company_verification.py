@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -88,6 +88,33 @@ _PARKED_DOMAIN_RE = re.compile("|".join(_PARKED_DOMAIN_PATTERNS), re.IGNORECASE)
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
+
+def _upgrade_plain_http_company_url(company_website: str) -> str:
+    """Upgrade a conventional HTTP company URL to the V2 HTTPS transport.
+
+    Only the default HTTP port is eligible.  Explicit nonstandard ports,
+    credentials, malformed URLs, and every non-HTTP scheme are left unchanged
+    so the measured provider transport can reject them fail-closed.
+    """
+
+    value = str(company_website or "").strip()
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return value
+    if (
+        parsed.scheme.lower() != "http"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 80)
+    ):
+        return value
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return urlunsplit(("https", host, parsed.path, parsed.query, parsed.fragment))
 
 def _registrable_domain(url: str) -> str:
     """Extract the registrable hostname from a URL (lowercased, no www).
@@ -170,6 +197,8 @@ async def verify_company_exists(
     company_name: str,
     company_website: str,
     timeout_secs: float = _HTTP_TIMEOUT_SECS,
+    *,
+    require_https_transport: bool = False,
 ) -> Tuple[bool, str]:
     """Verify that ``company_website`` is a real page for ``company_name``.
 
@@ -189,7 +218,13 @@ async def verify_company_exists(
     if not company_website or not company_website.strip():
         return False, "company_website is empty"
 
-    domain = _registrable_domain(company_website)
+    request_url = (
+        _upgrade_plain_http_company_url(company_website)
+        if require_https_transport
+        else company_website.strip()
+    )
+
+    domain = _registrable_domain(request_url)
     if not domain:
         return False, f"company_website has no valid hostname: {company_website!r}"
 
@@ -197,7 +232,7 @@ async def verify_company_exists(
 
     try:
         async with aiohttp.ClientSession(timeout=timeout, headers=_HEADERS) as session:
-            async with session.get(company_website, allow_redirects=True) as resp:
+            async with session.get(request_url, allow_redirects=True) as resp:
                 status = resp.status
                 # Read at most _MAX_BYTES so a giant single-page-app
                 # download can't stall the scorer.
@@ -208,14 +243,14 @@ async def verify_company_exists(
                     text = ""
     except aiohttp.ClientError as e:
         # Network-level failure.  Try the domain-name fallback.
-        if _domain_matches_name(company_website, company_name):
+        if _domain_matches_name(request_url, company_name):
             return True, (
                 f"verified (soft): homepage unreachable ({type(e).__name__}) "
                 f"but domain {domain!r} matches name {company_name!r}"
             )
         return False, f"website unreachable: {type(e).__name__}: {str(e)[:120]}"
     except Exception as e:  # noqa: BLE001 - log everything else and fall through
-        if _domain_matches_name(company_website, company_name):
+        if _domain_matches_name(request_url, company_name):
             return True, (
                 f"verified (soft): homepage fetch raised ({type(e).__name__}) "
                 f"but domain {domain!r} matches name {company_name!r}"
@@ -226,7 +261,7 @@ async def verify_company_exists(
     # 200 = ideal.  3xx are already followed by aiohttp.  4xx/5xx mean
     # the page itself is not a usable company page.
     if status >= 400:
-        if _domain_matches_name(company_website, company_name):
+        if _domain_matches_name(request_url, company_name):
             return True, (
                 f"verified (soft): homepage returned HTTP {status} but "
                 f"domain {domain!r} matches name {company_name!r}"
@@ -241,7 +276,7 @@ async def verify_company_exists(
     if _name_appears(text, company_name):
         return True, f"verified: name {company_name!r} found in homepage"
 
-    if _domain_matches_name(company_website, company_name):
+    if _domain_matches_name(request_url, company_name):
         return True, (
             f"verified (soft): name not found in homepage text but "
             f"domain {domain!r} matches name {company_name!r}"

@@ -1791,6 +1791,16 @@ def test_private_baseline_checkpoint_rejects_unresolved_and_cost_blocked_rows():
             "diagnostics": {"sourcing_failed": True},
         }
     )
+    assert not sw._baseline_summary_checkpointable(
+        {
+            "icp_ref": "verifier-unavailable",
+            "score": 0.0,
+            "company_count": 5,
+            "diagnostics": {
+                "failure_categories": ["scorer_provider_error"],
+            },
+        }
+    )
     assert sw._baseline_summary_checkpointable(
         {
             "icp_ref": "cost-blocked-with-output",

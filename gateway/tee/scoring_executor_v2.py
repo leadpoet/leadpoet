@@ -195,6 +195,16 @@ class ScoringExecutorV2:
         os.environ["QUALIFICATION_SCRAPINGDOG_API_KEY"] = (
             "leadpoet-v2-brokered-credential"
         )
+        # These are non-secret sentinels only.  The low-level broker strips
+        # credential headers and injects the KMS-held benchmark-scorer key.
+        # The qualification intent verifier still requires a truthy key before
+        # it reaches that intercepted HTTP boundary.
+        for name in (
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_KEY",
+            "QUALIFICATION_OPENROUTER_API_KEY",
+        ):
+            os.environ[name] = "leadpoet-v2-brokered-credential"
 
     def close(self) -> None:
         self._qualification_network.restore()

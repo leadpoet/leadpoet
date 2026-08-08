@@ -108,6 +108,31 @@ def _seal_artifact(*, plaintext, job_id, purpose, artifact_kind):
     }
 
 
+def test_scoring_executor_installs_openrouter_broker_sentinels(monkeypatch):
+    import os
+    from qualification.scoring.intent_verification_three_stage import (
+        _get_openrouter_key,
+    )
+
+    names = (
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_KEY",
+        "QUALIFICATION_OPENROUTER_API_KEY",
+    )
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    executor = ScoringExecutorV2(
+        provider_execute=lambda _request: pytest.fail("no request expected"),
+        retry_policy_hashes={"openrouter": HASH},
+    )
+    try:
+        for name in names:
+            assert os.environ[name] == "leadpoet-v2-brokered-credential"
+        assert _get_openrouter_key() == "leadpoet-v2-brokered-credential"
+    finally:
+        executor.close()
+
+
 @pytest.mark.asyncio
 async def test_v2_preflight_reuses_existing_cache_and_failure_streak_logic(
     monkeypatch,

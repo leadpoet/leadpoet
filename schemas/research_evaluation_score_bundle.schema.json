@@ -92,6 +92,7 @@
         "leads_per_icp_normalizer": { "type": "integer", "minimum": 1 },
         "fp_penalty_points": { "type": "number", "minimum": 0 },
         "fp_unverified_primary_penalty_points": { "type": "number", "minimum": 0 },
+        "fp_penalty_icp_floor": { "const": 0 },
         "lcb_z": { "type": "number", "minimum": 0 },
         "per_icp_results": {
           "type": "array",

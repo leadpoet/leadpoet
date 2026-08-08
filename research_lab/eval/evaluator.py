@@ -16,6 +16,7 @@ from .global_scoring_pool import get_global_scoring_pool
 from leadpoet_verifier.aggregation import per_icp_normalized_score
 from leadpoet_verifier.research_evaluation import (
     build_research_evaluation_score_bundle,
+    normalize_current_fp_penalty_points,
     score_bundle_hash,
 )
 from research_lab.canonical import canonical_json, sha256_json
@@ -238,11 +239,14 @@ def _fp_penalty_points() -> float:
     attribute, missing hard fields, country/duplicate/data-quality
     pre-checks, company re-verification) subtracts this many points from
     the ICP's score sum before normalization, so shipping junk scores
-    WORSE than honestly returning fewer companies. Default 0 = off; like
-    the capped flag, enable only together with a fresh baseline (never
-    compare scores across the boundary).
+    WORSE than honestly returning fewer companies. The current policy is
+    exact-commit-bound to at most 10 points; lower configured values remain
+    valid. A policy change requires a fresh baseline because scores must never
+    be compared across the boundary.
     """
-    return max(0.0, _env_float("RESEARCH_LAB_EVAL_FP_PENALTY_POINTS", 0.0))
+    return normalize_current_fp_penalty_points(
+        os.getenv("RESEARCH_LAB_EVAL_FP_PENALTY_POINTS")
+    )
 
 
 def _fp_unverified_primary_penalty_points() -> float:
@@ -286,6 +290,55 @@ PENALIZABLE_FAILURE_MARKERS: tuple = (
 _NEVER_PENALIZE_MARKERS: tuple = ("error", "timeout", "provider", "429")
 
 
+def scorer_breakdown_has_retryable_infrastructure_failure(
+    breakdown: Mapping[str, Any],
+) -> bool:
+    """True when a company judgment is incomplete for infrastructure reasons.
+
+    The three-stage intent verifier records provider/transport failures inside
+    ``intent_signals_detail``.  Historically the outer breakdown could still
+    say ``Intent fabrication detected``, which made an unavailable verifier
+    look like a model-controllable false positive and allowed that result into
+    the day-scoped score cache.  Treat the structured verdict as authoritative
+    and retain a reason-text fallback for company-verification transport
+    failures that predate structured verdicts.
+    """
+
+    if not isinstance(breakdown, Mapping):
+        return False
+    details = breakdown.get("intent_signals_detail")
+    if isinstance(details, Sequence) and not isinstance(details, (str, bytes)):
+        for detail in details:
+            if not isinstance(detail, Mapping):
+                continue
+            verdict = detail.get("judge_verdict")
+            if not isinstance(verdict, Mapping):
+                continue
+            if (
+                str(verdict.get("decision") or "") == "rejected_verifier_error"
+                or bool(verdict.get("error_class"))
+                or str(verdict.get("pipeline_decision") or "") == "unavailable"
+            ):
+                return True
+    reason = str(breakdown.get("failure_reason") or "").strip().lower()
+    return bool(reason) and any(
+        marker in reason
+        for marker in (
+            "intent verification unavailable:",
+            "llm scoring error:",
+            "company verification error:",
+            "company verification failed: website unreachable:",
+            "company verification failed: website fetch error:",
+            "providerclientv2error",
+            "runner external request must use https",
+            "provider error",
+            "provider timeout",
+            "http 429",
+            "no_openrouter_key",
+        )
+    )
+
+
 def _failure_reason_is_penalizable(reason: Any) -> bool:
     text = str(reason or "").strip().lower()
     if not text:
@@ -313,6 +366,8 @@ def count_penalizable_false_positives(
     unverified_primary = 0
     for row in breakdowns:
         if not isinstance(row, Mapping):
+            continue
+        if scorer_breakdown_has_retryable_infrastructure_failure(row):
             continue
         reason = row.get("failure_reason")
         if reason:
@@ -2409,9 +2464,10 @@ def _requested_count_or_default(requested_count: Any) -> int:
     return max(1, min(count, _MAX_ICP_COMPANY_GOAL))
 
 
-# A single catastrophic ICP must hurt, but not dominate the whole benchmark
-# mean by itself: per-ICP scores never go below this floor.
-_FP_PENALTY_ICP_FLOOR = -100.0
+# ICP scores are persisted and published on a non-negative scale. False-positive
+# penalties still reduce the score before normalization, but cannot change that
+# public contract or make the aggregate impossible to persist.
+_FP_PENALTY_ICP_FLOOR = 0.0
 
 
 def _benchmark_icp_score(
@@ -2427,8 +2483,7 @@ def _benchmark_icp_score(
         # score is clamped to [0, MAX_COMPANY_TOTAL_SCORE], summed over the top
         # N companies, and divided by the N-lead budget the ICP requested.
         # False-positive penalty points subtract from the sum BEFORE the
-        # normalization, so junk companies drag the ICP score — negative is
-        # allowed (floored) and pulls the whole benchmark mean down.
+        # normalization, so junk companies drag the ICP score down to zero.
         count = _requested_count_or_default(requested_count)
         top_values = sorted(values, reverse=True)[:count]
         normalized = float(per_icp_normalized_score(top_values, max_leads=count))
@@ -3009,7 +3064,10 @@ class QualificationStyleCompanyScorer:
             if scoring_cache is not None:
                 cache_key = scoring_cache_key(icp, companies, is_reference_model)
                 cached = scoring_cache.get(cache_key)
-                if cached is not None:
+                if cached is not None and not any(
+                    scorer_breakdown_has_retryable_infrastructure_failure(item)
+                    for item in cached
+                ):
                     return [dict(item) for item in cached]
         except Exception:
             scoring_cache = None
@@ -3054,7 +3112,14 @@ class QualificationStyleCompanyScorer:
             else:
                 item = dict(result)
             breakdowns.append(item)
-        if scoring_cache is not None and cache_key:
+        if (
+            scoring_cache is not None
+            and cache_key
+            and not any(
+                scorer_breakdown_has_retryable_infrastructure_failure(item)
+                for item in breakdowns
+            )
+        ):
             try:
                 scoring_cache.put(cache_key, breakdowns)
             except Exception:

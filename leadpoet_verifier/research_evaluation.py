@@ -21,6 +21,26 @@ SCORE_BUNDLE_SCHEMA_VERSION = "1.0"
 SUPPORTED_SCORE_BUNDLE_SCHEMA_VERSIONS = ("1.0", "1.1")
 DEFAULT_LEADS_PER_ICP_NORMALIZER = 5
 DEFAULT_LCB_Z = 1.96
+CURRENT_FP_PENALTY_POINTS = 10.0
+
+
+def normalize_current_fp_penalty_points(value: Any) -> float:
+    """Return the current exact-commit-bound false-positive penalty.
+
+    The initial production rollout used 25 points. Keep lower operator values
+    configurable, but cap stale or stricter configuration at the current
+    10-point policy so receipt configuration matches evaluator arithmetic.
+    """
+
+    if value is None or str(value).strip() == "":
+        return CURRENT_FP_PENALTY_POINTS
+    try:
+        configured = float(value)
+    except (TypeError, ValueError):
+        return CURRENT_FP_PENALTY_POINTS
+    if not math.isfinite(configured):
+        return CURRENT_FP_PENALTY_POINTS
+    return max(0.0, min(configured, CURRENT_FP_PENALTY_POINTS))
 
 # Reference-evaluation modes (version gate for the 52a9edce metric change).
 #
@@ -144,9 +164,25 @@ def _row_leads_normalizer(row: Mapping[str, Any], default: int) -> int:
     return max(1, min(goal, 50))
 
 
-# Per-ICP floor when false-positive penalties push a score negative: one
-# catastrophic ICP hurts the mean but cannot dominate it alone.
-FP_PENALTY_ICP_FLOOR = -100.0
+# Bundles produced before the non-negative score contract did not record a
+# floor and must remain replayable. New bundles record zero explicitly.
+LEGACY_FP_PENALTY_ICP_FLOOR = -100.0
+CURRENT_FP_PENALTY_ICP_FLOOR = 0.0
+
+
+def _normalized_fp_penalty_icp_floor(value: Any) -> float:
+    if value is None:
+        return LEGACY_FP_PENALTY_ICP_FLOOR
+    floor = float(value)
+    if (
+        not math.isfinite(floor)
+        or floor < LEGACY_FP_PENALTY_ICP_FLOOR
+        or floor > 0.0
+    ):
+        raise ValueError(
+            "false-positive ICP score floor must be finite and within -100..0"
+        )
+    return floor
 
 
 def _row_fp_penalty(
@@ -176,6 +212,7 @@ def compute_evaluation_aggregates(
     lcb_z: float = DEFAULT_LCB_Z,
     fp_penalty_points: float = 0.0,
     fp_unverified_primary_penalty_points: float = 0.0,
+    fp_penalty_icp_floor: float | None = None,
 ) -> dict[str, Any]:
     """Recompute paired base/candidate metrics from per-company scores."""
     if leads_per_icp_normalizer <= 0:
@@ -184,6 +221,7 @@ def compute_evaluation_aggregates(
     fp_unverified_primary_penalty_points = max(
         0.0, float(fp_unverified_primary_penalty_points)
     )
+    score_floor = _normalized_fp_penalty_icp_floor(fp_penalty_icp_floor)
     if not per_icp_results:
         raise ValueError("evaluation requires at least one ICP result")
 
@@ -199,7 +237,7 @@ def compute_evaluation_aggregates(
         candidate_company_scores = _coerce_scores(item.get("candidate_company_scores", ()))
         row_leads = _row_leads_normalizer(item, leads_per_icp_normalizer)
         base_score = max(
-            FP_PENALTY_ICP_FLOOR,
+            score_floor,
             per_icp_normalized_score(base_company_scores, max_leads=row_leads)
             - _row_fp_penalty(
                 item,
@@ -210,7 +248,7 @@ def compute_evaluation_aggregates(
             / row_leads,
         )
         candidate_score = max(
-            FP_PENALTY_ICP_FLOOR,
+            score_floor,
             per_icp_normalized_score(candidate_company_scores, max_leads=row_leads)
             - _row_fp_penalty(
                 item,
@@ -250,7 +288,7 @@ def compute_evaluation_aggregates(
     sd_delta = _sample_sd(deltas)
     se_delta = sd_delta / math.sqrt(len(deltas)) if deltas else 0.0
     delta_lcb = mean_delta - float(lcb_z) * se_delta
-    return {
+    aggregates = {
         "icp_count": len(normalized_rows),
         "successful_icp_count": successful_icps,
         "hard_failure_count": hard_failures,
@@ -268,6 +306,9 @@ def compute_evaluation_aggregates(
         "lcb_z": round(float(lcb_z), 6),
         "per_icp_results": normalized_rows,
     }
+    if fp_penalty_icp_floor is not None:
+        aggregates["fp_penalty_icp_floor"] = round(score_floor, 6)
+    return aggregates
 
 
 def evaluate_improvement_gate(
@@ -531,7 +572,11 @@ def evaluate_daily_baseline_improvement_gate(
         except (KeyError, TypeError, ValueError):
             fallback_leads = _row_leads_normalizer(row, normalizer)
             candidate_score = max(
-                FP_PENALTY_ICP_FLOOR,
+                _normalized_fp_penalty_icp_floor(
+                    aggregates.get("fp_penalty_icp_floor")
+                    if "fp_penalty_icp_floor" in aggregates
+                    else None
+                ),
                 per_icp_normalized_score(
                     _coerce_scores(row.get("candidate_company_scores", ())),
                     max_leads=fallback_leads,
@@ -644,6 +689,7 @@ def build_research_evaluation_score_bundle(
         fp_unverified_primary_penalty_points=float(
             (policy or {}).get("fp_unverified_primary_penalty_points", 0.0)
         ),
+        fp_penalty_icp_floor=CURRENT_FP_PENALTY_ICP_FLOOR,
     )
     total_cost_usd = float((policy or {}).get("observed_cost_usd", 0.0))
     aggregates = {**aggregates, "total_cost_usd": round(total_cost_usd, 6)}
@@ -771,6 +817,15 @@ def verify_research_evaluation_score_bundle(
             per_icp_results,
             leads_per_icp_normalizer=int(aggregates.get("leads_per_icp_normalizer", DEFAULT_LEADS_PER_ICP_NORMALIZER)),
             lcb_z=float(aggregates.get("lcb_z", DEFAULT_LCB_Z)),
+            fp_penalty_points=float(aggregates.get("fp_penalty_points", 0.0)),
+            fp_unverified_primary_penalty_points=float(
+                aggregates.get("fp_unverified_primary_penalty_points", 0.0)
+            ),
+            fp_penalty_icp_floor=(
+                float(aggregates["fp_penalty_icp_floor"])
+                if "fp_penalty_icp_floor" in aggregates
+                else None
+            ),
         )
         total_cost_usd = round(float(aggregates.get("total_cost_usd", 0.0) or 0.0), 6)
         recomputed_aggregates = {**recomputed_aggregates, "total_cost_usd": total_cost_usd}

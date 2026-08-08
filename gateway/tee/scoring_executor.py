@@ -15,6 +15,10 @@ from pathlib import Path
 import re
 from typing import Any, Dict, Mapping
 
+from leadpoet_verifier.research_evaluation import (
+    normalize_current_fp_penalty_points,
+)
+
 
 SCORING_EXECUTOR_SCHEMA_VERSION = "leadpoet.gateway_scoring_executor.v1"
 
@@ -166,6 +170,13 @@ def configuration_snapshot(values: Mapping[str, Any] = None) -> Dict[str, Any]:
         normalize_runtime_environment(values)
         if values is not None
         else runtime_environment_values()
+    )
+    source = dict(source)
+    source["RESEARCH_LAB_EVAL_FP_PENALTY_POINTS"] = format(
+        normalize_current_fp_penalty_points(
+            source.get("RESEARCH_LAB_EVAL_FP_PENALTY_POINTS")
+        ),
+        "g",
     )
     environment = {}
     for name in _manifest_configuration_env_names():

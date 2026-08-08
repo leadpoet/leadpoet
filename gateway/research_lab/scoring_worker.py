@@ -195,6 +195,7 @@ from research_lab.eval.evaluator import (
     _fp_unverified_primary_penalty_points,
     benchmark_icp_score_from_company_scores,
     fp_penalty_total_from_breakdowns,
+    scorer_breakdown_has_retryable_infrastructure_failure,
     build_holdout_gate_result,
     build_score_bundle_from_scored_icps,
     score_private_model_pair_items,
@@ -12929,6 +12930,19 @@ class ResearchLabGatewayScoringWorker:
                 end_attested_receipt_hash_collection(scorer_receipt_token)
                 attempt_receipt_hashes.update(scorer_receipt_hashes)
         scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
+        if any(
+            scorer_breakdown_has_retryable_infrastructure_failure(row)
+            for row in score_breakdowns
+        ):
+            scorer_error = "retryable scorer verification infrastructure failure"
+            retryable = True
+            logger.warning(
+                "research_lab_baseline_scorer_incomplete worker_ref=%s "
+                "icp_ref=%s retry_round=%s",
+                self.worker_ref,
+                compact_ref(label),
+                retry_round,
+            )
         # Shared flag-aware per-ICP score (see the isolation-path comment):
         # capped mode divides by the ICP's requested company count.
         icp_score = benchmark_icp_score_from_company_scores(

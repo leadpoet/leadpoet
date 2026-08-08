@@ -925,6 +925,141 @@ async def test_max_scored_companies_caps_llm_scoring(monkeypatch):
     assert len(scored_calls) == 3
 
 
+async def test_infrastructure_judgments_are_not_reused_or_cached(monkeypatch):
+    from research_lab.eval import scored_evidence_cache
+
+    class FakeModels:
+        class CompanyOutput:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class ICPPrompt:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+    calls = []
+
+    class FakeLeadScorer:
+        @staticmethod
+        async def score_company_autoresearch_intent_v2(**kwargs):
+            calls.append(kwargs)
+            return {"final_score": 55.0, "failure_reason": None}
+
+    def fake_import(name):
+        if name == "gateway.qualification.models":
+            return FakeModels
+        if name == "qualification.scoring.lead_scorer":
+            return FakeLeadScorer
+        raise ImportError(name)
+
+    class FakeCache:
+        def __init__(self):
+            self.puts = []
+
+        def get(self, _key):
+            return [
+                {
+                    "final_score": 0.0,
+                    "failure_reason": "Intent fabrication detected",
+                    "intent_signals_detail": [
+                        {
+                            "judge_verdict": {
+                                "decision": "rejected_verifier_error",
+                                "pipeline_decision": "unavailable",
+                            }
+                        }
+                    ],
+                }
+            ]
+
+        def put(self, key, breakdowns):
+            self.puts.append((key, list(breakdowns)))
+
+    cache = FakeCache()
+    monkeypatch.setattr(evaluator, "import_module", fake_import)
+    monkeypatch.setattr(
+        scored_evidence_cache, "get_scored_evidence_cache", lambda: cache
+    )
+    scorer = evaluator.QualificationStyleCompanyScorer()
+    result = await scorer.score_with_breakdowns(
+        [{"company_name": "co", "employee_count": "51-200"}],
+        {
+            "industry": "Software",
+            "employee_count": "51-200",
+            "intent_signals": ["hiring"],
+            "max_companies": 1,
+        },
+        True,
+    )
+    assert [item["final_score"] for item in result] == [55.0]
+    assert len(calls) == 1
+    assert len(cache.puts) == 1
+
+
+async def test_fresh_infrastructure_judgment_is_not_cached(monkeypatch):
+    from research_lab.eval import scored_evidence_cache
+
+    class FakeModels:
+        class CompanyOutput:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class ICPPrompt:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+    class FakeLeadScorer:
+        @staticmethod
+        async def score_company_autoresearch_intent_v2(**_kwargs):
+            return {
+                "final_score": 0.0,
+                "failure_reason": "Intent verification unavailable: provider error",
+                "intent_signals_detail": [
+                    {
+                        "judge_verdict": {
+                            "decision": "rejected_verifier_error",
+                            "pipeline_decision": "unavailable",
+                        }
+                    }
+                ],
+            }
+
+    def fake_import(name):
+        if name == "gateway.qualification.models":
+            return FakeModels
+        if name == "qualification.scoring.lead_scorer":
+            return FakeLeadScorer
+        raise ImportError(name)
+
+    class FakeCache:
+        def __init__(self):
+            self.puts = []
+
+        def get(self, _key):
+            return None
+
+        def put(self, key, breakdowns):
+            self.puts.append((key, list(breakdowns)))
+
+    cache = FakeCache()
+    monkeypatch.setattr(evaluator, "import_module", fake_import)
+    monkeypatch.setattr(
+        scored_evidence_cache, "get_scored_evidence_cache", lambda: cache
+    )
+    result = await evaluator.QualificationStyleCompanyScorer().score_with_breakdowns(
+        [{"company_name": "co", "employee_count": "51-200"}],
+        {
+            "industry": "Software",
+            "employee_count": "51-200",
+            "intent_signals": ["hiring"],
+            "max_companies": 1,
+        },
+        True,
+    )
+    assert result[0]["final_score"] == 0.0
+    assert cache.puts == []
+
+
 def test_explicit_candidate_intent_signals_are_schema_normalized():
     company = {
         "company_name": "ExampleCo",

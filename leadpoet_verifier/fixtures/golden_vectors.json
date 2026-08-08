@@ -1834,7 +1834,7 @@
       "expected": {
         "passed": true,
         "errors": [],
-        "score_bundle_hash": "sha256:1bf207412caa4b1a36638cff7dfe461902f005dc04eb66e38686a005994285c2",
+        "score_bundle_hash": "sha256:fc157c4df915a6b4babaf130d3651542d3d6084592cd287341073480fc4197e8",
         "eligible_for_probation": true,
         "on_chain_submission_allowed": false
       }

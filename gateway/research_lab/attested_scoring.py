@@ -105,7 +105,21 @@ async def execute_required_qualification_company_scores(
     except Exception as exc:
         if isinstance(exc, AttestedScoringError):
             raise
-        raise AttestedScoringError("required V2 company scoring failed") from exc
+        message = "required V2 company scoring failed"
+        from gateway.research_lab.attested_scoring_v2 import AttestedScoringV2Error
+        from gateway.research_lab.model_authority_v2 import (
+            RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
+            has_retryable_attested_provider_transport_failure,
+        )
+
+        if isinstance(
+            exc, AttestedScoringV2Error
+        ) and has_retryable_attested_provider_transport_failure(exc):
+            message = "%s; %s" % (
+                message,
+                RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
+            )
+        raise AttestedScoringError(message) from exc
 
 
 async def compare_score_bundle(

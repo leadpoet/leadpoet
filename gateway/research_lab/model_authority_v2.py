@@ -119,7 +119,7 @@ def _model_invocation_timeout_seconds(model_timeout_seconds: float) -> float:
     )
 
 
-def _has_retryable_attested_provider_transport_failure(
+def has_retryable_attested_provider_transport_failure(
     error: AttestedScoringV2Error,
 ) -> bool:
     """Recognize retryable model-scope failures from verified receipt evidence."""
@@ -882,7 +882,7 @@ class AttestedPrivateModelRunnerV2:
             ) from exc
         except AttestedScoringV2Error as exc:
             message = str(exc)
-            if _has_retryable_attested_provider_transport_failure(exc):
+            if has_retryable_attested_provider_transport_failure(exc):
                 message = "%s; %s" % (
                     message,
                     RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,

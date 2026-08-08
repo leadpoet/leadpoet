@@ -3,6 +3,10 @@ from __future__ import annotations
 import pytest
 
 from gateway.research_lab import attested_scoring, attested_v2_store, v2_authority
+from gateway.research_lab.attested_scoring_v2 import AttestedScoringV2Error
+from gateway.research_lab.model_authority_v2 import (
+    RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
+)
 from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 
 
@@ -67,6 +71,73 @@ async def test_company_facade_routes_only_to_v2(monkeypatch):
     assert result == [{"final_score": 4.5}]
     assert captured["epoch_id"] == 9
     assert sidecar["receipt"]["receipt_hash"] == HASH_A
+
+
+@pytest.mark.asyncio
+async def test_company_facade_preserves_verified_retryable_transport_evidence(
+    monkeypatch,
+):
+    async def execute(**_kwargs):
+        raise AttestedScoringV2Error(
+            "V2 scoring failed closed: execution_providerclientv2error",
+            authority={
+                "transport_attempts": [
+                    {
+                        "logical_operation_id": "company-check",
+                        "attempt_number": 0,
+                        "provider_id": "public_web",
+                        "terminal_status": "transport_failure",
+                        "http_status": None,
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(v2_authority, "execute_company_scores_v2", execute)
+    with pytest.raises(attested_scoring.AttestedScoringError) as raised:
+        await attested_scoring.execute_required_qualification_company_scores(
+            epoch_id=9,
+            purpose="research_lab.rebenchmark.v1",
+            companies=[{"company_name": "Example"}],
+            icp={"industry": "Software"},
+            is_reference_model=True,
+        )
+
+    assert RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER in str(raised.value)
+    assert isinstance(raised.value.__cause__, AttestedScoringV2Error)
+
+
+@pytest.mark.asyncio
+async def test_company_facade_does_not_retry_authenticated_terminal_failures(
+    monkeypatch,
+):
+    async def execute(**_kwargs):
+        raise AttestedScoringV2Error(
+            "V2 scoring failed closed: execution_providerclientv2error",
+            authority={
+                "transport_attempts": [
+                    {
+                        "logical_operation_id": "company-check",
+                        "attempt_number": 0,
+                        "provider_id": "openrouter",
+                        "terminal_status": "authenticated_response",
+                        "http_status": 401,
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(v2_authority, "execute_company_scores_v2", execute)
+    with pytest.raises(attested_scoring.AttestedScoringError) as raised:
+        await attested_scoring.execute_required_qualification_company_scores(
+            epoch_id=9,
+            purpose="research_lab.rebenchmark.v1",
+            companies=[{"company_name": "Example"}],
+            icp={"industry": "Software"},
+            is_reference_model=True,
+        )
+
+    assert RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER not in str(raised.value)
 
 
 @pytest.mark.asyncio

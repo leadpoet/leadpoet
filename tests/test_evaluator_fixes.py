@@ -926,6 +926,8 @@ async def test_max_scored_companies_caps_llm_scoring(monkeypatch):
 
 
 async def test_infrastructure_judgments_are_not_reused_or_cached(monkeypatch):
+    from importlib import import_module as real_import
+
     from research_lab.eval import scored_evidence_cache
 
     class FakeModels:
@@ -950,7 +952,7 @@ async def test_infrastructure_judgments_are_not_reused_or_cached(monkeypatch):
             return FakeModels
         if name == "qualification.scoring.lead_scorer":
             return FakeLeadScorer
-        raise ImportError(name)
+        return real_import(name)
 
     class FakeCache:
         def __init__(self):
@@ -997,6 +999,8 @@ async def test_infrastructure_judgments_are_not_reused_or_cached(monkeypatch):
 
 
 async def test_fresh_infrastructure_judgment_is_not_cached(monkeypatch):
+    from importlib import import_module as real_import
+
     from research_lab.eval import scored_evidence_cache
 
     class FakeModels:
@@ -1029,7 +1033,7 @@ async def test_fresh_infrastructure_judgment_is_not_cached(monkeypatch):
             return FakeModels
         if name == "qualification.scoring.lead_scorer":
             return FakeLeadScorer
-        raise ImportError(name)
+        return real_import(name)
 
     class FakeCache:
         def __init__(self):

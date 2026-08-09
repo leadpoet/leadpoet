@@ -278,6 +278,7 @@ async def _process_provenance(
     if not isinstance(manifest, Mapping) or not isinstance(metadata, Mapping):
         raise SourceAddWorkflowError("SOURCE_ADD provenance input is incomplete")
     work = await _begin_provider_execution(work)
+    attempt_count = int(work.get("attempt_count") or 0)
     precheck, outcome = await evaluate_source_add_provenance_v2(
         submission_id=str(current["submission_id"]),
         source_name=str(manifest.get("source_name") or ""),
@@ -287,11 +288,11 @@ async def _process_provenance(
         ],
         source_metadata=dict(metadata),
         epoch_id=max(0, int(getattr(config, "evaluation_epoch", 0) or 0)),
+        sequence=attempt_count,
         timeout_seconds=int(config.source_add_probe_timeout_seconds),
     )
     precheck_doc = precheck.to_record_doc()
     reasons = {str(item) for item in precheck.reasons}
-    attempt_count = int(work.get("attempt_count") or 0)
     if precheck.precheck_status == "needs_manual_review" and any(
         item.endswith("provider_error") or item == "scrapingdog_key_missing"
         for item in reasons

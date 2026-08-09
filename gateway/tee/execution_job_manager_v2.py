@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
@@ -574,6 +575,82 @@ class ExecutionContextV2:
                     for item in self.external_ancestry_proofs
                 )
             )
+
+    def external_receipt_authority_graphs(self) -> tuple[dict[str, Any], ...]:
+        """Expose full and compact parent authorities through one graph view.
+
+        Compact proofs are validated before they enter this context. Their
+        disclosed receipts and boot identities are the bounded business view
+        needed by measured executors after graph transport is checkpointed.
+        """
+
+        with self._external_receipt_lock:
+            graphs = [
+                json.loads(_canonical_bytes(item).decode("utf-8"))
+                for item in self.external_receipt_graphs
+            ]
+            roots = {
+                _hash(item.get("root_receipt_hash"), "external root receipt hash")
+                for item in graphs
+            }
+            for proof in self.external_ancestry_proofs:
+                normalized = json.loads(_canonical_bytes(proof).decode("utf-8"))
+                try:
+                    claim = normalized["certificate"]["claim"]
+                    lineage_id = str(claim["lineage_id"])
+                    root_hash = _hash(
+                        claim["output_root_receipt_hash"],
+                        "external ancestry root receipt hash",
+                    )
+                    if not isinstance(normalized["disclosed_receipts"], list):
+                        raise TypeError("disclosed receipts are not a list")
+                    if not isinstance(
+                        normalized["disclosed_boot_identities"], list
+                    ):
+                        raise TypeError("disclosed boot identities are not a list")
+                    receipts = [
+                        dict(item)
+                        for item in normalized["disclosed_receipts"]
+                        if isinstance(item, Mapping)
+                    ]
+                    boot_identities = [
+                        dict(item)
+                        for item in normalized["disclosed_boot_identities"]
+                        if isinstance(item, Mapping)
+                    ]
+                    if len(receipts) != len(normalized["disclosed_receipts"]):
+                        raise TypeError("disclosed receipt is not an object")
+                    if len(boot_identities) != len(
+                        normalized["disclosed_boot_identities"]
+                    ):
+                        raise TypeError("disclosed boot identity is not an object")
+                except (KeyError, TypeError) as exc:
+                    raise ExecutionJobV2Error(
+                        "external ancestry proof disclosure is invalid"
+                    ) from exc
+                if root_hash in roots or sum(
+                    str(item.get("receipt_hash") or "") == root_hash
+                    for item in receipts
+                ) != 1:
+                    raise ExecutionJobV2Error(
+                        "external ancestry proof root disclosure is invalid"
+                    )
+                roots.add(root_hash)
+                graphs.append(
+                    {
+                        "schema_version": (
+                            COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+                        ),
+                        "root_receipt_hash": root_hash,
+                        "boot_identities": boot_identities,
+                        "receipts": receipts,
+                        "transport_attempts": [],
+                        "host_operations": [],
+                        "ancestry_lineage_id": lineage_id,
+                        "ancestry_proof": normalized,
+                    }
+                )
+            return tuple(graphs)
 
     def execute_host_operation(
         self,

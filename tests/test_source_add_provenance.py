@@ -328,11 +328,22 @@ def test_archive_history_must_preexist_submission_window():
             },
         }
     )
+    arquivo = provenance._summarize_archive(
+        {
+            "provider_status": "ok",
+            "archive_provider": "arquivo",
+            "status": 200,
+            "json": {"timestamp": "20160101000000", "status": "200"},
+        }
+    )
 
     assert fresh["available"] is True
     assert fresh["established_history"] is False
     assert established["established_history"] is True
     assert established["snapshot_age_days"] >= 90
+    assert arquivo["provider"] == "arquivo"
+    assert arquivo["available"] is True
+    assert arquivo["established_history"] is True
 
 
 def test_missing_required_metadata_rejects_obvious_bad_submission():

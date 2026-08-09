@@ -216,6 +216,7 @@ _PROVIDER_BY_HOST = {
     "code.deepline.com": "deepline",
     "archive.org": "wayback",
     "web.archive.org": "wayback",
+    "arquivo.pt": "wayback",
     "api.truelist.io": "truelist",
     "cloudflare-dns.com": "dns",
     "rdap.org": "rdap",

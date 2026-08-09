@@ -198,6 +198,9 @@ SOURCE_ADD_ADMISSION_CONTROL_MIGRATION = (
 PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION = (
     "146-research-lab-private-benchmark-schema-v11.sql"
 )
+SOURCE_CATALOG_AUTH_METADATA_MIGRATION = (
+    "147-research-lab-source-catalog-auth-metadata.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -238,6 +241,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     PROVIDER_PERSISTENCE_BATCH_MIGRATION,
     SOURCE_ADD_ADMISSION_CONTROL_MIGRATION,
     PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION,
+    SOURCE_CATALOG_AUTH_METADATA_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -263,6 +267,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_096_source_add_functional_workflow_valid",
     "post_145_source_add_admission_control_contract_valid",
     "post_146_private_benchmark_schema_contract_valid",
+    "post_147_source_catalog_auth_metadata_contract_valid",
     "provider_outcome_append_atomic",
     "provider_outcome_batch_append_atomic",
     "provider_evidence_cache_put_atomic",
@@ -4371,6 +4376,124 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-146 private benchmark schema contract differs"
+            )
+        database.apply_migration(
+            scripts / SOURCE_CATALOG_AUTH_METADATA_MIGRATION
+        )
+        # The migration drops and recreates one validated CHECK; rerunning it
+        # must preserve both existing rows and the exact fail-closed contract.
+        database.apply_migration(
+            scripts / SOURCE_CATALOG_AUTH_METADATA_MIGRATION
+        )
+        applied.append(SOURCE_CATALOG_AUTH_METADATA_MIGRATION)
+        source_catalog_auth_metadata_contract = json.loads(
+            database.psql(
+                """
+                WITH safe AS (
+                    SELECT jsonb_build_object(
+                        'schema_version',
+                        'leadpoet.source_add_catalog_snapshot.v2',
+                        'provisioned_sources',
+                        jsonb_build_array(jsonb_build_object(
+                            'provision_doc', jsonb_build_object(
+                                'provider_registry_entry',
+                                jsonb_build_object(
+                                    'id', 'builtwith_trends',
+                                    'auth_kind', 'header',
+                                    'auth_name', 'Authorization'
+                                )
+                            )
+                        )),
+                        'provisioned_sources_hash',
+                        'sha256:' || repeat('1', 64),
+                        'private_registry_rows', '[]'::jsonb,
+                        'private_registry_rows_hash',
+                        'sha256:' || repeat('2', 64),
+                        'runtime_catalog', jsonb_build_object(
+                            'routes', jsonb_build_array(jsonb_build_object(
+                                'provider_id', 'builtwith_trends',
+                                'auth_kind', 'header',
+                                'auth_name', 'Authorization',
+                                'request_headers', '{}'::jsonb
+                            ))
+                        ),
+                        'runtime_catalog_hash',
+                        'sha256:' || repeat('3', 64)
+                    ) AS doc
+                )
+                SELECT jsonb_build_object(
+                    'valid_correlated_auth_metadata',
+                    public.research_lab_attested_execution_result_secret_free_v2(
+                        'source_add_catalog_snapshot_v2', doc
+                    ),
+                    'generic_authorization_rejected',
+                    NOT public.research_lab_attested_execution_result_secret_free_v2(
+                        'research_lab_allocation',
+                        '{"authorization":"forbidden"}'::jsonb
+                    ),
+                    'private_registry_authorization_rejected',
+                    NOT public.research_lab_attested_execution_result_secret_free_v2(
+                        'source_add_catalog_snapshot_v2',
+                        jsonb_set(
+                            doc,
+                            '{private_registry_rows}',
+                            '[{"authorization":"forbidden"}]'::jsonb
+                        )
+                    ),
+                    'request_header_authorization_rejected',
+                    NOT public.research_lab_attested_execution_result_secret_free_v2(
+                        'source_add_catalog_snapshot_v2',
+                        jsonb_set(
+                            doc,
+                            '{runtime_catalog,routes,0,request_headers}',
+                            '{"Authorization":"forbidden"}'::jsonb
+                        )
+                    ),
+                    'uncorrelated_auth_metadata_rejected',
+                    NOT public.research_lab_attested_execution_result_secret_free_v2(
+                        'source_add_catalog_snapshot_v2',
+                        jsonb_set(
+                            doc,
+                            '{runtime_catalog,routes,0,provider_id}',
+                            '"different_provider"'::jsonb
+                        )
+                    ),
+                    'proxy_authorization_rejected',
+                    NOT public.research_lab_attested_execution_result_secret_free_v2(
+                        'source_add_catalog_snapshot_v2',
+                        jsonb_set(
+                            doc,
+                            '{runtime_catalog,routes,0,request_headers}',
+                            '{"Proxy-Authorization":"forbidden"}'::jsonb
+                        )
+                    ),
+                    'constraint_valid', EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conrelid =
+                            'public.research_lab_attested_execution_results_v2'
+                                ::regclass
+                          AND conname =
+                            'research_lab_attested_execution_results_v2_result_doc_check'
+                          AND convalidated
+                    )
+                )::text
+                FROM safe;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_catalog_auth_metadata_contract != {
+            "valid_correlated_auth_metadata": True,
+            "generic_authorization_rejected": True,
+            "private_registry_authorization_rejected": True,
+            "request_header_authorization_rejected": True,
+            "uncorrelated_auth_metadata_rejected": True,
+            "proxy_authorization_rejected": True,
+            "constraint_valid": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-147 SOURCE_ADD catalog auth metadata contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(

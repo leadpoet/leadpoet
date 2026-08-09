@@ -448,6 +448,11 @@ def _summarize_archive(result: Mapping[str, Any]) -> dict[str, Any]:
     closest = snapshots.get("closest") if isinstance(snapshots, Mapping) else {}
     available = bool(isinstance(closest, Mapping) and closest.get("available") is True)
     timestamp = str(closest.get("timestamp") or "") if isinstance(closest, Mapping) else ""
+    if not available and isinstance(parsed, Mapping):
+        arquivo_timestamp = str(parsed.get("timestamp") or "")
+        if re.fullmatch(r"\d{14}", arquivo_timestamp):
+            available = True
+            timestamp = arquivo_timestamp
     snapshot_age_days = 0
     if available and re.fullmatch(r"\d{14}", timestamp):
         try:
@@ -461,6 +466,7 @@ def _summarize_archive(result: Mapping[str, Any]) -> dict[str, Any]:
             snapshot_age_days = 0
     return {
         "provider_status": str(result.get("provider_status") or "")[:80],
+        "provider": str(result.get("archive_provider") or "wayback")[:80],
         "status": int(result.get("status") or 0),
         "available": available,
         "snapshot_year": timestamp[:4] if re.fullmatch(r"\d{14}", timestamp) else "",

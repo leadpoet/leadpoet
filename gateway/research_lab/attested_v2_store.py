@@ -54,6 +54,7 @@ from leadpoet_canonical.weight_authority_v2 import (
 )
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
+    validate_source_add_credential_envelope_v2,
     validate_source_add_runtime_catalog_v2,
 )
 
@@ -112,6 +113,7 @@ ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_RPC = (
     "persist_research_lab_allocation_frontier_bootstrap_v2"
 )
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SOURCE_ADD_ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
 _EXACT_INSERT_ATTEMPTS = 4
@@ -1941,6 +1943,95 @@ def _execution_result_projection_v2(
     return dict(result)
 
 
+def _source_add_catalog_secret_scan_projection_v2(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Remove only validated encrypted credential metadata before scanning."""
+
+    scan_result = dict(result)
+    scan_sources: list[dict[str, Any]] = []
+    for raw_source in result.get("provisioned_sources") or ():
+        source = dict(raw_source)
+        raw_envelope = source.pop("credential_envelope", {})
+        provision = source.get("provision_doc")
+        provider = (
+            provision.get("provider_registry_entry")
+            if isinstance(provision, Mapping)
+            else None
+        )
+        if not isinstance(provider, Mapping):
+            raise AttestedV2StoreError(
+                "replayable SOURCE_ADD credential projection is invalid"
+            )
+        provider_scan = dict(provider)
+        auth_kind = str(provider_scan.get("auth_kind") or "none").lower()
+        envelope_ref = ""
+        if auth_kind != "none":
+            try:
+                normalized_envelope = validate_source_add_credential_envelope_v2(
+                    raw_envelope
+                )
+            except Exception as exc:
+                raise AttestedV2StoreError(
+                    "replayable SOURCE_ADD credential projection is invalid"
+                ) from exc
+            envelope_ref = str(normalized_envelope["credential_ref"])
+        elif raw_envelope:
+            raise AttestedV2StoreError(
+                "replayable SOURCE_ADD credential projection is invalid"
+            )
+
+        if "credential_ref" in provider_scan:
+            refs = provider_scan.pop("credential_ref")
+            if not isinstance(refs, list) or any(
+                not isinstance(item, str)
+                or (
+                    item != envelope_ref
+                    and not _SOURCE_ADD_ENV_REF_RE.fullmatch(item)
+                )
+                for item in refs
+            ):
+                raise AttestedV2StoreError(
+                    "replayable SOURCE_ADD credential projection is invalid"
+                )
+        if "credential_ready" in provider_scan:
+            ready = provider_scan.pop("credential_ready")
+            if (
+                ready is not None
+                and not isinstance(ready, bool)
+                and ready != "[redacted]"
+            ):
+                raise AttestedV2StoreError(
+                    "replayable SOURCE_ADD credential projection is invalid"
+                )
+
+        provision_scan = dict(provision)
+        provision_scan["provider_registry_entry"] = provider_scan
+        source["provision_doc"] = provision_scan
+        scan_sources.append(source)
+    scan_result["provisioned_sources"] = scan_sources
+
+    runtime_catalog = dict(result.get("runtime_catalog") or {})
+    scan_routes: list[dict[str, Any]] = []
+    for raw_route in runtime_catalog.get("routes") or ():
+        route = dict(raw_route)
+        for field in (
+            "credential_slot",
+            "credential_value_hash",
+            "credential_env_refs",
+            "credential_envelope_hash",
+        ):
+            if field not in route:
+                raise AttestedV2StoreError(
+                    "replayable SOURCE_ADD credential projection is invalid"
+                )
+            route.pop(field)
+        scan_routes.append(route)
+    runtime_catalog["routes"] = scan_routes
+    scan_result["runtime_catalog"] = runtime_catalog
+    return scan_result
+
+
 def _execution_result_storage_row_v2(
     *,
     operation: str,
@@ -1980,16 +2071,21 @@ def _execution_result_storage_row_v2(
             "execution result artifacts differ from receipt"
         )
     normalized_result = dict(result)
-    from gateway.research_lab.bundles import contains_secret_material
-
-    if contains_secret_material(normalized_result):
-        raise AttestedV2StoreError(
-            "replayable execution result contains secret material"
-        )
     projection = _execution_result_projection_v2(
         operation=normalized_operation,
         result=normalized_result,
     )
+    from gateway.research_lab.bundles import contains_secret_material
+
+    secret_scan_projection = normalized_result
+    if normalized_operation == "source_add_catalog_snapshot_v2":
+        secret_scan_projection = _source_add_catalog_secret_scan_projection_v2(
+            normalized_result
+        )
+    if contains_secret_material(secret_scan_projection):
+        raise AttestedV2StoreError(
+            "replayable execution result contains secret material"
+        )
     if receipt.get("output_root") != sha256_json(projection):
         raise AttestedV2StoreError(
             "execution result output differs from receipt"

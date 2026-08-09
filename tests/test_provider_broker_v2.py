@@ -288,6 +288,15 @@ def test_provider_registry_hash_binds_measured_https_routes():
     assert document["routes"]["openrouter"]["hosts"] == ["openrouter.ai"]
     assert document["routes"]["dns"]["hosts"] == ["cloudflare-dns.com"]
     assert document["routes"]["rdap"]["hosts"] == ["rdap.org"]
+    assert document["routes"]["wayback"]["hosts"] == [
+        "archive.org",
+        "web.archive.org",
+        "arquivo.pt",
+    ]
+    assert document["routes"]["wayback"]["path_prefixes"] == [
+        "/wayback/available",
+        "/wayback/cdx",
+    ]
     assert document["routes"]["bittensor_chain"]["hosts"] == [
         "entrypoint-finney.opentensor.ai"
     ]
@@ -695,6 +704,37 @@ def test_source_add_provenance_static_route_uses_bounded_hash_only_artifacts():
     assert b'"error":"provider unavailable"' not in artifact_bodies
     assert all(b"docs.example.com" not in body for body in artifact_bodies)
     assert result["transport_attempt"]["response_hash"].startswith("sha256:")
+
+
+def test_source_add_archive_fallback_is_an_exact_measured_route():
+    transport = FakeTransport()
+    broker = _broker(transport)
+    request = _request(
+        purpose="research_lab.source_add_provenance.v2",
+        provider_id="wayback",
+        method="GET",
+        url=(
+            "https://arquivo.pt/wayback/cdx?"
+            "url=api.example.com%2F%2A&output=json&"
+            "filter=statuscode%3A200&limit=1"
+        ),
+        body_b64="",
+        max_response_bytes=240_000,
+        artifact_mode="hash_only",
+    )
+
+    result = broker.execute(request)
+
+    assert transport.calls[0]["url"] == request["url"]
+    assert result["transport_attempt"]["provider_id"] == "wayback"
+    with pytest.raises(ProviderBrokerV2Error, match="path differs"):
+        broker.execute(
+            {
+                **request,
+                "logical_operation_id": "operation-2",
+                "url": "https://arquivo.pt/textsearch?maxItems=1",
+            }
+        )
 
 
 def test_unrelated_static_route_cannot_request_hash_only_artifacts():

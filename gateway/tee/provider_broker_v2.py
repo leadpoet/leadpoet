@@ -219,7 +219,8 @@ BUILTIN_PROVIDER_ROUTES = {
     ),
     "wayback": ProviderRouteV2(
         provider_id="wayback",
-        hosts=("archive.org", "web.archive.org"),
+        hosts=("archive.org", "web.archive.org", "arquivo.pt"),
+        path_prefixes=("/wayback/available", "/wayback/cdx"),
     ),
     "public_web": ProviderRouteV2(
         provider_id="public_web",

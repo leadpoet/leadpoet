@@ -65,26 +65,46 @@ def _config():
     )
 
 
-def _context(*, with_functional_parent=False):
+def _context(*, with_functional_parent=False, with_functional_proof=False):
     functional = _functional_result()
+    receipt = {
+        "receipt_hash": FUNCTIONAL_RECEIPT_HASH,
+        "purpose": "research_lab.source_add_functional_probe.v2",
+        "output_root": sha256_json(functional),
+    }
     return ExecutionContextV2(
         job_id="reward:test",
         purpose="research_lab.reward_decision.v2",
         epoch_id=100,
+        parent_receipt_hashes=(
+            (FUNCTIONAL_RECEIPT_HASH,)
+            if with_functional_parent or with_functional_proof
+            else ()
+        ),
         external_receipt_graphs=(
             [
                 {
                     "root_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
-                    "receipts": [
-                        {
-                            "receipt_hash": FUNCTIONAL_RECEIPT_HASH,
-                            "purpose": "research_lab.source_add_functional_probe.v2",
-                            "output_root": sha256_json(functional),
-                        }
-                    ],
+                    "receipts": [receipt],
                 }
             ]
             if with_functional_parent
+            else []
+        ),
+        external_ancestry_proofs=(
+            [
+                {
+                    "certificate": {
+                        "claim": {
+                            "lineage_id": "gateway:test",
+                            "output_root_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
+                        }
+                    },
+                    "disclosed_boot_identities": [],
+                    "disclosed_receipts": [receipt],
+                }
+            ]
+            if with_functional_proof
             else []
         ),
     )
@@ -221,6 +241,47 @@ def test_leg1_replaces_host_reward_rows_with_authenticated_rows():
         ("source_add_submission_by_id", {"submission_id": SUBMISSION_ID}),
         ("source_add_functional_probe_by_submission", {"submission_id": SUBMISSION_ID}),
     ]
+
+
+def test_leg1_accepts_checkpointed_functional_parent_proof():
+    reader = FakeReader(
+        {
+            "source_add_rewards_by_adapter": [],
+            "source_add_submission_by_id": [
+                {
+                    "submission_id": SUBMISSION_ID,
+                    "adapter_id": "adapter:test",
+                    "miner_hotkey": "miner",
+                    "precheck_status": "provenance_precheck_passed",
+                }
+            ],
+            "source_add_functional_probe_by_submission": [_functional_row()],
+        }
+    )
+    resolver = CoordinatorRewardSourceV2(
+        reader=reader,
+        chain_source=FakeChain(),
+        config_supplier=_config,
+    )
+
+    resolved = resolver.resolve(
+        payload={
+            "decision_kind": "source_add_leg1",
+            "decision_payload": {
+                "adapter_id": "adapter:test",
+                "miner_ref": "miner",
+                "start_epoch": 101,
+                "existing_rewards": [],
+                "alpha_percent": 1.0,
+                "reward_epochs": 20,
+                "functional_probe_result": _functional_result(),
+                "trigger_evidence": _functional_trigger(),
+            },
+        },
+        context=_context(with_functional_proof=True),
+    )
+
+    assert resolved["decision_kind"] == "source_add_leg1"
 
 
 def test_reward_never_falls_back_to_finalized_block_modulo():

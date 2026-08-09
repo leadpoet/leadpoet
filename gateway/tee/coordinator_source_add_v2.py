@@ -6,7 +6,7 @@ import base64
 import json
 import time
 from typing import Any, Callable, Dict, Mapping
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from gateway.research_lab.source_add_provenance import (
     SourceAddProvenanceResult,
@@ -41,6 +41,7 @@ SOURCE_ADD_FUNCTIONAL_PROBE_EVALUATOR_VERSION = (
 )
 SCRAPINGDOG_ORIGIN = "https://api.scrapingdog.com"
 WAYBACK_ORIGIN = "https://archive.org"
+ARQUIVO_ORIGIN = "https://arquivo.pt"
 _MAX_PROVIDER_BODY = 240_000
 _MAX_PROBE_BODY = 1024 * 1024
 _MAX_JSON_DEPTH = 12
@@ -172,21 +173,61 @@ class CoordinatorSourceAddProvenanceV2:
                 "SOURCE_ADD provider path is not measured"
             )
         if path == "/archive/available":
-            provider_id = "wayback"
-            origin = WAYBACK_ORIGIN
-            provider_path = "/wayback/available"
-            retry_policy_hash = self._wayback_retry_policy_hash
-            logical_suffix = "archive-history"
-            if not retry_policy_hash:
+            if not self._wayback_retry_policy_hash:
                 raise CoordinatorSourceAddV2Error(
                     "Wayback retry policy is unavailable"
                 )
-        else:
-            provider_id = "scrapingdog"
-            origin = SCRAPINGDOG_ORIGIN
-            provider_path = path
-            retry_policy_hash = self._retry_policy_hash
-            logical_suffix = "documentation" if path == "/scrape" else "ai-mode"
+            primary = self._fetch_provider(
+                provider_id="wayback",
+                origin=WAYBACK_ORIGIN,
+                provider_path="/wayback/available",
+                params=params,
+                timeout_seconds=timeout_seconds,
+                retry_policy_hash=self._wayback_retry_policy_hash,
+                logical_suffix="archive-history-wayback",
+                context=context,
+            )
+            primary["archive_provider"] = "wayback"
+            if _provider_result_succeeded(primary):
+                return primary
+
+            fallback_params = _arquivo_archive_params(params)
+            fallback = self._fetch_provider(
+                provider_id="wayback",
+                origin=ARQUIVO_ORIGIN,
+                provider_path="/wayback/cdx",
+                params=fallback_params,
+                timeout_seconds=timeout_seconds,
+                retry_policy_hash=self._wayback_retry_policy_hash,
+                logical_suffix="archive-history-arquivo",
+                context=context,
+            )
+            fallback["archive_provider"] = "arquivo"
+            return fallback
+
+        return self._fetch_provider(
+            provider_id="scrapingdog",
+            origin=SCRAPINGDOG_ORIGIN,
+            provider_path=path,
+            params=params,
+            timeout_seconds=timeout_seconds,
+            retry_policy_hash=self._retry_policy_hash,
+            logical_suffix="documentation" if path == "/scrape" else "ai-mode",
+            context=context,
+        )
+
+    def _fetch_provider(
+        self,
+        *,
+        provider_id: str,
+        origin: str,
+        provider_path: str,
+        params: Mapping[str, str],
+        timeout_seconds: int,
+        retry_policy_hash: str,
+        logical_suffix: str,
+        context: ExecutionContextV2,
+    ) -> Dict[str, Any]:
         result = dict(
             self._execute_provider(
                 {
@@ -264,6 +305,27 @@ class CoordinatorSourceAddProvenanceV2:
             "body_text": text,
             "json": parsed if isinstance(parsed, Mapping) else None,
         }
+
+
+def _provider_result_succeeded(result: Mapping[str, Any]) -> bool:
+    return str(result.get("provider_status") or "") == "ok" and 200 <= int(
+        result.get("status") or 0
+    ) < 300
+
+
+def _arquivo_archive_params(params: Mapping[str, str]) -> Dict[str, str]:
+    target = urlsplit(str(params.get("url") or ""))
+    hostname = str(target.hostname or "").strip().lower()
+    if target.scheme not in {"http", "https"} or not hostname:
+        raise CoordinatorSourceAddV2Error(
+            "SOURCE_ADD archive target is invalid"
+        )
+    return {
+        "url": hostname + "/*",
+        "output": "json",
+        "filter": "statuscode:200",
+        "limit": "1",
+    }
 
 
 class CoordinatorSourceAddFunctionalProbeV2:

@@ -110,6 +110,7 @@ async def evaluate_source_add_provenance_v2(
     declared_base_domains: Sequence[str],
     source_metadata: Mapping[str, Any],
     epoch_id: int,
+    sequence: int,
     timeout_seconds: int = 45,
     execute: Any = execute_coordinator_v2,
     persist_links: Any = None,
@@ -150,7 +151,7 @@ async def evaluate_source_add_provenance_v2(
         operation=OP_SOURCE_ADD_PROVENANCE_V2,
         purpose="research_lab.source_add_provenance.v2",
         epoch_id=max(0, int(epoch_id)),
-        sequence=0,
+        sequence=max(0, int(sequence)),
         payload={
             "schema_version": SOURCE_ADD_PROVENANCE_REQUEST_SCHEMA_VERSION,
             "submission_id": str(submission_id),
@@ -198,17 +199,74 @@ async def evaluate_source_add_provenance_v2(
         raise ResearchLabV2AuthorityError(
             "SOURCE_ADD provenance document projection differs"
         )
-    link = await _persist_business_links(
-        outcome,
-        (
+    artifact = {
+        "artifact_kind": "source_add_provenance",
+        "artifact_ref": str(submission_id),
+        "artifact_hash": str(receipt["output_root"]),
+    }
+    authority_outcome = dict(outcome)
+    try:
+        link = await _persist_business_links(
+            outcome,
+            (artifact,),
+            persist_links=persist_links,
+        )
+    except Exception as exc:
+        from gateway.research_lab.attested_v2_store import (
+            AttestedV2StoreError,
+            load_business_artifact_graph_v2,
+        )
+
+        if not isinstance(exc, AttestedV2StoreError) or str(exc) != (
+            "research_lab_attested_business_artifact_links_v2 "
+            "stored row conflicts at receipt_hash"
+        ):
+            raise
+        existing_graph = await load_business_artifact_graph_v2(
+            artifact_kind=artifact["artifact_kind"],
+            artifact_ref=artifact["artifact_ref"],
+            artifact_hash=artifact["artifact_hash"],
+        )
+        try:
+            validate_receipt_graph(
+                existing_graph,
+                required_purposes={"research_lab.source_add_provenance.v2"},
+            )
+        except Exception as validation_exc:
+            raise ResearchLabV2AuthorityError(
+                "existing SOURCE_ADD provenance authority is invalid"
+            ) from validation_exc
+        existing_root_hash = str(existing_graph.get("root_receipt_hash") or "")
+        existing_roots = [
+            item
+            for item in existing_graph.get("receipts") or ()
+            if isinstance(item, Mapping)
+            and item.get("receipt_hash") == existing_root_hash
+        ]
+        if (
+            len(existing_roots) != 1
+            or existing_roots[0].get("role") != "gateway_coordinator"
+            or existing_roots[0].get("purpose")
+            != "research_lab.source_add_provenance.v2"
+            or existing_roots[0].get("status") != "succeeded"
+            or existing_roots[0].get("output_root") != artifact["artifact_hash"]
+        ):
+            raise ResearchLabV2AuthorityError(
+                "existing SOURCE_ADD provenance authority differs"
+            ) from exc
+        existing_receipt = dict(existing_roots[0])
+        authority_outcome.update(
             {
-                "artifact_kind": "source_add_provenance",
-                "artifact_ref": str(submission_id),
-                "artifact_hash": str(receipt["output_root"]),
-            },
-        ),
-        persist_links=persist_links,
-    )
+                "execution_receipt": existing_receipt,
+                "receipt": existing_receipt,
+                "execution_receipt_graph": dict(existing_graph),
+                "receipt_graph": dict(existing_graph),
+            }
+        )
+        link = {
+            "status": "reused_existing_authority",
+            "receipt_hash": existing_root_hash,
+        }
     provenance = SourceAddProvenanceResult(
         precheck_status=str(result["precheck_status"]),
         reasons=tuple(str(item) for item in result["reasons"]),
@@ -219,7 +277,7 @@ async def evaluate_source_add_provenance_v2(
         },
     )
     return provenance, {
-        **dict(outcome),
+        **authority_outcome,
         "status": "matched",
         "artifact_link_status": link,
     }

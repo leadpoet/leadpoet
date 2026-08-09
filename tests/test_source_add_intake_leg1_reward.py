@@ -4,7 +4,9 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.research_lab import allocations
+from gateway.research_lab import attested_v2_store
 from gateway.research_lab import source_add_workflow as workflow
+from gateway.research_lab import v2_authority
 from gateway.research_lab.source_add_provenance import (
     PRECHECK_MANUAL,
     PRECHECK_PASSED,
@@ -106,8 +108,10 @@ def _leased_work(kind: str, **overrides):
 @pytest.mark.asyncio
 async def test_provenance_pass_only_queues_functional_probe(monkeypatch):
     finished = {}
+    observed = {}
 
-    async def fake_provenance(**_kwargs):
+    async def fake_provenance(**kwargs):
+        observed.update(kwargs)
         return (
             SourceAddProvenanceResult(
                 PRECHECK_PASSED,
@@ -133,6 +137,231 @@ async def test_provenance_pass_only_queues_functional_probe(monkeypatch):
     assert finished["next_work"]["work_kind"] == "functional_probe"
     assert finished["probe_config"]["credential_envelope"] == {}
     assert finished["precheck_status"] == PRECHECK_PASSED
+    assert observed["sequence"] == 1
+
+
+@pytest.mark.asyncio
+async def test_provenance_authority_uses_retry_sequence(monkeypatch):
+    receipt_hash = "sha256:" + "7" * 64
+    result = {
+        "schema_version": v2_authority.SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+        "submission_id": SUBMISSION_ID,
+        "precheck_status": PRECHECK_MANUAL,
+        "reasons": ["archive_provider_error"],
+        "precheck_doc": {
+            "precheck_status": PRECHECK_MANUAL,
+            "reasons": ["archive_provider_error"],
+        },
+    }
+    receipt = {
+        "receipt_hash": receipt_hash,
+        "output_root": sha256_json(result),
+    }
+    observed = {}
+
+    async def execute(**kwargs):
+        observed.update(kwargs)
+        return {
+            "result": result,
+            "receipt": receipt,
+            "receipt_graph": {
+                "root_receipt_hash": receipt_hash,
+                "receipts": [receipt],
+                "edges": [],
+            },
+        }
+
+    async def persist_links(**_kwargs):
+        return {"status": "persisted"}
+
+    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: False)
+    provenance, _outcome = await v2_authority.evaluate_source_add_provenance_v2(
+        submission_id=SUBMISSION_ID,
+        source_name="Credible API",
+        source_kind="registry",
+        declared_base_domains=["credible.example"],
+        source_metadata=_metadata(),
+        epoch_id=700,
+        sequence=4,
+        execute=execute,
+        persist_links=persist_links,
+    )
+
+    assert provenance.precheck_status == PRECHECK_MANUAL
+    assert observed["sequence"] == 4
+
+
+@pytest.mark.asyncio
+async def test_provenance_retry_reuses_identical_existing_authority(monkeypatch):
+    current_hash = "sha256:" + "7" * 64
+    existing_hash = "sha256:" + "8" * 64
+    result = {
+        "schema_version": v2_authority.SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+        "submission_id": SUBMISSION_ID,
+        "precheck_status": PRECHECK_MANUAL,
+        "reasons": ["archive_provider_error"],
+        "precheck_doc": {
+            "precheck_status": PRECHECK_MANUAL,
+            "reasons": ["archive_provider_error"],
+        },
+    }
+    output_root = sha256_json(result)
+    current_receipt = {
+        "receipt_hash": current_hash,
+        "output_root": output_root,
+    }
+    existing_receipt = {
+        "receipt_hash": existing_hash,
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.source_add_provenance.v2",
+        "status": "succeeded",
+        "output_root": output_root,
+    }
+    existing_graph = {
+        "root_receipt_hash": existing_hash,
+        "receipts": [existing_receipt],
+        "edges": [],
+    }
+    observed = {}
+
+    async def execute(**_kwargs):
+        return {
+            "result": result,
+            "receipt": current_receipt,
+            "receipt_graph": {
+                "root_receipt_hash": current_hash,
+                "receipts": [current_receipt],
+                "edges": [],
+            },
+        }
+
+    async def persist_links(**_kwargs):
+        raise attested_v2_store.AttestedV2StoreError(
+            "research_lab_attested_business_artifact_links_v2 "
+            "stored row conflicts at receipt_hash"
+        )
+
+    async def load_existing(**kwargs):
+        observed.update(kwargs)
+        return existing_graph
+
+    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: False)
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        load_existing,
+    )
+
+    provenance, outcome = await v2_authority.evaluate_source_add_provenance_v2(
+        submission_id=SUBMISSION_ID,
+        source_name="Credible API",
+        source_kind="registry",
+        declared_base_domains=["credible.example"],
+        source_metadata=_metadata(),
+        epoch_id=700,
+        sequence=2,
+        execute=execute,
+        persist_links=persist_links,
+    )
+
+    assert provenance.precheck_status == PRECHECK_MANUAL
+    assert outcome["receipt"]["receipt_hash"] == existing_hash
+    assert outcome["receipt_graph"] == existing_graph
+    assert outcome["artifact_link_status"] == {
+        "status": "reused_existing_authority",
+        "receipt_hash": existing_hash,
+    }
+    assert observed == {
+        "artifact_kind": "source_add_provenance",
+        "artifact_ref": SUBMISSION_ID,
+        "artifact_hash": output_root,
+    }
+
+
+@pytest.mark.asyncio
+async def test_provenance_retry_rejects_different_existing_authority(monkeypatch):
+    current_hash = "sha256:" + "7" * 64
+    existing_hash = "sha256:" + "8" * 64
+    result = {
+        "schema_version": v2_authority.SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+        "submission_id": SUBMISSION_ID,
+        "precheck_status": PRECHECK_MANUAL,
+        "reasons": ["archive_provider_error"],
+        "precheck_doc": {
+            "precheck_status": PRECHECK_MANUAL,
+            "reasons": ["archive_provider_error"],
+        },
+    }
+    output_root = sha256_json(result)
+    current_receipt = {
+        "receipt_hash": current_hash,
+        "output_root": output_root,
+    }
+
+    async def execute(**_kwargs):
+        return {
+            "result": result,
+            "receipt": current_receipt,
+            "receipt_graph": {
+                "root_receipt_hash": current_hash,
+                "receipts": [current_receipt],
+                "edges": [],
+            },
+        }
+
+    async def persist_links(**_kwargs):
+        raise attested_v2_store.AttestedV2StoreError(
+            "research_lab_attested_business_artifact_links_v2 "
+            "stored row conflicts at receipt_hash"
+        )
+
+    async def load_existing(**_kwargs):
+        return {
+            "root_receipt_hash": existing_hash,
+            "receipts": [
+                {
+                    "receipt_hash": existing_hash,
+                    "role": "gateway_coordinator",
+                    "purpose": "research_lab.source_add_provenance.v2",
+                    "status": "succeeded",
+                    "output_root": "sha256:" + "9" * 64,
+                }
+            ],
+            "edges": [],
+        }
+
+    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: False)
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        load_existing,
+    )
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="existing SOURCE_ADD provenance authority differs",
+    ):
+        await v2_authority.evaluate_source_add_provenance_v2(
+            submission_id=SUBMISSION_ID,
+            source_name="Credible API",
+            source_kind="registry",
+            declared_base_domains=["credible.example"],
+            source_metadata=_metadata(),
+            epoch_id=700,
+            sequence=2,
+            execute=execute,
+            persist_links=persist_links,
+        )
 
 
 @pytest.mark.asyncio

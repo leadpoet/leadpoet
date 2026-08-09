@@ -1203,6 +1203,14 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     with pytest.raises(RuntimeError, match="differs from candidate"):
         _migration_schema_contract(path, candidate_sha="2" * 40)
 
+    stale_migrations = json.loads(json.dumps(contract))
+    stale_migrations["applied_migrations"] = stale_migrations[
+        "applied_migrations"
+    ][:-1]
+    path.write_text(json.dumps(stale_migrations), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="final migration order"):
+        _migration_schema_contract(path, candidate_sha=COMMIT)
+
     incomplete = json.loads(json.dumps(contract))
     incomplete["seed_rows"][
         "research_lab_attested_execution_receipts_v2"

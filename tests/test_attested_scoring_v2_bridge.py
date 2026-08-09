@@ -76,6 +76,62 @@ def _hash(character):
     return "sha256:" + character * 64
 
 
+def _authenticated_source_catalog_row() -> dict:
+    credential_ref = "encrypted_ref:source_add:" + "a" * 32
+    ciphertext = b"coordinator-sealed-catalog-ciphertext"
+    context = {
+        "adapter_ref": "source_add:adapter:source-one",
+        "miner_hotkey": "miner-hotkey-one",
+        "purpose": "leadpoet_research_lab_source_add_credential",
+    }
+    envelope = {
+        "schema_version": "leadpoet.source_add_credential_envelope.enclave.v2",
+        "envelope_kind": "coordinator_sealed",
+        "ciphertext_b64": base64.b64encode(ciphertext).decode("ascii"),
+        "ciphertext_blob_hash": sha256_bytes(ciphertext),
+        "kms_key_id": "arn:aws:kms:us-east-1:111122223333:key/test-key",
+        "kms_key_id_hash": _hash("b"),
+        "encryption_context": context,
+        "encryption_context_hash": sha256_json(context),
+        "credential_ref": credential_ref,
+        "credential_value_hash": _hash("c"),
+        "key_ref_hash": sha256_bytes(credential_ref.encode("utf-8")),
+    }
+    return {
+        "adapter_id": "adapter:source-one",
+        "miner_hotkey": "miner-hotkey-one",
+        "provision_status": "provisioned_autoresearch_eligible",
+        "registry_provider_id": "source_one",
+        "credential_envelope": envelope,
+        "catalog_doc": {"source_kind": "technology"},
+        "provision_doc": {
+            "provider_registry_entry": {
+                "id": "source_one",
+                "base_url": "https://api.source-one.example/v1",
+                "auth_kind": "header",
+                "auth_name": "x-source-key",
+                "credential_ref": [credential_ref],
+                "credential_ready": "[redacted]",
+                "per_day_quota": 7,
+                "cost_model": {"est_cost_microusd_per_call": 1250},
+                "capability_policy": {
+                    "routes": [{"method": "GET", "path": "/status"}],
+                },
+            },
+            "probe_endpoints": [
+                {
+                    "endpoint_id": "source_one.status",
+                    "provider_id": "source_one",
+                    "method": "GET",
+                    "path": "/status",
+                    "params": [],
+                },
+            ],
+            "request_headers": {},
+        },
+    }
+
+
 @pytest.fixture(autouse=True)
 def _checkpoint_runtime(monkeypatch):
     monkeypatch.setenv(
@@ -927,6 +983,9 @@ async def test_v2_bridge_reloads_compact_durable_checkpoint_as_parent_proof():
             == payload["parent_root"]
         )
         authority_graphs = _receipt_authority_graphs_from_context(context)
+        assert context.external_receipt_authority_graphs() == tuple(
+            authority_graphs
+        )
         resolved = _receipt_graphs_by_declared_root(
             authority_graphs,
             context.parent_receipt_hashes,
@@ -1534,11 +1593,12 @@ async def test_v2_bridge_replays_logical_job_across_equivalent_parent_transport(
 @pytest.mark.asyncio
 async def test_v2_bridge_replays_source_catalog_snapshot_after_runner_restart():
     release = _release()
-    runtime_catalog = build_source_add_runtime_catalog_v2([])
+    provisioned_sources = [_authenticated_source_catalog_row()]
+    runtime_catalog = build_source_add_runtime_catalog_v2(provisioned_sources)
     catalog_result = {
         "schema_version": "leadpoet.source_add_catalog_snapshot.v2",
-        "provisioned_sources": [],
-        "provisioned_sources_hash": sha256_json([]),
+        "provisioned_sources": provisioned_sources,
+        "provisioned_sources_hash": sha256_json(provisioned_sources),
         "private_registry_rows": [],
         "private_registry_rows_hash": sha256_json([]),
         "runtime_catalog": runtime_catalog,
@@ -1631,6 +1691,32 @@ async def test_v2_bridge_replays_source_catalog_snapshot_after_runner_restart():
             receipt=fresh["receipt"],
             artifact_hashes=fresh["artifact_hashes"],
             release_hash=release["release_hash"],
+        )
+
+    unsafe_source = {
+        **_authenticated_source_catalog_row(),
+        "catalog_doc": {"credential": "plaintext-value"},
+    }
+    unsafe_catalog = build_source_add_runtime_catalog_v2([unsafe_source])
+    unsafe_result = {
+        **catalog_result,
+        "provisioned_sources": [unsafe_source],
+        "provisioned_sources_hash": sha256_json([unsafe_source]),
+        "runtime_catalog": unsafe_catalog,
+        "runtime_catalog_hash": unsafe_catalog["catalog_hash"],
+    }
+    with pytest.raises(
+        AttestedV2StoreError,
+        match="contains secret material",
+    ):
+        await execute_scoring_v2(
+            **{**common, "sequence": 1},
+            client=_CoordinatorClient(
+                release,
+                executor=lambda _operation, _payload, _context: unsafe_result,
+            ),
+            load_replayable_result=load_missing,
+            persist_replayable_result=persist_result,
         )
 
 

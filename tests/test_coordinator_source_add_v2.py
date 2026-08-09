@@ -209,8 +209,113 @@ def test_source_add_transport_failure_is_visible_manual_review():
 
     assert result["precheck_status"] == PRECHECK_MANUAL
     assert "documentation_provider_error" in result["reasons"]
-    assert len(context.attempts) == 3
+    assert len(context.attempts) == 4
     assert all(item["terminal_status"] == "transport_failure" for item in context.attempts)
+
+
+def test_source_add_archive_falls_back_to_measured_arquivo_history():
+    calls = []
+
+    def execute(request):
+        calls.append(dict(request))
+        if request["url"].startswith("https://archive.org/"):
+            body = b'{"error":"rate limited"}'
+            status = 429
+            content_type = "application/json"
+        elif request["url"].startswith("https://arquivo.pt/"):
+            body = json.dumps(
+                {
+                    "urlkey": "com,builtwith,api)/",
+                    "timestamp": "20160101000000",
+                    "status": "200",
+                }
+            ).encode()
+            status = 200
+            content_type = "text/x-ndjson"
+        elif "/scrape?" in request["url"]:
+            body = (
+                "<html><title>Example API Reference</title>"
+                "Quickstart endpoint authentication rate limit curl status code"
+                "</html>"
+            ).encode()
+            status = 200
+            content_type = "text/html"
+        else:
+            body = json.dumps(
+                {
+                    "markdown": "VERDICT: CREDIBLE. Example operates the official API.",
+                    "references": [
+                        {"url": "https://example.com/developers"},
+                        {"url": "https://www.g2.com/products/example"},
+                    ],
+                }
+            ).encode()
+            status = 200
+            content_type = "application/json"
+        response_hash = sha256_bytes(body)
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": status,
+            "headers": {"content-type": content_type},
+            "body_b64": base64.b64encode(body).decode(),
+            "transport_attempt": {
+                "terminal_status": "authenticated_response",
+                "request_artifact_hash": HASH_A,
+                "response_artifact_hash": response_hash,
+                "response_hash": response_hash,
+            },
+        }
+
+    context = _context()
+    resolver = CoordinatorSourceAddProvenanceV2(
+        execute_provider=execute,
+        retry_policy_hash=HASH_A,
+        wayback_retry_policy_hash=HASH_B,
+    )
+
+    result = resolver.resolve(payload=_payload(), context=context)
+
+    assert result["precheck_status"] == PRECHECK_PASSED
+    assert len(calls) == 4
+    assert calls[1]["url"].startswith(
+        "https://archive.org/wayback/available?"
+    )
+    assert calls[2]["url"].startswith("https://arquivo.pt/wayback/cdx?")
+    assert "url=api.example.com%2F%2A" in calls[2]["url"]
+    assert calls[1]["logical_operation_id"] != calls[2]["logical_operation_id"]
+    assert len(context.attempts) == 4
+    assert len(context.artifacts) == 9
+
+
+def test_source_add_archive_fallback_failure_remains_manual_review():
+    execute, _calls = _authenticated_provider()
+
+    def fail_archives(request):
+        if request["provider_id"] == "wayback":
+            return {
+                "terminal_status": "transport_failure",
+                "failure_code": "rate_limited",
+                "transport_attempt": {
+                    "terminal_status": "transport_failure",
+                    "failure_code": "rate_limited",
+                    "request_artifact_hash": HASH_A,
+                    "response_artifact_hash": None,
+                },
+            }
+        return execute(request)
+
+    context = _context()
+    resolver = CoordinatorSourceAddProvenanceV2(
+        execute_provider=fail_archives,
+        retry_policy_hash=HASH_A,
+        wayback_retry_policy_hash=HASH_B,
+    )
+
+    result = resolver.resolve(payload=_payload(), context=context)
+
+    assert result["precheck_status"] == PRECHECK_MANUAL
+    assert "archive_provider_error" in result["reasons"]
+    assert len(context.attempts) == 4
 
 
 def test_functional_probe_uses_exact_dynamic_route_and_persists_hash_summary_only():

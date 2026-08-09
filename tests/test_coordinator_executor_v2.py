@@ -51,6 +51,91 @@ from leadpoet_canonical.weight_authority_v2 import (
 from research_lab.eval.promotion_metric import promotion_improvement_metric
 
 
+def test_reward_ancestry_accepts_checkpointed_source_add_parent() -> None:
+    parent_hash = "sha256:" + "1" * 64
+    functional_result = {
+        "schema_version": "leadpoet.source_add_functional_probe_result.v2",
+        "result_status": "passed",
+    }
+    context = ExecutionContextV2(
+        job_id="reward:test",
+        purpose="research_lab.reward_decision.v2",
+        epoch_id=100,
+        parent_receipt_hashes=(parent_hash,),
+        external_ancestry_proofs=[
+            {
+                "certificate": {
+                    "claim": {
+                        "lineage_id": "gateway:test",
+                        "output_root_receipt_hash": parent_hash,
+                    }
+                },
+                "disclosed_boot_identities": [],
+                "disclosed_receipts": [
+                    {
+                        "receipt_hash": parent_hash,
+                        "purpose": (
+                            "research_lab.source_add_functional_probe.v2"
+                        ),
+                        "output_root": sha256_json(functional_result),
+                    }
+                ],
+            }
+        ],
+    )
+
+    CoordinatorExecutorV2._validate_reward_ancestry(
+        {
+            "decision_kind": "source_add_leg1",
+            "decision_payload": {
+                "functional_probe_result": functional_result,
+            },
+        },
+        context,
+    )
+
+
+def test_reward_ancestry_rejects_checkpointed_parent_output_mismatch() -> None:
+    parent_hash = "sha256:" + "1" * 64
+    context = ExecutionContextV2(
+        job_id="reward:test",
+        purpose="research_lab.reward_decision.v2",
+        epoch_id=100,
+        parent_receipt_hashes=(parent_hash,),
+        external_ancestry_proofs=[
+            {
+                "certificate": {
+                    "claim": {
+                        "lineage_id": "gateway:test",
+                        "output_root_receipt_hash": parent_hash,
+                    }
+                },
+                "disclosed_boot_identities": [],
+                "disclosed_receipts": [
+                    {
+                        "receipt_hash": parent_hash,
+                        "purpose": (
+                            "research_lab.source_add_functional_probe.v2"
+                        ),
+                        "output_root": "sha256:" + "2" * 64,
+                    }
+                ],
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="parent output differs"):
+        CoordinatorExecutorV2._validate_reward_ancestry(
+            {
+                "decision_kind": "source_add_leg1",
+                "decision_payload": {
+                    "functional_probe_result": {"result_status": "passed"},
+                },
+            },
+            context,
+        )
+
+
 @pytest.mark.asyncio
 async def test_coordinator_consumes_bound_provider_metadata_before_dispatch():
     credential_refs = {

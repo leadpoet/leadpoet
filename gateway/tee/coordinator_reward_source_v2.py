@@ -7,7 +7,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable, Dict, Mapping
 
 from gateway.tee.coordinator_chain_source_v2 import CoordinatorChainSourceV2
-from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+from gateway.tee.execution_job_manager_v2 import (
+    ExecutionContextV2,
+    ExecutionJobV2Error,
+)
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
 )
@@ -161,7 +164,12 @@ class CoordinatorRewardSourceV2:
                 raise CoordinatorRewardSourceV2Error(
                     "SOURCE_ADD Leg 1 functional result differs from measured state"
                 )
-            graphs = list(context.external_receipt_graphs)
+            try:
+                graphs = list(context.external_receipt_authority_graphs())
+            except ExecutionJobV2Error as exc:
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 functional parent is invalid"
+                ) from exc
             if len(graphs) != 1:
                 raise CoordinatorRewardSourceV2Error(
                     "SOURCE_ADD Leg 1 requires one functional parent"
@@ -182,6 +190,7 @@ class CoordinatorRewardSourceV2:
                 or root.get("purpose")
                 != "research_lab.source_add_functional_probe.v2"
                 or root.get("output_root") != sha256_json(dict(functional))
+                or tuple(context.parent_receipt_hashes) != (root_hash,)
                 or str(measured.get("receipt_hash") or "") != root_hash
             ):
                 raise CoordinatorRewardSourceV2Error(
@@ -643,7 +652,13 @@ class CoordinatorRewardSourceV2:
     @staticmethod
     def _parent_issued_at(context: ExecutionContextV2) -> datetime:
         roots = []
-        for graph in context.external_receipt_graphs:
+        try:
+            graphs = context.external_receipt_authority_graphs()
+        except ExecutionJobV2Error as exc:
+            raise CoordinatorRewardSourceV2Error(
+                "reimbursement autoresearch parent is invalid"
+            ) from exc
+        for graph in graphs:
             root_hash = str(graph.get("root_receipt_hash") or "")
             for receipt in graph.get("receipts") or ():
                 if (

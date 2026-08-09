@@ -902,7 +902,7 @@
       "symbol": "_process_leg1_reward"
     },
     {
-      "ast_sha256": "sha256:32ac326adfe6048b1981987dc3ca8684be2fce9a6c9e7a8f02f8bb655d014420",
+      "ast_sha256": "sha256:f987cdaef7d1355274ea7321d2c64a4dc87e85f33b61ae66f6c20a1e7d3da7bd",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_provenance"
     },
@@ -1102,7 +1102,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:a7eb0b4bda87bf9734c93b40c1da1c4f2a6c5108341c969d04149861721c08b2",
+      "ast_sha256": "sha256:d338417e221382280fd23696f7b1dab8f47931b040249c85431fc75e6a04d0ec",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -1112,7 +1112,7 @@
       "symbol": "CoordinatorLegacySettlementSourceV2"
     },
     {
-      "ast_sha256": "sha256:07a5ccfd5d25a196c3c3748c46045f40cfcb6d437f7fe34a94d08aea36905aaf",
+      "ast_sha256": "sha256:e20756343cdf6887240f91967761aa81c517d97865c2d6634b92a812e44cdc3a",
       "path": "gateway/tee/coordinator_reward_source_v2.py",
       "symbol": "CoordinatorRewardSourceV2"
     },
@@ -1122,7 +1122,7 @@
       "symbol": "CoordinatorSourceAddFunctionalProbeV2"
     },
     {
-      "ast_sha256": "sha256:0e06279fcba3ddbc1fa771f915bcdf8aa24cb070eb859a8a951951622f9f9c30",
+      "ast_sha256": "sha256:38ddf8b9a577c627fc318c7f0925fdf86221c1dd331ac19f9e05b3fad163e722",
       "path": "gateway/tee/coordinator_source_add_v2.py",
       "symbol": "CoordinatorSourceAddProvenanceV2"
     },
@@ -2607,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:130a8c07b7d4ee870460077561edd20e715150de1f557375a6301a187202ab1c",
-  "protected_source_commit": "7145bf994f7b97bed5a7fc7bf447902cb0dffc1d",
+  "manifest_hash": "sha256:a9fe6f4d2fb5d987de9f5c17839831de8c4a7769524d2a30897365fa159f6c8d",
+  "protected_source_commit": "63785047493aeec87016c5747ba4d571f5871914",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

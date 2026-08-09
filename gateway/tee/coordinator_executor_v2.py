@@ -13,6 +13,7 @@ from gateway.tee.artifact_vault_v2 import (
 )
 from gateway.tee.execution_job_manager_v2 import (
     ExecutionContextV2,
+    ExecutionJobV2Error,
     ExecutionResultV2,
 )
 from gateway.tee.scoring_executor import (
@@ -829,7 +830,11 @@ class CoordinatorExecutorV2:
     ) -> None:
         kind = str(payload.get("decision_kind") or "")
         if kind in {"champion_migration", "source_add_migration"}:
-            if context.external_receipt_graphs or context.parent_receipt_hashes:
+            if (
+                context.external_receipt_graphs
+                or context.external_ancestry_proofs
+                or context.parent_receipt_hashes
+            ):
                 raise ValueError(
                     "reward migration cannot inherit host-selected ancestry"
                 )
@@ -842,8 +847,11 @@ class CoordinatorExecutorV2:
         }.get(kind)
         if expected_purpose is None:
             raise ValueError("reward ancestry kind is unsupported")
-        graphs = list(context.external_receipt_graphs)
-        if len(graphs) != 1:
+        try:
+            graphs = list(context.external_receipt_authority_graphs())
+        except ExecutionJobV2Error as exc:
+            raise ValueError("reward decision parent authority is invalid") from exc
+        if len(graphs) != 1 or len(context.parent_receipt_hashes) != 1:
             raise ValueError("reward decision requires exactly one parent graph")
         graph = graphs[0]
         root_hash = str(graph.get("root_receipt_hash") or "")

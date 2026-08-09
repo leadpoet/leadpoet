@@ -99,6 +99,7 @@ from tests.restart_rehearsal.sanitized_weight_fixture import (
 ALLOCATION_CANDIDATE_MIGRATION = (
     "33-research-lab-candidate-evaluation-queue.sql"
 )
+EVENT_PROJECTIONS_MIGRATION = "29-research-lab-event-projections.sql"
 ALLOCATION_AUTO_RESEARCH_MIGRATION = (
     "34-research-lab-auto-research-loop-events.sql"
 )
@@ -108,6 +109,22 @@ ALLOCATION_SCORING_AUDIT_MIGRATION = (
 )
 ALLOCATION_PROMOTION_MIGRATION = (
     "37-research-lab-promotion-and-public-benchmarks.sql"
+)
+ATOMIC_CLAIM_GUARDS_MIGRATION = (
+    "42-research-lab-atomic-claim-guards.sql"
+)
+QUEUE_CAPACITY_GUARD_MIGRATION = (
+    "43-research-lab-queue-capacity-guard.sql"
+)
+MAINTENANCE_PAUSE_MIGRATION = "44-research-lab-maintenance-pause.sql"
+PAUSED_CAPACITY_AGING_MIGRATION = (
+    "48-research-lab-paused-capacity-aging.sql"
+)
+RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION = (
+    "54-research-lab-resume-requeue-hotkey-guard.sql"
+)
+HOTKEY_ACTIVE_LOOP_CAP_MIGRATION = (
+    "67-research-lab-hotkey-active-loop-cap.sql"
 )
 ALLOCATION_IMAGE_BUILD_MIGRATIONS = (
     "46-research-lab-code-edit-candidate-images.sql",
@@ -208,12 +225,20 @@ CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
 EXPECTED_APPLIED_MIGRATIONS = (
+    EVENT_PROJECTIONS_MIGRATION,
     ALLOCATION_CANDIDATE_MIGRATION,
     ALLOCATION_AUTO_RESEARCH_MIGRATION,
     ALLOCATION_SCHEMA_MIGRATION,
     ALLOCATION_SCORING_AUDIT_MIGRATION,
     ALLOCATION_PROMOTION_MIGRATION,
-    *ALLOCATION_IMAGE_BUILD_MIGRATIONS,
+    ATOMIC_CLAIM_GUARDS_MIGRATION,
+    QUEUE_CAPACITY_GUARD_MIGRATION,
+    MAINTENANCE_PAUSE_MIGRATION,
+    *ALLOCATION_IMAGE_BUILD_MIGRATIONS[:2],
+    PAUSED_CAPACITY_AGING_MIGRATION,
+    ALLOCATION_IMAGE_BUILD_MIGRATIONS[2],
+    RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
+    HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
     *SOURCE_ADD_PRE_V2_MIGRATIONS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX[0],
     ALLOCATION_CONTAINMENT_MIGRATION,
@@ -326,6 +351,28 @@ EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "state_transition_hash",
     "finalization_doc",
 )
+EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE = {
+    "event_id": "40000000-0000-0000-0000-000000000147",
+    "event_hash": "sha256:" + "2" * 64,
+    "identical_replay": True,
+    "concurrent_replay_serialized": True,
+    "differing_replay_rejected": True,
+    "invalid_arguments_rejected": True,
+    "stale_head_rejected": True,
+    "empty_head_rejected": True,
+    "wrong_paused_head_rejected": True,
+    "rpc_security_contract_valid": True,
+    "queue_capacity_guard_exercised": True,
+    "hotkey_capacity_guard_exercised": True,
+    "row_counts": {
+        "resumed_run": 2,
+        "empty_run": 0,
+        "wrong_paused_run": 1,
+        "capacity_closed_run": 1,
+        "hotkey_capacity_closed_run": 1,
+        "concurrent_run": 2,
+    },
+}
 IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 SYSTEM_BINARY_DIRS = tuple(
     Path(value)
@@ -343,37 +390,31 @@ CREATE TABLE public.research_evaluation_score_bundles (
     score_bundle_doc JSONB NOT NULL DEFAULT '{}'::JSONB
 );
 CREATE TABLE public.research_loop_tickets (
-    ticket_id UUID PRIMARY KEY
+    ticket_id UUID PRIMARY KEY,
+    miner_hotkey TEXT NOT NULL
+);
+CREATE TABLE public.research_loop_balance_ledger (
+    ledger_entry_id UUID PRIMARY KEY,
+    miner_hotkey TEXT NOT NULL,
+    ticket_id UUID REFERENCES public.research_loop_tickets(ticket_id)
+        ON DELETE RESTRICT,
+    amount_microusd BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE public.research_weight_input_snapshots (
+    weight_input_snapshot_id UUID PRIMARY KEY,
+    snapshot_status TEXT NOT NULL CHECK (
+        snapshot_status IN ('shadow', 'candidate', 'active', 'tombstoned')
+    )
 );
 CREATE TABLE public.research_loop_receipts (
     receipt_id UUID PRIMARY KEY
 );
-CREATE TABLE public.research_loop_run_queue_events (
-    event_id       UUID        PRIMARY KEY,
-    schema_version TEXT        NOT NULL DEFAULT '1.0'
-                               CHECK (schema_version = '1.0'),
-    run_id         UUID        NOT NULL,
-    ticket_id      UUID        NOT NULL
-                               REFERENCES public.research_loop_tickets(ticket_id)
-                               ON DELETE RESTRICT,
-    seq            INTEGER     NOT NULL CHECK (seq >= 0),
-    event_type     TEXT        NOT NULL CHECK (
-                               event_type IN (
-                                   'queued', 'started', 'paused', 'completed',
-                                   'failed', 'cancelled', 'tombstoned'
-                               )
-                               ),
-    queue_priority INTEGER     NOT NULL DEFAULT 0,
-    worker_ref     TEXT,
-    reason         TEXT,
-    anchored_hash  TEXT        NOT NULL UNIQUE,
-    event_doc      JSONB       NOT NULL DEFAULT '{}'::JSONB CHECK (
-                               jsonb_typeof(event_doc) = 'object'
-                               AND event_doc::TEXT !~* '(sk-or-|openrouter_api_key|raw_openrouter_key|raw_secret)'
-                               ),
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT research_loop_run_queue_events_run_seq_key
-        UNIQUE (run_id, seq)
+CREATE TABLE public.research_loop_start_payments (
+    payment_id UUID PRIMARY KEY
+);
+CREATE TABLE public.research_reimbursement_awards (
+    award_id TEXT PRIMARY KEY
 );
 """
 GIT_TREE_CANDIDATE_PREREQUISITES_SQL = """
@@ -825,17 +866,120 @@ def _credit_resume_rejection(
 def _atomic_credit_resume_postgres_contract(
     database: DisposablePostgres,
 ) -> dict[str, Any]:
+    rpc_signature = (
+        "public.resume_research_lab_credit_blocked_run_v1("
+        "uuid,uuid,integer,text,uuid,text,integer,text,text,jsonb)"
+    )
+    rpc_catalog = json.loads(
+        database.psql(
+            """
+            SELECT pg_catalog.json_build_object(
+                'security_definer', p.prosecdef,
+                'config', pg_catalog.to_jsonb(p.proconfig),
+                'service_role_execute', EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.aclexplode(
+                        COALESCE(
+                            p.proacl,
+                            pg_catalog.acldefault('f', p.proowner)
+                        )
+                    ) AS acl
+                    JOIN pg_catalog.pg_roles AS role
+                      ON role.oid = acl.grantee
+                    WHERE role.rolname = 'service_role'
+                      AND acl.privilege_type = 'EXECUTE'
+                ),
+                'anon_execute', EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.aclexplode(
+                        COALESCE(
+                            p.proacl,
+                            pg_catalog.acldefault('f', p.proowner)
+                        )
+                    ) AS acl
+                    JOIN pg_catalog.pg_roles AS role
+                      ON role.oid = acl.grantee
+                    WHERE role.rolname = 'anon'
+                      AND acl.privilege_type = 'EXECUTE'
+                ),
+                'authenticated_execute', EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.aclexplode(
+                        COALESCE(
+                            p.proacl,
+                            pg_catalog.acldefault('f', p.proowner)
+                        )
+                    ) AS acl
+                    JOIN pg_catalog.pg_roles AS role
+                      ON role.oid = acl.grantee
+                    WHERE role.rolname = 'authenticated'
+                      AND acl.privilege_type = 'EXECUTE'
+                ),
+                'public_execute', EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.aclexplode(
+                        COALESCE(
+                            p.proacl,
+                            pg_catalog.acldefault('f', p.proowner)
+                        )
+                    ) AS acl
+                    WHERE acl.grantee = 0
+                      AND acl.privilege_type = 'EXECUTE'
+                )
+            )::text
+            FROM pg_catalog.pg_proc AS p
+            WHERE p.oid = %s::pg_catalog.regprocedure;
+            """
+            % _postgres_literal(rpc_signature),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    config = rpc_catalog.pop("config", None)
+    search_path_values = (
+        [
+            value.split("=", 1)[1]
+            for value in config
+            if isinstance(value, str) and value.startswith("search_path=")
+        ]
+        if isinstance(config, list)
+        else []
+    )
+    if (
+        rpc_catalog
+        != {
+            "security_definer": True,
+            "service_role_execute": True,
+            "anon_execute": False,
+            "authenticated_execute": False,
+            "public_execute": False,
+        }
+        or search_path_values not in ([""], ['""'])
+    ):
+        raise PostgresContractProbeError(
+            "atomic credit resume RPC security contract differs"
+        )
     ticket_id = "20000000-0000-0000-0000-000000000147"
+    capacity_ticket_id = "20000000-0000-0000-0000-000000000148"
     run_id = "10000000-0000-0000-0000-000000000147"
     empty_run_id = "10000000-0000-0000-0000-000000000148"
     wrong_paused_run_id = "10000000-0000-0000-0000-000000000149"
+    capacity_closed_run_id = "10000000-0000-0000-0000-000000000150"
+    hotkey_capacity_closed_run_id = "10000000-0000-0000-0000-000000000151"
+    concurrent_run_id = "10000000-0000-0000-0000-000000000152"
     paused_hash = "sha256:" + "1" * 64
     resumed_hash = "sha256:" + "2" * 64
     wrong_paused_hash = "sha256:" + "7" * 64
+    capacity_closed_hash = "sha256:" + "9" * 64
+    hotkey_capacity_closed_hash = "sha256:" + "b" * 64
+    concurrent_paused_hash = "sha256:" + "d" * 64
+    concurrent_resumed_hash = "sha256:" + "e" * 64
     _postgres_insert_row(
         database,
         "research_loop_tickets",
-        {"ticket_id": ticket_id},
+        {
+            "ticket_id": ticket_id,
+            "miner_hotkey": "5F-rehearsal-credit-resume-miner",
+        },
     )
     _postgres_insert_row(
         database,
@@ -866,6 +1010,10 @@ def _atomic_credit_resume_postgres_contract(
         "p_reason": "credit_topup_resume",
         "p_event_doc": {
             "schema_version": "1.0",
+            "autoresearch_capacity_policy": "proxy_worker_capacity:v1",
+            "autoresearch_capacity": 1,
+            "autoresearch_hotkey_capacity": 1,
+            "active_loop_stale_after_seconds": 300,
             "resume_source": "miner_credit_topup_resume",
             "previous_event_hash": paused_hash,
         },
@@ -892,6 +1040,18 @@ def _atomic_credit_resume_postgres_contract(
         {**common, "p_anchored_hash": "sha256:" + "3" * 64},
         expected_error="research_lab_credit_resume_replay_differs",
     )
+    invalid_arguments = {
+        **common,
+        "p_event_doc": {
+            **common["p_event_doc"],
+            "resume_source": "noncanonical_resume",
+        },
+    }
+    _credit_resume_rejection(
+        database,
+        invalid_arguments,
+        expected_error="research_lab_credit_resume_invalid_arguments",
+    )
     _credit_resume_rejection(
         database,
         {
@@ -917,6 +1077,14 @@ def _atomic_credit_resume_postgres_contract(
         database,
         empty,
         expected_error="research_lab_credit_resume_head_conflict",
+    )
+    _postgres_insert_row(
+        database,
+        "research_loop_tickets",
+        {
+            "ticket_id": capacity_ticket_id,
+            "miner_hotkey": "5F-rehearsal-capacity-other-miner",
+        },
     )
     _postgres_insert_row(
         database,
@@ -952,6 +1120,229 @@ def _atomic_credit_resume_postgres_contract(
         wrong_paused,
         expected_error="research_lab_credit_resume_head_conflict",
     )
+    _postgres_insert_row(
+        database,
+        "research_loop_run_queue_events",
+        {
+            "event_id": "30000000-0000-0000-0000-000000000150",
+            "schema_version": "1.0",
+            "run_id": capacity_closed_run_id,
+            "ticket_id": capacity_ticket_id,
+            "seq": 0,
+            "event_type": "paused",
+            "queue_priority": 3,
+            "worker_ref": "worker:credit-blocked",
+            "reason": "blocked_for_credit",
+            "anchored_hash": capacity_closed_hash,
+            "event_doc": {"schema_version": "1.0"},
+        },
+    )
+    capacity_closed = {
+        **common,
+        "p_run_id": capacity_closed_run_id,
+        "p_ticket_id": capacity_ticket_id,
+        "p_expected_event_seq": 0,
+        "p_expected_event_hash": capacity_closed_hash,
+        "p_event_id": "40000000-0000-0000-0000-000000000151",
+        "p_anchored_hash": "sha256:" + "a" * 64,
+        "p_event_doc": {
+            **common["p_event_doc"],
+            "autoresearch_capacity": 1,
+            "autoresearch_hotkey_capacity": 10,
+            "previous_event_hash": capacity_closed_hash,
+        },
+    }
+    _credit_resume_rejection(
+        database,
+        capacity_closed,
+        expected_error="research_lab_queue_capacity_conflict",
+    )
+    _postgres_insert_row(
+        database,
+        "research_loop_run_queue_events",
+        {
+            "event_id": "30000000-0000-0000-0000-000000000151",
+            "schema_version": "1.0",
+            "run_id": hotkey_capacity_closed_run_id,
+            "ticket_id": ticket_id,
+            "seq": 0,
+            "event_type": "paused",
+            "queue_priority": 3,
+            "worker_ref": "worker:credit-blocked",
+            "reason": "blocked_for_credit",
+            "anchored_hash": hotkey_capacity_closed_hash,
+            "event_doc": {"schema_version": "1.0"},
+        },
+    )
+    hotkey_capacity_closed = {
+        **common,
+        "p_run_id": hotkey_capacity_closed_run_id,
+        "p_expected_event_seq": 0,
+        "p_expected_event_hash": hotkey_capacity_closed_hash,
+        "p_event_id": "40000000-0000-0000-0000-000000000152",
+        "p_anchored_hash": "sha256:" + "c" * 64,
+        "p_event_doc": {
+            **common["p_event_doc"],
+            "autoresearch_capacity": 10,
+            "autoresearch_hotkey_capacity": 1,
+            "previous_event_hash": hotkey_capacity_closed_hash,
+        },
+    }
+    _credit_resume_rejection(
+        database,
+        hotkey_capacity_closed,
+        expected_error="research_lab_queue_hotkey_conflict",
+    )
+    _postgres_insert_row(
+        database,
+        "research_loop_run_queue_events",
+        {
+            "event_id": "30000000-0000-0000-0000-000000000152",
+            "schema_version": "1.0",
+            "run_id": concurrent_run_id,
+            "ticket_id": ticket_id,
+            "seq": 0,
+            "event_type": "paused",
+            "queue_priority": 3,
+            "worker_ref": "worker:credit-blocked",
+            "reason": "blocked_for_credit",
+            "anchored_hash": concurrent_paused_hash,
+            "event_doc": {"schema_version": "1.0"},
+        },
+    )
+    concurrent_params = {
+        **common,
+        "p_run_id": concurrent_run_id,
+        "p_expected_event_seq": 0,
+        "p_expected_event_hash": concurrent_paused_hash,
+        "p_event_id": "40000000-0000-0000-0000-000000000153",
+        "p_anchored_hash": concurrent_resumed_hash,
+        "p_event_doc": {
+            **common["p_event_doc"],
+            "autoresearch_capacity": 10,
+            "autoresearch_hotkey_capacity": 2,
+            "previous_event_hash": concurrent_paused_hash,
+        },
+    }
+    concurrent_arguments = ",".join(
+        "%s => %s" % (name, _postgres_literal(concurrent_params[name]))
+        for name in (
+            "p_run_id",
+            "p_ticket_id",
+            "p_expected_event_seq",
+            "p_expected_event_hash",
+            "p_event_id",
+            "p_anchored_hash",
+            "p_queue_priority",
+            "p_worker_ref",
+            "p_reason",
+            "p_event_doc",
+        )
+    )
+
+    def delayed_concurrent_resume() -> dict[str, Any]:
+        result = database.psql(
+            "BEGIN; "
+            "SELECT pg_catalog.to_jsonb(resumed)::text "
+            "FROM public.resume_research_lab_credit_blocked_run_v1(%s) "
+            "AS resumed; "
+            "SELECT pg_catalog.pg_sleep(0.75); COMMIT;"
+            % concurrent_arguments,
+            check=False,
+            tuples_only=True,
+        )
+        if result.returncode != 0:
+            raise PostgresContractProbeError(
+                "delayed concurrent credit resume failed: %s"
+                % result.stderr.strip()
+            )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                return dict(json.loads(line))
+        raise PostgresContractProbeError(
+            "delayed concurrent credit resume returned no row"
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(delayed_concurrent_resume)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            lock_observed = database.psql(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_locks
+                    WHERE locktype = 'advisory'
+                      AND granted
+                );
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+            if lock_observed == "t":
+                break
+            if first_future.done():
+                first_future.result()
+                raise PostgresContractProbeError(
+                    "concurrent credit resume lock was not observable"
+                )
+            time.sleep(0.01)
+        else:
+            raise PostgresContractProbeError(
+                "concurrent credit resume lock observation timed out"
+            )
+        second_future = executor.submit(
+            _credit_resume_rpc,
+            database,
+            concurrent_params,
+        )
+        concurrent_first = first_future.result(timeout=10)
+        concurrent_second = second_future.result(timeout=10)
+    if (
+        concurrent_first != concurrent_second
+        or concurrent_first.get("event_id") != concurrent_params["p_event_id"]
+        or concurrent_first.get("anchored_hash")
+        != concurrent_params["p_anchored_hash"]
+    ):
+        raise PostgresContractProbeError(
+            "concurrent credit resume replay was not exactly serialized"
+        )
+    capacity_trigger_enabled = database.psql(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_trigger
+            WHERE tgrelid =
+                  'public.research_loop_run_queue_events'::pg_catalog.regclass
+              AND tgname = 'guard_research_loop_queue_capacity_insert'
+              AND tgenabled <> 'D'
+              AND NOT tgisinternal
+        );
+        """,
+        tuples_only=True,
+    ).stdout.strip()
+    if capacity_trigger_enabled != "t":
+        raise PostgresContractProbeError(
+            "production queue-capacity trigger was not exercised"
+        )
+    capacity_guard_definition = database.psql(
+        """
+        SELECT pg_catalog.pg_get_functiondef(
+            'public.guard_research_lab_queue_capacity()'::pg_catalog.regprocedure
+        );
+        """,
+        tuples_only=True,
+    ).stdout
+    if not all(
+        marker in capacity_guard_definition
+        for marker in (
+            "hotkey_capacity_text",
+            "same_hotkey_count >= hotkey_capacity",
+        )
+    ):
+        raise PostgresContractProbeError(
+            "production queue-capacity guard is not the migration-67 definition"
+        )
     counts = json.loads(
         database.psql(
             """
@@ -964,6 +1355,15 @@ def _atomic_credit_resume_postgres_contract(
                 ),
                 'wrong_paused_run', pg_catalog.count(*) FILTER (
                     WHERE run_id = '10000000-0000-0000-0000-000000000149'::uuid
+                ),
+                'capacity_closed_run', pg_catalog.count(*) FILTER (
+                    WHERE run_id = '10000000-0000-0000-0000-000000000150'::uuid
+                ),
+                'hotkey_capacity_closed_run', pg_catalog.count(*) FILTER (
+                    WHERE run_id = '10000000-0000-0000-0000-000000000151'::uuid
+                ),
+                'concurrent_run', pg_catalog.count(*) FILTER (
+                    WHERE run_id = '10000000-0000-0000-0000-000000000152'::uuid
                 )
             )::text
             FROM public.research_loop_run_queue_events;
@@ -975,20 +1375,33 @@ def _atomic_credit_resume_postgres_contract(
         "resumed_run": 2,
         "empty_run": 0,
         "wrong_paused_run": 1,
+        "capacity_closed_run": 1,
+        "hotkey_capacity_closed_run": 1,
+        "concurrent_run": 2,
     }:
         raise PostgresContractProbeError(
             "credit resume rejection persisted an extra row"
         )
-    return {
+    evidence = {
         "event_id": str(first["event_id"]),
         "event_hash": str(first["anchored_hash"]),
         "identical_replay": True,
+        "concurrent_replay_serialized": True,
         "differing_replay_rejected": True,
+        "invalid_arguments_rejected": True,
         "stale_head_rejected": True,
         "empty_head_rejected": True,
         "wrong_paused_head_rejected": True,
+        "rpc_security_contract_valid": True,
+        "queue_capacity_guard_exercised": True,
+        "hotkey_capacity_guard_exercised": True,
         "row_counts": counts,
     }
+    if evidence != EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE:
+        raise PostgresContractProbeError(
+            "atomic credit resume evidence differs from the release contract"
+        )
+    return evidence
 
 
 def _provider_outcome_append_sql(row: Mapping[str, Any]) -> str:
@@ -3816,6 +4229,8 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         scripts = args.source_root / "scripts"
         applied = []
         database.psql(ALLOCATION_MIGRATION_PREREQUISITES_SQL)
+        database.apply_migration(scripts / EVENT_PROJECTIONS_MIGRATION)
+        applied.append(EVENT_PROJECTIONS_MIGRATION)
         database.apply_migration(
             scripts / ALLOCATION_CANDIDATE_MIGRATION
         )
@@ -3829,7 +4244,14 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         for name in (
             ALLOCATION_SCORING_AUDIT_MIGRATION,
             ALLOCATION_PROMOTION_MIGRATION,
-            *ALLOCATION_IMAGE_BUILD_MIGRATIONS,
+            ATOMIC_CLAIM_GUARDS_MIGRATION,
+            QUEUE_CAPACITY_GUARD_MIGRATION,
+            MAINTENANCE_PAUSE_MIGRATION,
+            *ALLOCATION_IMAGE_BUILD_MIGRATIONS[:2],
+            PAUSED_CAPACITY_AGING_MIGRATION,
+            ALLOCATION_IMAGE_BUILD_MIGRATIONS[2],
+            RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
+            HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
         ):
             database.apply_migration(scripts / name)
             applied.append(name)

@@ -37,6 +37,7 @@ from tests.restart_rehearsal.fixture_contract import (
     load_rehearsal_metagraph_hotkeys,
 )
 from tests.restart_rehearsal.gateway_boundary_service import (
+    EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE as GATEWAY_ATOMIC_CREDIT_RESUME_EVIDENCE,
     LocalPostgRESTState,
     RUNTIME_TABLES,
     _apply_table_query,
@@ -49,6 +50,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _schema_contract,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
+    ALLOCATION_MIGRATION_PREREQUISITES_SQL,
     ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
@@ -59,14 +61,21 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     CHAMPION_LIFETIME_CREDIT_MIGRATION,
     COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
     DisposablePostgres,
+    EVENT_PROJECTIONS_MIGRATION,
+    EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
     EXPECTED_APPLIED_MIGRATIONS,
     EXPECTED_FINALIZED_VIEW_COLUMNS,
     EXPECTED_POSTGRES_CONTRACT_CHECKS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX,
+    HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
+    MAINTENANCE_PAUSE_MIGRATION,
+    PAUSED_CAPACITY_AGING_MIGRATION,
     PROVIDER_OUTCOME_APPEND_MIGRATION,
     PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
     PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
     PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
+    QUEUE_CAPACITY_GUARD_MIGRATION,
+    RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
     SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
@@ -123,6 +132,10 @@ def _provider_persistence_batch_fixture() -> dict[str, Any]:
             "conflict_head_checkpoint_row": "encrypted_or_null",
         },
     }
+
+
+def _atomic_credit_resume_fixture() -> dict[str, Any]:
+    return json.loads(json.dumps(EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE))
 
 
 def _receipt_graph_seed_contract() -> tuple[
@@ -1094,7 +1107,9 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_allocation_frontier_historical_source_contract_v1",
             "research_lab_source_catalog_replay_contract_v2",
             "research_lab_compact_checkpoint_graph_contract_v1",
+            "resume_research_lab_credit_blocked_run_v1",
         ],
+        "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
             "atomic_acquire": True,
@@ -1186,6 +1201,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     )
     assert "research_lab_champion_lifetime_credit_contract_v1" in rpcs
     assert "research_lab_active_model_replay_contract_v2" in rpcs
+    assert "resume_research_lab_credit_blocked_run_v1" in rpcs
     assert "persist_research_lab_ancestry_checkpoint_v2" in rpcs
     assert "persist_research_lab_allocation_settlement_frontier_v2" in rpcs
     assert "persist_research_lab_allocation_frontier_bootstrap_v2" in rpcs
@@ -1209,6 +1225,20 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     ][:-1]
     path.write_text(json.dumps(stale_migrations), encoding="utf-8")
     with pytest.raises(RuntimeError, match="final migration order"):
+        _migration_schema_contract(path, candidate_sha=COMMIT)
+
+    missing_atomic_resume = json.loads(json.dumps(contract))
+    missing_atomic_resume.pop("atomic_credit_resume")
+    path.write_text(json.dumps(missing_atomic_resume), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="atomic credit resume evidence"):
+        _migration_schema_contract(path, candidate_sha=COMMIT)
+
+    missing_atomic_resume_rpc = json.loads(json.dumps(contract))
+    missing_atomic_resume_rpc["rpcs"].remove(
+        "resume_research_lab_credit_blocked_run_v1"
+    )
+    path.write_text(json.dumps(missing_atomic_resume_rpc), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="RPCs are unavailable"):
         _migration_schema_contract(path, candidate_sha=COMMIT)
 
     incomplete = json.loads(json.dumps(contract))
@@ -1342,7 +1372,9 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "record_research_lab_autoresearch_tree_handoff",
             "create_research_lab_git_tree_candidate_handoff",
             "research_lab_autoresearch_run_evaluation_usage",
+            "resume_research_lab_credit_blocked_run_v1",
         ],
+        "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
             "atomic_acquire": True,
@@ -1614,6 +1646,14 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
         reordered_migrations["applied_migrations"][0:2]
     )
     invalid_contracts.append(reordered_migrations)
+    missing_atomic_credit_resume = json.loads(json.dumps(contract))
+    missing_atomic_credit_resume.pop("atomic_credit_resume")
+    invalid_contracts.append(missing_atomic_credit_resume)
+    altered_atomic_credit_resume = json.loads(json.dumps(contract))
+    altered_atomic_credit_resume["atomic_credit_resume"]["row_counts"][
+        "resumed_run"
+    ] = 3
+    invalid_contracts.append(altered_atomic_credit_resume)
     missing_relation = json.loads(json.dumps(contract))
     del missing_relation["relations"][
         "research_lab_autoresearch_tree_current"
@@ -1739,6 +1779,89 @@ def test_source_add_rehearsal_migrations_preserve_prerequisite_order() -> None:
     assert applied.index(postgres_probe.SOURCE_ADD_FUNCTIONAL_WORKFLOW_MIGRATION) < (
         applied.index(postgres_probe.SOURCE_ADD_ADMISSION_CONTROL_MIGRATION)
     )
+
+
+def test_credit_resume_rehearsal_uses_final_production_queue_guard() -> None:
+    applied = list(EXPECTED_APPLIED_MIGRATIONS)
+    ordered = (
+        EVENT_PROJECTIONS_MIGRATION,
+        QUEUE_CAPACITY_GUARD_MIGRATION,
+        MAINTENANCE_PAUSE_MIGRATION,
+        PAUSED_CAPACITY_AGING_MIGRATION,
+        RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
+        HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
+        postgres_probe.ATOMIC_CREDIT_RESUME_MIGRATION,
+    )
+    positions = [applied.index(name) for name in ordered]
+
+    assert positions == sorted(positions)
+    assert "miner_hotkey TEXT NOT NULL" in ALLOCATION_MIGRATION_PREREQUISITES_SQL
+    assert (
+        "CREATE TABLE public.research_loop_run_queue_events"
+        not in ALLOCATION_MIGRATION_PREREQUISITES_SQL
+    )
+
+    source_root = Path(__file__).resolve().parents[2]
+    projections = (source_root / "scripts" / EVENT_PROJECTIONS_MIGRATION).read_text(
+        encoding="utf-8"
+    )
+    final_guard = (
+        source_root / "scripts" / HOTKEY_ACTIVE_LOOP_CAP_MIGRATION
+    ).read_text(encoding="utf-8")
+    assert (
+        "CREATE TABLE IF NOT EXISTS public.research_loop_run_queue_events"
+        in projections
+    )
+    assert (
+        "CREATE OR REPLACE VIEW public.research_loop_run_queue_current"
+        in projections
+    )
+    assert "hotkey_capacity_text" in final_guard
+    assert "same_hotkey_count >= hotkey_capacity" in final_guard
+    assert EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE[
+        "hotkey_capacity_guard_exercised"
+    ] is True
+    assert EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE[
+        "rpc_security_contract_valid"
+    ] is True
+    assert (
+        GATEWAY_ATOMIC_CREDIT_RESUME_EVIDENCE
+        == EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE
+    )
+
+
+def test_event_projection_prerequisites_cover_migration_28_base_relations() -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    persistence = (
+        source_root / "scripts" / "28-research-lab-persistence-state.sql"
+    ).read_text(encoding="utf-8")
+    projections = (source_root / "scripts" / EVENT_PROJECTIONS_MIGRATION).read_text(
+        encoding="utf-8"
+    )
+    prerequisite_fragments = (
+        "CREATE TABLE public.research_loop_balance_ledger",
+        "ledger_entry_id UUID PRIMARY KEY",
+        "miner_hotkey TEXT NOT NULL",
+        "ticket_id UUID REFERENCES public.research_loop_tickets(ticket_id)",
+        "amount_microusd BIGINT NOT NULL",
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        "CREATE TABLE public.research_weight_input_snapshots",
+        "weight_input_snapshot_id UUID PRIMARY KEY",
+        "snapshot_status TEXT NOT NULL CHECK",
+    )
+    normalized_prerequisites = " ".join(
+        ALLOCATION_MIGRATION_PREREQUISITES_SQL.split()
+    )
+    normalized_persistence = " ".join(persistence.split())
+
+    for fragment in prerequisite_fragments:
+        normalized_fragment = " ".join(fragment.split())
+        assert normalized_fragment in normalized_prerequisites
+        assert normalized_fragment.replace(
+            "CREATE TABLE public.", "CREATE TABLE IF NOT EXISTS public."
+        ) in normalized_persistence
+    assert "FROM public.research_loop_balance_ledger" in projections
+    assert "FROM public.research_weight_input_snapshots" in projections
 
 
 def test_gateway_rehearsal_signing_identity_uses_its_real_private_key() -> None:

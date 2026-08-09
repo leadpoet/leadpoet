@@ -34,11 +34,13 @@ with redirect_stdout(sys.stderr):
     from leadpoet_canonical.attested_v2 import sha256_json
     if __package__:
         from .postgres_v2_contract_probe import (
+            EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
             EXPECTED_APPLIED_MIGRATIONS,
             EXPECTED_POSTGRES_CONTRACT_CHECKS,
         )
     else:
         from postgres_v2_contract_probe import (
+            EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
             EXPECTED_APPLIED_MIGRATIONS,
             EXPECTED_POSTGRES_CONTRACT_CHECKS,
         )
@@ -780,6 +782,13 @@ def verify_migration_backed_database_contract(
     ):
         raise SystemExit(
             "migration-backed PostgreSQL contract evidence is incomplete"
+        )
+    if (
+        document.get("atomic_credit_resume")
+        != EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE
+    ):
+        raise SystemExit(
+            "migration-backed atomic credit resume evidence is missing"
         )
     if document.get("provider_outcome_contention_contract") != {
         "schema_version": "leadpoet.provider_outcome_contention_contract.v3",

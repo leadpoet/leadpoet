@@ -35,6 +35,7 @@ Public API:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Tuple
@@ -52,6 +53,8 @@ logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT_SECS = 5
 _MAX_BYTES = 200_000  # cap body read to 200KB — plenty for title + first paragraph
+_TRANSIENT_FETCH_ATTEMPTS = 2
+_TRANSIENT_FETCH_RETRY_DELAY_SECS = 0.25
 
 # Headers that look like a real browser.  Some company sites refuse
 # default ``python-aiohttp/...`` user agents with 403, which would
@@ -231,16 +234,26 @@ async def verify_company_exists(
     timeout = aiohttp.ClientTimeout(total=timeout_secs, connect=min(3.0, timeout_secs))
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout, headers=_HEADERS) as session:
-            async with session.get(request_url, allow_redirects=True) as resp:
-                status = resp.status
-                # Read at most _MAX_BYTES so a giant single-page-app
-                # download can't stall the scorer.
-                raw = await resp.content.read(_MAX_BYTES)
-                try:
-                    text = raw.decode("utf-8", errors="replace")
-                except Exception:
-                    text = ""
+        for attempt in range(_TRANSIENT_FETCH_ATTEMPTS):
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=timeout,
+                    headers=_HEADERS,
+                ) as session:
+                    async with session.get(request_url, allow_redirects=True) as resp:
+                        status = resp.status
+                        # Read at most _MAX_BYTES so a giant single-page-app
+                        # download can't stall the scorer.
+                        raw = await resp.content.read(_MAX_BYTES)
+                        try:
+                            text = raw.decode("utf-8", errors="replace")
+                        except Exception:
+                            text = ""
+                break
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                if attempt + 1 >= _TRANSIENT_FETCH_ATTEMPTS:
+                    raise
+                await asyncio.sleep(_TRANSIENT_FETCH_RETRY_DELAY_SECS)
     except aiohttp.ClientError as e:
         # Network-level failure.  Try the domain-name fallback.
         if _domain_matches_name(request_url, company_name):

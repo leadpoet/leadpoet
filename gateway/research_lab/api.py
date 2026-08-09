@@ -170,6 +170,7 @@ from research_lab.source_add_identity import (
     source_identity_hash_from_metadata,
 )
 from .source_add_workflow import (
+    source_add_control_state,
     source_add_host_hash,
     source_add_probe_config_ref,
     source_add_ref,
@@ -452,7 +453,10 @@ async def _seal_openrouter_credential_v2(
 @router.get("/status")
 async def research_lab_status() -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
-    maintenance = await get_autoresearch_maintenance_state()
+    maintenance, source_add_control = await asyncio.gather(
+        get_autoresearch_maintenance_state(),
+        source_add_control_state(),
+    )
     maintenance_public = {
         key: maintenance.get(key)
         for key in ("paused", "status", "reason", "status_at", "unavailable")
@@ -483,10 +487,23 @@ async def research_lab_status() -> dict[str, object]:
     except Exception as exc:
         logger.warning("research_lab_private_model_repo_head_status_unavailable: %s", str(exc)[:200])
         private_model_repo_head = {"status": "unavailable"}
+    public_status = config.public_status()
+    source_add_public = dict(public_status.get("source_add") or {})
+    source_add_public["control"] = {
+        key: source_add_control.get(key)
+        for key in ("paused", "status", "updated_at", "unavailable")
+        if key in source_add_control
+    }
+    source_add_public["effective_dispatcher_enabled"] = bool(
+        config.source_add_enabled
+        and config.source_add_dispatcher_enabled
+        and not source_add_control.get("paused", True)
+    )
     return {
         "service": "leadpoet-research-lab-gateway",
         "status": "configured" if config.api_enabled else "disabled",
-        **config.public_status(),
+        **public_status,
+        "source_add": source_add_public,
         "maintenance": maintenance_public,
         "latest_public_benchmark": latest_public_benchmark,
         "private_model_repo_head": private_model_repo_head,
@@ -658,6 +675,12 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         raise HTTPException(
             status_code=503,
             detail="Research Lab maintenance is active; source adapter intake is paused",
+        )
+    source_add_control = await source_add_control_state()
+    if source_add_control.get("paused", True):
+        raise HTTPException(
+            status_code=503,
+            detail="SOURCE_ADD workflow is paused",
         )
     await _verify_signed_miner(payload)
     await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="source_adapters")

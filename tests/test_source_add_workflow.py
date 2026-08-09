@@ -62,6 +62,52 @@ def test_automatic_probe_selection_rejects_encoded_api_base_path():
 
 
 @pytest.mark.asyncio
+async def test_source_add_control_state_reads_durable_pause(monkeypatch):
+    async def fake_select_one(*_args, **_kwargs):
+        return {
+            "paused": True,
+            "reason": "operator rollout hold",
+            "updated_at": "2026-08-08T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(source_add_workflow, "select_one", fake_select_one)
+
+    state = await source_add_workflow.source_add_control_state()
+
+    assert state == {
+        "paused": True,
+        "status": "paused",
+        "reason": "operator rollout hold",
+        "updated_at": "2026-08-08T00:00:00+00:00",
+        "unavailable": False,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["missing", "read_error"])
+async def test_source_add_control_state_fails_closed(
+    monkeypatch, caplog, failure_mode
+):
+    caplog.set_level(logging.WARNING, logger=source_add_workflow.__name__)
+
+    async def fake_select_one(*_args, **_kwargs):
+        if failure_mode == "read_error":
+            raise RuntimeError("storage unavailable")
+        return None
+
+    monkeypatch.setattr(source_add_workflow, "select_one", fake_select_one)
+
+    state = await source_add_workflow.source_add_control_state()
+
+    assert state == {
+        "paused": True,
+        "status": "unavailable_fail_closed",
+        "unavailable": True,
+    }
+    assert "SOURCE_ADD_CONTROL_" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_survives_config_read_failure_and_fails_closed(
     monkeypatch, caplog
 ):
@@ -95,6 +141,45 @@ async def test_dispatcher_survives_config_read_failure_and_fails_closed(
     assert supplier_calls == 2
     assert sleep_calls == [2.0, 0.25]
     assert "SOURCE_ADD_DISPATCHER_LOOP_FAILED type=RuntimeError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_logs_durable_pause_once_and_resume(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=source_add_workflow.__name__)
+    claims = iter(
+        [
+            {"status": "paused"},
+            {"status": "paused"},
+            {"status": "empty"},
+        ]
+    )
+    sleep_calls = 0
+
+    async def fake_rpc(*_args, **_kwargs):
+        return next(claims)
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(source_add_workflow, "_rpc", fake_rpc)
+    monkeypatch.setattr(source_add_workflow.asyncio, "sleep", fake_sleep)
+    config = SimpleNamespace(
+        source_add_enabled=True,
+        source_add_dispatcher_enabled=True,
+        source_add_dispatcher_poll_seconds=0.25,
+        source_add_work_lease_seconds=120,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await source_add_workflow.run_source_add_dispatcher(
+            config_supplier=lambda: config
+        )
+
+    assert caplog.text.count("SOURCE_ADD_DISPATCHER_PAUSED") == 1
+    assert caplog.text.count("SOURCE_ADD_DISPATCHER_RESUMED") == 1
 
 
 def _smoke_result(status: str) -> dict:

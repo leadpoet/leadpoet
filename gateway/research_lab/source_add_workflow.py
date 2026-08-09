@@ -50,6 +50,41 @@ class SourceAddWorkflowError(RuntimeError):
     """SOURCE_ADD queue state or measured authority is inconsistent."""
 
 
+async def source_add_control_state() -> dict[str, Any]:
+    """Return the durable SOURCE_ADD queue control, failing closed on drift."""
+
+    try:
+        row = await select_one(
+            "research_lab_source_add_control",
+            columns="paused,reason,updated_at",
+            filters=(("singleton", True),),
+        )
+    except Exception as exc:
+        logger.warning(
+            "SOURCE_ADD_CONTROL_UNAVAILABLE type=%s", type(exc).__name__
+        )
+        return {
+            "paused": True,
+            "status": "unavailable_fail_closed",
+            "unavailable": True,
+        }
+    if not isinstance(row, Mapping):
+        logger.warning("SOURCE_ADD_CONTROL_MISSING")
+        return {
+            "paused": True,
+            "status": "unavailable_fail_closed",
+            "unavailable": True,
+        }
+    paused = bool(row.get("paused", True))
+    return {
+        "paused": paused,
+        "status": "paused" if paused else "active",
+        "reason": str(row.get("reason") or ""),
+        "updated_at": row.get("updated_at"),
+        "unavailable": False,
+    }
+
+
 def source_add_ref(prefix: str, *parts: Any) -> str:
     digest = sha256_json({"prefix": prefix, "parts": list(parts)}).split(":", 1)[1]
     return "%s:%s" % (prefix, digest[:16])
@@ -801,6 +836,7 @@ async def run_source_add_dispatcher(
 
     worker_id = "source-add:%s:%s" % (os.getpid(), id(asyncio.current_task()))
     logger.info("SOURCE_ADD_DISPATCHER_STARTED worker_id=%s", worker_id)
+    queue_paused = False
     while True:
         poll_seconds = 2.0
         try:
@@ -821,7 +857,17 @@ async def run_source_add_dispatcher(
                     "p_lease_seconds": int(config.source_add_work_lease_seconds),
                 },
             )
-            if claim.get("status") != "claimed":
+            claim_status = str(claim.get("status") or "")
+            if claim_status == "paused":
+                if not queue_paused:
+                    logger.info("SOURCE_ADD_DISPATCHER_PAUSED worker_id=%s", worker_id)
+                queue_paused = True
+                await asyncio.sleep(poll_seconds)
+                continue
+            if queue_paused:
+                logger.info("SOURCE_ADD_DISPATCHER_RESUMED worker_id=%s", worker_id)
+                queue_paused = False
+            if claim_status != "claimed":
                 await asyncio.sleep(poll_seconds)
                 continue
             work = claim.get("work")
@@ -1059,6 +1105,7 @@ __all__ = [
     "build_automatic_probe_config",
     "process_source_add_work_item",
     "run_source_add_dispatcher",
+    "source_add_control_state",
     "source_add_probe_attempt_ref",
     "source_add_probe_config_ref",
     "source_add_host_hash",

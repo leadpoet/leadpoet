@@ -28,6 +28,60 @@ def _async_value(value):
 
 
 @pytest.mark.asyncio
+async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        api_enabled=False,
+        source_add_enabled=True,
+        source_add_dispatcher_enabled=True,
+        public_status=lambda: {
+            "source_add": {
+                "enabled": True,
+                "dispatcher_enabled": True,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(lambda: config),
+    )
+    monkeypatch.setattr(
+        api,
+        "get_autoresearch_maintenance_state",
+        _async_value({"paused": False, "status": "active"}),
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        _async_value(
+            {
+                "paused": True,
+                "status": "paused",
+                "updated_at": "2026-08-08T00:00:00+00:00",
+                "unavailable": False,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "private_repo_head_alignment_status",
+        _async_value({"status": "aligned"}),
+    )
+
+    status = await api.research_lab_status()
+
+    assert status["source_add"]["control"] == {
+        "paused": True,
+        "status": "paused",
+        "updated_at": "2026-08-08T00:00:00+00:00",
+        "unavailable": False,
+    }
+    assert status["source_add"]["effective_dispatcher_enabled"] is False
+
+
+@pytest.mark.asyncio
 async def test_source_adapter_intake_rejected_while_scoring_paused(monkeypatch):
     from types import SimpleNamespace
 
@@ -100,3 +154,57 @@ async def test_source_adapter_intake_rejected_while_autoresearch_paused(monkeypa
     with pytest.raises(HTTPException) as exc:
         await api.submit_research_lab_source_adapter(payload)
     assert exc.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_source_adapter_intake_rejected_while_source_add_queue_paused(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                source_add_enabled=True,
+            )
+        ),
+    )
+    from gateway.research_lab import maintenance
+
+    monkeypatch.setattr(
+        maintenance, "is_scoring_maintenance_paused", _async_value(False)
+    )
+    monkeypatch.setattr(
+        maintenance, "is_autoresearch_maintenance_paused", _async_value(False)
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        _async_value({"paused": True, "status": "paused"}),
+    )
+    monkeypatch.setattr(
+        api,
+        "_verify_signed_miner",
+        lambda *_args, **_kwargs: pytest.fail(
+            "paused SOURCE_ADD intake must fail before signature work"
+        ),
+    )
+    payload = ResearchLabSourceAdapterSubmissionRequest(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key="source-submit-paused-3",
+        manifest=_manifest_doc(),
+        source_metadata=_source_metadata_doc(),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await api.submit_research_lab_source_adapter(payload)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "SOURCE_ADD workflow is paused"

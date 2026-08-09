@@ -112,6 +112,10 @@ async def _async_none():
     return None
 
 
+async def _async_value(value):
+    return value
+
+
 @pytest.mark.asyncio
 async def test_source_add_rejects_plaintext_and_v2_miner_credentials():
     common = {
@@ -225,6 +229,11 @@ async def test_submission_delegates_identity_and_limits_to_atomic_rpc(monkeypatc
     )
     monkeypatch.setattr(
         api,
+        "source_add_control_state",
+        lambda *a, **k: _async_value({"paused": False, "status": "active"}),
+    )
+    monkeypatch.setattr(
+        api,
         "_enforce_research_lab_submission_rate_limit",
         lambda *_args, **_kwargs: _async_none(),
     )
@@ -288,6 +297,11 @@ async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
     )
     monkeypatch.setattr(
         maintenance, "is_autoresearch_maintenance_paused", lambda *a, **k: _async_none()
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        lambda *a, **k: _async_value({"paused": False, "status": "active"}),
     )
     monkeypatch.setattr(
         api,

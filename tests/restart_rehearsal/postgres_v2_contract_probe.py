@@ -181,6 +181,12 @@ COMPACT_ANCESTRY_CHECKPOINT_MIGRATION = (
 PROVIDER_PERSISTENCE_BATCH_MIGRATION = (
     "144-research-lab-provider-persistence-batches.sql"
 )
+SOURCE_ADD_ADMISSION_CONTROL_MIGRATION = (
+    "145-research-lab-source-add-admission-control.sql"
+)
+PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION = (
+    "146-research-lab-private-benchmark-schema-v11.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -217,6 +223,8 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
     COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
     PROVIDER_PERSISTENCE_BATCH_MIGRATION,
+    SOURCE_ADD_ADMISSION_CONTROL_MIGRATION,
+    PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -239,6 +247,8 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_142_source_catalog_replay_contract_valid",
     "post_143_compact_checkpoint_contract_valid",
     "post_144_provider_persistence_batch_contract_valid",
+    "post_145_source_add_admission_control_contract_valid",
+    "post_146_private_benchmark_schema_contract_valid",
     "provider_outcome_append_atomic",
     "provider_outcome_batch_append_atomic",
     "provider_evidence_cache_put_atomic",
@@ -4292,6 +4302,55 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / PROVIDER_PERSISTENCE_BATCH_MIGRATION
         )
         applied.append(PROVIDER_PERSISTENCE_BATCH_MIGRATION)
+        database.apply_migration(
+            scripts / SOURCE_ADD_ADMISSION_CONTROL_MIGRATION
+        )
+        applied.append(SOURCE_ADD_ADMISSION_CONTROL_MIGRATION)
+        source_add_admission_control_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_admission_control_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_admission_control_contract != {
+            "schema_version": (
+                "leadpoet.source_add_admission_control_contract.v1"
+            ),
+            "control_row_present": True,
+            "trigger_enabled": True,
+            "pause_rpc": "research_lab_source_add_set_paused",
+            "admission_trigger": "trg_source_add_work_admission_control",
+        }:
+            raise PostgresContractProbeError(
+                "post-145 source-add admission-control contract differs"
+            )
+        database.apply_migration(
+            scripts / PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION
+        )
+        applied.append(PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION)
+        private_benchmark_schema_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_private_benchmark_schema_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if private_benchmark_schema_contract != {
+            "schema_version": "leadpoet.private_benchmark_schema_contract.v1",
+            "constraint_name": "rl_private_benchmark_schema_version_check",
+            "accepted_schema_versions": ["1.0", "1.1"],
+            "schema_constraint_count": 1,
+            "legacy_constraint_count": 0,
+            "constraint_valid": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-146 private benchmark schema contract differs"
+            )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,

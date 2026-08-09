@@ -500,6 +500,8 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/133-research-lab-provider-outcome-contention-status.sql",
         "scripts/134-research-lab-provider-outcome-head-contention.sql",
         "scripts/144-research-lab-provider-persistence-batches.sql",
+        "scripts/145-research-lab-source-add-admission-control.sql",
+        "scripts/146-research-lab-private-benchmark-schema-v11.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 
@@ -999,6 +1001,44 @@ def test_required_supabase_v2_schema_requires_provider_persistence_batch_contrac
         match=(
             rf"{required_function}.*"
             r"144-research-lab-provider-persistence-batches"
+        ),
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
+
+
+def test_required_supabase_v2_schema_requires_private_benchmark_schema_contract() -> None:
+    required_function = "research_lab_private_benchmark_schema_contract_v1"
+
+    def opener(request, *, timeout):
+        del timeout
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in (
+                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+                )
+                if function_name != required_function
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        if (
+            "research_lab_chain_realized_settlement_activation_v1"
+            in request.full_url
+            and "limit=2" in request.full_url
+        ):
+            return _SchemaResponse(body=_chain_realized_activation_response())
+        return _SchemaResponse()
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match=(
+            r"research_lab_private_benchmark_schema_contract_v1.*"
+            r"146-research-lab-private-benchmark-schema-v11"
         ),
     ):
         schema_preflight.verify_required_supabase_v2_schema(

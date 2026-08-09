@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 from research_lab.eval.snapshot_store import dev_record_bootstrap
 from scripts import record_research_lab_dev_snapshots as recorder
@@ -82,6 +85,87 @@ assert _rl_dev_record(
         "openai/gpt-production"
     ]
     assert not (tmp_path / "provider_models.jsonl").exists()
+
+
+def test_snapshot_runtime_context_finishes_before_host_timeout():
+    context = recorder._snapshot_runtime_context(
+        "dev_snapshot_recording",
+        timeout_seconds=300,
+    )
+
+    assert context["dev_snapshot_recording"] is True
+    options = context["runtime_options"]
+    assert options["runtime_cap_seconds"] == 267.0
+    assert options["finalization_reserve_seconds"] == pytest.approx(26.7)
+    assert options["agent_timeout_seconds"] == 240
+    assert options["runtime_cap_seconds"] <= 300 - 30
+
+
+def test_named_docker_is_removed_when_host_run_is_interrupted(monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((list(command), dict(kwargs)))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(command, timeout=5)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(recorder.subprocess, "run", run)
+
+    try:
+        recorder._run_named_docker(
+            ["docker", "run", "--name", "snapshot-test", "image"],
+            container_name="snapshot-test",
+            input_text="{}",
+            timeout_seconds=5,
+            environment={"PATH": "/usr/bin"},
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("the host timeout must propagate")
+
+    assert calls[1][0] == ["docker", "rm", "-f", "snapshot-test"]
+    assert calls[1][1]["timeout"] == 30
+
+
+def test_offline_replay_uses_only_nonsecret_key_sentinels(monkeypatch, tmp_path):
+    captured = {}
+
+    def run_named(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = dict(kwargs)
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="receipt")
+
+    monkeypatch.setattr(recorder, "_run_named_docker", run_named)
+    monkeypatch.setattr(
+        "research_lab.eval.private_runtime.validate_sourcing_runtime_receipt",
+        lambda *args, **kwargs: {},
+    )
+
+    assert recorder._replay_icp_with_docker(
+        image_digest="example.invalid/model@sha256:" + "1" * 64,
+        module_name="research_lab_adapter",
+        callable_name="run_icp",
+        icp={
+            "industry": "Software Development",
+            "intent_signal": "hiring sales leadership",
+        },
+        snapshot_dir=str(tmp_path),
+        timeout_seconds=300,
+    ) == []
+
+    command = captured["command"]
+    assert command[command.index("--network") + 1] == "none"
+    replay_environment = [
+        command[index + 1]
+        for index, argument in enumerate(command[:-1])
+        if argument == "-e"
+    ]
+    for group in recorder.PROVIDER_KEY_GROUPS:
+        for name in group:
+            assert f"{name}=research-lab-offline-replay" in replay_environment
+    assert all("sk-or-" not in value.lower() for value in replay_environment)
 
 
 def test_observed_provider_models_are_authoritative():

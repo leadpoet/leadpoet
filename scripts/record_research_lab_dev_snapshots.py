@@ -132,6 +132,60 @@ def _subprocess_env(snapshot_dir: str, *, icp_ref: str = "") -> dict[str, str]:
     return env
 
 
+def _snapshot_runtime_context(
+    marker: str,
+    *,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Finish model work before the host-owned Docker deadline."""
+
+    from research_lab.eval.private_runtime import context_with_runtime_options
+
+    host_reserve_seconds = min(
+        60.0,
+        max(10.0, float(timeout_seconds) * 0.1),
+    )
+    return context_with_runtime_options(
+        {str(marker): True},
+        outer_timeout_seconds=max(
+            10.0,
+            float(timeout_seconds) - host_reserve_seconds,
+        ),
+    )
+
+
+def _run_named_docker(
+    command: Sequence[str],
+    *,
+    container_name: str,
+    input_text: str,
+    timeout_seconds: int,
+    environment: Mapping[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Run one uniquely named container and remove it on interruption."""
+
+    try:
+        return subprocess.run(
+            command,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env=dict(environment),
+            check=False,
+        )
+    except BaseException:
+        subprocess.run(
+            [str(command[0]), "rm", "-f", container_name],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            env={"PATH": os.environ.get("PATH", "")},
+            check=False,
+        )
+        raise
+
+
 def _record_icp_with_subprocess(
     *,
     adapter_path: str,
@@ -156,7 +210,10 @@ def _record_icp_with_subprocess(
         raise RuntimeError("private_runtime adapter bootstrap is unavailable")
     payload = {
         "icp": private_runtime.canonicalize_private_model_icp(icp),
-        "context": {"dev_snapshot_recording": True},
+        "context": _snapshot_runtime_context(
+            "dev_snapshot_recording",
+            timeout_seconds=timeout_seconds,
+        ),
     }
     command = [
         sys.executable,
@@ -180,6 +237,10 @@ def _record_icp_with_subprocess(
             f"champion adapter failed with code {completed.returncode}: "
             f"{completed.stderr[-1200:]}"
         )
+    private_runtime.validate_sourcing_runtime_receipt(
+        completed.stderr,
+        expected_runtime_options=payload["context"]["runtime_options"],
+    )
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, list):
         raise RuntimeError("champion adapter must return a JSON array")
@@ -216,8 +277,12 @@ def _record_icp_with_docker(
     container_dir = "/research_lab_dev_snapshots"
     payload = {
         "icp": private_runtime.canonicalize_private_model_icp(icp),
-        "context": {"dev_snapshot_recording": True},
+        "context": _snapshot_runtime_context(
+            "dev_snapshot_recording",
+            timeout_seconds=timeout_seconds,
+        ),
     }
+    container_name = "leadpoet-dev-snapshot-record-" + uuid.uuid4().hex
     env_args: list[str] = []
     for name in private_runtime.private_model_env_passthrough():
         if name in os.environ:
@@ -226,6 +291,8 @@ def _record_icp_with_docker(
         docker_executable,
         "run",
         "--rm",
+        "--name",
+        container_name,
         "-i",
         "-v",
         f"{Path(snapshot_dir).expanduser().resolve()}:{container_dir}",
@@ -241,23 +308,25 @@ def _record_icp_with_docker(
         module_name,
         callable_name,
     ]
-    completed = subprocess.run(
+    completed = _run_named_docker(
         command,
-        input=json.dumps(payload, separators=(",", ":"), sort_keys=True),
-        text=True,
-        capture_output=True,
-        timeout=timeout_seconds,
-        env={
+        container_name=container_name,
+        input_text=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        timeout_seconds=timeout_seconds,
+        environment={
             **_subprocess_env(str(snapshot_dir), icp_ref=icp_ref),
             "PATH": os.environ.get("PATH", ""),
         },
-        check=False,
     )
     if completed.returncode != 0:
         raise RuntimeError(
             f"docker champion adapter failed with code {completed.returncode}: "
             f"{completed.stderr[-1200:]}"
         )
+    private_runtime.validate_sourcing_runtime_receipt(
+        completed.stderr,
+        expected_runtime_options=payload["context"]["runtime_options"],
+    )
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, list):
         raise RuntimeError("docker champion adapter must return a JSON array")
@@ -288,17 +357,30 @@ def _replay_icp_with_docker(
     container_dir = "/research_lab_dev_snapshots"
     payload = {
         "icp": private_runtime.canonicalize_private_model_icp(icp),
-        "context": {"dev_snapshot_replay_validation": True},
+        "context": _snapshot_runtime_context(
+            "dev_snapshot_replay_validation",
+            timeout_seconds=timeout_seconds,
+        ),
     }
+    container_name = "leadpoet-dev-snapshot-replay-" + uuid.uuid4().hex
     env_args: list[str] = []
     for name, value in container_replay_env(
         container_dir, miss_policy=MISS_POLICY_STRICT
     ).items():
         env_args.extend(["-e", f"{name}={value}"])
+    # The measured sourcing adapter validates provider-key presence before it
+    # issues its first request. Replay never receives real credentials and has
+    # no network; these non-secret sentinels only let startup reach the strict
+    # request-keyed cache, where every miss still fails closed.
+    for group in PROVIDER_KEY_GROUPS:
+        for name in group:
+            env_args.extend(["-e", f"{name}=research-lab-offline-replay"])
     command = [
         docker_executable,
         "run",
         "--rm",
+        "--name",
+        container_name,
         "-i",
         "--network",
         "none",
@@ -312,20 +394,22 @@ def _replay_icp_with_docker(
         module_name,
         callable_name,
     ]
-    completed = subprocess.run(
+    completed = _run_named_docker(
         command,
-        input=json.dumps(payload, separators=(",", ":"), sort_keys=True),
-        text=True,
-        capture_output=True,
-        timeout=timeout_seconds,
-        env={**os.environ},
-        check=False,
+        container_name=container_name,
+        input_text=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        timeout_seconds=timeout_seconds,
+        environment={**os.environ},
     )
     if completed.returncode != 0:
         raise RuntimeError(
             f"offline replay failed with code {completed.returncode}: "
             f"{completed.stderr[-1200:]}"
         )
+    private_runtime.validate_sourcing_runtime_receipt(
+        completed.stderr,
+        expected_runtime_options=payload["context"]["runtime_options"],
+    )
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, list):
         raise RuntimeError("offline replay adapter must return a JSON array")

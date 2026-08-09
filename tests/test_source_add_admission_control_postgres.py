@@ -76,7 +76,15 @@ def postgres():
             "password": "postgres",
             "dbname": "postgres",
         }
-        connection = psycopg2.connect(**dsn)
+        connect_deadline = time.monotonic() + 15
+        while True:
+            try:
+                connection = psycopg2.connect(**dsn)
+                break
+            except psycopg2.OperationalError:
+                if time.monotonic() >= connect_deadline:
+                    raise
+                time.sleep(0.25)
         connection.autocommit = True
         with connection.cursor() as cursor:
             cursor.execute(

@@ -75,6 +75,9 @@ SNAPSHOT_POINTER_TYPE = "research_lab_dev_snapshot_pointer"
 SNAPSHOT_URI_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_URI"
 SNAPSHOT_MISS_POLICY_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_MISS_POLICY"
 SNAPSHOT_DIR_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_DIR"
+SNAPSHOT_RECORD_REUSE_EXISTING_ENV = (
+    "RESEARCH_LAB_DEV_SNAPSHOT_RECORD_REUSE_EXISTING"
+)
 MISS_POLICY_STRICT = "strict"
 MISS_POLICY_EMPTY = "empty"
 MISS_POLICIES = (MISS_POLICY_STRICT, MISS_POLICY_EMPTY)
@@ -1198,6 +1201,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 _RL_DEV_SNAPSHOT_DIR = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_DIR", "").strip()
 _RL_DEV_MISS_POLICY = (os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_MISS_POLICY", "").strip().lower() or "strict")
+_RL_DEV_RECORD_REUSE_EXISTING = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_RECORD_REUSE_EXISTING", "").strip().lower() in ("1", "true", "yes", "on")
 _RL_DEV_RECORD_ICP_REF = os.environ.get("RESEARCH_LAB_DEV_RECORD_ICP_REF", "").strip()
 _RL_DEV_AUTH_PARAMS = ("api_key", "apikey", "x-api-key", "authorization", "token", "access_token", "bearer")
 _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrouter": "{}"}
@@ -1298,7 +1302,30 @@ def _rl_dev_lookup(method, url, body, params=None):
             "body_text": _RL_DEV_EMPTY_BODIES.get(provider, "{}"),
             "synthesized": "research_lab_dev_snapshot_synthesized_empty",
         }
-    raise _RlDevSnapshotMiss("RESEARCH_LAB_DEV_SNAPSHOT_MISS:" + request_key)
+    message = "RESEARCH_LAB_DEV_SNAPSHOT_MISS:" + request_key
+    import sys
+    sys.stderr.write(message + "\n")
+    sys.stderr.flush()
+    raise _RlDevSnapshotMiss(message)
+
+
+def _rl_dev_lookup_existing(method, url, body, params=None):
+    if not _RL_DEV_RECORD_REUSE_EXISTING:
+        return None
+    provider, request_key, storage_name = _rl_dev_request_identity(
+        method, url, body, params
+    )
+    path = _rl_dev_snapshot_path(storage_name)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as handle:
+        record = json.load(handle)
+    response = record.get("response")
+    if not isinstance(response, dict):
+        raise RuntimeError(
+            "existing provider snapshot is corrupt: " + request_key
+        )
+    return dict(response)
 
 
 class _RlDevFakeResponse(object):
@@ -1525,6 +1552,15 @@ def _rl_dev_record_failure(reason, request_key=""):
         )
 
 
+def _rl_dev_record_live_failure(reason, method, url, body, params=None):
+    request_key = ""
+    try:
+        _, request_key, _ = _rl_dev_request_identity(method, url, body, params)
+    except Exception:
+        pass
+    _rl_dev_record_failure(reason, request_key)
+
+
 def _rl_dev_record_provider_model(provider, body, request_key):
     if provider != "openrouter":
         return True
@@ -1609,8 +1645,20 @@ def _rl_dev_install_record():
         url = str(getattr(req, "full_url", req if isinstance(req, str) else ""))
         method = getattr(req, "get_method", lambda: "GET")()
         data = getattr(req, "data", None)
-        response = _rl_dev_original_urlopen(req, *args, **kwargs)
-        body = response.read()
+        existing = _rl_dev_lookup_existing(method, url, data)
+        if existing is not None:
+            return _RlDevFakeResponse(url, existing)
+        try:
+            response = _rl_dev_original_urlopen(req, *args, **kwargs)
+            body = response.read()
+        except Exception as exc:
+            _rl_dev_record_live_failure(
+                "urllib_live_request_error:" + type(exc).__name__,
+                method,
+                url,
+                data,
+            )
+            raise
         status = getattr(response, "status", None) or getattr(response, "code", 0)
         headers = dict(getattr(response, "headers", {}) or {})
         body_text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
@@ -1629,7 +1677,32 @@ def _rl_dev_install_record():
         _rl_dev_original_requests_send = _rl_requests.Session.send
 
         def _rl_dev_record_requests_send(session, prepared, *args, **kwargs):
-            response = _rl_dev_original_requests_send(session, prepared, *args, **kwargs)
+            existing = _rl_dev_lookup_existing(
+                str(prepared.method or "GET"),
+                str(prepared.url or ""),
+                prepared.body,
+            )
+            if existing is not None:
+                response = _rl_requests.models.Response()
+                response.status_code = int(existing.get("status") or 0)
+                response._content = str(existing.get("body_text") or "").encode("utf-8")
+                response.encoding = "utf-8"
+                response.headers.update(dict(existing.get("headers") or {}))
+                response.url = str(prepared.url or "")
+                response.request = prepared
+                return response
+            try:
+                response = _rl_dev_original_requests_send(
+                    session, prepared, *args, **kwargs
+                )
+            except Exception as exc:
+                _rl_dev_record_live_failure(
+                    "requests_live_request_error:" + type(exc).__name__,
+                    str(prepared.method or "GET"),
+                    str(prepared.url or ""),
+                    prepared.body,
+                )
+                raise
             try:
                 _rl_dev_record(
                     str(prepared.method or "GET"),
@@ -1658,7 +1731,30 @@ def _rl_dev_install_record():
         _rl_dev_original_httpx_send = _rl_httpx.Client.send
 
         def _rl_dev_record_httpx_send(client, request, *args, **kwargs):
-            response = _rl_dev_original_httpx_send(client, request, *args, **kwargs)
+            existing = _rl_dev_lookup_existing(
+                str(request.method or "GET"),
+                str(request.url or ""),
+                bytes(getattr(request, "content", b"") or b""),
+            )
+            if existing is not None:
+                return _rl_httpx.Response(
+                    status_code=int(existing.get("status") or 0),
+                    headers=dict(existing.get("headers") or {}),
+                    content=str(existing.get("body_text") or "").encode("utf-8"),
+                    request=request,
+                )
+            try:
+                response = _rl_dev_original_httpx_send(
+                    client, request, *args, **kwargs
+                )
+            except Exception as exc:
+                _rl_dev_record_live_failure(
+                    "httpx_live_request_error:" + type(exc).__name__,
+                    str(request.method or "GET"),
+                    str(request.url or ""),
+                    bytes(getattr(request, "content", b"") or b""),
+                )
+                raise
             try:
                 _rl_dev_record(
                     str(request.method or "GET"),
@@ -1679,7 +1775,30 @@ def _rl_dev_install_record():
         _rl_dev_original_httpx_async_send = _rl_httpx.AsyncClient.send
 
         async def _rl_dev_record_httpx_async_send(client, request, *args, **kwargs):
-            response = await _rl_dev_original_httpx_async_send(client, request, *args, **kwargs)
+            existing = _rl_dev_lookup_existing(
+                str(request.method or "GET"),
+                str(request.url or ""),
+                bytes(getattr(request, "content", b"") or b""),
+            )
+            if existing is not None:
+                return _rl_httpx.Response(
+                    status_code=int(existing.get("status") or 0),
+                    headers=dict(existing.get("headers") or {}),
+                    content=str(existing.get("body_text") or "").encode("utf-8"),
+                    request=request,
+                )
+            try:
+                response = await _rl_dev_original_httpx_async_send(
+                    client, request, *args, **kwargs
+                )
+            except Exception as exc:
+                _rl_dev_record_live_failure(
+                    "httpx_async_live_request_error:" + type(exc).__name__,
+                    str(request.method or "GET"),
+                    str(request.url or ""),
+                    bytes(getattr(request, "content", b"") or b""),
+                )
+                raise
             _rl_dev_record(
                 str(request.method or "GET"),
                 str(request.url or ""),
@@ -1701,10 +1820,36 @@ def _rl_dev_install_record():
         _rl_dev_original_aiohttp_request = _rl_aiohttp.ClientSession._request
 
         async def _rl_dev_record_aiohttp_request(session, method, str_or_url, *args, **kwargs):
-            response = await _rl_dev_original_aiohttp_request(
-                session, method, str_or_url, *args, **kwargs
+            body = kwargs.get("json")
+            if body is None:
+                body = kwargs.get("data")
+            existing = _rl_dev_lookup_existing(
+                str(method or "GET"),
+                str(str_or_url),
+                body,
+                kwargs.get("params"),
             )
-            body = await response.read()
+            if existing is not None:
+                response = _RlDevAiohttpResponse(str(str_or_url), existing)
+                if kwargs.get("raise_for_status") is True:
+                    response.raise_for_status()
+                return response
+            try:
+                response = await _rl_dev_original_aiohttp_request(
+                    session, method, str_or_url, *args, **kwargs
+                )
+                body = await response.read()
+            except Exception as exc:
+                _rl_dev_record_live_failure(
+                    "aiohttp_live_request_error:" + type(exc).__name__,
+                    str(method or "GET"),
+                    str(str_or_url or ""),
+                    kwargs.get("json")
+                    if kwargs.get("json") is not None
+                    else kwargs.get("data"),
+                    kwargs.get("params"),
+                )
+                raise
             charset = getattr(response, "charset", None) or "utf-8"
             _rl_dev_record(
                 str(method or "GET"),

@@ -65,10 +65,13 @@ from gateway.research_lab.config import (  # noqa: E402
 from research_lab.eval.private_runtime import SECRET_MARKERS  # noqa: E402
 from research_lab.eval.snapshot_store import (  # noqa: E402
     RECORDED_PROVIDER_MODELS_NAME,
+    SNAPSHOT_MISS_SENTINEL,
+    SNAPSHOT_RECORD_REUSE_EXISTING_ENV,
 )
 
 RECORD_ENABLED_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED"
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
+MAX_SNAPSHOT_CLOSURE_ROUNDS = 8
 
 PROVIDER_KEY_GROUPS = (
     ("EXA_API_KEY",),
@@ -257,6 +260,7 @@ def _record_icp_with_docker(
     snapshot_dir: str,
     timeout_seconds: int,
     docker_executable: str = "docker",
+    reuse_existing: bool = False,
 ) -> list[Mapping[str, Any]]:
     """Run one champion ICP through docker with the snapshot dir mounted.
 
@@ -287,6 +291,8 @@ def _record_icp_with_docker(
     for name in private_runtime.private_model_env_passthrough():
         if name in os.environ:
             env_args.extend(["-e", name])
+    if reuse_existing:
+        env_args.extend(["-e", f"{SNAPSHOT_RECORD_REUSE_EXISTING_ENV}=true"])
     command = [
         docker_executable,
         "run",
@@ -331,6 +337,90 @@ def _record_icp_with_docker(
     if not isinstance(decoded, list):
         raise RuntimeError("docker champion adapter must return a JSON array")
     return decoded
+
+
+def _close_snapshot_request_set(
+    *,
+    items: Sequence[Mapping[str, Any]],
+    store: Any,
+    image_digest: str,
+    module_name: str,
+    callable_name: str,
+    snapshot_dir: str,
+    timeout_seconds: int,
+    max_rounds: int = MAX_SNAPSHOT_CLOSURE_ROUNDS,
+) -> dict[str, Any]:
+    """Record newly exposed request identities until every ICP is stable."""
+
+    if max_rounds < 1:
+        raise ValueError("snapshot closure requires at least one round")
+    pending = list(enumerate(items, start=1))
+    runner_failure_refs: list[str] = []
+    completed_rounds = 0
+    for round_index in range(1, max_rounds + 1):
+        completed_rounds = round_index
+        next_pending: list[tuple[int, Mapping[str, Any]]] = []
+        for item_index, item in pending:
+            ref = str(item["icp_ref"])
+            before_count = int(store.snapshot_count())
+            try:
+                companies = _record_icp_with_docker(
+                    image_digest=image_digest,
+                    module_name=module_name,
+                    callable_name=callable_name,
+                    icp=item["icp"],
+                    icp_ref=ref,
+                    snapshot_dir=snapshot_dir,
+                    timeout_seconds=timeout_seconds,
+                    reuse_existing=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - collect every failed ICP
+                runner_failure_refs.append(ref)
+                print(
+                    "WARNING: snapshot closure failed for daily ICP "
+                    f"{item_index} in round {round_index}: {type(exc).__name__}"
+                )
+                continue
+            after_count = int(store.snapshot_count())
+            if after_count < before_count:
+                runner_failure_refs.append(ref)
+                print(
+                    "WARNING: snapshot count regressed for daily ICP "
+                    f"{item_index} in round {round_index}"
+                )
+                continue
+            added_count = after_count - before_count
+            print(
+                "snapshot closure daily ICP "
+                f"{item_index}/{len(items)} round={round_index}: "
+                f"{len(companies)} companies, added={added_count}, "
+                f"snapshots={after_count}"
+            )
+            if added_count:
+                next_pending.append((item_index, item))
+
+        if runner_failure_refs:
+            return {
+                "stable": False,
+                "rounds": completed_rounds,
+                "pending_icp_count": len(next_pending),
+                "runner_failure_refs": runner_failure_refs,
+            }
+        if not next_pending:
+            return {
+                "stable": True,
+                "rounds": completed_rounds,
+                "pending_icp_count": 0,
+                "runner_failure_refs": [],
+            }
+        pending = next_pending
+
+    return {
+        "stable": False,
+        "rounds": completed_rounds,
+        "pending_icp_count": len(pending),
+        "runner_failure_refs": [],
+    }
 
 
 def _replay_icp_with_docker(
@@ -401,6 +491,8 @@ def _replay_icp_with_docker(
         timeout_seconds=timeout_seconds,
         environment={**os.environ},
     )
+    if SNAPSHOT_MISS_SENTINEL in completed.stderr:
+        raise RuntimeError("offline replay observed a strict snapshot miss")
     if completed.returncode != 0:
         raise RuntimeError(
             f"offline replay failed with code {completed.returncode}: "
@@ -473,6 +565,16 @@ def _recording_failure_summary(
         ),
         "has_failures": bool(runner_refs or provider_events or invalid_rows),
     }
+
+
+def _recording_is_complete(
+    *,
+    closure_result: Mapping[str, Any],
+    failure_summary: Mapping[str, Any],
+) -> bool:
+    return bool(closure_result.get("stable")) and not bool(
+        failure_summary.get("has_failures")
+    )
 
 
 def _recorded_provider_model_ids(snapshot_dir: Path) -> list[str]:
@@ -709,15 +811,47 @@ def main() -> int:
                 )
 
         failure_file = staging / "record_failures.jsonl"
+        initial_failure_summary = _recording_failure_summary(
+            runner_failure_refs=runner_failure_refs,
+            failure_file=failure_file,
+        )
+        closure_result: dict[str, Any] = {
+            "stable": False,
+            "rounds": 0,
+            "pending_icp_count": len(dev_set.items),
+            "runner_failure_refs": [],
+        }
+        if not initial_failure_summary["has_failures"]:
+            closure_result = _close_snapshot_request_set(
+                items=dev_set.items,
+                store=store,
+                image_digest=args.champion_image,
+                module_name=args.module_name,
+                callable_name=args.callable_name,
+                snapshot_dir=str(staging),
+                timeout_seconds=args.timeout_seconds,
+            )
+            runner_failure_refs.extend(closure_result["runner_failure_refs"])
+
         failure_summary = _recording_failure_summary(
             runner_failure_refs=runner_failure_refs,
             failure_file=failure_file,
+        )
+        recording_complete = _recording_is_complete(
+            closure_result=closure_result,
+            failure_summary=failure_summary,
         )
         if failure_summary["provider_failure_event_count"]:
             print(
                 "WARNING: "
                 f"{failure_summary['provider_failure_event_count']} distinct provider "
                 "snapshot failure event(s) recorded"
+            )
+        if not closure_result["stable"]:
+            print(
+                "WARNING: snapshot request set did not converge: "
+                f"rounds={closure_result['rounds']} "
+                f"pending_icps={closure_result['pending_icp_count']}"
             )
 
         try:
@@ -730,7 +864,7 @@ def main() -> int:
             return 1
 
         store.write_dev_icp_items(dev_set.items)
-        if not failure_summary["has_failures"]:
+        if recording_complete:
             for item in dev_set.items:
                 outputs = _replay_icp_with_docker(
                     image_digest=args.champion_image,
@@ -766,7 +900,7 @@ def main() -> int:
         store.write_manifest(manifest)
         verification = store.verify_manifest(expected_icp_set_hash=dev_set.dev_set_hash)
         ready = store.build_ready_document(manifest)
-        if verification["passed"] and not failure_summary["has_failures"]:
+        if verification["passed"] and recording_complete:
             store.write_ready_document(ready)
         ready_verification = store.verify_ready_document(
             expected_dev_icp_count=configured_icp_count,
@@ -790,7 +924,7 @@ def main() -> int:
         if (
             not verification["passed"]
             or not ready_verification["passed"]
-            or failure_summary["has_failures"]
+            or not recording_complete
         ):
             return 1
         os.replace(staging, target)

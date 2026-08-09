@@ -44,6 +44,7 @@ from research_lab.eval.snapshot_store import (
     MODE_REPLAY,
     SNAPSHOT_DIR_ENV,
     SNAPSHOT_MISS_POLICY_ENV,
+    SNAPSHOT_RECORD_REUSE_EXISTING_ENV,
     SNAPSHOT_URI_ENV,
     SYNTHESIZED_EMPTY_MARKER,
     DevSnapshotStoreError,
@@ -51,10 +52,16 @@ from research_lab.eval.snapshot_store import (
     SnapshotMiss,
     build_snapshot_request,
     container_replay_env,
+    dev_record_bootstrap,
     dev_replay_bootstrap,
 )
 
-DEV_ENV_VARS = (SNAPSHOT_URI_ENV, SNAPSHOT_MISS_POLICY_ENV, SNAPSHOT_DIR_ENV)
+DEV_ENV_VARS = (
+    SNAPSHOT_URI_ENV,
+    SNAPSHOT_MISS_POLICY_ENV,
+    SNAPSHOT_DIR_ENV,
+    SNAPSHOT_RECORD_REUSE_EXISTING_ENV,
+)
 
 SCRAPINGDOG_URL = (
     "https://api.scrapingdog.com/linkedin?type=company&linkId={link_id}&api_key={key}"
@@ -370,9 +377,31 @@ def test_replay_bootstrap_strict_miss_fails_loudly(tmp_path):
     assert "RESEARCH_LAB_DEV_SNAPSHOT_MISS:" in completed.stderr
 
 
-def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
-    from research_lab.eval.snapshot_store import dev_record_bootstrap
+def test_replay_bootstrap_reports_strict_miss_even_when_model_catches_it(tmp_path):
+    _record_store(tmp_path)
+    probe = (
+        "\nimport urllib.request\n"
+        "try:\n"
+        "    urllib.request.urlopen('https://api.exa.ai/contents?id=missing')\n"
+        "except Exception:\n"
+        "    pass\n"
+        "print('caught')\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_replay_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(tmp_path / "snapshot_set"), "PATH": ""},
+        check=False,
+    )
 
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == "caught"
+    assert "RESEARCH_LAB_DEV_SNAPSHOT_MISS:" in completed.stderr
+
+
+def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
     snapshot_dir = tmp_path / "record_set"
     probe = (
         "\nimport json, os\n"
@@ -411,6 +440,211 @@ def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
     assert len(failures) == 1
     assert failures[0]["reason"] == "secret_material_rejected"
     assert failures[0]["request_key"].startswith("exa|GET|api.exa.ai/search|")
+
+
+def test_record_bootstrap_reuses_existing_urllib_response_without_network(tmp_path):
+    recorder = _record_store(tmp_path)
+    body = _record_companies_response(recorder, "acme", [_rich_company()])
+    url = SCRAPINGDOG_URL.format(link_id="acme", key="REUSEKEY")
+    probe = (
+        "\nimport json, urllib.request\n"
+        f"with urllib.request.urlopen({url!r}) as response:\n"
+        "    payload = {'status': response.status, 'body': response.read().decode('utf-8')}\n"
+        "print(json.dumps(payload))\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(tmp_path / "snapshot_set"),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"status": 200, "body": body}
+
+
+def test_record_bootstrap_reuses_existing_httpx_async_response_without_network(
+    tmp_path,
+):
+    pytest.importorskip("httpx")
+    recorder = _record_store(tmp_path)
+    body = _record_companies_response(recorder, "acme", [_rich_company()])
+    url = SCRAPINGDOG_URL.format(link_id="acme", key="ASYNCREUSEKEY")
+    probe = (
+        "\nimport asyncio, json, httpx\n"
+        "async def _probe():\n"
+        "    async with httpx.AsyncClient() as client:\n"
+        f"        response = await client.get({url!r})\n"
+        "    print(json.dumps({'status': response.status_code, 'body': response.text}))\n"
+        "asyncio.run(_probe())\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(tmp_path / "snapshot_set"),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"status": 200, "body": body}
+
+
+def test_record_bootstrap_calls_live_boundary_for_missing_identity_in_reuse_mode(
+    tmp_path,
+):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import http.server
+import json
+import os
+import threading
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        body = b'{"results": ["live"]}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/new-request" % server.server_port
+try:
+    with urllib.request.urlopen(url) as response:
+        body = response.read().decode("utf-8")
+finally:
+    server.shutdown()
+    server.server_close()
+snapshots = os.path.join(os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "snapshots")
+print(json.dumps({"body": body, "hits": len(hits), "snapshots": len(os.listdir(snapshots))}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "body": '{"results": ["live"]}',
+        "hits": 1,
+        "snapshots": 1,
+    }
+
+
+def test_record_bootstrap_without_reuse_flag_keeps_live_recording_semantics(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import http.server
+import json
+import threading
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        body = b'{"source": "live"}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/existing-request" % server.server_port
+assert _rl_dev_record("GET", url, None, 200, {"content-type": "application/json"}, '{"source": "cached"}')
+try:
+    with urllib.request.urlopen(url) as response:
+        body = response.read().decode("utf-8")
+finally:
+    server.shutdown()
+    server.server_close()
+print(json.dumps({"body": body, "hits": len(hits)}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "body": '{"source": "live"}',
+        "hits": 1,
+    }
+
+
+def test_record_bootstrap_persists_live_transport_failure_when_model_catches_it(
+    tmp_path,
+):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import json
+import os
+import socket
+import urllib.request
+
+sock = socket.socket()
+sock.bind(("127.0.0.1", 0))
+port = sock.getsockname()[1]
+sock.close()
+try:
+    urllib.request.urlopen("http://127.0.0.1:%d/search?q=bounded" % port, timeout=1)
+except Exception:
+    pass
+with open(os.path.join(os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "record_failures.jsonl"), "r", encoding="utf-8") as handle:
+    rows = [json.loads(line) for line in handle if line.strip()]
+print(json.dumps(rows))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    failures = json.loads(completed.stdout)
+    assert len(failures) == 1
+    assert failures[0]["reason"].startswith("urllib_live_request_error:")
+    assert failures[0]["request_key"].startswith("127.0.0.1:")
 
 
 def test_replay_bootstrap_inert_without_snapshot_dir_env():

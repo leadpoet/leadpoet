@@ -83,6 +83,7 @@ from gateway.research_lab.maintenance import (
     is_autoresearch_maintenance_paused,
     reconcile_champion_reward_statuses,
     reconcile_terminal_ticket_statuses,
+    resolve_openrouter_key_ref_for_run,
     set_autoresearch_maintenance_paused,
     try_acquire_maintenance_lease,
 )
@@ -2992,6 +2993,10 @@ class ResearchLabHostedWorker:
             order_by=(("seq", True),),
             limit=_RUN_CONTEXT_QUEUE_EVENT_LIMIT,
         )
+        openrouter_key_ref = await resolve_openrouter_key_ref_for_run(
+            ticket,
+            run_id=str(queue_row["run_id"]),
+        )
         payment = None
         payment_id = _payment_id_from_queue_events(queue_events)
         if payment_id:
@@ -3010,6 +3015,7 @@ class ResearchLabHostedWorker:
             payment=payment,
             ticket_events=tuple(ticket_events),
             queue_events=tuple(queue_events),
+            openrouter_key_ref=openrouter_key_ref,
         )
 
     async def _process_run(self, context: HostedRunContext) -> HostedWorkerOutcome:
@@ -3433,9 +3439,14 @@ class ResearchLabHostedWorker:
                 selection_seed=dev_selection_seed,
                 miner_direction=miner_direction,
             )
+            guard_queue_event_hash = await self._current_started_queue_event_hash(
+                context
+            )
             openrouter_guard = await verify_openrouter_guard_v2(
                 key_ref=context.openrouter_key_ref,
                 miner_hotkey=str(context.ticket["miner_hotkey"]),
+                run_id=context.run_id,
+                queue_event_hash=guard_queue_event_hash,
                 epoch_id=evaluation_epoch,
                 worker_index=int(self.config.hosted_worker_index or 0),
                 require_egress_proxy=bool(
@@ -7019,11 +7030,7 @@ class ResearchLabHostedWorker:
 
 
 def _miner_openrouter_key_ref(context: HostedRunContext) -> str:
-    for event in (*context.queue_events, *context.ticket_events):
-        event_doc = event.get("event_doc")
-        if isinstance(event_doc, Mapping) and event_doc.get("miner_openrouter_key_ref"):
-            return str(event_doc["miner_openrouter_key_ref"])
-    direct = str(context.ticket.get("miner_openrouter_key_ref") or "")
+    direct = str(context.openrouter_key_ref or "").strip()
     if direct:
         return direct
     raise HostedResearchLabWorkerError("Research Lab run is missing miner OpenRouter key ref")

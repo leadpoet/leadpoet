@@ -798,18 +798,34 @@ def test_attested_credit_preflight_uses_leased_key_and_one_authenticated_call():
 
 @pytest.mark.asyncio
 async def test_maintenance_credit_preflight_uses_attested_coordinator(monkeypatch):
-    monkeypatch.setattr(
-        maintenance,
-        "select_one",
-        lambda *_args, **_kwargs: _async_value(
-            {
+    key_ref = "encrypted_ref:openrouter:" + "f" * 32
+
+    async def select_one(table, **_kwargs):
+        if table == "research_loop_ticket_current":
+            return {
                 "ticket_id": "ticket-1",
                 "miner_hotkey": MINER,
-                "miner_openrouter_key_ref": "encrypted_ref:openrouter:" + "f" * 32,
+                "miner_openrouter_key_ref": key_ref,
                 "miner_openrouter_key_handling": "encrypted_ref",
             }
-        ),
-    )
+        if table == "research_lab_openrouter_key_refs":
+            return {"key_ref": key_ref, "miner_hotkey": MINER}
+        raise AssertionError(table)
+
+    async def select_all(table, **_kwargs):
+        assert table == "research_loop_run_queue_events"
+        return [
+            {
+                "run_id": "run-1",
+                "ticket_id": "ticket-1",
+                "event_type": "queued",
+                "seq": 0,
+                "event_doc": {"miner_openrouter_key_ref": key_ref},
+            }
+        ]
+
+    monkeypatch.setattr(maintenance, "select_one", select_one)
+    monkeypatch.setattr(maintenance, "select_all", select_all)
     monkeypatch.setattr(
         maintenance.ResearchLabGatewayConfig,
         "from_env",
@@ -843,7 +859,12 @@ async def test_maintenance_credit_preflight_uses_attested_coordinator(monkeypatc
         "preflight_openrouter_key_ref_v2",
         preflight,
     )
-    result = await maintenance._preflight_openrouter_key_for_run("ticket-1")
+    result = await maintenance._preflight_openrouter_key_for_run(
+        "ticket-1",
+        run_id="run-1",
+        preflight_sequence=991,
+    )
     assert result["ok"] is True
     assert result["limit_remaining"] == 12
     assert observed["miner_hotkey"] == MINER
+    assert observed["sequence"] == 991

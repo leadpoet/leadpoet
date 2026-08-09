@@ -660,6 +660,82 @@ async def create_queue_event(
     )
 
 
+async def resume_credit_blocked_queue_event(
+    *,
+    run_id: str,
+    ticket_id: str,
+    expected_event_seq: int,
+    expected_event_hash: str,
+    queue_priority: int,
+    worker_ref: str | None,
+    reason: str,
+    event_doc: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Atomically append or replay one credit-top-up resume event.
+
+    The database locks the run, verifies the exact paused head, and returns the
+    same deterministic event after a commit-before-response retry.  This keeps
+    the existing Python canonical hash contract while preventing concurrent
+    signed resume requests from appending multiple ``queued`` events.
+    """
+
+    if reason != "credit_topup_resume":
+        raise ValueError("credit resume reason is invalid")
+    normalized_doc = {
+        **dict(event_doc),
+        "previous_event_hash": str(expected_event_hash),
+    }
+    seq = int(expected_event_seq) + 1
+    payload = {
+        "run_id": str(run_id),
+        "ticket_id": str(ticket_id),
+        "seq": seq,
+        "event_type": "queued",
+        "queue_priority": int(queue_priority),
+        "worker_ref": worker_ref,
+        "reason": reason,
+        "event_doc": normalized_doc,
+    }
+    event_id = deterministic_uuid(
+        "credit_topup_resume",
+        run_id,
+        ticket_id,
+        expected_event_hash,
+    )
+    anchored_hash = canonical_hash(payload)
+    response = await call_rpc(
+        "resume_research_lab_credit_blocked_run_v1",
+        {
+            "p_run_id": str(run_id),
+            "p_ticket_id": str(ticket_id),
+            "p_expected_event_seq": int(expected_event_seq),
+            "p_expected_event_hash": str(expected_event_hash),
+            "p_event_id": event_id,
+            "p_anchored_hash": anchored_hash,
+            "p_queue_priority": int(queue_priority),
+            "p_worker_ref": worker_ref,
+            "p_reason": reason,
+            "p_event_doc": normalized_doc,
+        },
+    )
+    rows = response if isinstance(response, list) else [response]
+    if len(rows) != 1 or not isinstance(rows[0], Mapping):
+        raise RuntimeError("credit resume RPC returned an invalid result")
+    row = dict(rows[0])
+    if (
+        str(row.get("event_id") or "") != event_id
+        or str(row.get("run_id") or "") != str(run_id)
+        or str(row.get("ticket_id") or "") != str(ticket_id)
+        or int(row.get("seq") or -1) != seq
+        or str(row.get("event_type") or "") != "queued"
+        or str(row.get("reason") or "") != reason
+        or str(row.get("anchored_hash") or "") != anchored_hash
+        or row.get("event_doc") != normalized_doc
+    ):
+        raise RuntimeError("credit resume RPC readback differs")
+    return row
+
+
 async def create_gateway_control_event(
     *,
     control_key: str,

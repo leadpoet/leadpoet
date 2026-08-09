@@ -1123,6 +1123,7 @@ async def test_inflight_root_change_requeues_replacement_instead_of_pausing(
         **dict(context.ticket),
         "miner_openrouter_key_ref": "test-key-ref",
     }
+    context.openrouter_key_ref = "test-key-ref"
     prior_artifact = SimpleNamespace(
         model_artifact_hash="sha256:" + "1" * 64,
         manifest_hash="sha256:" + "2" * 64,

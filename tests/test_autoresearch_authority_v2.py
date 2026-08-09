@@ -49,6 +49,8 @@ HASHES = {
 }
 KEY_REF = "encrypted_ref:openrouter:" + "a" * 32
 RECEIPT_HASH = "sha256:" + "5" * 64
+RUN_ID = "run-credential-transition"
+QUEUE_EVENT_HASH = "sha256:" + "6" * 64
 
 
 class _CoordinatorClient:
@@ -119,6 +121,69 @@ def _coordinator_graph(
         transport_attempts=(),
     )
     return graph, receipt
+
+
+def _autoresearch_guard_authority(result):
+    key = Ed25519PrivateKey.generate()
+    public_key = key.public_key().public_bytes_raw().hex()
+    boot = create_boot_identity(
+        body=build_boot_identity_body(
+            role="gateway_autoresearch",
+            physical_role="gateway_autoresearch",
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_nonce="5" * 32,
+            signing_pubkey=public_key,
+            transport_pubkey="6" * 64,
+            transport_certificate_hash="sha256:" + "7" * 64,
+            attestation_user_data_hash="sha256:" + "8" * 64,
+            issued_at="2026-07-10T20:00:00Z",
+        ),
+        attestation_document_b64=base64.b64encode(b"attestation").decode(
+            "ascii"
+        ),
+    )
+    receipt = create_signed_execution_receipt(
+        body=build_execution_receipt_body(
+            role="gateway_autoresearch",
+            purpose="research_lab.openrouter_guard.v2",
+            job_id="openrouter-guard",
+            epoch_id=10,
+            sequence=0,
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_identity_hash=boot["boot_identity_hash"],
+            input_root="sha256:" + "9" * 64,
+            output_root=sha256_json(result),
+            transport_root_hash=EMPTY_TRANSPORT_ROOT,
+            host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+            artifact_root=EMPTY_ARTIFACT_ROOT,
+            parent_receipt_hashes=(),
+            status="succeeded",
+            failure_code=None,
+            issued_at="2026-07-10T20:00:00Z",
+        ),
+        enclave_pubkey=public_key,
+        sign_digest=key.sign,
+    )
+    graph = build_receipt_graph(
+        root_receipt_hash=receipt["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=(receipt,),
+        transport_attempts=(),
+        host_operations=(),
+    )
+    return {
+        "result": dict(result),
+        "receipt": receipt,
+        "receipt_graph": graph,
+    }
 
 
 def _artifact_wrapped_coordinator_authority(result, *, purpose):
@@ -220,6 +285,7 @@ def test_guard_bridge_provisions_both_envelopes_and_releases_job(monkeypatch):
     loaded_kinds = []
     provisioned = []
     client = _CoordinatorClient()
+    execution_payloads = []
     monkeypatch.setattr(
         authority,
         "_load_release",
@@ -241,9 +307,11 @@ def test_guard_bridge_provisions_both_envelopes_and_releases_job(monkeypatch):
         assert kwargs["operation"] == authority.OP_VERIFY_OPENROUTER_GUARD
         assert kwargs["purpose"] == "research_lab.openrouter_guard.v2"
         assert set(kwargs["input_artifact_hashes"]) == set(HASHES.values())
+        execution_payloads.append(dict(kwargs["payload"]))
         result = {
             "schema_version": authority.OPENROUTER_GUARD_RESULT_SCHEMA_VERSION,
             **HASHES,
+            "run_state_hash": kwargs["payload"]["run_state_hash"],
             "preflight_status": "passed",
             "preflight_error_type": "",
             "credit_depleted": False,
@@ -268,24 +336,54 @@ def test_guard_bridge_provisions_both_envelopes_and_releases_job(monkeypatch):
     )
     monkeypatch.setattr(authority, "provision_job_provider_envelope_v2", provision)
 
-    result = asyncio.run(
+    first = asyncio.run(
         authority.verify_openrouter_guard_v2(
             key_ref=KEY_REF,
             miner_hotkey=MINER_HOTKEY,
+            run_id=RUN_ID,
+            queue_event_hash=QUEUE_EVENT_HASH,
+            epoch_id=10,
+            execute=execute,
+            coordinator_client=client,
+        )
+    )
+    second = asyncio.run(
+        authority.verify_openrouter_guard_v2(
+            key_ref=KEY_REF,
+            miner_hotkey=MINER_HOTKEY,
+            run_id=RUN_ID,
+            queue_event_hash="sha256:" + "7" * 64,
+            epoch_id=10,
+            execute=execute,
+            coordinator_client=client,
+        )
+    )
+    replay = asyncio.run(
+        authority.verify_openrouter_guard_v2(
+            key_ref=KEY_REF,
+            miner_hotkey=MINER_HOTKEY,
+            run_id=RUN_ID,
+            queue_event_hash=QUEUE_EVENT_HASH,
             epoch_id=10,
             execute=execute,
             coordinator_client=client,
         )
     )
 
-    assert loaded_kinds == ["runtime", "management"]
+    assert loaded_kinds == ["runtime", "management"] * 3
     assert [item["credential_kind"] for item in provisioned] == [
         "runtime",
         "management",
-    ]
-    assert len(client.released) == 1
-    assert result.credential_commitments == HASHES
-    assert result.credit_depleted is False
+    ] * 3
+    assert len(client.released) == 3
+    assert client.released[0] != client.released[1]
+    assert client.released[0] == client.released[2]
+    assert first.credential_commitments == HASHES
+    assert first.credit_depleted is False
+    assert first.run_state_hash != second.run_state_hash
+    assert first.run_state_hash == replay.run_state_hash
+    assert execution_payloads[0]["run_id"] == RUN_ID
+    assert execution_payloads[0]["queue_event_hash"] == QUEUE_EVENT_HASH
 
 
 def test_guard_bridge_releases_partial_lease_when_provisioning_fails(monkeypatch):
@@ -320,6 +418,8 @@ def test_guard_bridge_releases_partial_lease_when_provisioning_fails(monkeypatch
             authority.verify_openrouter_guard_v2(
                 key_ref=KEY_REF,
                 miner_hotkey=MINER_HOTKEY,
+                run_id=RUN_ID,
+                queue_event_hash=QUEUE_EVENT_HASH,
                 epoch_id=10,
                 execute=lambda **_kwargs: pytest.fail("execution must not start"),
                 coordinator_client=client,
@@ -476,7 +576,29 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     catalog_execution_hash = catalog_authority["execution_receipt"][
         "receipt_hash"
     ]
-    guard_hash = "sha256:" + "8" * 64
+    guard_queue_event_hash = "sha256:" + "8" * 64
+    guard_run_state_hash = sha256_json(
+        {"run_id": "run-1", "queue_event_hash": guard_queue_event_hash}
+    )
+    guard_result = {
+        "schema_version": authority.OPENROUTER_GUARD_RESULT_SCHEMA_VERSION,
+        "key_ref_hash": HASHES["key_ref_hash"],
+        "miner_hotkey_hash": HASHES["miner_hotkey_hash"],
+        "runtime_credential_value_hash": HASHES[
+            "runtime_credential_value_hash"
+        ],
+        "management_credential_value_hash": HASHES[
+            "management_credential_value_hash"
+        ],
+        "run_state_hash": guard_run_state_hash,
+        "preflight_status": "passed",
+        "preflight_error_type": "",
+        "credit_depleted": False,
+        "credit_limit_remaining": 1,
+        "privacy_proof_doc": {"status": "verified"},
+    }
+    guard_authority = _autoresearch_guard_authority(guard_result)
+    guard_hash = guard_authority["receipt"]["receipt_hash"]
     component_hash = "sha256:" + "9" * 64
     observed = {}
 
@@ -601,10 +723,10 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
                         "management_credential_value_hash"
                     ],
                 },
-                authority={
-                    "receipt": {"receipt_hash": guard_hash},
-                    "receipt_graph": {"root_receipt_hash": guard_hash},
-                },
+                run_id="run-1",
+                queue_event_hash=guard_queue_event_hash,
+                run_state_hash=guard_run_state_hash,
+                authority=guard_authority,
             ),
             component_registry_authority={
                 "result": {
@@ -650,6 +772,12 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     assert observed["payload"]["provider_outcome_evidence"][
         "root_receipt_hash"
     ] == outcome_execution_receipt["receipt_hash"]
+    assert observed["payload"]["openrouter_guard_evidence"] == {
+        "result": guard_result,
+        "receipt_graph": guard_authority["receipt_graph"],
+        "root_receipt_hash": guard_hash,
+        "queue_event_hash": guard_queue_event_hash,
+    }
     assert active_receipt["receipt_hash"] in observed["input_artifact_hashes"]
     assert active_execution_receipt["receipt_hash"] in observed[
         "input_artifact_hashes"

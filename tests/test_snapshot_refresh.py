@@ -80,31 +80,41 @@ def test_auto_refresh_defaults_on_and_explicit_false_disables(monkeypatch):
     assert snapshot_refresh.snapshot_auto_refresh_enabled() is False
 
 
-def test_only_worker_zero_in_active_tree_mode_can_refresh(monkeypatch, tmp_path):
+def test_any_paid_worker_can_refresh_under_shared_lock(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
-    config = SimpleNamespace()
-    policy = TreePolicy(mode="active")
+    calls: list[list[str]] = []
 
-    async def _run():
-        return await asyncio.gather(
-            *(
-                snapshot_refresh.maybe_refresh_dev_snapshot(
-                    config,
-                    worker_index=index,
-                    tree_policy=policy,
-                    now=1000,
-                )
-                for index in range(1, 10)
-            )
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return _active()
+
+    def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
+        calls.append(list(command))
+        return "ok"
+
+    readiness = iter(
+        [
+            _ready(ready=False, reason="snapshot_not_ready"),
+            _ready(manifest_hash="sha256:" + "e" * 64),
+        ]
+    )
+    refreshed = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=7,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: next(readiness),
+            active_loader=active_loader,
         )
-
-    results = asyncio.run(_run())
-    assert {row["reason"] for row in results} == {"not_refresh_worker"}
+    )
+    assert refreshed["status"] == "refreshed"
+    assert len(calls) == 4
 
     disabled = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
             SimpleNamespace(),
-            worker_index=0,
+            worker_index=8,
             tree_policy=TreePolicy(mode="off"),
             now=1000,
         )
@@ -126,7 +136,7 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
     first = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
             SimpleNamespace(),
-            worker_index=0,
+            worker_index=1,
             tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
@@ -137,7 +147,7 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
     second = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
             SimpleNamespace(),
-            worker_index=0,
+            worker_index=6,
             tree_policy=TreePolicy(mode="active"),
             now=1100,
             command_runner=command_runner,
@@ -149,6 +159,210 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
     assert second == {"status": "skipped", "reason": "check_not_due"}
     assert not calls
     assert (tmp_path / "state.json").is_file()
+
+
+def test_recent_model_a_check_does_not_delay_model_b_refresh(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    model_b = _active(
+        image=IMAGE[:-1] + "e",
+        commit="e" * 40,
+        config_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+    active = _active()
+    commands: list[list[str]] = []
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return active
+
+    first = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            readiness_loader=lambda _uri, **_kwargs: _ready(),
+            active_loader=active_loader,
+        )
+    )
+    assert first["status"] == "healthy"
+
+    active = model_b
+    readiness = iter(
+        [
+            _ready(),
+            _ready(
+                champion_image_digest=model_b.artifact.image_digest,
+                source_commit=model_b.artifact.git_commit_sha,
+                model_config_hash=model_b.artifact.config_hash,
+                private_model_manifest_hash=model_b.artifact.manifest_hash,
+                manifest_hash="sha256:" + "3" * 64,
+            ),
+        ]
+    )
+
+    def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
+        commands.append(list(command))
+        return "ok"
+
+    second = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=6,
+            tree_policy=TreePolicy(mode="active"),
+            now=1100,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: next(readiness),
+            active_loader=active_loader,
+        )
+    )
+
+    assert second["status"] == "refreshed"
+    assert len(commands) == 4
+
+
+def test_failed_model_a_refresh_obeys_retry_cadence(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    calls: list[list[str]] = []
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return _active()
+
+    def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
+        calls.append(list(command))
+        raise RuntimeError("controlled recorder failure")
+
+    first = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: _ready(
+                ready=False,
+                reason="not_ready",
+            ),
+            active_loader=active_loader,
+        )
+    )
+    second = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1001,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: _ready(
+                ready=False,
+                reason="not_ready",
+            ),
+            active_loader=active_loader,
+        )
+    )
+
+    assert first["status"] == "failed"
+    assert first["active_manifest_hash"] == MODEL_MANIFEST_HASH
+    assert second == {"status": "skipped", "reason": "check_not_due"}
+    assert len(calls) == 1
+
+
+def test_failed_model_a_refresh_does_not_delay_model_b(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    active = _active()
+    model_b = _active(
+        image=IMAGE[:-1] + "e",
+        commit="e" * 40,
+        config_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+    calls: list[list[str]] = []
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return active
+
+    def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
+        calls.append(list(command))
+        raise RuntimeError("controlled recorder failure")
+
+    first = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: _ready(
+                ready=False,
+                reason="not_ready",
+            ),
+            active_loader=active_loader,
+        )
+    )
+    active = model_b
+    second = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1001,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: _ready(
+                ready=False,
+                reason="active_model_mismatch",
+            ),
+            active_loader=active_loader,
+        )
+    )
+
+    assert first["status"] == "failed"
+    assert second["status"] == "failed"
+    assert second["active_manifest_hash"] == model_b.artifact.manifest_hash
+    assert len(calls) == 2
+
+
+def test_failed_authority_read_obeys_short_retry_without_trusting_healthy_state(
+    monkeypatch,
+    tmp_path,
+):
+    _configure(monkeypatch, tmp_path)
+    active_calls = 0
+
+    async def failing_active_loader(*_args: Any, **_kwargs: Any):
+        nonlocal active_calls
+        active_calls += 1
+        raise RuntimeError("active authority unavailable")
+
+    state_path = tmp_path / "state.json"
+    snapshot_refresh._write_state(
+        state_path,
+        {
+            "schema_version": "research_lab.dev_snapshot_refresh_state.v1",
+            "status": "failed",
+            "last_check_unix": 1000,
+            "last_error": "RuntimeError:active authority unavailable",
+            "active_image_digest": IMAGE,
+            "active_git_commit_sha": COMMIT,
+            "active_config_hash": CONFIG_HASH,
+            "active_manifest_hash": MODEL_MANIFEST_HASH,
+        },
+    )
+
+    result = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1001,
+            active_loader=failing_active_loader,
+        )
+    )
+
+    assert result == {
+        "status": "skipped",
+        "reason": "failed_check_retry_not_due",
+    }
+    assert active_calls == 1
 
 
 def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_path):
@@ -238,7 +452,9 @@ def test_due_refresh_uses_observed_model_provenance_without_manual_ids(
 def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
     commands: list[list[str]] = []
-    active_rows = iter([_active(), _active(image=IMAGE[:-1] + "f")])
+    active_rows = iter(
+        [_active(), _active(), _active(image=IMAGE[:-1] + "f")]
+    )
 
     async def active_loader(*_args: Any, **_kwargs: Any):
         return next(active_rows)
@@ -309,9 +525,14 @@ def test_cross_process_lock_allows_only_one_simultaneous_check(monkeypatch, tmp_
         entered = asyncio.Event()
         release = asyncio.Event()
 
+        calls = 0
+
         async def active_loader(*_args: Any, **_kwargs: Any):
-            entered.set()
-            await release.wait()
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                entered.set()
+                await release.wait()
             return _active()
 
         first = asyncio.create_task(

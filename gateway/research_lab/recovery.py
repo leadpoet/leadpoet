@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import logging
+import time
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -33,6 +34,7 @@ from .maintenance import (
     _is_queue_capacity_conflict,
     autoresearch_queue_capacity_doc,
     default_actor_ref,
+    resolve_openrouter_key_ref_for_run,
 )
 from .promotion import load_active_private_model
 from .public_activity import safe_project_public_loop_activity
@@ -46,6 +48,7 @@ from .store import (
     create_candidate_evaluation_event,
     create_queue_event,
     latest_auto_research_checkpoint,
+    resume_credit_blocked_queue_event,
     select_all,
     select_many,
     select_one,
@@ -123,7 +126,11 @@ async def _latest_queue_event_error(run_id: str) -> str:
 
 
 async def _openrouter_credit_ready(
-    config: ResearchLabGatewayConfig, *, ticket_id: str
+    config: ResearchLabGatewayConfig,
+    *,
+    ticket_id: str,
+    run_id: str,
+    preflight_sequence: int,
 ) -> tuple[bool, str]:
     """Best-effort credit/key readiness check for the miner that owns ``ticket_id``.
 
@@ -133,7 +140,11 @@ async def _openrouter_credit_ready(
     credit-blocked run is not re-queued into the same wall.
     """
     try:
-        result = await _preflight_openrouter_key_for_run(str(ticket_id))
+        result = await _preflight_openrouter_key_for_run(
+            str(ticket_id),
+            run_id=str(run_id),
+            preflight_sequence=int(preflight_sequence),
+        )
     except Exception as exc:  # noqa: BLE001 - best-effort; any failure => not ready
         return False, f"credit_check_error:{str(exc)[:120]}"
     if not result.get("ok"):
@@ -254,7 +265,20 @@ async def award_failed_run_reimbursements(
             result["skipped"].append({"run_id": rid, "reason": "missing_loop_start_payment_or_credit"})
             continue
 
-        miner_key_ref = _openrouter_key_ref_from_ticket_or_events(ticket, queue_events)
+        try:
+            miner_key_ref = await resolve_openrouter_key_ref_for_run(
+                ticket,
+                run_id=rid,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result["skipped"].append(
+                {
+                    "run_id": rid,
+                    "reason": "invalid_miner_openrouter_key",
+                    "detail": str(exc)[:160],
+                }
+            )
+            continue
         if not miner_key_ref:
             result["skipped"].append({"run_id": rid, "reason": "missing_miner_openrouter_key"})
             continue
@@ -337,6 +361,7 @@ async def resume_failed_runs_from_checkpoint(
     config = ResearchLabGatewayConfig.from_env()
     actor = actor_ref or default_actor_ref()
     capacity_doc = autoresearch_queue_capacity_doc(config)
+    preflight_sequence = int(time.time())
     columns = (
         "run_id,ticket_id,current_queue_status,queue_priority,"
         "current_event_hash,current_status_at"
@@ -390,7 +415,12 @@ async def resume_failed_runs_from_checkpoint(
         credit_failure = _is_openrouter_credit_failure(error_text)
         credit_detail: str | None = None
         if credit_failure and require_openrouter_credit:
-            ready, credit_detail = await _openrouter_credit_ready(config, ticket_id=ticket_id)
+            ready, credit_detail = await _openrouter_credit_ready(
+                config,
+                ticket_id=ticket_id,
+                run_id=run_id,
+                preflight_sequence=preflight_sequence,
+            )
             if not ready:
                 result["blocked_for_credit"].append(run_id)
                 result["runs"].append(
@@ -465,6 +495,7 @@ async def resume_credit_blocked_runs_for_miner(
     *,
     run_ids: list[str] | None = None,
     actor_ref: str | None = None,
+    preflight_sequence: int | None = None,
 ) -> dict[str, Any]:
     """Re-queue a miner's credit-blocked (paused/blocked_for_credit) runs after a top-up.
 
@@ -478,10 +509,18 @@ async def resume_credit_blocked_runs_for_miner(
     actor = actor_ref or f"miner:{str(miner_hotkey)[:12]}"
     capacity_doc = autoresearch_queue_capacity_doc(config)
     requested = set(run_ids or [])
+    sequence = int(time.time()) if preflight_sequence is None else int(
+        preflight_sequence
+    )
+    if sequence < 0:
+        raise ValueError("OpenRouter preflight sequence must be nonnegative")
 
     blocked = await select_all(
         "research_loop_run_queue_current",
-        columns="run_id,ticket_id,current_queue_status,current_reason,queue_priority",
+        columns=(
+            "run_id,ticket_id,current_queue_status,current_reason,queue_priority,"
+            "current_event_seq,current_event_hash"
+        ),
         filters=(("current_queue_status", "paused"), ("current_reason", "blocked_for_credit")),
         max_rows=10000,
     )
@@ -498,16 +537,22 @@ async def resume_credit_blocked_runs_for_miner(
         if not ticket or str(ticket.get("miner_hotkey") or "") != str(miner_hotkey):
             continue  # only this miner's runs
 
-        ready, detail = await _openrouter_credit_ready(config, ticket_id=ticket_id)
+        ready, detail = await _openrouter_credit_ready(
+            config,
+            ticket_id=ticket_id,
+            run_id=run_id,
+            preflight_sequence=sequence,
+        )
         if not ready:
             still_blocked += 1
             results.append({"run_id": run_id, "status": "still_blocked_for_credit", "detail": detail})
             continue
         try:
-            await create_queue_event(
+            await resume_credit_blocked_queue_event(
                 run_id=run_id,
                 ticket_id=ticket_id,
-                event_type="queued",
+                expected_event_seq=int(row.get("current_event_seq") or 0),
+                expected_event_hash=str(row.get("current_event_hash") or ""),
                 queue_priority=int(row.get("queue_priority") or 0),
                 worker_ref=actor,
                 reason="credit_topup_resume",
@@ -1046,14 +1091,11 @@ def _openrouter_key_ref_from_ticket_or_events(
     ticket: Mapping[str, Any],
     events: list[Mapping[str, Any]],
 ) -> str:
-    direct = str(ticket.get("miner_openrouter_key_ref") or "").strip()
-    if direct:
-        return direct
     for event in events:
         doc = event.get("event_doc")
         if isinstance(doc, Mapping) and doc.get("miner_openrouter_key_ref"):
             return str(doc["miner_openrouter_key_ref"]).strip()
-    return ""
+    return str(ticket.get("miner_openrouter_key_ref") or "").strip()
 
 
 def _run_budget_context_for_backfill(

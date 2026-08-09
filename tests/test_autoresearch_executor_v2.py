@@ -84,9 +84,6 @@ from research_lab.eval.private_runtime import compute_private_source_tree_hash
 from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 
-PRIVACY_RECEIPT_HASH = "sha256:" + "2" * 64
-
-
 class _HostChannel:
     def __init__(self) -> None:
         self.records = []
@@ -232,6 +229,28 @@ def _source_and_artifact(tmp_path: Path):
 def _payload(tmp_path: Path):
     source_bundle, artifact = _source_and_artifact(tmp_path)
     tree_policy = TreePolicy(mode="active")
+    run_id = "run-v2-1"
+    queue_event_hash = "sha256:" + "a" * 64
+    privacy_proof_doc = {"status": "verified"}
+    openrouter_key_ref = "encrypted_ref:openrouter:" + "1" * 32
+    runtime_credential_hash = "sha256:" + "5" * 64
+    management_credential_hash = "sha256:" + "6" * 64
+    guard_result = {
+        "schema_version": "leadpoet.openrouter_guard_result.v3",
+        "key_ref_hash": sha256_bytes(openrouter_key_ref.encode("utf-8")),
+        "miner_hotkey_hash": sha256_bytes(b"miner-hotkey"),
+        "runtime_credential_value_hash": runtime_credential_hash,
+        "management_credential_value_hash": management_credential_hash,
+        "run_state_hash": sha256_json(
+            {"run_id": run_id, "queue_event_hash": queue_event_hash}
+        ),
+        "preflight_status": "passed",
+        "preflight_error_type": "",
+        "credit_depleted": False,
+        "credit_limit_remaining": 1,
+        "privacy_proof_doc": privacy_proof_doc,
+    }
+    guard_graph = _openrouter_guard_graph(guard_result)
     active_model_result = {
         "schema_version": "leadpoet.active_private_model.v2",
         "artifact": private_model_artifact_replay_identity_v2(artifact),
@@ -273,7 +292,7 @@ def _payload(tmp_path: Path):
     provider_outcome_graph = _provider_outcome_graph(provider_outcome_result)
     return {
         "schema_version": AUTORESEARCH_REQUEST_SCHEMA_VERSION,
-        "run_id": "run-v2-1",
+        "run_id": run_id,
         "ticket": {"ticket_id": "ticket-1", "requested_loop_count": 1},
         "artifact": artifact,
         "component_registry": component_registry,
@@ -370,12 +389,18 @@ def _payload(tmp_path: Path):
         ],
         "dev_evaluator_enabled": True,
         "openrouter_context": {
-            "key_ref": "encrypted_ref:openrouter:" + "1" * 32,
+            "key_ref": openrouter_key_ref,
             "miner_hotkey": "miner-hotkey",
-            "privacy_proof_doc": {"status": "verified"},
-            "privacy_receipt_hash": PRIVACY_RECEIPT_HASH,
-            "runtime_credential_value_hash": "sha256:" + "5" * 64,
-            "management_credential_value_hash": "sha256:" + "6" * 64,
+            "privacy_proof_doc": privacy_proof_doc,
+            "privacy_receipt_hash": guard_graph["root_receipt_hash"],
+            "runtime_credential_value_hash": runtime_credential_hash,
+            "management_credential_value_hash": management_credential_hash,
+        },
+        "openrouter_guard_evidence": {
+            "result": guard_result,
+            "receipt_graph": guard_graph,
+            "root_receipt_hash": guard_graph["root_receipt_hash"],
+            "queue_event_hash": queue_event_hash,
         },
         "expected_event_state_hash": "sha256:" + "3" * 64,
     }
@@ -452,6 +477,62 @@ def _component_registry_graph(component_result):
             boot_identity_hash=boot["boot_identity_hash"],
             input_root="sha256:" + "5" * 64,
             output_root=sha256_bytes(canonical_json(component_result).encode("utf-8")),
+            transport_root_hash=EMPTY_TRANSPORT_ROOT,
+            host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+            artifact_root=EMPTY_ARTIFACT_ROOT,
+            parent_receipt_hashes=(),
+            status="succeeded",
+            failure_code=None,
+            issued_at="2026-07-10T20:00:00Z",
+        ),
+        enclave_pubkey=public_key,
+        sign_digest=private_key.sign,
+    )
+    return build_receipt_graph(
+        root_receipt_hash=receipt["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=(receipt,),
+        transport_attempts=(),
+        host_operations=(),
+    )
+
+
+def _openrouter_guard_graph(guard_result):
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes_raw().hex()
+    boot = create_boot_identity(
+        body=build_boot_identity_body(
+            role="gateway_autoresearch",
+            physical_role="gateway_autoresearch",
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_nonce="3" * 32,
+            signing_pubkey=public_key,
+            transport_pubkey="4" * 64,
+            transport_certificate_hash="sha256:" + "5" * 64,
+            attestation_user_data_hash="sha256:" + "6" * 64,
+            issued_at="2026-07-10T20:00:00Z",
+        ),
+        attestation_document_b64=base64.b64encode(b"attestation").decode("ascii"),
+    )
+    receipt = create_signed_execution_receipt(
+        body=build_execution_receipt_body(
+            role="gateway_autoresearch",
+            purpose="research_lab.openrouter_guard.v2",
+            job_id="openrouter-guard",
+            epoch_id=1,
+            sequence=0,
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_identity_hash=boot["boot_identity_hash"],
+            input_root="sha256:" + "7" * 64,
+            output_root=sha256_json(guard_result),
             transport_root_hash=EMPTY_TRANSPORT_ROOT,
             host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
             artifact_root=EMPTY_ARTIFACT_ROOT,
@@ -648,7 +729,7 @@ def _provider_outcome_graph(provider_outcome_result):
 
 def _parent_receipt_hashes(payload):
     return (
-        PRIVACY_RECEIPT_HASH,
+        payload["openrouter_guard_evidence"]["root_receipt_hash"],
         payload["component_registry_evidence"]["root_receipt_hash"],
         payload["active_model_evidence"]["root_receipt_hash"],
         payload["provider_catalog_evidence"]["root_receipt_hash"],
@@ -1846,7 +1927,10 @@ def test_autoresearch_executor_rejects_uncommitted_privacy_context(tmp_path):
         artifact_seal=_artifact_seal,
     )
     try:
-        with pytest.raises(AutoresearchExecutorV2Error, match="privacy receipt hash"):
+        with pytest.raises(
+            AutoresearchExecutorV2Error,
+            match="privacy receipt hash",
+        ):
             asyncio.run(
                 executor(
                     OP_RUN_CODE_EDIT_LOOP,
@@ -1862,10 +1946,84 @@ def test_autoresearch_executor_rejects_uncommitted_privacy_context(tmp_path):
         executor.close()
 
 
+def test_autoresearch_executor_requires_guard_evidence_ancestry(tmp_path):
+    payload = _payload(tmp_path)
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: {},
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(
+            AutoresearchExecutorV2Error,
+            match="OpenRouter guard receipt is missing",
+        ):
+            asyncio.run(
+                executor(
+                    OP_RUN_CODE_EDIT_LOOP,
+                    payload,
+                    ExecutionContextV2(
+                        job_id="autoresearch-v2:missing-guard-parent",
+                        purpose="research_lab.candidate_decision.v2",
+                        epoch_id=1,
+                    ),
+                )
+            )
+    finally:
+        executor.close()
+
+
+@pytest.mark.parametrize("substitution", ["run", "queue_head"])
+def test_autoresearch_executor_rejects_cross_run_guard_substitution(
+    tmp_path,
+    substitution,
+):
+    payload = _payload(tmp_path)
+    if substitution == "run":
+        payload["run_id"] = "run-v2-other"
+    else:
+        payload["openrouter_guard_evidence"]["queue_event_hash"] = (
+            "sha256:" + "b" * 64
+        )
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: {},
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(
+            AutoresearchExecutorV2Error,
+            match="guard evidence differs from autoresearch run",
+        ):
+            asyncio.run(
+                executor(
+                    OP_RUN_CODE_EDIT_LOOP,
+                    payload,
+                    ExecutionContextV2(
+                        job_id="autoresearch-v2:cross-run-guard",
+                        purpose="research_lab.candidate_decision.v2",
+                        epoch_id=1,
+                        parent_receipt_hashes=_parent_receipt_hashes(payload),
+                    ),
+                )
+            )
+    finally:
+        executor.close()
+
+
 def test_openrouter_guard_returns_only_committed_redacted_key_evidence(monkeypatch):
     runtime_hash = "sha256:" + "5" * 64
     management_hash = "sha256:" + "6" * 64
     key_ref = "encrypted_ref:openrouter:" + "1" * 32
+    run_id = "run-credential-transition"
+    queue_event_hash = "sha256:" + "a" * 64
+    run_state_hash = sha256_json(
+        {"run_id": run_id, "queue_event_hash": queue_event_hash}
+    )
     monkeypatch.setattr(
         "gateway.tee.autoresearch_executor_v2.preflight_openrouter_key",
         lambda _key: {"limit_remaining": "0.00", "usage": 12},
@@ -1904,6 +2062,9 @@ def test_openrouter_guard_returns_only_committed_redacted_key_evidence(monkeypat
                         "data_collection": "deny",
                         "allow_fallbacks": False,
                     },
+                    "run_id": run_id,
+                    "queue_event_hash": queue_event_hash,
+                    "run_state_hash": run_state_hash,
                 },
                 ExecutionContextV2(
                     job_id="autoresearch-v2:guard",
@@ -1919,6 +2080,7 @@ def test_openrouter_guard_returns_only_committed_redacted_key_evidence(monkeypat
         executor.close()
     assert result.output["credit_depleted"] is True
     assert result.output["management_credential_value_hash"] == management_hash
+    assert result.output["run_state_hash"] == run_state_hash
     assert result.output["privacy_proof_doc"]["management_key_hash"] == (
         management_hash.split(":", 1)[1]
     )

@@ -124,8 +124,8 @@ from research_lab.probe_catalog import (
 
 AUTORESEARCH_REQUEST_SCHEMA_VERSION = "leadpoet.autoresearch_request.v2"
 AUTORESEARCH_RESULT_SCHEMA_VERSION = "leadpoet.autoresearch_result.v2"
-OPENROUTER_GUARD_REQUEST_SCHEMA_VERSION = "leadpoet.openrouter_guard_request.v2"
-OPENROUTER_GUARD_RESULT_SCHEMA_VERSION = "leadpoet.openrouter_guard_result.v2"
+OPENROUTER_GUARD_REQUEST_SCHEMA_VERSION = "leadpoet.openrouter_guard_request.v3"
+OPENROUTER_GUARD_RESULT_SCHEMA_VERSION = "leadpoet.openrouter_guard_result.v3"
 STALE_PARENT_REPAIR_REQUEST_SCHEMA_VERSION = (
     "leadpoet.stale_parent_repair_request.v2"
 )
@@ -207,6 +207,7 @@ _REQUEST_FIELDS = {
     "provider_outcome_digest",
     "dev_evaluator_enabled",
     "openrouter_context",
+    "openrouter_guard_evidence",
     "expected_event_state_hash",
 }
 
@@ -1961,6 +1962,9 @@ class AutoresearchExecutorV2:
             "management_credential_value_hash",
             "stage",
             "request_policy",
+            "run_id",
+            "queue_event_hash",
+            "run_state_hash",
         }
         if not isinstance(payload, Mapping) or set(payload) != required:
             raise AutoresearchExecutorV2Error(
@@ -1990,6 +1994,28 @@ class AutoresearchExecutorV2:
             payload.get("miner_hotkey_hash"),
             "miner hotkey hash",
         )
+        run_id = str(payload.get("run_id") or "")
+        if not run_id or len(run_id) > 128 or "\x00" in run_id:
+            raise AutoresearchExecutorV2Error(
+                "OpenRouter guard run identity is invalid"
+            )
+        queue_event_hash = _hash(
+            payload.get("queue_event_hash"),
+            "OpenRouter guard queue event hash",
+        )
+        run_state_hash = _hash(
+            payload.get("run_state_hash"),
+            "OpenRouter guard run state hash",
+        )
+        if run_state_hash != sha256_json(
+            {
+                "run_id": run_id,
+                "queue_event_hash": queue_event_hash,
+            }
+        ):
+            raise AutoresearchExecutorV2Error(
+                "OpenRouter guard run state commitment differs"
+            )
         stage = str(payload.get("stage") or "")
         if not stage or "\x00" in stage:
             raise AutoresearchExecutorV2Error("OpenRouter guard stage is invalid")
@@ -2055,6 +2081,7 @@ class AutoresearchExecutorV2:
             "miner_hotkey_hash": miner_hash,
             "runtime_credential_value_hash": runtime_hash,
             "management_credential_value_hash": management_hash,
+            "run_state_hash": run_state_hash,
             "preflight_status": preflight_status,
             "preflight_error_type": preflight_error_type,
             "credit_depleted": bool(credit_depleted),
@@ -2436,6 +2463,93 @@ class AutoresearchExecutorV2:
         privacy_doc = _mapping(openrouter.get("privacy_proof_doc"), "privacy_proof_doc")
         if not privacy_doc:
             raise AutoresearchExecutorV2Error("OpenRouter privacy proof is empty")
+        guard_evidence = _mapping(
+            payload.get("openrouter_guard_evidence"),
+            "OpenRouter guard evidence",
+        )
+        if set(guard_evidence) != {
+            "result",
+            "receipt_graph",
+            "root_receipt_hash",
+            "queue_event_hash",
+        }:
+            raise AutoresearchExecutorV2Error(
+                "OpenRouter guard evidence fields are invalid"
+            )
+        guard_result = _mapping(
+            guard_evidence.get("result"),
+            "OpenRouter guard result",
+        )
+        if set(guard_result) != {
+            "schema_version",
+            "key_ref_hash",
+            "miner_hotkey_hash",
+            "runtime_credential_value_hash",
+            "management_credential_value_hash",
+            "run_state_hash",
+            "preflight_status",
+            "preflight_error_type",
+            "credit_depleted",
+            "credit_limit_remaining",
+            "privacy_proof_doc",
+        } or guard_result.get("schema_version") != (
+            OPENROUTER_GUARD_RESULT_SCHEMA_VERSION
+        ):
+            raise AutoresearchExecutorV2Error(
+                "OpenRouter guard result fields are invalid"
+            )
+        queue_event_hash = _hash(
+            guard_evidence.get("queue_event_hash"),
+            "OpenRouter guard queue event hash",
+        )
+        expected_run_state_hash = sha256_json(
+            {"run_id": run_id, "queue_event_hash": queue_event_hash}
+        )
+        guard_root = _hash(
+            guard_evidence.get("root_receipt_hash"),
+            "OpenRouter guard receipt hash",
+        )
+        guard_graph = _mapping(
+            guard_evidence.get("receipt_graph"),
+            "OpenRouter guard receipt graph",
+        )
+        validate_receipt_graph(
+            guard_graph,
+            required_purposes=("research_lab.openrouter_guard.v2",),
+        )
+        guard_root_receipts = [
+            receipt
+            for receipt in guard_graph.get("receipts", ())
+            if isinstance(receipt, Mapping)
+            and receipt.get("receipt_hash") == guard_root
+        ]
+        if (
+            guard_graph.get("root_receipt_hash") != guard_root
+            or guard_root != privacy_receipt_hash
+            or guard_result.get("key_ref_hash")
+            != sha256_bytes(str(openrouter.get("key_ref") or "").encode("utf-8"))
+            or guard_result.get("miner_hotkey_hash")
+            != sha256_bytes(
+                str(openrouter.get("miner_hotkey") or "").encode("utf-8")
+            )
+            or guard_result.get("runtime_credential_value_hash")
+            != openrouter["runtime_credential_value_hash"]
+            or guard_result.get("management_credential_value_hash")
+            != openrouter["management_credential_value_hash"]
+            or guard_result.get("run_state_hash") != expected_run_state_hash
+            or guard_result.get("privacy_proof_doc") != privacy_doc
+            or guard_result.get("credit_depleted") is not False
+            or len(guard_root_receipts) != 1
+            or guard_root_receipts[0].get("role") != "gateway_autoresearch"
+            or guard_root_receipts[0].get("purpose")
+            != "research_lab.openrouter_guard.v2"
+            or guard_root_receipts[0].get("status") != "succeeded"
+            or guard_root_receipts[0].get("output_root")
+            != sha256_json(dict(guard_result))
+        ):
+            raise AutoresearchExecutorV2Error(
+                "OpenRouter guard evidence differs from autoresearch run"
+            )
         component_registry = _mapping(
             payload.get("component_registry"), "component_registry"
         )
@@ -3045,6 +3159,7 @@ class AutoresearchExecutorV2:
             ),
             "dev_evaluator_enabled": bool(payload["dev_evaluator_enabled"]),
             "openrouter_context": {**openrouter, "privacy_proof_doc": privacy_doc},
+            "openrouter_guard_receipt_hash": guard_root,
             "expected_event_state_hash": _hash(
                 payload.get("expected_event_state_hash"),
                 "expected_event_state_hash",

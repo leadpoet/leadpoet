@@ -173,6 +173,9 @@ class OpenRouterGuardAuthorityV2:
     credit_depleted: bool
     credit_limit_remaining: Any
     credential_commitments: Mapping[str, str]
+    run_id: str
+    queue_event_hash: str
+    run_state_hash: str
     authority: Mapping[str, Any]
 
 
@@ -195,6 +198,8 @@ async def verify_openrouter_guard_v2(
     *,
     key_ref: str,
     miner_hotkey: str,
+    run_id: str,
+    queue_event_hash: str,
     epoch_id: int,
     worker_index: int = 0,
     require_egress_proxy: bool = False,
@@ -212,6 +217,26 @@ async def verify_openrouter_guard_v2(
         raise AutoresearchAuthorityV2Error(
             "OpenRouter credential envelope belongs to another miner"
         )
+    normalized_run_id = str(run_id or "")
+    normalized_queue_event_hash = str(queue_event_hash or "")
+    if (
+        not normalized_run_id
+        or len(normalized_run_id) > 128
+        or "\x00" in normalized_run_id
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "OpenRouter guard run identity is invalid"
+        )
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized_queue_event_hash):
+        raise AutoresearchAuthorityV2Error(
+            "OpenRouter guard queue event hash is invalid"
+        )
+    run_state_hash = sha256_json(
+        {
+            "run_id": normalized_run_id,
+            "queue_event_hash": normalized_queue_event_hash,
+        }
+    )
     payload = {
         "schema_version": OPENROUTER_GUARD_REQUEST_SCHEMA_VERSION,
         "key_ref": str(key_ref),
@@ -225,6 +250,9 @@ async def verify_openrouter_guard_v2(
         ],
         "stage": str(stage),
         "request_policy": strict_openrouter_provider_policy(),
+        "run_id": normalized_run_id,
+        "queue_event_hash": normalized_queue_event_hash,
+        "run_state_hash": run_state_hash,
     }
     payload_hash = sha256_bytes(canonical_json(payload).encode("utf-8"))
     provider_profile = load_provider_profile_v2(
@@ -298,6 +326,7 @@ async def verify_openrouter_guard_v2(
         "miner_hotkey_hash",
         "runtime_credential_value_hash",
         "management_credential_value_hash",
+        "run_state_hash",
         "preflight_status",
         "preflight_error_type",
         "credit_depleted",
@@ -316,6 +345,7 @@ async def verify_openrouter_guard_v2(
             )
         )
         or result.get("miner_hotkey_hash") != miner_hotkey_hash
+        or result.get("run_state_hash") != run_state_hash
         or not isinstance(result.get("credit_depleted"), bool)
         or not isinstance(result.get("privacy_proof_doc"), Mapping)
     ):
@@ -337,6 +367,9 @@ async def verify_openrouter_guard_v2(
         credit_depleted=bool(result["credit_depleted"]),
         credit_limit_remaining=result.get("credit_limit_remaining"),
         credential_commitments=dict(commitments),
+        run_id=normalized_run_id,
+        queue_event_hash=normalized_queue_event_hash,
+        run_state_hash=run_state_hash,
         authority=dict(outcome),
     )
 
@@ -1044,6 +1077,42 @@ async def run_authoritative_autoresearch_v2(
             "OpenRouter guard receipt lineage is unavailable"
         )
     privacy_receipt_hash = str(guard_receipt["receipt_hash"])
+    guard_result = openrouter_guard.authority.get("result")
+    if not isinstance(guard_result, Mapping):
+        raise AutoresearchAuthorityV2Error(
+            "OpenRouter guard measured result is unavailable"
+        )
+    expected_guard_state_hash = sha256_json(
+        {
+            "run_id": str(run_id),
+            "queue_event_hash": str(openrouter_guard.queue_event_hash),
+        }
+    )
+    guard_root_receipts = [
+        receipt
+        for receipt in guard_graph.get("receipts", ())
+        if isinstance(receipt, Mapping)
+        and receipt.get("receipt_hash") == privacy_receipt_hash
+    ]
+    if (
+        openrouter_guard.run_id != str(run_id)
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(openrouter_guard.queue_event_hash),
+        )
+        or openrouter_guard.run_state_hash != expected_guard_state_hash
+        or guard_result.get("run_state_hash") != expected_guard_state_hash
+        or len(guard_root_receipts) != 1
+        or guard_root_receipts[0].get("role") != "gateway_autoresearch"
+        or guard_root_receipts[0].get("purpose")
+        != "research_lab.openrouter_guard.v2"
+        or guard_root_receipts[0].get("status") != "succeeded"
+        or guard_root_receipts[0].get("output_root")
+        != sha256_json(dict(guard_result))
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "OpenRouter guard measured result differs from run authority"
+        )
     commitments = dict(openrouter_guard.credential_commitments)
     component_graph = component_registry_authority.get("receipt_graph")
     component_receipt = component_registry_authority.get("receipt")
@@ -1258,6 +1327,12 @@ async def run_authoritative_autoresearch_v2(
             "management_credential_value_hash": commitments[
                 "management_credential_value_hash"
             ],
+        },
+        "openrouter_guard_evidence": {
+            "result": dict(guard_result),
+            "receipt_graph": dict(guard_graph),
+            "root_receipt_hash": privacy_receipt_hash,
+            "queue_event_hash": str(openrouter_guard.queue_event_hash),
         },
         "expected_event_state_hash": str(expected_event_state_hash),
     }

@@ -36,6 +36,7 @@ from .store import (
     create_queue_event,
     create_ticket_event,
     ensure_auto_research_loop_transition_event,
+    resume_credit_blocked_queue_event,
     select_all,
     select_many,
     select_one,
@@ -930,7 +931,7 @@ async def requeue_paused_autoresearch_runs(
         "research_loop_run_queue_current",
         columns=(
             "run_id,ticket_id,current_queue_status,current_reason,queue_priority,"
-            "current_event_hash,current_status_at"
+            "current_event_hash,current_event_seq,current_status_at"
         ),
         filters=(("current_queue_status", "paused"),),
         max_rows=10000,
@@ -1643,15 +1644,16 @@ async def requeue_stale_started_autoresearch_runs(
 async def resume_credit_blocked_run(
     *,
     run_id: str,
-    reason: str = "credit_preflight_passed_resume",
+    reason: str = "credit_topup_resume",
     actor_ref: str | None = None,
     dry_run: bool = True,
+    preflight_sequence: int | None = None,
 ) -> dict[str, Any]:
     qrow = await select_one(
         "research_loop_run_queue_current",
         columns=(
             "run_id,ticket_id,current_queue_status,current_reason,queue_priority,"
-            "current_event_hash,current_status_at"
+            "current_event_seq,current_event_hash,current_status_at"
         ),
         filters=(("run_id", run_id),),
     )
@@ -1665,7 +1667,11 @@ async def resume_credit_blocked_run(
             "queue_status": qrow.get("current_queue_status"),
             "reason": qrow.get("current_reason"),
         }
-    key_doc = await _preflight_openrouter_key_for_run(str(qrow["ticket_id"]))
+    key_doc = await _preflight_openrouter_key_for_run(
+        str(qrow["ticket_id"]),
+        run_id=str(qrow["run_id"]),
+        preflight_sequence=preflight_sequence,
+    )
     if not key_doc.get("ok"):
         return {"ok": False, "run_id": run_id, **key_doc}
     plan = {
@@ -1678,17 +1684,18 @@ async def resume_credit_blocked_run(
     if dry_run:
         return {**plan, "dry_run": True}
     config = ResearchLabGatewayConfig.from_env()
-    event = await create_queue_event(
+    event = await resume_credit_blocked_queue_event(
         run_id=str(qrow["run_id"]),
         ticket_id=str(qrow["ticket_id"]),
-        event_type="queued",
+        expected_event_seq=int(qrow.get("current_event_seq") or 0),
+        expected_event_hash=str(qrow.get("current_event_hash") or ""),
         queue_priority=int(qrow.get("queue_priority") or 0),
         worker_ref=actor_ref,
         reason=reason,
         event_doc={
             "schema_version": "1.0",
             **autoresearch_queue_capacity_doc(config),
-            "resume_source": "research_lab_credit_preflight_cli",
+            "resume_source": "miner_credit_topup_resume",
             "previous_reason": qrow.get("current_reason"),
             "previous_event_hash": qrow.get("current_event_hash"),
             "previous_status_at": qrow.get("current_status_at"),
@@ -1698,7 +1705,79 @@ async def resume_credit_blocked_run(
     return {**plan, "dry_run": False, "event_seq": event.get("seq"), "event_hash": event.get("anchored_hash")}
 
 
-async def _preflight_openrouter_key_for_run(ticket_id: str) -> dict[str, Any]:
+async def resolve_openrouter_key_ref_for_run(
+    ticket: Mapping[str, Any],
+    *,
+    run_id: str,
+) -> str:
+    """Resolve one run's credential without consulting another run's events.
+
+    A ticket can own many paid runs and each run can rotate credentials.  The
+    immutable ticket row and ticket event stream therefore cannot identify the
+    credential for a later run.  Read the complete append-only queue history
+    for this exact run, require one consistent credential commitment, and
+    verify that its encrypted reference belongs to the ticket miner.
+    """
+
+    ticket_id = str(ticket.get("ticket_id") or "")
+    miner_hotkey = str(ticket.get("miner_hotkey") or "")
+    if not ticket_id or not miner_hotkey or not str(run_id or ""):
+        raise RuntimeError("Research Lab run credential identity is incomplete")
+    events = await select_all(
+        "research_loop_run_queue_events",
+        columns="run_id,ticket_id,event_type,event_doc,seq",
+        filters=(("run_id", str(run_id)), ("event_type", "queued")),
+        order_by=(("seq", False),),
+        max_rows=10000,
+    )
+    refs: set[str] = set()
+    for event in events:
+        if (
+            str(event.get("run_id") or "") != str(run_id)
+            or str(event.get("ticket_id") or "") != ticket_id
+        ):
+            raise RuntimeError("Research Lab run credential ticket differs")
+        event_doc = event.get("event_doc")
+        if isinstance(event_doc, Mapping):
+            event_ref = str(
+                event_doc.get("miner_openrouter_key_ref") or ""
+            ).strip()
+            if event_ref:
+                refs.add(event_ref)
+    if len(refs) > 1:
+        raise RuntimeError("Research Lab run has conflicting credential refs")
+    key_ref = (
+        next(iter(refs))
+        if refs
+        else str(ticket.get("miner_openrouter_key_ref") or "").strip()
+    )
+    if not key_ref:
+        raise RuntimeError("Research Lab run is missing miner OpenRouter key ref")
+    if key_ref.startswith("encrypted_ref:openrouter:"):
+        key_row = await select_one(
+            "research_lab_openrouter_key_refs",
+            columns="key_ref,miner_hotkey",
+            filters=(("key_ref", key_ref),),
+        )
+        if (
+            not key_row
+            or str(key_row.get("key_ref") or "") != key_ref
+            or str(key_row.get("miner_hotkey") or "") != miner_hotkey
+        ):
+            raise RuntimeError(
+                "encrypted OpenRouter key ref does not belong to ticket miner"
+            )
+    elif not legacy_v1_enabled():
+        raise RuntimeError("encrypted OpenRouter key ref is required")
+    return key_ref
+
+
+async def _preflight_openrouter_key_for_run(
+    ticket_id: str,
+    *,
+    run_id: str,
+    preflight_sequence: int | None = None,
+) -> dict[str, Any]:
     ticket = await select_one(
         "research_loop_ticket_current",
         columns="ticket_id,miner_hotkey,miner_openrouter_key_ref,miner_openrouter_key_handling",
@@ -1707,12 +1786,21 @@ async def _preflight_openrouter_key_for_run(ticket_id: str) -> dict[str, Any]:
     if not ticket:
         return {"ok": False, "error": "ticket_not_found", "ticket_id": ticket_id}
     try:
+        key_ref = await resolve_openrouter_key_ref_for_run(
+            ticket,
+            run_id=run_id,
+        )
+        miner_hotkey = str(ticket.get("miner_hotkey") or "")
+        sequence = int(time.time()) if preflight_sequence is None else int(
+            preflight_sequence
+        )
+        if sequence < 0:
+            raise RuntimeError("OpenRouter preflight sequence must be nonnegative")
         if legacy_v1_enabled():
-            raw_key = await _resolve_openrouter_key_for_ticket(ticket)
+            ticket_for_key = {**ticket, "miner_openrouter_key_ref": key_ref}
+            raw_key = await _resolve_openrouter_key_for_ticket(ticket_for_key)
             doc = await asyncio.to_thread(preflight_openrouter_key, raw_key)
         else:
-            key_ref = str(ticket.get("miner_openrouter_key_ref") or "")
-            miner_hotkey = str(ticket.get("miner_hotkey") or "")
             if not key_ref.startswith("encrypted_ref:openrouter:") or not miner_hotkey:
                 raise RuntimeError("encrypted OpenRouter key ref is required")
             from gateway.research_lab.attested_coordinator_v2 import (
@@ -1730,7 +1818,7 @@ async def _preflight_openrouter_key_for_run(ticket_id: str) -> dict[str, Any]:
                 key_ref=key_ref,
                 miner_hotkey=miner_hotkey,
                 epoch_id=int(epoch_id),
-                sequence=0,
+                sequence=sequence,
             )
             result = authority.get("result")
             if not isinstance(result, Mapping) or not isinstance(
@@ -1753,6 +1841,7 @@ async def _preflight_openrouter_key_for_run(ticket_id: str) -> dict[str, Any]:
         "limit": doc.get("limit"),
         "limit_remaining": remaining,
         "limit_reset": doc.get("limit_reset"),
+        "preflight_sequence": sequence,
     }
 
 

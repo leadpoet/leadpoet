@@ -171,6 +171,18 @@ def _artifact_identity(active: Any) -> tuple[str, str, str, str]:
     )
 
 
+def _state_artifact_identity(
+    state: Mapping[str, Any],
+) -> tuple[str, str, str, str] | None:
+    identity = (
+        str(state.get("active_image_digest") or ""),
+        str(state.get("active_git_commit_sha") or ""),
+        str(state.get("active_config_hash") or ""),
+        str(state.get("active_manifest_hash") or ""),
+    )
+    return identity if all(identity) else None
+
+
 def _readiness_matches_artifact(
     readiness: Mapping[str, Any], identity: tuple[str, str, str, str]
 ) -> bool:
@@ -223,8 +235,12 @@ async def maybe_refresh_dev_snapshot(
 ) -> dict[str, Any]:
     """Check daily and refresh weekly; a failed run never mutates current.json."""
 
-    if int(worker_index) != 0:
-        return {"status": "skipped", "reason": "not_refresh_worker"}
+    # Paid runs may be claimed by any hosted worker.  Every worker therefore
+    # has to observe the active-model identity before honoring the shared
+    # cadence state; otherwise a newly promoted model can strand a run on a
+    # nonzero worker until worker zero happens to refresh.  The process-shared
+    # refresh lock below still guarantees one publisher across contenders.
+    _ = int(worker_index)
     if tree_policy.mode != "active":
         return {"status": "skipped", "reason": "tree_mode_not_active"}
     if not snapshot_auto_refresh_enabled():
@@ -241,7 +257,29 @@ async def maybe_refresh_dev_snapshot(
     )
     last_check = float(state.get("last_check_unix") or 0.0)
     retry_after = retry_interval if state.get("last_error") else check_interval
-    if last_check and timestamp - last_check < retry_after:
+    try:
+        active_probe = await active_loader(config, register_bootstrap=False)
+        identity_probe = _artifact_identity(active_probe)
+    except Exception:
+        # The locked path below records the normal fail-closed error state.  A
+        # transient authority read after an already-recorded failure observes
+        # the short retry cadence rather than hammering every worker preclaim.
+        # A healthy state is never trusted for this shortcut: the active model
+        # may have changed while authority was temporarily unreadable.
+        identity_probe = None
+        if (
+            state.get("last_error")
+            and _state_artifact_identity(state) is not None
+            and last_check
+            and timestamp - last_check < retry_interval
+        ):
+            return {"status": "skipped", "reason": "failed_check_retry_not_due"}
+    if (
+        identity_probe is not None
+        and _state_artifact_identity(state) == identity_probe
+        and last_check
+        and timestamp - last_check < retry_after
+    ):
         return {"status": "skipped", "reason": "check_not_due"}
 
     with _exclusive_refresh_lock(state_path) as acquired:
@@ -250,15 +288,55 @@ async def maybe_refresh_dev_snapshot(
         state = _load_state(state_path)
         last_check = float(state.get("last_check_unix") or 0.0)
         retry_after = retry_interval if state.get("last_error") else check_interval
-        if last_check and timestamp - last_check < retry_after:
-            return {"status": "skipped", "reason": "check_not_due_after_lock"}
 
         pointer_uri = str(
             os.getenv(SNAPSHOT_URI_ENV) or DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
         ).strip()
+        failure_base = {
+            key: state[key]
+            for key in (
+                "active_image_digest",
+                "active_git_commit_sha",
+                "active_config_hash",
+                "active_manifest_hash",
+                "snapshot_manifest_hash",
+                "snapshot_ready",
+                "last_refresh_unix",
+                "last_refresh_at",
+            )
+            if key in state
+        }
         try:
             active_before = await active_loader(config, register_bootstrap=False)
             identity_before = _artifact_identity(active_before)
+            if (
+                _state_artifact_identity(state) == identity_before
+                and last_check
+                and timestamp - last_check < retry_after
+            ):
+                return {
+                    "status": "skipped",
+                    "reason": "check_not_due_after_lock",
+                }
+            base_state = {
+                "schema_version": "research_lab.dev_snapshot_refresh_state.v1",
+                "last_check_unix": timestamp,
+                "last_check_at": datetime.fromtimestamp(
+                    timestamp, tz=timezone.utc
+                ).isoformat(),
+                "active_image_digest": identity_before[0],
+                "active_git_commit_sha": identity_before[1],
+                "active_config_hash": identity_before[2],
+                "active_manifest_hash": identity_before[3],
+                "snapshot_manifest_hash": str(
+                    state.get("snapshot_manifest_hash") or ""
+                ),
+                "snapshot_ready": bool(state.get("snapshot_ready")),
+            }
+            failure_base = {
+                **failure_base,
+                **base_state,
+            }
             readiness = await asyncio.to_thread(
                 readiness_loader,
                 pointer_uri,
@@ -267,14 +345,13 @@ async def maybe_refresh_dev_snapshot(
             )
             reason = _refresh_reason(readiness, identity_before)
             base_state = {
-                "schema_version": "research_lab.dev_snapshot_refresh_state.v1",
-                "last_check_unix": timestamp,
-                "last_check_at": datetime.fromtimestamp(
-                    timestamp, tz=timezone.utc
-                ).isoformat(),
-                "active_image_digest": identity_before[0],
+                **base_state,
                 "snapshot_manifest_hash": str(readiness.get("manifest_hash") or ""),
                 "snapshot_ready": bool(readiness.get("ready")),
+            }
+            failure_base = {
+                **failure_base,
+                **base_state,
             }
             if not reason:
                 healthy = {**base_state, "status": "healthy", "last_error": ""}
@@ -416,6 +493,7 @@ async def maybe_refresh_dev_snapshot(
             return completed
         except Exception as exc:
             failure = {
+                **failure_base,
                 "schema_version": "research_lab.dev_snapshot_refresh_state.v1",
                 "status": "failed",
                 "last_check_unix": timestamp,

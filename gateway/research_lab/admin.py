@@ -479,7 +479,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicitly resume a credit-blocked run only after OpenRouter key preflight passes",
     )
     resume_credit.add_argument("--run-id", required=True)
-    resume_credit.add_argument("--reason", default="credit_preflight_passed_resume")
+    resume_credit.add_argument("--reason", default="credit_topup_resume")
+    resume_credit.add_argument("--preflight-sequence", type=int)
     resume_credit.add_argument("--actor-ref", default=default_actor_ref())
     resume_credit.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     resume_credit.add_argument("--write", dest="dry_run", action="store_false")
@@ -1982,6 +1983,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             reason=args.reason,
             actor_ref=args.actor_ref,
             dry_run=args.dry_run,
+            preflight_sequence=args.preflight_sequence,
         )
     if args.command == "award-failed-run-reimbursements":
         from .recovery import award_failed_run_reimbursements

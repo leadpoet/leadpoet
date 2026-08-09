@@ -2033,7 +2033,20 @@ async def resume_research_lab_credit_blocked(payload: ResearchLabResumeCreditBlo
 
     from .recovery import resume_credit_blocked_runs_for_miner
 
-    result = await resume_credit_blocked_runs_for_miner(payload.miner_hotkey, run_ids=payload.run_ids)
+    from leadpoet_canonical.attested_v2 import sha256_json
+
+    # Bind the measured preflight to the complete signed resume attempt.  A
+    # timestamp alone can collide when a miner tops up and retries within the
+    # same second, replaying the prior terminal zero-credit enclave job.  The
+    # first 60 commitment bits remain within signed BIGINT range while exact
+    # request retries deterministically reuse the same job identity.
+    signed_attempt_hash = sha256_json(payload.signed_payload())
+    preflight_sequence = int(signed_attempt_hash.split(":", 1)[1][:15], 16)
+    result = await resume_credit_blocked_runs_for_miner(
+        payload.miner_hotkey,
+        run_ids=payload.run_ids,
+        preflight_sequence=preflight_sequence,
+    )
     return ResearchLabResumeCreditBlockedResponse(**result)
 
 

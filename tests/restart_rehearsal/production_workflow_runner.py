@@ -5244,6 +5244,16 @@ print(",".join((
 def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     """Keep measured sandbox failures inside the bounded baseline retry path."""
 
+    import httpx
+
+    from Leadpoet.utils.subnet_epoch import ensure_cutover_manifest_configured
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+    from gateway.tee.research_lab_runtime_config_v2 import (
+        build_research_lab_execution_config,
+    )
+    from gateway.tee.scoring_executor import OP_QUALIFICATION_COMPANY_SCORES
+    from gateway.tee.scoring_executor_v2 import ScoringExecutorV2
     from gateway.research_lab.attested_artifacts_v2 import (
         AttestedArtifactPersistenceV2Error,
         _validate_transport_artifact_commitments,
@@ -5265,6 +5275,8 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
         PrivateModelRuntimeError,
         context_with_runtime_options,
     )
+    from research_lab.eval import evaluator
+    from leadpoet_canonical.attested_v2 import build_transport_attempt
 
     failures = [
         AttestedScoringV2Error(
@@ -5401,6 +5413,117 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     if not _baseline_summary_checkpointable(recovered_result):
         raise RuntimeError("recovered ICP result remained checkpoint ineligible")
 
+    terminal_hash = sha256_json({"rehearsal": "handled-company-transport"})
+
+    def failed_public_web(request: Mapping[str, Any]) -> dict[str, Any]:
+        attempt = build_transport_attempt(
+            request_id="1" * 32,
+            logical_operation_id=request["logical_operation_id"],
+            job_id=request["job_id"],
+            purpose=request["purpose"],
+            provider_id=request["provider_id"],
+            attempt_number=request["attempt_number"],
+            method=request["method"],
+            destination_host="example.com",
+            destination_port=443,
+            path_hash=terminal_hash,
+            nonsecret_headers_hash=terminal_hash,
+            body_hash=terminal_hash,
+            credential_ref_hash=terminal_hash,
+            egress_proxy_ref_hash=terminal_hash,
+            retry_policy_hash=terminal_hash,
+            timeout_ms=request["timeout_ms"],
+            started_at=NOW,
+            terminal_status="transport_failure",
+            http_status=None,
+            response_hash=None,
+            request_artifact_hash=terminal_hash,
+            response_artifact_hash=None,
+            tls_peer_chain_hash=None,
+            tls_protocol=None,
+            failure_code="connection_reset",
+            completed_at=NOW,
+        )
+        return {
+            "terminal_status": "transport_failure",
+            "http_status": None,
+            "headers": {},
+            "body_b64": "",
+            "failure_code": "connection_reset",
+            "encrypted_request_artifact_id": terminal_hash,
+            "transport_attempt": attempt,
+        }
+
+    class HandledEvidenceFailureScorer:
+        async def score_with_breakdowns(
+            self,
+            _companies: Any,
+            _icp: Any,
+            _is_reference_model: Any,
+        ) -> list[dict[str, Any]]:
+            try:
+                async with httpx.AsyncClient() as client:
+                    await client.get("https://example.com/evidence")
+            except httpx.TransportError:
+                return [
+                    {
+                        "final_score": 0.0,
+                        "failure_reason": (
+                            "Company verification failed: website unreachable: "
+                            "connection reset"
+                        ),
+                    }
+                ]
+            raise RuntimeError("signed transport failure did not reach the scorer")
+
+    original_scorer = evaluator.QualificationStyleCompanyScorer
+    evaluator.QualificationStyleCompanyScorer = HandledEvidenceFailureScorer
+    scorer_context = ExecutionContextV2(
+        job_id="rehearsal-company-score-handled-transport",
+        purpose="research_lab.company_score.v2",
+        epoch_id=30_000,
+    )
+    scorer_environment = dict(os.environ)
+    ensure_cutover_manifest_configured(scorer_environment)
+    scorer_executor = ScoringExecutorV2(
+        provider_execute=failed_public_web,
+        retry_policy_hashes={"public_web": terminal_hash},
+        execution_config=build_research_lab_execution_config(
+            config=ResearchLabGatewayConfig.from_env(),
+            environment=scorer_environment,
+        ),
+    )
+    try:
+        handled_result = asyncio.run(
+            scorer_executor(
+                OP_QUALIFICATION_COMPANY_SCORES,
+                {
+                    "companies": [{"company_name": "Example"}],
+                    "icp": {"industry": "Software"},
+                    "is_reference_model": True,
+                    "provider_execution_mode": "live_enclave",
+                },
+                scorer_context,
+            )
+        )
+    finally:
+        scorer_executor.close()
+        evaluator.QualificationStyleCompanyScorer = original_scorer
+    handled_breakdowns = handled_result.output.get("breakdowns") or []
+    if (
+        handled_result.output.get("scores") != [0.0]
+        or len(handled_breakdowns) != 1
+        or not evaluator.scorer_breakdown_has_retryable_infrastructure_failure(
+            handled_breakdowns[0]
+        )
+        or len(scorer_context.transport_attempts) != 1
+        or scorer_context.transport_attempts[0].get("terminal_status")
+        != "transport_failure"
+    ):
+        raise RuntimeError(
+            "handled company transport failure left the bounded retry contract"
+        )
+
     request_hash = "sha256:" + "1" * 64
     response_hash = "sha256:" + "2" * 64
     _validate_transport_artifact_commitments(
@@ -5428,6 +5551,7 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
         "configured_runtime_finalization_reserve_bound": True,
         "signed_http_retry_selected": True,
         "retry_checkpoint_recovery_bound": True,
+        "handled_company_transport_failure_retryable": True,
         "content_addressed_artifact_persistence_bound": True,
         "missing_distinct_artifact_rejected": True,
     }
@@ -7730,6 +7854,11 @@ def main() -> int:
                 "rebenchmark-sandbox-retry",
                 {},
             ).get("retry_checkpoint_recovery_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-sandbox-retry",
+                {},
+            ).get("handled_company_transport_failure_retryable")
             is True
             and behavior_evidence.get(
                 "rebenchmark-sandbox-retry",

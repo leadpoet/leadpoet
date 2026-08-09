@@ -8,6 +8,7 @@ from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.scoring_executor import (
     OP_BENCHMARK_ICP_SCORE,
+    OP_QUALIFICATION_COMPANY_SCORES,
     execute_scoring_operation,
 )
 from gateway.tee.scoring_executor_v2 import (
@@ -48,6 +49,46 @@ from tests.private_model_artifact_fixtures import install_reviewed_consumer_snap
 
 
 HASH = "sha256:" + "a" * 64
+
+
+def _transport_failure_result(request, *, request_id: str = "1" * 32):
+    attempt = build_transport_attempt(
+        request_id=request_id,
+        logical_operation_id=request["logical_operation_id"],
+        job_id=request["job_id"],
+        purpose=request["purpose"],
+        provider_id=request["provider_id"],
+        attempt_number=request["attempt_number"],
+        method=request["method"],
+        destination_host="example.com",
+        destination_port=443,
+        path_hash=HASH,
+        nonsecret_headers_hash=HASH,
+        body_hash=HASH,
+        credential_ref_hash=HASH,
+        egress_proxy_ref_hash=HASH,
+        retry_policy_hash=HASH,
+        timeout_ms=request["timeout_ms"],
+        started_at="2026-07-10T20:00:00Z",
+        terminal_status="transport_failure",
+        http_status=None,
+        response_hash=None,
+        request_artifact_hash=HASH,
+        response_artifact_hash=None,
+        tls_peer_chain_hash=None,
+        tls_protocol=None,
+        failure_code="connection_reset",
+        completed_at="2026-07-10T20:00:01Z",
+    )
+    return {
+        "terminal_status": "transport_failure",
+        "http_status": None,
+        "headers": {},
+        "body_b64": "",
+        "failure_code": "connection_reset",
+        "encrypted_request_artifact_id": HASH,
+        "transport_attempt": attempt,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -131,6 +172,122 @@ def test_scoring_executor_installs_openrouter_broker_sentinels(monkeypatch):
         assert _get_openrouter_key() == "leadpoet-v2-brokered-credential"
     finally:
         executor.close()
+
+
+@pytest.mark.asyncio
+async def test_company_scoring_preserves_handled_signed_transport_failure(
+    monkeypatch,
+):
+    from research_lab.eval import evaluator
+
+    class HandledEvidenceFailureScorer:
+        async def score_with_breakdowns(
+            self,
+            _companies,
+            _icp,
+            _is_reference_model,
+        ):
+            try:
+                async with httpx.AsyncClient() as client:
+                    await client.get("https://example.com/evidence")
+            except httpx.TransportError:
+                return [
+                    {
+                        "final_score": 0.0,
+                        "failure_reason": (
+                            "Company verification failed: website unreachable: "
+                            "connection reset"
+                        ),
+                    }
+                ]
+            raise AssertionError("transport failure was not delivered to the scorer")
+
+    monkeypatch.setattr(
+        evaluator,
+        "QualificationStyleCompanyScorer",
+        HandledEvidenceFailureScorer,
+    )
+    context = ExecutionContextV2(
+        job_id="company-score-handled-transport",
+        purpose="research_lab.company_score.v2",
+        epoch_id=1,
+    )
+    executor = ScoringExecutorV2(
+        provider_execute=_transport_failure_result,
+        retry_policy_hashes={"public_web": HASH},
+    )
+    try:
+        result = await executor(
+            OP_QUALIFICATION_COMPANY_SCORES,
+            {
+                "companies": [{"company_name": "Example"}],
+                "icp": {"industry": "Software"},
+                "is_reference_model": True,
+                "provider_execution_mode": "live_enclave",
+            },
+            context,
+        )
+    finally:
+        executor.close()
+
+    assert result.output["scores"] == [0.0]
+    assert result.output["breakdowns"][0]["failure_reason"] == (
+        "Company verification failed: website unreachable: connection reset"
+    )
+    assert evaluator.scorer_breakdown_has_retryable_infrastructure_failure(
+        result.output["breakdowns"][0]
+    )
+    assert len(context.transport_attempts) == 1
+    assert context.transport_attempts[0]["terminal_status"] == (
+        "transport_failure"
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_company_scoring_still_rejects_handled_transport_failure(
+    monkeypatch,
+):
+    from gateway.tee import scoring_executor_v2
+
+    async def handled_transport_failure(_operation, _payload):
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.get("https://example.com/evidence")
+        except httpx.TransportError:
+            return {"score": 0.0}
+        raise AssertionError("transport failure was not delivered to the operation")
+
+    monkeypatch.setattr(
+        scoring_executor_v2,
+        "execute_scoring_operation",
+        handled_transport_failure,
+    )
+    context = ExecutionContextV2(
+        job_id="benchmark-score-handled-transport",
+        purpose="research_lab.benchmark.v2",
+        epoch_id=1,
+    )
+    executor = ScoringExecutorV2(
+        provider_execute=_transport_failure_result,
+        retry_policy_hashes={"public_web": HASH},
+    )
+    try:
+        with pytest.raises(
+            ProviderClientV2Error,
+            match="provider transport did not authenticate",
+        ):
+            await executor(
+                OP_BENCHMARK_ICP_SCORE,
+                {"scores": [0.0]},
+                context,
+            )
+    finally:
+        executor.close()
+
+    assert len(context.transport_attempts) == 1
+    assert context.transport_attempts[0]["terminal_status"] == (
+        "transport_failure"
+    )
 
 
 @pytest.mark.asyncio

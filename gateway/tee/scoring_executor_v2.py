@@ -411,6 +411,15 @@ class ScoringExecutorV2:
             retry_policy_hashes=self._retry_policy_hashes,
             terminal_sink=context.record_transport,
             artifact_sink=context.record_artifact,
+            # Qualification scoring deliberately converts an unavailable
+            # evidence URL into a scored verification failure. Preserve the
+            # signed transport terminal in the receipt graph without letting
+            # the scope finalizer replace that authoritative scorer result
+            # with an execution failure. Every other scoring operation keeps
+            # the default fail-closed transport policy.
+            allow_transport_failures=(
+                operation == OP_QUALIFICATION_COMPANY_SCORES
+            ),
         ):
             if operation == OP_QUALIFICATION_EMAIL_EVIDENCE_V2:
                 return await self._qualification_executor.execute_email_evidence(

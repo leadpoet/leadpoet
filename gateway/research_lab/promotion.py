@@ -639,7 +639,7 @@ async def load_active_private_model(
             try:
                 version_row, _event = await create_private_model_version(
                     artifact_manifest=artifact.to_dict(),
-                    manifest_uri=config.private_model_manifest_uri,
+                    manifest_uri=artifact.manifest_uri,
                     redacted_version_doc={
                         "source": "bootstrap_private_model_manifest_uri",
                         "model_artifact_hash": artifact.model_artifact_hash,

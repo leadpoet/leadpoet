@@ -682,6 +682,8 @@ async def test_lineage_empty_with_flag_registers_bootstrap(store, bootstrap_arti
     assert len(store.version_writes) == 1
     assert store.version_writes[0]["version_status"] == "active"
     assert store.version_writes[0]["reason"] == "bootstrap_private_model_manifest_uri"
+    assert store.version_writes[0]["manifest_uri"] == bootstrap_artifact.manifest_uri
+    assert store.version_writes[0]["manifest_uri"] != _config().private_model_manifest_uri
 
 
 async def test_lineage_empty_register_bootstrap_false_never_writes(store, bootstrap_artifact, monkeypatch):

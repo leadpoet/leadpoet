@@ -709,14 +709,13 @@ print(json.dumps({
     assert not (snapshot_dir / "record_failures.jsonl").exists()
 
 
-def test_record_bootstrap_persists_live_transport_failure_when_model_catches_it(
-    tmp_path,
-):
+def test_urllib_url_error_is_recorded_reused_and_replayed(tmp_path):
     snapshot_dir = tmp_path / "record_set"
-    probe = r'''
+    record_probe = r'''
 import json
 import os
 import socket
+import urllib.error
 import urllib.request
 
 sock = socket.socket()
@@ -725,11 +724,168 @@ port = sock.getsockname()[1]
 sock.close()
 try:
     urllib.request.urlopen("http://127.0.0.1:%d/search?q=bounded" % port, timeout=1)
-except Exception:
-    pass
+except urllib.error.URLError as exc:
+    outcome = {
+        "error_type": type(exc).__name__,
+        "reason_type": type(exc.reason).__name__,
+    }
+else:
+    raise AssertionError("connection refusal did not reach urllib")
+snapshots = os.path.join(os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "snapshots")
+failures = os.path.join(os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "record_failures.jsonl")
+print(json.dumps({
+    "failure_file_exists": os.path.exists(failures),
+    "outcome": outcome,
+    "snapshot_count": len(os.listdir(snapshots)),
+    "url": "http://127.0.0.1:%d/search?q=bounded" % port,
+}))
+'''
+    recorded = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + record_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+
+    assert recorded.returncode == 0, recorded.stderr
+    recorded_doc = json.loads(recorded.stdout)
+    expected = {
+        "error_type": "URLError",
+        "reason_type": "ConnectionRefusedError",
+    }
+    assert recorded_doc["outcome"] == expected
+    assert recorded_doc["snapshot_count"] == 1
+    assert recorded_doc["failure_file_exists"] is False
+
+    replay_probe = (
+        "\nimport json, urllib.error, urllib.request\n"
+        "try:\n"
+        f"    urllib.request.urlopen({recorded_doc['url']!r}, timeout=1)\n"
+        "except urllib.error.URLError as exc:\n"
+        "    print(json.dumps({'error_type': type(exc).__name__, "
+        "'reason_type': type(exc.reason).__name__}))\n"
+        "else:\n"
+        "    raise AssertionError('replayed URL error was not preserved')\n"
+    )
+    for bootstrap, extra_env in (
+        (
+            dev_record_bootstrap(),
+            {SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true"},
+        ),
+        (dev_replay_bootstrap(), {}),
+    ):
+        replayed = subprocess.run(
+            [sys.executable, "-c", bootstrap + replay_probe],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": "", **extra_env},
+            check=False,
+        )
+        assert replayed.returncode == 0, replayed.stderr
+        assert json.loads(replayed.stdout) == expected
+    assert not (snapshot_dir / "record_failures.jsonl").exists()
+
+
+def test_direct_urllib_timeout_is_recorded_and_replayed(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    record_probe = r'''
+import json
+import os
+import socket
+import threading
+import time
+import urllib.request
+
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+
+def accept_without_responding():
+    connection, _ = listener.accept()
+    try:
+        time.sleep(1)
+    finally:
+        connection.close()
+
+threading.Thread(target=accept_without_responding, daemon=True).start()
+url = "http://127.0.0.1:%d/probe" % listener.getsockname()[1]
+try:
+    urllib.request.urlopen(url, timeout=0.05)
+except TimeoutError as exc:
+    outcome = {"error_type": type(exc).__name__}
+else:
+    raise AssertionError("timeout did not reach urllib")
+finally:
+    listener.close()
+print(json.dumps({
+    "failure_file_exists": os.path.exists(os.path.join(
+        os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "record_failures.jsonl"
+    )),
+    "outcome": outcome,
+}))
+'''
+    recorded = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + record_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+    assert recorded.returncode == 0, recorded.stderr
+    assert json.loads(recorded.stdout) == {
+        "failure_file_exists": False,
+        "outcome": {"error_type": "TimeoutError"},
+    }
+
+    replay_probe = r'''
+import json
+import urllib.request
+try:
+    urllib.request.urlopen("http://127.0.0.1:1/probe", timeout=1)
+except TimeoutError as exc:
+    print(json.dumps({"error_type": type(exc).__name__}))
+else:
+    raise AssertionError("replayed timeout was not preserved")
+'''
+    snapshot_files = list((snapshot_dir / "snapshots").glob("*.json"))
+    assert len(snapshot_files) == 1
+    snapshot_text = snapshot_files[0].read_text(encoding="utf-8")
+    assert "live timeout detail" not in snapshot_text
+    snapshot = json.loads(snapshot_text)
+    replay_url = snapshot["request_key"].split("|")[2]
+    replay_probe = replay_probe.replace(
+        "http://127.0.0.1:1/probe", "http://" + replay_url
+    )
+    replayed = subprocess.run(
+        [sys.executable, "-c", dev_replay_bootstrap() + replay_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+    assert replayed.returncode == 0, replayed.stderr
+    assert json.loads(replayed.stdout) == {"error_type": "TimeoutError"}
+
+
+def test_unsupported_urllib_failure_remains_terminal_recording_evidence(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import json
+import os
+import urllib.request
+
+try:
+    urllib.request.urlopen(None)
+except Exception as exc:
+    caught_type = type(exc).__name__
 with open(os.path.join(os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "record_failures.jsonl"), "r", encoding="utf-8") as handle:
     rows = [json.loads(line) for line in handle if line.strip()]
-print(json.dumps(rows))
+print(json.dumps({"caught_type": caught_type, "rows": rows}))
 '''
     completed = subprocess.run(
         [sys.executable, "-c", dev_record_bootstrap() + probe],
@@ -741,10 +897,13 @@ print(json.dumps(rows))
     )
 
     assert completed.returncode == 0, completed.stderr
-    failures = json.loads(completed.stdout)
+    result = json.loads(completed.stdout)
+    failures = result["rows"]
     assert len(failures) == 1
-    assert failures[0]["reason"].startswith("urllib_live_request_error:")
-    assert failures[0]["request_key"].startswith("127.0.0.1:")
+    assert failures[0]["reason"] == (
+        "urllib_live_request_error:" + result["caught_type"]
+    )
+    assert failures[0]["request_key"].startswith("unknown|GET|")
 
 
 def test_replay_bootstrap_inert_without_snapshot_dir_env():
@@ -806,6 +965,51 @@ def test_inprocess_urllib_replay_preserves_http_error(tmp_path):
     assert raised.value.reason == "Missing"
     assert raised.value.headers["content-type"] == "application/json"
     assert raised.value.read() == b'{"detail": "not found"}'
+
+
+def test_inprocess_urllib_replay_preserves_dns_failure(tmp_path):
+    import socket
+    import urllib.error
+    import urllib.request
+
+    recorder = _record_store(tmp_path)
+    url = "https://unresolvable.invalid/probe"
+    recorder.record_urllib_transport_error(
+        build_snapshot_request("GET", url),
+        error=urllib.error.URLError(
+            socket.gaierror(socket.EAI_NONAME, "live detail is not persisted")
+        ),
+    )
+    snapshot_text = next((tmp_path / "snapshot_set" / "snapshots").iterdir()).read_text(
+        encoding="utf-8"
+    )
+    assert "live detail" not in snapshot_text
+
+    with _replay_store(tmp_path).replay_installed():
+        with pytest.raises(urllib.error.URLError) as raised:
+            urllib.request.urlopen(url)
+
+    assert isinstance(raised.value.reason, socket.gaierror)
+    assert "live detail" not in str(raised.value)
+
+
+def test_inprocess_urllib_transport_recording_rejects_http_error(tmp_path):
+    import io
+    import urllib.error
+
+    recorder = _record_store(tmp_path)
+    request = build_snapshot_request("GET", "https://example.invalid/missing")
+    with pytest.raises(DevSnapshotStoreError, match="unsupported urllib transport"):
+        recorder.record_urllib_transport_error(
+            request,
+            error=urllib.error.HTTPError(
+                request.endpoint,
+                404,
+                "Missing",
+                {},
+                io.BytesIO(b"missing"),
+            ),
+        )
 
 
 async def test_replay_seam_serves_httpx_async_client(tmp_path):

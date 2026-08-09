@@ -90,6 +90,94 @@ READY_NAME = "READY.json"
 POINTER_NAME = "current.json"
 RECORD_FAILURES_NAME = "record_failures.jsonl"
 RECORDED_PROVIDER_MODELS_NAME = "provider_models.jsonl"
+URLLIB_TRANSPORT_OUTCOME = "urllib_transport_error"
+
+
+def _urllib_transport_response(error: BaseException) -> dict[str, Any] | None:
+    """Return a bounded replay document for supported urllib failures."""
+
+    import socket
+    import ssl
+    from urllib.error import HTTPError, URLError
+
+    if isinstance(error, TimeoutError):
+        return {
+            "outcome": URLLIB_TRANSPORT_OUTCOME,
+            "error_type": "TimeoutError",
+            "reason_type": "timeout",
+        }
+    if isinstance(error, HTTPError) or not isinstance(error, URLError):
+        return None
+
+    reason = error.reason
+    if isinstance(reason, TimeoutError):
+        reason_type = "timeout"
+    elif isinstance(reason, socket.gaierror):
+        reason_type = "dns"
+    elif isinstance(reason, ConnectionRefusedError):
+        reason_type = "connection_refused"
+    elif isinstance(reason, ConnectionResetError):
+        reason_type = "connection_reset"
+    elif isinstance(reason, ConnectionAbortedError):
+        reason_type = "connection_aborted"
+    elif isinstance(reason, ssl.SSLCertVerificationError):
+        reason_type = "tls_certificate"
+    elif isinstance(reason, ssl.SSLError):
+        reason_type = "tls"
+    elif isinstance(reason, OSError):
+        reason_type = "os_error"
+    elif isinstance(reason, str):
+        reason_type = "message"
+    else:
+        return None
+    return {
+        "outcome": URLLIB_TRANSPORT_OUTCOME,
+        "error_type": "URLError",
+        "reason_type": reason_type,
+    }
+
+
+def _raise_urllib_transport_response(doc: Mapping[str, Any]) -> None:
+    """Reconstruct a supported urllib failure without persisting its message."""
+
+    import socket
+    import ssl
+    from urllib.error import URLError
+
+    if doc.get("outcome") != URLLIB_TRANSPORT_OUTCOME:
+        return
+    error_type = str(doc.get("error_type") or "")
+    reason_type = str(doc.get("reason_type") or "")
+    if error_type == "TimeoutError" and reason_type == "timeout":
+        raise TimeoutError("replayed urllib transport timeout")
+    if error_type != "URLError":
+        raise DevSnapshotStoreError("unsupported urllib transport snapshot")
+
+    reason_factories: dict[str, Callable[[], Any]] = {
+        "timeout": lambda: TimeoutError("replayed urllib transport timeout"),
+        "dns": lambda: socket.gaierror(
+            getattr(socket, "EAI_AGAIN", -3), "replayed name resolution failure"
+        ),
+        "connection_refused": lambda: ConnectionRefusedError(
+            "replayed connection refusal"
+        ),
+        "connection_reset": lambda: ConnectionResetError(
+            "replayed connection reset"
+        ),
+        "connection_aborted": lambda: ConnectionAbortedError(
+            "replayed connection abort"
+        ),
+        "tls_certificate": lambda: ssl.SSLCertVerificationError(
+            "replayed TLS certificate failure"
+        ),
+        "tls": lambda: ssl.SSLError("replayed TLS failure"),
+        "os_error": lambda: OSError("replayed urllib operating-system failure"),
+        "message": lambda: "replayed urllib transport failure",
+    }
+    factory = reason_factories.get(reason_type)
+    if factory is None:
+        raise DevSnapshotStoreError("unsupported urllib transport reason snapshot")
+    raise URLError(factory())
 
 
 def build_snapshot_pointer_document(
@@ -437,6 +525,33 @@ class ProviderSnapshotStore:
         reason_text = str(reason or "").strip()
         if reason_text:
             response["reason"] = reason_text[:240]
+        return self._record_snapshot(request, response)
+
+    def record_urllib_transport_error(
+        self,
+        request: SnapshotRequest,
+        *,
+        error: BaseException,
+    ) -> dict[str, Any]:
+        """Persist a supported urllib transport outcome for exact replay."""
+
+        if self.mode != MODE_RECORD:
+            raise DevSnapshotStoreError(
+                "record_urllib_transport_error requires a record-mode store"
+            )
+        response = _urllib_transport_response(error)
+        if response is None:
+            raise DevSnapshotStoreError(
+                "unsupported urllib transport error cannot be snapshotted"
+            )
+        return self._record_snapshot(request, response)
+
+    def _record_snapshot(
+        self,
+        request: SnapshotRequest,
+        response: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        response_doc = dict(response)
         record = {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
             "record_type": SNAPSHOT_RECORD_TYPE,
@@ -445,7 +560,7 @@ class ProviderSnapshotStore:
             "method": request.method,
             "endpoint": request.endpoint,
             "params_hash": request.params_hash,
-            "response": response,
+            "response": response_doc,
         }
         if _contains_secret_material(record):
             raise DevSnapshotStoreError(
@@ -1040,6 +1155,7 @@ class _FakeUrllibResponse:
 def _build_urllib_replay_response(
     url: str, doc: Mapping[str, Any]
 ) -> _FakeUrllibResponse:
+    _raise_urllib_transport_response(doc)
     response = _FakeUrllibResponse(url, doc)
     if response.status < 400:
         return response
@@ -1231,6 +1347,7 @@ _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrout
 _RL_DEV_SECRET_MARKERS = ("sk-or-", "sb_secret_", "aws_secret_access_key", "openrouter_api_key", "scrapingdog_api_key", "exa_api_key", "raw_secret", "service_role")
 _RL_DEV_RECORD_FAILURES_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "record_failures.jsonl")
 _RL_DEV_PROVIDER_MODELS_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "provider_models.jsonl")
+_RL_DEV_URLLIB_TRANSPORT_OUTCOME = "urllib_transport_error"
 
 
 def _rl_dev_canonical_json(data):
@@ -1350,6 +1467,89 @@ def _rl_dev_lookup_existing(method, url, body, params=None):
     return dict(response)
 
 
+def _rl_dev_urllib_transport_response(error):
+    import socket
+    import ssl
+    import urllib.error
+
+    if isinstance(error, TimeoutError):
+        return {
+            "outcome": _RL_DEV_URLLIB_TRANSPORT_OUTCOME,
+            "error_type": "TimeoutError",
+            "reason_type": "timeout",
+        }
+    if isinstance(error, urllib.error.HTTPError) or not isinstance(
+        error, urllib.error.URLError
+    ):
+        return None
+    reason = error.reason
+    if isinstance(reason, TimeoutError):
+        reason_type = "timeout"
+    elif isinstance(reason, socket.gaierror):
+        reason_type = "dns"
+    elif isinstance(reason, ConnectionRefusedError):
+        reason_type = "connection_refused"
+    elif isinstance(reason, ConnectionResetError):
+        reason_type = "connection_reset"
+    elif isinstance(reason, ConnectionAbortedError):
+        reason_type = "connection_aborted"
+    elif isinstance(reason, ssl.SSLCertVerificationError):
+        reason_type = "tls_certificate"
+    elif isinstance(reason, ssl.SSLError):
+        reason_type = "tls"
+    elif isinstance(reason, OSError):
+        reason_type = "os_error"
+    elif isinstance(reason, str):
+        reason_type = "message"
+    else:
+        return None
+    return {
+        "outcome": _RL_DEV_URLLIB_TRANSPORT_OUTCOME,
+        "error_type": "URLError",
+        "reason_type": reason_type,
+    }
+
+
+def _rl_dev_raise_urllib_transport_response(doc):
+    import socket
+    import ssl
+    import urllib.error
+
+    if doc.get("outcome") != _RL_DEV_URLLIB_TRANSPORT_OUTCOME:
+        return
+    error_type = str(doc.get("error_type") or "")
+    reason_type = str(doc.get("reason_type") or "")
+    if error_type == "TimeoutError" and reason_type == "timeout":
+        raise TimeoutError("replayed urllib transport timeout")
+    if error_type != "URLError":
+        raise RuntimeError("unsupported urllib transport snapshot")
+    reason_factories = {
+        "timeout": lambda: TimeoutError("replayed urllib transport timeout"),
+        "dns": lambda: socket.gaierror(
+            getattr(socket, "EAI_AGAIN", -3), "replayed name resolution failure"
+        ),
+        "connection_refused": lambda: ConnectionRefusedError(
+            "replayed connection refusal"
+        ),
+        "connection_reset": lambda: ConnectionResetError(
+            "replayed connection reset"
+        ),
+        "connection_aborted": lambda: ConnectionAbortedError(
+            "replayed connection abort"
+        ),
+        "tls_certificate": lambda: ssl.SSLCertVerificationError(
+            "replayed TLS certificate failure"
+        ),
+        "tls": lambda: ssl.SSLError("replayed TLS failure"),
+        "os_error": lambda: OSError("replayed urllib operating-system failure"),
+        "message": lambda: "replayed urllib transport failure",
+    }
+    factory = reason_factories.get(reason_type)
+    if factory is None:
+        raise RuntimeError("unsupported urllib transport reason snapshot")
+    raise urllib.error.URLError(factory())
+
+
 class _RlDevFakeResponse(object):
     def __init__(self, url, doc):
         self._body = str(doc.get("body_text") or "").encode("utf-8")
@@ -1388,6 +1588,7 @@ class _RlDevFakeResponse(object):
 
 
 def _rl_dev_urllib_response(url, doc):
+    _rl_dev_raise_urllib_transport_response(doc)
     response = _RlDevFakeResponse(url, doc)
     if response.status < 400:
         return response
@@ -1627,7 +1828,15 @@ def _rl_dev_record_provider_model(provider, body, request_key):
 
 
 def _rl_dev_record(
-    method, url, body, status, headers, body_text, params=None, reason=None
+    method,
+    url,
+    body,
+    status,
+    headers,
+    body_text,
+    params=None,
+    reason=None,
+    response_override=None,
 ):
     request_key = ""
     try:
@@ -1639,14 +1848,17 @@ def _rl_dev_record(
             if str(key).lower() == "content-type":
                 content_type = str(value)
                 break
-        response = {
-            "status": int(status or 0),
-            "headers": {"content-type": content_type or "application/json"},
-            "body_text": str(body_text or ""),
-        }
-        reason_text = str(reason or "").strip()
-        if reason_text:
-            response["reason"] = reason_text[:240]
+        if response_override is None:
+            response = {
+                "status": int(status or 0),
+                "headers": {"content-type": content_type or "application/json"},
+                "body_text": str(body_text or ""),
+            }
+            reason_text = str(reason or "").strip()
+            if reason_text:
+                response["reason"] = reason_text[:240]
+        else:
+            response = dict(response_override)
         record = {
             "schema_version": "1.0",
             "record_type": "research_lab_dev_provider_snapshot",
@@ -1725,12 +1937,24 @@ def _rl_dev_install_record():
                 },
             )
         except Exception as exc:
-            _rl_dev_record_live_failure(
-                "urllib_live_request_error:" + type(exc).__name__,
-                method,
-                url,
-                data,
-            )
+            transport_response = _rl_dev_urllib_transport_response(exc)
+            if transport_response is None:
+                _rl_dev_record_live_failure(
+                    "urllib_live_request_error:" + type(exc).__name__,
+                    method,
+                    url,
+                    data,
+                )
+            else:
+                _rl_dev_record(
+                    method,
+                    url,
+                    data,
+                    0,
+                    {},
+                    "",
+                    response_override=transport_response,
+                )
             raise
         status = getattr(response, "status", None) or getattr(response, "code", 0)
         headers = dict(getattr(response, "headers", {}) or {})

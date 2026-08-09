@@ -28,6 +28,21 @@ import pytest
 import gateway.research_lab.maintenance as maintenance_mod
 import gateway.research_lab.worker as worker_mod
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.model_authority_v2 import (
+    _measured_environment_for_provider_cost_scope,
+)
+from gateway.tee.research_lab_runtime_config_v2 import (
+    build_research_lab_execution_config,
+    validate_model_sandbox_environment,
+)
+from research_lab.eval.private_runtime import (
+    DockerPrivateModelSpec,
+    INCONTAINER_TRACE_CORPUS_MAX_CALL_BYTES,
+    INCONTAINER_TRACE_CORPUS_MAX_TOTAL_BYTES,
+    INCONTAINER_TRACE_MAX_CALL_BYTES_ENV,
+    INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV,
+)
+from tests.v2_epoch_test_utils import epoch_test_environment
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +82,102 @@ def test_tree_policy_owns_topology_and_paid_handoff(monkeypatch):
     assert worker.tree_policy.mode == "active"
     assert worker.tree_policy.max_nodes == 8
     assert worker.tree_policy.live_max_icps_per_node == 5
+
+
+@pytest.mark.parametrize(
+    ("trace_prefix", "explicit_call_cap", "explicit_total_cap"),
+    (
+        (None, None, None),
+        ("s3://example.invalid/research-lab/traces", None, None),
+        ("s3://example.invalid/research-lab/traces", "12345", "67890"),
+    ),
+)
+def test_hosted_private_model_environment_matches_measured_scoring_profile(
+    monkeypatch,
+    trace_prefix,
+    explicit_call_cap,
+    explicit_total_cap,
+):
+    trace_environment = {
+        "RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE": "true",
+    }
+    for name in (
+        "EXA_MAX_RPS",
+        "SOURCING_DEEPLINE_FALLBACK",
+        "SOURCING_DEEPLINE_TIMEOUT_S",
+        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
+        INCONTAINER_TRACE_MAX_CALL_BYTES_ENV,
+        INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+    if trace_prefix is not None:
+        trace_environment["RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX"] = trace_prefix
+    for name, value in trace_environment.items():
+        monkeypatch.setenv(name, value)
+    if explicit_call_cap is not None:
+        monkeypatch.setenv(
+            INCONTAINER_TRACE_MAX_CALL_BYTES_ENV,
+            explicit_call_cap,
+        )
+        trace_environment[INCONTAINER_TRACE_MAX_CALL_BYTES_ENV] = explicit_call_cap
+    if explicit_total_cap is not None:
+        monkeypatch.setenv(
+            INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV,
+            explicit_total_cap,
+        )
+        trace_environment[INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV] = explicit_total_cap
+
+    config = ResearchLabGatewayConfig()
+    extra_env = worker_mod._private_model_docker_env(config, {})
+    expected_call_cap = explicit_call_cap or (
+        str(INCONTAINER_TRACE_CORPUS_MAX_CALL_BYTES) if trace_prefix else None
+    )
+    expected_total_cap = explicit_total_cap or (
+        str(INCONTAINER_TRACE_CORPUS_MAX_TOTAL_BYTES) if trace_prefix else None
+    )
+    if explicit_call_cap is None and trace_prefix:
+        assert extra_env[INCONTAINER_TRACE_MAX_CALL_BYTES_ENV] == expected_call_cap
+    else:
+        assert INCONTAINER_TRACE_MAX_CALL_BYTES_ENV not in extra_env
+    if explicit_total_cap is None and trace_prefix:
+        assert extra_env[INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV] == expected_total_cap
+    else:
+        assert INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV not in extra_env
+
+    provider_cost_scope = "sha256:" + "8" * 64
+    spec = DockerPrivateModelSpec(
+        image_digest="example.invalid/private@sha256:" + "7" * 64,
+        env_passthrough=worker_mod._private_model_env_passthrough(config),
+        extra_env=extra_env,
+    )
+    measured_environment = _measured_environment_for_provider_cost_scope(
+        spec,
+        provider_cost_scope=provider_cost_scope,
+    )
+    execution_config = build_research_lab_execution_config(
+        config=config,
+        environment=epoch_test_environment(**trace_environment),
+    )
+
+    if expected_call_cap is None:
+        assert INCONTAINER_TRACE_MAX_CALL_BYTES_ENV not in measured_environment
+    else:
+        assert (
+            measured_environment[INCONTAINER_TRACE_MAX_CALL_BYTES_ENV]
+            == expected_call_cap
+        )
+    if expected_total_cap is None:
+        assert INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV not in measured_environment
+    else:
+        assert (
+            measured_environment[INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV]
+            == expected_total_cap
+        )
+    assert validate_model_sandbox_environment(
+        execution_config,
+        measured_environment,
+        provider_cost_scope=provider_cost_scope,
+    ) == dict(sorted(measured_environment.items()))
 
 
 @pytest.mark.parametrize(

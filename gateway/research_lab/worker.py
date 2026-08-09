@@ -7383,10 +7383,40 @@ def _private_model_docker_env(
     config: ResearchLabGatewayConfig,
     provider_env: Mapping[str, str],
 ) -> dict[str, str]:
+    # Metadata and dev evaluation use the same measured sandbox profile as
+    # scoring, so construct that exact non-secret environment here.
     env = {str(key): str(value) for key, value in provider_env.items() if value}
-    if config.private_model_docker_global_proxy_enabled:
-        return env
-    return {key: value for key, value in env.items() if key not in _PROXY_ENV_NAMES}
+    if not config.private_model_docker_global_proxy_enabled:
+        env = {key: value for key, value in env.items() if key not in _PROXY_ENV_NAMES}
+    for name in (
+        "EXA_MAX_RPS",
+        "SOURCING_DEEPLINE_FALLBACK",
+        "SOURCING_DEEPLINE_TIMEOUT_S",
+    ):
+        value = os.getenv(name)
+        if value:
+            env[name] = value
+    env.update(
+        {
+            "RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP": str(
+                config.provider_cost_cap_usd_per_icp
+            ),
+            "RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD": str(
+                config.scrapingdog_cost_per_credit_usd
+            ),
+            "RESEARCH_LAB_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS": str(
+                config.scrapingdog_unknown_endpoint_credits
+            ),
+            "RESEARCH_LAB_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY": str(
+                config.provider_cost_unknown_endpoint_policy
+            ),
+            "RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD": "1",
+        }
+    )
+    from research_lab.eval.private_runtime import incontainer_trace_corpus_env
+
+    env.update(incontainer_trace_corpus_env())
+    return env
 
 
 def _row_partition(row: Mapping[str, Any], total_workers: int) -> int:

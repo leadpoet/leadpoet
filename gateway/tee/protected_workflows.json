@@ -287,7 +287,7 @@
       "symbol": "persist_allocation_settlement_frontier_v2"
     },
     {
-      "ast_sha256": "sha256:bccbed415d99c27900f04807c897be7d49ddc1a46d6ca0a373eeb9927c860001",
+      "ast_sha256": "sha256:b12e845e36d4938487d1104b765fc3489f00fe34f780109093f7681dba6c07c2",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "persist_ancestry_checkpoint_v2"
     },
@@ -2607,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:1491b65924ff4a152e66791fef385642bfbbfb47176f1cfb96ba90df014559af",
-  "protected_source_commit": "84123fcfebcebab0839e291dd9568861f8cb8e89",
+  "manifest_hash": "sha256:130a8c07b7d4ee870460077561edd20e715150de1f557375a6301a187202ab1c",
+  "protected_source_commit": "7145bf994f7b97bed5a7fc7bf447902cb0dffc1d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

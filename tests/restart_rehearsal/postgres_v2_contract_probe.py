@@ -114,11 +114,22 @@ ALLOCATION_IMAGE_BUILD_MIGRATIONS = (
     "47-research-lab-disable-new-patch-candidates.sql",
     "52-research-lab-image-build-candidate-current-view.sql",
 )
+SOURCE_ADD_PRE_V2_MIGRATIONS = (
+    "72-research-lab-source-experiments.sql",
+    "74-research-lab-source-add-provenance-precheck.sql",
+    "78-research-lab-source-add-catalog-provisioning.sql",
+    "79-research-lab-source-add-llm-leg2-evidence.sql",
+    "82-research-lab-source-add-llm-only-leg2.sql",
+    "84-expand-source-add-source-kinds.sql",
+)
 ALLOCATION_CONTAINMENT_MIGRATION = (
     "87-research-lab-source-add-allocation-containment.sql"
 )
 GIT_TREE_AUTORESEARCH_MIGRATION = (
     "95-research-lab-git-tree-autoresearch.sql"
+)
+SOURCE_ADD_FUNCTIONAL_WORKFLOW_MIGRATION = (
+    "96-research-lab-source-add-functional-workflow.sql"
 )
 GIT_TREE_ROOT_REPLACEMENT_MIGRATION = (
     "115-research-lab-git-tree-root-replacement.sql"
@@ -197,11 +208,13 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ALLOCATION_SCORING_AUDIT_MIGRATION,
     ALLOCATION_PROMOTION_MIGRATION,
     *ALLOCATION_IMAGE_BUILD_MIGRATIONS,
+    *SOURCE_ADD_PRE_V2_MIGRATIONS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX[0],
     ALLOCATION_CONTAINMENT_MIGRATION,
     MIGRATIONS_BEFORE_TRANSPORT_FIX[1],
     MIGRATIONS_BEFORE_TRANSPORT_FIX[2],
     GIT_TREE_AUTORESEARCH_MIGRATION,
+    SOURCE_ADD_FUNCTIONAL_WORKFLOW_MIGRATION,
     MIGRATIONS_BEFORE_TRANSPORT_FIX[3],
     MIGRATIONS_BEFORE_TRANSPORT_FIX[4],
     GIT_TREE_ROOT_REPLACEMENT_MIGRATION,
@@ -247,6 +260,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_142_source_catalog_replay_contract_valid",
     "post_143_compact_checkpoint_contract_valid",
     "post_144_provider_persistence_batch_contract_valid",
+    "post_096_source_add_functional_workflow_valid",
     "post_145_source_add_admission_control_contract_valid",
     "post_146_private_benchmark_schema_contract_valid",
     "provider_outcome_append_atomic",
@@ -3535,6 +3549,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         ):
             database.apply_migration(scripts / name)
             applied.append(name)
+        for name in SOURCE_ADD_PRE_V2_MIGRATIONS:
+            database.apply_migration(scripts / name)
+            applied.append(name)
         candidate_view_columns = {
             row.strip()
             for row in database.psql(
@@ -3574,6 +3591,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     scripts / GIT_TREE_AUTORESEARCH_MIGRATION
                 )
                 applied.append(GIT_TREE_AUTORESEARCH_MIGRATION)
+                database.apply_migration(
+                    scripts / SOURCE_ADD_FUNCTIONAL_WORKFLOW_MIGRATION
+                )
+                applied.append(SOURCE_ADD_FUNCTIONAL_WORKFLOW_MIGRATION)
             if name == "104-research-lab-attested-result-replay-v2.sql":
                 database.apply_migration(
                     scripts / GIT_TREE_ROOT_REPLACEMENT_MIGRATION

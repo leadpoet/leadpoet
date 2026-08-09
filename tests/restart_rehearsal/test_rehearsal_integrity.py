@@ -1711,6 +1711,28 @@ def test_required_schema_preflight_is_backed_by_candidate_migrations() -> None:
     assert counts["migration_count"] > 10
 
 
+def test_source_add_rehearsal_migrations_preserve_prerequisite_order() -> None:
+    applied = list(EXPECTED_APPLIED_MIGRATIONS)
+    prerequisite_positions = [
+        applied.index(name)
+        for name in postgres_probe.SOURCE_ADD_PRE_V2_MIGRATIONS
+    ]
+
+    assert prerequisite_positions == sorted(prerequisite_positions)
+    assert prerequisite_positions[-1] < applied.index(
+        "86-research-lab-attested-v2-authority.sql"
+    )
+    assert applied.index(postgres_probe.GIT_TREE_AUTORESEARCH_MIGRATION) < (
+        applied.index(postgres_probe.SOURCE_ADD_FUNCTIONAL_WORKFLOW_MIGRATION)
+    )
+    assert applied.index(postgres_probe.SOURCE_ADD_FUNCTIONAL_WORKFLOW_MIGRATION) < (
+        applied.index("99-research-lab-v2-champion-settlement.sql")
+    )
+    assert applied.index(postgres_probe.SOURCE_ADD_FUNCTIONAL_WORKFLOW_MIGRATION) < (
+        applied.index(postgres_probe.SOURCE_ADD_ADMISSION_CONTROL_MIGRATION)
+    )
+
+
 def test_gateway_rehearsal_signing_identity_uses_its_real_private_key() -> None:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 

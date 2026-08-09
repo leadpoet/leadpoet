@@ -419,6 +419,7 @@ class ProviderSnapshotStore:
         status: int,
         body_text: str,
         content_type: str = "application/json",
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Persist one provider response under its request key.
 
@@ -428,6 +429,14 @@ class ProviderSnapshotStore:
         """
         if self.mode != MODE_RECORD:
             raise DevSnapshotStoreError("record_response requires a record-mode store")
+        response = {
+            "status": int(status),
+            "headers": {"content-type": str(content_type or "application/json")},
+            "body_text": str(body_text),
+        }
+        reason_text = str(reason or "").strip()
+        if reason_text:
+            response["reason"] = reason_text[:240]
         record = {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
             "record_type": SNAPSHOT_RECORD_TYPE,
@@ -436,11 +445,7 @@ class ProviderSnapshotStore:
             "method": request.method,
             "endpoint": request.endpoint,
             "params_hash": request.params_hash,
-            "response": {
-                "status": int(status),
-                "headers": {"content-type": str(content_type or "application/json")},
-                "body_text": str(body_text),
-            },
+            "response": response,
         }
         if _contains_secret_material(record):
             raise DevSnapshotStoreError(
@@ -529,7 +534,7 @@ class ProviderSnapshotStore:
             method = getattr(req, "get_method", lambda: "GET")()
             data = getattr(req, "data", None)
             response = self.replay(method, str(url), body=data)
-            return _FakeUrllibResponse(str(url), response)
+            return _build_urllib_replay_response(str(url), response)
 
         _urllib_request.urlopen = _replay_urlopen
         restore: list[Callable[[], None]] = [
@@ -1032,6 +1037,23 @@ class _FakeUrllibResponse:
         self.close()
 
 
+def _build_urllib_replay_response(
+    url: str, doc: Mapping[str, Any]
+) -> _FakeUrllibResponse:
+    response = _FakeUrllibResponse(url, doc)
+    if response.status < 400:
+        return response
+    from urllib.error import HTTPError
+
+    raise HTTPError(
+        url,
+        response.status,
+        str(doc.get("reason") or "HTTP Error"),
+        response.headers,
+        response,
+    )
+
+
 class _FakeAiohttpContent:
     def __init__(self, body: bytes) -> None:
         self._body = body
@@ -1365,6 +1387,20 @@ class _RlDevFakeResponse(object):
         self.close()
 
 
+def _rl_dev_urllib_response(url, doc):
+    response = _RlDevFakeResponse(url, doc)
+    if response.status < 400:
+        return response
+    import urllib.error as _rl_urllib_error
+    raise _rl_urllib_error.HTTPError(
+        url,
+        response.status,
+        str(doc.get("reason") or "HTTP Error"),
+        response.headers,
+        response,
+    )
+
+
 class _RlDevAiohttpContent(object):
     def __init__(self, body):
         self._body = body
@@ -1444,7 +1480,9 @@ def _rl_dev_install_replay():
         url = getattr(req, "full_url", req if isinstance(req, str) else "")
         method = getattr(req, "get_method", lambda: "GET")()
         data = getattr(req, "data", None)
-        return _RlDevFakeResponse(str(url), _rl_dev_lookup(method, str(url), data))
+        return _rl_dev_urllib_response(
+            str(url), _rl_dev_lookup(method, str(url), data)
+        )
 
     _rl_urllib_request.urlopen = _rl_dev_replay_urlopen
 
@@ -1588,7 +1626,9 @@ def _rl_dev_record_provider_model(provider, body, request_key):
         return False
 
 
-def _rl_dev_record(method, url, body, status, headers, body_text, params=None):
+def _rl_dev_record(
+    method, url, body, status, headers, body_text, params=None, reason=None
+):
     request_key = ""
     try:
         provider, request_key, storage_name = _rl_dev_request_identity(
@@ -1599,6 +1639,14 @@ def _rl_dev_record(method, url, body, status, headers, body_text, params=None):
             if str(key).lower() == "content-type":
                 content_type = str(value)
                 break
+        response = {
+            "status": int(status or 0),
+            "headers": {"content-type": content_type or "application/json"},
+            "body_text": str(body_text or ""),
+        }
+        reason_text = str(reason or "").strip()
+        if reason_text:
+            response["reason"] = reason_text[:240]
         record = {
             "schema_version": "1.0",
             "record_type": "research_lab_dev_provider_snapshot",
@@ -1607,11 +1655,7 @@ def _rl_dev_record(method, url, body, status, headers, body_text, params=None):
             "method": str(method or "GET").strip().upper() or "GET",
             "endpoint": request_key.split("|")[2],
             "params_hash": request_key.split("|")[3],
-            "response": {
-                "status": int(status or 0),
-                "headers": {"content-type": content_type or "application/json"},
-                "body_text": str(body_text or ""),
-            },
+            "response": response,
         }
         payload_text = _rl_dev_canonical_json(record).lower()
         if any(marker in payload_text for marker in _RL_DEV_SECRET_MARKERS):
@@ -1638,6 +1682,7 @@ def _rl_dev_install_record():
         return
 
     import urllib.request as _rl_urllib_request
+    import urllib.error as _rl_urllib_error
 
     _rl_dev_original_urlopen = _rl_urllib_request.urlopen
 
@@ -1647,10 +1692,38 @@ def _rl_dev_install_record():
         data = getattr(req, "data", None)
         existing = _rl_dev_lookup_existing(method, url, data)
         if existing is not None:
-            return _RlDevFakeResponse(url, existing)
+            return _rl_dev_urllib_response(url, existing)
         try:
             response = _rl_dev_original_urlopen(req, *args, **kwargs)
             body = response.read()
+        except _rl_urllib_error.HTTPError as exc:
+            body = exc.read()
+            status = int(getattr(exc, "code", 0) or 0)
+            headers = dict(getattr(exc, "headers", {}) or {})
+            body_text = (
+                body.decode("utf-8", "replace")
+                if isinstance(body, bytes)
+                else str(body)
+            )
+            reason = str(getattr(exc, "reason", "") or "HTTP Error")
+            _rl_dev_record(
+                method,
+                url,
+                data,
+                status,
+                headers,
+                body_text,
+                reason=reason,
+            )
+            return _rl_dev_urllib_response(
+                url,
+                {
+                    "status": status,
+                    "headers": headers,
+                    "body_text": body_text,
+                    "reason": reason,
+                },
+            )
         except Exception as exc:
             _rl_dev_record_live_failure(
                 "urllib_live_request_error:" + type(exc).__name__,
@@ -1663,11 +1736,14 @@ def _rl_dev_install_record():
         headers = dict(getattr(response, "headers", {}) or {})
         body_text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
         _rl_dev_record(method, url, data, status, headers, body_text)
-        return _RlDevFakeResponse(url, {
-            "status": int(status or 0),
-            "headers": headers,
-            "body_text": body_text,
-        })
+        return _rl_dev_urllib_response(
+            url,
+            {
+                "status": int(status or 0),
+                "headers": headers,
+                "body_text": body_text,
+            },
+        )
 
     _rl_urllib_request.urlopen = _rl_dev_record_urlopen
 

@@ -609,6 +609,106 @@ print(json.dumps({"body": body, "hits": len(hits)}))
     }
 
 
+def test_urllib_http_error_is_recorded_reused_and_replayed(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    record_probe = r'''
+import http.server
+import json
+import os
+import threading
+import urllib.error
+import urllib.request
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b'{"detail": "not found"}'
+        self.send_response(404, "Missing")
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/missing" % server.server_port
+try:
+    try:
+        urllib.request.urlopen(url)
+    except urllib.error.HTTPError as exc:
+        outcome = {
+            "body": exc.read().decode("utf-8"),
+            "code": exc.code,
+            "content_type": exc.headers.get("content-type"),
+            "reason": exc.reason,
+        }
+    else:
+        raise AssertionError("live HTTP error was not preserved")
+finally:
+    server.shutdown()
+    server.server_close()
+snapshots = os.path.join(os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "snapshots")
+failures = os.path.join(os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "record_failures.jsonl")
+print(json.dumps({
+    "failure_file_exists": os.path.exists(failures),
+    "outcome": outcome,
+    "snapshot_count": len(os.listdir(snapshots)),
+    "url": url,
+}))
+'''
+    recorded = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + record_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+    assert recorded.returncode == 0, recorded.stderr
+    recorded_doc = json.loads(recorded.stdout)
+    expected = {
+        "body": '{"detail": "not found"}',
+        "code": 404,
+        "content_type": "application/json",
+        "reason": "Missing",
+    }
+    assert recorded_doc["outcome"] == expected
+    assert recorded_doc["snapshot_count"] == 1
+    assert recorded_doc["failure_file_exists"] is False
+
+    replay_probe = (
+        "\nimport json, urllib.error, urllib.request\n"
+        "try:\n"
+        f"    urllib.request.urlopen({recorded_doc['url']!r})\n"
+        "except urllib.error.HTTPError as exc:\n"
+        "    print(json.dumps({"
+        "'body': exc.read().decode('utf-8'), 'code': exc.code, "
+        "'content_type': exc.headers.get('content-type'), 'reason': exc.reason}))\n"
+        "else:\n"
+        "    raise AssertionError('replayed HTTP error was not preserved')\n"
+    )
+    for bootstrap, extra_env in (
+        (
+            dev_record_bootstrap(),
+            {SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true"},
+        ),
+        (dev_replay_bootstrap(), {}),
+    ):
+        replayed = subprocess.run(
+            [sys.executable, "-c", bootstrap + replay_probe],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": "", **extra_env},
+            check=False,
+        )
+        assert replayed.returncode == 0, replayed.stderr
+        assert json.loads(replayed.stdout) == expected
+    assert not (snapshot_dir / "record_failures.jsonl").exists()
+
+
 def test_record_bootstrap_persists_live_transport_failure_when_model_catches_it(
     tmp_path,
 ):
@@ -682,6 +782,30 @@ def test_replay_seams_serve_requests_and_httpx(tmp_path):
             via_httpx = client.get(url)
         assert via_httpx.status_code == 200
         assert via_httpx.text == body
+
+
+def test_inprocess_urllib_replay_preserves_http_error(tmp_path):
+    import urllib.error
+    import urllib.request
+
+    recorder = _record_store(tmp_path)
+    url = "https://api.scrapingdog.com/missing?api_key=REDACTED"
+    recorder.record_response(
+        build_snapshot_request("GET", url),
+        status=404,
+        body_text='{"detail": "not found"}',
+        content_type="application/json",
+        reason="Missing",
+    )
+
+    with _replay_store(tmp_path).replay_installed():
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(url)
+
+    assert raised.value.code == 404
+    assert raised.value.reason == "Missing"
+    assert raised.value.headers["content-type"] == "application/json"
+    assert raised.value.read() == b'{"detail": "not found"}'
 
 
 async def test_replay_seam_serves_httpx_async_client(tmp_path):

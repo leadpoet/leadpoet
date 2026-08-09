@@ -375,6 +375,20 @@ def test_atomic_credit_resume_migration_is_expected_head_and_idempotent() -> Non
     assert "WHERE e.event_id = p_event_id" in sql
     assert "NOTIFY pgrst, 'reload schema'" in sql
 
+    from gateway.tee.supabase_schema_preflight_v2 import (
+        REQUIRED_SUPABASE_V2_RPCS,
+    )
+    from tests.restart_rehearsal.postgres_v2_contract_probe import (
+        ATOMIC_CREDIT_RESUME_MIGRATION,
+        EXPECTED_APPLIED_MIGRATIONS,
+    )
+
+    assert (
+        "scripts/148-research-lab-atomic-credit-resume.sql",
+        "resume_research_lab_credit_blocked_run_v1",
+    ) in REQUIRED_SUPABASE_V2_RPCS
+    assert ATOMIC_CREDIT_RESUME_MIGRATION == EXPECTED_APPLIED_MIGRATIONS[-1]
+
 
 @pytest.mark.asyncio
 async def test_admin_credit_resume_uses_exact_nonzero_head_and_canonical_source(

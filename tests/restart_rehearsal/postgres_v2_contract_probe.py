@@ -201,6 +201,9 @@ PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION = (
 SOURCE_CATALOG_AUTH_METADATA_MIGRATION = (
     "147-research-lab-source-catalog-auth-metadata.sql"
 )
+ATOMIC_CREDIT_RESUME_MIGRATION = (
+    "148-research-lab-atomic-credit-resume.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -242,6 +245,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_ADMISSION_CONTROL_MIGRATION,
     PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION,
     SOURCE_CATALOG_AUTH_METADATA_MIGRATION,
+    ATOMIC_CREDIT_RESUME_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -268,6 +272,10 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_145_source_add_admission_control_contract_valid",
     "post_146_private_benchmark_schema_contract_valid",
     "post_147_source_catalog_auth_metadata_contract_valid",
+    "post_148_atomic_credit_resume_contract_valid",
+    "credit_resume_identical_replay_idempotent",
+    "credit_resume_differing_replay_rejected",
+    "credit_resume_invalid_heads_rejected",
     "provider_outcome_append_atomic",
     "provider_outcome_batch_append_atomic",
     "provider_evidence_cache_put_atomic",
@@ -339,6 +347,33 @@ CREATE TABLE public.research_loop_tickets (
 );
 CREATE TABLE public.research_loop_receipts (
     receipt_id UUID PRIMARY KEY
+);
+CREATE TABLE public.research_loop_run_queue_events (
+    event_id       UUID        PRIMARY KEY,
+    schema_version TEXT        NOT NULL DEFAULT '1.0'
+                               CHECK (schema_version = '1.0'),
+    run_id         UUID        NOT NULL,
+    ticket_id      UUID        NOT NULL
+                               REFERENCES public.research_loop_tickets(ticket_id)
+                               ON DELETE RESTRICT,
+    seq            INTEGER     NOT NULL CHECK (seq >= 0),
+    event_type     TEXT        NOT NULL CHECK (
+                               event_type IN (
+                                   'queued', 'started', 'paused', 'completed',
+                                   'failed', 'cancelled', 'tombstoned'
+                               )
+                               ),
+    queue_priority INTEGER     NOT NULL DEFAULT 0,
+    worker_ref     TEXT,
+    reason         TEXT,
+    anchored_hash  TEXT        NOT NULL UNIQUE,
+    event_doc      JSONB       NOT NULL DEFAULT '{}'::JSONB CHECK (
+                               jsonb_typeof(event_doc) = 'object'
+                               AND event_doc::TEXT !~* '(sk-or-|openrouter_api_key|raw_openrouter_key|raw_secret)'
+                               ),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT research_loop_run_queue_events_run_seq_key
+        UNIQUE (run_id, seq)
 );
 """
 GIT_TREE_CANDIDATE_PREREQUISITES_SQL = """
@@ -710,6 +745,250 @@ def _postgres_insert_row(
     if not result:
         raise PostgresContractProbeError("insert returned no row: %s" % table)
     return dict(json.loads(result))
+
+
+def _credit_resume_rpc(
+    database: DisposablePostgres,
+    params: Mapping[str, Any],
+) -> dict[str, Any]:
+    required = (
+        "p_run_id",
+        "p_ticket_id",
+        "p_expected_event_seq",
+        "p_expected_event_hash",
+        "p_event_id",
+        "p_anchored_hash",
+        "p_queue_priority",
+        "p_worker_ref",
+        "p_reason",
+        "p_event_doc",
+    )
+    if set(params) != set(required):
+        raise PostgresContractProbeError("credit resume RPC parameters differ")
+    arguments = ",".join(
+        "%s => %s" % (name, _postgres_literal(params[name]))
+        for name in required
+    )
+    result = database.psql(
+        "SELECT pg_catalog.to_jsonb(resumed)::text "
+        "FROM public.resume_research_lab_credit_blocked_run_v1(%s) AS resumed;"
+        % arguments,
+        check=False,
+        tuples_only=True,
+    )
+    if result.returncode != 0:
+        raise PostgresContractProbeError(
+            "credit resume RPC failed: %s" % result.stderr.strip()
+        )
+    payload = result.stdout.strip()
+    if not payload:
+        raise PostgresContractProbeError("credit resume RPC returned no row")
+    return dict(json.loads(payload))
+
+
+def _credit_resume_rejection(
+    database: DisposablePostgres,
+    params: Mapping[str, Any],
+    *,
+    expected_error: str,
+) -> None:
+    required = (
+        "p_run_id",
+        "p_ticket_id",
+        "p_expected_event_seq",
+        "p_expected_event_hash",
+        "p_event_id",
+        "p_anchored_hash",
+        "p_queue_priority",
+        "p_worker_ref",
+        "p_reason",
+        "p_event_doc",
+    )
+    arguments = ",".join(
+        "%s => %s" % (name, _postgres_literal(params[name]))
+        for name in required
+    )
+    result = database.psql(
+        "SELECT pg_catalog.to_jsonb(resumed)::text "
+        "FROM public.resume_research_lab_credit_blocked_run_v1(%s) AS resumed;"
+        % arguments,
+        check=False,
+        tuples_only=True,
+    )
+    if result.returncode == 0 or expected_error not in result.stderr:
+        raise PostgresContractProbeError(
+            "credit resume rejection differed expected=%s stderr=%s"
+            % (expected_error, result.stderr.strip())
+        )
+
+
+def _atomic_credit_resume_postgres_contract(
+    database: DisposablePostgres,
+) -> dict[str, Any]:
+    ticket_id = "20000000-0000-0000-0000-000000000147"
+    run_id = "10000000-0000-0000-0000-000000000147"
+    empty_run_id = "10000000-0000-0000-0000-000000000148"
+    wrong_paused_run_id = "10000000-0000-0000-0000-000000000149"
+    paused_hash = "sha256:" + "1" * 64
+    resumed_hash = "sha256:" + "2" * 64
+    wrong_paused_hash = "sha256:" + "7" * 64
+    _postgres_insert_row(
+        database,
+        "research_loop_tickets",
+        {"ticket_id": ticket_id},
+    )
+    _postgres_insert_row(
+        database,
+        "research_loop_run_queue_events",
+        {
+            "event_id": "30000000-0000-0000-0000-000000000147",
+            "schema_version": "1.0",
+            "run_id": run_id,
+            "ticket_id": ticket_id,
+            "seq": 4,
+            "event_type": "paused",
+            "queue_priority": 3,
+            "worker_ref": "worker:credit-blocked",
+            "reason": "blocked_for_credit",
+            "anchored_hash": paused_hash,
+            "event_doc": {"schema_version": "1.0"},
+        },
+    )
+    common = {
+        "p_run_id": run_id,
+        "p_ticket_id": ticket_id,
+        "p_expected_event_seq": 4,
+        "p_expected_event_hash": paused_hash,
+        "p_event_id": "40000000-0000-0000-0000-000000000147",
+        "p_anchored_hash": resumed_hash,
+        "p_queue_priority": 3,
+        "p_worker_ref": "miner:credit-topup",
+        "p_reason": "credit_topup_resume",
+        "p_event_doc": {
+            "schema_version": "1.0",
+            "resume_source": "miner_credit_topup_resume",
+            "previous_event_hash": paused_hash,
+        },
+    }
+    first = _credit_resume_rpc(database, common)
+    replay = _credit_resume_rpc(database, common)
+    if (
+        first != replay
+        or first.get("event_id") != common["p_event_id"]
+        or first.get("run_id") != run_id
+        or first.get("ticket_id") != ticket_id
+        or first.get("seq") != 5
+        or first.get("event_type") != "queued"
+        or first.get("reason") != "credit_topup_resume"
+        or first.get("anchored_hash") != resumed_hash
+        or first.get("event_doc") != common["p_event_doc"]
+    ):
+        raise PostgresContractProbeError(
+            "credit resume append or identical replay differed"
+        )
+
+    _credit_resume_rejection(
+        database,
+        {**common, "p_anchored_hash": "sha256:" + "3" * 64},
+        expected_error="research_lab_credit_resume_replay_differs",
+    )
+    _credit_resume_rejection(
+        database,
+        {
+            **common,
+            "p_event_id": "40000000-0000-0000-0000-000000000148",
+            "p_anchored_hash": "sha256:" + "4" * 64,
+        },
+        expected_error="research_lab_credit_resume_head_conflict",
+    )
+    empty = {
+        **common,
+        "p_run_id": empty_run_id,
+        "p_expected_event_seq": 0,
+        "p_expected_event_hash": "sha256:" + "5" * 64,
+        "p_event_id": "40000000-0000-0000-0000-000000000149",
+        "p_anchored_hash": "sha256:" + "6" * 64,
+    }
+    empty["p_event_doc"] = {
+        **common["p_event_doc"],
+        "previous_event_hash": empty["p_expected_event_hash"],
+    }
+    _credit_resume_rejection(
+        database,
+        empty,
+        expected_error="research_lab_credit_resume_head_conflict",
+    )
+    _postgres_insert_row(
+        database,
+        "research_loop_run_queue_events",
+        {
+            "event_id": "30000000-0000-0000-0000-000000000149",
+            "schema_version": "1.0",
+            "run_id": wrong_paused_run_id,
+            "ticket_id": ticket_id,
+            "seq": 0,
+            "event_type": "paused",
+            "queue_priority": 3,
+            "worker_ref": "worker:maintenance",
+            "reason": "maintenance_pause",
+            "anchored_hash": wrong_paused_hash,
+            "event_doc": {"schema_version": "1.0"},
+        },
+    )
+    wrong_paused = {
+        **common,
+        "p_run_id": wrong_paused_run_id,
+        "p_expected_event_seq": 0,
+        "p_expected_event_hash": wrong_paused_hash,
+        "p_event_id": "40000000-0000-0000-0000-000000000150",
+        "p_anchored_hash": "sha256:" + "8" * 64,
+    }
+    wrong_paused["p_event_doc"] = {
+        **common["p_event_doc"],
+        "previous_event_hash": wrong_paused_hash,
+    }
+    _credit_resume_rejection(
+        database,
+        wrong_paused,
+        expected_error="research_lab_credit_resume_head_conflict",
+    )
+    counts = json.loads(
+        database.psql(
+            """
+            SELECT pg_catalog.json_build_object(
+                'resumed_run', pg_catalog.count(*) FILTER (
+                    WHERE run_id = '10000000-0000-0000-0000-000000000147'::uuid
+                ),
+                'empty_run', pg_catalog.count(*) FILTER (
+                    WHERE run_id = '10000000-0000-0000-0000-000000000148'::uuid
+                ),
+                'wrong_paused_run', pg_catalog.count(*) FILTER (
+                    WHERE run_id = '10000000-0000-0000-0000-000000000149'::uuid
+                )
+            )::text
+            FROM public.research_loop_run_queue_events;
+            """,
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if counts != {
+        "resumed_run": 2,
+        "empty_run": 0,
+        "wrong_paused_run": 1,
+    }:
+        raise PostgresContractProbeError(
+            "credit resume rejection persisted an extra row"
+        )
+    return {
+        "event_id": str(first["event_id"]),
+        "event_hash": str(first["anchored_hash"]),
+        "identical_replay": True,
+        "differing_replay_rejected": True,
+        "stale_head_rejected": True,
+        "empty_head_rejected": True,
+        "wrong_paused_head_rejected": True,
+        "row_counts": counts,
+    }
 
 
 def _provider_outcome_append_sql(row: Mapping[str, Any]) -> str:
@@ -4495,6 +4774,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-147 SOURCE_ADD catalog auth metadata contract differs"
             )
+        database.apply_migration(scripts / ATOMIC_CREDIT_RESUME_MIGRATION)
+        applied.append(ATOMIC_CREDIT_RESUME_MIGRATION)
+        atomic_credit_resume = _atomic_credit_resume_postgres_contract(database)
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,
@@ -4606,6 +4888,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "relations": contract["relations"],
             "rpcs": contract["rpcs"],
             "maintenance_lease": maintenance_lease,
+            "atomic_credit_resume": atomic_credit_resume,
             "checks": {
                 name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS
             },

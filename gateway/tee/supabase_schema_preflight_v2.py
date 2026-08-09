@@ -694,6 +694,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_private_benchmark_schema_contract_v1",
     ),
     (
+        "scripts/148-research-lab-atomic-credit-resume.sql",
+        "resume_research_lab_credit_blocked_run_v1",
+    ),
+    (
         "scripts/132-research-lab-champion-lifetime-credit.sql",
         "persist_research_lab_chain_realized_lifetime_settlement_v2",
     ),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from copy import deepcopy
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -715,19 +716,34 @@ async def test_checkpoint_persistence_compacts_after_full_graph_validation(
         require_boot_attestation_verification=True,
     )
     durable = {}
+    rpc_calls = 0
 
     async def select_one(table, *, filters):
-        assert table == attested_v2_store.ANCESTRY_CHECKPOINT_TABLE
-        assert filters == (("root_receipt_hash", delta["root_receipt_hash"]),)
-        return durable.get("row")
+        if table == attested_v2_store.ANCESTRY_CHECKPOINT_TABLE:
+            assert filters == (
+                ("root_receipt_hash", delta["root_receipt_hash"]),
+            )
+            return durable.get("row")
+        assert table == attested_v2_store.ANCESTRY_ACTIVATION_TABLE
+        assert filters == (
+            ("activation_root_receipt_hash", delta["root_receipt_hash"]),
+        )
+        return durable.get("activation")
 
     async def call_rpc(name, payload):
+        nonlocal rpc_calls
+        rpc_calls += 1
         assert name == attested_v2_store.ANCESTRY_CHECKPOINT_RPC
         row = dict(payload["checkpoint"])
         if "row" in durable:
             assert row == durable["row"]
         else:
             durable["row"] = row
+            durable["activation"] = {
+                "lineage_id": row["lineage_id"],
+                "activation_root_receipt_hash": row["root_receipt_hash"],
+                "activation_certificate_hash": row["certificate_hash"],
+            }
         return {
             "status": "persisted",
             "root_activated": True,
@@ -774,6 +790,90 @@ async def test_checkpoint_persistence_compacts_after_full_graph_validation(
         allowed_issuer_roles=(SCORING_ROLE,),
     )
     assert replay == result
+    assert rpc_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable_mode", ["exact", "missing", "conflict"])
+async def test_checkpoint_persistence_recovers_only_exact_timeout_commit(
+    ancestry_fixture, monkeypatch, durable_mode
+):
+    from gateway.research_lab import attested_v2_store
+
+    delta = ancestry_fixture["delta"]
+    graph = build_checkpointed_receipt_graph(
+        root_receipt_hash=delta["root_receipt_hash"],
+        boot_identities=delta["boot_identities"],
+        receipts=delta["receipts"],
+        transport_attempts=delta["transport_attempts"],
+        host_operations=delta["host_operations"],
+        ancestry_lineage_id=LINEAGE_ID,
+        ancestry_proof=ancestry_fixture["proof"],
+        boot_attestation_verifier=_boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    durable = {}
+    rpc_calls = 0
+
+    async def select_one(table, *, filters):
+        if table == attested_v2_store.ANCESTRY_CHECKPOINT_TABLE:
+            assert filters == (
+                ("root_receipt_hash", delta["root_receipt_hash"]),
+            )
+            return durable.get("row")
+        assert table == attested_v2_store.ANCESTRY_ACTIVATION_TABLE
+        assert filters == (
+            ("activation_root_receipt_hash", delta["root_receipt_hash"]),
+        )
+        return durable.get("activation")
+
+    async def call_rpc(name, payload):
+        nonlocal rpc_calls
+        rpc_calls += 1
+        assert name == attested_v2_store.ANCESTRY_CHECKPOINT_RPC
+        row = dict(payload["checkpoint"])
+        if durable_mode != "missing":
+            durable["row"] = row
+            durable["activation"] = {
+                "lineage_id": row["lineage_id"],
+                "activation_root_receipt_hash": row["root_receipt_hash"],
+                "activation_certificate_hash": (
+                    row["certificate_hash"]
+                    if durable_mode == "exact"
+                    else "sha256:" + "0" * 64
+                ),
+            }
+        raise httpx.ReadTimeout("checkpoint response timed out")
+
+    monkeypatch.setattr(attested_v2_store, "select_one", select_one)
+    monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+
+    kwargs = {
+        "proof": ancestry_fixture["proof"],
+        "checkpointed_graph": graph,
+        "expected_lineage_id": LINEAGE_ID,
+        "boot_attestation_verifier": _boot_verifier,
+        "allowed_issuer_roles": (SCORING_ROLE,),
+    }
+    if durable_mode == "missing":
+        with pytest.raises(httpx.ReadTimeout):
+            await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
+        return
+    if durable_mode == "conflict":
+        with pytest.raises(
+            attested_v2_store.AttestedV2StoreError,
+            match="activations_v2 stored row conflicts",
+        ):
+            await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
+        return
+
+    result = await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
+    assert result["root_activated"] is True
+    assert result["root_receipt_hash"] == delta["root_receipt_hash"]
+
+    replay = await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
+    assert replay == result
+    assert rpc_calls == 1
 
 
 def test_legacy_bootstrap_rejects_noncanonical_roots_and_incomplete_resume(

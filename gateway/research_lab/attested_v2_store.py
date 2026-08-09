@@ -888,14 +888,14 @@ async def persist_ancestry_checkpoint_v2(
         boot_attestation_verifier=boot_attestation_verifier,
         require_boot_attestation_verification=True,
     )
+    existing = await select_one(
+        ANCESTRY_CHECKPOINT_TABLE,
+        filters=(("root_receipt_hash", root_hash),),
+    )
     if (
         checkpointed_graph.get("schema_version")
         == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
     ):
-        existing = await select_one(
-            ANCESTRY_CHECKPOINT_TABLE,
-            filters=(("root_receipt_hash", root_hash),),
-        )
         existing_graph = (
             existing.get("checkpoint_graph_doc")
             if isinstance(existing, Mapping)
@@ -936,11 +936,6 @@ async def persist_ancestry_checkpoint_v2(
         "checkpoint_graph_hash": sha256_json(dict(checkpointed_graph)),
         "checkpoint_graph_doc": dict(checkpointed_graph),
     }
-    result = await call_rpc(ANCESTRY_CHECKPOINT_RPC, {"checkpoint": row})
-    if not isinstance(result, Mapping):
-        raise AttestedV2StoreError(
-            "ancestry checkpoint RPC returned no durable acknowledgment"
-        )
     expected_ack = {
         "root_receipt_hash": root_hash,
         "certificate_hash": row["certificate_hash"],
@@ -949,23 +944,76 @@ async def persist_ancestry_checkpoint_v2(
         "certificate_sequence": row["certificate_sequence"],
         "checkpoint_graph_hash": row["checkpoint_graph_hash"],
     }
+
+    async def exact_durable_ack(
+        stored_checkpoint: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        stored = stored_checkpoint
+        if not isinstance(stored, Mapping):
+            stored = await select_one(
+                ANCESTRY_CHECKPOINT_TABLE,
+                filters=(("root_receipt_hash", root_hash),),
+            )
+        if not isinstance(stored, Mapping):
+            return None
+        _assert_stored_row(ANCESTRY_CHECKPOINT_TABLE, stored, row)
+        activation = await select_one(
+            ANCESTRY_ACTIVATION_TABLE,
+            filters=(("activation_root_receipt_hash", root_hash),),
+        )
+        if not isinstance(activation, Mapping):
+            return None
+        _assert_stored_row(
+            ANCESTRY_ACTIVATION_TABLE,
+            activation,
+            {
+                "lineage_id": row["lineage_id"],
+                "activation_root_receipt_hash": root_hash,
+                "activation_certificate_hash": row["certificate_hash"],
+            },
+        )
+        return {**expected_ack, "root_activated": True}
+
+    replay_ack = (
+        await exact_durable_ack(existing)
+        if isinstance(existing, Mapping)
+        else None
+    )
+    if replay_ack is not None:
+        return replay_ack
+
+    try:
+        result = await call_rpc(ANCESTRY_CHECKPOINT_RPC, {"checkpoint": row})
+    except Exception as exc:
+        if not _is_transient_store_error(exc):
+            raise
+        durable_ack = await exact_durable_ack()
+        if durable_ack is None:
+            raise
+        logger.warning(
+            "ancestry_checkpoint_rpc_transient_recovered root=%s type=%s",
+            root_hash,
+            type(exc).__name__,
+        )
+        return durable_ack
+    if not isinstance(result, Mapping):
+        raise AttestedV2StoreError(
+            "ancestry checkpoint RPC returned no durable acknowledgment"
+        )
     if any(result.get(field) != value for field, value in expected_ack.items()):
         raise AttestedV2StoreError(
             "ancestry checkpoint RPC acknowledgment conflicts"
         )
-    stored = await select_one(
-        ANCESTRY_CHECKPOINT_TABLE,
-        filters=(("root_receipt_hash", root_hash),),
-    )
-    if not isinstance(stored, Mapping):
+    durable_ack = await exact_durable_ack()
+    if durable_ack is None:
         raise AttestedV2StoreError(
-            "ancestry checkpoint durable readback is missing"
+            "ancestry checkpoint durable activation readback is missing"
         )
-    _assert_stored_row(ANCESTRY_CHECKPOINT_TABLE, stored, row)
-    return {
-        **expected_ack,
-        "root_activated": result.get("root_activated") is True,
-    }
+    if result.get("root_activated") is not True:
+        raise AttestedV2StoreError(
+            "ancestry checkpoint RPC activation acknowledgment conflicts"
+        )
+    return durable_ack
 
 
 async def load_ancestry_checkpoint_proofs_v2(

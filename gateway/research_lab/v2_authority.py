@@ -1249,6 +1249,7 @@ def _current_allocation_frontier_outcome_v2(
 async def execute_company_scores_v2(
     *,
     epoch_id: int,
+    sequence: int = 0,
     purpose: str,
     companies: Sequence[Mapping[str, Any]],
     icp: Mapping[str, Any],
@@ -1257,11 +1258,15 @@ async def execute_company_scores_v2(
     attestation_out: dict[str, Any] | None = None,
     execute: Any = execute_scoring_v2,
 ) -> list[dict[str, Any]]:
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        raise ResearchLabV2AuthorityError(
+            "V2 company score sequence must be a non-negative integer"
+        )
     outcome = await execute(
         operation=OP_QUALIFICATION_COMPANY_SCORES,
         purpose="research_lab.company_score.v2",
         epoch_id=int(epoch_id),
-        sequence=0,
+        sequence=sequence,
         payload={
             "companies": [dict(item) for item in companies],
             "icp": dict(icp),

@@ -79,6 +79,7 @@ async def compare_qualification_company_scores(**_kwargs: Any) -> dict[str, Any]
 async def execute_required_qualification_company_scores(
     *,
     epoch_id: int,
+    sequence: int = 0,
     purpose: str,
     companies: list[Mapping[str, Any]],
     icp: Mapping[str, Any],
@@ -95,6 +96,7 @@ async def execute_required_qualification_company_scores(
     try:
         return await execute_company_scores_v2(
             epoch_id=int(epoch_id),
+            sequence=sequence,
             purpose=purpose,
             companies=companies,
             icp=icp,

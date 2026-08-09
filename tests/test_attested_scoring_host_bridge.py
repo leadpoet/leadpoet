@@ -62,6 +62,7 @@ async def test_company_facade_routes_only_to_v2(monkeypatch):
     sidecar = {}
     result = await attested_scoring.execute_required_qualification_company_scores(
         epoch_id=9,
+        sequence=3,
         purpose="research_lab.candidate_score.v1",
         companies=[{"company_name": "Example"}],
         icp={"industry": "Software"},
@@ -70,7 +71,42 @@ async def test_company_facade_routes_only_to_v2(monkeypatch):
     )
     assert result == [{"final_score": 4.5}]
     assert captured["epoch_id"] == 9
+    assert captured["sequence"] == 3
     assert sidecar["receipt"]["receipt_hash"] == HASH_A
+
+
+@pytest.mark.asyncio
+async def test_company_scorer_forwards_bounded_retry_sequence(monkeypatch):
+    from research_lab.eval.evaluator import QualificationStyleCompanyScorer
+
+    captured = {}
+
+    async def execute(**kwargs):
+        captured.update(kwargs)
+        kwargs["attestation_out"].update({"receipt": {"receipt_hash": HASH_A}})
+        return [{"final_score": 4.5}]
+
+    monkeypatch.setattr(
+        attested_scoring,
+        "execute_required_qualification_company_scores",
+        execute,
+    )
+    scorer = QualificationStyleCompanyScorer(
+        attested_epoch_id=9,
+        attested_purpose="research_lab.rebenchmark.v1",
+        attested_provider_profile="benchmark_scorer",
+    )
+
+    result = await scorer.score_with_breakdowns_for_attempt(
+        [{"company_name": "Example"}],
+        {"industry": "Software"},
+        True,
+        sequence=5,
+    )
+
+    assert result == [{"final_score": 4.5}]
+    assert captured["sequence"] == 5
+    assert scorer.last_attested_receipt_hash() == HASH_A
 
 
 @pytest.mark.asyncio

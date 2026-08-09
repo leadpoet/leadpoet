@@ -244,6 +244,7 @@ async def test_company_scores_are_returned_only_from_v2_enclave(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_SCORING_WORKER_INDEX", "24")
     result = await v2_authority.execute_company_scores_v2(
         epoch_id=10,
+        sequence=6,
         purpose="research_lab.candidate_score.v1",
         companies=[{"company_name": "Example"}],
         icp={"industry": "Software"},
@@ -253,6 +254,7 @@ async def test_company_scores_are_returned_only_from_v2_enclave(monkeypatch):
 
     assert result == [{"final_score": 7.5}]
     assert captured["purpose"] == "research_lab.company_score.v2"
+    assert captured["sequence"] == 6
     assert captured["payload"]["provider_execution_mode"] == "live_enclave"
     assert captured["payload"]["scoring_context_purpose"] == "research_lab.candidate_score.v2"
     assert captured["worker_index"] == 24
@@ -279,6 +281,22 @@ async def test_company_score_projection_mismatch_fails_closed():
             icp={},
             is_reference_model=False,
             execute=execute,
+        )
+
+
+@pytest.mark.asyncio
+async def test_company_score_sequence_must_be_non_negative_integer():
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="sequence",
+    ):
+        await v2_authority.execute_company_scores_v2(
+            epoch_id=10,
+            sequence=-1,
+            purpose="research_lab.candidate_score.v1",
+            companies=[],
+            icp={},
+            is_reference_model=False,
         )
 
 

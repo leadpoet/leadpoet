@@ -12905,6 +12905,7 @@ class ResearchLabGatewayScoringWorker:
                     outputs=outputs,
                     icp=item["icp"],
                     scorer_semaphore=scorer_semaphore,
+                    attested_sequence_base=max(0, int(retry_round)) * 2,
                 )
             except Exception as scorer_exc:  # noqa: BLE001 - §0-N6: non-fatal for the batch
                 scorer_error = _short_error(scorer_exc)
@@ -13043,6 +13044,7 @@ class ResearchLabGatewayScoringWorker:
         icp: Mapping[str, Any],
         scorer_semaphore: asyncio.Semaphore | None = None,
         apply_isolation: bool = False,
+        attested_sequence_base: int = 0,
     ) -> list[dict[str, Any]]:
         """Baseline-batch scorer call with the §0-N6 semantics.
 
@@ -13052,7 +13054,9 @@ class ResearchLabGatewayScoringWorker:
           concurrency would restore prod keys mid-flight for sibling tasks);
         * optional burst semaphore (RESEARCH_LAB_BENCHMARK_SCORER_MAX_CONCURRENCY);
         * one inline retry for transient scorer provider errors (classified by
-          the same rules as runner errors).
+          the same rules as runner errors). Each bounded retry advances the
+          immutable V2 execution sequence so it cannot reopen a terminal failed
+          enclave job for the same payload.
         """
         # max_companies is scorer-enforced: when the ICP pins a goal, at most
         # that many companies are scored/counted (model output is best-first,
@@ -13066,15 +13070,30 @@ class ResearchLabGatewayScoringWorker:
             )
             outputs = list(outputs)[:goal]
 
-        async def _call() -> list[dict[str, Any]]:
+        async def _invoke(sequence: int) -> list[dict[str, Any]]:
+            attempt_method = getattr(
+                scorer,
+                "score_with_breakdowns_for_attempt",
+                None,
+            )
+            if callable(attempt_method):
+                return await attempt_method(
+                    outputs,
+                    icp,
+                    True,
+                    sequence=sequence,
+                )
+            return await scorer.score_with_breakdowns(outputs, icp, True)
+
+        async def _call(sequence: int) -> list[dict[str, Any]]:
             if scorer_semaphore is None:
-                return await scorer.score_with_breakdowns(outputs, icp, True)
+                return await _invoke(sequence)
             async with scorer_semaphore:
-                return await scorer.score_with_breakdowns(outputs, icp, True)
+                return await _invoke(sequence)
 
         async def _guarded() -> list[dict[str, Any]]:
             try:
-                return await _call()
+                return await _call(attested_sequence_base)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -13096,7 +13115,7 @@ class ResearchLabGatewayScoringWorker:
                     await asyncio.sleep(backoff_seconds)
                 else:
                     await asyncio.sleep(2.0)
-                return await _call()
+                return await _call(attested_sequence_base + 1)
 
         if not apply_isolation:
             return await _guarded()

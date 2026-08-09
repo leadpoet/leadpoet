@@ -1121,19 +1121,29 @@ def test_benchmark_scorer_max_concurrency_env(monkeypatch):
 
 async def test_score_baseline_outputs_retries_transient_once():
     worker = _worker()
-    calls = {"n": 0}
+    sequences = []
 
     class FlakyScorer:
-        async def score_with_breakdowns(self, outputs: Any, icp: Any, is_reference: bool) -> list[dict[str, Any]]:
-            calls["n"] += 1
-            if calls["n"] == 1:
+        async def score_with_breakdowns_for_attempt(
+            self,
+            outputs: Any,
+            icp: Any,
+            is_reference: bool,
+            *,
+            sequence: int,
+        ) -> list[dict[str, Any]]:
+            sequences.append(sequence)
+            if len(sequences) == 1:
                 raise RuntimeError("HTTP Error 429: Too Many Requests")
             return [{"final_score": 12.0}]
 
     result = await worker._score_baseline_outputs(
-        scorer=FlakyScorer(), outputs=[{"company_name": "acme"}], icp={"industry": "saas"}
+        scorer=FlakyScorer(),
+        outputs=[{"company_name": "acme"}],
+        icp={"industry": "saas"},
+        attested_sequence_base=4,
     )
-    assert calls["n"] == 2
+    assert sequences == [4, 5]
     assert result == [{"final_score": 12.0}]
 
 
@@ -1261,6 +1271,52 @@ async def test_run_baseline_icp_mode_label_reaches_runner():
     assert summary["_nonempty"] is False
     assert summary["diagnostics"]["sourcing_failed"] is True
     assert sw._baseline_summary_checkpointable(summary) is False
+
+
+async def test_run_baseline_icp_derives_sequence_from_retry_round():
+    worker = _worker()
+    import concurrent.futures
+
+    sequences: list[int] = []
+
+    class SequenceScorer:
+        async def score_with_breakdowns_for_attempt(
+            self,
+            outputs: Any,
+            icp: Any,
+            is_reference: bool,
+            *,
+            sequence: int,
+        ) -> list[dict[str, Any]]:
+            sequences.append(sequence)
+            return [{"final_score": 10.0}]
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        summary = await worker._run_baseline_icp(
+            runner=lambda _icp, _ctx: [
+                {"company_name": "acme", "employee_count": "11-50"}
+            ],
+            scorer=SequenceScorer(),
+            item={
+                "icp": {"industry": "saas"},
+                "icp_ref": "icp:a",
+                "icp_hash": "hash-a",
+                "set_id": 1,
+                "day_index": 1,
+                "day_rank": 1,
+            },
+            item_index=1,
+            total_icps=1,
+            run_start=0.0,
+            executor=executor,
+            retry_round=2,
+        )
+    finally:
+        executor.shutdown(wait=False)
+
+    assert sequences == [4]
+    assert summary["score"] > 0
 
 
 async def test_run_baseline_icp_retries_verifier_infrastructure_failure():

@@ -3000,6 +3000,27 @@ class QualificationStyleCompanyScorer:
         icp: Mapping[str, Any],
         is_reference_model: bool,
     ) -> list[dict[str, Any]]:
+        return await self.score_with_breakdowns_for_attempt(
+            companies,
+            icp,
+            is_reference_model,
+            sequence=0,
+        )
+
+    async def score_with_breakdowns_for_attempt(
+        self,
+        companies: Sequence[Mapping[str, Any]],
+        icp: Mapping[str, Any],
+        is_reference_model: bool,
+        *,
+        sequence: int,
+    ) -> list[dict[str, Any]]:
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence < 0
+        ):
+            raise ValueError("attested scoring sequence must be a non-negative integer")
         # Gateway legacy compatibility keeps the established host scorer while
         # current main is deployed before the multi-enclave V2 runtime is
         # ready. Import lazily so this shared package remains gateway-optional.
@@ -3027,6 +3048,7 @@ class QualificationStyleCompanyScorer:
         attestation: dict[str, Any] = {}
         result = await execute_required_qualification_company_scores(
             epoch_id=int(self._attested_epoch_id),
+            sequence=sequence,
             purpose=self._attested_purpose,
             companies=[dict(item) for item in companies],
             icp=dict(icp),

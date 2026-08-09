@@ -1096,6 +1096,156 @@ async def test_provider_tape_loader_preserves_source_and_persistence_ancestry(
 
 
 @pytest.mark.asyncio
+async def test_provider_tape_link_reuses_exact_existing_receipt_owner(monkeypatch):
+    from gateway.research_lab import attested_v2_store
+
+    cache_ref = "1" * 64
+    cache_hash = "sha256:" + "2" * 64
+    owner_hash = "sha256:" + "3" * 64
+    tape_receipt = {
+        "receipt_hash": "sha256:" + "4" * 64,
+        "role": "gateway_scoring",
+        "purpose": "research_lab.provider_evidence_tape.v2",
+        "status": "succeeded",
+        "input_root": provider_evidence_tape_input_root(cache_ref, cache_hash),
+        "output_root": cache_hash,
+    }
+    owner_graph = {
+        "root_receipt_hash": owner_hash,
+        "receipts": [tape_receipt, {"receipt_hash": owner_hash}],
+    }
+
+    async def persist_business_artifact_links_v2(**_kwargs):
+        raise attested_v2_store.AttestedV2StoreError(
+            "research_lab_attested_business_artifact_links_v2 "
+            "stored row conflicts at receipt_hash"
+        )
+
+    async def load_business_artifact_graph_v2(**kwargs):
+        assert kwargs == {
+            "artifact_kind": "provider_evidence_tape_v2",
+            "artifact_ref": cache_ref,
+            "artifact_hash": cache_hash,
+        }
+        return owner_graph
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_business_artifact_links_v2",
+        persist_business_artifact_links_v2,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        load_business_artifact_graph_v2,
+    )
+
+    result = await model_authority_v2._persist_provider_evidence_tape_link(
+        receipt_hash="sha256:" + "5" * 64,
+        cache_ref=cache_ref,
+        cache_hash=cache_hash,
+    )
+
+    assert result == {
+        "business_artifact_link_count": 1,
+        "business_artifact_link_set_hash": sha256_json(
+            [
+                {
+                    "receipt_hash": owner_hash,
+                    "artifact_kind": "provider_evidence_tape_v2",
+                    "artifact_ref": cache_ref,
+                    "artifact_hash": cache_hash,
+                }
+            ]
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_provider_tape_link_replay_rejects_mismatched_existing_graph(monkeypatch):
+    from gateway.research_lab import attested_v2_store
+
+    cache_ref = "1" * 64
+    cache_hash = "sha256:" + "2" * 64
+    mismatched_graph = {
+        "root_receipt_hash": "sha256:" + "3" * 64,
+        "receipts": [
+            {
+                "receipt_hash": "sha256:" + "4" * 64,
+                "role": "gateway_scoring",
+                "purpose": "research_lab.provider_evidence_tape.v2",
+                "status": "succeeded",
+                "input_root": provider_evidence_tape_input_root(
+                    cache_ref,
+                    "sha256:" + "9" * 64,
+                ),
+                "output_root": "sha256:" + "9" * 64,
+            },
+            {"receipt_hash": "sha256:" + "3" * 64},
+        ],
+    }
+
+    async def persist_business_artifact_links_v2(**_kwargs):
+        raise attested_v2_store.AttestedV2StoreError(
+            "research_lab_attested_business_artifact_links_v2 "
+            "stored row conflicts at receipt_hash"
+        )
+
+    async def load_business_artifact_graph_v2(**_kwargs):
+        return mismatched_graph
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_business_artifact_links_v2",
+        persist_business_artifact_links_v2,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        load_business_artifact_graph_v2,
+    )
+
+    with pytest.raises(
+        AttestedPrivateModelRunnerV2Error,
+        match="provider evidence cache has no unique measured tape receipt",
+    ):
+        await model_authority_v2._persist_provider_evidence_tape_link(
+            receipt_hash="sha256:" + "5" * 64,
+            cache_ref=cache_ref,
+            cache_hash=cache_hash,
+        )
+
+
+@pytest.mark.asyncio
+async def test_provider_tape_link_replay_does_not_mask_other_store_conflicts(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    async def persist_business_artifact_links_v2(**_kwargs):
+        raise attested_v2_store.AttestedV2StoreError(
+            "research_lab_attested_business_artifact_links_v2 "
+            "stored row conflicts at artifact_hash"
+        )
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_business_artifact_links_v2",
+        persist_business_artifact_links_v2,
+    )
+
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="stored row conflicts at artifact_hash",
+    ):
+        await model_authority_v2._persist_provider_evidence_tape_link(
+            receipt_hash="sha256:" + "5" * 64,
+            cache_ref="1" * 64,
+            cache_hash="sha256:" + "2" * 64,
+        )
+
+
+@pytest.mark.asyncio
 async def test_candidate_cache_without_exact_tape_graph_fails_before_execution(
     tmp_path, monkeypatch
 ):

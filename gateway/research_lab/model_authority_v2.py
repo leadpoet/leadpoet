@@ -516,19 +516,44 @@ async def _persist_provider_evidence_tape_link(
     cache_hash: str,
 ) -> dict[str, Any]:
     from gateway.research_lab.attested_v2_store import (
+        AttestedV2StoreError,
         persist_business_artifact_links_v2,
     )
 
-    return await persist_business_artifact_links_v2(
-        receipt_hash=receipt_hash,
-        artifacts=(
-            {
-                "artifact_kind": PROVIDER_EVIDENCE_TAPE_ARTIFACT_KIND,
-                "artifact_ref": cache_ref,
-                "artifact_hash": cache_hash,
-            },
-        ),
-    )
+    artifact = {
+        "artifact_kind": PROVIDER_EVIDENCE_TAPE_ARTIFACT_KIND,
+        "artifact_ref": cache_ref,
+        "artifact_hash": cache_hash,
+    }
+    try:
+        return await persist_business_artifact_links_v2(
+            receipt_hash=receipt_hash,
+            artifacts=(artifact,),
+        )
+    except AttestedV2StoreError as exc:
+        if "stored row conflicts at receipt_hash" not in str(exc):
+            raise
+
+        # An interrupted/retried baseline may reproduce the exact immutable
+        # tape under a new measured receipt. The artifact table deliberately
+        # retains its first receipt owner, so validate and reuse that owner's
+        # complete graph instead of treating exact replay as corruption.
+        existing_graphs = await _load_provider_evidence_tape_graphs(
+            cache_ref=cache_ref,
+            cache_hash=cache_hash,
+        )
+        owner_receipt_hash = str(
+            existing_graphs[-1].get("root_receipt_hash") or ""
+        ).lower()
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", owner_receipt_hash) is None:
+            raise AttestedPrivateModelRunnerV2Error(
+                "provider evidence tape owner receipt is invalid"
+            ) from exc
+        canonical_link = {"receipt_hash": owner_receipt_hash, **artifact}
+        return {
+            "business_artifact_link_count": 1,
+            "business_artifact_link_set_hash": sha256_json([canonical_link]),
+        }
 
 
 def _write_provider_evidence_cache(

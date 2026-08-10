@@ -262,7 +262,43 @@ def test_record_refuses_secret_material(tmp_path):
     recorder = _record_store(tmp_path)
     request = build_snapshot_request("GET", "https://api.exa.ai/contents?id=1")
     with pytest.raises(DevSnapshotStoreError):
-        recorder.record_response(request, status=200, body_text='{"leak": "sk-or-abc123"}')
+        recorder.record_response(
+            request,
+            status=200,
+            body_text='{"leak": "sk-or-v1-abcdefghijklmnopqrstuvwxyz012345"}',
+        )
+
+
+def test_record_allows_secret_names_and_incomplete_prefixes(tmp_path):
+    recorder = _record_store(tmp_path)
+    request = build_snapshot_request("GET", "https://api.exa.ai/contents?id=1")
+    body = json.dumps(
+        {
+            "configuration": "OPENROUTER_API_KEY",
+            "format": "sk-or-",
+            "role": "service_role",
+        }
+    )
+
+    record = recorder.record_response(request, status=200, body_text=body)
+
+    assert record["response"]["body_text"] == body
+
+
+def test_record_refuses_exact_runtime_secret_without_known_prefix(
+    tmp_path, monkeypatch
+):
+    runtime_secret = "opaque-runtime-credential-value-for-testing"
+    monkeypatch.setenv("EXA_API_KEY", runtime_secret)
+    recorder = _record_store(tmp_path)
+    request = build_snapshot_request("GET", "https://api.exa.ai/contents?id=1")
+
+    with pytest.raises(DevSnapshotStoreError):
+        recorder.record_response(
+            request,
+            status=200,
+            body_text=json.dumps({"echo": runtime_secret}),
+        )
 
 
 def test_container_replay_env_shape():
@@ -408,7 +444,8 @@ def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
         "_rl_dev_record('GET', 'https://api.exa.ai/search?q=clean', None, 200,"
         " {'content-type': 'application/json'}, '{\"results\": [1]}')\n"
         "_rl_dev_record('GET', 'https://api.exa.ai/search?q=leaky', None, 200,"
-        " {'content-type': 'application/json'}, '{\"echo\": \"sk-or-abc123\"}')\n"
+        " {'content-type': 'application/json'},"
+        " '{\"echo\": \"sk-or-v1-abcdefghijklmnopqrstuvwxyz012345\"}')\n"
         "snapshots = os.path.join(os.environ['RESEARCH_LAB_DEV_SNAPSHOT_DIR'], 'snapshots')\n"
         "names = sorted(os.listdir(snapshots)) if os.path.isdir(snapshots) else []\n"
         "bodies = []\n"
@@ -449,7 +486,8 @@ def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_pat
         "\nimport json, os\n"
         "_rl_dev_record('GET', 'https://api.scrapingdog.com/profile?id=clean', None, 200,"
         " {'content-type': 'application/json'},"
-        " json.dumps({'role': 'service_role', 'configuration': 'SCRAPINGDOG_API_KEY'}))\n"
+        " json.dumps({'role': 'service_role', 'configuration': 'SCRAPINGDOG_API_KEY',"
+        " 'documented_prefix': 'sk-or-'}))\n"
         "_rl_dev_record('GET', 'https://api.scrapingdog.com/profile?id=leaky', None, 200,"
         " {'content-type': 'application/json'},"
         " json.dumps({'echo': os.environ['SCRAPINGDOG_API_KEY']}))\n"
@@ -479,7 +517,8 @@ def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_pat
     assert decoded == {
         "count": 1,
         "bodies": [
-            '{"role": "service_role", "configuration": "SCRAPINGDOG_API_KEY"}'
+            '{"role": "service_role", "configuration": "SCRAPINGDOG_API_KEY", '
+            '"documented_prefix": "sk-or-"}'
         ],
     }
     failures = [

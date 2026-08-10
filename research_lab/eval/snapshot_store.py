@@ -58,14 +58,13 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import parse_qsl, urlsplit
 
 from research_lab.canonical import sha256_json, sha256_text
-
-from .private_runtime import SECRET_MARKERS
 
 SNAPSHOT_SCHEMA_VERSION = "1.0"
 SNAPSHOT_RECORD_TYPE = "research_lab_dev_provider_snapshot"
@@ -91,6 +90,36 @@ POINTER_NAME = "current.json"
 RECORD_FAILURES_NAME = "record_failures.jsonl"
 RECORDED_PROVIDER_MODELS_NAME = "provider_models.jsonl"
 URLLIB_TRANSPORT_OUTCOME = "urllib_transport_error"
+
+_SNAPSHOT_SECRET_ENV_NAMES = (
+    "AWS_SECRET_ACCESS_KEY",
+    "DEEPLINE_API_KEY",
+    "EXA_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_KEY",
+    "OPENROUTER_MANAGEMENT_KEY",
+    "QUALIFICATION_OPENROUTER_API_KEY",
+    "QUALIFICATION_SCRAPINGDOG_API_KEY",
+    "SCRAPINGDOG_API_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+)
+_SNAPSHOT_SECRET_VALUE_PATTERNS = (
+    re.compile(r"\bsk-or-[A-Za-z0-9_-]{24,}\b", re.IGNORECASE),
+    re.compile(r"\bsb_secret_[A-Za-z0-9_-]{24,}\b", re.IGNORECASE),
+)
+
+
+def _snapshot_runtime_secret_values() -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                value
+                for name in _SNAPSHOT_SECRET_ENV_NAMES
+                for value in (os.environ.get(name, ""),)
+                if len(value) >= 8 and value != "local-encrypted-recipient-v1"
+            }
+        )
+    )
 
 
 def _urllib_transport_response(error: BaseException) -> dict[str, Any] | None:
@@ -1263,8 +1292,9 @@ def _contains_secret_material(value: Any) -> bool:
     if isinstance(value, list):
         return any(_contains_secret_material(item) for item in value)
     if isinstance(value, str):
-        lowered = value.lower()
-        return any(marker in lowered for marker in SECRET_MARKERS)
+        if any(pattern.search(value) for pattern in _SNAPSHOT_SECRET_VALUE_PATTERNS):
+            return True
+        return any(secret in value for secret in _snapshot_runtime_secret_values())
     return False
 
 
@@ -1335,6 +1365,7 @@ _BOOTSTRAP_KEY_HELPERS = r"""
 import hashlib
 import json
 import os
+import re
 from urllib.parse import parse_qsl, urlsplit
 
 _RL_DEV_SNAPSHOT_DIR = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_DIR", "").strip()
@@ -1343,7 +1374,6 @@ _RL_DEV_RECORD_REUSE_EXISTING = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_RECORD
 _RL_DEV_RECORD_ICP_REF = os.environ.get("RESEARCH_LAB_DEV_RECORD_ICP_REF", "").strip()
 _RL_DEV_AUTH_PARAMS = ("api_key", "apikey", "x-api-key", "authorization", "token", "access_token", "bearer")
 _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrouter": "{}"}
-_RL_DEV_SECRET_VALUE_PREFIXES = ("sk-or-", "sb_secret_")
 _RL_DEV_SECRET_ENV_NAMES = (
     "AWS_SECRET_ACCESS_KEY",
     "DEEPLINE_API_KEY",
@@ -1362,6 +1392,10 @@ _RL_DEV_RUNTIME_SECRET_VALUES = tuple(sorted({
     for value in (os.environ.get(name, ""),)
     if len(value) >= 8 and value != "local-encrypted-recipient-v1"
 }))
+_RL_DEV_SECRET_VALUE_PATTERNS = (
+    re.compile(r"\bsk-or-[A-Za-z0-9_-]{24,}\b", re.IGNORECASE),
+    re.compile(r"\bsb_secret_[A-Za-z0-9_-]{24,}\b", re.IGNORECASE),
+)
 _RL_DEV_RECORD_FAILURES_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "record_failures.jsonl")
 _RL_DEV_PROVIDER_MODELS_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "provider_models.jsonl")
 _RL_DEV_URLLIB_TRANSPORT_OUTCOME = "urllib_transport_error"
@@ -1386,8 +1420,7 @@ def _rl_dev_contains_runtime_secret(value):
         return any(_rl_dev_contains_runtime_secret(item) for item in value)
     if not isinstance(value, str):
         return False
-    lowered = value.lower()
-    if any(prefix in lowered for prefix in _RL_DEV_SECRET_VALUE_PREFIXES):
+    if any(pattern.search(value) for pattern in _RL_DEV_SECRET_VALUE_PATTERNS):
         return True
     return any(secret in value for secret in _RL_DEV_RUNTIME_SECRET_VALUES)
 

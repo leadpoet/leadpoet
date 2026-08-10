@@ -6116,6 +6116,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD,
         BaselineMaintenancePause,
         ResearchLabGatewayScoringWorker,
+        _baseline_attempt_ledger_entry,
         _attested_receipts_with_persisted_roots,
         _baseline_summary_checkpointable,
         _load_baseline_scoring_progress,
@@ -7070,8 +7071,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             raise RuntimeError("same-release baseline checkpoint did not resume")
         if restored_receipt_hashes != set(checkpoint_receipt_hashes):
             raise RuntimeError("baseline checkpoint receipt roots did not resume")
-        if load_checkpoint(gateway_runtime_commit_sha="9" * 40):
-            raise RuntimeError("cross-release baseline checkpoint was reused")
+        if load_checkpoint(gateway_runtime_commit_sha="9" * 40) != [checkpoint_row]:
+            raise RuntimeError("cross-release baseline checkpoint did not resume")
         if load_checkpoint(scoring_configuration_hash_value="sha256:" + "8" * 64):
             raise RuntimeError("cross-config baseline checkpoint was reused")
         if load_checkpoint(repo_git_sha="7" * 40):
@@ -7247,6 +7248,166 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 raise RuntimeError("baseline did not finish after checkpoint resume")
 
         asyncio.run(exercise_pause_checkpoint_resume())
+
+        async def exercise_partial_retry_round_resume() -> None:
+            class RetryResumeWorker(ResearchLabGatewayScoringWorker):
+                async def _run_baseline_icp(
+                    self,
+                    *,
+                    item: Mapping[str, Any],
+                    item_index: int,
+                    retry_round: int,
+                    **_kwargs: Any,
+                ) -> dict[str, Any]:
+                    retry_calls.append((item_index, retry_round))
+                    retryable = retry_round < 2
+                    return attempt_row(
+                        item_index,
+                        retry_round=retry_round,
+                        retryable=retryable,
+                    )
+
+            def attempt_row(
+                item_index: int,
+                *,
+                retry_round: int,
+                retryable: bool,
+            ) -> dict[str, Any]:
+                return {
+                    "icp_ref": f"retry-icp-{item_index}",
+                    "icp_hash": f"retry-hash-{item_index}",
+                    "score": 0.0 if retryable else float(item_index),
+                    "company_count": 0 if retryable else 1,
+                    "sourced_count": 0 if retryable else 1,
+                    "diagnostics": (
+                        {
+                            "sourcing_failed": True,
+                            "runtime_error": {"category": "provider"},
+                        }
+                        if retryable
+                        else {}
+                    ),
+                    "_item_index": item_index,
+                    "_retryable": retryable,
+                    "_nonempty": not retryable,
+                    "_runtime_error": "provider unavailable" if retryable else "",
+                    "_retry_backoff_seconds": 0.0,
+                    _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+                }
+
+            retry_worker = object.__new__(RetryResumeWorker)
+            retry_worker.worker_ref = "rehearsal-baseline-retry-worker"
+            retry_worker.config = SimpleNamespace(
+                private_baseline_concurrency=3,
+                private_baseline_retry_concurrency=3,
+                private_baseline_provider_retry_rounds=2,
+            )
+            retry_window = SimpleNamespace(
+                benchmark_items=[
+                    {
+                        "icp_ref": f"retry-icp-{index}",
+                        "icp_hash": f"retry-hash-{index}",
+                    }
+                    for index in range(1, 4)
+                ]
+            )
+            prior_runtime = "8" * 40
+            resume_attempts = [
+                _baseline_attempt_ledger_entry(
+                    attempt_row(index, retry_round=0, retryable=True),
+                    retry_round=0,
+                    gateway_runtime_commit_sha=prior_runtime,
+                )
+                for index in range(1, 4)
+            ]
+            resume_attempts.extend(
+                _baseline_attempt_ledger_entry(
+                    attempt_row(index, retry_round=1, retryable=True),
+                    retry_round=1,
+                    gateway_runtime_commit_sha=prior_runtime,
+                )
+                for index in range(1, 3)
+            )
+            retry_checkpoint_key = "baseline/partial-retry-progress.json"
+            _store_baseline_scoring_progress(
+                checkpoint_bucket,
+                retry_checkpoint_key,
+                benchmark_date="2026-07-25",
+                window_hash="sha256:" + "3" * 64,
+                private_model_artifact_hash="sha256:" + "4" * 64,
+                gateway_runtime_commit_sha=prior_runtime,
+                scoring_configuration_hash_value=checkpoint_config_hash,
+                rows=[],
+                attested_parent_receipt_hashes=[],
+                repo_git_sha=checkpoint_repo_sha,
+                manifest_hash=checkpoint_manifest_hash,
+                attempt_ledger=resume_attempts,
+                provider_cost_base_scope_hash="sha256:" + "5" * 64,
+            )
+            restored_attempts: list[dict[str, Any]] = []
+            restored_scope: list[str] = []
+            restored_terminal_rows = _load_baseline_scoring_progress(
+                checkpoint_bucket,
+                retry_checkpoint_key,
+                benchmark_date="2026-07-25",
+                window_hash="sha256:" + "3" * 64,
+                private_model_artifact_hash="sha256:" + "4" * 64,
+                gateway_runtime_commit_sha="9" * 40,
+                scoring_configuration_hash_value=checkpoint_config_hash,
+                repo_git_sha=checkpoint_repo_sha,
+                manifest_hash=checkpoint_manifest_hash,
+                attempt_ledger_out=restored_attempts,
+                provider_cost_base_scope_out=restored_scope,
+                benchmark_items=retry_window.benchmark_items,
+            )
+            if restored_terminal_rows or len(restored_attempts) != 5:
+                raise RuntimeError(
+                    "partial retry checkpoint did not survive a gateway release"
+                )
+            if restored_scope != ["sha256:" + "5" * 64]:
+                raise RuntimeError("partial retry provider-cost scope changed")
+            retry_calls: list[tuple[int, int]] = []
+
+            async def unpaused() -> dict[str, Any]:
+                return {"paused": False}
+
+            original_maintenance_reader = (
+                scoring_worker_module.get_scoring_maintenance_state
+            )
+            original_retry_scope = (
+                scoring_worker_module._retry_runner_with_provider_cost_scope
+            )
+            scoring_worker_module.get_scoring_maintenance_state = unpaused
+            scoring_worker_module._retry_runner_with_provider_cost_scope = (
+                lambda runner, **_kwargs: runner
+            )
+            try:
+                rows, stats = await retry_worker._run_baseline_batch_inner(
+                    runner=object(),
+                    retry_runner=object(),
+                    scorer=object(),
+                    window=retry_window,
+                    run_start=time.time(),
+                    resume_attempt_ledger=restored_attempts,
+                    provider_cost_base_scope=restored_scope[0],
+                )
+            finally:
+                scoring_worker_module.get_scoring_maintenance_state = (
+                    original_maintenance_reader
+                )
+                scoring_worker_module._retry_runner_with_provider_cost_scope = (
+                    original_retry_scope
+                )
+            if retry_calls != [(3, 1), (1, 2), (2, 2), (3, 2)]:
+                raise RuntimeError("partial retry round replayed settled attempts")
+            if len(rows) != 3 or stats != {
+                "retried": 6,
+                "recovered": 3,
+                "unresolved": 0,
+            }:
+                raise RuntimeError("partial retry round did not resume exactly")
+
+        asyncio.run(exercise_partial_retry_round_resume())
     finally:
         if prior_boto3 is None:
             sys.modules.pop("boto3", None)
@@ -7301,7 +7462,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "completed_provider_job_state_released": True,
         "active_provider_job_state_isolated": True,
         "provider_recovery_checkpoint_bound": True,
-        "baseline_checkpoint_runtime_identity_bound": True,
+        "baseline_checkpoint_cross_release_resume": True,
+        "baseline_partial_retry_round_resume_exact": True,
         "baseline_checkpoint_receipt_ancestry_restored": True,
         "baseline_exact_receipt_frontier_bound": True,
         "baseline_pause_checkpoint_resume_complete": True,
@@ -7920,7 +8082,12 @@ def main() -> int:
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",
                 {},
-            ).get("baseline_checkpoint_runtime_identity_bound")
+            ).get("baseline_checkpoint_cross_release_resume")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("baseline_partial_retry_round_resume_exact")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

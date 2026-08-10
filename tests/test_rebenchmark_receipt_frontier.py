@@ -182,7 +182,7 @@ async def test_40_icp_two_round_recovery_excludes_superseded_receipts(
     monkeypatch.setattr(
         sw,
         "_retry_runner_with_provider_cost_scope",
-        lambda _runner, *, retry_round: Runner(retry_round),
+        lambda _runner, *, retry_round, **_kwargs: Runner(retry_round),
     )
 
     window = type(

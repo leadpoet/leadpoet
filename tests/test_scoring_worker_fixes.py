@@ -1929,6 +1929,10 @@ def test_private_baseline_retry_runner_gets_fresh_cost_scope(monkeypatch):
     )
 
     round_one = sw._retry_runner_with_provider_cost_scope(retry_runner, retry_round=1)
+    round_one_after_restart = sw._retry_runner_with_provider_cost_scope(
+        retry_runner,
+        retry_round=1,
+    )
     round_two = sw._retry_runner_with_provider_cost_scope(retry_runner, retry_round=2)
 
     assert retry_runner.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV] == base_scope
@@ -1940,6 +1944,10 @@ def test_private_baseline_retry_runner_gets_fresh_cost_scope(monkeypatch):
     assert (
         round_one.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV]
         != round_two.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV]
+    )
+    assert (
+        round_one.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV]
+        == round_one_after_restart.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV]
     )
 
 
@@ -2005,6 +2013,189 @@ async def test_private_baseline_retry_round_uses_fresh_cost_scope(monkeypatch):
     assert seen_scopes[1] != seen_scopes[0]
     assert rows[0]["score"] == 3.0
     assert stats == {"retried": 1, "recovered": 1, "unresolved": 0}
+
+
+@pytest.mark.asyncio
+async def test_private_baseline_restart_resumes_partial_retry_round_exactly(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=5,
+        private_baseline_retry_concurrency=4,
+        private_baseline_provider_retry_rounds=2,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[
+            {"icp_ref": f"icp-{index:02d}", "icp_hash": f"hash-{index:02d}"}
+            for index in range(1, 21)
+        ]
+    )
+    image_digest = (
+        "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:"
+        + "c" * 64
+    )
+    base_scope = "sha256:" + "4" * 64
+    first_runner = _retry_test_runner(image_digest=image_digest, scope=base_scope)
+    retry_runner = _retry_test_runner(image_digest=image_digest, scope=base_scope)
+    producer_sha = "a" * 40
+
+    def unresolved_row(index, retry_round):  # noqa: ANN001
+        return {
+            "icp_ref": f"icp-{index:02d}",
+            "icp_hash": f"hash-{index:02d}",
+            "score": 0.0,
+            "company_count": 0,
+            "sourced_count": 0,
+            "diagnostics": {
+                "sourcing_failed": True,
+                "runtime_error": {"category": "provider"},
+            },
+            "_item_index": index,
+            "_retryable": True,
+            "_nonempty": False,
+            "_runtime_error": "HTTP 500",
+            "_retry_backoff_seconds": 0.0,
+            sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+        }
+
+    resume_attempts = [
+        sw._baseline_attempt_ledger_entry(
+            unresolved_row(index, 0),
+            retry_round=0,
+            gateway_runtime_commit_sha=producer_sha,
+        )
+        for index in range(1, 21)
+    ]
+    resume_attempts.extend(
+        sw._baseline_attempt_ledger_entry(
+            unresolved_row(index, 1),
+            retry_round=1,
+            gateway_runtime_commit_sha=producer_sha,
+        )
+        for index in range(1, 13)
+    )
+    called: list[tuple[int, int]] = []
+    persisted: list[tuple[int, int]] = []
+
+    async def run_icp(self, *, item, item_index, retry_round, **_kwargs):  # noqa: ANN001
+        called.append((item_index, retry_round))
+        if retry_round == 1:
+            return unresolved_row(item_index, retry_round)
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": float(item_index),
+            "company_count": 1,
+            "sourced_count": 1,
+            "diagnostics": {},
+            "_item_index": item_index,
+            "_retryable": False,
+            "_nonempty": True,
+            "_runtime_error": "",
+            "_retry_backoff_seconds": 0.0,
+            sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+        }
+
+    async def checkpoint(row, *, retry_round):  # noqa: ANN001
+        persisted.append((int(row["_item_index"]), retry_round))
+        return True
+
+    async def maintenance_state():
+        return {"paused": False}
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        run_icp,
+    )
+
+    rows, stats = await worker._run_baseline_batch_inner(
+        runner=first_runner,
+        retry_runner=retry_runner,
+        scorer=object(),
+        window=window,
+        run_start=0.0,
+        resume_attempt_ledger=resume_attempts,
+        attempt_checkpoint=checkpoint,
+        provider_cost_base_scope=base_scope,
+    )
+
+    assert [index for index, round_no in called if round_no == 1] == list(
+        range(13, 21)
+    )
+    assert [index for index, round_no in called if round_no == 2] == list(
+        range(1, 21)
+    )
+    assert called == persisted
+    assert len(rows) == 20
+    assert stats == {"retried": 40, "recovered": 20, "unresolved": 0}
+
+
+@pytest.mark.asyncio
+async def test_private_baseline_restart_cannot_exceed_retry_budget(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=1,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=2,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[{"icp_ref": "icp-a", "icp_hash": "hash-a"}]
+    )
+    producer_sha = "b" * 40
+    attempts = []
+    for retry_round in range(3):
+        row = {
+            "icp_ref": "icp-a",
+            "icp_hash": "hash-a",
+            "score": 0.0,
+            "company_count": 0,
+            "sourced_count": 0,
+            "diagnostics": {
+                "sourcing_failed": True,
+                "runtime_error": {"category": "provider"},
+            },
+            "_item_index": 1,
+            "_retryable": True,
+            "_nonempty": False,
+            "_runtime_error": "HTTP 500",
+            "_retry_backoff_seconds": 0.0,
+            sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+        }
+        attempts.append(
+            sw._baseline_attempt_ledger_entry(
+                row,
+                retry_round=retry_round,
+                gateway_runtime_commit_sha=producer_sha,
+            )
+        )
+
+    async def forbidden_run(*_args, **_kwargs):
+        pytest.fail("an exhausted ICP was retried after restart")
+
+    async def maintenance_state():
+        return {"paused": False}
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        forbidden_run,
+    )
+
+    rows, stats = await worker._run_baseline_batch_inner(
+        runner=object(),
+        retry_runner=object(),
+        scorer=object(),
+        window=window,
+        run_start=0.0,
+        resume_attempt_ledger=attempts,
+    )
+
+    assert len(rows) == 1
+    assert stats == {"retried": 2, "recovered": 0, "unresolved": 1}
 
 
 def test_private_baseline_checkpoint_rejects_unresolved_and_cost_blocked_rows():

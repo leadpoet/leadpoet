@@ -531,10 +531,15 @@ def _scoring_worker_source_hash() -> str:
     return "sha256:" + hashlib.sha256(source).hexdigest()
 
 
-_BASELINE_SCORING_PROGRESS_SCHEMA_VERSION = "2.0"
+_BASELINE_SCORING_PROGRESS_SCHEMA_VERSION = "3.0"
+_BASELINE_SCORING_PROGRESS_LEGACY_SCHEMA_VERSION = "2.0"
 _BASELINE_SCORING_PROGRESS_ARTIFACT_TYPE = (
     "research_lab_private_baseline_scoring_progress"
 )
+_BASELINE_ATTEMPT_LEDGER_SCHEMA_VERSION = (
+    "research_lab_private_baseline_attempt_ledger.v1"
+)
+_BASELINE_CHECKPOINT_RUNTIME_HISTORY_LIMIT = 128
 _FULL_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD = "_attested_parent_receipt_hashes"
@@ -635,6 +640,46 @@ def _validate_baseline_checkpoint_model_identity(
     if not _SHA256_RE.fullmatch(normalized_manifest_hash):
         raise ValueError("baseline checkpoint model manifest hash is invalid")
     return repo_commit, normalized_manifest_hash
+
+
+@functools.lru_cache(maxsize=1)
+def _baseline_scoring_contract_hash() -> str:
+    """Hash score-producing code without binding checkpoints to a release SHA."""
+
+    worker_type = globals().get("ResearchLabGatewayScoringWorker")
+    sources: list[tuple[str, str]] = []
+    callables: list[Any] = [
+        benchmark_icp_score_from_company_scores,
+        fp_penalty_total_from_breakdowns,
+        sanitize_benchmark_item_summary,
+        QualificationStyleCompanyScorer,
+        _accept_provider_backed_empty_retry,
+    ]
+    if worker_type is not None:
+        callables.extend(
+            (
+                worker_type._run_baseline_icp,
+                worker_type._score_baseline_outputs,
+            )
+        )
+    try:
+        for value in callables:
+            sources.append(
+                (
+                    f"{value.__module__}.{value.__qualname__}",
+                    inspect.getsource(value),
+                )
+            )
+    except (OSError, TypeError) as exc:
+        raise RuntimeError(
+            "private baseline scoring contract source is unavailable"
+        ) from exc
+    return sha256_json(
+        {
+            "schema_version": "research_lab_baseline_scoring_contract.v1",
+            "sources": sources,
+        }
+    )
 
 
 def _baseline_publication_retry_token_hash() -> str:
@@ -805,22 +850,29 @@ def _retry_runner_with_provider_cost_scope(
     runner: AttestedPrivateModelRunnerV2,
     *,
     retry_round: int,
+    base_scope_override: str = "",
 ) -> AttestedPrivateModelRunnerV2:
-    """Clone a retry runner with a fresh provider-cost budget scope.
+    """Clone a retry runner with a deterministic per-round cost scope.
 
     The Docker runtime hashes this evaluation scope together with the actual
-    ICP payload, so every ICP still gets an independent ledger. The extra retry
-    seed prevents an in-attempt retry from inheriting the first-pass spend.
+    ICP payload, so every ICP still gets an independent ledger. Binding the
+    retry scope only to the durable baseline scope and round prevents a gateway
+    restart from creating an additional logical retry budget.
     """
 
     extra_env = dict(runner.spec.extra_env or {})
-    base_scope = str(extra_env.get(PROVIDER_COST_EVALUATION_SCOPE_ENV) or "").strip()
+    base_scope = str(
+        base_scope_override
+        or extra_env.get(PROVIDER_COST_EVALUATION_SCOPE_ENV)
+        or ""
+    ).strip()
+    if not _SHA256_RE.fullmatch(base_scope):
+        raise ValueError("private baseline provider-cost base scope is invalid")
     retry_scope = sha256_json(
         {
             "schema_version": "research_lab_provider_cost_retry_scope.v1",
             "base_scope": base_scope,
             "retry_round": int(retry_round),
-            "retry_round_started_at_ms": int(time.time() * 1000),
         }
     )
     extra_env[PROVIDER_COST_EVALUATION_SCOPE_ENV] = retry_scope
@@ -1889,6 +1941,199 @@ def _baseline_progress_public_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in row.items() if not str(key).startswith("_")}
 
 
+def _baseline_attempt_checkpoint_row(
+    row: Mapping[str, Any],
+    *,
+    retry_round: int,
+) -> dict[str, Any]:
+    """Return the private orchestration state required for exact resume."""
+
+    item_index = row.get("_item_index")
+    if (
+        not isinstance(item_index, int)
+        or isinstance(item_index, bool)
+        or item_index <= 0
+    ):
+        raise ValueError("baseline attempt item index is invalid")
+    normalized_round = int(retry_round)
+    if normalized_round < 0:
+        raise ValueError("baseline attempt retry round is invalid")
+    ref = _benchmark_item_ref_for_progress(row)
+    if not ref:
+        raise ValueError("baseline attempt ICP reference is missing")
+    backoff_seconds = float(row.get("_retry_backoff_seconds") or 0.0)
+    if not math.isfinite(backoff_seconds) or backoff_seconds < 0:
+        raise ValueError("baseline attempt retry backoff is invalid")
+    receipt_hashes = row.get(_BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD) or []
+    if not isinstance(receipt_hashes, (list, tuple)):
+        raise ValueError("baseline attempt receipt roots are invalid")
+    normalized_receipts = sorted(
+        str(value or "").strip().lower() for value in receipt_hashes
+    )
+    if (
+        len(normalized_receipts) > _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
+        or len(set(normalized_receipts)) != len(normalized_receipts)
+        or any(not _SHA256_RE.fullmatch(value) for value in normalized_receipts)
+    ):
+        raise ValueError("baseline attempt receipt roots are invalid")
+    return {
+        **_baseline_progress_public_row(row),
+        "_item_index": item_index,
+        "_retry_round": normalized_round,
+        "_retryable": bool(row.get("_retryable")),
+        "_nonempty": bool(row.get("_nonempty")),
+        # The scheduler only needs to know whether the attempt failed. Raw
+        # provider errors can contain request or credential-shaped material,
+        # so they never enter the durable checkpoint.
+        "_runtime_error": "attempt_failed" if row.get("_runtime_error") else "",
+        "_retry_backoff_seconds": backoff_seconds,
+        _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: normalized_receipts,
+    }
+
+
+def _baseline_attempt_ledger_entry(
+    row: Mapping[str, Any],
+    *,
+    retry_round: int,
+    gateway_runtime_commit_sha: str,
+) -> dict[str, Any]:
+    runtime_commit = str(gateway_runtime_commit_sha or "").strip().lower()
+    if not _FULL_GIT_COMMIT_RE.fullmatch(runtime_commit):
+        raise ValueError("baseline attempt runtime commit is invalid")
+    result_row = _baseline_attempt_checkpoint_row(row, retry_round=retry_round)
+    entry = {
+        "icp_ref": _benchmark_item_ref_for_progress(result_row),
+        "icp_hash": str(result_row.get("icp_hash") or ""),
+        "item_index": int(result_row["_item_index"]),
+        "retry_round": int(result_row["_retry_round"]),
+        "gateway_runtime_commit_sha": runtime_commit,
+        "result_row": result_row,
+    }
+    entry["result_row_hash"] = canonical_hash(result_row)
+    return entry
+
+
+def _normalize_baseline_attempt_ledger(
+    value: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        raise ValueError("baseline attempt ledger is missing")
+    if str(value.get("schema_version") or "") != _BASELINE_ATTEMPT_LEDGER_SCHEMA_VERSION:
+        raise ValueError("baseline attempt ledger schema is invalid")
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("baseline attempt ledger entries are invalid")
+    if value.get("settled_attempt_count") != len(entries):
+        raise ValueError("baseline attempt ledger count is invalid")
+    expected_hash = str(value.get("ledger_hash") or "")
+    normalized: list[dict[str, Any]] = []
+    keys: set[tuple[str, int]] = set()
+    for raw_entry in entries:
+        if not isinstance(raw_entry, Mapping):
+            raise ValueError("baseline attempt ledger entry is invalid")
+        result_row = raw_entry.get("result_row")
+        if not isinstance(result_row, Mapping):
+            raise ValueError("baseline attempt result row is invalid")
+        retry_round = raw_entry.get("retry_round")
+        item_index = raw_entry.get("item_index")
+        if (
+            not isinstance(retry_round, int)
+            or isinstance(retry_round, bool)
+            or retry_round < 0
+            or not isinstance(item_index, int)
+            or isinstance(item_index, bool)
+            or item_index <= 0
+        ):
+            raise ValueError("baseline attempt ledger position is invalid")
+        runtime_commit = str(
+            raw_entry.get("gateway_runtime_commit_sha") or ""
+        ).strip().lower()
+        if not _FULL_GIT_COMMIT_RE.fullmatch(runtime_commit):
+            raise ValueError("baseline attempt ledger runtime is invalid")
+        normalized_row = _baseline_attempt_checkpoint_row(
+            result_row,
+            retry_round=retry_round,
+        )
+        ref = _benchmark_item_ref_for_progress(normalized_row)
+        if (
+            ref != str(raw_entry.get("icp_ref") or "")
+            or str(normalized_row.get("icp_hash") or "")
+            != str(raw_entry.get("icp_hash") or "")
+            or int(normalized_row["_item_index"]) != item_index
+            or canonical_hash(normalized_row)
+            != str(raw_entry.get("result_row_hash") or "")
+        ):
+            raise ValueError("baseline attempt ledger readback differs")
+        key = (ref, retry_round)
+        if key in keys:
+            raise ValueError("baseline attempt ledger contains a duplicate round")
+        keys.add(key)
+        normalized.append(
+            {
+                "icp_ref": ref,
+                "icp_hash": str(normalized_row.get("icp_hash") or ""),
+                "item_index": item_index,
+                "retry_round": retry_round,
+                "gateway_runtime_commit_sha": runtime_commit,
+                "result_row": normalized_row,
+                "result_row_hash": canonical_hash(normalized_row),
+            }
+        )
+    normalized.sort(
+        key=lambda entry: (
+            int(entry["item_index"]),
+            int(entry["retry_round"]),
+            str(entry["icp_ref"]),
+        )
+    )
+    payload = {
+        "schema_version": _BASELINE_ATTEMPT_LEDGER_SCHEMA_VERSION,
+        "settled_attempt_count": len(normalized),
+        "entries": normalized,
+    }
+    if canonical_hash(payload) != expected_hash:
+        raise ValueError("baseline attempt ledger hash is invalid")
+    return normalized
+
+
+def _baseline_attempt_ledger_doc(
+    entries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    for raw_entry in entries:
+        if not isinstance(raw_entry, Mapping):
+            raise ValueError("baseline attempt ledger entry is invalid")
+        result_row = raw_entry.get("result_row")
+        if not isinstance(result_row, Mapping):
+            raise ValueError("baseline attempt result row is invalid")
+        entry = _baseline_attempt_ledger_entry(
+            result_row,
+            retry_round=int(raw_entry.get("retry_round") or 0),
+            gateway_runtime_commit_sha=str(
+                raw_entry.get("gateway_runtime_commit_sha") or ""
+            ),
+        )
+        key = (str(entry["icp_ref"]), int(entry["retry_round"]))
+        existing = by_key.get(key)
+        if existing is not None and existing["result_row_hash"] != entry["result_row_hash"]:
+            raise ValueError("baseline attempt ledger contains conflicting results")
+        by_key[key] = entry
+    normalized = sorted(
+        by_key.values(),
+        key=lambda entry: (
+            int(entry["item_index"]),
+            int(entry["retry_round"]),
+            str(entry["icp_ref"]),
+        ),
+    )
+    payload = {
+        "schema_version": _BASELINE_ATTEMPT_LEDGER_SCHEMA_VERSION,
+        "settled_attempt_count": len(normalized),
+        "entries": normalized,
+    }
+    return {**payload, "ledger_hash": canonical_hash(payload)}
+
+
 def _baseline_distribution_complete(
     rows: Sequence[Mapping[str, Any]],
     benchmark_items: Sequence[Mapping[str, Any]],
@@ -1918,6 +2163,11 @@ def _load_baseline_scoring_progress(
     repo_git_sha: str,
     manifest_hash: str,
     parent_receipt_hashes_out: set[str] | None = None,
+    attempt_ledger_out: list[dict[str, Any]] | None = None,
+    producer_runtime_commits_out: set[str] | None = None,
+    provider_cost_base_scope_out: list[str] | None = None,
+    scoring_contract_hash_value: str = "",
+    benchmark_items: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     import boto3  # type: ignore
 
@@ -1933,6 +2183,21 @@ def _load_baseline_scoring_progress(
             manifest_hash=manifest_hash,
         )
     )
+    expected_scoring_contract_hash = str(
+        scoring_contract_hash_value or _baseline_scoring_contract_hash()
+    ).strip().lower()
+    if not _SHA256_RE.fullmatch(expected_scoring_contract_hash):
+        raise ValueError("baseline checkpoint scoring contract hash is invalid")
+    expected_items_by_ref: dict[str, tuple[int, str]] = {}
+    for index, item in enumerate(benchmark_items, start=1):
+        ref = _benchmark_item_ref_for_progress(item)
+        if not ref or ref in expected_items_by_ref:
+            logger.warning(
+                "research_lab_baseline_progress_rejected "
+                "reason=benchmark_item_identity_invalid"
+            )
+            return []
+        expected_items_by_ref[ref] = (index, str(item.get("icp_hash") or ""))
 
     try:
         body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
@@ -1941,7 +2206,11 @@ def _load_baseline_scoring_progress(
         return []
     if not isinstance(doc, Mapping):
         return []
-    if str(doc.get("schema_version") or "") != _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION:
+    checkpoint_schema_version = str(doc.get("schema_version") or "")
+    if checkpoint_schema_version not in {
+        _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION,
+        _BASELINE_SCORING_PROGRESS_LEGACY_SCHEMA_VERSION,
+    }:
         logger.warning(
             "research_lab_baseline_progress_rejected reason=schema_version_changed "
             "checkpoint=%s current=%s",
@@ -1970,14 +2239,18 @@ def _load_baseline_scoring_progress(
     checkpoint_runtime_commit = str(
         doc.get("gateway_runtime_commit_sha") or ""
     ).strip().lower()
+    if not _FULL_GIT_COMMIT_RE.fullmatch(checkpoint_runtime_commit):
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=gateway_runtime_invalid"
+        )
+        return []
     if checkpoint_runtime_commit != expected_runtime_commit:
         logger.warning(
-            "research_lab_baseline_progress_rejected reason=gateway_runtime_changed "
+            "research_lab_baseline_progress_reused_across_gateway_release "
             "checkpoint=%s current=%s",
             checkpoint_runtime_commit[:16] or "missing",
             expected_runtime_commit[:16],
         )
-        return []
     checkpoint_scoring_config_hash = str(
         doc.get("scoring_configuration_hash") or ""
     ).strip().lower()
@@ -2009,10 +2282,9 @@ def _load_baseline_scoring_progress(
             "reason=attested_parent_receipts_invalid"
         )
         return []
-    # A checkpoint is reusable only by the exact model, gateway release, and
-    # scoring configuration that wrote it. Receipt roots preserve the measured
-    # V2 ancestry across a same-release worker recycle; any identity mismatch
-    # discards the score rows and relies on the provider-call cache for recovery.
+    # Model, scoring configuration, and score-producing code are resume keys.
+    # Gateway release is provenance, not a resume key: immutable receipt roots
+    # preserve the exact producer release for every reusable measured result.
     checkpoint_repo_commit = str(doc.get("repo_git_sha") or "").strip().lower()
     if checkpoint_repo_commit != expected_repo_commit:
         logger.warning(
@@ -2055,6 +2327,166 @@ def _load_baseline_scoring_progress(
             "reason=attested_parent_receipts_empty"
         )
         return []
+    reusable_by_ref = _progress_rows_by_icp_ref(reusable_rows)
+    if len(reusable_by_ref) != len(reusable_rows):
+        logger.warning(
+            "research_lab_baseline_progress_rejected reason=duplicate_icp_result"
+        )
+        return []
+    if expected_items_by_ref:
+        for ref, row in reusable_by_ref.items():
+            expected = expected_items_by_ref.get(ref)
+            if expected is None or (
+                str(row.get("icp_hash") or "")
+                and str(row.get("icp_hash") or "") != expected[1]
+            ):
+                logger.warning(
+                    "research_lab_baseline_progress_rejected "
+                    "reason=icp_result_identity_changed"
+                )
+                return []
+
+    attempt_entries: list[dict[str, Any]] = []
+    producer_runtime_commits = {checkpoint_runtime_commit}
+    provider_cost_base_scope = ""
+    if checkpoint_schema_version == _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION:
+        checkpoint_contract_hash = str(
+            doc.get("scoring_contract_hash") or ""
+        ).strip().lower()
+        if checkpoint_contract_hash != expected_scoring_contract_hash:
+            logger.warning(
+                "research_lab_baseline_progress_rejected "
+                "reason=scoring_contract_changed checkpoint=%s current=%s",
+                checkpoint_contract_hash[:24] or "missing",
+                expected_scoring_contract_hash[:24],
+            )
+            return []
+        provider_cost_base_scope = str(
+            doc.get("provider_cost_base_scope_hash") or ""
+        ).strip().lower()
+        if not _SHA256_RE.fullmatch(provider_cost_base_scope):
+            logger.warning(
+                "research_lab_baseline_progress_rejected "
+                "reason=provider_cost_base_scope_invalid"
+            )
+            return []
+        raw_runtime_commits = doc.get("producer_gateway_runtime_commits")
+        if not isinstance(raw_runtime_commits, list):
+            logger.warning(
+                "research_lab_baseline_progress_rejected "
+                "reason=producer_runtime_history_missing"
+            )
+            return []
+        producer_runtime_commits = {
+            str(value or "").strip().lower() for value in raw_runtime_commits
+        }
+        if (
+            not producer_runtime_commits
+            or checkpoint_runtime_commit not in producer_runtime_commits
+            or len(producer_runtime_commits) != len(raw_runtime_commits)
+            or len(producer_runtime_commits)
+            > _BASELINE_CHECKPOINT_RUNTIME_HISTORY_LIMIT
+            or any(
+                not _FULL_GIT_COMMIT_RE.fullmatch(value)
+                for value in producer_runtime_commits
+            )
+        ):
+            logger.warning(
+                "research_lab_baseline_progress_rejected "
+                "reason=producer_runtime_history_invalid"
+            )
+            return []
+        try:
+            attempt_entries = _normalize_baseline_attempt_ledger(
+                doc.get("attempt_ledger")
+            )
+        except ValueError as exc:
+            logger.warning(
+                "research_lab_baseline_progress_rejected "
+                "reason=attempt_ledger_invalid error=%s",
+                _short_error(exc),
+            )
+            return []
+        attempt_entries_by_ref: dict[str, list[dict[str, Any]]] = {}
+        for entry in attempt_entries:
+            ref = str(entry["icp_ref"])
+            if expected_items_by_ref:
+                expected = expected_items_by_ref.get(ref)
+                if expected is None or (
+                    str(entry.get("icp_hash") or "")
+                    and str(entry.get("icp_hash") or "") != expected[1]
+                    or int(entry["item_index"]) != expected[0]
+                ):
+                    logger.warning(
+                        "research_lab_baseline_progress_rejected "
+                        "reason=attempt_icp_identity_changed"
+                    )
+                    return []
+            attempt_entries_by_ref.setdefault(ref, []).append(entry)
+        for ref, entries in attempt_entries_by_ref.items():
+            if any(
+                str(entry["gateway_runtime_commit_sha"])
+                not in producer_runtime_commits
+                for entry in entries
+            ):
+                logger.warning(
+                    "research_lab_baseline_progress_rejected "
+                    "reason=attempt_runtime_history_incomplete"
+                )
+                return []
+            rounds = sorted(int(entry["retry_round"]) for entry in entries)
+            if rounds != list(range(rounds[-1] + 1)):
+                logger.warning(
+                    "research_lab_baseline_progress_rejected "
+                    "reason=attempt_round_gap icp_ref=%s",
+                    compact_ref(ref),
+                )
+                return []
+        for ref, row in reusable_by_ref.items():
+            entries = attempt_entries_by_ref.get(ref) or []
+            if not entries:
+                logger.warning(
+                    "research_lab_baseline_progress_rejected "
+                    "reason=terminal_attempt_missing"
+                )
+                return []
+            latest_row = entries[-1]["result_row"]
+            if (
+                not _baseline_summary_checkpointable(latest_row)
+                or canonical_hash(_baseline_progress_public_row(latest_row))
+                != canonical_hash(row)
+            ):
+                logger.warning(
+                    "research_lab_baseline_progress_rejected "
+                    "reason=terminal_attempt_differs"
+                )
+                return []
+    else:
+        logger.warning(
+            "research_lab_baseline_progress_legacy_checkpoint_migrated "
+            "schema_version=%s producer_runtime=%s",
+            checkpoint_schema_version,
+            checkpoint_runtime_commit[:16],
+        )
+        for fallback_index, row in enumerate(reusable_rows, start=1):
+            ref = _benchmark_item_ref_for_progress(row)
+            item_index = expected_items_by_ref.get(ref, (fallback_index, ""))[0]
+            legacy_row = {
+                **dict(row),
+                "_item_index": item_index,
+                "_retryable": False,
+                "_nonempty": _baseline_summary_nonempty(row),
+                "_runtime_error": "",
+                "_retry_backoff_seconds": 0.0,
+                _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+            }
+            attempt_entries.append(
+                _baseline_attempt_ledger_entry(
+                    legacy_row,
+                    retry_round=0,
+                    gateway_runtime_commit_sha=checkpoint_runtime_commit,
+                )
+            )
     rejected_count = len(rows) - len(reusable_rows)
     if rejected_count > 0:
         logger.warning(
@@ -2066,6 +2498,12 @@ def _load_baseline_scoring_progress(
         )
     if parent_receipt_hashes_out is not None:
         parent_receipt_hashes_out.update(parent_receipt_hashes)
+    if attempt_ledger_out is not None:
+        attempt_ledger_out.extend(attempt_entries)
+    if producer_runtime_commits_out is not None:
+        producer_runtime_commits_out.update(producer_runtime_commits)
+    if provider_cost_base_scope_out is not None and provider_cost_base_scope:
+        provider_cost_base_scope_out.append(provider_cost_base_scope)
     return reusable_rows
 
 
@@ -2083,6 +2521,10 @@ def _store_baseline_scoring_progress(
     telemetry_index: Mapping[str, Any] | None = None,
     repo_git_sha: str,
     manifest_hash: str,
+    attempt_ledger: Sequence[Mapping[str, Any]] = (),
+    producer_gateway_runtime_commits: Sequence[str] = (),
+    provider_cost_base_scope_hash: str = "",
+    scoring_contract_hash_value: str = "",
 ) -> str:
     import boto3  # type: ignore
 
@@ -2096,6 +2538,27 @@ def _store_baseline_scoring_progress(
             manifest_hash=manifest_hash,
         )
     )
+    scoring_contract_hash = str(
+        scoring_contract_hash_value or _baseline_scoring_contract_hash()
+    ).strip().lower()
+    if not _SHA256_RE.fullmatch(scoring_contract_hash):
+        raise ValueError("baseline checkpoint scoring contract hash is invalid")
+    provider_cost_base_scope = str(
+        provider_cost_base_scope_hash
+        or sha256_json(
+            {
+                "schema_version": "research_lab_baseline_provider_cost_scope.v1",
+                "benchmark_date": str(benchmark_date),
+                "rolling_window_hash": str(window_hash),
+                "private_model_artifact_hash": str(private_model_artifact_hash),
+                "scoring_configuration_hash": scoring_config_hash,
+                "repo_git_sha": repo_commit,
+                "manifest_hash": normalized_manifest_hash,
+            }
+        )
+    ).strip().lower()
+    if not _SHA256_RE.fullmatch(provider_cost_base_scope):
+        raise ValueError("baseline checkpoint provider-cost base scope is invalid")
     parent_receipt_hashes = sorted(
         {str(value or "").strip().lower() for value in attested_parent_receipt_hashes}
     )
@@ -2111,6 +2574,78 @@ def _store_baseline_scoring_progress(
     ]
     if safe_rows and not parent_receipt_hashes:
         raise ValueError("baseline checkpoint parent receipt hashes are required")
+    ledger_entries = [dict(entry) for entry in attempt_ledger]
+    ledger_keys = {
+        (str(entry.get("icp_ref") or ""), int(entry.get("retry_round") or 0))
+        for entry in ledger_entries
+    }
+    latest_round_by_ref: dict[str, int] = {}
+    for entry in ledger_entries:
+        ref = str(entry.get("icp_ref") or "")
+        latest_round_by_ref[ref] = max(
+            latest_round_by_ref.get(ref, -1),
+            int(entry.get("retry_round") or 0),
+        )
+    for fallback_index, row in enumerate(safe_rows, start=1):
+        ref = _benchmark_item_ref_for_progress(row)
+        if ref in latest_round_by_ref:
+            continue
+        synthetic_row = {
+            **dict(row),
+            "_item_index": fallback_index,
+            "_retryable": False,
+            "_nonempty": _baseline_summary_nonempty(row),
+            "_runtime_error": "",
+            "_retry_backoff_seconds": 0.0,
+            _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+        }
+        synthetic_entry = _baseline_attempt_ledger_entry(
+            synthetic_row,
+            retry_round=0,
+            gateway_runtime_commit_sha=runtime_commit,
+        )
+        synthetic_key = (
+            str(synthetic_entry["icp_ref"]),
+            int(synthetic_entry["retry_round"]),
+        )
+        if synthetic_key not in ledger_keys:
+            ledger_entries.append(synthetic_entry)
+            ledger_keys.add(synthetic_key)
+            latest_round_by_ref[ref] = 0
+    attempt_ledger_doc = _baseline_attempt_ledger_doc(ledger_entries)
+    normalized_attempt_entries = attempt_ledger_doc["entries"]
+    attempts_by_ref: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in normalized_attempt_entries:
+        attempts_by_ref.setdefault(str(entry["icp_ref"]), []).append(entry)
+    for row in safe_rows:
+        ref = _benchmark_item_ref_for_progress(row)
+        entries = attempts_by_ref.get(ref) or []
+        if (
+            not entries
+            or not _baseline_summary_checkpointable(entries[-1]["result_row"])
+            or canonical_hash(
+                _baseline_progress_public_row(entries[-1]["result_row"])
+            )
+            != canonical_hash(row)
+        ):
+            raise ValueError("baseline checkpoint terminal attempt differs")
+    producer_runtime_commits = {
+        str(value or "").strip().lower()
+        for value in producer_gateway_runtime_commits
+    }
+    producer_runtime_commits.add(runtime_commit)
+    producer_runtime_commits.update(
+        str(entry.get("gateway_runtime_commit_sha") or "").strip().lower()
+        for entry in normalized_attempt_entries
+    )
+    if (
+        len(producer_runtime_commits) > _BASELINE_CHECKPOINT_RUNTIME_HISTORY_LIMIT
+        or any(
+            not _FULL_GIT_COMMIT_RE.fullmatch(value)
+            for value in producer_runtime_commits
+        )
+    ):
+        raise ValueError("baseline checkpoint producer runtime history is invalid")
     doc = {
         "schema_version": _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION,
         "artifact_type": _BASELINE_SCORING_PROGRESS_ARTIFACT_TYPE,
@@ -2119,12 +2654,16 @@ def _store_baseline_scoring_progress(
         "rolling_window_hash": str(window_hash),
         "private_model_artifact_hash": str(private_model_artifact_hash),
         "gateway_runtime_commit_sha": runtime_commit,
+        "producer_gateway_runtime_commits": sorted(producer_runtime_commits),
         "scoring_configuration_hash": scoring_config_hash,
+        "scoring_contract_hash": scoring_contract_hash,
+        "provider_cost_base_scope_hash": provider_cost_base_scope,
         "attested_parent_receipt_hashes": parent_receipt_hashes,
         "repo_git_sha": repo_commit,
         "manifest_hash": normalized_manifest_hash,
         "completed_icp_count": len(safe_rows),
         "per_icp_results": safe_rows,
+        "attempt_ledger": attempt_ledger_doc,
     }
     if telemetry_index:
         doc["telemetry_index"] = dict(telemetry_index)
@@ -11598,11 +12137,22 @@ class ResearchLabGatewayScoringWorker:
         )
         baseline_progress_runtime_commit_sha = ""
         baseline_progress_scoring_configuration_hash = ""
+        baseline_progress_scoring_contract_hash = ""
         baseline_progress_parent_receipt_hashes: set[str] = set()
+        baseline_progress_attempt_ledger: list[dict[str, Any]] = []
+        baseline_progress_producer_runtime_commits: set[str] = set()
+        baseline_progress_provider_cost_scope_values: list[str] = []
+        baseline_progress_provider_cost_base_scope = str(
+            (runner.spec.extra_env or {}).get(PROVIDER_COST_EVALUATION_SCOPE_ENV)
+            or ""
+        ).strip()
         if baseline_progress_location is not None:
             baseline_progress_runtime_commit_sha = _gateway_runtime_commit_sha()
             baseline_progress_scoring_configuration_hash = (
                 scoring_configuration_hash()
+            )
+            baseline_progress_scoring_contract_hash = (
+                _baseline_scoring_contract_hash()
             )
             await self._ensure_private_baseline_repo_head_unchanged(
                 expected_git_sha=baseline_repo_main_sha,
@@ -11627,8 +12177,35 @@ class ResearchLabGatewayScoringWorker:
                 parent_receipt_hashes_out=(
                     baseline_progress_parent_receipt_hashes
                 ),
+                attempt_ledger_out=baseline_progress_attempt_ledger,
+                producer_runtime_commits_out=(
+                    baseline_progress_producer_runtime_commits
+                ),
+                provider_cost_base_scope_out=(
+                    baseline_progress_provider_cost_scope_values
+                ),
+                scoring_contract_hash_value=(
+                    baseline_progress_scoring_contract_hash
+                ),
+                benchmark_items=window.benchmark_items,
             )
-            if baseline_progress_rows:
+            if baseline_progress_provider_cost_scope_values:
+                if len(baseline_progress_provider_cost_scope_values) != 1:
+                    raise RuntimeError(
+                        "baseline checkpoint provider-cost scope is ambiguous"
+                    )
+                baseline_progress_provider_cost_base_scope = (
+                    baseline_progress_provider_cost_scope_values[0]
+                )
+                runner_env = dict(runner.spec.extra_env or {})
+                runner_env[PROVIDER_COST_EVALUATION_SCOPE_ENV] = (
+                    baseline_progress_provider_cost_base_scope
+                )
+                runner = retry_attested_model_runner_v2(
+                    runner,
+                    extra_env=runner_env,
+                )
+            if baseline_progress_rows or baseline_progress_attempt_ledger:
                 logger.info(
                     format_worker_block(
                         "RESEARCH LAB PRIVATE BASELINE PROGRESS RESUMED",
@@ -11638,7 +12215,15 @@ class ResearchLabGatewayScoringWorker:
                             ("Rolling window", compact_ref(window.window_hash)),
                             ("Private model", compact_ref(artifact.model_artifact_hash)),
                             ("Completed ICPs", len(baseline_progress_rows)),
-                            ("Action", "skipping already-checkpointed ICPs after restart"),
+                            ("Settled attempts", len(baseline_progress_attempt_ledger)),
+                            (
+                                "Producer releases",
+                                len(baseline_progress_producer_runtime_commits),
+                            ),
+                            (
+                                "Action",
+                                "resuming the exact first-pass/retry position after restart",
+                            ),
                         ),
                     )
                 )
@@ -11673,16 +12258,19 @@ class ResearchLabGatewayScoringWorker:
 
         baseline_progress_lock = asyncio.Lock()
 
-        async def _checkpoint_completed_baseline_icp(row: Mapping[str, Any]) -> bool:
-            if not _baseline_summary_checkpointable(row):
-                return False
-            if not legacy_v1_enabled():
+        async def _checkpoint_baseline_attempt(
+            row: Mapping[str, Any],
+            *,
+            retry_round: int = 0,
+        ) -> bool:
+            checkpointable = _baseline_summary_checkpointable(row)
+            if checkpointable and not legacy_v1_enabled():
                 _record_baseline_attempt_parent_receipts(
                     baseline_progress_parent_receipt_hashes,
                     row,
                 )
             if baseline_progress_location is None:
-                if baseline_telemetry_session is not None:
+                if checkpointable and baseline_telemetry_session is not None:
                     await baseline_telemetry_session.complete_result(
                         row,
                         model_role="reference",
@@ -11692,13 +12280,50 @@ class ResearchLabGatewayScoringWorker:
                 return False
             async with baseline_progress_lock:
                 progress_bucket, progress_key = baseline_progress_location
-                public_row = _baseline_progress_public_row(row)
-                by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
-                ref = str(public_row.get("icp_ref") or public_row.get("icp_hash") or "")
+                ref = _benchmark_item_ref_for_progress(row)
                 if not ref:
                     return False
-                by_ref[ref] = public_row
-                baseline_progress_rows[:] = list(by_ref.values())
+                if checkpointable:
+                    public_row = _baseline_progress_public_row(row)
+                    by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
+                    by_ref[ref] = public_row
+                    baseline_progress_rows[:] = list(by_ref.values())
+                attempt_entry = _baseline_attempt_ledger_entry(
+                    row,
+                    retry_round=retry_round,
+                    gateway_runtime_commit_sha=(
+                        baseline_progress_runtime_commit_sha
+                    ),
+                )
+                attempt_by_key = {
+                    (
+                        str(entry.get("icp_ref") or ""),
+                        int(entry.get("retry_round") or 0),
+                    ): dict(entry)
+                    for entry in baseline_progress_attempt_ledger
+                }
+                attempt_key = (ref, int(retry_round))
+                existing_attempt = attempt_by_key.get(attempt_key)
+                if (
+                    existing_attempt is not None
+                    and existing_attempt.get("result_row_hash")
+                    != attempt_entry.get("result_row_hash")
+                ):
+                    raise RuntimeError(
+                        "baseline checkpoint attempt result changed within a retry round"
+                    )
+                attempt_by_key[attempt_key] = attempt_entry
+                baseline_progress_attempt_ledger[:] = sorted(
+                    attempt_by_key.values(),
+                    key=lambda entry: (
+                        int(entry["item_index"]),
+                        int(entry["retry_round"]),
+                        str(entry["icp_ref"]),
+                    ),
+                )
+                baseline_progress_producer_runtime_commits.add(
+                    baseline_progress_runtime_commit_sha
+                )
                 telemetry_index = checkpoint_telemetry_index(
                     baseline_telemetry_session,
                     baseline_progress_rows,
@@ -11724,8 +12349,18 @@ class ResearchLabGatewayScoringWorker:
                     telemetry_index=telemetry_index,
                     repo_git_sha=baseline_repo_main_sha,
                     manifest_hash=str(artifact.manifest_hash or ""),
+                    attempt_ledger=baseline_progress_attempt_ledger,
+                    producer_gateway_runtime_commits=sorted(
+                        baseline_progress_producer_runtime_commits
+                    ),
+                    provider_cost_base_scope_hash=(
+                        baseline_progress_provider_cost_base_scope
+                    ),
+                    scoring_contract_hash_value=(
+                        baseline_progress_scoring_contract_hash
+                    ),
                 )
-            if baseline_telemetry_session is not None:
+            if checkpointable and baseline_telemetry_session is not None:
                 await baseline_telemetry_session.complete_result(
                     row,
                     model_role="reference",
@@ -11874,7 +12509,11 @@ class ResearchLabGatewayScoringWorker:
                     run_start=start,
                     trace_context=baseline_trace_context,
                     resume_results=baseline_progress_rows,
-                    icp_checkpoint=_checkpoint_completed_baseline_icp,
+                    resume_attempt_ledger=baseline_progress_attempt_ledger,
+                    attempt_checkpoint=_checkpoint_baseline_attempt,
+                    provider_cost_base_scope=(
+                        baseline_progress_provider_cost_base_scope
+                    ),
                     checkpoint_recycle_enabled=(
                         baseline_progress_location is not None
                     ),
@@ -12130,8 +12769,9 @@ class ResearchLabGatewayScoringWorker:
                             "error": runtime_error or scorer_error,
                         },
                     )
-                checkpoint_persisted = await _checkpoint_completed_baseline_icp(
-                    item_summary
+                checkpoint_persisted = await _checkpoint_baseline_attempt(
+                    item_summary,
+                    retry_round=0,
                 )
                 per_icp_summaries.append(item_summary)
                 if checkpoint_persisted and len(baseline_progress_rows) < total_icps:
@@ -13397,6 +14037,9 @@ class ResearchLabGatewayScoringWorker:
         trace_context: Mapping[str, Any] | None = None,
         resume_results: list[dict[str, Any]] | None = None,
         icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
+        resume_attempt_ledger: Sequence[Mapping[str, Any]] = (),
+        attempt_checkpoint: Callable[..., Any] | None = None,
+        provider_cost_base_scope: str = "",
         checkpoint_recycle_enabled: bool = False,
         expected_repo_main_git_sha: str = "",
         benchmark_date: str = "",
@@ -13421,6 +14064,9 @@ class ResearchLabGatewayScoringWorker:
                 trace_context=trace_context,
                 resume_results=resume_results,
                 icp_checkpoint=icp_checkpoint,
+                resume_attempt_ledger=resume_attempt_ledger,
+                attempt_checkpoint=attempt_checkpoint,
+                provider_cost_base_scope=provider_cost_base_scope,
                 checkpoint_recycle_enabled=checkpoint_recycle_enabled,
                 expected_repo_main_git_sha=expected_repo_main_git_sha,
                 benchmark_date=benchmark_date,
@@ -13440,6 +14086,9 @@ class ResearchLabGatewayScoringWorker:
         trace_context: Mapping[str, Any] | None = None,
         resume_results: list[dict[str, Any]] | None = None,
         icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
+        resume_attempt_ledger: Sequence[Mapping[str, Any]] = (),
+        attempt_checkpoint: Callable[..., Any] | None = None,
+        provider_cost_base_scope: str = "",
         checkpoint_recycle_enabled: bool = False,
         expected_repo_main_git_sha: str = "",
         benchmark_date: str = "",
@@ -13467,6 +14116,49 @@ class ResearchLabGatewayScoringWorker:
         total_icps = len(items)
         resumed_by_ref = _progress_rows_by_icp_ref(resume_results)
         results: dict[int, dict[str, Any]] = {}
+        item_index_by_ref = {
+            _benchmark_item_ref_for_progress(item): item_index
+            for item_index, item in items
+        }
+        if len(item_index_by_ref) != total_icps or "" in item_index_by_ref:
+            raise RuntimeError("private baseline ICP identities are not unique")
+        attempted_rounds_by_index: dict[int, set[int]] = {}
+        attempt_results_by_key: dict[tuple[int, int], dict[str, Any]] = {}
+        for raw_entry in resume_attempt_ledger:
+            if not isinstance(raw_entry, Mapping):
+                raise RuntimeError("baseline checkpoint attempt entry is invalid")
+            ref = str(raw_entry.get("icp_ref") or "")
+            item_index = item_index_by_ref.get(ref)
+            result_row = raw_entry.get("result_row")
+            retry_round = raw_entry.get("retry_round")
+            if (
+                item_index is None
+                or not isinstance(result_row, Mapping)
+                or not isinstance(retry_round, int)
+                or isinstance(retry_round, bool)
+                or retry_round < 0
+                or retry_round > self.config.private_baseline_provider_retry_rounds
+                or int(raw_entry.get("item_index") or 0) != item_index
+                or _benchmark_item_ref_for_progress(result_row) != ref
+            ):
+                raise RuntimeError(
+                    "baseline checkpoint attempt does not match the current ICP bank"
+                )
+            key = (item_index, retry_round)
+            restored_attempt = dict(result_row)
+            if key in attempt_results_by_key:
+                raise RuntimeError(
+                    "baseline checkpoint contains duplicate retry-round progress"
+                )
+            attempt_results_by_key[key] = restored_attempt
+            attempted_rounds_by_index.setdefault(item_index, set()).add(
+                retry_round
+            )
+        for item_index, rounds in attempted_rounds_by_index.items():
+            if sorted(rounds) != list(range(max(rounds) + 1)):
+                raise RuntimeError(
+                    "baseline checkpoint contains a retry-round gap"
+                )
 
         def completed_checkpoint_count() -> int:
             return sum(
@@ -13479,28 +14171,51 @@ class ResearchLabGatewayScoringWorker:
         for item_index, item in items:
             ref = _benchmark_item_ref_for_progress(item)
             resumed = resumed_by_ref.get(ref)
-            if resumed is None:
+            if resumed is None and not attempted_rounds_by_index.get(item_index):
                 run_items.append((item_index, item))
                 continue
-            restored = dict(resumed)
+            if resumed is not None:
+                restored = dict(resumed)
+                restored["_retryable"] = False
+                restored["_nonempty"] = _baseline_summary_nonempty(restored)
+                restored["_runtime_error"] = ""
+                restored["_retry_backoff_seconds"] = 0.0
+            else:
+                latest_round = max(attempted_rounds_by_index[item_index])
+                restored = dict(attempt_results_by_key[(item_index, latest_round)])
+                if _baseline_summary_checkpointable(restored):
+                    raise RuntimeError(
+                        "baseline checkpoint terminal attempt is missing its result row"
+                    )
             restored["_item_index"] = item_index
-            restored["_retryable"] = False
-            restored["_nonempty"] = _baseline_summary_nonempty(restored)
-            restored["_runtime_error"] = ""
-            restored["_retry_backoff_seconds"] = 0.0
             results[item_index] = restored
-        if resumed_by_ref:
+        if resumed_by_ref or resume_attempt_ledger:
             logger.info(
                 format_worker_block(
                     "RESEARCH LAB PRIVATE BASELINE PARALLEL RESUME",
                     (
                         ("Worker", self.worker_ref),
                         ("Resumed ICPs", len(results)),
+                        ("Resumed terminal ICPs", len(resumed_by_ref)),
+                        ("Settled attempts", len(resume_attempt_ledger)),
                         ("Remaining ICPs", len(run_items)),
                         ("Total ICPs", total_icps),
                     ),
                 )
             )
+
+        async def persist_attempt(
+            entry: dict[str, Any],
+            *,
+            retry_round: int,
+        ) -> bool:
+            if attempt_checkpoint is not None:
+                return bool(
+                    await attempt_checkpoint(entry, retry_round=retry_round)
+                )
+            if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
+                return bool(await icp_checkpoint(entry))
+            return False
         scorer_limit = _benchmark_scorer_max_concurrency()
         scorer_semaphore = asyncio.Semaphore(scorer_limit) if scorer_limit > 0 else None
         executor = concurrent.futures.ThreadPoolExecutor(
@@ -13510,7 +14225,7 @@ class ResearchLabGatewayScoringWorker:
         )
         try:
             semaphore = asyncio.Semaphore(concurrency)
-            checkpointed_indexes: set[int] = set()
+            persisted_attempt_indexes: set[int] = set()
 
             async def run_one(item_index: int, item: Mapping[str, Any]) -> dict[str, Any]:
                 async with semaphore:
@@ -13531,9 +14246,10 @@ class ResearchLabGatewayScoringWorker:
                         telemetry_model_role=telemetry_model_role,
                         retry_round=0,
                     )
-                    if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
-                        if await icp_checkpoint(entry):
-                            checkpointed_indexes.add(item_index)
+                    if await persist_attempt(entry, retry_round=0):
+                        persisted_attempt_indexes.add(item_index)
+                    attempted_rounds_by_index.setdefault(item_index, set()).add(0)
+                    attempt_results_by_key[(item_index, 0)] = dict(entry)
                     return entry
 
             # Run one bounded wave at a time. This preserves the configured
@@ -13564,7 +14280,7 @@ class ResearchLabGatewayScoringWorker:
                 )
                 if (
                     checkpoint_recycle_enabled
-                    and checkpointed_indexes
+                    and persisted_attempt_indexes
                     and (more_first_pass_work or retry_work_waiting)
                 ):
                     recycle_pressure = _baseline_checkpoint_recycle_pressure(
@@ -13573,9 +14289,7 @@ class ResearchLabGatewayScoringWorker:
                     if recycle_pressure is not None:
                         raise BaselineCheckpointRecycle(
                             pressure=recycle_pressure,
-                            completed_icps=(
-                                len(resumed_by_ref) + len(checkpointed_indexes)
-                            ),
+                            completed_icps=completed_checkpoint_count(),
                             total_icps=total_icps,
                         )
 
@@ -13585,14 +14299,33 @@ class ResearchLabGatewayScoringWorker:
                 benchmark_date=benchmark_date,
             )
 
-            retried_total = 0
-            recovered_total = 0
+            retried_total = sum(
+                1
+                for rounds in attempted_rounds_by_index.values()
+                for retry_round in rounds
+                if retry_round > 0
+            )
+            recovered_total = sum(
+                1
+                for item_index, rounds in attempted_rounds_by_index.items()
+                if max(rounds) > 0
+                and _baseline_summary_checkpointable(results[item_index])
+            )
             for round_no in range(1, self.config.private_baseline_provider_retry_rounds + 1):
-                pending = sorted(
-                    item_index for item_index, entry in results.items() if entry.get("_retryable")
+                retryable_indexes = sorted(
+                    item_index
+                    for item_index, entry in results.items()
+                    if entry.get("_retryable")
                 )
-                if not pending:
+                if not retryable_indexes:
                     break
+                pending = [
+                    item_index
+                    for item_index in retryable_indexes
+                    if round_no not in attempted_rounds_by_index.get(item_index, set())
+                ]
+                if not pending:
+                    continue
                 logger.info(
                     format_worker_block(
                         "RESEARCH LAB PRIVATE BASELINE RETRY ROUND",
@@ -13609,8 +14342,9 @@ class ResearchLabGatewayScoringWorker:
                 round_retry_runner = _retry_runner_with_provider_cost_scope(
                     retry_runner,
                     retry_round=round_no,
+                    base_scope_override=provider_cost_base_scope,
                 )
-                retry_checkpointed_indexes: set[int] = set()
+                retry_persisted_attempt_indexes: set[int] = set()
 
                 async def retry_one(item_index: int) -> dict[str, Any]:
                     async with retry_semaphore:
@@ -13643,9 +14377,12 @@ class ResearchLabGatewayScoringWorker:
                             telemetry_model_role=telemetry_model_role,
                             retry_round=round_no,
                         )
-                        if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
-                            if await icp_checkpoint(entry):
-                                retry_checkpointed_indexes.add(item_index)
+                        if await persist_attempt(entry, retry_round=round_no):
+                            retry_persisted_attempt_indexes.add(item_index)
+                        attempted_rounds_by_index.setdefault(item_index, set()).add(
+                            round_no
+                        )
+                        attempt_results_by_key[(item_index, round_no)] = dict(entry)
                         return entry
 
                 retry_width = max(
@@ -13690,7 +14427,7 @@ class ResearchLabGatewayScoringWorker:
                     )
                     if (
                         checkpoint_recycle_enabled
-                        and retry_checkpointed_indexes
+                        and retry_persisted_attempt_indexes
                         and (more_retry_work or another_round_needed)
                     ):
                         recycle_pressure = _baseline_checkpoint_recycle_pressure(
@@ -13699,11 +14436,7 @@ class ResearchLabGatewayScoringWorker:
                         if recycle_pressure is not None:
                             raise BaselineCheckpointRecycle(
                                 pressure=recycle_pressure,
-                                completed_icps=(
-                                    len(resumed_by_ref)
-                                    + len(checkpointed_indexes)
-                                    + len(retry_checkpointed_indexes)
-                                ),
+                                completed_icps=completed_checkpoint_count(),
                                 total_icps=total_icps,
                             )
             await _enforce_baseline_wave_maintenance_boundary(

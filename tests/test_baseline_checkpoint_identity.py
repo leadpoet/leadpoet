@@ -1,11 +1,11 @@
-"""Benchmark checkpoints are bound to the exact model and runtime that wrote them.
+"""Benchmark checkpoints preserve measured work across gateway releases.
 
 A mid-benchmark model change must rescore every ICP with the new model —
 old score rows are never carried across a model identity change (artifact
-hash, repo commit, or manifest hash). The same rule applies to gateway release
-and scoring-configuration changes, preventing a published aggregate from
-mixing results produced by different scoring runtimes. Cost recovery on the
-rescore comes from the provider-call cache, not from reused results.
+hash, repo commit, or manifest hash). Scoring-configuration and scoring-contract
+changes also invalidate progress. Gateway release changes retain the rows and
+their immutable receipt/runtime provenance instead of spending the same ICP
+budget again.
 """
 
 import json
@@ -119,13 +119,20 @@ def test_legacy_checkpoint_without_runtime_identity_is_rejected():
     assert rows == []
 
 
-def test_gateway_runtime_change_discards():
+def test_gateway_runtime_change_reuses_measured_rows():
+    attempts = []
+    producers = set()
     assert _load(
         _doc(),
         gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
         repo_git_sha=MODEL_REPO_SHA,
         manifest_hash=MODEL_MANIFEST_HASH,
-    ) == []
+        attempt_ledger_out=attempts,
+        producer_runtime_commits_out=producers,
+    ) == [{"icp_ref": "icp-1", "score": 54.0}]
+    assert producers == {RUNTIME_SHA}
+    assert len(attempts) == 1
+    assert attempts[0]["gateway_runtime_commit_sha"] == RUNTIME_SHA
 
 
 def test_scoring_configuration_change_discards():
@@ -387,7 +394,7 @@ def test_globally_all_zero_invalidation_is_durable_and_non_reusable():
     assert loaded == []
 
 
-def test_active_checkpoint_round_trip_preserves_runtime_identity():
+def test_active_checkpoint_round_trip_preserves_runtime_provenance():
     stored = {}
     s3 = mock.Mock()
 
@@ -418,6 +425,8 @@ def test_active_checkpoint_round_trip_preserves_runtime_identity():
             repo_git_sha=MODEL_REPO_SHA,
             manifest_hash=MODEL_MANIFEST_HASH,
         )
+        attempts = []
+        producers = set()
         loaded = sw._load_baseline_scoring_progress(
             "bucket",
             "key",
@@ -428,17 +437,170 @@ def test_active_checkpoint_round_trip_preserves_runtime_identity():
             scoring_configuration_hash_value=SCORING_CONFIG_HASH,
             repo_git_sha=MODEL_REPO_SHA,
             manifest_hash=MODEL_MANIFEST_HASH,
+            attempt_ledger_out=attempts,
+            producer_runtime_commits_out=producers,
+        )
+        cross_release_loaded = sw._load_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+            scoring_configuration_hash_value=SCORING_CONFIG_HASH,
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+        )
+        changed_contract_loaded = sw._load_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+            scoring_configuration_hash_value=SCORING_CONFIG_HASH,
+            scoring_contract_hash_value="sha256:" + "f" * 64,
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
         )
 
     doc = json.loads(stored["body"])
     assert digest == sw.canonical_hash(doc)
-    assert doc["schema_version"] == "2.0"
+    assert doc["schema_version"] == "3.0"
     assert doc["gateway_runtime_commit_sha"] == RUNTIME_SHA
+    assert doc["producer_gateway_runtime_commits"] == [RUNTIME_SHA]
     assert doc["scoring_configuration_hash"] == SCORING_CONFIG_HASH
+    assert doc["scoring_contract_hash"].startswith("sha256:")
+    assert doc["provider_cost_base_scope_hash"].startswith("sha256:")
     assert doc["repo_git_sha"] == MODEL_REPO_SHA
     assert doc["manifest_hash"] == MODEL_MANIFEST_HASH
     assert doc["attested_parent_receipt_hashes"] == [PARENT_RECEIPT_HASH]
+    assert doc["attempt_ledger"]["settled_attempt_count"] == 1
     assert loaded == [{"icp_ref": "icp-1", "score": 54.0, "company_count": 1}]
+    assert producers == {RUNTIME_SHA}
+    assert len(attempts) == 1
+    assert cross_release_loaded == loaded
+    assert changed_contract_loaded == []
+
+
+def test_unresolved_attempt_ledger_round_trips_across_release():
+    stored = {}
+    s3 = mock.Mock()
+
+    def put_object(**kwargs):
+        stored["body"] = bytes(kwargs["Body"])
+
+    def get_object(**_kwargs):
+        body = mock.Mock()
+        body.read.return_value = stored["body"]
+        return {"Body": body}
+
+    s3.put_object.side_effect = put_object
+    s3.get_object.side_effect = get_object
+    stub = types.ModuleType("boto3")
+    stub.client = lambda *args, **kwargs: s3
+    attempt_rows = []
+    for retry_round in (0, 1):
+        row = {
+            "icp_ref": "icp-1",
+            "icp_hash": "hash-1",
+            "score": 0.0,
+            "company_count": 0,
+            "diagnostics": {
+                "sourcing_failed": True,
+                "runtime_error": {"category": "provider"},
+            },
+            "_item_index": 1,
+            "_retryable": True,
+            "_nonempty": False,
+            "_runtime_error": "HTTP 500",
+            "_retry_backoff_seconds": 0.0,
+            sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+        }
+        attempt_rows.append(
+            sw._baseline_attempt_ledger_entry(
+                row,
+                retry_round=retry_round,
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+            )
+        )
+
+    with mock.patch.dict(sys.modules, {"boto3": stub}):
+        sw._store_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=RUNTIME_SHA,
+            scoring_configuration_hash_value=SCORING_CONFIG_HASH,
+            rows=[],
+            attested_parent_receipt_hashes=[],
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+            attempt_ledger=attempt_rows,
+            provider_cost_base_scope_hash="sha256:" + "b" * 64,
+        )
+        restored_attempts = []
+        scope_values = []
+        loaded = sw._load_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+            scoring_configuration_hash_value=SCORING_CONFIG_HASH,
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+            attempt_ledger_out=restored_attempts,
+            provider_cost_base_scope_out=scope_values,
+            benchmark_items=[{"icp_ref": "icp-1", "icp_hash": "hash-1"}],
+        )
+
+    assert loaded == []
+    assert [entry["retry_round"] for entry in restored_attempts] == [0, 1]
+    assert {
+        entry["result_row"]["_runtime_error"] for entry in restored_attempts
+    } == {"attempt_failed"}
+    assert b"HTTP 500" not in stored["body"]
+    assert scope_values == ["sha256:" + "b" * 64]
+
+
+def test_attempt_ledger_gap_is_rejected():
+    base = _doc(schema_version="3.0")
+    row = {
+        "icp_ref": "icp-1",
+        "score": 54.0,
+        "_item_index": 1,
+        "_retryable": False,
+        "_nonempty": True,
+        "_runtime_error": "",
+        "_retry_backoff_seconds": 0.0,
+        sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+    }
+    entry = sw._baseline_attempt_ledger_entry(
+        row,
+        retry_round=1,
+        gateway_runtime_commit_sha=RUNTIME_SHA,
+    )
+    payload = {
+        "schema_version": sw._BASELINE_ATTEMPT_LEDGER_SCHEMA_VERSION,
+        "settled_attempt_count": 1,
+        "entries": [entry],
+    }
+    base.update(
+        scoring_contract_hash=sw._baseline_scoring_contract_hash(),
+        provider_cost_base_scope_hash="sha256:" + "b" * 64,
+        producer_gateway_runtime_commits=[RUNTIME_SHA],
+        attempt_ledger={**payload, "ledger_hash": sw.canonical_hash(payload)},
+    )
+
+    assert _load(
+        base,
+        repo_git_sha=MODEL_REPO_SHA,
+        manifest_hash=MODEL_MANIFEST_HASH,
+    ) == []
 
 
 def test_persisted_receipt_roots_merge_with_live_receipts_without_duplicates():

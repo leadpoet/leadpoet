@@ -2537,7 +2537,7 @@
       "symbol": "merge_evidence_caches"
     },
     {
-      "ast_sha256": "sha256:f0915b64f99bed35014a657532426136b79ef61c907470ac1f0e248fe443a2ef",
+      "ast_sha256": "sha256:7adf9b8d6a6dc3dc6f439360361e680f7d482fd763bb98866923744b978bd7ac",
       "path": "research_lab/eval/snapshot_store.py",
       "symbol": "ProviderSnapshotStore"
     },
@@ -2607,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:a9fe6f4d2fb5d987de9f5c17839831de8c4a7769524d2a30897365fa159f6c8d",
-  "protected_source_commit": "63785047493aeec87016c5747ba4d571f5871914",
+  "manifest_hash": "sha256:63459aff671cd8d96983c518927cc9d102e0badee3b076070ec082cb7ab82274",
+  "protected_source_commit": "995be26219af3a4b26b868a45c273f64391ddd91",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

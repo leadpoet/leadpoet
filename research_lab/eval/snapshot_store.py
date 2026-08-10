@@ -1283,19 +1283,34 @@ def container_replay_env(
     }
 
 
-def _contains_secret_material(value: Any) -> bool:
+def _secret_material_kind(value: Any) -> str:
     if isinstance(value, Mapping):
-        return any(
-            _contains_secret_material(key) or _contains_secret_material(item)
-            for key, item in value.items()
-        )
+        observed_shape = False
+        for key, item in value.items():
+            for nested in (key, item):
+                kind = _secret_material_kind(nested)
+                if kind == "runtime_secret_value":
+                    return kind
+                observed_shape = observed_shape or kind == "secret_value_shape"
+        return "secret_value_shape" if observed_shape else ""
     if isinstance(value, list):
-        return any(_contains_secret_material(item) for item in value)
+        observed_shape = False
+        for item in value:
+            kind = _secret_material_kind(item)
+            if kind == "runtime_secret_value":
+                return kind
+            observed_shape = observed_shape or kind == "secret_value_shape"
+        return "secret_value_shape" if observed_shape else ""
     if isinstance(value, str):
+        if any(secret in value for secret in _snapshot_runtime_secret_values()):
+            return "runtime_secret_value"
         if any(pattern.search(value) for pattern in _SNAPSHOT_SECRET_VALUE_PATTERNS):
-            return True
-        return any(secret in value for secret in _snapshot_runtime_secret_values())
-    return False
+            return "secret_value_shape"
+    return ""
+
+
+def _contains_secret_material(value: Any) -> bool:
+    return bool(_secret_material_kind(value))
 
 
 def _s3_client() -> Any:
@@ -1409,20 +1424,35 @@ def _rl_dev_sha256_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _rl_dev_contains_runtime_secret(value):
+def _rl_dev_secret_material_kind(value):
     if isinstance(value, dict):
-        return any(
-            _rl_dev_contains_runtime_secret(key)
-            or _rl_dev_contains_runtime_secret(item)
-            for key, item in value.items()
-        )
+        observed_shape = False
+        for key, item in value.items():
+            for nested in (key, item):
+                kind = _rl_dev_secret_material_kind(nested)
+                if kind == "runtime_secret_value":
+                    return kind
+                observed_shape = observed_shape or kind == "secret_value_shape"
+        return "secret_value_shape" if observed_shape else ""
     if isinstance(value, (list, tuple)):
-        return any(_rl_dev_contains_runtime_secret(item) for item in value)
+        observed_shape = False
+        for item in value:
+            kind = _rl_dev_secret_material_kind(item)
+            if kind == "runtime_secret_value":
+                return kind
+            observed_shape = observed_shape or kind == "secret_value_shape"
+        return "secret_value_shape" if observed_shape else ""
     if not isinstance(value, str):
-        return False
+        return ""
+    if any(secret in value for secret in _RL_DEV_RUNTIME_SECRET_VALUES):
+        return "runtime_secret_value"
     if any(pattern.search(value) for pattern in _RL_DEV_SECRET_VALUE_PATTERNS):
-        return True
-    return any(secret in value for secret in _RL_DEV_RUNTIME_SECRET_VALUES)
+        return "secret_value_shape"
+    return ""
+
+
+def _rl_dev_contains_runtime_secret(value):
+    return bool(_rl_dev_secret_material_kind(value))
 
 
 def _rl_dev_provider_for_host(host):
@@ -1935,8 +1965,9 @@ def _rl_dev_record(
             "params_hash": request_key.split("|")[3],
             "response": response,
         }
-        if _rl_dev_contains_runtime_secret(record):
-            _rl_dev_record_failure("secret_material_rejected", request_key)
+        secret_kind = _rl_dev_secret_material_kind(record)
+        if secret_kind:
+            _rl_dev_record_failure(secret_kind + "_rejected", request_key)
             return False
         if not _rl_dev_record_provider_model(provider, body, request_key):
             return False

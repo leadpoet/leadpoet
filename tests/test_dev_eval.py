@@ -494,7 +494,7 @@ def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
         if line.strip()
     ]
     assert len(failures) == 1
-    assert failures[0]["reason"] == "secret_material_rejected"
+    assert failures[0]["reason"] == "secret_value_shape_rejected"
     assert failures[0]["request_key"].startswith("exa|GET|api.exa.ai/search|")
 
 
@@ -529,7 +529,7 @@ def test_record_bootstrap_rejects_short_secret_values(tmp_path):
         if line.strip()
     ]
     assert len(failures) == 1
-    assert failures[0]["reason"] == "secret_material_rejected"
+    assert failures[0]["reason"] == "secret_value_shape_rejected"
 
 
 def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_path):
@@ -543,7 +543,8 @@ def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_pat
         " 'documented_prefix': 'sk-or-'}))\n"
         "_rl_dev_record('GET', 'https://api.scrapingdog.com/profile?id=leaky', None, 200,"
         " {'content-type': 'application/json'},"
-        " json.dumps({'echo': os.environ['SCRAPINGDOG_API_KEY']}))\n"
+        " json.dumps({'documented_example': 'sk-or-' + 'abcdefghijklm123456',"
+        " 'echo': os.environ['SCRAPINGDOG_API_KEY']}))\n"
         "snapshots = os.path.join(os.environ['RESEARCH_LAB_DEV_SNAPSHOT_DIR'], 'snapshots')\n"
         "names = sorted(os.listdir(snapshots)) if os.path.isdir(snapshots) else []\n"
         "bodies = []\n"
@@ -582,7 +583,7 @@ def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_pat
         if line.strip()
     ]
     assert len(failures) == 1
-    assert failures[0]["reason"] == "secret_material_rejected"
+    assert failures[0]["reason"] == "runtime_secret_value_rejected"
     assert failures[0]["request_key"].startswith(
         "scrapingdog|GET|api.scrapingdog.com/profile|"
     )

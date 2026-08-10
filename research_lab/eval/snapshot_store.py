@@ -1343,8 +1343,25 @@ _RL_DEV_RECORD_REUSE_EXISTING = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_RECORD
 _RL_DEV_RECORD_ICP_REF = os.environ.get("RESEARCH_LAB_DEV_RECORD_ICP_REF", "").strip()
 _RL_DEV_AUTH_PARAMS = ("api_key", "apikey", "x-api-key", "authorization", "token", "access_token", "bearer")
 _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrouter": "{}"}
-# Keep in sync with research_lab.eval.private_runtime.SECRET_MARKERS.
-_RL_DEV_SECRET_MARKERS = ("sk-or-", "sb_secret_", "aws_secret_access_key", "openrouter_api_key", "scrapingdog_api_key", "exa_api_key", "raw_secret", "service_role")
+_RL_DEV_SECRET_VALUE_PREFIXES = ("sk-or-", "sb_secret_")
+_RL_DEV_SECRET_ENV_NAMES = (
+    "AWS_SECRET_ACCESS_KEY",
+    "DEEPLINE_API_KEY",
+    "EXA_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_KEY",
+    "OPENROUTER_MANAGEMENT_KEY",
+    "QUALIFICATION_OPENROUTER_API_KEY",
+    "QUALIFICATION_SCRAPINGDOG_API_KEY",
+    "SCRAPINGDOG_API_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+)
+_RL_DEV_RUNTIME_SECRET_VALUES = tuple(sorted({
+    value
+    for name in _RL_DEV_SECRET_ENV_NAMES
+    for value in (os.environ.get(name, ""),)
+    if len(value) >= 8 and value != "local-encrypted-recipient-v1"
+}))
 _RL_DEV_RECORD_FAILURES_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "record_failures.jsonl")
 _RL_DEV_PROVIDER_MODELS_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "provider_models.jsonl")
 _RL_DEV_URLLIB_TRANSPORT_OUTCOME = "urllib_transport_error"
@@ -1356,6 +1373,23 @@ def _rl_dev_canonical_json(data):
 
 def _rl_dev_sha256_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _rl_dev_contains_runtime_secret(value):
+    if isinstance(value, dict):
+        return any(
+            _rl_dev_contains_runtime_secret(key)
+            or _rl_dev_contains_runtime_secret(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_rl_dev_contains_runtime_secret(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    lowered = value.lower()
+    if any(prefix in lowered for prefix in _RL_DEV_SECRET_VALUE_PREFIXES):
+        return True
+    return any(secret in value for secret in _RL_DEV_RUNTIME_SECRET_VALUES)
 
 
 def _rl_dev_provider_for_host(host):
@@ -1809,8 +1843,7 @@ def _rl_dev_record_provider_model(provider, body, request_key):
         model_id = str(normalized.get("model") or "").strip()
     if not model_id:
         return True
-    lowered = model_id.lower()
-    if len(model_id) > 500 or any(marker in lowered for marker in _RL_DEV_SECRET_MARKERS):
+    if len(model_id) > 500 or _rl_dev_contains_runtime_secret(model_id):
         _rl_dev_record_failure("provider_model_id_rejected", request_key)
         return False
     try:
@@ -1869,8 +1902,7 @@ def _rl_dev_record(
             "params_hash": request_key.split("|")[3],
             "response": response,
         }
-        payload_text = _rl_dev_canonical_json(record).lower()
-        if any(marker in payload_text for marker in _RL_DEV_SECRET_MARKERS):
+        if _rl_dev_contains_runtime_secret(record):
             _rl_dev_record_failure("secret_material_rejected", request_key)
             return False
         if not _rl_dev_record_provider_model(provider, body, request_key):

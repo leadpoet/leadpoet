@@ -442,6 +442,65 @@ def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
     assert failures[0]["request_key"].startswith("exa|GET|api.exa.ai/search|")
 
 
+def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    runtime_secret = "opaque-runtime-credential-value-for-testing"
+    probe = (
+        "\nimport json, os\n"
+        "_rl_dev_record('GET', 'https://api.scrapingdog.com/profile?id=clean', None, 200,"
+        " {'content-type': 'application/json'},"
+        " json.dumps({'role': 'service_role', 'configuration': 'SCRAPINGDOG_API_KEY'}))\n"
+        "_rl_dev_record('GET', 'https://api.scrapingdog.com/profile?id=leaky', None, 200,"
+        " {'content-type': 'application/json'},"
+        " json.dumps({'echo': os.environ['SCRAPINGDOG_API_KEY']}))\n"
+        "snapshots = os.path.join(os.environ['RESEARCH_LAB_DEV_SNAPSHOT_DIR'], 'snapshots')\n"
+        "names = sorted(os.listdir(snapshots)) if os.path.isdir(snapshots) else []\n"
+        "bodies = []\n"
+        "for name in names:\n"
+        "    with open(os.path.join(snapshots, name), 'r', encoding='utf-8') as handle:\n"
+        "        bodies.append(json.load(handle)['response']['body_text'])\n"
+        "print(json.dumps({'count': len(names), 'bodies': bodies}))\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            "SCRAPINGDOG_API_KEY": runtime_secret,
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    decoded = json.loads(completed.stdout)
+    assert decoded == {
+        "count": 1,
+        "bodies": [
+            '{"role": "service_role", "configuration": "SCRAPINGDOG_API_KEY"}'
+        ],
+    }
+    failures = [
+        json.loads(line)
+        for line in (snapshot_dir / "record_failures.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert len(failures) == 1
+    assert failures[0]["reason"] == "secret_material_rejected"
+    assert failures[0]["request_key"].startswith(
+        "scrapingdog|GET|api.scrapingdog.com/profile|"
+    )
+    assert runtime_secret not in "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in snapshot_dir.rglob("*")
+        if path.is_file()
+    )
+
+
 def test_record_bootstrap_reuses_existing_urllib_response_without_network(tmp_path):
     recorder = _record_store(tmp_path)
     body = _record_companies_response(recorder, "acme", [_rich_company()])

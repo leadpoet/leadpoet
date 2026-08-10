@@ -1798,6 +1798,61 @@ def _baseline_summary_sourcing_failed(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _accept_provider_backed_empty_retry(
+    item_summary: dict[str, Any],
+    *,
+    retry_round: int,
+    runtime_error: str,
+    scorer_error: str,
+) -> bool:
+    """Classify a measured, provider-backed empty retry as a valid zero.
+
+    The private runtime already raises for auth, quota, rate-limit, outage, and
+    transport failures before returning an empty result. Keep the first empty
+    attempt retryable, then accept a later empty attempt only when its captured
+    provider-cost evidence proves that the provider path ran and was tracked.
+    Missing evidence, cost-cap blocks, tracking failures, and execution errors
+    remain unresolved and non-checkpointable.
+    """
+
+    if retry_round <= 0 or runtime_error or scorer_error:
+        return False
+    diagnostics = item_summary.get("diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        return False
+    provider_cost = diagnostics.get("provider_cost_summary")
+    if not isinstance(provider_cost, Mapping):
+        return False
+    if not re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        str(diagnostics.get("incontainer_trace_sha256") or ""),
+    ):
+        return False
+    try:
+        blocked_calls = int(provider_cost.get("blocked_call_count") or 0)
+        tracking_failures = int(provider_cost.get("tracking_failed_count") or 0)
+        paid_calls = int(provider_cost.get("paid_call_count") or 0)
+        cache_hits = int(provider_cost.get("cache_hit_count") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if (
+        bool(provider_cost.get("cap_blocked"))
+        or blocked_calls > 0
+        or tracking_failures > 0
+    ):
+        return False
+    evidenced_calls = paid_calls + cache_hits
+    if evidenced_calls <= 0:
+        return False
+
+    updated = dict(diagnostics)
+    updated["sourcing_failed"] = False
+    updated["empty_result_provider_evidence_validated"] = True
+    updated["empty_result_retry_round"] = int(retry_round)
+    item_summary["diagnostics"] = updated
+    return True
+
+
 def _icp_company_goal(icp: Any) -> int | None:
     """The ICP's pinned company goal (max_companies), clamped, or None."""
     raw = icp.get("max_companies") if isinstance(icp, Mapping) else None
@@ -13042,9 +13097,9 @@ class ResearchLabGatewayScoringWorker:
                 context_label=f"{mode_label} for {label}",
                 require_non_empty=False,
             )
-            # The shared benchmark diagnostics classify no returned companies
-            # as an infrastructure sourcing failure. Retry it just like a
-            # provider exception; it must not become a durable zero checkpoint.
+            # The shared benchmark diagnostics cannot initially distinguish a
+            # legitimate no-match from missing provider work. Require one fresh
+            # retry; provider-backed evidence can then establish a durable zero.
             if not outputs:
                 retryable = True
         except PrivateModelRuntimeError as exc:
@@ -13208,6 +13263,13 @@ class ResearchLabGatewayScoringWorker:
             telemetry_model_role=telemetry_model_role,
         )
         _apply_provider_cost_baseline_outcome(item_summary)
+        if not outputs and _accept_provider_backed_empty_retry(
+            item_summary,
+            retry_round=retry_round,
+            runtime_error=runtime_error,
+            scorer_error=scorer_error,
+        ):
+            retryable = False
         diagnostics = item_summary.get("diagnostics")
         if isinstance(diagnostics, Mapping):
             categories = {str(value) for value in diagnostics.get("failure_categories") or []}

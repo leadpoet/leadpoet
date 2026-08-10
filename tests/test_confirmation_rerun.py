@@ -1273,6 +1273,66 @@ async def test_run_baseline_icp_mode_label_reaches_runner():
     assert sw._baseline_summary_checkpointable(summary) is False
 
 
+async def test_run_baseline_icp_accepts_provider_backed_empty_after_retry(monkeypatch):
+    worker = _worker()
+    import concurrent.futures
+
+    def runner(icp: Any, ctx: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return []
+
+    class NullScorer:
+        async def score_with_breakdowns(self, *args: Any) -> list[dict[str, Any]]:
+            return []
+
+    async def record_provider_evidence(**kwargs: Any) -> None:
+        diagnostics = dict(kwargs["item_summary"].get("diagnostics") or {})
+        diagnostics.update(
+            {
+                "incontainer_trace_sha256": "sha256:" + "c" * 64,
+                "provider_cost_summary": {
+                    "paid_call_count": 3,
+                    "cache_hit_count": 0,
+                    "blocked_call_count": 0,
+                    "tracking_failed_count": 0,
+                    "cap_blocked": False,
+                },
+            }
+        )
+        kwargs["item_summary"]["diagnostics"] = diagnostics
+
+    monkeypatch.setattr(worker, "_record_baseline_icp_traces", record_provider_evidence)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        summary = await worker._run_baseline_icp(
+            runner=runner,
+            scorer=NullScorer(),
+            item={
+                "icp": {},
+                "icp_ref": "icp:empty",
+                "icp_hash": "hash-empty",
+                "set_id": 1,
+                "day_index": 1,
+                "day_rank": 1,
+            },
+            item_index=1,
+            total_icps=1,
+            run_start=0.0,
+            executor=executor,
+            trace_context={"context_ref": "test"},
+            retry_round=1,
+        )
+    finally:
+        executor.shutdown(wait=False)
+
+    assert summary["score"] == pytest.approx(0.0)
+    assert summary["_retryable"] is False
+    assert summary["_nonempty"] is False
+    assert summary["_runtime_error"] == ""
+    assert summary["diagnostics"]["sourcing_failed"] is False
+    assert summary["diagnostics"]["empty_result_provider_evidence_validated"] is True
+    assert sw._baseline_summary_checkpointable(summary) is True
+
+
 async def test_run_baseline_icp_derives_sequence_from_retry_round():
     worker = _worker()
     import concurrent.futures

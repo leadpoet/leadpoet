@@ -2054,6 +2054,131 @@ def test_private_baseline_checkpoint_rejects_unresolved_and_cost_blocked_rows():
     )
 
 
+def test_provider_backed_empty_retry_becomes_checkpointable_zero():
+    row = {
+        "icp_ref": "empty-but-measured",
+        "score": 0.0,
+        "company_count": 0,
+        "diagnostics": {
+            "sourcing_failed": True,
+            "incontainer_trace_sha256": "sha256:" + "a" * 64,
+            "provider_cost_summary": {
+                "paid_call_count": 2,
+                "cache_hit_count": 1,
+                "blocked_call_count": 0,
+                "tracking_failed_count": 0,
+                "cap_blocked": False,
+            },
+        },
+    }
+
+    assert sw._accept_provider_backed_empty_retry(
+        row,
+        retry_round=1,
+        runtime_error="",
+        scorer_error="",
+    ) is True
+    assert row["diagnostics"]["sourcing_failed"] is False
+    assert row["diagnostics"]["empty_result_provider_evidence_validated"] is True
+    assert row["diagnostics"]["empty_result_retry_round"] == 1
+    assert sw._baseline_summary_checkpointable(row) is True
+    health = sw._build_baseline_health(
+        per_icp_summaries=[row],
+        retried=1,
+        recovered=1,
+        max_unresolved_icps=0,
+    )
+    assert health["unresolved_provider_errors"] == 0
+    assert health["gate_passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("retry_round", "runtime_error", "scorer_error", "cost_overrides"),
+    [
+        (0, "", "", {}),
+        (1, "timed out", "", {}),
+        (1, "", "provider failed", {}),
+        (1, "", "", {"paid_call_count": 0, "cache_hit_count": 0}),
+        (1, "", "", {"cap_blocked": True}),
+        (1, "", "", {"blocked_call_count": 1}),
+        (1, "", "", {"tracking_failed_count": 1}),
+    ],
+)
+def test_empty_retry_without_complete_provider_evidence_stays_unresolved(
+    retry_round,
+    runtime_error,
+    scorer_error,
+    cost_overrides,
+):
+    provider_cost = {
+        "paid_call_count": 1,
+        "cache_hit_count": 0,
+        "blocked_call_count": 0,
+        "tracking_failed_count": 0,
+        "cap_blocked": False,
+        **cost_overrides,
+    }
+    row = {
+        "icp_ref": "still-unresolved",
+        "score": 0.0,
+        "company_count": 0,
+        "diagnostics": {
+            "sourcing_failed": True,
+            "incontainer_trace_sha256": "sha256:" + "b" * 64,
+            "provider_cost_summary": provider_cost,
+        },
+    }
+
+    assert sw._accept_provider_backed_empty_retry(
+        row,
+        retry_round=retry_round,
+        runtime_error=runtime_error,
+        scorer_error=scorer_error,
+    ) is False
+    assert row["diagnostics"]["sourcing_failed"] is True
+    assert sw._baseline_summary_checkpointable(row) is False
+
+
+@pytest.mark.parametrize(
+    "diagnostic_overrides",
+    [
+        {"incontainer_trace_sha256": ""},
+        {"incontainer_trace_sha256": "sha256:not-a-hash"},
+        {"provider_cost_summary": {"paid_call_count": "not-an-int"}},
+    ],
+)
+def test_empty_retry_with_malformed_provider_evidence_fails_closed(
+    diagnostic_overrides,
+):
+    diagnostics = {
+        "sourcing_failed": True,
+        "incontainer_trace_sha256": "sha256:" + "d" * 64,
+        "provider_cost_summary": {
+            "paid_call_count": 1,
+            "cache_hit_count": 0,
+            "blocked_call_count": 0,
+            "tracking_failed_count": 0,
+            "cap_blocked": False,
+        },
+        **diagnostic_overrides,
+    }
+    row = {
+        "icp_ref": "malformed-evidence",
+        "score": 0.0,
+        "company_count": 0,
+        "diagnostics": diagnostics,
+    }
+
+    assert sw._accept_provider_backed_empty_retry(
+        row,
+        retry_round=1,
+        runtime_error="",
+        scorer_error="",
+    ) is False
+    assert row["diagnostics"]["sourcing_failed"] is True
+    assert sw._baseline_summary_checkpointable(row) is False
+
+
 def test_private_baseline_cost_cap_is_terminal_and_preserves_partial_scores():
     for message in (
         "HTTPError: HTTP Error 402: Payment Required; status=402",

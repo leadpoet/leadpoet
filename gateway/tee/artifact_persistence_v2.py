@@ -127,7 +127,9 @@ def _transport_failure_code(exc: BaseException) -> str:
         ("dns", "dns_failure"),
         ("reset", "connection_reset"),
         ("refused", "connection_refused"),
+        ("proxy", "proxy_failure"),
         ("malformed", "malformed_reply"),
+        ("protocol", "malformed_reply"),
     ):
         if token in text:
             return code

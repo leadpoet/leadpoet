@@ -453,6 +453,91 @@ class HTTPXProviderTransport:
         self.proxy_url = proxy_url
         self.ca_bundle = ca_bundle
         self.response_body_ceiling_bytes = response_body_ceiling_bytes
+        self._direct_client = None
+        self._direct_client_lock = threading.Lock()
+
+    def _new_client(self, *, proxy_headers: Optional[Mapping[str, str]] = None) -> Any:
+        import certifi
+        import httpx
+        from http.cookiejar import CookieJar, DefaultCookiePolicy
+
+        class RejectAllCookies(DefaultCookiePolicy):
+            def set_ok(self, cookie: Any, request: Any) -> bool:
+                return False
+
+        verify_path = self.ca_bundle or certifi.where()
+        return httpx.Client(
+            proxy=httpx.Proxy(
+                self.proxy_url,
+                headers=dict(proxy_headers) if proxy_headers else None,
+            ),
+            verify=verify_path,
+            trust_env=False,
+            http2=True,
+            limits=httpx.Limits(
+                max_connections=64,
+                max_keepalive_connections=32,
+                keepalive_expiry=300.0,
+            ),
+            cookies=CookieJar(policy=RejectAllCookies()),
+            follow_redirects=False,
+        )
+
+    def _get_direct_client(self) -> Any:
+        client = self._direct_client
+        if client is not None:
+            return client
+        with self._direct_client_lock:
+            if self._direct_client is None:
+                self._direct_client = self._new_client()
+            return self._direct_client
+
+    def close(self) -> None:
+        with self._direct_client_lock:
+            client = self._direct_client
+            self._direct_client = None
+        if client is not None:
+            client.close()
+
+    @staticmethod
+    def _execute_with_client(
+        client: Any,
+        *,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        timeout_seconds: float,
+        max_response_bytes: int,
+    ) -> Dict[str, Any]:
+        with client.stream(
+            method,
+            url,
+            headers=dict(headers),
+            content=body,
+            timeout=timeout_seconds,
+        ) as response:
+            # TLS is authenticated before response headers are available.
+            # Capture its evidence now because a peer may close the stream
+            # immediately after sending a complete bounded response body.
+            tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
+            chunks = []
+            byte_count = 0
+            for chunk in response.iter_bytes():
+                byte_count += len(chunk)
+                if byte_count > max_response_bytes:
+                    raise ProviderBrokerV2Error(
+                        "provider response exceeds size limit"
+                    )
+                chunks.append(chunk)
+            response_body = b"".join(chunks)
+            return {
+                "http_status": int(response.status_code),
+                "headers": _decoded_response_headers(response.headers),
+                "body": response_body,
+                "tls_peer_chain_hash": tls_peer_chain_hash,
+                "tls_protocol": tls_protocol,
+            }
 
     def __call__(
         self,
@@ -474,10 +559,6 @@ class HTTPXProviderTransport:
         ):
             raise ProviderBrokerV2Error("provider response limit is invalid")
 
-        import certifi
-        import httpx
-
-        verify_path = self.ca_bundle or certifi.where()
         proxy_headers = None
         if upstream_proxy_url:
             proxy_headers = {
@@ -485,41 +566,33 @@ class HTTPXProviderTransport:
                     upstream_proxy_url.encode("utf-8")
                 ).decode("ascii")
             }
-        with httpx.Client(
-            proxy=httpx.Proxy(self.proxy_url, headers=proxy_headers),
-            verify=verify_path,
-            trust_env=False,
-            http2=True,
-            timeout=max(0.001, timeout_ms / 1000.0),
-            follow_redirects=False,
-        ) as client:
-            with client.stream(
-                method,
-                url,
-                headers=dict(headers),
-                content=body,
-            ) as response:
-                # TLS is authenticated before response headers are available.
-                # Capture its evidence now because a peer may close the stream
-                # immediately after sending a complete bounded response body.
-                tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
-                chunks = []
-                byte_count = 0
-                for chunk in response.iter_bytes():
-                    byte_count += len(chunk)
-                    if byte_count > max_response_bytes:
-                        raise ProviderBrokerV2Error(
-                            "provider response exceeds size limit"
-                        )
-                    chunks.append(chunk)
-                response_body = b"".join(chunks)
-                return {
-                    "http_status": int(response.status_code),
-                    "headers": _decoded_response_headers(response.headers),
-                    "body": response_body,
-                    "tls_peer_chain_hash": tls_peer_chain_hash,
-                    "tls_protocol": tls_protocol,
-                }
+        timeout_seconds = max(0.001, timeout_ms / 1000.0)
+        if proxy_headers is None:
+            return self._execute_with_client(
+                self._get_direct_client(),
+                method=method,
+                url=url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=max_response_bytes,
+            )
+
+        # The upstream proxy URL contains a job-scoped credential. Never retain
+        # it in the process-lifetime direct connection pool after the job lease.
+        client = self._new_client(proxy_headers=proxy_headers)
+        try:
+            return self._execute_with_client(
+                client,
+                method=method,
+                url=url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=max_response_bytes,
+            )
+        finally:
+            client.close()
 
 
 class ProviderBrokerV2:

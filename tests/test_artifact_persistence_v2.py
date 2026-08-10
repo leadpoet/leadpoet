@@ -409,6 +409,45 @@ def test_parent_drop_is_a_visible_transport_failure() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (RuntimeError("proxy tunnel unavailable"), "proxy_failure"),
+        (RuntimeError("remote protocol error"), "malformed_reply"),
+    ],
+)
+def test_transport_boundary_failure_is_classified_without_exposing_detail(
+    error: Exception,
+    expected_code: str,
+) -> None:
+    vault = _vault()
+    descriptor, _document = _sealed(vault)
+
+    def failed_transport(**_kwargs):
+        raise error
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=failed_transport,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_code"] == expected_code
+    assert len(result["transport_attempts"]) == (
+        ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+    )
+
+
 def test_transport_failure_retries_and_binds_every_attempt() -> None:
     vault = _vault()
     descriptor, document = _sealed(vault)

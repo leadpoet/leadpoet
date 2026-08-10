@@ -623,6 +623,7 @@ def test_httpx_tls_transport_survives_full_close_through_both_relays(
         idle_timeout_seconds=2,
     )
     proxy._open_parent_tunnel = open_parent_tunnel
+    proxy._configure_environment = lambda: None
     proxy.start()
     try:
         result = HTTPXProviderTransport(
@@ -650,6 +651,158 @@ def test_httpx_tls_transport_survives_full_close_through_both_relays(
     assert result["tls_protocol"].startswith("TLSv1.")
     assert proxy.status().get("last_failure") is None
     assert proxy.status()["last_tunnel"]["parent_to_client_bytes"] > 0
+
+
+def test_httpx_direct_transport_reuses_and_recovers_enclave_tunnel(tmp_path: Path):
+    certificate_path, private_key_path = _write_test_server_identity(tmp_path)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(
+        certfile=str(certificate_path),
+        keyfile=str(private_key_path),
+    )
+    origin_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    origin_listener.settimeout(3)
+    origin_listener.bind(("127.0.0.1", 0))
+    origin_listener.listen(2)
+    origin_address = origin_listener.getsockname()
+    origin_errors = []
+    origin_connections = []
+    requests_seen = []
+
+    def serve_origin():
+        try:
+            while len(requests_seen) < 3:
+                connection, _address = origin_listener.accept()
+                origin_connections.append(connection)
+                protected = tls_context.wrap_socket(connection, server_side=True)
+                try:
+                    while len(requests_seen) < 3:
+                        request = bytearray()
+                        while b"\r\n\r\n" not in request:
+                            chunk = protected.recv(4096)
+                            if not chunk:
+                                break
+                            request.extend(chunk)
+                        if not request:
+                            break
+                        requests_seen.append(bytes(request))
+                        body = b'{"ok":true}'
+                        connection_header = (
+                            b"close" if len(requests_seen) in {2, 3} else b"keep-alive"
+                        )
+                        protected.sendall(
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: application/json\r\n"
+                            b"Content-Length: 11\r\n"
+                            b"Set-Cookie: must-not-persist=secret; Secure\r\n"
+                            b"Connection: "
+                            + connection_header
+                            + b"\r\n\r\n"
+                            + body
+                        )
+                        if len(requests_seen) in {2, 3}:
+                            break
+                finally:
+                    protected.close()
+        except Exception as exc:
+            origin_errors.append(exc)
+        finally:
+            origin_listener.close()
+
+    origin_thread = threading.Thread(target=serve_origin, daemon=True)
+    origin_thread.start()
+    host_threads = []
+    opened_parent_tunnels = []
+
+    def open_parent_tunnel(_host, _port):
+        opened_parent_tunnels.append((_host, _port))
+        enclave_side, host_side = socket.socketpair()
+        host_thread = threading.Thread(
+            target=_handle_connection,
+            kwargs={
+                "connection": host_side,
+                "connector": lambda _name, _number: socket.create_connection(
+                    origin_address,
+                    timeout=2,
+                ),
+                "idle_timeout_seconds": 2,
+            },
+            daemon=True,
+        )
+        host_thread.start()
+        host_threads.append(host_thread)
+        enclave_side.sendall(
+            _frame(
+                {
+                    "method": "connect",
+                    "params": {
+                        "host": "example.com",
+                        "port": 443,
+                        "policy_hash": destination_policy_hash(),
+                    },
+                }
+            )
+        )
+        response = _read_frame(enclave_side)
+        assert response["result"]["status"] == "connected"
+        return enclave_side
+
+    proxy_port = _unused_loopback_port()
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        local_port=proxy_port,
+        loopback_initializer=lambda: None,
+        idle_timeout_seconds=2,
+    )
+    proxy._open_parent_tunnel = open_parent_tunnel
+    proxy._configure_environment = lambda: None
+    proxy.start()
+    transport = HTTPXProviderTransport(
+        proxy_url=f"http://127.0.0.1:{proxy_port}",
+        ca_bundle=str(certificate_path),
+    )
+    try:
+        results = [
+            transport(
+                method="GET",
+                url="https://example.com/artifact",
+                headers={"accept": "application/json"},
+                body=b"",
+                timeout_ms=3000,
+            )
+            for _ in range(2)
+        ]
+        assert opened_parent_tunnels == [("example.com", 443)]
+        results.append(
+            transport(
+                method="GET",
+                url="https://example.com/artifact",
+                headers={"accept": "application/json"},
+                body=b"",
+                timeout_ms=3000,
+            )
+        )
+    finally:
+        transport.close()
+        proxy.stop()
+        origin_thread.join(timeout=3)
+        for thread in host_threads:
+            thread.join(timeout=3)
+
+    assert origin_errors == []
+    assert len(requests_seen) == 3
+    assert all(b"must-not-persist" not in request for request in requests_seen)
+    assert len(origin_connections) == 2
+    assert opened_parent_tunnels == [
+        ("example.com", 443),
+        ("example.com", 443),
+    ]
+    assert [result["body"] for result in results] == [
+        b'{"ok":true}',
+        b'{"ok":true}',
+        b'{"ok":true}',
+    ]
+    assert all(result["tls_protocol"].startswith("TLSv1.") for result in results)
 
 
 def test_enclave_proxy_parses_connect_without_exposing_http_payload():

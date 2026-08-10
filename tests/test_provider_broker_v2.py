@@ -131,13 +131,20 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         def __exit__(self, *_args):
             return False
 
+        def close(self):
+            pass
+
         def stream(self, *_args, **_kwargs):
             return ResponseContext()
 
     monkeypatch.setitem(
         sys.modules,
         "httpx",
-        SimpleNamespace(Client=Client, Proxy=lambda *_args, **_kwargs: object()),
+        SimpleNamespace(
+            Client=Client,
+            Limits=lambda **kwargs: kwargs,
+            Proxy=lambda *_args, **_kwargs: object(),
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -161,6 +168,11 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         "tls_protocol": "TLSv1.3",
     }
     assert client_options[-1]["http2"] is True
+    assert client_options[-1]["limits"] == {
+        "max_connections": 64,
+        "max_keepalive_connections": 32,
+        "keepalive_expiry": 300.0,
+    }
 
     artifact_transport = HTTPXProviderTransport(
         response_body_ceiling_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES
@@ -236,13 +248,20 @@ def test_httpx_transport_enforces_artifact_specific_large_response_ceiling(
         def __exit__(self, *_args):
             return False
 
+        def close(self):
+            pass
+
         def stream(self, *_args, **_kwargs):
             return ResponseContext()
 
     monkeypatch.setitem(
         sys.modules,
         "httpx",
-        SimpleNamespace(Client=Client, Proxy=lambda *_args, **_kwargs: object()),
+        SimpleNamespace(
+            Client=Client,
+            Limits=lambda **kwargs: kwargs,
+            Proxy=lambda *_args, **_kwargs: object(),
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -274,6 +293,124 @@ def test_httpx_transport_enforces_artifact_specific_large_response_ceiling(
     assert len(result["body"]) > MAX_RESPONSE_BODY_BYTES
     assert result["tls_peer_chain_hash"] == sha256_bytes(b"peer-certificate")
     assert result["tls_protocol"] == "TLSv1.3"
+
+
+def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
+    clients = []
+    proxies = []
+
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        extensions = {"network_stream": Stream()}
+
+        def iter_bytes(self):
+            yield b'{"ok":true}'
+
+    class ResponseContext:
+        def __enter__(self):
+            return Response()
+
+        def __exit__(self, *_args):
+            return False
+
+    class Client:
+        def __init__(self, **options):
+            self.options = dict(options)
+            self.closed = False
+            self.stream_calls = []
+            clients.append(self)
+
+        def stream(self, *args, **kwargs):
+            self.stream_calls.append((args, kwargs))
+            return ResponseContext()
+
+        def close(self):
+            self.closed = True
+
+    def proxy(url, **options):
+        value = {"url": url, **options}
+        proxies.append(value)
+        return value
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(
+            Client=Client,
+            Limits=lambda **kwargs: kwargs,
+            Proxy=proxy,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "certifi",
+        SimpleNamespace(where=lambda: "/tmp/test-ca.pem"),
+    )
+
+    transport = HTTPXProviderTransport()
+    request = {
+        "method": "GET",
+        "url": "https://example.com/artifact",
+        "headers": {},
+        "body": b"",
+        "timeout_ms": 1200,
+    }
+    errors = []
+
+    def request_direct():
+        try:
+            transport(**request)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=request_direct) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(clients) == 1
+    assert len(clients[0].stream_calls) == 8
+    assert clients[0].stream_calls[0][1]["timeout"] == 1.2
+    assert clients[0].closed is False
+    assert proxies[0] == {
+        "url": "http://127.0.0.1:18080",
+        "headers": None,
+    }
+
+    upstream_proxy = "https://worker:test-secret@proxy.example.com:443"
+    transport(**request, upstream_proxy_url=upstream_proxy)
+    transport(**request, upstream_proxy_url=upstream_proxy)
+
+    assert len(clients) == 3
+    assert clients[1].closed is True
+    assert clients[2].closed is True
+    expected_proxy_header = base64.b64encode(upstream_proxy.encode("utf-8")).decode(
+        "ascii"
+    )
+    assert proxies[1]["headers"] == {
+        "X-Leadpoet-Upstream-Proxy-B64": expected_proxy_header
+    }
+    assert proxies[2]["headers"] == proxies[1]["headers"]
+
+    transport.close()
+    assert clients[0].closed is True
 
 
 def test_provider_registry_hash_binds_measured_https_routes():

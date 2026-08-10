@@ -77,6 +77,7 @@ SNAPSHOT_DIR_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_DIR"
 SNAPSHOT_RECORD_REUSE_EXISTING_ENV = (
     "RESEARCH_LAB_DEV_SNAPSHOT_RECORD_REUSE_EXISTING"
 )
+SNAPSHOT_RUNTIME_SECRET_REDACTION = "[REDACTED_RUNTIME_SECRET]"
 MISS_POLICY_STRICT = "strict"
 MISS_POLICY_EMPTY = "empty"
 MISS_POLICIES = (MISS_POLICY_STRICT, MISS_POLICY_EMPTY)
@@ -120,6 +121,50 @@ def _snapshot_runtime_secret_values() -> tuple[str, ...]:
             }
         )
     )
+
+
+def _redact_runtime_secret_values(value: Any) -> tuple[Any, int]:
+    """Replace only exact in-memory credentials in a provider response."""
+
+    if isinstance(value, Mapping):
+        redacted: dict[Any, Any] = {}
+        count = 0
+        for key, item in value.items():
+            redacted_item, item_count = _redact_runtime_secret_values(item)
+            redacted[key] = redacted_item
+            count += item_count
+        return redacted, count
+    if isinstance(value, list):
+        redacted_items = []
+        count = 0
+        for item in value:
+            redacted_item, item_count = _redact_runtime_secret_values(item)
+            redacted_items.append(redacted_item)
+            count += item_count
+        return redacted_items, count
+    if isinstance(value, tuple):
+        redacted_items = []
+        count = 0
+        for item in value:
+            redacted_item, item_count = _redact_runtime_secret_values(item)
+            redacted_items.append(redacted_item)
+            count += item_count
+        return tuple(redacted_items), count
+    if not isinstance(value, str):
+        return value, 0
+
+    redacted_text = value
+    count = 0
+    for secret in sorted(
+        _snapshot_runtime_secret_values(), key=lambda item: (-len(item), item)
+    ):
+        occurrences = redacted_text.count(secret)
+        if occurrences:
+            redacted_text = redacted_text.replace(
+                secret, SNAPSHOT_RUNTIME_SECRET_REDACTION
+            )
+            count += occurrences
+    return redacted_text, count
 
 
 def _urllib_transport_response(error: BaseException) -> dict[str, Any] | None:
@@ -580,7 +625,11 @@ class ProviderSnapshotStore:
         request: SnapshotRequest,
         response: Mapping[str, Any],
     ) -> dict[str, Any]:
-        response_doc = dict(response)
+        response_doc, redaction_count = _redact_runtime_secret_values(
+            dict(response)
+        )
+        if redaction_count:
+            response_doc["runtime_secret_redaction_count"] = redaction_count
         record = {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
             "record_type": SNAPSHOT_RECORD_TYPE,
@@ -1411,6 +1460,7 @@ _RL_DEV_SECRET_VALUE_PATTERNS = (
     re.compile(r"\bsk-or-[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
     re.compile(r"\bsb_secret_[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
 )
+_RL_DEV_RUNTIME_SECRET_REDACTION = "[REDACTED_RUNTIME_SECRET]"
 _RL_DEV_RECORD_FAILURES_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "record_failures.jsonl")
 _RL_DEV_PROVIDER_MODELS_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "provider_models.jsonl")
 _RL_DEV_URLLIB_TRANSPORT_OUTCOME = "urllib_transport_error"
@@ -1453,6 +1503,45 @@ def _rl_dev_secret_material_kind(value):
 
 def _rl_dev_contains_runtime_secret(value):
     return bool(_rl_dev_secret_material_kind(value))
+
+
+def _rl_dev_redact_runtime_secret_values(value):
+    if isinstance(value, dict):
+        redacted = {}
+        count = 0
+        for key, item in value.items():
+            redacted_item, item_count = _rl_dev_redact_runtime_secret_values(item)
+            redacted[key] = redacted_item
+            count += item_count
+        return redacted, count
+    if isinstance(value, list):
+        redacted = []
+        count = 0
+        for item in value:
+            redacted_item, item_count = _rl_dev_redact_runtime_secret_values(item)
+            redacted.append(redacted_item)
+            count += item_count
+        return redacted, count
+    if isinstance(value, tuple):
+        redacted = []
+        count = 0
+        for item in value:
+            redacted_item, item_count = _rl_dev_redact_runtime_secret_values(item)
+            redacted.append(redacted_item)
+            count += item_count
+        return tuple(redacted), count
+    if not isinstance(value, str):
+        return value, 0
+    redacted = value
+    count = 0
+    for secret in sorted(
+        _RL_DEV_RUNTIME_SECRET_VALUES, key=lambda item: (-len(item), item)
+    ):
+        occurrences = redacted.count(secret)
+        if occurrences:
+            redacted = redacted.replace(secret, _RL_DEV_RUNTIME_SECRET_REDACTION)
+            count += occurrences
+    return redacted, count
 
 
 def _rl_dev_provider_for_host(host):
@@ -1955,6 +2044,9 @@ def _rl_dev_record(
                 response["reason"] = reason_text[:240]
         else:
             response = dict(response_override)
+        response, redaction_count = _rl_dev_redact_runtime_secret_values(response)
+        if redaction_count:
+            response["runtime_secret_redaction_count"] = redaction_count
         record = {
             "schema_version": "1.0",
             "record_type": "research_lab_dev_provider_snapshot",
@@ -1968,9 +2060,9 @@ def _rl_dev_record(
         secret_kind = _rl_dev_secret_material_kind(record)
         if secret_kind:
             _rl_dev_record_failure(secret_kind + "_rejected", request_key)
-            return False
+            return None
         if not _rl_dev_record_provider_model(provider, body, request_key):
-            return False
+            return None
         path = _rl_dev_snapshot_path(storage_name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         temporary = path + "." + str(os.getpid()) + ".tmp"
@@ -1979,10 +2071,16 @@ def _rl_dev_record(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        return True
+        return response
     except Exception as exc:
         _rl_dev_record_failure("record_write_error:" + type(exc).__name__, request_key)
-        return False
+        return None
+
+
+def _rl_dev_require_recorded_response(response):
+    if not isinstance(response, dict):
+        raise RuntimeError("provider snapshot response was rejected")
+    return response
 
 
 def _rl_dev_install_record():
@@ -2014,24 +2112,18 @@ def _rl_dev_install_record():
                 else str(body)
             )
             reason = str(getattr(exc, "reason", "") or "HTTP Error")
-            _rl_dev_record(
-                method,
-                url,
-                data,
-                status,
-                headers,
-                body_text,
-                reason=reason,
+            recorded = _rl_dev_require_recorded_response(
+                _rl_dev_record(
+                    method,
+                    url,
+                    data,
+                    status,
+                    headers,
+                    body_text,
+                    reason=reason,
+                )
             )
-            return _rl_dev_urllib_response(
-                url,
-                {
-                    "status": status,
-                    "headers": headers,
-                    "body_text": body_text,
-                    "reason": reason,
-                },
-            )
+            return _rl_dev_urllib_response(url, recorded)
         except Exception as exc:
             transport_response = _rl_dev_urllib_transport_response(exc)
             if transport_response is None:
@@ -2055,15 +2147,10 @@ def _rl_dev_install_record():
         status = getattr(response, "status", None) or getattr(response, "code", 0)
         headers = dict(getattr(response, "headers", {}) or {})
         body_text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
-        _rl_dev_record(method, url, data, status, headers, body_text)
-        return _rl_dev_urllib_response(
-            url,
-            {
-                "status": int(status or 0),
-                "headers": headers,
-                "body_text": body_text,
-            },
+        recorded = _rl_dev_require_recorded_response(
+            _rl_dev_record(method, url, data, status, headers, body_text)
         )
+        return _rl_dev_urllib_response(url, recorded)
 
     _rl_urllib_request.urlopen = _rl_dev_record_urlopen
 
@@ -2099,7 +2186,7 @@ def _rl_dev_install_record():
                     prepared.body,
                 )
                 raise
-            try:
+            recorded = _rl_dev_require_recorded_response(
                 _rl_dev_record(
                     str(prepared.method or "GET"),
                     str(prepared.url or ""),
@@ -2108,10 +2195,13 @@ def _rl_dev_install_record():
                     dict(response.headers or {}),
                     response.text,
                 )
-            except Exception as exc:
-                _rl_dev_record_failure(
-                    "requests_record_hook_error:" + type(exc).__name__
-                )
+            )
+            response.status_code = int(recorded.get("status") or 0)
+            response._content = str(recorded.get("body_text") or "").encode("utf-8")
+            response.encoding = "utf-8"
+            response.headers.clear()
+            response.headers.update(dict(recorded.get("headers") or {}))
+            response.reason = str(recorded.get("reason") or "")
             return response
 
         _rl_requests.Session.send = _rl_dev_record_requests_send
@@ -2151,7 +2241,7 @@ def _rl_dev_install_record():
                     bytes(getattr(request, "content", b"") or b""),
                 )
                 raise
-            try:
+            recorded = _rl_dev_require_recorded_response(
                 _rl_dev_record(
                     str(request.method or "GET"),
                     str(request.url or ""),
@@ -2160,11 +2250,13 @@ def _rl_dev_install_record():
                     dict(response.headers or {}),
                     response.text,
                 )
-            except Exception as exc:
-                _rl_dev_record_failure(
-                    "httpx_record_hook_error:" + type(exc).__name__
-                )
-            return response
+            )
+            return _rl_httpx.Response(
+                status_code=int(recorded.get("status") or 0),
+                headers=dict(recorded.get("headers") or {}),
+                content=str(recorded.get("body_text") or "").encode("utf-8"),
+                request=request,
+            )
 
         _rl_httpx.Client.send = _rl_dev_record_httpx_send
 
@@ -2195,15 +2287,22 @@ def _rl_dev_install_record():
                     bytes(getattr(request, "content", b"") or b""),
                 )
                 raise
-            _rl_dev_record(
-                str(request.method or "GET"),
-                str(request.url or ""),
-                bytes(getattr(request, "content", b"") or b""),
-                response.status_code,
-                dict(response.headers or {}),
-                response.text,
+            recorded = _rl_dev_require_recorded_response(
+                _rl_dev_record(
+                    str(request.method or "GET"),
+                    str(request.url or ""),
+                    bytes(getattr(request, "content", b"") or b""),
+                    response.status_code,
+                    dict(response.headers or {}),
+                    response.text,
+                )
             )
-            return response
+            return _rl_httpx.Response(
+                status_code=int(recorded.get("status") or 0),
+                headers=dict(recorded.get("headers") or {}),
+                content=str(recorded.get("body_text") or "").encode("utf-8"),
+                request=request,
+            )
 
         _rl_httpx.AsyncClient.send = _rl_dev_record_httpx_async_send
     except Exception as exc:
@@ -2247,16 +2346,21 @@ def _rl_dev_install_record():
                 )
                 raise
             charset = getattr(response, "charset", None) or "utf-8"
-            _rl_dev_record(
-                str(method or "GET"),
-                str(str_or_url or ""),
-                kwargs.get("json") if kwargs.get("json") is not None else kwargs.get("data"),
-                response.status,
-                dict(response.headers or {}),
-                body.decode(charset, "replace"),
-                kwargs.get("params"),
+            recorded = _rl_dev_require_recorded_response(
+                _rl_dev_record(
+                    str(method or "GET"),
+                    str(str_or_url or ""),
+                    kwargs.get("json") if kwargs.get("json") is not None else kwargs.get("data"),
+                    response.status,
+                    dict(response.headers or {}),
+                    body.decode(charset, "replace"),
+                    kwargs.get("params"),
+                )
             )
-            return response
+            replayed = _RlDevAiohttpResponse(str(str_or_url), recorded)
+            if kwargs.get("raise_for_status") is True:
+                replayed.raise_for_status()
+            return replayed
 
         _rl_aiohttp.ClientSession._request = _rl_dev_record_aiohttp_request
     except Exception as exc:

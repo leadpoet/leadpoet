@@ -45,6 +45,7 @@ from research_lab.eval.snapshot_store import (
     SNAPSHOT_DIR_ENV,
     SNAPSHOT_MISS_POLICY_ENV,
     SNAPSHOT_RECORD_REUSE_EXISTING_ENV,
+    SNAPSHOT_RUNTIME_SECRET_REDACTION,
     SNAPSHOT_URI_ENV,
     SYNTHESIZED_EMPTY_MARKER,
     DevSnapshotStoreError,
@@ -304,7 +305,7 @@ def test_record_allows_secret_names_and_incomplete_prefixes(tmp_path):
     assert record["response"]["body_text"] == body
 
 
-def test_record_refuses_exact_runtime_secret_without_known_prefix(
+def test_record_redacts_exact_runtime_secret_without_known_prefix(
     tmp_path, monkeypatch
 ):
     runtime_secret = "opaque-runtime-credential-value-for-testing"
@@ -312,12 +313,23 @@ def test_record_refuses_exact_runtime_secret_without_known_prefix(
     recorder = _record_store(tmp_path)
     request = build_snapshot_request("GET", "https://api.exa.ai/contents?id=1")
 
-    with pytest.raises(DevSnapshotStoreError):
-        recorder.record_response(
-            request,
-            status=200,
-            body_text=json.dumps({"echo": runtime_secret}),
-        )
+    record = recorder.record_response(
+        request,
+        status=200,
+        body_text=json.dumps({"echo": runtime_secret}),
+    )
+
+    response = record["response"]
+    assert response["body_text"] == json.dumps(
+        {"echo": SNAPSHOT_RUNTIME_SECRET_REDACTION}
+    )
+    assert response["runtime_secret_redaction_count"] == 1
+    assert _replay_store(tmp_path).lookup(request) == response
+    assert runtime_secret not in "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / "snapshot_set").rglob("*")
+        if path.is_file()
+    )
 
 
 def test_container_replay_env_shape():
@@ -532,7 +544,7 @@ def test_record_bootstrap_rejects_short_secret_values(tmp_path):
     assert failures[0]["reason"] == "secret_value_shape_rejected"
 
 
-def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_path):
+def test_record_bootstrap_redacts_runtime_values_and_allows_secret_names(tmp_path):
     snapshot_dir = tmp_path / "record_set"
     runtime_secret = "opaque-runtime-credential-value-for-testing"
     probe = (
@@ -543,15 +555,14 @@ def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_pat
         " 'documented_prefix': 'sk-or-'}))\n"
         "_rl_dev_record('GET', 'https://api.scrapingdog.com/profile?id=leaky', None, 200,"
         " {'content-type': 'application/json'},"
-        " json.dumps({'documented_example': 'sk-or-' + 'abcdefghijklm123456',"
-        " 'echo': os.environ['SCRAPINGDOG_API_KEY']}))\n"
+        " json.dumps({'echo': os.environ['SCRAPINGDOG_API_KEY']}))\n"
         "snapshots = os.path.join(os.environ['RESEARCH_LAB_DEV_SNAPSHOT_DIR'], 'snapshots')\n"
         "names = sorted(os.listdir(snapshots)) if os.path.isdir(snapshots) else []\n"
-        "bodies = []\n"
+        "responses = []\n"
         "for name in names:\n"
         "    with open(os.path.join(snapshots, name), 'r', encoding='utf-8') as handle:\n"
-        "        bodies.append(json.load(handle)['response']['body_text'])\n"
-        "print(json.dumps({'count': len(names), 'bodies': bodies}))\n"
+        "        responses.append(json.load(handle)['response'])\n"
+        "print(json.dumps({'count': len(names), 'responses': responses}))\n"
     )
     completed = subprocess.run(
         [sys.executable, "-c", dev_record_bootstrap() + probe],
@@ -568,13 +579,55 @@ def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_pat
 
     assert completed.returncode == 0, completed.stderr
     decoded = json.loads(completed.stdout)
-    assert decoded == {
-        "count": 1,
-        "bodies": [
-            '{"role": "service_role", "configuration": "SCRAPINGDOG_API_KEY", '
-            '"documented_prefix": "sk-or-"}'
-        ],
-    }
+    assert decoded["count"] == 2
+    responses = decoded["responses"]
+    assert any(
+        response["body_text"]
+        == '{"role": "service_role", "configuration": "SCRAPINGDOG_API_KEY", '
+        '"documented_prefix": "sk-or-"}'
+        for response in responses
+    )
+    assert any(
+        response["body_text"]
+        == json.dumps({"echo": SNAPSHOT_RUNTIME_SECRET_REDACTION})
+        and response["runtime_secret_redaction_count"] == 1
+        for response in responses
+    )
+    assert not (snapshot_dir / "record_failures.jsonl").exists()
+    assert runtime_secret not in "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in snapshot_dir.rglob("*")
+        if path.is_file()
+    )
+
+
+def test_record_bootstrap_still_rejects_unknown_secret_shape_after_redaction(
+    tmp_path,
+):
+    snapshot_dir = tmp_path / "record_set"
+    runtime_secret = "opaque-runtime-credential-value-for-testing"
+    probe = (
+        "\nimport json, os\n"
+        "_rl_dev_record('GET', 'https://api.scrapingdog.com/profile?id=mixed', None, 200,"
+        " {'content-type': 'application/json'},"
+        " json.dumps({'echo': os.environ['SCRAPINGDOG_API_KEY'],"
+        " 'unknown': 'sk-or-' + 'abcdefghijklm123456'}))\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            "SCRAPINGDOG_API_KEY": runtime_secret,
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
     failures = [
         json.loads(line)
         for line in (snapshot_dir / "record_failures.jsonl")
@@ -583,10 +636,244 @@ def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_pat
         if line.strip()
     ]
     assert len(failures) == 1
-    assert failures[0]["reason"] == "runtime_secret_value_rejected"
-    assert failures[0]["request_key"].startswith(
-        "scrapingdog|GET|api.scrapingdog.com/profile|"
+    assert failures[0]["reason"] == "secret_value_shape_rejected"
+    assert not (snapshot_dir / "snapshots").exists()
+    assert runtime_secret not in "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in snapshot_dir.rglob("*")
+        if path.is_file()
     )
+
+
+def test_urllib_recording_returns_and_replays_the_same_redacted_response(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    runtime_secret = "opaque-runtime-credential-value-for-testing"
+    record_probe = r'''
+import http.server
+import json
+import os
+import threading
+import urllib.request
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({
+            "echo": os.environ["SCRAPINGDOG_API_KEY"],
+            "ok": True,
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/echo" % server.server_port
+try:
+    with urllib.request.urlopen(url) as response:
+        body = response.read().decode("utf-8")
+finally:
+    server.shutdown()
+    server.server_close()
+print(json.dumps({"body": body, "url": url}))
+'''
+    recorded = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + record_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            "SCRAPINGDOG_API_KEY": runtime_secret,
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert recorded.returncode == 0, recorded.stderr
+    recorded_doc = json.loads(recorded.stdout)
+    expected_body = json.dumps(
+        {"echo": SNAPSHOT_RUNTIME_SECRET_REDACTION, "ok": True}
+    )
+    assert recorded_doc["body"] == expected_body
+    snapshot_paths = list((snapshot_dir / "snapshots").glob("*.json"))
+    assert len(snapshot_paths) == 1
+    persisted = json.loads(snapshot_paths[0].read_text(encoding="utf-8"))
+    assert persisted["response"]["body_text"] == expected_body
+    assert persisted["response"]["runtime_secret_redaction_count"] == 1
+    assert not (snapshot_dir / "record_failures.jsonl").exists()
+    assert runtime_secret not in "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in snapshot_dir.rglob("*")
+        if path.is_file()
+    )
+
+    replay_probe = (
+        "\nimport json, urllib.request\n"
+        f"with urllib.request.urlopen({recorded_doc['url']!r}) as response:\n"
+        "    print(json.dumps({'body': response.read().decode('utf-8')}))\n"
+    )
+    replayed = subprocess.run(
+        [sys.executable, "-c", dev_replay_bootstrap() + replay_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+
+    assert replayed.returncode == 0, replayed.stderr
+    assert json.loads(replayed.stdout) == {"body": expected_body}
+
+
+def test_urllib_recording_does_not_deliver_unknown_secret_shape(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import http.server
+import json
+import os
+import threading
+import urllib.request
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"unknown": "sk-or-abcdefghijklm123456"}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/reject" % server.server_port
+try:
+    try:
+        urllib.request.urlopen(url)
+    except RuntimeError as exc:
+        outcome = type(exc).__name__
+    else:
+        raise AssertionError("secret-shaped response reached the caller")
+finally:
+    server.shutdown()
+    server.server_close()
+print(json.dumps({"outcome": outcome}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"outcome": "RuntimeError"}
+    failures = [
+        json.loads(line)
+        for line in (snapshot_dir / "record_failures.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert len(failures) == 1
+    assert failures[0]["reason"] == "secret_value_shape_rejected"
+    assert not (snapshot_dir / "snapshots").exists()
+
+
+def test_recording_http_clients_return_only_redacted_runtime_values(tmp_path):
+    pytest.importorskip("aiohttp")
+    pytest.importorskip("httpx")
+    pytest.importorskip("requests")
+    snapshot_dir = tmp_path / "record_set"
+    runtime_secret = "opaque-runtime-credential-value-for-testing"
+    probe = r'''
+import asyncio
+import http.server
+import json
+import os
+import threading
+
+import aiohttp
+import httpx
+import requests
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({
+            "echo": os.environ["SCRAPINGDOG_API_KEY"],
+            "ok": True,
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/echo" % server.server_port
+
+async def aiohttp_body():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            return await response.text()
+
+async def httpx_async_body():
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
+        return response.text
+
+try:
+    bodies = {
+        "aiohttp": asyncio.run(aiohttp_body()),
+        "httpx_async": asyncio.run(httpx_async_body()),
+        "httpx_sync": httpx.get(url).text,
+        "requests": requests.get(url).text,
+    }
+finally:
+    server.shutdown()
+    server.server_close()
+print(json.dumps(bodies, sort_keys=True))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            "SCRAPINGDOG_API_KEY": runtime_secret,
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    expected_body = json.dumps(
+        {"echo": SNAPSHOT_RUNTIME_SECRET_REDACTION, "ok": True}
+    )
+    assert json.loads(completed.stdout) == {
+        "aiohttp": expected_body,
+        "httpx_async": expected_body,
+        "httpx_sync": expected_body,
+        "requests": expected_body,
+    }
+    snapshot_paths = list((snapshot_dir / "snapshots").glob("*.json"))
+    assert len(snapshot_paths) == 1
+    persisted = json.loads(snapshot_paths[0].read_text(encoding="utf-8"))
+    assert persisted["response"]["runtime_secret_redaction_count"] == 1
     assert runtime_secret not in "\n".join(
         path.read_text(encoding="utf-8")
         for path in snapshot_dir.rglob("*")

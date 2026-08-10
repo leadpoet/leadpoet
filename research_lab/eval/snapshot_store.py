@@ -91,6 +91,24 @@ POINTER_NAME = "current.json"
 RECORD_FAILURES_NAME = "record_failures.jsonl"
 RECORDED_PROVIDER_MODELS_NAME = "provider_models.jsonl"
 URLLIB_TRANSPORT_OUTCOME = "urllib_transport_error"
+HTTPX_TRANSPORT_OUTCOME = "httpx_transport_error"
+
+_HTTPX_TRANSPORT_ERROR_TYPES = frozenset(
+    {
+        "CloseError",
+        "ConnectError",
+        "ConnectTimeout",
+        "LocalProtocolError",
+        "PoolTimeout",
+        "ProxyError",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "UnsupportedProtocol",
+        "WriteError",
+        "WriteTimeout",
+    }
+)
 
 _SNAPSHOT_SECRET_ENV_NAMES = (
     "AWS_SECRET_ACCESS_KEY",
@@ -121,6 +139,52 @@ def _snapshot_runtime_secret_values() -> tuple[str, ...]:
             }
         )
     )
+
+
+def _httpx_transport_response(error: BaseException) -> dict[str, Any] | None:
+    """Return a bounded replay document for supported httpx failures."""
+
+    try:
+        import httpx
+    except (ImportError, ModuleNotFoundError):
+        return None
+    error_type = type(error).__name__
+    if (
+        error_type not in _HTTPX_TRANSPORT_ERROR_TYPES
+        or not isinstance(error, httpx.TransportError)
+    ):
+        return None
+    return {
+        "outcome": HTTPX_TRANSPORT_OUTCOME,
+        "error_type": error_type,
+    }
+
+
+def _raise_httpx_transport_response(
+    doc: Mapping[str, Any],
+    *,
+    request: Any,
+) -> None:
+    """Reconstruct a supported httpx failure without persisting its message."""
+
+    if doc.get("outcome") != HTTPX_TRANSPORT_OUTCOME:
+        return
+    try:
+        import httpx
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise DevSnapshotStoreError(
+            "httpx transport snapshot cannot be replayed"
+        ) from exc
+    error_type = str(doc.get("error_type") or "")
+    if error_type not in _HTTPX_TRANSPORT_ERROR_TYPES:
+        raise DevSnapshotStoreError("unsupported httpx transport snapshot")
+    error_class = getattr(httpx, error_type, None)
+    if (
+        not isinstance(error_class, type)
+        or not issubclass(error_class, httpx.TransportError)
+    ):
+        raise DevSnapshotStoreError("unsupported httpx transport snapshot")
+    raise error_class("replayed httpx transport failure", request=request)
 
 
 def _redact_runtime_secret_values(value: Any) -> tuple[Any, int]:
@@ -620,6 +684,25 @@ class ProviderSnapshotStore:
             )
         return self._record_snapshot(request, response)
 
+    def record_httpx_transport_error(
+        self,
+        request: SnapshotRequest,
+        *,
+        error: BaseException,
+    ) -> dict[str, Any]:
+        """Persist a supported httpx transport outcome for exact replay."""
+
+        if self.mode != MODE_RECORD:
+            raise DevSnapshotStoreError(
+                "record_httpx_transport_error requires a record-mode store"
+            )
+        response = _httpx_transport_response(error)
+        if response is None:
+            raise DevSnapshotStoreError(
+                "unsupported httpx transport error cannot be snapshotted"
+            )
+        return self._record_snapshot(request, response)
+
     def _record_snapshot(
         self,
         request: SnapshotRequest,
@@ -782,6 +865,7 @@ class ProviderSnapshotStore:
                 str(request.url or ""),
                 body=bytes(getattr(request, "content", b"") or b""),
             )
+            _raise_httpx_transport_response(doc, request=request)
             return httpx.Response(
                 status_code=int(doc.get("status") or 0),
                 headers=dict(doc.get("headers") or {}),
@@ -1464,6 +1548,21 @@ _RL_DEV_RUNTIME_SECRET_REDACTION = "[REDACTED_RUNTIME_SECRET]"
 _RL_DEV_RECORD_FAILURES_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "record_failures.jsonl")
 _RL_DEV_PROVIDER_MODELS_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "provider_models.jsonl")
 _RL_DEV_URLLIB_TRANSPORT_OUTCOME = "urllib_transport_error"
+_RL_DEV_HTTPX_TRANSPORT_OUTCOME = "httpx_transport_error"
+_RL_DEV_HTTPX_TRANSPORT_ERROR_TYPES = frozenset({
+    "CloseError",
+    "ConnectError",
+    "ConnectTimeout",
+    "LocalProtocolError",
+    "PoolTimeout",
+    "ProxyError",
+    "ReadError",
+    "ReadTimeout",
+    "RemoteProtocolError",
+    "UnsupportedProtocol",
+    "WriteError",
+    "WriteTimeout",
+})
 
 
 def _rl_dev_canonical_json(data):
@@ -1736,6 +1835,40 @@ def _rl_dev_raise_urllib_transport_response(doc):
     raise urllib.error.URLError(factory())
 
 
+def _rl_dev_httpx_transport_response(error):
+    try:
+        import httpx
+    except (ImportError, ModuleNotFoundError):
+        return None
+    error_type = type(error).__name__
+    if (
+        error_type not in _RL_DEV_HTTPX_TRANSPORT_ERROR_TYPES
+        or not isinstance(error, httpx.TransportError)
+    ):
+        return None
+    return {
+        "outcome": _RL_DEV_HTTPX_TRANSPORT_OUTCOME,
+        "error_type": error_type,
+    }
+
+
+def _rl_dev_raise_httpx_transport_response(doc, request):
+    if doc.get("outcome") != _RL_DEV_HTTPX_TRANSPORT_OUTCOME:
+        return
+    import httpx
+
+    error_type = str(doc.get("error_type") or "")
+    if error_type not in _RL_DEV_HTTPX_TRANSPORT_ERROR_TYPES:
+        raise RuntimeError("unsupported httpx transport snapshot")
+    error_class = getattr(httpx, error_type, None)
+    if (
+        not isinstance(error_class, type)
+        or not issubclass(error_class, httpx.TransportError)
+    ):
+        raise RuntimeError("unsupported httpx transport snapshot")
+    raise error_class("replayed httpx transport failure", request=request)
+
+
 class _RlDevFakeResponse(object):
     def __init__(self, url, doc):
         self._body = str(doc.get("body_text") or "").encode("utf-8")
@@ -1904,6 +2037,7 @@ def _rl_dev_install_replay():
                 str(request.url or ""),
                 bytes(getattr(request, "content", b"") or b""),
             )
+            _rl_dev_raise_httpx_transport_response(doc, request)
             return _rl_httpx.Response(
                 status_code=int(doc.get("status") or 0),
                 headers=dict(doc.get("headers") or {}),
@@ -2223,6 +2357,7 @@ def _rl_dev_install_record():
                 bytes(getattr(request, "content", b"") or b""),
             )
             if existing is not None:
+                _rl_dev_raise_httpx_transport_response(existing, request)
                 return _rl_httpx.Response(
                     status_code=int(existing.get("status") or 0),
                     headers=dict(existing.get("headers") or {}),
@@ -2234,12 +2369,26 @@ def _rl_dev_install_record():
                     client, request, *args, **kwargs
                 )
             except Exception as exc:
-                _rl_dev_record_live_failure(
-                    "httpx_live_request_error:" + type(exc).__name__,
-                    str(request.method or "GET"),
-                    str(request.url or ""),
-                    bytes(getattr(request, "content", b"") or b""),
-                )
+                transport_response = _rl_dev_httpx_transport_response(exc)
+                if transport_response is None:
+                    _rl_dev_record_live_failure(
+                        "httpx_live_request_error:" + type(exc).__name__,
+                        str(request.method or "GET"),
+                        str(request.url or ""),
+                        bytes(getattr(request, "content", b"") or b""),
+                    )
+                else:
+                    _rl_dev_require_recorded_response(
+                        _rl_dev_record(
+                            str(request.method or "GET"),
+                            str(request.url or ""),
+                            bytes(getattr(request, "content", b"") or b""),
+                            0,
+                            {},
+                            "",
+                            response_override=transport_response,
+                        )
+                    )
                 raise
             recorded = _rl_dev_require_recorded_response(
                 _rl_dev_record(
@@ -2269,6 +2418,7 @@ def _rl_dev_install_record():
                 bytes(getattr(request, "content", b"") or b""),
             )
             if existing is not None:
+                _rl_dev_raise_httpx_transport_response(existing, request)
                 return _rl_httpx.Response(
                     status_code=int(existing.get("status") or 0),
                     headers=dict(existing.get("headers") or {}),
@@ -2280,12 +2430,26 @@ def _rl_dev_install_record():
                     client, request, *args, **kwargs
                 )
             except Exception as exc:
-                _rl_dev_record_live_failure(
-                    "httpx_async_live_request_error:" + type(exc).__name__,
-                    str(request.method or "GET"),
-                    str(request.url or ""),
-                    bytes(getattr(request, "content", b"") or b""),
-                )
+                transport_response = _rl_dev_httpx_transport_response(exc)
+                if transport_response is None:
+                    _rl_dev_record_live_failure(
+                        "httpx_async_live_request_error:" + type(exc).__name__,
+                        str(request.method or "GET"),
+                        str(request.url or ""),
+                        bytes(getattr(request, "content", b"") or b""),
+                    )
+                else:
+                    _rl_dev_require_recorded_response(
+                        _rl_dev_record(
+                            str(request.method or "GET"),
+                            str(request.url or ""),
+                            bytes(getattr(request, "content", b"") or b""),
+                            0,
+                            {},
+                            "",
+                            response_override=transport_response,
+                        )
+                    )
                 raise
             recorded = _rl_dev_require_recorded_response(
                 _rl_dev_record(

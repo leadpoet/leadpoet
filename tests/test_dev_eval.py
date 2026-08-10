@@ -1311,6 +1311,102 @@ else:
     assert json.loads(replayed.stdout) == {"error_type": "TimeoutError"}
 
 
+def test_httpx_async_timeout_is_recorded_reused_and_replayed(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    record_probe = r'''
+import asyncio
+import httpx
+import json
+import os
+import socket
+import threading
+import time
+
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+
+def accept_without_responding():
+    connection, _ = listener.accept()
+    try:
+        time.sleep(1)
+    finally:
+        connection.close()
+
+threading.Thread(target=accept_without_responding, daemon=True).start()
+url = "http://127.0.0.1:%d/probe" % listener.getsockname()[1]
+
+async def run():
+    async with httpx.AsyncClient(trust_env=False) as client:
+        try:
+            await client.get(url, timeout=0.05)
+        except httpx.ReadTimeout as exc:
+            return {"error_type": type(exc).__name__}
+        raise AssertionError("read timeout did not reach httpx")
+
+try:
+    outcome = asyncio.run(run())
+finally:
+    listener.close()
+print(json.dumps({
+    "failure_file_exists": os.path.exists(os.path.join(
+        os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "record_failures.jsonl"
+    )),
+    "outcome": outcome,
+    "url": url,
+}))
+'''
+    recorded = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + record_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+
+    assert recorded.returncode == 0, recorded.stderr
+    recorded_doc = json.loads(recorded.stdout)
+    assert recorded_doc["outcome"] == {"error_type": "ReadTimeout"}
+    assert recorded_doc["failure_file_exists"] is False
+    snapshots = list((snapshot_dir / "snapshots").glob("*.json"))
+    assert len(snapshots) == 1
+    snapshot = json.loads(snapshots[0].read_text(encoding="utf-8"))
+    assert snapshot["response"] == {
+        "error_type": "ReadTimeout",
+        "outcome": "httpx_transport_error",
+    }
+
+    replay_probe = (
+        "\nimport asyncio, httpx, json\n"
+        "async def run():\n"
+        "    async with httpx.AsyncClient(trust_env=False) as client:\n"
+        "        try:\n"
+        f"            await client.get({recorded_doc['url']!r}, timeout=1)\n"
+        "        except httpx.ReadTimeout as exc:\n"
+        "            return {'error_type': type(exc).__name__}\n"
+        "        raise AssertionError('replayed timeout was not raised')\n"
+        "print(json.dumps(asyncio.run(run())))\n"
+    )
+    for bootstrap, extra_env in (
+        (
+            dev_record_bootstrap(),
+            {SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true"},
+        ),
+        (dev_replay_bootstrap(), {}),
+    ):
+        replayed = subprocess.run(
+            [sys.executable, "-c", bootstrap + replay_probe],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": "", **extra_env},
+            check=False,
+        )
+        assert replayed.returncode == 0, replayed.stderr
+        assert json.loads(replayed.stdout) == {"error_type": "ReadTimeout"}
+
+
 def test_unsupported_urllib_failure_remains_terminal_recording_evidence(tmp_path):
     snapshot_dir = tmp_path / "record_set"
     probe = r'''
@@ -1448,6 +1544,48 @@ def test_inprocess_urllib_transport_recording_rejects_http_error(tmp_path):
                 {},
                 io.BytesIO(b"missing"),
             ),
+        )
+
+
+def test_inprocess_httpx_replay_preserves_read_timeout(tmp_path):
+    httpx_lib = pytest.importorskip("httpx")
+    recorder = _record_store(tmp_path)
+    url = "https://api.exa.ai/search?q=timeout"
+    snapshot_request = build_snapshot_request("GET", url)
+    live_request = httpx_lib.Request("GET", url)
+    recorder.record_httpx_transport_error(
+        snapshot_request,
+        error=httpx_lib.ReadTimeout(
+            "live provider detail must not persist",
+            request=live_request,
+        ),
+    )
+    snapshot_text = next(
+        (tmp_path / "snapshot_set" / "snapshots").iterdir()
+    ).read_text(encoding="utf-8")
+    assert "live provider detail" not in snapshot_text
+
+    with _replay_store(tmp_path).replay_installed():
+        with httpx_lib.Client() as client:
+            with pytest.raises(httpx_lib.ReadTimeout) as raised:
+                client.get(url)
+
+    assert raised.value.request.url == live_request.url
+    assert "live provider detail" not in str(raised.value)
+
+
+def test_inprocess_httpx_transport_recording_rejects_unsupported_error(tmp_path):
+    recorder = _record_store(tmp_path)
+    request = build_snapshot_request(
+        "GET", "https://api.exa.ai/search?q=bad"
+    )
+
+    with pytest.raises(
+        DevSnapshotStoreError, match="unsupported httpx transport"
+    ):
+        recorder.record_httpx_transport_error(
+            request,
+            error=RuntimeError("not an httpx transport error"),
         )
 
 

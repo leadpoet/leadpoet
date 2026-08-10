@@ -294,7 +294,16 @@ async def test_provider_preflight_failure_does_not_reserve_run(monkeypatch):
     async def unhealthy_preflight(**_kwargs):
         return {"proceed": False}
 
-    async def forbidden_queue_claim():
+    async def queued_preview():
+        return {"run_id": RUN_ID, "ticket_id": TICKET_ID}
+
+    async def load_context(_queued):
+        return _make_context()
+
+    async def tree_ready(_context):
+        return ""
+
+    async def forbidden_queue_claim(**_kwargs):
         pytest.fail("provider failure must not reserve a queued run")
 
     monkeypatch.setattr(
@@ -302,7 +311,11 @@ async def test_provider_preflight_failure_does_not_reserve_run(monkeypatch):
         "_run_preclaim_maintenance",
         completed_maintenance,
     )
+    worker._require_worker_proxy_for_execution = lambda: None
     monkeypatch.setattr(worker_mod, "preflight_gate", unhealthy_preflight)
+    monkeypatch.setattr(worker, "_peek_next_queued_run", queued_preview)
+    monkeypatch.setattr(worker, "_load_run_context", load_context)
+    monkeypatch.setattr(worker, "_preclaim_tree_readiness", tree_ready)
     monkeypatch.setattr(worker, "_next_queued_run", forbidden_queue_claim)
 
     outcome = await worker.run_once()
@@ -359,11 +372,14 @@ async def test_tree_preflight_defers_before_paid_run_processing(monkeypatch):
     async def maintenance_state():
         return {"paused": False, "reason": ""}
 
-    async def queued_run():
+    async def completed_maintenance():
+        return None, {"paused": False, "reason": ""}
+
+    async def queued_preview():
         return {"run_id": RUN_ID, "ticket_id": TICKET_ID}
 
     async def provider_preflight(**_kwargs):
-        return {"proceed": True}
+        pytest.fail("snapshot hold must happen before provider preflight")
 
     async def load_context(_queued):
         return _make_context()
@@ -381,8 +397,13 @@ async def test_tree_preflight_defers_before_paid_run_processing(monkeypatch):
         "get_autoresearch_maintenance_state",
         maintenance_state,
     )
+    monkeypatch.setattr(
+        worker,
+        "_run_preclaim_maintenance",
+        completed_maintenance,
+    )
     monkeypatch.setattr(worker_mod, "preflight_gate", provider_preflight)
-    monkeypatch.setattr(worker, "_next_queued_run", queued_run)
+    monkeypatch.setattr(worker, "_peek_next_queued_run", queued_preview)
     monkeypatch.setattr(worker, "_load_run_context", load_context)
     monkeypatch.setattr(
         worker,
@@ -397,6 +418,76 @@ async def test_tree_preflight_defers_before_paid_run_processing(monkeypatch):
     assert outcome.processed is False
     assert outcome.run_id == RUN_ID
     assert "pointer_missing" in outcome.error
+
+
+@pytest.mark.asyncio
+async def test_ready_hosted_run_preflights_then_claims_exact_preview(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_TREE_MODE", "active")
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "v2")
+    worker = worker_mod.ResearchLabHostedWorker(
+        ResearchLabGatewayConfig(),
+        worker_ref="worker-a",
+    )
+    worker._require_enabled = lambda: None
+    worker._code_edit_builder_unavailable_reason = lambda: None
+    worker._require_worker_proxy_for_execution = lambda: None
+    calls: list[str] = []
+
+    async def completed_maintenance():
+        return None, {"paused": False, "reason": "operator_resume"}
+
+    async def queued_preview():
+        calls.append("preview")
+        return {"run_id": RUN_ID, "ticket_id": TICKET_ID}
+
+    async def load_context(_queued):
+        calls.append("context")
+        return _make_context()
+
+    async def tree_ready(_context):
+        calls.append("tree_ready")
+        return ""
+
+    async def provider_preflight(**_kwargs):
+        calls.append("provider_preflight")
+        return {"proceed": True}
+
+    async def claim_exact(*, allowed_run_ids):
+        calls.append("claim")
+        assert allowed_run_ids == (RUN_ID,)
+        return {"run_id": RUN_ID, "ticket_id": TICKET_ID}
+
+    async def process(_context):
+        calls.append("process")
+        return worker_mod.HostedWorkerOutcome(
+            processed=True,
+            dry_run=False,
+            run_id=RUN_ID,
+            ticket_id=TICKET_ID,
+            status="completed",
+        )
+
+    monkeypatch.setattr(worker, "_run_preclaim_maintenance", completed_maintenance)
+    monkeypatch.setattr(worker, "_peek_next_queued_run", queued_preview)
+    monkeypatch.setattr(worker, "_load_run_context", load_context)
+    monkeypatch.setattr(worker, "_preclaim_tree_readiness", tree_ready)
+    monkeypatch.setattr(worker_mod, "preflight_gate", provider_preflight)
+    monkeypatch.setattr(worker, "_next_queued_run", claim_exact)
+    monkeypatch.setattr(worker, "_process_run", process)
+
+    outcome = await worker.run_once()
+
+    assert outcome.status == "completed"
+    assert calls == [
+        "preview",
+        "context",
+        "tree_ready",
+        "provider_preflight",
+        "claim",
+        "context",
+        "tree_ready",
+        "process",
+    ]
 
 
 @pytest.mark.asyncio

@@ -92,6 +92,149 @@ async def test_source_manifest_reconcile_precedes_baseline_repo_head_sync(monkey
     assert result["private_source_reconcile"] == reconcile_result
 
 
+@pytest.mark.asyncio
+async def test_nonowner_resume_holds_before_provider_preflight(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_enabled=True,
+        production_writes_enabled=True,
+        evaluation_bundles_enabled=True,
+        scoring_worker_require_proxy=False,
+        scoring_worker_index=4,
+        private_baseline_rebenchmark_enabled=True,
+    )
+    worker.proxy_url = ""
+    worker.worker_ref = "nonowner-worker"
+
+    async def maintenance_state():
+        return {"paused": False, "reason": "operator_resume"}
+
+    async def held_gate():
+        return {
+            "available": False,
+            "reason": "candidate_scoring_daily_baseline_not_ready",
+            "target_benchmark_date": "2026-08-10",
+        }
+
+    async def forbidden_preflight(_state):
+        pytest.fail("nonowner must not run provider preflight before daily publication")
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    worker._is_private_baseline_owner = lambda: False
+    worker._candidate_scoring_start_gate = held_gate
+    worker._run_lease_held_recovery_and_preflight = forbidden_preflight
+
+    result = await worker.run_once()
+
+    assert result["status"] == "candidate_scoring_daily_baseline_held"
+    assert result["processed"] is False
+    assert result["candidate_start_gate"]["target_benchmark_date"] == "2026-08-10"
+
+
+@pytest.mark.asyncio
+async def test_baseline_rollover_pass_stops_before_confirmation(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_enabled=True,
+        production_writes_enabled=True,
+        evaluation_bundles_enabled=True,
+        scoring_worker_require_proxy=False,
+        scoring_worker_index=0,
+        auto_promotion_enabled=False,
+        private_baseline_rebenchmark_enabled=True,
+    )
+    worker.proxy_url = ""
+    worker.worker_ref = "baseline-owner"
+
+    async def maintenance_state():
+        return {"paused": False, "reason": "operator_resume"}
+
+    async def preflight(_state):
+        return {"proceed": True, "verdicts": []}
+
+    async def baseline():
+        return {
+            "status": "baseline_utc_day_rollover",
+            "benchmark_date": "2026-08-09",
+            "next_benchmark_date": "2026-08-10",
+            "completed_icp_count": 23,
+            "selected_icp_count": 40,
+        }
+
+    async def forbidden_confirmation():
+        pytest.fail("old-day rollover must stop before confirmation scoring")
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    worker._is_private_baseline_owner = lambda: True
+    worker._run_lease_held_recovery_and_preflight = preflight
+    worker._run_private_baseline_contained = baseline
+    worker._maybe_run_pending_confirmation = forbidden_confirmation
+
+    result = await worker.run_once()
+
+    assert result["status"] == "baseline_utc_day_rollover"
+    assert result["baseline"]["completed_icp_count"] == 23
+    assert result["confirmation"] is None
+
+
+@pytest.mark.asyncio
+async def test_completed_published_baseline_releases_confirmation_automatically(
+    monkeypatch,
+):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_enabled=True,
+        production_writes_enabled=True,
+        evaluation_bundles_enabled=True,
+        scoring_worker_require_proxy=False,
+        scoring_worker_index=0,
+        scoring_worker_max_candidates=1,
+        auto_promotion_enabled=False,
+        private_baseline_rebenchmark_enabled=True,
+    )
+    worker.proxy_url = ""
+    worker.worker_ref = "baseline-owner"
+    calls: list[str] = []
+
+    async def maintenance_state():
+        return {"paused": False, "reason": "operator_resume"}
+
+    async def preflight(_state):
+        calls.append("preflight")
+        return {"proceed": True, "verdicts": []}
+
+    async def baseline():
+        calls.append("baseline")
+        return {"status": "completed", "benchmark_date": "2026-08-10"}
+
+    async def open_gate():
+        calls.append("publication_gate")
+        return {"available": True, "target_benchmark_date": "2026-08-10"}
+
+    async def confirmation():
+        calls.append("confirmation")
+        return {"processed": True}
+
+    async def no_capacity():
+        return {"available": False, "reason": "active_claim_capacity_full"}
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(sw, "promotion_confirmation_rerun_enabled", lambda: True)
+    monkeypatch.setattr(sw.global_icp_queue, "global_icp_queue_enabled", lambda: False)
+    worker._is_private_baseline_owner = lambda: True
+    worker._run_lease_held_recovery_and_preflight = preflight
+    worker._run_private_baseline_contained = baseline
+    worker._candidate_scoring_start_gate = open_gate
+    worker._maybe_run_pending_confirmation = confirmation
+    worker._candidate_claim_capacity = no_capacity
+
+    result = await worker.run_once()
+
+    assert calls == ["preflight", "baseline", "publication_gate", "confirmation"]
+    assert result["status"] == "baseline_completed"
+    assert result["confirmation"] == {"processed": True}
+
+
 def test_private_source_reconcile_is_due_on_first_worker_pass():
     worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
 
@@ -1365,6 +1508,7 @@ async def test_private_baseline_enters_flow_on_or_after_scheduled_start(
 
 @pytest.mark.asyncio
 async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
+    benchmark_date = datetime.now(timezone.utc).date().isoformat()
     worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
     worker.worker_ref = "baseline-worker"
     worker.config = SimpleNamespace(
@@ -1384,7 +1528,7 @@ async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
     async def fake_run_baseline_icp(self, *, item, item_index, **kwargs):  # noqa: ANN001
         called.append(item["icp_ref"])
         assert kwargs["expected_repo_main_git_sha"] == "abc123"
-        assert kwargs["benchmark_date"] == "2026-07-10"
+        assert kwargs["benchmark_date"] == benchmark_date
         return {
             "icp_ref": item["icp_ref"],
             "icp_hash": item["icp_hash"],
@@ -1430,7 +1574,7 @@ async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
         ],
         icp_checkpoint=checkpoint,
         expected_repo_main_git_sha="abc123",
-        benchmark_date="2026-07-10",
+        benchmark_date=benchmark_date,
     )
 
     assert called == ["icp-b"]
@@ -1582,6 +1726,104 @@ async def test_provider_preflight_pause_does_not_interrupt_active_wave(monkeypat
         completed_icps=0,
         total_icps=40,
     )
+
+
+@pytest.mark.asyncio
+async def test_utc_day_rollover_precedes_next_baseline_wave(monkeypatch):
+    async def forbidden_maintenance_state():
+        pytest.fail("UTC rollover should stop before another maintenance read")
+
+    monkeypatch.setattr(
+        sw,
+        "get_scoring_maintenance_state",
+        forbidden_maintenance_state,
+    )
+
+    with pytest.raises(sw.BaselineUtcDayRollover) as raised:
+        await sw._enforce_baseline_wave_maintenance_boundary(
+            completed_icps=23,
+            total_icps=40,
+            benchmark_date="2026-08-09",
+            now=datetime(2026, 8, 10, 0, 0, 1, tzinfo=timezone.utc),
+        )
+
+    assert raised.value.benchmark_date == "2026-08-09"
+    assert raised.value.next_benchmark_date == "2026-08-10"
+    assert raised.value.completed_icps == 23
+    assert raised.value.total_icps == 40
+
+
+@pytest.mark.asyncio
+async def test_utc_rollover_waits_for_wave_checkpoint_before_stopping(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=1,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=0,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[
+            {"icp_ref": "icp-a", "icp_hash": "hash-a"},
+            {"icp_ref": "icp-b", "icp_hash": "hash-b"},
+        ]
+    )
+    called: list[int] = []
+    checkpointed: list[int] = []
+    boundaries = 0
+
+    async def boundary(*, completed_icps, total_icps, benchmark_date="", now=None):
+        nonlocal boundaries
+        boundaries += 1
+        if boundaries == 2:
+            raise sw.BaselineUtcDayRollover(
+                benchmark_date=benchmark_date,
+                next_benchmark_date="2026-08-10",
+                completed_icps=completed_icps,
+                total_icps=total_icps,
+            )
+
+    async def run_icp(self, *, item, item_index, **_kwargs):
+        called.append(item_index)
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": float(item_index),
+            "company_count": 1,
+            "sourced_count": 1,
+            "diagnostics": {},
+            "_item_index": item_index,
+            "_retryable": False,
+            "_nonempty": True,
+            "_runtime_error": "",
+            "_retry_backoff_seconds": 0.0,
+        }
+
+    async def checkpoint(row):
+        checkpointed.append(int(row["_item_index"]))
+        return True
+
+    monkeypatch.setattr(sw, "_enforce_baseline_wave_maintenance_boundary", boundary)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        run_icp,
+    )
+
+    with pytest.raises(sw.BaselineUtcDayRollover) as raised:
+        await worker._run_baseline_batch_inner(
+            runner=object(),
+            retry_runner=object(),
+            scorer=object(),
+            window=window,
+            run_start=0.0,
+            icp_checkpoint=checkpoint,
+            benchmark_date="2026-08-09",
+        )
+
+    assert called == [1]
+    assert checkpointed == [1]
+    assert raised.value.completed_icps == 1
 
 
 @pytest.mark.asyncio
@@ -1956,7 +2198,20 @@ async def test_daily_candidate_scoring_uses_same_day_baseline_window(monkeypatch
         captured["reconstruct_window_hash"] = window_hash
         return reconstructed_window
 
+    async def fake_select_one(table, *, columns, filters):
+        assert table == "research_lab_public_benchmark_report_current"
+        return {
+            "report_id": "public_report:" + "b" * 64,
+            "benchmark_date": "2026-07-05",
+            "benchmark_bundle_id": "private_benchmark:" + "a" * 64,
+            "private_model_manifest_hash": artifact.manifest_hash,
+            "rolling_window_hash": baseline_window_hash,
+            "benchmark_quality": "passed",
+            "current_report_status": "published",
+        }
+
     monkeypatch.setattr(sw, "select_many", fake_select_many)
+    monkeypatch.setattr(sw, "select_one", fake_select_one)
     monkeypatch.setattr(sw.ResearchLabGatewayScoringWorker, "_reconstruct_rolling_window", fake_reconstruct)
 
     window, gate = await worker._daily_candidate_scoring_window_and_gate(
@@ -1971,6 +2226,57 @@ async def test_daily_candidate_scoring_uses_same_day_baseline_window(monkeypatch
     assert captured["reconstruct_window_hash"] == baseline_window_hash
     assert gate["rolling_window_hash"] == baseline_window_hash
     assert gate["baseline_private_holdout_icp_count"] == 1
+    assert gate["public_report_id"] == "public_report:" + "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_daily_candidate_scoring_waits_for_durable_public_report(monkeypatch):
+    artifact = _artifact()
+    worker = sw.ResearchLabGatewayScoringWorker(
+        sw.ResearchLabGatewayConfig(conditional_validation_mode="off")
+    )
+
+    async def fake_select_many(_table, **_kwargs):
+        return [
+            {
+                "benchmark_bundle_id": "private_benchmark:" + "a" * 64,
+                "private_model_manifest_hash": artifact.manifest_hash,
+                "rolling_window_hash": "sha256:" + "4" * 64,
+                "current_benchmark_status": "completed",
+                "benchmark_quality": "passed",
+                "evaluation_epoch": 23766,
+                "score_summary_doc": {
+                    "aggregate_score": 12.0,
+                    "per_icp_summaries": [{"company_count": 1}],
+                    "visibility_split": {
+                        "private_count": 1,
+                        "items": [
+                            {"visibility": "public", "icp_ref": "public", "score": 10.0},
+                            {"visibility": "private", "icp_ref": "private", "score": 14.0},
+                        ],
+                    },
+                },
+            }
+        ]
+
+    async def no_public_report(_table, **_kwargs):
+        return None
+
+    async def forbidden_reconstruct(*_args, **_kwargs):
+        pytest.fail("unpublished baseline must not become a candidate window")
+
+    monkeypatch.setattr(sw, "select_many", fake_select_many)
+    monkeypatch.setattr(sw, "select_one", no_public_report)
+    monkeypatch.setattr(worker, "_reconstruct_rolling_window", forbidden_reconstruct)
+
+    with pytest.raises(
+        sw.CandidateBaselineNotReady,
+        match="same_day_completed_private_baseline_required",
+    ):
+        await worker._daily_candidate_scoring_window_and_gate(
+            artifact=artifact,
+            now=datetime(2026, 8, 10, 1, 0, tzinfo=timezone.utc),
+        )
 
 
 @pytest.mark.asyncio

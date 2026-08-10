@@ -1107,7 +1107,20 @@ async def _enforce_baseline_wave_maintenance_boundary(
     *,
     completed_icps: int,
     total_icps: int,
+    benchmark_date: str = "",
+    now: datetime | None = None,
 ) -> None:
+    if benchmark_date:
+        current_date = (now or datetime.now(timezone.utc)).astimezone(
+            timezone.utc
+        ).date().isoformat()
+        if current_date != benchmark_date:
+            raise BaselineUtcDayRollover(
+                benchmark_date=benchmark_date,
+                next_benchmark_date=current_date,
+                completed_icps=completed_icps,
+                total_icps=total_icps,
+            )
     state = await get_scoring_maintenance_state()
     if _operator_scoring_pause_active(state):
         raise BaselineMaintenancePause(
@@ -1314,6 +1327,29 @@ class BaselineMaintenancePause(RuntimeError):
         self.maintenance_state = dict(maintenance_state)
         super().__init__(
             "private baseline stopped at maintenance boundary: "
+            f"completed_icps={self.completed_icps}/{self.total_icps}"
+        )
+
+
+class BaselineUtcDayRollover(RuntimeError):
+    """Stop an old daily baseline after its current settled ICP wave."""
+
+    def __init__(
+        self,
+        *,
+        benchmark_date: str,
+        next_benchmark_date: str,
+        completed_icps: int,
+        total_icps: int,
+    ) -> None:
+        self.benchmark_date = str(benchmark_date)
+        self.next_benchmark_date = str(next_benchmark_date)
+        self.completed_icps = int(completed_icps)
+        self.total_icps = int(total_icps)
+        super().__init__(
+            "private baseline reached the next UTC day: "
+            f"benchmark_date={self.benchmark_date} "
+            f"next_benchmark_date={self.next_benchmark_date} "
             f"completed_icps={self.completed_icps}/{self.total_icps}"
         )
 
@@ -4127,6 +4163,21 @@ class ResearchLabGatewayScoringWorker:
             # below, which auto-resumes once providers recover.
             return {"processed": False, "status": "maintenance_paused"}
 
+        preflight_start_gate: dict[str, Any] | None = None
+        if (
+            self.config.private_baseline_rebenchmark_enabled
+            and not self._is_private_baseline_owner()
+        ):
+            preflight_start_gate = await self._candidate_scoring_start_gate()
+            self._last_candidate_start_gate = preflight_start_gate
+            if not preflight_start_gate.get("available"):
+                return {
+                    "processed": False,
+                    "status": "candidate_scoring_daily_baseline_held",
+                    "candidate_ids": [],
+                    "candidate_start_gate": preflight_start_gate,
+                }
+
         preflight = await self._run_lease_held_recovery_and_preflight(
             maintenance_state
         )
@@ -4200,15 +4251,25 @@ class ResearchLabGatewayScoringWorker:
                 )
             )
             self._baseline_skip_logged = True
+        baseline_status = (
+            str(baseline_result.get("status") or "")
+            if isinstance(baseline_result, Mapping)
+            else ""
+        )
+        baseline_ready_statuses = {
+            "already_benchmarked",
+            "completed",
+            "reused_same_day_benchmark",
+        }
         if (
-            isinstance(baseline_result, Mapping)
-            and str(baseline_result.get("status") or "")
-            in {"baseline_checkpoint_recycle", "baseline_maintenance_paused"}
+            self.config.private_baseline_rebenchmark_enabled
+            and self._is_private_baseline_owner()
+            and baseline_status not in baseline_ready_statuses
         ):
-            baseline_status = str(baseline_result["status"])
+            effective_status = baseline_status or "candidate_scoring_daily_baseline_held"
             return {
-                "processed": True,
-                "status": baseline_status,
+                "processed": baseline_result is not None,
+                "status": effective_status,
                 "candidate_ids": [],
                 "baseline": baseline_result,
                 "confirmation": None,
@@ -4216,6 +4277,22 @@ class ResearchLabGatewayScoringWorker:
                 "candidate_claim_capacity": {"available": False},
                 "candidate_start_gate": None,
                 "recycle_requested": baseline_status == "baseline_checkpoint_recycle",
+            }
+
+        execution_start_gate: dict[str, Any] | None = None
+        if self.config.private_baseline_rebenchmark_enabled:
+            execution_start_gate = await self._candidate_scoring_start_gate()
+            self._last_candidate_start_gate = execution_start_gate
+        if execution_start_gate is not None and not execution_start_gate.get("available"):
+            return {
+                "processed": baseline_result is not None,
+                "status": "candidate_scoring_daily_baseline_held",
+                "candidate_ids": [],
+                "baseline": baseline_result,
+                "confirmation": None,
+                "private_source_reconcile": private_source_reconcile_result,
+                "candidate_claim_capacity": {"available": False},
+                "candidate_start_gate": execution_start_gate,
             }
 
         # §5.2-2: run at most one pending confirmation measurement per pass.
@@ -10396,7 +10473,28 @@ class ResearchLabGatewayScoringWorker:
                 continue
             gate = _private_holdout_gate_from_baseline_row(row)
             window_hash = str(row.get("rolling_window_hash") or "")
-            if not gate or not window_hash:
+            benchmark_bundle_id = str(row.get("benchmark_bundle_id") or "")
+            if not gate or not window_hash or not benchmark_bundle_id:
+                continue
+            public_report = await select_one(
+                "research_lab_public_benchmark_report_current",
+                columns=(
+                    "report_id,benchmark_date,benchmark_bundle_id,"
+                    "private_model_manifest_hash,rolling_window_hash,"
+                    "benchmark_quality,current_report_status"
+                ),
+                filters=(("benchmark_bundle_id", benchmark_bundle_id),),
+            )
+            if (
+                not isinstance(public_report, Mapping)
+                or str(public_report.get("current_report_status") or "")
+                != "published"
+                or str(public_report.get("benchmark_quality") or "") != "passed"
+                or str(public_report.get("benchmark_date") or "") != today
+                or str(public_report.get("private_model_manifest_hash") or "")
+                != str(artifact.manifest_hash or "")
+                or str(public_report.get("rolling_window_hash") or "") != window_hash
+            ):
                 continue
             window = await self._reconstruct_rolling_window(window_hash)
             if window is None:
@@ -10404,6 +10502,7 @@ class ResearchLabGatewayScoringWorker:
                     "same_day_private_baseline_window_reconstruction_required_before_candidate_scoring: "
                     f"manifest={compact_ref(artifact.manifest_hash)} window={compact_ref(window_hash)}"
                 )
+            gate["public_report_id"] = str(public_report.get("report_id") or "")
             return window, gate
         raise CandidateBaselineNotReady(
             "same_day_completed_private_baseline_required_before_candidate_scoring: "
@@ -11754,6 +11853,11 @@ class ResearchLabGatewayScoringWorker:
                     per_icp_summaries.append(item_summary)
             baseline_resume_by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
             for item_index, item in enumerate([] if batch_execution else window.benchmark_items, start=1):
+                await _enforce_baseline_wave_maintenance_boundary(
+                    completed_icps=len(per_icp_summaries),
+                    total_icps=total_icps,
+                    benchmark_date=today,
+                )
                 item_start = time.time()
                 label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
                 resumed_summary = baseline_resume_by_ref.get(label)
@@ -11985,6 +12089,11 @@ class ResearchLabGatewayScoringWorker:
                             completed_icps=len(baseline_progress_rows),
                             total_icps=total_icps,
                         )
+            await _enforce_baseline_wave_maintenance_boundary(
+                completed_icps=len(per_icp_summaries),
+                total_icps=total_icps,
+                benchmark_date=today,
+            )
             if nonempty_output_count <= 0:
                 complete_distribution = _baseline_distribution_complete(
                     per_icp_summaries,
@@ -12047,6 +12156,98 @@ class ResearchLabGatewayScoringWorker:
                 health_gate_enforced=bool(self.config.baseline_health_gate_enforced),
                 max_day_jump=_baseline_max_day_jump_points(),
             )
+        except BaselineUtcDayRollover as exc:
+            await _stop_baseline_telemetry_heartbeat()
+            event_doc = {
+                "benchmark_date": today,
+                "next_benchmark_date": exc.next_benchmark_date,
+                "benchmark_attempt": benchmark_attempt,
+                "selected_icp_count": len(window.item_refs),
+                "completed_icp_count": exc.completed_icps,
+                "private_model_manifest_hash": artifact.manifest_hash,
+                "failure_phase": "utc_day_rollover",
+                "terminal_no_automatic_retry": True,
+                "scoring_worker_source_hash": _scoring_worker_source_hash(),
+                "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
+                "elapsed_seconds": round(time.time() - start, 3),
+            }
+            try:
+                await create_scoring_dispatch_event(
+                    dispatch_type="private_baseline_rebenchmark",
+                    dispatch_status="failed",
+                    worker_ref=self.worker_ref,
+                    proxy_ref_hash=self.proxy_ref_hash,
+                    rolling_window_hash=window.window_hash,
+                    scoring_id=(
+                        baseline_telemetry_session.run.scoring_id
+                        if baseline_telemetry_session is not None
+                        and baseline_telemetry_session.run is not None
+                        else None
+                    ),
+                    scoring_run_id=(
+                        baseline_telemetry_session.run.scoring_run_id
+                        if baseline_telemetry_session is not None
+                        and baseline_telemetry_session.run is not None
+                        else None
+                    ),
+                    event_doc=event_doc,
+                )
+            except Exception as dispatch_exc:  # noqa: BLE001 - checkpoint is durable
+                logger.exception(
+                    "research_lab_baseline_utc_rollover_dispatch_failed "
+                    "benchmark_date=%s next_benchmark_date=%s completed_icps=%s error=%s",
+                    today,
+                    exc.next_benchmark_date,
+                    exc.completed_icps,
+                    _short_error(dispatch_exc),
+                )
+            if baseline_telemetry_session is not None:
+                try:
+                    await baseline_telemetry_session.cancel_active(
+                        failure_category="baseline_utc_day_rollover",
+                        error=exc,
+                    )
+                    await emit_run_event(
+                        baseline_telemetry_session.run,
+                        "cancelled",
+                        failure_category="baseline_utc_day_rollover",
+                        error=exc,
+                        telemetry_degraded=baseline_telemetry_session.degraded,
+                    )
+                except Exception as telemetry_exc:  # noqa: BLE001 - checkpoint is durable
+                    logger.exception(
+                        "research_lab_baseline_utc_rollover_telemetry_failed "
+                        "benchmark_date=%s next_benchmark_date=%s completed_icps=%s error=%s",
+                        today,
+                        exc.next_benchmark_date,
+                        exc.completed_icps,
+                        _short_error(telemetry_exc),
+                    )
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE UTC DAY ROLLOVER",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Completed date", today),
+                        ("Next date", exc.next_benchmark_date),
+                        ("Rolling window", compact_ref(window.window_hash)),
+                        ("Completed ICPs", f"{exc.completed_icps}/{exc.total_icps}"),
+                        (
+                            "Action",
+                            "retaining immutable old-day checkpoints and allocating the new UTC day on the next pass",
+                        ),
+                    ),
+                )
+            )
+            return {
+                "status": "baseline_utc_day_rollover",
+                "benchmark_date": today,
+                "next_benchmark_date": exc.next_benchmark_date,
+                "rolling_window_hash": window.window_hash,
+                "benchmark_attempt": benchmark_attempt,
+                "completed_icp_count": exc.completed_icps,
+                "selected_icp_count": exc.total_icps,
+            }
         except BaselineMaintenancePause as exc:
             await _stop_baseline_telemetry_heartbeat()
             event_doc = {
@@ -13283,6 +13484,7 @@ class ResearchLabGatewayScoringWorker:
                 await _enforce_baseline_wave_maintenance_boundary(
                     completed_icps=completed_checkpoint_count(),
                     total_icps=total_icps,
+                    benchmark_date=benchmark_date,
                 )
                 wave = run_items[wave_start : wave_start + first_pass_wave_width]
                 settled = await asyncio.gather(
@@ -13318,6 +13520,7 @@ class ResearchLabGatewayScoringWorker:
             await _enforce_baseline_wave_maintenance_boundary(
                 completed_icps=completed_checkpoint_count(),
                 total_icps=total_icps,
+                benchmark_date=benchmark_date,
             )
 
             retried_total = 0
@@ -13391,6 +13594,7 @@ class ResearchLabGatewayScoringWorker:
                     await _enforce_baseline_wave_maintenance_boundary(
                         completed_icps=completed_checkpoint_count(),
                         total_icps=total_icps,
+                        benchmark_date=benchmark_date,
                     )
                     wave_indexes = pending[wave_start : wave_start + retry_width]
                     retried = await asyncio.gather(
@@ -13443,6 +13647,7 @@ class ResearchLabGatewayScoringWorker:
             await _enforce_baseline_wave_maintenance_boundary(
                 completed_icps=completed_checkpoint_count(),
                 total_icps=total_icps,
+                benchmark_date=benchmark_date,
             )
             unresolved = sorted(
                 item_index

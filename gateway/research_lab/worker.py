@@ -1903,31 +1903,11 @@ class ResearchLabHostedWorker:
                 status="code_edit_builder_not_ready",
                 error=builder_unavailable[:500],
             )
-        if not self.config.hosted_worker_dry_run:
-            # Check provider readiness before reserving a queued run. Otherwise
-            # every unhealthy pass leaves an unstarted claim behind for the full
-            # claim TTL and can temporarily strand all queued work.
-            preflight = await preflight_gate(
-                scope="autoresearch",
-                actor_ref=self.worker_ref,
-                is_paused=get_autoresearch_maintenance_state,
-                set_paused=set_autoresearch_maintenance_paused,
-                worker_index=int(self.config.hosted_worker_index or 0),
-                # Reuse the maintenance state already read at the start of this
-                # pass instead of re-reading research_lab_gateway_control_current.
-                prefetched_state=autoresearch_state,
-            )
-            if not preflight.get("proceed"):
-                return HostedWorkerOutcome(
-                    processed=False,
-                    dry_run=False,
-                    status="provider_preflight_deferred",
-                )
-        queued = await self._next_queued_run()
-        if not queued:
+        queued_preview = await self._peek_next_queued_run()
+        if not queued_preview:
             return HostedWorkerOutcome(processed=False, dry_run=self.config.hosted_worker_dry_run)
-        run_id = str(queued["run_id"])
-        ticket_id = str(queued["ticket_id"])
+        run_id = str(queued_preview["run_id"])
+        ticket_id = str(queued_preview["ticket_id"])
         if self.config.hosted_worker_dry_run:
             return HostedWorkerOutcome(
                 processed=False,
@@ -1935,6 +1915,35 @@ class ResearchLabHostedWorker:
                 run_id=run_id,
                 ticket_id=ticket_id,
                 status="dry_run_queued_run_found",
+            )
+        preview_context = await self._load_run_context(queued_preview)
+        try:
+            tree_preflight_reason = await self._preclaim_tree_readiness(
+                preview_context
+            )
+        except Exception as exc:
+            tree_preflight_reason = (
+                "tree_preclaim_readiness_unavailable:"
+                f"{exc.__class__.__name__}"
+            )
+            logger.warning(
+                "research_lab_git_tree_preclaim_failed run_id=%s error=%s",
+                compact_ref(run_id),
+                str(exc)[:240],
+            )
+        if tree_preflight_reason:
+            logger.info(
+                "research_lab_git_tree_preclaim_deferred run_id=%s reason=%s",
+                compact_ref(run_id),
+                tree_preflight_reason[:300],
+            )
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=False,
+                run_id=run_id,
+                ticket_id=ticket_id,
+                status="tree_preflight_deferred",
+                error=tree_preflight_reason[:500],
             )
         try:
             self._require_worker_proxy_for_execution()
@@ -1958,6 +1967,31 @@ class ResearchLabHostedWorker:
                 status="worker_proxy_required",
                 error=str(exc)[:500],
             )
+        # Provider checks are paid measured work. Run them only after the exact
+        # current-day snapshot/tree authority is ready, but before reserving the
+        # queue row. Operator resume intent therefore remains active without a
+        # cold-start preflight storm while the daily baseline is incomplete.
+        preflight = await preflight_gate(
+            scope="autoresearch",
+            actor_ref=self.worker_ref,
+            is_paused=get_autoresearch_maintenance_state,
+            set_paused=set_autoresearch_maintenance_paused,
+            worker_index=int(self.config.hosted_worker_index or 0),
+            prefetched_state=autoresearch_state,
+        )
+        if not preflight.get("proceed"):
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=False,
+                status="provider_preflight_deferred",
+            )
+        queued = await self._next_queued_run(allowed_run_ids=(run_id,))
+        if not queued:
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=False,
+                status="queued_run_claim_raced",
+            )
         context = await self._load_run_context(queued)
         try:
             tree_preflight_reason = await self._preclaim_tree_readiness(context)
@@ -1973,7 +2007,7 @@ class ResearchLabHostedWorker:
             )
         if tree_preflight_reason:
             logger.warning(
-                "research_lab_git_tree_preclaim_deferred run_id=%s reason=%s",
+                "research_lab_git_tree_postclaim_changed run_id=%s reason=%s",
                 compact_ref(run_id),
                 tree_preflight_reason[:300],
             )
@@ -2196,8 +2230,46 @@ class ResearchLabHostedWorker:
                 "the encrypted worker proxy profile is unavailable or invalid"
             ) from exc
 
-    async def _next_queued_run(self) -> Mapping[str, Any] | None:
+    async def _peek_next_queued_run(self) -> Mapping[str, Any] | None:
+        """Read the next eligible run without reserving or mutating it."""
+
         allowlist = _hosted_run_allowlist()
+        filters: list[tuple[Any, ...]] = [("current_queue_status", "queued")]
+        if allowlist:
+            filters.append(("run_id", "in", allowlist))
+        rows = await select_many(
+            "research_loop_run_queue_current",
+            columns="run_id,ticket_id,queue_priority,current_event_hash,current_status_at",
+            filters=tuple(filters),
+            order_by=(("queue_priority", False), ("current_status_at", False)),
+            limit=self.config.hosted_worker_queue_fetch_limit,
+        )
+        if allowlist:
+            allowed = set(allowlist)
+            rows = [
+                row for row in rows if str(row.get("run_id") or "") in allowed
+            ]
+        return self._select_preferred_queued_row(rows)
+
+    async def _next_queued_run(
+        self,
+        *,
+        allowed_run_ids: Sequence[str] | None = None,
+    ) -> Mapping[str, Any] | None:
+        configured_allowlist = set(_hosted_run_allowlist())
+        requested_allowlist = {
+            str(run_id).strip()
+            for run_id in (allowed_run_ids or ())
+            if str(run_id).strip()
+        }
+        if configured_allowlist and requested_allowlist:
+            allowlist = tuple(sorted(configured_allowlist & requested_allowlist))
+        elif requested_allowlist:
+            allowlist = tuple(sorted(requested_allowlist))
+        else:
+            allowlist = tuple(sorted(configured_allowlist))
+        if allowed_run_ids is not None and not allowlist:
+            return None
         # Atomic claim: Postgres picks the next queued run by priority
         # (oldest-first within a priority), reserves it for THIS worker under an
         # advisory lock, and returns only the columns the claim path consumes.
@@ -2217,9 +2289,7 @@ class ResearchLabHostedWorker:
                 if not rows:
                     return None
                 claimed = dict(rows[0])
-                if allowlist and str(claimed.get("run_id") or "") not in set(
-                    allowlist
-                ):
+                if allowlist and str(claimed.get("run_id") or "") not in set(allowlist):
                     raise HostedResearchLabWorkerError(
                         "atomic run claim returned a run outside the hosted allowlist"
                     )

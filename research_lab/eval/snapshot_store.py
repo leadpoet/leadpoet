@@ -104,8 +104,8 @@ _SNAPSHOT_SECRET_ENV_NAMES = (
     "SUPABASE_SERVICE_ROLE_KEY",
 )
 _SNAPSHOT_SECRET_VALUE_PATTERNS = (
-    re.compile(r"\bsk-or-[A-Za-z0-9_-]{24,}\b", re.IGNORECASE),
-    re.compile(r"\bsb_secret_[A-Za-z0-9_-]{24,}\b", re.IGNORECASE),
+    re.compile(r"\bsk-or-[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
+    re.compile(r"\bsb_secret_[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
 )
 
 
@@ -1393,8 +1393,8 @@ _RL_DEV_RUNTIME_SECRET_VALUES = tuple(sorted({
     if len(value) >= 8 and value != "local-encrypted-recipient-v1"
 }))
 _RL_DEV_SECRET_VALUE_PATTERNS = (
-    re.compile(r"\bsk-or-[A-Za-z0-9_-]{24,}\b", re.IGNORECASE),
-    re.compile(r"\bsb_secret_[A-Za-z0-9_-]{24,}\b", re.IGNORECASE),
+    re.compile(r"\bsk-or-[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
+    re.compile(r"\bsb_secret_[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
 )
 _RL_DEV_RECORD_FAILURES_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "record_failures.jsonl")
 _RL_DEV_PROVIDER_MODELS_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "provider_models.jsonl")

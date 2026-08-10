@@ -269,6 +269,25 @@ def test_record_refuses_secret_material(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "secret_value",
+    (
+        "sk-or-" + "abcdefghijklm123456",
+        "sb_secret_" + "abcdefgh",
+    ),
+)
+def test_record_refuses_short_secret_values(tmp_path, secret_value):
+    recorder = _record_store(tmp_path)
+    request = build_snapshot_request("GET", "https://api.exa.ai/contents?id=short")
+
+    with pytest.raises(DevSnapshotStoreError):
+        recorder.record_response(
+            request,
+            status=200,
+            body_text=json.dumps({"leak": secret_value}),
+        )
+
+
 def test_record_allows_secret_names_and_incomplete_prefixes(tmp_path):
     recorder = _record_store(tmp_path)
     request = build_snapshot_request("GET", "https://api.exa.ai/contents?id=1")
@@ -477,6 +496,40 @@ def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
     assert len(failures) == 1
     assert failures[0]["reason"] == "secret_material_rejected"
     assert failures[0]["request_key"].startswith("exa|GET|api.exa.ai/search|")
+
+
+def test_record_bootstrap_rejects_short_secret_values(tmp_path):
+    snapshot_dir = tmp_path / "short_secret_record_set"
+    probe = (
+        "\nimport json, os\n"
+        "_rl_dev_record('GET', 'https://api.exa.ai/search?q=short-secret', None, 200,"
+        " {'content-type': 'application/json'},"
+        " json.dumps({'echo': 'sk-or-' + 'abcdefghijklm123456'}))\n"
+        "snapshots = os.path.join(os.environ['RESEARCH_LAB_DEV_SNAPSHOT_DIR'], 'snapshots')\n"
+        "names = sorted(os.listdir(snapshots)) if os.path.isdir(snapshots) else []\n"
+        "print(json.dumps({'count': len(names)}))\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"count": 0}
+    failures = [
+        json.loads(line)
+        for line in (snapshot_dir / "record_failures.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert len(failures) == 1
+    assert failures[0]["reason"] == "secret_material_rejected"
 
 
 def test_record_bootstrap_distinguishes_secret_names_from_runtime_values(tmp_path):

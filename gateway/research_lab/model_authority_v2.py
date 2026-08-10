@@ -936,10 +936,10 @@ class AttestedPrivateModelRunnerV2:
             self.artifact,
             timeout_seconds=self.spec.timeout_seconds,
         )
-        argv = [
-            self.spec.module_name,
-            self.spec.callable_name if operation == "run_icp" else "adapter_metadata",
-        ]
+        callable_name = (
+            self.spec.callable_name if operation == "run_icp" else "adapter_metadata"
+        )
+        argv = [self.spec.module_name, callable_name]
         scope_doc: dict[str, Any] = {
             "image_digest": self.spec.image_digest,
             "argv": argv,
@@ -1086,7 +1086,7 @@ class AttestedPrivateModelRunnerV2:
                 "artifact": self.artifact.to_dict(),
                 "source_bundle": source_bundle,
                 "module_name": self.spec.module_name,
-                "callable_name": self.spec.callable_name,
+                "callable_name": callable_name,
                 "input": dict(input_doc),
                 "environment": model_environment,
                 "provider_evidence_cache": dict(provider_evidence_cache),

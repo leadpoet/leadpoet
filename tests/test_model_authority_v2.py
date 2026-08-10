@@ -804,6 +804,8 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
 
     assert result == [{"company_name": "Measured Co"}]
     payload = observed[0]["payload"]
+    assert payload["operation"] == "run_icp"
+    assert payload["callable_name"] == "run_icp"
     assert "EXA_API_KEY" not in payload["environment"]
     assert V2_PROVIDER_PROFILE_ENV not in payload["environment"]
     assert (
@@ -858,6 +860,8 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
 
     async def execute(**kwargs):
         payload = kwargs["payload"]
+        assert payload["operation"] == "metadata"
+        assert payload["callable_name"] == "adapter_metadata"
         output = _ready_adapter_metadata()
         return {
             "result": {

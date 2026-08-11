@@ -18,7 +18,7 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from httpx import SyncByteStream
+from httpx import ReadError, RemoteProtocolError, SyncByteStream
 
 from gateway.tee.egress_policy import (
     normalize_destination,
@@ -454,6 +454,48 @@ def _make_response_cleanup_nonfatal(response: Any) -> None:
     response.stream = CleanupSafeStream()
 
 
+def _authenticated_body_is_complete_after_stream_error(
+    *,
+    method: str,
+    response: Any,
+    byte_count: int,
+    error: BaseException,
+) -> bool:
+    """Recognize only framing errors after an authenticated complete response."""
+    if not isinstance(
+        error,
+        (EOFError, ConnectionResetError, ReadError, RemoteProtocolError),
+    ):
+        return False
+    normalized_method = str(method or "").upper()
+    if normalized_method == "HEAD":
+        return byte_count == 0
+    if normalized_method != "GET":
+        return False
+    response_headers = response.headers
+    if str(response_headers.get("content-encoding") or "").strip().lower() not in {
+        "",
+        "identity",
+    }:
+        return False
+    if str(response_headers.get("transfer-encoding") or "").strip():
+        return False
+    try:
+        raw_values = response_headers.get_list("content-length")
+    except AttributeError:
+        raw_value = response_headers.get("content-length")
+        raw_values = [] if raw_value is None else [raw_value]
+    tokens = [
+        token.strip()
+        for raw_value in raw_values
+        for token in str(raw_value).split(",")
+    ]
+    if not tokens or any(not token.isdigit() for token in tokens):
+        return False
+    declared_lengths = {int(token) for token in tokens}
+    return len(declared_lengths) == 1 and byte_count == next(iter(declared_lengths))
+
+
 class HTTPXProviderTransport:
     """TLS and hostname verification run inside the coordinator enclave."""
 
@@ -463,6 +505,7 @@ class HTTPXProviderTransport:
         proxy_url: str = "http://127.0.0.1:18080",
         ca_bundle: Optional[str] = None,
         response_body_ceiling_bytes: int = MAX_RESPONSE_BODY_BYTES,
+        allow_authenticated_complete_body_eof: bool = False,
     ) -> None:
         if (
             isinstance(response_body_ceiling_bytes, bool)
@@ -474,9 +517,16 @@ class HTTPXProviderTransport:
             raise ProviderBrokerV2Error(
                 "provider transport response ceiling is invalid"
             )
+        if not isinstance(allow_authenticated_complete_body_eof, bool):
+            raise ProviderBrokerV2Error(
+                "provider transport complete-body EOF policy is invalid"
+            )
         self.proxy_url = proxy_url
         self.ca_bundle = ca_bundle
         self.response_body_ceiling_bytes = response_body_ceiling_bytes
+        self.allow_authenticated_complete_body_eof = (
+            allow_authenticated_complete_body_eof
+        )
         self._direct_client = None
         self._direct_client_lock = threading.Lock()
 
@@ -533,6 +583,7 @@ class HTTPXProviderTransport:
         body: bytes,
         timeout_seconds: float,
         max_response_bytes: int,
+        allow_authenticated_complete_body_eof: bool = False,
     ) -> Dict[str, Any]:
         with client.stream(
             method,
@@ -548,13 +599,26 @@ class HTTPXProviderTransport:
             tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
             chunks = []
             byte_count = 0
-            for chunk in response.iter_bytes():
-                byte_count += len(chunk)
-                if byte_count > max_response_bytes:
-                    raise ProviderBrokerV2Error(
-                        "provider response exceeds size limit"
+            try:
+                for chunk in response.iter_bytes():
+                    byte_count += len(chunk)
+                    if byte_count > max_response_bytes:
+                        raise ProviderBrokerV2Error(
+                            "provider response exceeds size limit"
+                        )
+                    chunks.append(chunk)
+            except Exception as exc:
+                if not (
+                    allow_authenticated_complete_body_eof
+                    and byte_count <= max_response_bytes
+                    and _authenticated_body_is_complete_after_stream_error(
+                        method=method,
+                        response=response,
+                        byte_count=byte_count,
+                        error=exc,
                     )
-                chunks.append(chunk)
+                ):
+                    raise
             response_body = b"".join(chunks)
             return {
                 "http_status": int(response.status_code),
@@ -601,6 +665,9 @@ class HTTPXProviderTransport:
                 body=body,
                 timeout_seconds=timeout_seconds,
                 max_response_bytes=max_response_bytes,
+                allow_authenticated_complete_body_eof=(
+                    self.allow_authenticated_complete_body_eof
+                ),
             )
 
         # The upstream proxy URL contains a job-scoped credential. Never retain
@@ -615,6 +682,9 @@ class HTTPXProviderTransport:
                 body=body,
                 timeout_seconds=timeout_seconds,
                 max_response_bytes=max_response_bytes,
+                allow_authenticated_complete_body_eof=(
+                    self.allow_authenticated_complete_body_eof
+                ),
             )
         finally:
             client.close()

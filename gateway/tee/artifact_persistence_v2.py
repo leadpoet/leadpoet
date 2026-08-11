@@ -150,7 +150,8 @@ class _ArtifactVerificationTransportSession:
     def get(self) -> Callable[..., Mapping[str, Any]]:
         if self._transport is None:
             self._transport = HTTPXProviderTransport(
-                response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+                response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
+                allow_authenticated_complete_body_eof=True,
             )
         return self._transport
 

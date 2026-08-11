@@ -656,7 +656,8 @@ def test_default_transport_retries_on_fresh_bounded_sessions(monkeypatch) -> Non
     assert all(transport.closed is True for transport in transports)
     assert all(
         transport.options == {
-            "response_body_ceiling_bytes": MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+            "response_body_ceiling_bytes": MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
+            "allow_authenticated_complete_body_eof": True,
         }
         for transport in transports
     )

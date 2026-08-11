@@ -1312,7 +1312,7 @@
       "symbol": "write_identity_to_tmpfs"
     },
     {
-      "ast_sha256": "sha256:081c2ac571d1fd97e51aee5b973c5279a8c0d5e3bb08da3ae4daeda769807ace",
+      "ast_sha256": "sha256:965d5a420080e88630246bd321521df44b9192de9b4402a5add95eafa320e05d",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -2607,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:c5e929a9f643f8968949b028176f6299e5dc1ff1c317c1482760499594e9385f",
+  "manifest_hash": "sha256:ee8f9a542c4e075038bf85a54182a6628c6201655cb680e46e68e7ca9234cacc",
   "protected_source_commit": "58b657e12b3c88ce33500cd0f6b525635d520e9d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

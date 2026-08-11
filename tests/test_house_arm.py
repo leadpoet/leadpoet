@@ -207,7 +207,19 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeHouseStore:
     async def _not_paused() -> dict[str, Any]:
         return {"paused": False}
 
+    async def _baseline_ready(_config: Any, *, now: datetime | None = None) -> dict[str, Any]:
+        return {
+            "available": True,
+            "reason": "daily_baseline_published",
+            "benchmark_date": (now or NOW).date().isoformat(),
+        }
+
     monkeypatch.setattr(house_arm, "get_autoresearch_maintenance_state", _not_paused)
+    monkeypatch.setattr(
+        house_arm,
+        "autoresearch_daily_baseline_readiness",
+        _baseline_ready,
+    )
     monkeypatch.setattr(
         house_arm,
         "autoresearch_queue_capacity_doc",
@@ -398,6 +410,39 @@ async def test_maintenance_pause_blocks_opening(store, monkeypatch):
     result = await open_house_loops(budget_usd_today=200.0, max_open_loops=1, dry_run=False, now=NOW)
     assert result["ok"] is False
     assert "paused" in str(result["error"])
+    assert _write_counts(store) == before
+
+
+async def test_daily_baseline_hold_blocks_house_intake_before_key_lookup(store, monkeypatch):
+    monkeypatch.setenv(house_arm.HOUSE_ARM_ENABLED_ENV, "true")
+
+    async def _held(_config: Any, *, now: datetime | None = None) -> dict[str, Any]:
+        return {
+            "available": False,
+            "reason": "daily_baseline_not_published",
+            "benchmark_date": (now or NOW).date().isoformat(),
+        }
+
+    async def _forbidden_key_lookup(*_args: Any, **_kwargs: Any) -> str | None:
+        pytest.fail("held house intake must stop before key lookup")
+
+    monkeypatch.setattr(house_arm, "autoresearch_daily_baseline_readiness", _held)
+    monkeypatch.setattr(house_arm, "_validate_house_key_ref", _forbidden_key_lookup)
+    before = _write_counts(store)
+
+    result = await open_house_loops(
+        budget_usd_today=200.0,
+        max_open_loops=1,
+        dry_run=False,
+        now=NOW,
+    )
+
+    assert result["ok"] is False
+    assert result["daily_baseline_readiness"] == {
+        "available": False,
+        "reason": "daily_baseline_not_published",
+        "benchmark_date": "2026-07-02",
+    }
     assert _write_counts(store) == before
 
 

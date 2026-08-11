@@ -80,6 +80,7 @@ from research_lab.counterfactual_gate import (
 from research_lab.eval.promotion_metric import benchmark_relative_score_deltas
 
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
+from .daily_baseline_readiness import autoresearch_daily_baseline_readiness
 from .maintenance import (
     autoresearch_queue_capacity_doc,
     dumps_status,
@@ -766,6 +767,24 @@ async def open_house_loops(
         return result
     result["house_hotkey_prefix"] = hotkey[:16]
 
+    maintenance = await get_autoresearch_maintenance_state()
+    if maintenance.get("paused"):
+        result["error"] = "research lab auto-research is paused for maintenance"
+        result["maintenance"] = {key: maintenance.get(key) for key in ("paused", "reason", "status_at")}
+        return result
+
+    readiness = await autoresearch_daily_baseline_readiness(config, now=now)
+    if not readiness.get("available"):
+        result["error"] = (
+            "research lab auto-research is waiting for the current daily "
+            "baseline publication"
+        )
+        result["daily_baseline_readiness"] = {
+            key: readiness.get(key)
+            for key in ("available", "reason", "benchmark_date")
+        }
+        return result
+
     try:
         policy = build_house_arm_operating_policy(config)
     except ValueError as exc:
@@ -778,12 +797,6 @@ async def open_house_loops(
         result["error"] = key_error
         return result
     key_handling = house_key_handling(key_ref)
-
-    maintenance = await get_autoresearch_maintenance_state()
-    if maintenance.get("paused"):
-        result["error"] = "research lab auto-research is paused for maintenance"
-        result["maintenance"] = {key: maintenance.get(key) for key in ("paused", "reason", "status_at")}
-        return result
 
     # Hard clamp at the policy max regardless of arguments.
     policy_max_usd = policy.daily_budget_max_cents / 100.0

@@ -120,6 +120,7 @@ from .public_activity import (
 )
 from .chain import resolve_research_lab_evaluation_epoch
 from .promotion import private_repo_head_alignment_status
+from .daily_baseline_readiness import autoresearch_daily_baseline_readiness
 from .source_add_catalog import (
     ALREADY_SUBMITTED_DETAIL,
     PROVISION_STATUS_APPROVED_PENDING,
@@ -519,7 +520,7 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
     await _verify_signed_miner(payload)
     await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="tickets")
     await _enforce_open_ticket_cap(config, payload.miner_hotkey)
-    await _require_autoresearch_not_paused()
+    await _require_autoresearch_not_paused(config)
     await _enforce_autoresearch_loop_capacity(config, payload.miner_hotkey)
     island = _validate_allowed_research_island(config, payload.island)
     _require_default_research_model_tier(config, payload.research_model_tier)
@@ -2028,7 +2029,7 @@ async def resume_research_lab_credit_blocked(payload: ResearchLabResumeCreditBlo
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     _require_enabled(config.miner_submissions_enabled, "Research Lab miner submissions are disabled")
     await _verify_signed_miner(payload)
-    await _require_autoresearch_not_paused()
+    await _require_autoresearch_not_paused(config)
 
     from .recovery import resume_credit_blocked_runs_for_miner
 
@@ -2045,7 +2046,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
     _require_enabled(config.paid_loops_enabled, "Research Lab paid loops are disabled")
     _require_enabled(config.hosted_runs_enabled, "Research Lab hosted runs are disabled")
     await _verify_signed_miner(payload)
-    await _require_autoresearch_not_paused()
+    await _require_autoresearch_not_paused(config)
     if config.miner_openrouter_key_required and payload.miner_openrouter_preflight_status != "passed":
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
@@ -2122,7 +2123,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
             _raise_storage_error(exc)
 
     try:
-        await _require_autoresearch_not_paused()
+        await _require_autoresearch_not_paused(config)
         await create_ticket_event(
             ticket_id=str(payload.ticket_id),
             event_type="funded",
@@ -2233,7 +2234,7 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
     _require_enabled(config.hosted_runs_enabled, "Research Lab hosted runs are disabled")
     _require_enabled(config.loop_topups_enabled, "Research Lab loop top-ups are disabled for launch")
     await _verify_signed_miner(payload)
-    await _require_autoresearch_not_paused()
+    await _require_autoresearch_not_paused(config)
     if config.miner_openrouter_key_required and payload.miner_openrouter_preflight_status != "passed":
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
@@ -2305,7 +2306,7 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
         _raise_storage_error(exc)
 
     try:
-        await _require_autoresearch_not_paused()
+        await _require_autoresearch_not_paused(config)
         await create_ticket_event(
             ticket_id=str(payload.ticket_id),
             event_type="funded",
@@ -3707,17 +3708,34 @@ def _require_enabled(enabled: bool, detail: str) -> None:
         raise HTTPException(status_code=403, detail=detail)
 
 
-async def _require_autoresearch_not_paused() -> None:
+async def _require_autoresearch_not_paused(
+    config: ResearchLabGatewayConfig,
+) -> None:
     state = await get_autoresearch_maintenance_state()
-    if not state.get("paused"):
+    if state.get("paused"):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "research_lab_maintenance_paused",
+                "message": "Research Lab auto-research is paused for maintenance",
+                "reason": state.get("reason"),
+                "status_at": state.get("status_at"),
+            },
+        )
+
+    readiness = await autoresearch_daily_baseline_readiness(config)
+    if readiness.get("available"):
         return
     raise HTTPException(
         status_code=503,
         detail={
-            "code": "research_lab_maintenance_paused",
-            "message": "Research Lab auto-research is paused for maintenance",
-            "reason": state.get("reason"),
-            "status_at": state.get("status_at"),
+            "code": "research_lab_daily_baseline_not_ready",
+            "message": (
+                "Research Lab auto-research is waiting for the current daily "
+                "baseline publication"
+            ),
+            "reason": readiness.get("reason"),
+            "benchmark_date": readiness.get("benchmark_date"),
         },
     )
 

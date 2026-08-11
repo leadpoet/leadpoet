@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import ssl
 import sys
 import threading
 import time
 from types import SimpleNamespace
 
+import httpcore
 import httpx
 import pytest
 
@@ -18,6 +20,7 @@ from gateway.tee.provider_broker_v2 import (
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
     ProviderBrokerV2Error,
+    _authenticated_body_is_complete_after_stream_error,
     _extract_tls_metadata,
     _provider_rpc_response_body_limit,
     credential_reference_hash,
@@ -374,6 +377,55 @@ def test_httpx_transport_accepts_authenticated_complete_body_before_eof(method):
 
     assert result["http_status"] == 200
     assert result["body"] == body
+
+
+@pytest.mark.parametrize(
+    "nested_error",
+    (
+        httpcore.ReadError("relay read ended after the complete body"),
+        httpcore.RemoteProtocolError("relay closed after the complete body"),
+        ssl.SSLEOFError("TLS peer closed after the complete body"),
+    ),
+)
+def test_complete_body_classifier_accepts_wrapped_transport_eof(nested_error):
+    body = b'{"ok":true}'
+    try:
+        raise nested_error
+    except BaseException as exc:
+        wrapped = RuntimeError("transport stream terminated")
+        wrapped.__cause__ = exc
+    response = SimpleNamespace(
+        headers=httpx.Headers({"content-length": str(len(body))})
+    )
+
+    assert _authenticated_body_is_complete_after_stream_error(
+        method="GET",
+        response=response,
+        byte_count=len(body),
+        error=wrapped,
+    )
+    assert not _authenticated_body_is_complete_after_stream_error(
+        method="GET",
+        response=response,
+        byte_count=len(body) - 1,
+        error=wrapped,
+    )
+
+
+def test_complete_body_classifier_rejects_unrelated_wrapped_error():
+    body = b'{"ok":true}'
+    wrapped = RuntimeError("stream processing failed")
+    wrapped.__cause__ = ValueError("response decoder invariant failed")
+    response = SimpleNamespace(
+        headers=httpx.Headers({"content-length": str(len(body))})
+    )
+
+    assert not _authenticated_body_is_complete_after_stream_error(
+        method="GET",
+        response=response,
+        byte_count=len(body),
+        error=wrapped,
+    )
 
 
 def test_httpx_transport_requires_declared_length_for_eof_recovery():

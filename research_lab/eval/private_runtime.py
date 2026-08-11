@@ -1583,24 +1583,40 @@ def parse_sourcing_runtime_lines(stderr: str) -> list[dict[str, Any]]:
     """Decode bounded, structured model receipts/events from stderr."""
 
     entries: list[dict[str, Any]] = []
+    decoder = json.JSONDecoder()
+    markers = (
+        (SOURCING_BRANCH_RECEIPT_MARKER, "sourcing_branch_receipt"),
+        (SOURCING_RUNTIME_EVENT_MARKER, "sourcing_runtime_event"),
+    )
     for line in (stderr or "").splitlines():
-        for marker, kind in (
-            (SOURCING_BRANCH_RECEIPT_MARKER, "sourcing_branch_receipt"),
-            (SOURCING_RUNTIME_EVENT_MARKER, "sourcing_runtime_event"),
-        ):
-            marker_index = line.find(marker)
-            if marker_index < 0:
-                continue
-            payload = line[marker_index + len(marker):].strip()
-            if not payload or len(payload) > 256 * 1024:
-                continue
+        cursor = 0
+        while cursor < len(line):
+            matches = (
+                (marker_index, marker, kind)
+                for marker, kind in markers
+                if (marker_index := line.find(marker, cursor)) >= 0
+            )
             try:
-                decoded = json.loads(payload)
+                marker_index, marker, kind = min(matches, key=lambda item: item[0])
+            except ValueError:
+                break
+            payload_start = marker_index + len(marker)
+            untrimmed_payload = line[payload_start:]
+            payload = untrimmed_payload.lstrip()
+            payload_offset = payload_start + len(untrimmed_payload) - len(payload)
+            if not payload:
+                break
+            try:
+                decoded, consumed = decoder.raw_decode(payload[: 256 * 1024 + 1])
             except json.JSONDecodeError:
+                cursor = payload_start
+                continue
+            if consumed > 256 * 1024:
+                cursor = payload_offset + consumed
                 continue
             if isinstance(decoded, Mapping):
                 entries.append({"kind": kind, **dict(decoded)})
-            break
+            cursor = payload_offset + max(1, consumed)
     return entries
 
 

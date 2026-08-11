@@ -212,6 +212,69 @@ def test_sourcing_receipts_and_events_are_collected_and_stripped() -> None:
     assert stripped == "ordinary diagnostic"
 
 
+def test_sourcing_receipt_and_event_frames_may_share_one_stderr_line() -> None:
+    stderr = "".join(
+        (
+            'sourcing_branch_receipt {"runtime_cap_seconds":57,"returned_count":2}',
+            'sourcing_runtime_event {"event":"candidate_deferred","attempt_ordinal":1}\n',
+            "ordinary diagnostic",
+        )
+    )
+
+    entries, token = private_runtime.begin_incontainer_trace_collection()
+    try:
+        stripped = private_runtime._collect_incontainer_trace(stderr)
+    finally:
+        private_runtime.end_incontainer_trace_collection(token)
+
+    assert entries == [
+        {
+            "kind": "sourcing_branch_receipt",
+            "runtime_cap_seconds": 57,
+            "returned_count": 2,
+        },
+        {
+            "kind": "sourcing_runtime_event",
+            "event": "candidate_deferred",
+            "attempt_ordinal": 1,
+        },
+    ]
+    assert stripped == "ordinary diagnostic"
+
+
+def test_adjacent_sourcing_receipts_still_fail_the_exactly_one_gate() -> None:
+    entries = private_runtime.parse_sourcing_runtime_lines(
+        'sourcing_branch_receipt {}sourcing_branch_receipt {}'
+    )
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="emitted 2 sourcing branch receipts; expected 1",
+    ):
+        private_runtime.validate_sourcing_runtime_receipt_entries(
+            entries,
+            expected_runtime_options={"runtime_cap_seconds": 57.0},
+        )
+
+
+def test_adjacent_sourcing_frames_keep_the_per_entry_size_bound() -> None:
+    oversized_receipt = json.dumps({"payload": "x" * (256 * 1024)})
+    stderr = "".join(
+        (
+            "sourcing_branch_receipt ",
+            oversized_receipt,
+            'sourcing_runtime_event {"event":"candidate_deferred"}',
+        )
+    )
+
+    assert private_runtime.parse_sourcing_runtime_lines(stderr) == [
+        {
+            "kind": "sourcing_runtime_event",
+            "event": "candidate_deferred",
+        }
+    ]
+
+
 def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
     routing_catalog = {"schema_version": 1}
     routing_policy = {"schema_version": 1}

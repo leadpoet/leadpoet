@@ -72,6 +72,7 @@ from research_lab.eval.snapshot_store import (  # noqa: E402
 RECORD_ENABLED_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED"
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 MAX_SNAPSHOT_CLOSURE_ROUNDS = 8
+SNAPSHOT_EXECUTION_CONTEXT_MARKER = "dev_snapshot_recording"
 
 PROVIDER_KEY_GROUPS = (
     ("EXA_API_KEY",),
@@ -214,7 +215,7 @@ def _record_icp_with_subprocess(
     payload = {
         "icp": private_runtime.canonicalize_private_model_icp(icp),
         "context": _snapshot_runtime_context(
-            "dev_snapshot_recording",
+            SNAPSHOT_EXECUTION_CONTEXT_MARKER,
             timeout_seconds=timeout_seconds,
         ),
     }
@@ -282,7 +283,7 @@ def _record_icp_with_docker(
     payload = {
         "icp": private_runtime.canonicalize_private_model_icp(icp),
         "context": _snapshot_runtime_context(
-            "dev_snapshot_recording",
+            SNAPSHOT_EXECUTION_CONTEXT_MARKER,
             timeout_seconds=timeout_seconds,
         ),
     }
@@ -448,7 +449,9 @@ def _replay_icp_with_docker(
     payload = {
         "icp": private_runtime.canonicalize_private_model_icp(icp),
         "context": _snapshot_runtime_context(
-            "dev_snapshot_replay_validation",
+            # Strict replay must present the exact same model input as capture.
+            # Network isolation and the replay bootstrap enforce replay mode.
+            SNAPSHOT_EXECUTION_CONTEXT_MARKER,
             timeout_seconds=timeout_seconds,
         ),
     }

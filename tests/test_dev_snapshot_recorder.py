@@ -331,6 +331,39 @@ def test_offline_replay_uses_only_nonsecret_key_sentinels(monkeypatch, tmp_path)
     assert all("sk-or-" not in value.lower() for value in replay_environment)
 
 
+def test_record_and_offline_replay_use_identical_model_context(monkeypatch, tmp_path):
+    payloads = []
+
+    def run_named(_command, **kwargs):
+        payloads.append(json.loads(kwargs["input_text"]))
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="receipt")
+
+    monkeypatch.setattr(recorder, "_run_named_docker", run_named)
+    monkeypatch.setattr(
+        "research_lab.eval.private_runtime.validate_sourcing_runtime_receipt",
+        lambda *args, **kwargs: {},
+    )
+    common = {
+        "image_digest": "example.invalid/model@sha256:" + "1" * 64,
+        "module_name": "research_lab_adapter",
+        "callable_name": "run_icp",
+        "icp": {
+            "industry": "Software Development",
+            "intent_signal": "hiring sales leadership",
+        },
+        "snapshot_dir": str(tmp_path),
+        "timeout_seconds": 300,
+    }
+
+    recorder._record_icp_with_docker(icp_ref="icp-1", **common)
+    recorder._replay_icp_with_docker(**common)
+
+    assert len(payloads) == 2
+    assert payloads[0]["context"] == payloads[1]["context"]
+    assert payloads[0]["context"][recorder.SNAPSHOT_EXECUTION_CONTEXT_MARKER] is True
+    assert "dev_snapshot_replay_validation" not in payloads[1]["context"]
+
+
 def test_offline_replay_rejects_caught_strict_snapshot_miss(monkeypatch, tmp_path):
     def run_named(_command, **_kwargs):
         return SimpleNamespace(

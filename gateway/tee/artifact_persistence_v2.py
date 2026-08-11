@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import datetime, timezone
 import json
 import re
@@ -226,7 +227,11 @@ class ArtifactPersistenceVerifierV2:
                 )
             finally:
                 if owned_transport is not None:
-                    owned_transport.close()
+                    # The response body and TLS evidence are fully materialized by
+                    # the transport before it returns. A tunnel cleanup error must
+                    # not replace that result or mask the request's own failure.
+                    with suppress(Exception):
+                        owned_transport.close()
             body = bytes(response.get("body") or b"")
             terminal = {
                 "terminal_status": "authenticated_response",

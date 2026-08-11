@@ -662,3 +662,93 @@ def test_default_transport_retries_on_fresh_bounded_connections(monkeypatch) -> 
         }
         for transport in transports
     )
+
+
+def test_default_transport_cleanup_cannot_replace_authenticated_response(
+    monkeypatch,
+) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    transports = []
+
+    class CleanupFailureTransport:
+        def __init__(self, **_options):
+            self.closed = False
+            transports.append(self)
+
+        def __call__(self, **request):
+            return successful(**request)
+
+        def close(self):
+            self.closed = True
+            raise EOFError("tunnel cleanup reached EOF after complete response")
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        CleanupFailureTransport,
+    )
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "persisted"
+    assert [attempt["terminal_status"] for attempt in result["transport_attempts"]] == [
+        "authenticated_response",
+        "authenticated_response",
+    ]
+    assert len(transports) == 2
+    assert all(transport.closed is True for transport in transports)
+
+
+def test_default_transport_cleanup_cannot_mask_request_failure(monkeypatch) -> None:
+    vault = _vault()
+    descriptor, _document = _sealed(vault)
+    transports = []
+
+    class RequestAndCleanupFailureTransport:
+        def __init__(self, **_options):
+            self.closed = False
+            transports.append(self)
+
+        def __call__(self, **_request):
+            raise TimeoutError("artifact readback timed out")
+
+        def close(self):
+            self.closed = True
+            raise EOFError("tunnel cleanup reached EOF")
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        RequestAndCleanupFailureTransport,
+    )
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_code"] == "timeout"
+    assert len(transports) == ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+    assert all(transport.closed is True for transport in transports)

@@ -79,6 +79,7 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
+    _git_tree_ticket_seed_row,
     _json_insert_sql,
     _validate_required_migration_declarations,
 )
@@ -112,6 +113,15 @@ from gateway.research_lab.git_tree_models import (
 
 COMMIT = "1" * 40
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
+
+
+def test_git_tree_rehearsal_ticket_seed_includes_required_miner() -> None:
+    ticket_id = "00000000-0000-4000-8000-000000000096"
+
+    assert _git_tree_ticket_seed_row(ticket_id) == {
+        "ticket_id": ticket_id,
+        "miner_hotkey": "5F-rehearsal-miner-hotkey",
+    }
 
 
 def _provider_persistence_batch_fixture() -> dict[str, Any]:

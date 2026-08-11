@@ -3655,6 +3655,15 @@ def _git_tree_candidate_request(
     )
 
 
+def _git_tree_ticket_seed_row(ticket_id: str) -> dict[str, str]:
+    """Return the production-required identity for the Git-tree ticket."""
+
+    return {
+        "ticket_id": ticket_id,
+        "miner_hotkey": "5F-rehearsal-miner-hotkey",
+    }
+
+
 def _git_tree_autoresearch_postgres_contract(
     database: DisposablePostgres,
 ) -> dict[str, Any]:
@@ -3686,7 +3695,10 @@ def _git_tree_autoresearch_postgres_contract(
     database.psql(
         "".join(
             (
-                _json_insert_sql("research_loop_tickets", {"ticket_id": ticket_id}),
+                _json_insert_sql(
+                    "research_loop_tickets",
+                    _git_tree_ticket_seed_row(ticket_id),
+                ),
                 _json_insert_sql("research_lab_private_model_versions", version_a),
                 _json_insert_sql("research_lab_private_model_version_events", active_a),
             )

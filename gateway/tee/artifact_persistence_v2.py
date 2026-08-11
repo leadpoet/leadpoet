@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import re
 import secrets
+import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, urlsplit
@@ -122,6 +123,11 @@ def _validate_presigned_url(
 def _transport_failure_code(exc: BaseException) -> str:
     text = (type(exc).__name__ + " " + str(exc)).lower()
     for token, code in (
+        ("cannot assign requested address", "proxy_failure"),
+        ("address already in use", "proxy_failure"),
+        ("too many open files", "proxy_failure"),
+        ("no buffer space available", "proxy_failure"),
+        ("cannot allocate memory", "proxy_failure"),
         ("timeout", "timeout"),
         ("certificate", "tls_failure"),
         ("tls", "tls_failure"),
@@ -137,40 +143,82 @@ def _transport_failure_code(exc: BaseException) -> str:
     return "unexpected_eof"
 
 
+class _ArtifactVerificationTransportPool:
+    """Reuse bounded HTTP clients without reusing a failed generation."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._transport = None
+        self._generation = 0
+        self._active = {}  # type: Dict[int, int]
+        self._retired = {}  # type: Dict[int, Any]
+
+    @staticmethod
+    def _new_transport() -> HTTPXProviderTransport:
+        return HTTPXProviderTransport(
+            response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
+            allow_authenticated_complete_body_eof=True,
+        )
+
+    def acquire(self) -> tuple[Callable[..., Mapping[str, Any]], int]:
+        with self._lock:
+            if self._transport is None:
+                self._transport = self._new_transport()
+            generation = self._generation
+            self._active[generation] = self._active.get(generation, 0) + 1
+            return self._transport, generation
+
+    def release(self, generation: int, *, failed: bool = False) -> None:
+        to_close = None
+        with self._lock:
+            if failed and generation == self._generation:
+                self._retired[generation] = self._transport
+                self._transport = None
+                self._generation += 1
+            remaining = self._active.get(generation, 0) - 1
+            if remaining > 0:
+                self._active[generation] = remaining
+            else:
+                self._active.pop(generation, None)
+                to_close = self._retired.pop(generation, None)
+        if to_close is not None:
+            with suppress(Exception):
+                to_close.close()
+
+
 class _ArtifactVerificationTransportSession:
-    """Own one bounded transport for a single artifact verification."""
+    """Lease one reusable transport generation for an artifact verification."""
 
     def __init__(
         self,
         transport: Optional[Callable[..., Mapping[str, Any]]],
+        transport_pool: Optional[_ArtifactVerificationTransportPool],
     ) -> None:
         self._transport = transport
-        self._owns_transport = transport is None
+        self._transport_pool = transport_pool
+        self._generation = None  # type: Optional[int]
 
     def get(self) -> Callable[..., Mapping[str, Any]]:
         if self._transport is None:
-            self._transport = HTTPXProviderTransport(
-                response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
-                allow_authenticated_complete_body_eof=True,
-            )
+            if self._transport_pool is None:
+                raise RuntimeError("artifact verification transport pool is unavailable")
+            self._transport, self._generation = self._transport_pool.acquire()
         return self._transport
 
     def rotate_after_failure(self) -> None:
-        if self._owns_transport:
-            self._close_owned_transport()
+        self._release(failed=True)
 
     def close(self) -> None:
-        if self._owns_transport:
-            self._close_owned_transport()
+        self._release(failed=False)
 
-    def _close_owned_transport(self) -> None:
-        transport = self._transport
+    def _release(self, *, failed: bool) -> None:
+        generation = self._generation
+        if generation is None:
+            return
         self._transport = None
-        if transport is not None:
-            # Request results are fully materialized before close. Cleanup must
-            # not replace an authenticated response or its original failure.
-            with suppress(Exception):
-                transport.close()
+        self._generation = None
+        if self._transport_pool is not None:
+            self._transport_pool.release(generation, failed=failed)
 
     def __enter__(self) -> "_ArtifactVerificationTransportSession":
         return self
@@ -196,8 +244,13 @@ class ArtifactPersistenceVerifierV2:
         self._policy_hash = sha256_json(self._policy)
         # Artifact readbacks can approach the relay's per-tunnel byte budget.
         # Each verification owns one bounded session; transport failures rotate
-        # that session before retrying instead of sharing it across artifacts.
+        # the shared client generation before retrying. Reusing healthy clients
+        # avoids exhausting the enclave's loopback TCP endpoints under the
+        # thousands of artifact readbacks in a production rebenchmark.
         self._transport = transport
+        self._transport_pool = (
+            None if transport is not None else _ArtifactVerificationTransportPool()
+        )
         self._clock = clock
         self._sleeper = sleeper
         self._retry_policy_hash = sha256_json(
@@ -318,7 +371,8 @@ class ArtifactPersistenceVerifierV2:
             raise ArtifactPersistenceV2Error("artifact verification URLs differ")
 
         with _ArtifactVerificationTransportSession(
-            self._transport
+            self._transport,
+            self._transport_pool,
         ) as transport_session:
             return self._verify_with_transport_session(
                 artifact_id=artifact_id,
@@ -364,8 +418,7 @@ class ArtifactPersistenceVerifierV2:
                 ):
                     continue
                 break
-            if ordinal + 1 < ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS:
-                transport_session.rotate_after_failure()
+            transport_session.rotate_after_failure()
         if get_attempt["terminal_status"] != "authenticated_response":
             return self._failure(attempts, get_attempt["failure_code"])
         if get_attempt["http_status"] != 200:
@@ -408,8 +461,7 @@ class ArtifactPersistenceVerifierV2:
                 ):
                     continue
                 break
-            if offset + 1 < ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS:
-                transport_session.rotate_after_failure()
+            transport_session.rotate_after_failure()
         if head_attempt["terminal_status"] != "authenticated_response":
             return self._failure(attempts, head_attempt["failure_code"])
         if head_attempt["http_status"] != 200:

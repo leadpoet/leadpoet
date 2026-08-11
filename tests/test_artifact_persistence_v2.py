@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import threading
 
 import pytest
 
@@ -653,7 +654,8 @@ def test_default_transport_retries_on_fresh_bounded_sessions(monkeypatch) -> Non
         ["GET"],
         ["GET", "HEAD"],
     ]
-    assert all(transport.closed is True for transport in transports)
+    assert transports[0].closed is True
+    assert transports[1].closed is False
     assert all(
         transport.options == {
             "response_body_ceiling_bytes": MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
@@ -663,7 +665,7 @@ def test_default_transport_retries_on_fresh_bounded_sessions(monkeypatch) -> Non
     )
 
 
-def test_default_transport_cleanup_cannot_replace_authenticated_response(
+def test_default_transport_success_keeps_reusable_client_open(
     monkeypatch,
 ) -> None:
     vault = _vault()
@@ -708,10 +710,10 @@ def test_default_transport_cleanup_cannot_replace_authenticated_response(
         "authenticated_response",
     ]
     assert len(transports) == 1
-    assert all(transport.closed is True for transport in transports)
+    assert all(transport.closed is False for transport in transports)
 
 
-def test_default_transport_is_bounded_to_one_verification(monkeypatch) -> None:
+def test_default_transport_is_reused_across_verifications(monkeypatch) -> None:
     vault = _vault()
     descriptor, document = _sealed(vault)
     successful = _Transport(document)
@@ -752,10 +754,104 @@ def test_default_transport_is_bounded_to_one_verification(monkeypatch) -> None:
         assert result["status"] == "persisted"
 
     assert [[call["method"] for call in transport.calls] for transport in transports] == [
-        ["GET", "HEAD"],
-        ["GET", "HEAD"],
+        ["GET", "HEAD", "GET", "HEAD"],
     ]
-    assert all(transport.closed is True for transport in transports)
+    assert all(transport.closed is False for transport in transports)
+
+
+def test_default_transport_pool_reuses_one_client_under_concurrency(monkeypatch) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    transports = []
+    barrier = threading.Barrier(2)
+
+    class ConcurrentTransport:
+        def __init__(self, **_options):
+            self.calls = []
+            self.closed = False
+            transports.append(self)
+
+        def __call__(self, **request):
+            self.calls.append(dict(request))
+            if request["method"] == "GET":
+                barrier.wait(timeout=2)
+            return successful(**request)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        ConcurrentTransport,
+    )
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+    results = []
+
+    def verify(job_id):
+        results.append(
+            verifier.verify(
+                artifact_id=descriptor["artifact_id"],
+                attestation_job_id=job_id,
+                artifact_ref="s3://immutable.example/item.json",
+                get_url=_url(),
+                head_url=_url(),
+            )
+        )
+
+    threads = [
+        threading.Thread(target=verify, args=("job-1",)),
+        threading.Thread(target=verify, args=("job-2",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert [result["status"] for result in results] == ["persisted", "persisted"]
+    assert len(transports) == 1
+    assert len(transports[0].calls) == 4
+    assert transports[0].closed is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "[Errno 99] Cannot assign requested address",
+        "[Errno 24] Too many open files",
+    ],
+)
+def test_local_transport_exhaustion_is_safely_classified(
+    message: str,
+) -> None:
+    vault = _vault()
+    descriptor, _document = _sealed(vault)
+
+    def exhausted(**_kwargs):
+        raise OSError(message)
+
+    result = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=exhausted,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    ).verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_code"] == "proxy_failure"
 
 
 def test_default_transport_cleanup_cannot_mask_request_failure(monkeypatch) -> None:

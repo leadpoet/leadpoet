@@ -8,8 +8,10 @@ scoping), and the same-day baseline replacement guard.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -1059,6 +1061,124 @@ def test_stale_claim_recovery_preserves_operator_shards_but_lease_owner_gets_all
 )
 def test_baseline_error_is_retryable(text: str, expected: bool):
     assert sw._baseline_error_is_retryable(text) is expected
+
+
+def test_baseline_wave_watchdog_fires_and_disarms():
+    fired = threading.Event()
+    calls = []
+
+    def on_timeout(**kwargs):  # noqa: ANN003
+        calls.append(kwargs)
+        fired.set()
+
+    with sw._baseline_wave_watchdog(
+        worker_ref="baseline-worker",
+        phase="first_pass",
+        item_indexes=(37, 40),
+        timeout_seconds=0.01,
+        on_timeout=on_timeout,
+    ):
+        assert fired.wait(1.0)
+
+    assert calls == [
+        {
+            "worker_ref": "baseline-worker",
+            "phase": "first_pass",
+            "item_indexes": (37, 40),
+            "timeout_seconds": 0.01,
+        }
+    ]
+
+    fired.clear()
+    calls.clear()
+    with sw._baseline_wave_watchdog(
+        worker_ref="baseline-worker",
+        phase="retry_1",
+        item_indexes=(13,),
+        timeout_seconds=0.05,
+        on_timeout=on_timeout,
+    ):
+        pass
+    assert not fired.wait(0.1)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_checkpointed_baseline_arms_watchdog_for_each_wave(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=1,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=1,
+        scoring_worker_model_timeout_seconds=1800,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[{"icp_ref": "icp-a", "icp_hash": "hash-a"}]
+    )
+    phases = []
+    attempts = 0
+
+    @contextlib.contextmanager
+    def watchdog(**kwargs):  # noqa: ANN003
+        phases.append(kwargs)
+        yield
+
+    async def maintenance_state():
+        return {"paused": False}
+
+    async def run_icp(self, *, item, item_index, retry_round, **_kwargs):  # noqa: ANN001
+        nonlocal attempts
+        attempts += 1
+        retryable = retry_round == 0
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": 0.0 if retryable else 1.0,
+            "company_count": 0 if retryable else 1,
+            "sourced_count": 0 if retryable else 1,
+            "diagnostics": (
+                {"sourcing_failed": True} if retryable else {}
+            ),
+            "_item_index": item_index,
+            "_retryable": retryable,
+            "_nonempty": not retryable,
+            "_runtime_error": "unexpected_eof" if retryable else "",
+            "_retry_backoff_seconds": 0.0,
+        }
+
+    async def checkpoint(_row, *, retry_round):  # noqa: ANN001
+        return True
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(sw, "_baseline_wave_watchdog", watchdog)
+    monkeypatch.setattr(sw, "_baseline_checkpoint_recycle_pressure", lambda _config: None)
+    monkeypatch.setattr(
+        sw,
+        "_retry_runner_with_provider_cost_scope",
+        lambda runner, **_kwargs: runner,
+    )
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        run_icp,
+    )
+
+    rows, stats = await worker._run_baseline_batch_inner(
+        runner=object(),
+        retry_runner=object(),
+        scorer=object(),
+        window=window,
+        run_start=0.0,
+        attempt_checkpoint=checkpoint,
+        checkpoint_recycle_enabled=True,
+    )
+
+    assert attempts == 2
+    assert [entry["phase"] for entry in phases] == ["first_pass", "retry_1"]
+    assert all(entry["item_indexes"] == (1,) for entry in phases)
+    assert rows[0]["score"] == 1.0
+    assert stats == {"retried": 1, "recovered": 1, "unresolved": 0}
 
 
 def test_baseline_429_backoff_only_for_explicit_429(monkeypatch):

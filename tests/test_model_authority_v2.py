@@ -14,6 +14,7 @@ from gateway.research_lab.model_authority_v2 import (
     AttestedPrivateModelRunnerV2,
     V2_PROVIDER_PROFILE_ENV,
 )
+from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
 from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 from gateway.tee.model_sandbox_v2 import provider_evidence_tape_input_root
 from gateway.tee.source_add_runtime_v2 import build_source_add_runtime_catalog_v2
@@ -513,6 +514,35 @@ async def test_measured_model_invocation_timeout_cancels_complete_operation(monk
 
     assert cancelled.is_set()
     assert isinstance(captured.value.__cause__, asyncio.TimeoutError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "retryable"),
+    (
+        ("enclave rejected artifact persistence: unexpected_eof", True),
+        ("encrypted artifact document hash mismatch", False),
+    ),
+)
+async def test_measured_model_artifact_failure_stays_in_runner_contract(
+    message,
+    retryable,
+):
+    async def fail_artifact_persistence(**_kwargs):
+        raise TEEArtifactStoreV2Error(message)
+
+    runner = object.__new__(AttestedPrivateModelRunnerV2)
+    runner.spec = SimpleNamespace(timeout_seconds=1800)
+    runner._execute_operation = fail_artifact_persistence
+
+    with pytest.raises(AttestedPrivateModelRunnerV2Error) as captured:
+        await runner._invoke_operation(operation="run_icp")
+
+    marker = (
+        model_authority_v2.RETRYABLE_ATTESTED_ARTIFACT_PERSISTENCE_MARKER
+    )
+    assert (marker in str(captured.value)) is retryable
+    assert isinstance(captured.value.__cause__, TEEArtifactStoreV2Error)
 
 
 def test_measured_model_invocation_budget_covers_attested_persistence():

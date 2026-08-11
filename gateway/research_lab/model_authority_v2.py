@@ -42,6 +42,7 @@ from gateway.tee.source_add_runtime_v2 import (
     validate_source_add_runtime_catalog_v2,
 )
 from gateway.tee.source_bundle_v2 import build_source_bundle_v2
+from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from research_lab.eval import (
     DockerPrivateModelSpec,
@@ -76,6 +77,26 @@ V2_PROVIDER_PROFILE_ENV = "LEADPOET_V2_PROVIDER_CREDENTIAL_PROFILE"
 PROVIDER_EVIDENCE_TAPE_ARTIFACT_KIND = "provider_evidence_tape_v2"
 RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER = (
     "retryable_attested_provider_transport_failure"
+)
+RETRYABLE_ATTESTED_ARTIFACT_PERSISTENCE_MARKER = (
+    "retryable_attested_artifact_persistence_failure"
+)
+_RETRYABLE_ARTIFACT_PERSISTENCE_FAILURE_MARKERS = (
+    "authenticated_http_408",
+    "authenticated_http_429",
+    "authenticated_http_500",
+    "authenticated_http_502",
+    "authenticated_http_503",
+    "authenticated_http_504",
+    "connection_refused",
+    "connection_reset",
+    "dns_failure",
+    "gateway timeout",
+    "proxy_failure",
+    "read operation timed out",
+    "timeout",
+    "tls_failure",
+    "unexpected_eof",
 )
 _MODEL_INVOCATION_TIMEOUT_OVERHEAD_SECONDS = 120.0
 _MODEL_INVOCATION_ATTESTED_PHASES = 2.0
@@ -917,6 +938,17 @@ class AttestedPrivateModelRunnerV2:
                 message = "%s; %s" % (
                     message,
                     RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
+                )
+            raise AttestedPrivateModelRunnerV2Error(message) from exc
+        except TEEArtifactStoreV2Error as exc:
+            message = str(exc)
+            if any(
+                marker in message.lower()
+                for marker in _RETRYABLE_ARTIFACT_PERSISTENCE_FAILURE_MARKERS
+            ):
+                message = "%s; %s" % (
+                    message,
+                    RETRYABLE_ATTESTED_ARTIFACT_PERSISTENCE_MARKER,
                 )
             raise AttestedPrivateModelRunnerV2Error(message) from exc
 

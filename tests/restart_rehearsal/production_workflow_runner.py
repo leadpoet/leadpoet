@@ -5266,7 +5266,9 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     from gateway.research_lab.scoring_worker import (
         _baseline_error_is_retryable,
         _baseline_summary_checkpointable,
+        _baseline_wave_watchdog,
     )
+    from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
     from gateway.tee.model_sandbox_v2 import (
         ModelSandboxV2Error,
         _model_sandbox_process_timeout_seconds,
@@ -5355,6 +5357,31 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
             raise RuntimeError("generic provider contract failure became retryable")
     else:
         raise RuntimeError("generic provider contract failure did not fail closed")
+
+    async def artifact_readback_failure(**_kwargs: Any) -> Any:
+        raise TEEArtifactStoreV2Error(
+            "enclave rejected artifact persistence: unexpected_eof"
+        )
+
+    runner._execute_operation = artifact_readback_failure  # type: ignore[method-assign]
+    try:
+        asyncio.run(runner._invoke_operation(operation="run_icp"))
+    except AttestedPrivateModelRunnerV2Error as exc:
+        if not _baseline_error_is_retryable(str(exc)):
+            raise RuntimeError("artifact readback failure bypassed bounded retry")
+    else:
+        raise RuntimeError("artifact readback failure left the runner contract")
+
+    watchdog_fired = threading.Event()
+    with _baseline_wave_watchdog(
+        worker_ref="rehearsal-scoring-worker",
+        phase="first_pass",
+        item_indexes=(37, 40),
+        timeout_seconds=0.01,
+        on_timeout=lambda **_kwargs: watchdog_fired.set(),
+    ):
+        if not watchdog_fired.wait(1.0):
+            raise RuntimeError("baseline wave watchdog did not fire")
 
     sandbox_timeout = _model_sandbox_process_timeout_seconds(
         {

@@ -78,8 +78,10 @@ from gateway.research_lab.maintenance import (
 )
 from gateway.research_lab.model_authority_v2 import (
     AttestedPrivateModelRunnerV2,
+    RETRYABLE_ATTESTED_ARTIFACT_PERSISTENCE_MARKER,
     RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
     V2_PROVIDER_PROFILE_ENV,
+    _model_invocation_timeout_seconds,
     retry_attested_model_runner_v2,
 )
 from gateway.research_lab.provider_preflight import (
@@ -1225,6 +1227,85 @@ def _worker_recycle_max_jobs() -> int:
     return _env_int("RESEARCH_LAB_SCORING_WORKER_RECYCLE_JOBS", 16)
 
 
+_BASELINE_WAVE_STALL_GRACE_SECONDS = 180.0
+_BASELINE_WAVE_STALL_EXIT_CODE = 75
+
+
+def _baseline_wave_stall_timeout_seconds(config: Any) -> float:
+    """Bound one checkpoint-backed wave beyond its full measured deadline."""
+
+    model_timeout = max(
+        1.0,
+        float(getattr(config, "scoring_worker_model_timeout_seconds", 1800) or 1800),
+    )
+    return (
+        _model_invocation_timeout_seconds(model_timeout)
+        + _BASELINE_WAVE_STALL_GRACE_SECONDS
+    )
+
+
+def _terminate_stalled_baseline_worker(
+    *,
+    worker_ref: str,
+    phase: str,
+    item_indexes: Sequence[int],
+    timeout_seconds: float,
+) -> None:
+    """Exit only this supervised worker; durable attempts resume on restart."""
+
+    message = (
+        "research_lab_baseline_wave_stalled "
+        f"worker_ref={worker_ref} phase={phase} "
+        f"item_indexes={','.join(str(value) for value in item_indexes)} "
+        f"timeout_seconds={timeout_seconds:.1f}; "
+        "terminating supervised scoring worker for checkpoint resume\n"
+    )
+    try:
+        os.write(2, message.encode("utf-8", errors="replace"))
+    finally:
+        os._exit(_BASELINE_WAVE_STALL_EXIT_CODE)
+
+
+@contextlib.contextmanager
+def _baseline_wave_watchdog(
+    *,
+    worker_ref: str,
+    phase: str,
+    item_indexes: Sequence[int],
+    timeout_seconds: float,
+    on_timeout: Callable[..., None] | None = None,
+):
+    """Hard-stop a stalled checkpoint-backed wave without racing disarm."""
+
+    deadline = max(0.001, float(timeout_seconds))
+    state_lock = threading.Lock()
+    armed = True
+
+    def fire() -> None:
+        nonlocal armed
+        with state_lock:
+            if not armed:
+                return
+            armed = False
+        callback = on_timeout or _terminate_stalled_baseline_worker
+        callback(
+            worker_ref=worker_ref,
+            phase=phase,
+            item_indexes=tuple(int(value) for value in item_indexes),
+            timeout_seconds=deadline,
+        )
+
+    timer = threading.Timer(deadline, fire)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        with state_lock:
+            armed = False
+        timer.cancel()
+
+
 def _read_own_rss_mb(status_path: str = "/proc/self/status") -> int | None:
     """Current process resident set size in MB (None off-Linux/on failure)."""
     try:
@@ -1295,6 +1376,7 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
         marker in lowered
         for marker in (
             "execution_modelsandboxv2error",
+            RETRYABLE_ATTESTED_ARTIFACT_PERSISTENCE_MARKER,
             RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
             "too many requests",
             "rate limit",
@@ -14265,10 +14347,23 @@ class ResearchLabGatewayScoringWorker:
                     benchmark_date=benchmark_date,
                 )
                 wave = run_items[wave_start : wave_start + first_pass_wave_width]
-                settled = await asyncio.gather(
-                    *(run_one(item_index, item) for item_index, item in wave),
-                    return_exceptions=True,
+                watchdog = (
+                    _baseline_wave_watchdog(
+                        worker_ref=self.worker_ref,
+                        phase="first_pass",
+                        item_indexes=tuple(item_index for item_index, _ in wave),
+                        timeout_seconds=_baseline_wave_stall_timeout_seconds(
+                            self.config
+                        ),
+                    )
+                    if checkpoint_recycle_enabled
+                    else contextlib.nullcontext()
                 )
+                with watchdog:
+                    settled = await asyncio.gather(
+                        *(run_one(item_index, item) for item_index, item in wave),
+                        return_exceptions=True,
+                    )
                 fatal = [entry for entry in settled if isinstance(entry, BaseException)]
                 if fatal:
                     raise fatal[0]
@@ -14396,10 +14491,23 @@ class ResearchLabGatewayScoringWorker:
                         benchmark_date=benchmark_date,
                     )
                     wave_indexes = pending[wave_start : wave_start + retry_width]
-                    retried = await asyncio.gather(
-                        *(retry_one(item_index) for item_index in wave_indexes),
-                        return_exceptions=True,
+                    watchdog = (
+                        _baseline_wave_watchdog(
+                            worker_ref=self.worker_ref,
+                            phase=f"retry_{round_no}",
+                            item_indexes=tuple(wave_indexes),
+                            timeout_seconds=_baseline_wave_stall_timeout_seconds(
+                                self.config
+                            ),
+                        )
+                        if checkpoint_recycle_enabled
+                        else contextlib.nullcontext()
                     )
+                    with watchdog:
+                        retried = await asyncio.gather(
+                            *(retry_one(item_index) for item_index in wave_indexes),
+                            return_exceptions=True,
+                        )
                     fatal = [
                         entry for entry in retried if isinstance(entry, BaseException)
                     ]

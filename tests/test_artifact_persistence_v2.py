@@ -605,3 +605,60 @@ def test_exhausted_transport_verification_does_not_poison_later_invocation() -> 
     assert first["status"] == "failed"
     assert first["failure_code"] == "unexpected_eof"
     assert second["status"] == "persisted"
+
+
+def test_default_transport_retries_on_fresh_bounded_connections(monkeypatch) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    transports = []
+
+    class OneAttemptTransport:
+        def __init__(self, **options):
+            self.options = dict(options)
+            self.calls = []
+            self.closed = False
+            transports.append(self)
+
+        def __call__(self, **request):
+            self.calls.append(dict(request))
+            if len(transports) == 1:
+                raise EOFError("shared relay tunnel reached its byte budget")
+            return successful(**request)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        OneAttemptTransport,
+    )
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "persisted"
+    assert [transport.calls[0]["method"] for transport in transports] == [
+        "GET",
+        "GET",
+        "HEAD",
+    ]
+    assert all(len(transport.calls) == 1 for transport in transports)
+    assert all(transport.closed is True for transport in transports)
+    assert all(
+        transport.options == {
+            "response_body_ceiling_bytes": MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+        }
+        for transport in transports
+    )

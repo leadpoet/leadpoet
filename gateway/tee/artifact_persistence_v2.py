@@ -151,13 +151,10 @@ class ArtifactPersistenceVerifierV2:
         self._vault = vault
         self._policy = validate_artifact_policy(policy)
         self._policy_hash = sha256_json(self._policy)
-        self._transport = (
-            transport
-            if transport is not None
-            else HTTPXProviderTransport(
-                response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
-            )
-        )
+        # Artifact readbacks can approach the relay's per-tunnel byte budget.
+        # Do not multiplex or accumulate them on the provider broker's long-lived
+        # HTTP/2 tunnel; each bounded verification attempt owns one connection.
+        self._transport = transport
         self._clock = clock
         self._sleeper = sleeper
         self._retry_policy_hash = sha256_json(
@@ -207,16 +204,29 @@ class ArtifactPersistenceVerifierV2:
                 transport_kwargs["max_response_bytes"] = (
                     MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
                 )
-            response = dict(
-                self._transport(
-                    method=method,
-                    url=url,
-                    headers={"accept": "application/json"},
-                    body=b"",
-                    timeout_ms=ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
-                    **transport_kwargs,
+            owned_transport = None
+            transport = self._transport
+            if transport is None:
+                owned_transport = HTTPXProviderTransport(
+                    response_body_ceiling_bytes=(
+                        MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+                    )
                 )
-            )
+                transport = owned_transport
+            try:
+                response = dict(
+                    transport(
+                        method=method,
+                        url=url,
+                        headers={"accept": "application/json"},
+                        body=b"",
+                        timeout_ms=ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
+                        **transport_kwargs,
+                    )
+                )
+            finally:
+                if owned_transport is not None:
+                    owned_transport.close()
             body = bytes(response.get("body") or b"")
             terminal = {
                 "terminal_status": "authenticated_response",

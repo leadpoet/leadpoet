@@ -1,7 +1,8 @@
 import base64
+import hashlib
 import json
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
@@ -198,16 +199,22 @@ def test_registration_executes_unchanged_provider_sequence_and_seals_jobs():
                 }
             }
         elif parsed.path == "/api/v1/workspaces" and request["method"] == "GET":
-            body = {"data": [{"id": "workspace-1"}]}
+            body = {"data": [{"id": "workspace-1"}], "total_count": 1}
         elif parsed.path == "/api/v1/keys":
-            body = {
-                "data": [
-                    {
-                        "label": "miner-runtime",
-                        "creator_user_id": "user-1",
-                    }
-                ]
-            }
+            query = parse_qs(parsed.query)
+            body = (
+                {
+                    "data": [
+                        {
+                            "hash": hashlib.sha256(
+                                RUNTIME_KEY.encode("utf-8")
+                            ).hexdigest(),
+                        }
+                    ]
+                }
+                if query.get("offset") == ["0"]
+                else {"data": []}
+            )
         elif request["method"] == "PATCH":
             body = {"data": {"id": "workspace-1"}}
         else:
@@ -275,12 +282,22 @@ def test_registration_executes_unchanged_provider_sequence_and_seals_jobs():
         ("GET", "/api/v1/key"),
         ("GET", "/api/v1/workspaces"),
         ("GET", "/api/v1/keys"),
+        ("GET", "/api/v1/keys"),
         ("PATCH", "/api/v1/workspaces/workspace-1"),
         ("GET", "/api/v1/workspaces/workspace-1"),
     ]
     assert observed[0][3] == "Bearer " + RUNTIME_KEY
     assert observed[2][3] == "Bearer " + MANAGEMENT_KEY
-    assert len(result.transport_attempts) == 6
+    assert parse_qs(observed[2][2]) == {"offset": ["0"], "limit": ["100"]}
+    assert parse_qs(observed[3][2]) == {
+        "workspace_id": ["workspace-1"],
+        "offset": ["0"],
+    }
+    assert parse_qs(observed[4][2]) == {
+        "workspace_id": ["workspace-1"],
+        "offset": ["1"],
+    }
+    assert len(result.transport_attempts) == 7
     assert broker.health()["job_credential_lease_count"] == 0
     assert RUNTIME_KEY not in canonical_json(result.output)
     assert MANAGEMENT_KEY not in canonical_json(result.output)

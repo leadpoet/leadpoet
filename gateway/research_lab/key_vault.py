@@ -24,6 +24,10 @@ OPENROUTER_LOGGING_DISABLED_PATCH: dict[str, bool] = {
     "is_observability_broadcast_enabled": False,
 }
 OPENROUTER_LOGGING_FLAG_FIELDS = tuple(OPENROUTER_LOGGING_DISABLED_PATCH)
+OPENROUTER_WORKSPACE_PAGE_LIMIT = 100
+OPENROUTER_INVENTORY_MAX_RECORDS = 10_000
+OPENROUTER_INVENTORY_MAX_PAGES = 1_000
+_OPENROUTER_KEY_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 # Workspace input/output logging is enforced with the management API immediately
 # before every hidden call. Keep request policy routeable for the configured
 # production models; live OpenRouter probes showed global `zdr` and
@@ -111,13 +115,10 @@ def verify_openrouter_workspace_privacy(
     key_doc = preflight_openrouter_key(runtime, timeout_seconds=timeout_seconds)
     runtime_label_hash = key_doc.get("key_label_hash")
     runtime_creator_hash = key_doc.get("creator_user_id_hash")
-    if not runtime_label_hash or not runtime_creator_hash:
-        raise OpenRouterKeyVaultError("OpenRouter runtime key metadata is missing workspace match fields")
 
     workspace = _find_runtime_key_workspace(
         management_key=management,
-        runtime_label_hash=str(runtime_label_hash),
-        runtime_creator_hash=str(runtime_creator_hash),
+        runtime_key_hash=_local_key_hash(runtime),
         timeout_seconds=timeout_seconds,
     )
     workspace_id = str(workspace["id"])
@@ -392,42 +393,161 @@ def _openrouter_api_request(
 def _find_runtime_key_workspace(
     *,
     management_key: str,
-    runtime_label_hash: str,
-    runtime_creator_hash: str,
+    runtime_key_hash: str,
     timeout_seconds: int,
 ) -> dict[str, Any]:
-    workspaces_doc = _openrouter_api_request(
-        "/workspaces",
+    if not _OPENROUTER_KEY_HASH_RE.fullmatch(runtime_key_hash):
+        raise OpenRouterKeyVaultError("OpenRouter runtime key hash is invalid")
+
+    workspaces = _list_openrouter_inventory(
+        path="/workspaces",
         bearer_token=management_key,
+        base_params={},
+        identity_field="id",
+        page_limit=OPENROUTER_WORKSPACE_PAGE_LIMIT,
         timeout_seconds=timeout_seconds,
     )
-    workspaces = workspaces_doc.get("data")
-    if not isinstance(workspaces, list) or not workspaces:
+    if not workspaces:
         raise OpenRouterKeyVaultError("OpenRouter management key does not expose any workspaces")
-    for workspace in workspaces:
-        if not isinstance(workspace, Mapping):
-            continue
+
+    matches: list[dict[str, Any]] = []
+    scanned_key_count = 0
+    for workspace_index, workspace in enumerate(workspaces):
+        remaining_key_budget = (
+            OPENROUTER_INVENTORY_MAX_RECORDS - scanned_key_count
+        )
+        if remaining_key_budget <= 0:
+            raise OpenRouterKeyVaultError(
+                "OpenRouter workspace key inventory exceeds the verification bound"
+            )
         workspace_id = str(workspace.get("id") or "").strip()
-        if not workspace_id:
-            continue
-        keys_doc = _openrouter_api_request(
-            "/keys",
+        keys = _list_openrouter_inventory(
+            path="/keys",
             bearer_token=management_key,
-            params={"workspace_id": workspace_id},
+            base_params={"workspace_id": workspace_id},
+            identity_field="hash",
+            page_limit=None,
+            max_records=remaining_key_budget,
             timeout_seconds=timeout_seconds,
         )
-        keys = keys_doc.get("data")
-        if not isinstance(keys, list):
-            continue
+        scanned_key_count += len(keys)
+        if (
+            scanned_key_count == OPENROUTER_INVENTORY_MAX_RECORDS
+            and workspace_index + 1 < len(workspaces)
+        ):
+            raise OpenRouterKeyVaultError(
+                "OpenRouter workspace key inventory exceeds the verification bound"
+            )
         for key_doc in keys:
-            if not isinstance(key_doc, Mapping):
-                continue
-            if (
-                _optional_hash(key_doc.get("label")) == runtime_label_hash
-                and _optional_hash(key_doc.get("creator_user_id")) == runtime_creator_hash
-            ):
-                return dict(workspace)
+            if str(key_doc.get("hash") or "") == runtime_key_hash:
+                matches.append(dict(workspace))
+
+    if len(matches) > 1:
+        raise OpenRouterKeyVaultError(
+            "OpenRouter management key exposes the runtime key in multiple workspaces"
+        )
+    if matches:
+        return matches[0]
     raise OpenRouterKeyVaultError("OpenRouter management key does not control the runtime key workspace")
+
+
+def _list_openrouter_inventory(
+    *,
+    path: str,
+    bearer_token: str,
+    base_params: Mapping[str, Any],
+    identity_field: str,
+    page_limit: int | None,
+    timeout_seconds: int,
+    max_records: int = OPENROUTER_INVENTORY_MAX_RECORDS,
+) -> list[dict[str, Any]]:
+    """Read one bounded OpenRouter inventory without silently truncating it."""
+
+    records: list[dict[str, Any]] = []
+    seen_identities: set[str] = set()
+    expected_total: int | None = None
+    offset = 0
+    for _page_number in range(OPENROUTER_INVENTORY_MAX_PAGES):
+        params = dict(base_params)
+        params["offset"] = offset
+        if page_limit is not None:
+            params["limit"] = int(page_limit)
+        page_doc = _openrouter_api_request(
+            path,
+            bearer_token=bearer_token,
+            params=params,
+            timeout_seconds=timeout_seconds,
+        )
+        page = page_doc.get("data")
+        if not isinstance(page, list):
+            raise OpenRouterKeyVaultError(
+                "OpenRouter workspace inventory returned invalid data"
+            )
+
+        reported_total = page_doc.get("total_count")
+        if reported_total is not None:
+            if (
+                isinstance(reported_total, bool)
+                or not isinstance(reported_total, int)
+                or reported_total < 0
+                or reported_total > max_records
+            ):
+                raise OpenRouterKeyVaultError(
+                    "OpenRouter workspace inventory returned an invalid total count"
+                )
+            if expected_total is None:
+                expected_total = reported_total
+            elif expected_total != reported_total:
+                raise OpenRouterKeyVaultError(
+                    "OpenRouter workspace inventory total changed during pagination"
+                )
+
+        if not page:
+            if expected_total is not None and len(records) != expected_total:
+                raise OpenRouterKeyVaultError(
+                    "OpenRouter workspace inventory ended before its reported total"
+                )
+            return records
+        if len(records) + len(page) > max_records:
+            raise OpenRouterKeyVaultError(
+                "OpenRouter workspace inventory exceeds the verification bound"
+            )
+
+        for item in page:
+            if not isinstance(item, Mapping):
+                raise OpenRouterKeyVaultError(
+                    "OpenRouter workspace inventory contains an invalid record"
+                )
+            identity = str(item.get(identity_field) or "").strip()
+            if not identity:
+                raise OpenRouterKeyVaultError(
+                    "OpenRouter workspace inventory record has no stable identity"
+                )
+            if identity_field == "hash" and not _OPENROUTER_KEY_HASH_RE.fullmatch(
+                identity
+            ):
+                raise OpenRouterKeyVaultError(
+                    "OpenRouter workspace key hash is invalid"
+                )
+            if identity in seen_identities:
+                raise OpenRouterKeyVaultError(
+                    "OpenRouter workspace inventory repeated a record during pagination"
+                )
+            seen_identities.add(identity)
+            records.append(dict(item))
+
+        offset += len(page)
+        if expected_total is not None:
+            if offset > expected_total:
+                raise OpenRouterKeyVaultError(
+                    "OpenRouter workspace inventory exceeds its reported total"
+                )
+            if offset == expected_total:
+                return records
+
+    raise OpenRouterKeyVaultError(
+        "OpenRouter workspace inventory exceeds the pagination bound"
+    )
 
 
 def _workspace_data(doc: Mapping[str, Any]) -> dict[str, Any]:

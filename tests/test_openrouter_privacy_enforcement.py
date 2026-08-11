@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -27,6 +29,10 @@ class _FakeResponse:
         return json.dumps(self.payload).encode("utf-8")
 
 
+def _key_hash(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
 def test_openrouter_workspace_privacy_verification_patches_and_proves(monkeypatch):
     runtime_key = "sk-or-v1-" + "a" * 48
     management_key = "sk-or-v1-" + "b" * 48
@@ -35,7 +41,8 @@ def test_openrouter_workspace_privacy_verification_patches_and_proves(monkeypatc
     def fake_urlopen(req, timeout: int):
         body = json.loads((req.data or b"{}").decode("utf-8")) if getattr(req, "data", None) else None
         calls.append((req.get_method(), req.full_url, body))
-        if req.full_url.endswith("/api/v1/key"):
+        path = urlsplit(req.full_url).path
+        if path == "/api/v1/key":
             return _FakeResponse(
                 {
                     "data": {
@@ -45,11 +52,16 @@ def test_openrouter_workspace_privacy_verification_patches_and_proves(monkeypatc
                     }
                 }
             )
-        if req.full_url.endswith("/api/v1/workspaces"):
-            return _FakeResponse({"data": [{"id": "workspace-1"}]})
-        if "/api/v1/keys?" in req.full_url:
+        if path == "/api/v1/workspaces":
             return _FakeResponse(
-                {"data": [{"label": "research-lab-runtime", "creator_user_id": "user-1"}]}
+                {"data": [{"id": "workspace-1"}], "total_count": 1}
+            )
+        if path == "/api/v1/keys":
+            return _FakeResponse(
+                {
+                    "data": [{"hash": _key_hash(runtime_key)}],
+                    "total_count": 1,
+                }
             )
         if req.full_url.endswith("/api/v1/workspaces/workspace-1") and req.get_method() == "PATCH":
             return _FakeResponse({"data": {"id": "workspace-1"}})
@@ -116,14 +128,19 @@ def test_openrouter_workspace_privacy_rejects_unmatched_workspace(monkeypatch):
     management_key = "sk-or-v1-" + "b" * 48
 
     def fake_urlopen(req, timeout: int):
-        if req.full_url.endswith("/api/v1/key"):
+        path = urlsplit(req.full_url).path
+        if path == "/api/v1/key":
             return _FakeResponse(
                 {"data": {"hash": "runtime-key-hash", "label": "runtime", "creator_user_id": "user-1"}}
             )
-        if req.full_url.endswith("/api/v1/workspaces"):
-            return _FakeResponse({"data": [{"id": "workspace-1"}]})
-        if "/api/v1/keys?" in req.full_url:
-            return _FakeResponse({"data": [{"label": "other", "creator_user_id": "user-2"}]})
+        if path == "/api/v1/workspaces":
+            return _FakeResponse(
+                {"data": [{"id": "workspace-1"}], "total_count": 1}
+            )
+        if path == "/api/v1/keys":
+            return _FakeResponse(
+                {"data": [{"hash": "0" * 64}], "total_count": 1}
+            )
         raise AssertionError(f"unexpected OpenRouter URL: {req.get_method()} {req.full_url}")
 
     monkeypatch.setattr(key_vault.urlrequest, "urlopen", fake_urlopen)
@@ -141,14 +158,22 @@ def test_openrouter_workspace_privacy_rejects_when_get_still_reports_logging_ena
     management_key = "sk-or-v1-" + "b" * 48
 
     def fake_urlopen(req, timeout: int):
-        if req.full_url.endswith("/api/v1/key"):
+        path = urlsplit(req.full_url).path
+        if path == "/api/v1/key":
             return _FakeResponse(
                 {"data": {"hash": "runtime-key-hash", "label": "runtime", "creator_user_id": "user-1"}}
             )
-        if req.full_url.endswith("/api/v1/workspaces"):
-            return _FakeResponse({"data": [{"id": "workspace-1"}]})
-        if "/api/v1/keys?" in req.full_url:
-            return _FakeResponse({"data": [{"label": "runtime", "creator_user_id": "user-1"}]})
+        if path == "/api/v1/workspaces":
+            return _FakeResponse(
+                {"data": [{"id": "workspace-1"}], "total_count": 1}
+            )
+        if path == "/api/v1/keys":
+            return _FakeResponse(
+                {
+                    "data": [{"hash": _key_hash(runtime_key)}],
+                    "total_count": 1,
+                }
+            )
         if req.full_url.endswith("/api/v1/workspaces/workspace-1") and req.get_method() == "PATCH":
             return _FakeResponse({"data": {"id": "workspace-1"}})
         if req.full_url.endswith("/api/v1/workspaces/workspace-1") and req.get_method() == "GET":
@@ -167,6 +192,121 @@ def test_openrouter_workspace_privacy_rejects_when_get_still_reports_logging_ena
     monkeypatch.setattr(key_vault.urlrequest, "urlopen", fake_urlopen)
 
     with pytest.raises(key_vault.OpenRouterKeyVaultError, match="could not be verified off"):
+        key_vault.verify_openrouter_workspace_privacy(
+            runtime_key=runtime_key,
+            management_key=management_key,
+            stage="unit_test",
+        )
+
+
+def test_openrouter_workspace_privacy_pages_inventory_and_matches_exact_key_hash(
+    monkeypatch,
+):
+    runtime_key = "sk-or-v1-" + "a" * 48
+    management_key = "sk-or-v1-" + "b" * 48
+    requested: list[tuple[str, dict[str, list[str]]]] = []
+
+    def fake_urlopen(req, timeout: int):
+        parsed = urlsplit(req.full_url)
+        query = parse_qs(parsed.query)
+        requested.append((parsed.path, query))
+        if parsed.path == "/api/v1/key":
+            # OpenRouter's live endpoint currently omits a provider key hash and
+            # mutable label/creator metadata is not an ownership authority.
+            return _FakeResponse({"data": {"disabled": False}})
+        if parsed.path == "/api/v1/workspaces":
+            offset = int(query.get("offset", ["0"])[0])
+            if offset == 0:
+                return _FakeResponse(
+                    {"data": [{"id": "workspace-1"}], "total_count": 2}
+                )
+            if offset == 1:
+                return _FakeResponse(
+                    {"data": [{"id": "workspace-2"}], "total_count": 2}
+                )
+        if parsed.path == "/api/v1/keys":
+            workspace_id = query.get("workspace_id", [""])[0]
+            offset = int(query.get("offset", ["0"])[0])
+            if workspace_id == "workspace-1" and offset == 0:
+                return _FakeResponse({"data": [{"hash": "0" * 64}]})
+            if workspace_id == "workspace-1" and offset == 1:
+                return _FakeResponse({"data": []})
+            if workspace_id == "workspace-2" and offset == 0:
+                return _FakeResponse({"data": [{"hash": "1" * 64}]})
+            if workspace_id == "workspace-2" and offset == 1:
+                return _FakeResponse({"data": [{"hash": _key_hash(runtime_key)}]})
+            if workspace_id == "workspace-2" and offset == 2:
+                return _FakeResponse({"data": []})
+        if (
+            parsed.path == "/api/v1/workspaces/workspace-2"
+            and req.get_method() == "PATCH"
+        ):
+            return _FakeResponse({"data": {"id": "workspace-2"}})
+        if (
+            parsed.path == "/api/v1/workspaces/workspace-2"
+            and req.get_method() == "GET"
+        ):
+            return _FakeResponse(
+                {
+                    "data": {
+                        "id": "workspace-2",
+                        "is_observability_io_logging_enabled": False,
+                        "is_data_discount_logging_enabled": False,
+                        "is_observability_broadcast_enabled": False,
+                    }
+                }
+            )
+        raise AssertionError(f"unexpected OpenRouter URL: {req.get_method()} {req.full_url}")
+
+    monkeypatch.setattr(key_vault.urlrequest, "urlopen", fake_urlopen)
+
+    proof = key_vault.verify_openrouter_workspace_privacy(
+        runtime_key=runtime_key,
+        management_key=management_key,
+        stage="unit_test",
+    )
+
+    assert proof["logging_flags"] == {
+        "is_observability_io_logging_enabled": False,
+        "is_data_discount_logging_enabled": False,
+        "is_observability_broadcast_enabled": False,
+        "io_logging_api_key_ids_count": 0,
+    }
+    workspace_offsets = [
+        query["offset"][0]
+        for path, query in requested
+        if path == "/api/v1/workspaces"
+    ]
+    key_offsets = [
+        (query["workspace_id"][0], query["offset"][0])
+        for path, query in requested
+        if path == "/api/v1/keys"
+    ]
+    assert workspace_offsets == ["0", "1"]
+    assert key_offsets == [
+        ("workspace-1", "0"),
+        ("workspace-1", "1"),
+        ("workspace-2", "0"),
+        ("workspace-2", "1"),
+        ("workspace-2", "2"),
+    ]
+
+
+def test_openrouter_workspace_privacy_rejects_repeated_inventory_page(monkeypatch):
+    runtime_key = "sk-or-v1-" + "a" * 48
+    management_key = "sk-or-v1-" + "b" * 48
+
+    def fake_urlopen(req, timeout: int):
+        parsed = urlsplit(req.full_url)
+        if parsed.path == "/api/v1/key":
+            return _FakeResponse({"data": {"disabled": False}})
+        if parsed.path == "/api/v1/workspaces":
+            return _FakeResponse({"data": [{"id": "workspace-1"}]})
+        raise AssertionError(f"unexpected OpenRouter URL: {req.get_method()} {req.full_url}")
+
+    monkeypatch.setattr(key_vault.urlrequest, "urlopen", fake_urlopen)
+
+    with pytest.raises(key_vault.OpenRouterKeyVaultError, match="repeated a record"):
         key_vault.verify_openrouter_workspace_privacy(
             runtime_key=runtime_key,
             management_key=management_key,

@@ -12,8 +12,11 @@ from types import SimpleNamespace
 import pytest
 
 from research_lab.eval.snapshot_store import (
+    MODE_RECORD,
     SNAPSHOT_MISS_SENTINEL,
     SNAPSHOT_RECORD_REUSE_EXISTING_ENV,
+    ProviderSnapshotStore,
+    build_snapshot_request,
     dev_record_bootstrap,
 )
 from scripts import record_research_lab_dev_snapshots as recorder
@@ -372,3 +375,110 @@ def test_observed_provider_models_are_authoritative():
         assert "outside the declared allowlist" in str(exc)
     else:
         raise AssertionError("an unexpected observed model must fail closed")
+
+
+def _store_with_provider_request(tmp_path, provider: str) -> ProviderSnapshotStore:
+    store = ProviderSnapshotStore(str(tmp_path), mode=MODE_RECORD)
+    if provider == "openrouter":
+        request = build_snapshot_request(
+            "POST",
+            "https://openrouter.ai/api/v1/chat/completions",
+            body={"model": "openai/gpt-production", "messages": []},
+        )
+    else:
+        request = build_snapshot_request(
+            "POST",
+            "https://api.exa.ai/search",
+            body={"query": "production-shaped query"},
+        )
+    store.record_response(request, status=200, body_text='{"results":[]}')
+    return store
+
+
+def test_snapshot_provider_models_are_optional_without_openrouter_requests(tmp_path):
+    store = _store_with_provider_request(tmp_path, "exa")
+
+    assert recorder._resolve_snapshot_provider_model_ids(
+        store=store,
+        observed=[],
+        declared=[],
+    ) == []
+
+
+def test_snapshot_provider_models_remain_required_for_openrouter_requests(tmp_path):
+    store = _store_with_provider_request(tmp_path, "openrouter")
+
+    with pytest.raises(
+        ValueError,
+        match="champion emitted no attributable OpenRouter model request",
+    ):
+        recorder._resolve_snapshot_provider_model_ids(
+            store=store,
+            observed=[],
+            declared=[],
+        )
+
+    assert recorder._resolve_snapshot_provider_model_ids(
+        store=store,
+        observed=["openai/gpt-production"],
+        declared=["openai/gpt-production"],
+    ) == ["openai/gpt-production"]
+
+
+def test_snapshot_provider_models_reject_unattributed_openrouter_rows(tmp_path):
+    store = _store_with_provider_request(tmp_path, "exa")
+
+    with pytest.raises(ValueError, match="has no OpenRouter snapshot request"):
+        recorder._resolve_snapshot_provider_model_ids(
+            store=store,
+            observed=["openai/gpt-production"],
+            declared=["openai/gpt-production"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("provider", "provider_model_ids", "expected_error"),
+    [
+        ("exa", [], ""),
+        ("openrouter", ["openai/gpt-production"], ""),
+        (
+            "openrouter",
+            [],
+            "snapshot_provenance_missing:provider_model_ids",
+        ),
+        (
+            "exa",
+            ["openai/gpt-production"],
+            "snapshot_provenance_unattributed:provider_model_ids",
+        ),
+    ],
+)
+def test_manifest_binds_model_provenance_to_recorded_provider_requests(
+    tmp_path,
+    provider,
+    provider_model_ids,
+    expected_error,
+):
+    store = _store_with_provider_request(tmp_path, provider)
+    store.write_dev_icp_items(
+        [
+            {
+                "icp_ref": "test:1",
+                "icp_hash": "sha256:" + "1" * 64,
+                "icp": {"industry": "Software Development"},
+            }
+        ]
+    )
+    manifest = store.build_manifest(
+        icp_set_hash="sha256:" + "2" * 64,
+        provenance={"provider_model_ids": provider_model_ids},
+    )
+
+    verification = store.verify_manifest(manifest)
+
+    assert verification["provider_request_counts"] == {provider: 1}
+    if expected_error:
+        assert verification["passed"] is False
+        assert expected_error in verification["errors"]
+    else:
+        assert verification["passed"] is True, verification["errors"]

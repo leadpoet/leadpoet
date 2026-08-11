@@ -171,7 +171,7 @@ def _write_snapshot_set(
             "champion_image_digest": IMAGE_DIGEST,
             "source_commit": "a" * 40,
             "model_config_hash": "sha256:" + "b" * 64,
-            "provider_model_ids": ["test/provider-model"],
+            "provider_model_ids": [],
             "replay_output_hashes": [
                 {"icp_hash": item["icp_hash"], "output_hash": "sha256:" + "c" * 64}
                 for item in items
@@ -405,7 +405,7 @@ def test_current_day_snapshot_is_eligible_only_for_its_utc_benchmark_date(
             "source_commit": "a" * 40,
             "model_config_hash": "sha256:" + "b" * 64,
             "private_model_manifest_hash": "sha256:" + "4" * 64,
-            "provider_model_ids": ["test/provider-model"],
+            "provider_model_ids": [],
             "replay_output_hashes": [
                 {
                     "icp_hash": item["icp_hash"],

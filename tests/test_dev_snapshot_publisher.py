@@ -118,7 +118,7 @@ def _snapshot(tmp_path):
             "champion_image_digest": IMAGE,
             "source_commit": "b" * 40,
             "model_config_hash": "sha256:" + "c" * 64,
-            "provider_model_ids": ["provider/model"],
+            "provider_model_ids": [],
             "replay_output_hashes": [
                 {
                     "icp_hash": item["icp_hash"],

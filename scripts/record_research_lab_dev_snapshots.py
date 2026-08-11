@@ -620,6 +620,24 @@ def _resolve_provider_model_ids(
     return actual
 
 
+def _resolve_snapshot_provider_model_ids(
+    *,
+    store: ProviderSnapshotStore,
+    observed: Sequence[str],
+    declared: Sequence[str],
+) -> list[str]:
+    """Bind model provenance only when the snapshots contain OpenRouter traffic."""
+
+    openrouter_request_count = store.provider_request_counts().get("openrouter", 0)
+    if openrouter_request_count:
+        return _resolve_provider_model_ids(observed, declared)
+    if any(str(item).strip() for item in observed):
+        raise ValueError(
+            "recorded OpenRouter model provenance has no OpenRouter snapshot request"
+        )
+    return []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Record a frozen provider snapshot set for the L1 dev-eval rung"
@@ -855,9 +873,10 @@ def main() -> int:
             )
 
         try:
-            provider_model_ids = _resolve_provider_model_ids(
-                _recorded_provider_model_ids(staging),
-                declared_provider_model_ids,
+            provider_model_ids = _resolve_snapshot_provider_model_ids(
+                store=store,
+                observed=_recorded_provider_model_ids(staging),
+                declared=declared_provider_model_ids,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             print(f"ERROR: could not bind provider-model provenance: {exc}")

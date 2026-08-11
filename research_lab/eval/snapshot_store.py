@@ -930,6 +930,27 @@ class ProviderSnapshotStore:
     def snapshot_count(self) -> int:
         return len(self._list_snapshot_names())
 
+    def provider_request_counts(self) -> dict[str, int]:
+        """Return provider counts derived from the immutable snapshot records."""
+        counts: dict[str, int] = {}
+        for name in self._list_snapshot_names():
+            raw = self._read_text(f"{SNAPSHOT_SUBDIR}/{name}")
+            if raw is None:
+                continue
+            record = json.loads(raw)
+            if not isinstance(record, Mapping):
+                raise DevSnapshotStoreError("snapshot record must be a JSON object")
+            provider = str(record.get("provider") or "").strip().lower()
+            request_key = str(record.get("request_key") or "")
+            if (
+                not provider
+                or len(provider) > 500
+                or not request_key.startswith(provider + "|")
+            ):
+                raise DevSnapshotStoreError("snapshot record provider is invalid")
+            counts[provider] = counts.get(provider, 0) + 1
+        return dict(sorted(counts.items()))
+
     def content_hash(self) -> str:
         """Hash over every stored record, keyed and sorted by request key."""
         entries: list[list[str]] = []
@@ -1007,9 +1028,11 @@ class ProviderSnapshotStore:
         try:
             stored_content_hash = self.content_hash()
             request_keys = self.request_keys()
+            provider_request_counts = self.provider_request_counts()
         except Exception as exc:
             stored_content_hash = ""
             request_keys = []
+            provider_request_counts = {}
             errors.append(f"snapshot_record_invalid:{type(exc).__name__}")
         if str(doc.get("content_hash") or "") != stored_content_hash:
             errors.append("content_hash_mismatch")
@@ -1025,6 +1048,24 @@ class ProviderSnapshotStore:
                 errors.append("dev_set_manifest_hash_mismatch")
         elif doc.get("dev_set_manifest_hash"):
             errors.append("dev_set_manifest_invalid")
+        provenance = doc.get("provenance")
+        provenance = provenance if isinstance(provenance, Mapping) else {}
+        provider_model_ids = provenance.get("provider_model_ids")
+        if "provider_model_ids" in provenance:
+            if not isinstance(provider_model_ids, list) or any(
+                not isinstance(item, str)
+                or item != item.strip()
+                or not item
+                or len(item) > 500
+                for item in provider_model_ids or ()
+            ):
+                errors.append("snapshot_provenance_invalid:provider_model_ids")
+            elif provider_model_ids != sorted(set(provider_model_ids)):
+                errors.append("snapshot_provenance_invalid:provider_model_ids")
+            elif provider_request_counts.get("openrouter", 0) and not provider_model_ids:
+                errors.append("snapshot_provenance_missing:provider_model_ids")
+            elif not provider_request_counts.get("openrouter", 0) and provider_model_ids:
+                errors.append("snapshot_provenance_unattributed:provider_model_ids")
         items = self.load_dev_icp_items()
         if not items:
             errors.append("dev_icps_missing")
@@ -1040,6 +1081,7 @@ class ProviderSnapshotStore:
             "content_hash": stored_content_hash,
             "icp_set_hash": str(doc.get("icp_set_hash") or ""),
             "snapshot_count": self.snapshot_count(),
+            "provider_request_counts": provider_request_counts,
         }
 
     def build_ready_document(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -1124,11 +1166,12 @@ class ProviderSnapshotStore:
             errors.append("ready_dev_set_size_mismatch")
         provenance = manifest.get("provenance") if isinstance(manifest, Mapping) else {}
         provenance = provenance if isinstance(provenance, Mapping) else {}
+        if "provider_model_ids" not in provenance:
+            errors.append("snapshot_provenance_missing:provider_model_ids")
         for key in (
             "champion_image_digest",
             "source_commit",
             "model_config_hash",
-            "provider_model_ids",
             "replay_output_hashes",
         ):
             value = provenance.get(key)

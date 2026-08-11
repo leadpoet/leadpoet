@@ -78,7 +78,8 @@ RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER = (
     "retryable_attested_provider_transport_failure"
 )
 _MODEL_INVOCATION_TIMEOUT_OVERHEAD_SECONDS = 120.0
-_MODEL_INVOCATION_TIMEOUT_MULTIPLIER = 1.5
+_MODEL_INVOCATION_ATTESTED_PHASES = 2.0
+_MODEL_INVOCATION_PERSISTENCE_RESERVE_SECONDS = 300.0
 _CREDENTIAL_ENV_NAMES = frozenset(
     {
         "DEEPLINE_API_KEY",
@@ -112,10 +113,15 @@ class AttestedPrivateModelRunnerV2Error(PrivateModelRuntimeError):
 
 
 def _model_invocation_timeout_seconds(model_timeout_seconds: float) -> float:
+    """Bound measured execution plus its required artifact-lineage attestation."""
+
     model_timeout = max(1.0, float(model_timeout_seconds))
-    return max(
-        model_timeout + _MODEL_INVOCATION_TIMEOUT_OVERHEAD_SECONDS,
-        model_timeout * _MODEL_INVOCATION_TIMEOUT_MULTIPLIER,
+    attested_phase_timeout = (
+        model_timeout + _MODEL_INVOCATION_TIMEOUT_OVERHEAD_SECONDS
+    )
+    return (
+        attested_phase_timeout * _MODEL_INVOCATION_ATTESTED_PHASES
+        + _MODEL_INVOCATION_PERSISTENCE_RESERVE_SECONDS
     )
 
 

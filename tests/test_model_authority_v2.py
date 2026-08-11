@@ -515,6 +515,20 @@ async def test_measured_model_invocation_timeout_cancels_complete_operation(monk
     assert isinstance(captured.value.__cause__, asyncio.TimeoutError)
 
 
+def test_measured_model_invocation_budget_covers_attested_persistence():
+    model_timeout = 1800.0
+    assert model_authority_v2._MODEL_INVOCATION_ATTESTED_PHASES == 2.0
+    attested_phase_timeout = (
+        model_timeout
+        + model_authority_v2._MODEL_INVOCATION_TIMEOUT_OVERHEAD_SECONDS
+    )
+
+    assert model_authority_v2._model_invocation_timeout_seconds(model_timeout) == (
+        attested_phase_timeout * 2.0
+        + model_authority_v2._MODEL_INVOCATION_PERSISTENCE_RESERVE_SECONDS
+    )
+
+
 def _ready_adapter_metadata() -> dict:
     routing_catalog = {"schema_version": 1}
     routing_policy = {"schema_version": 1}
@@ -827,6 +841,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
     assert observed[0]["purpose"] == "research_lab.candidate_model_run.v2"
     assert observed[0]["provider_credential_profile"] == "benchmark_model"
     assert observed[0]["epoch_id"] == 24001
+    assert observed[0]["timeout_seconds"] == 1920.0
     assert payload["input"]["context"] == {
         "evaluation_epoch": 24000,
         "run_id": "run-1",

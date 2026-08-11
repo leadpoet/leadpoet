@@ -18,6 +18,8 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from httpx import SyncByteStream
+
 from gateway.tee.egress_policy import (
     normalize_destination,
     normalize_proxy_destination,
@@ -430,6 +432,28 @@ def _extract_tls_metadata(response: Any) -> Tuple[str, str]:
     return sha256_bytes(bytes(certificate)), str(protocol)
 
 
+def _make_response_cleanup_nonfatal(response: Any) -> None:
+    """Keep stream cleanup from replacing a completed read or its real error."""
+    stream = getattr(response, "stream", None)
+    if not isinstance(stream, SyncByteStream):
+        return
+
+    class CleanupSafeStream(SyncByteStream):
+        def __iter__(self):
+            yield from stream
+
+        def close(self) -> None:
+            # HTTPX closes once when iteration finishes and again when the
+            # response context exits. A relay EOF during cleanup is not body
+            # evidence; iterator failures above still propagate fail-closed.
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    response.stream = CleanupSafeStream()
+
+
 class HTTPXProviderTransport:
     """TLS and hostname verification run inside the coordinator enclave."""
 
@@ -517,6 +541,7 @@ class HTTPXProviderTransport:
             content=body,
             timeout=timeout_seconds,
         ) as response:
+            _make_response_cleanup_nonfatal(response)
             # TLS is authenticated before response headers are available.
             # Capture its evidence now because a peer may close the stream
             # immediately after sending a complete bounded response body.

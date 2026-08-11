@@ -6,6 +6,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from gateway.tee.provider_broker_v2 import (
@@ -200,6 +201,115 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
     with pytest.raises(ProviderBrokerV2Error, match="transport response ceiling"):
         HTTPXProviderTransport(
             response_body_ceiling_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES + 1
+        )
+
+
+def test_httpx_transport_preserves_complete_response_when_stream_cleanup_fails():
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class NetworkStream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    class CloseFailsAfterCompleteBody(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'{"ok":true}'
+
+        def close(self):
+            raise EOFError("TLS close_notify was not available")
+
+    response = httpx.Response(
+        200,
+        headers={"content-type": "application/json"},
+        stream=CloseFailsAfterCompleteBody(),
+        extensions={"network_stream": NetworkStream()},
+        request=httpx.Request("GET", "https://example.com/artifact"),
+    )
+
+    class ResponseContext:
+        def __enter__(self):
+            return response
+
+        def __exit__(self, *_args):
+            response.close()
+
+    class Client:
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+    result = HTTPXProviderTransport._execute_with_client(
+        Client(),
+        method="GET",
+        url="https://example.com/artifact",
+        headers={},
+        body=b"",
+        timeout_seconds=1.0,
+        max_response_bytes=1024,
+    )
+
+    assert result["http_status"] == 200
+    assert result["body"] == b'{"ok":true}'
+    assert result["tls_peer_chain_hash"] == sha256_bytes(b"peer-certificate")
+    assert result["tls_protocol"] == "TLSv1.3"
+
+
+def test_httpx_transport_does_not_hide_incomplete_response_body():
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class NetworkStream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    class BodyReadFails(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"partial"
+            raise EOFError("response body is incomplete")
+
+        def close(self):
+            raise EOFError("cleanup also failed")
+
+    response = httpx.Response(
+        200,
+        headers={"content-type": "application/json"},
+        stream=BodyReadFails(),
+        extensions={"network_stream": NetworkStream()},
+        request=httpx.Request("GET", "https://example.com/artifact"),
+    )
+
+    class ResponseContext:
+        def __enter__(self):
+            return response
+
+        def __exit__(self, *_args):
+            response.close()
+
+    class Client:
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+    with pytest.raises(EOFError, match="response body is incomplete"):
+        HTTPXProviderTransport._execute_with_client(
+            Client(),
+            method="GET",
+            url="https://example.com/artifact",
+            headers={},
+            body=b"",
+            timeout_seconds=1.0,
+            max_response_bytes=1024,
         )
 
 

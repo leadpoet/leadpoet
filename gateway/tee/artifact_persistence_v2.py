@@ -137,6 +137,47 @@ def _transport_failure_code(exc: BaseException) -> str:
     return "unexpected_eof"
 
 
+class _ArtifactVerificationTransportSession:
+    """Own one bounded transport for a single artifact verification."""
+
+    def __init__(
+        self,
+        transport: Optional[Callable[..., Mapping[str, Any]]],
+    ) -> None:
+        self._transport = transport
+        self._owns_transport = transport is None
+
+    def get(self) -> Callable[..., Mapping[str, Any]]:
+        if self._transport is None:
+            self._transport = HTTPXProviderTransport(
+                response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+            )
+        return self._transport
+
+    def rotate_after_failure(self) -> None:
+        if self._owns_transport:
+            self._close_owned_transport()
+
+    def close(self) -> None:
+        if self._owns_transport:
+            self._close_owned_transport()
+
+    def _close_owned_transport(self) -> None:
+        transport = self._transport
+        self._transport = None
+        if transport is not None:
+            # Request results are fully materialized before close. Cleanup must
+            # not replace an authenticated response or its original failure.
+            with suppress(Exception):
+                transport.close()
+
+    def __enter__(self) -> "_ArtifactVerificationTransportSession":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
+
 class ArtifactPersistenceVerifierV2:
     """Fetch ciphertext back through enclave-verified TLS before acceptance."""
 
@@ -153,8 +194,8 @@ class ArtifactPersistenceVerifierV2:
         self._policy = validate_artifact_policy(policy)
         self._policy_hash = sha256_json(self._policy)
         # Artifact readbacks can approach the relay's per-tunnel byte budget.
-        # Do not multiplex or accumulate them on the provider broker's long-lived
-        # HTTP/2 tunnel; each bounded verification attempt owns one connection.
+        # Each verification owns one bounded session; transport failures rotate
+        # that session before retrying instead of sharing it across artifacts.
         self._transport = transport
         self._clock = clock
         self._sleeper = sleeper
@@ -184,6 +225,7 @@ class ArtifactPersistenceVerifierV2:
         method: str,
         url: str,
         ordinal: int,
+        transport_session: _ArtifactVerificationTransportSession,
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
         parsed = urlsplit(url)
         started_at = self._clock()
@@ -205,33 +247,16 @@ class ArtifactPersistenceVerifierV2:
                 transport_kwargs["max_response_bytes"] = (
                     MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
                 )
-            owned_transport = None
-            transport = self._transport
-            if transport is None:
-                owned_transport = HTTPXProviderTransport(
-                    response_body_ceiling_bytes=(
-                        MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
-                    )
+            response = dict(
+                transport_session.get()(
+                    method=method,
+                    url=url,
+                    headers={"accept": "application/json"},
+                    body=b"",
+                    timeout_ms=ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
+                    **transport_kwargs,
                 )
-                transport = owned_transport
-            try:
-                response = dict(
-                    transport(
-                        method=method,
-                        url=url,
-                        headers={"accept": "application/json"},
-                        body=b"",
-                        timeout_ms=ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
-                        **transport_kwargs,
-                    )
-                )
-            finally:
-                if owned_transport is not None:
-                    # The response body and TLS evidence are fully materialized by
-                    # the transport before it returns. A tunnel cleanup error must
-                    # not replace that result or mask the request's own failure.
-                    with suppress(Exception):
-                        owned_transport.close()
+            )
             body = bytes(response.get("body") or b"")
             terminal = {
                 "terminal_status": "authenticated_response",
@@ -291,6 +316,28 @@ class ArtifactPersistenceVerifierV2:
         if urlsplit(normalized_get).path != urlsplit(normalized_head).path:
             raise ArtifactPersistenceV2Error("artifact verification URLs differ")
 
+        with _ArtifactVerificationTransportSession(
+            self._transport
+        ) as transport_session:
+            return self._verify_with_transport_session(
+                artifact_id=artifact_id,
+                attestation_job_id=attestation_job_id,
+                artifact_ref=artifact_ref,
+                normalized_get=normalized_get,
+                normalized_head=normalized_head,
+                transport_session=transport_session,
+            )
+
+    def _verify_with_transport_session(
+        self,
+        *,
+        artifact_id: str,
+        attestation_job_id: str,
+        artifact_ref: str,
+        normalized_get: str,
+        normalized_head: str,
+        transport_session: _ArtifactVerificationTransportSession,
+    ) -> Dict[str, Any]:
         attempts = []
         get_response = {}
         get_attempt = {}
@@ -305,6 +352,7 @@ class ArtifactPersistenceVerifierV2:
                 method="GET",
                 url=normalized_get,
                 ordinal=ordinal,
+                transport_session=transport_session,
             )
             attempts.append(get_attempt)
             if get_attempt["terminal_status"] == "authenticated_response":
@@ -315,6 +363,8 @@ class ArtifactPersistenceVerifierV2:
                 ):
                     continue
                 break
+            if ordinal + 1 < ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS:
+                transport_session.rotate_after_failure()
         if get_attempt["terminal_status"] != "authenticated_response":
             return self._failure(attempts, get_attempt["failure_code"])
         if get_attempt["http_status"] != 200:
@@ -346,6 +396,7 @@ class ArtifactPersistenceVerifierV2:
                 method="HEAD",
                 url=normalized_head,
                 ordinal=len(attempts),
+                transport_session=transport_session,
             )
             attempts.append(head_attempt)
             if head_attempt["terminal_status"] == "authenticated_response":
@@ -356,6 +407,8 @@ class ArtifactPersistenceVerifierV2:
                 ):
                     continue
                 break
+            if offset + 1 < ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS:
+                transport_session.rotate_after_failure()
         if head_attempt["terminal_status"] != "authenticated_response":
             return self._failure(attempts, head_attempt["failure_code"])
         if head_attempt["http_status"] != 200:

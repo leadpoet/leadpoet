@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "02d6e6ff5096ade29714a42d45542208c2e22114",
+  "baseline_commit": "58b657e12b3c88ce33500cd0f6b525635d520e9d",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -337,7 +337,7 @@
       "symbol": "build_gateway_weight_inputs_v2"
     },
     {
-      "ast_sha256": "sha256:efa7869da409bce73bc622e6a8951b04bd357a38a061d03190135180f3911675",
+      "ast_sha256": "sha256:645a2a037fe06846d4dfc8794557edbb3d631c6a22a31d4e884ca0d0164a0d13",
       "path": "gateway/research_lab/autoresearch_authority_v2.py",
       "symbol": "run_authoritative_autoresearch_v2"
     },
@@ -862,7 +862,7 @@
       "symbol": "_load_candidate_source_diff"
     },
     {
-      "ast_sha256": "sha256:f30b68760230b77cd2e401f6b4aa73649f56129c7ce6a495a66a843e34231656",
+      "ast_sha256": "sha256:e4db7096c56f450ca5ddd540f7dae21fc980150b38119dbdb93f01988c5b689a",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
     },
@@ -987,7 +987,7 @@
       "symbol": "hourly_batch_task"
     },
     {
-      "ast_sha256": "sha256:a1270b127f0f80ac37f554fc1c4a298de6f7eadab0435416089a3dc6d85f781b",
+      "ast_sha256": "sha256:8dd58d8a0378cea9368537f2ad5084489199d18440f668922af70328bb559583",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
     },
@@ -2607,7 +2607,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:ffed581a0706248bfab74512245ef625090e7f2d76c358fd97c78c166e97383f",
-  "protected_source_commit": "995be26219af3a4b26b868a45c273f64391ddd91",
+  "manifest_hash": "sha256:7bc2e864870b4c6d825c7fc1c5d5e2476a515892642a355cc3bd502096c45a9c",
+  "protected_source_commit": "58b657e12b3c88ce33500cd0f6b525635d520e9d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

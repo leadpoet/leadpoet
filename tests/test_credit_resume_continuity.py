@@ -25,7 +25,7 @@ def test_resume_preflight_sequence_binds_complete_signed_attempt(
     async def fake_verify(_payload: Any) -> None:
         return None
 
-    async def fake_not_paused() -> None:
+    async def fake_not_paused(_config: Any) -> None:
         return None
 
     async def fake_resume(

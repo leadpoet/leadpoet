@@ -33,6 +33,7 @@ BEHAVIOR_SCENARIOS = (
     "model-sandbox-scope-binding",
     "rebenchmark-sandbox-retry",
     "rebenchmark-provider-transport-evidence",
+    "artifact-egress-sustained-readback",
     "chain-settlement-state-space",
     "conditional-icp-policy",
     "conditional-candidate-gate",
@@ -65,6 +66,7 @@ BEHAVIORAL_INVARIANTS = (
     "model_sandbox_final_provider_cost_scope_bound",
     "rebenchmark_sandbox_failure_bounded_retry",
     "rebenchmark_provider_transport_evidence_unique",
+    "artifact_egress_sustained_readback_verified",
     "chain_settlement_state_space_complete",
     "conditional_icp_policy_config_bound",
     "conditional_candidate_advancement_exact",
@@ -98,6 +100,12 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "scripts/restart_attested_release_local.sh",
     "gateway/tee/rehearsal_behavior_contract_v2.py",
     "gateway/tee/verify_weight_submission_ready_v2.py",
+    "gateway/tee/artifact_persistence_v2.py",
+    "gateway/tee/egress_framing.py",
+    "gateway/tee/egress_policy.py",
+    "gateway/tee/egress_proxy.py",
+    "gateway/tee/provider_broker_v2.py",
+    "gateway/utils/tee_egress_forwarder.py",
     "research_lab/eval/private_runtime.py",
     "research_lab/sourcing_model_contract.json",
     "research_lab/sourcing_model_contract_check.py",
@@ -129,6 +137,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "neurons/auditor_validator.py",
     "validator_models/containerizing/deploy_dynamic.sh",
     "validator_tee/scripts/verify_pinned_gateway_release_v2.sh",
+    "tests/restart_rehearsal/production_workflow_runner.py",
 )
 
 

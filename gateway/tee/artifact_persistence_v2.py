@@ -17,6 +17,7 @@ from gateway.tee.artifact_vault_v2 import (
     ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES,
     EncryptedArtifactVaultV2,
 )
+from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
 from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
 from leadpoet_canonical.attested_v2 import (
     build_transport_attempt,
@@ -176,7 +177,7 @@ class _ArtifactVerificationTransportPool:
         return HTTPXProviderTransport(
             response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
             allow_authenticated_complete_body_eof=True,
-            defer_remote_eof_until_client_close=True,
+            parent_tunnel_framing=TUNNEL_FRAMING_MODE,
         )
 
     def acquire(self) -> Callable[..., Mapping[str, Any]]:
@@ -336,10 +337,7 @@ class ArtifactPersistenceVerifierV2:
                 transport_session.get()(
                     method=method,
                     url=url,
-                    headers={
-                        "accept": "application/json",
-                        "connection": "close",
-                    },
+                    headers={"accept": "application/json"},
                     body=b"",
                     timeout_ms=ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
                     **transport_kwargs,
@@ -376,9 +374,7 @@ class ArtifactPersistenceVerifierV2:
             destination_host=str(parsed.hostname or ""),
             destination_port=parsed.port or 443,
             path_hash=sha256_bytes(parsed.path.encode("utf-8")),
-            nonsecret_headers_hash=sha256_json(
-                {"accept": "application/json", "connection": "close"}
-            ),
+            nonsecret_headers_hash=sha256_json({"accept": "application/json"}),
             body_hash=sha256_bytes(b""),
             credential_ref_hash=sha256_json(
                 {"policy_hash": self._policy_hash, "sigv4_query_present": True}

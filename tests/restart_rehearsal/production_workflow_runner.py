@@ -7502,6 +7502,416 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     }
 
 
+def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
+    """Exercise the exact artifact transport across both production relays."""
+
+    from datetime import timedelta
+    import socket
+    import ssl
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    from gateway.tee.artifact_persistence_v2 import (
+        MAX_ARTIFACT_VERIFICATION_TRANSPORTS,
+    )
+    from gateway.tee.egress_framing import (
+        EgressTunnelFramingError,
+        TUNNEL_FRAME_BYTES,
+        TUNNEL_FRAMING_MODE,
+        receive_tunnel_frame,
+    )
+    from gateway.tee.egress_proxy import EnclaveEgressProxy
+    from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
+    from gateway.utils.tee_client import AF_VSOCK, _recv_exact
+    from gateway.utils.tee_egress_forwarder import _handle_connection
+
+    request_count = max(64, int(MAX_ARTIFACT_VERIFICATION_TRANSPORTS) * 4)
+    requests_seen: list[str] = []
+    concurrent_requests_seen: set[str] = set()
+    origin_errors: list[str] = []
+    origin_threads: list[threading.Thread] = []
+    parent_threads: list[threading.Thread] = []
+    parent_tunnel_count = 0
+    sequence_lock = threading.Lock()
+    provider_first_close = threading.Event()
+    concurrent_workers = min(8, int(MAX_ARTIFACT_VERIFICATION_TRANSPORTS))
+    concurrent_requests_per_worker = 8
+
+    payloads = []
+    for ordinal in range(request_count):
+        padding_bytes = TUNNEL_FRAME_BYTES + 1024 if ordinal % 17 == 0 else 128
+        payloads.append(
+            b'{"ordinal":'
+            + str(ordinal).encode("ascii")
+            + b',"padding":"'
+            + (b"x" * padding_bytes)
+            + b'"}'
+        )
+
+    with tempfile.TemporaryDirectory(prefix="leadpoet-artifact-egress-") as root:
+        root_path = Path(root)
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, "example.com")]
+        )
+        now = datetime.now(timezone.utc)
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now.replace(microsecond=0) - timedelta(minutes=1))
+            .not_valid_after(now.replace(microsecond=0) + timedelta(hours=1))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("example.com")]),
+                critical=False,
+            )
+            .sign(private_key, hashes.SHA256())
+        )
+        certificate_path = root_path / "origin-cert.pem"
+        private_key_path = root_path / "origin-key.pem"
+        certificate_path.write_bytes(
+            certificate.public_bytes(serialization.Encoding.PEM)
+        )
+        private_key_path.write_bytes(
+            private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.load_cert_chain(
+            certfile=str(certificate_path),
+            keyfile=str(private_key_path),
+        )
+
+        def serve_origin(raw_connection: socket.socket) -> None:
+            try:
+                with raw_connection:
+                    with tls_context.wrap_socket(
+                        raw_connection,
+                        server_side=True,
+                    ) as protected:
+                        pending = bytearray()
+                        while True:
+                            while b"\r\n\r\n" not in pending:
+                                chunk = protected.recv(16 * 1024)
+                                if not chunk:
+                                    return
+                                pending.extend(chunk)
+                            encoded_headers, remainder = bytes(pending).split(
+                                b"\r\n\r\n",
+                                1,
+                            )
+                            pending = bytearray(remainder)
+                            request_line = encoded_headers.split(b"\r\n", 1)[0]
+                            parts = request_line.split(b" ")
+                            if len(parts) != 3:
+                                raise RuntimeError("artifact request line differs")
+                            method = parts[0].decode("ascii")
+                            target = parts[1].decode("ascii")
+                            if target.startswith("/concurrent/"):
+                                target_parts = target.split("/")
+                                if (
+                                    method != "GET"
+                                    or len(target_parts) != 4
+                                    or not target_parts[2].isdigit()
+                                    or not target_parts[3].isdigit()
+                                ):
+                                    raise RuntimeError(
+                                        "concurrent artifact request differs"
+                                    )
+                                worker = int(target_parts[2])
+                                worker_ordinal = int(target_parts[3])
+                                if (
+                                    worker >= concurrent_workers
+                                    or worker_ordinal >= concurrent_requests_per_worker
+                                ):
+                                    raise RuntimeError(
+                                        "concurrent artifact request exceeds contract"
+                                    )
+                                identity = f"{worker}:{worker_ordinal}"
+                                with sequence_lock:
+                                    if identity in concurrent_requests_seen:
+                                        raise RuntimeError(
+                                            "concurrent artifact request duplicated"
+                                        )
+                                    concurrent_requests_seen.add(identity)
+                                payload = (
+                                    b'{"concurrent":"'
+                                    + identity.encode("ascii")
+                                    + b'"}'
+                                )
+                                final_response = (
+                                    worker_ordinal + 1
+                                    == concurrent_requests_per_worker
+                                )
+                                protected.sendall(
+                                    b"HTTP/1.1 200 OK\r\n"
+                                    b"Content-Type: application/json\r\n"
+                                    b"Content-Length: "
+                                    + str(len(payload)).encode("ascii")
+                                    + b"\r\nConnection: "
+                                    + (
+                                        b"close"
+                                        if final_response
+                                        else b"keep-alive"
+                                    )
+                                    + b"\r\n\r\n"
+                                    + payload
+                                )
+                                if final_response:
+                                    return
+                                continue
+                            with sequence_lock:
+                                ordinal = len(requests_seen)
+                                if ordinal >= request_count:
+                                    raise RuntimeError(
+                                        "artifact transport exceeded request contract"
+                                    )
+                                expected_method = "GET" if ordinal % 2 == 0 else "HEAD"
+                                if method != expected_method:
+                                    raise RuntimeError("artifact method sequence differs")
+                                requests_seen.append(method)
+                            payload = payloads[ordinal]
+                            final_response = ordinal + 1 == request_count
+                            response_body = payload if method == "GET" else b""
+                            protected.sendall(
+                                b"HTTP/1.1 200 OK\r\n"
+                                b"Content-Type: application/json\r\n"
+                                b"Content-Length: "
+                                + str(len(payload)).encode("ascii")
+                                + b"\r\nConnection: "
+                                + (b"close" if final_response else b"keep-alive")
+                                + b"\r\n\r\n"
+                                + response_body
+                            )
+                            if final_response:
+                                provider_first_close.set()
+                                return
+            except Exception as exc:
+                origin_errors.append(type(exc).__name__ + ":" + str(exc))
+
+        def connect_origin(_host: str, _port: int) -> socket.socket:
+            provider_side, origin_side = socket.socketpair()
+            thread = threading.Thread(
+                target=serve_origin,
+                args=(origin_side,),
+                name="rehearsal-artifact-origin",
+                daemon=True,
+            )
+            origin_threads.append(thread)
+            thread.start()
+            return provider_side
+
+        class ConnectedVsock:
+            def __init__(self, connection: socket.socket) -> None:
+                self._connection = connection
+
+            def connect(self, _address: object) -> None:
+                return None
+
+            def fileno(self) -> int:
+                return self._connection.fileno()
+
+            def recv(self, size: int) -> bytes:
+                return self._connection.recv(size)
+
+            def sendall(self, payload: bytes) -> None:
+                self._connection.sendall(payload)
+
+            def shutdown(self, how: int) -> None:
+                self._connection.shutdown(how)
+
+            def close(self) -> None:
+                self._connection.close()
+
+        def socket_factory(
+            family: int,
+            socket_type: int,
+            protocol: int = 0,
+        ) -> Any:
+            nonlocal parent_tunnel_count
+            if family != AF_VSOCK:
+                return socket.socket(family, socket_type, protocol)
+            enclave_side, parent_side = socket.socketpair()
+            with sequence_lock:
+                parent_tunnel_count += 1
+            thread = threading.Thread(
+                target=_handle_connection,
+                kwargs={
+                    "connection": parent_side,
+                    "connector": connect_origin,
+                    "idle_timeout_seconds": 5.0,
+                },
+                name="rehearsal-artifact-parent-forwarder",
+                daemon=True,
+            )
+            parent_threads.append(thread)
+            thread.start()
+            return ConnectedVsock(enclave_side)
+
+        port_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            port_probe.bind(("127.0.0.1", 0))
+            proxy_port = int(port_probe.getsockname()[1])
+        finally:
+            port_probe.close()
+
+        proxy = EnclaveEgressProxy(
+            recv_exact=_recv_exact,
+            local_port=proxy_port,
+            socket_factory=socket_factory,
+            loopback_initializer=lambda: None,
+            idle_timeout_seconds=5.0,
+        )
+        proxy._configure_environment = lambda: None  # type: ignore[method-assign]
+        transport = HTTPXProviderTransport(
+            proxy_url=f"http://127.0.0.1:{proxy_port}",
+            ca_bundle=str(certificate_path),
+            response_body_ceiling_bytes=2 * TUNNEL_FRAME_BYTES,
+            allow_authenticated_complete_body_eof=True,
+            parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+        )
+        results: list[dict[str, Any]] = []
+        try:
+            proxy.start()
+            for ordinal in range(request_count):
+                method = "GET" if ordinal % 2 == 0 else "HEAD"
+                result = transport(
+                    method=method,
+                    url=f"https://example.com/artifacts/{ordinal}",
+                    headers={"accept": "application/json"},
+                    body=b"",
+                    timeout_ms=5_000,
+                    max_response_bytes=2 * TUNNEL_FRAME_BYTES,
+                )
+                expected_body = payloads[ordinal] if method == "GET" else b""
+                if result.get("http_status") != 200 or result.get("body") != expected_body:
+                    raise RuntimeError("artifact transport readback differs")
+                results.append(result)
+            if not provider_first_close.wait(timeout=2):
+                raise RuntimeError("provider-first close was not observed")
+
+            def exercise_concurrent_transport(worker: int) -> int:
+                concurrent_transport = HTTPXProviderTransport(
+                    proxy_url=f"http://127.0.0.1:{proxy_port}",
+                    ca_bundle=str(certificate_path),
+                    response_body_ceiling_bytes=2 * TUNNEL_FRAME_BYTES,
+                    allow_authenticated_complete_body_eof=True,
+                    parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+                )
+                try:
+                    for ordinal in range(concurrent_requests_per_worker):
+                        expected = (
+                            b'{"concurrent":"'
+                            + f"{worker}:{ordinal}".encode("ascii")
+                            + b'"}'
+                        )
+                        response = concurrent_transport(
+                            method="GET",
+                            url=(
+                                "https://example.com/concurrent/"
+                                f"{worker}/{ordinal}"
+                            ),
+                            headers={"accept": "application/json"},
+                            body=b"",
+                            timeout_ms=5_000,
+                            max_response_bytes=2 * TUNNEL_FRAME_BYTES,
+                        )
+                        if (
+                            response.get("http_status") != 200
+                            or response.get("body") != expected
+                        ):
+                            raise RuntimeError(
+                                "concurrent artifact readback differs"
+                            )
+                    return concurrent_requests_per_worker
+                finally:
+                    concurrent_transport.close()
+
+            with ThreadPoolExecutor(max_workers=concurrent_workers) as executor:
+                concurrent_counts = list(
+                    executor.map(
+                        exercise_concurrent_transport,
+                        range(concurrent_workers),
+                    )
+                )
+        finally:
+            transport.close()
+            proxy_status = proxy.status()
+            proxy.stop()
+            for thread in parent_threads + origin_threads:
+                thread.join(timeout=3)
+
+    framed, truncated_peer = socket.socketpair()
+    truncated_rejected = False
+    try:
+        truncated_peer.sendall((8).to_bytes(4, "big") + b"short")
+        truncated_peer.shutdown(socket.SHUT_WR)
+        try:
+            receive_tunnel_frame(
+                framed,
+                deadline=time.monotonic() + 1,
+            )
+        except EgressTunnelFramingError:
+            truncated_rejected = True
+    finally:
+        framed.close()
+        truncated_peer.close()
+    if not truncated_rejected:
+        raise RuntimeError("truncated artifact tunnel frame was accepted")
+
+    ordinary_transport = HTTPXProviderTransport()
+    try:
+        ordinary_transport_unchanged = not ordinary_transport.parent_tunnel_framing
+    finally:
+        ordinary_transport.close()
+    if (
+        origin_errors
+        or len(results) != request_count
+        or len(requests_seen) != request_count
+        or len(concurrent_requests_seen)
+        != concurrent_workers * concurrent_requests_per_worker
+        or concurrent_counts
+        != [concurrent_requests_per_worker] * concurrent_workers
+        or parent_tunnel_count != 1 + concurrent_workers
+        or proxy_status.get("last_failure")
+        or not ordinary_transport_unchanged
+    ):
+        raise RuntimeError(
+            "sustained artifact egress contract failed: "
+            + json.dumps(
+                {
+                    "origin_errors": origin_errors,
+                    "result_count": len(results),
+                    "request_count": len(requests_seen),
+                    "concurrent_request_count": len(concurrent_requests_seen),
+                    "parent_tunnel_count": parent_tunnel_count,
+                    "proxy_failure": proxy_status.get("last_failure"),
+                    "ordinary_transport_unchanged": ordinary_transport_unchanged,
+                },
+                sort_keys=True,
+            )
+        )
+    return {
+        "exact_transport_proxy_forwarder_path": True,
+        "sustained_single_tunnel_reused": True,
+        "bounded_concurrent_tunnels_verified": True,
+        "multi_frame_response_verified": True,
+        "provider_first_close_verified": True,
+        "truncated_frame_rejected": True,
+        "ordinary_provider_transport_unchanged": True,
+        "request_count": request_count,
+        "concurrent_request_count": len(concurrent_requests_seen),
+    }
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "signed-private-model-contract-transition": (
         _exercise_signed_private_model_contract_transition
@@ -7514,6 +7924,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "rebenchmark-sandbox-retry": _exercise_rebenchmark_sandbox_retry_contract,
     "rebenchmark-provider-transport-evidence": (
         _exercise_rebenchmark_provider_transport_evidence
+    ),
+    "artifact-egress-sustained-readback": (
+        _exercise_artifact_egress_sustained_readback
     ),
     "historical-metagraph-layouts": _exercise_historical_metagraph_layouts,
     "receipt-graph-aggregate-pagination": (
@@ -8125,6 +8538,43 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("baseline_pause_checkpoint_resume_complete")
+            is True
+        ),
+        "artifact_egress_sustained_readback_verified": (
+            behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("exact_transport_proxy_forwarder_path")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("sustained_single_tunnel_reused")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("bounded_concurrent_tunnels_verified")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("multi_frame_response_verified")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("provider_first_close_verified")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("truncated_frame_rejected")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("ordinary_provider_transport_unchanged")
             is True
         ),
         "chain_settlement_state_space_complete": (

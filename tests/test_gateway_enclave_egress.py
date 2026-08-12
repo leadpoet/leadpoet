@@ -19,8 +19,15 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from gateway.tee.egress_framing import (
+    EgressTunnelFramingError,
+    TUNNEL_FRAME_BYTES,
+    TUNNEL_FRAMING_HEADER,
+    TUNNEL_FRAMING_MODE,
+    relay_raw_and_framed,
+    send_tunnel_frame,
+)
 from gateway.tee.egress_policy import (
-    DEFER_REMOTE_EOF_HEADER,
     EgressPolicyError,
     destination_policy_hash,
     normalize_destination,
@@ -108,7 +115,8 @@ def _unused_loopback_port() -> int:
 def test_destination_policy_allows_public_dns_https_only():
     assert normalize_destination("API.OpenRouter.AI.", 443) == ("api.openrouter.ai", 443)
     assert destination_policy_hash().startswith("sha256:")
-    assert policy_document()["deferred_remote_eof_requires_enclave_opt_in"] is True
+    assert policy_document()["framed_tunnel_modes"] == [TUNNEL_FRAMING_MODE]
+    assert policy_document()["framed_tunnel_requires_enclave_opt_in"] is True
 
 
 def test_destination_policy_allows_proxy_port_without_relaxing_provider_port():
@@ -329,12 +337,12 @@ def test_parent_forwarder_rejects_policy_mismatch_before_connecting():
 @pytest.mark.parametrize(
     "extra_params",
     (
-        {"defer_remote_eof": False},
-        {"defer_remote_eof": "true"},
-        {"defer_remote_eof": True, "purpose": "upstream_proxy"},
+        {"tunnel_framing": ""},
+        {"tunnel_framing": "length-v2"},
+        {"tunnel_framing": TUNNEL_FRAMING_MODE, "purpose": "upstream_proxy"},
     ),
 )
-def test_parent_forwarder_rejects_noncanonical_deferred_eof_control(extra_params):
+def test_parent_forwarder_rejects_noncanonical_tunnel_framing(extra_params):
     client, parent = socket.socketpair()
     called = []
 
@@ -406,46 +414,125 @@ def test_parent_relay_reports_directional_bytes_and_first_close():
     provider.close()
 
 
-def test_parent_relay_defers_provider_eof_until_enclave_client_closes():
-    enclave, parent = socket.socketpair()
-    upstream, provider = socket.socketpair()
+def test_framed_relay_preserves_large_bidirectional_payload_and_explicit_eof():
+    client, enclave_raw = socket.socketpair()
+    enclave_framed, parent_framed = socket.socketpair()
+    parent_raw, provider = socket.socketpair()
+    request = b"r" * (TUNNEL_FRAME_BYTES * 2 + 137)
+    response = b"s" * (TUNNEL_FRAME_BYTES + 271)
     observed = {}
+    errors = []
+
+    def run(name, *args, **kwargs):
+        try:
+            observed[name] = relay_raw_and_framed(*args, **kwargs)
+        except Exception as exc:
+            errors.append(exc)
+
+    enclave_thread = threading.Thread(
+        target=run,
+        args=("enclave", enclave_raw, enclave_framed),
+        kwargs={
+            "idle_timeout_seconds": 2,
+            "max_bytes_per_direction": len(request) + len(response),
+            "raw_label": "client",
+            "framed_label": "parent",
+        },
+        daemon=True,
+    )
+    parent_thread = threading.Thread(
+        target=run,
+        args=("parent", parent_raw, parent_framed),
+        kwargs={
+            "idle_timeout_seconds": 2,
+            "max_bytes_per_direction": len(request) + len(response),
+            "raw_label": "provider",
+            "framed_label": "enclave",
+        },
+        daemon=True,
+    )
+    enclave_thread.start()
+    parent_thread.start()
+    try:
+        request_thread = threading.Thread(
+            target=client.sendall,
+            args=(request,),
+            daemon=True,
+        )
+        request_thread.start()
+        assert _recv_exact(provider, len(request)) == request
+        request_thread.join(timeout=2)
+        assert not request_thread.is_alive()
+        response_thread = threading.Thread(
+            target=provider.sendall,
+            args=(response,),
+            daemon=True,
+        )
+        response_thread.start()
+        assert _recv_exact(client, len(response)) == response
+        response_thread.join(timeout=2)
+        assert not response_thread.is_alive()
+        provider.shutdown(socket.SHUT_WR)
+        assert client.recv(1) == b""
+        client.shutdown(socket.SHUT_WR)
+        enclave_thread.join(timeout=2)
+        parent_thread.join(timeout=2)
+    finally:
+        for connection in (
+            client,
+            enclave_raw,
+            enclave_framed,
+            parent_framed,
+            parent_raw,
+            provider,
+        ):
+            connection.close()
+
+    assert not enclave_thread.is_alive()
+    assert not parent_thread.is_alive()
+    assert errors == []
+    assert observed["enclave"]["client_to_parent_bytes"] == len(request)
+    assert observed["enclave"]["parent_to_client_bytes"] == len(response)
+    assert observed["parent"]["enclave_to_provider_bytes"] == len(request)
+    assert observed["parent"]["provider_to_enclave_bytes"] == len(response)
+
+
+def test_framed_relay_fails_closed_without_forwarding_truncated_frame():
+    client, raw = socket.socketpair()
+    framed, peer = socket.socketpair()
+    errors = []
 
     def run():
-        observed.update(
-            _relay_bidirectional(
-                parent,
-                upstream,
+        try:
+            relay_raw_and_framed(
+                raw,
+                framed,
                 idle_timeout_seconds=2,
-                defer_right_eof_until_left_close=True,
+                max_bytes_per_direction=1024,
+                raw_label="client",
+                framed_label="parent",
             )
-        )
+        except Exception as exc:
+            errors.append(exc)
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
-    enclave.sendall(b"request")
-    assert provider.recv(64) == b"request"
-    provider.sendall(b"complete-response")
-    provider.shutdown(socket.SHUT_WR)
-    assert enclave.recv(64) == b"complete-response"
-
-    enclave.settimeout(0.1)
-    with pytest.raises(socket.timeout):
-        enclave.recv(1)
-    enclave.settimeout(None)
-    enclave.shutdown(socket.SHUT_WR)
+    peer.sendall((10).to_bytes(4, "big") + b"short")
+    peer.close()
     thread.join(timeout=2)
+    client.settimeout(0.1)
+    try:
+        with pytest.raises(socket.timeout):
+            client.recv(1)
+    finally:
+        client.close()
+        raw.close()
+        framed.close()
 
     assert not thread.is_alive()
-    assert observed == {
-        "enclave_to_provider_bytes": 7,
-        "provider_to_enclave_bytes": 17,
-        "first_closed": "provider",
-    }
-    enclave.close()
-    parent.close()
-    upstream.close()
-    provider.close()
+    assert len(errors) == 1
+    assert isinstance(errors[0], EgressTunnelFramingError)
+    assert "explicit EOF frame" in str(errors[0])
 
 
 def test_parent_relay_tolerates_late_tls_write_after_provider_full_close():
@@ -549,10 +636,7 @@ def test_relays_treat_peer_close_recv_error_as_directional_eof(
     right.close()
 
 
-@pytest.mark.parametrize("defer_remote_eof", (False, True))
-def test_parent_relay_does_not_turn_incomplete_provider_body_into_success(
-    defer_remote_eof,
-):
+def test_parent_relay_does_not_turn_incomplete_provider_body_into_success():
     enclave, parent = socket.socketpair()
     upstream, provider = socket.socketpair()
     errors = []
@@ -563,7 +647,6 @@ def test_parent_relay_does_not_turn_incomplete_provider_body_into_success(
                 parent,
                 upstream,
                 idle_timeout_seconds=2,
-                defer_right_eof_until_left_close=defer_remote_eof,
             )
         except Exception as exc:
             errors.append(exc)
@@ -579,14 +662,8 @@ def test_parent_relay_does_not_turn_incomplete_provider_body_into_success(
 
     response = http.client.HTTPResponse(enclave)
     response.begin()
-    if defer_remote_eof:
-        enclave.settimeout(0.1)
-        with pytest.raises(socket.timeout):
-            response.read()
-        enclave.settimeout(None)
-    else:
-        with pytest.raises(http.client.IncompleteRead):
-            response.read()
+    with pytest.raises(http.client.IncompleteRead):
+        response.read()
     enclave.sendall(b"late-tls-close")
     enclave.shutdown(socket.SHUT_WR)
     thread.join(timeout=2)
@@ -641,7 +718,7 @@ def test_enclave_relay_tolerates_late_client_write_after_parent_full_close():
     parent_side.close()
 
 
-def test_httpx_tls_transport_defers_remote_eof_through_both_relays(
+def test_httpx_tls_transport_uses_explicit_framing_through_both_relays(
     tmp_path: Path,
 ):
     certificate_path, private_key_path = _write_test_server_identity(tmp_path)
@@ -683,8 +760,8 @@ def test_httpx_tls_transport_defers_remote_eof_through_both_relays(
     origin_thread.start()
     host_threads = []
 
-    def open_parent_tunnel(_host, _port, *, defer_remote_eof=False):
-        assert defer_remote_eof is True
+    def open_parent_tunnel(_host, _port, *, tunnel_framing=""):
+        assert tunnel_framing == TUNNEL_FRAMING_MODE
         enclave_side, host_side = socket.socketpair()
         host_thread = threading.Thread(
             target=_handle_connection,
@@ -707,13 +784,14 @@ def test_httpx_tls_transport_defers_remote_eof_through_both_relays(
                     "host": "example.com",
                     "port": 443,
                     "policy_hash": destination_policy_hash(),
-                    "defer_remote_eof": True,
+                    "tunnel_framing": TUNNEL_FRAMING_MODE,
                 },
             }
         )
         enclave_side.sendall(request)
         response = _read_frame(enclave_side)
         assert response["result"]["status"] == "connected"
+        assert response["result"]["tunnel_framing"] == TUNNEL_FRAMING_MODE
         return enclave_side
 
     proxy_port = _unused_loopback_port()
@@ -730,11 +808,11 @@ def test_httpx_tls_transport_defers_remote_eof_through_both_relays(
         result = HTTPXProviderTransport(
             proxy_url=f"http://127.0.0.1:{proxy_port}",
             ca_bundle=str(certificate_path),
-            defer_remote_eof_until_client_close=True,
+            parent_tunnel_framing=TUNNEL_FRAMING_MODE,
         )(
             method="GET",
             url="https://example.com/artifact",
-            headers={"accept": "application/json", "connection": "close"},
+            headers={"accept": "application/json"},
             body=b"",
             timeout_ms=3000,
         )
@@ -753,6 +831,147 @@ def test_httpx_tls_transport_defers_remote_eof_through_both_relays(
     assert result["tls_protocol"].startswith("TLSv1.")
     assert proxy.status().get("last_failure") is None
     assert proxy.status()["last_tunnel"]["parent_to_client_bytes"] > 0
+
+
+def test_httpx_framed_transport_reuses_one_tunnel_under_sustained_load(
+    tmp_path: Path,
+):
+    request_count = 64
+    certificate_path, private_key_path = _write_test_server_identity(tmp_path)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(
+        certfile=str(certificate_path),
+        keyfile=str(private_key_path),
+    )
+    origin_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    origin_listener.bind(("127.0.0.1", 0))
+    origin_listener.listen(1)
+    origin_address = origin_listener.getsockname()
+    origin_connections = []
+    requests_seen = []
+    origin_errors = []
+
+    def serve_origin():
+        try:
+            connection, _address = origin_listener.accept()
+            origin_connections.append(connection)
+            protected = tls_context.wrap_socket(connection, server_side=True)
+            try:
+                for index in range(request_count):
+                    request = bytearray()
+                    while b"\r\n\r\n" not in request:
+                        chunk = protected.recv(4096)
+                        if not chunk:
+                            raise AssertionError("artifact client closed early")
+                        request.extend(chunk)
+                    requests_seen.append(bytes(request))
+                    connection_header = (
+                        b"close" if index == request_count - 1 else b"keep-alive"
+                    )
+                    body = ('{"sequence":%d}' % index).encode("ascii")
+                    protected.sendall(
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Content-Type: application/json\r\n"
+                        b"Content-Length: "
+                        + str(len(body)).encode("ascii")
+                        + b"\r\nConnection: "
+                        + connection_header
+                        + b"\r\n\r\n"
+                        + body
+                    )
+            finally:
+                protected.close()
+        except Exception as exc:
+            origin_errors.append(exc)
+        finally:
+            origin_listener.close()
+
+    origin_thread = threading.Thread(target=serve_origin, daemon=True)
+    origin_thread.start()
+    host_threads = []
+    opened_parent_tunnels = []
+
+    def open_parent_tunnel(_host, _port, *, tunnel_framing=""):
+        assert tunnel_framing == TUNNEL_FRAMING_MODE
+        opened_parent_tunnels.append((_host, _port))
+        enclave_side, host_side = socket.socketpair()
+        host_thread = threading.Thread(
+            target=_handle_connection,
+            kwargs={
+                "connection": host_side,
+                "connector": lambda _name, _number: socket.create_connection(
+                    origin_address,
+                    timeout=2,
+                ),
+                "idle_timeout_seconds": 3,
+            },
+            daemon=True,
+        )
+        host_thread.start()
+        host_threads.append(host_thread)
+        enclave_side.sendall(
+            _frame(
+                {
+                    "method": "connect",
+                    "params": {
+                        "host": "example.com",
+                        "port": 443,
+                        "policy_hash": destination_policy_hash(),
+                        "tunnel_framing": TUNNEL_FRAMING_MODE,
+                    },
+                }
+            )
+        )
+        response = _read_frame(enclave_side)
+        assert response["result"]["tunnel_framing"] == TUNNEL_FRAMING_MODE
+        return enclave_side
+
+    proxy_port = _unused_loopback_port()
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        local_port=proxy_port,
+        loopback_initializer=lambda: None,
+        idle_timeout_seconds=3,
+    )
+    proxy._open_parent_tunnel = open_parent_tunnel
+    proxy._configure_environment = lambda: None
+    proxy.start()
+    transport = HTTPXProviderTransport(
+        proxy_url=f"http://127.0.0.1:{proxy_port}",
+        ca_bundle=str(certificate_path),
+        response_body_ceiling_bytes=1024,
+        allow_authenticated_complete_body_eof=True,
+        parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+    )
+    try:
+        results = [
+            transport(
+                method="GET",
+                url="https://example.com/artifact",
+                headers={"accept": "application/json"},
+                body=b"",
+                timeout_ms=3000,
+                max_response_bytes=1024,
+            )
+            for _ in range(request_count)
+        ]
+    finally:
+        transport.close()
+        proxy.stop()
+        origin_thread.join(timeout=3)
+        for thread in host_threads:
+            thread.join(timeout=3)
+
+    assert origin_errors == []
+    assert len(origin_connections) == 1
+    assert len(opened_parent_tunnels) == 1
+    assert len(requests_seen) == request_count
+    assert all(b"Connection: close" not in request for request in requests_seen)
+    assert [result["body"] for result in results] == [
+        ('{"sequence":%d}' % index).encode("ascii")
+        for index in range(request_count)
+    ]
+    assert proxy.status().get("last_failure") is None
 
 
 def test_httpx_direct_transport_reuses_and_recovers_enclave_tunnel(tmp_path: Path):
@@ -920,12 +1139,14 @@ def test_enclave_proxy_parses_connect_without_exposing_http_payload():
     }
 
 
-def test_enclave_proxy_accepts_exact_deferred_eof_opt_in():
+def test_enclave_proxy_accepts_exact_tunnel_framing_opt_in():
     parsed = _parse_proxy_request(
         b"CONNECT immutable.example:443 HTTP/1.1\r\n"
         b"Host: immutable.example:443\r\n"
-        + DEFER_REMOTE_EOF_HEADER.encode("ascii")
-        + b": 1\r\n\r\n"
+        + TUNNEL_FRAMING_HEADER.encode("ascii")
+        + b": "
+        + TUNNEL_FRAMING_MODE.encode("ascii")
+        + b"\r\n\r\n"
     )
 
     assert parsed == {
@@ -934,34 +1155,49 @@ def test_enclave_proxy_accepts_exact_deferred_eof_opt_in():
         "port": 443,
         "forward_headers": b"",
         "tls_protected": True,
-        "defer_remote_eof": True,
+        "tunnel_framing": TUNNEL_FRAMING_MODE,
     }
 
 
-@pytest.mark.parametrize("value", (b"0", b"true", b"1, 1"))
-def test_enclave_proxy_rejects_invalid_deferred_eof_opt_in(value):
-    with pytest.raises(EnclaveEgressProxyError, match="deferred EOF header"):
+def test_enclave_proxy_rejects_duplicate_tunnel_framing_opt_in():
+    framing_header = TUNNEL_FRAMING_HEADER.encode("ascii")
+    with pytest.raises(EnclaveEgressProxyError, match="duplicated"):
         _parse_proxy_request(
             b"CONNECT immutable.example:443 HTTP/1.1\r\n"
             b"Host: immutable.example:443\r\n"
-            + DEFER_REMOTE_EOF_HEADER.encode("ascii")
+            + framing_header
+            + b": length-v1\r\n"
+            + framing_header
+            + b": length-v1\r\n\r\n"
+        )
+
+
+@pytest.mark.parametrize("value", (b"", b"length-v2", b"length-v1, length-v1"))
+def test_enclave_proxy_rejects_invalid_tunnel_framing_opt_in(value):
+    with pytest.raises(EnclaveEgressProxyError, match="tunnel framing header"):
+        _parse_proxy_request(
+            b"CONNECT immutable.example:443 HTTP/1.1\r\n"
+            b"Host: immutable.example:443\r\n"
+            + TUNNEL_FRAMING_HEADER.encode("ascii")
             + b": "
             + value
             + b"\r\n\r\n"
         )
 
 
-def test_enclave_proxy_rejects_deferred_eof_with_upstream_proxy():
+def test_enclave_proxy_rejects_tunnel_framing_with_upstream_proxy():
     encoded = base64.b64encode(b"https://worker:secret@proxy.example.com:443")
-    with pytest.raises(EnclaveEgressProxyError, match="cannot defer remote EOF"):
+    with pytest.raises(EnclaveEgressProxyError, match="cannot use framed"):
         _parse_proxy_request(
             b"CONNECT immutable.example:443 HTTP/1.1\r\n"
             b"Host: immutable.example:443\r\n"
             b"X-Leadpoet-Upstream-Proxy-B64: "
             + encoded
             + b"\r\n"
-            + DEFER_REMOTE_EOF_HEADER.encode("ascii")
-            + b": 1\r\n\r\n"
+            + TUNNEL_FRAMING_HEADER.encode("ascii")
+            + b": "
+            + TUNNEL_FRAMING_MODE.encode("ascii")
+            + b"\r\n\r\n"
         )
 
 
@@ -1233,6 +1469,108 @@ def test_enclave_parent_handshake_uses_same_length_prefixed_json_contract():
     assert tunnel is adapted_enclave
     thread.join(timeout=2)
     enclave.close()
+    parent.close()
+
+
+def test_enclave_parent_handshake_binds_exact_framing_mode():
+    enclave, parent = socket.socketpair()
+
+    class _VsockAdapter:
+        def connect(self, _address):
+            return None
+
+        def sendall(self, data):
+            return enclave.sendall(data)
+
+        def recv(self, size):
+            return enclave.recv(size)
+
+        def close(self):
+            return enclave.close()
+
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        socket_factory=lambda *_args: _VsockAdapter(),
+        idle_timeout_seconds=2,
+    )
+
+    def parent_side():
+        request = _read_frame(parent)
+        assert request["params"] == {
+            "host": "immutable.example",
+            "port": 443,
+            "policy_hash": destination_policy_hash(),
+            "tunnel_framing": TUNNEL_FRAMING_MODE,
+        }
+        parent.sendall(
+            _frame(
+                {
+                    "result": {
+                        "status": "connected",
+                        "policy_hash": destination_policy_hash(),
+                        "tunnel_framing": TUNNEL_FRAMING_MODE,
+                    }
+                }
+            )
+        )
+
+    thread = threading.Thread(target=parent_side, daemon=True)
+    thread.start()
+    tunnel = proxy._open_parent_tunnel(
+        "immutable.example",
+        443,
+        tunnel_framing=TUNNEL_FRAMING_MODE,
+    )
+    assert isinstance(tunnel, _VsockAdapter)
+    thread.join(timeout=2)
+    enclave.close()
+    parent.close()
+
+
+def test_enclave_parent_handshake_rejects_framing_downgrade():
+    enclave, parent = socket.socketpair()
+
+    class _VsockAdapter:
+        def connect(self, _address):
+            return None
+
+        def sendall(self, data):
+            return enclave.sendall(data)
+
+        def recv(self, size):
+            return enclave.recv(size)
+
+        def close(self):
+            return enclave.close()
+
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        socket_factory=lambda *_args: _VsockAdapter(),
+        idle_timeout_seconds=2,
+    )
+
+    def parent_side():
+        _read_frame(parent)
+        parent.sendall(
+            _frame(
+                {
+                    "result": {
+                        "status": "connected",
+                        "policy_hash": destination_policy_hash(),
+                    }
+                }
+            )
+        )
+
+    thread = threading.Thread(target=parent_side, daemon=True)
+    thread.start()
+    with pytest.raises(EnclaveEgressProxyError, match="framing mismatch"):
+        proxy._open_parent_tunnel(
+            "immutable.example",
+            443,
+            tunnel_framing=TUNNEL_FRAMING_MODE,
+        )
+    thread.join(timeout=2)
     parent.close()
 
 

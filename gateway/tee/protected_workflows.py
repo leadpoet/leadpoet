@@ -637,6 +637,35 @@ PROTECTED_SYMBOLS = {
         "ProviderBrokerV2",
         "provider_registry_document",
     ),
+    "gateway/tee/egress_framing.py": (
+        "TUNNEL_FRAMING_HEADER",
+        "TUNNEL_FRAMING_MODE",
+        "TUNNEL_FRAME_BYTES",
+        "EgressTunnelFramingError",
+        "_receive_exact_until",
+        "send_tunnel_frame",
+        "receive_tunnel_frame",
+        "relay_raw_and_framed",
+    ),
+    "gateway/tee/egress_policy.py": (
+        "EGRESS_POLICY_VERSION",
+        "ALLOWED_PORTS",
+        "policy_document",
+        "destination_policy_hash",
+    ),
+    "gateway/tee/egress_proxy.py": (
+        "_parse_proxy_request",
+        "EnclaveEgressProxy",
+    ),
+    "gateway/tee/artifact_persistence_v2.py": (
+        "_ArtifactVerificationTransportPool",
+        "_ArtifactVerificationTransportSession",
+        "ArtifactPersistenceVerifierV2",
+    ),
+    "gateway/utils/tee_egress_forwarder.py": (
+        "_handle_connection",
+        "TEEEgressForwarder",
+    ),
     "gateway/tee/provider_semantics_v2.py": (
         "ProviderSemanticsAuthorityV2",
     ),

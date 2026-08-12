@@ -132,6 +132,33 @@ def test_model_sandbox_launcher_boundaries_are_protected():
     } <= set(PROTECTED_SYMBOLS["gateway/tee/model_sandbox_v2.py"])
 
 
+def test_artifact_egress_transport_boundaries_are_protected():
+    assert {
+        "TUNNEL_FRAMING_HEADER",
+        "TUNNEL_FRAMING_MODE",
+        "send_tunnel_frame",
+        "receive_tunnel_frame",
+        "relay_raw_and_framed",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/egress_framing.py"])
+    assert {
+        "policy_document",
+        "destination_policy_hash",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/egress_policy.py"])
+    assert {
+        "_parse_proxy_request",
+        "EnclaveEgressProxy",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/egress_proxy.py"])
+    assert {
+        "_ArtifactVerificationTransportPool",
+        "_ArtifactVerificationTransportSession",
+        "ArtifactPersistenceVerifierV2",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/artifact_persistence_v2.py"])
+    assert {
+        "_handle_connection",
+        "TEEEgressForwarder",
+    } <= set(PROTECTED_SYMBOLS["gateway/utils/tee_egress_forwarder.py"])
+
+
 def test_protected_manifest_detects_logic_change(tmp_path: Path):
     committed = load_manifest(MANIFEST_PATH)
     manifest = build_manifest(

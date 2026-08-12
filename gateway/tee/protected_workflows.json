@@ -987,6 +987,21 @@
       "symbol": "hourly_batch_task"
     },
     {
+      "ast_sha256": "sha256:416ebc1460323275132b2c16f10db13456ac0e2a980128c440cee6a97d0f6d44",
+      "path": "gateway/tee/artifact_persistence_v2.py",
+      "symbol": "ArtifactPersistenceVerifierV2"
+    },
+    {
+      "ast_sha256": "sha256:7b0ea6a6b1fa4e0700da3e044514ff2597f2004f41e9d406a34634fd92f3b0b5",
+      "path": "gateway/tee/artifact_persistence_v2.py",
+      "symbol": "_ArtifactVerificationTransportPool"
+    },
+    {
+      "ast_sha256": "sha256:e0bcc0af1bfed2d333e29add5b7601943fbc9b4f87bcd4ec33819308e7e806d6",
+      "path": "gateway/tee/artifact_persistence_v2.py",
+      "symbol": "_ArtifactVerificationTransportSession"
+    },
+    {
       "ast_sha256": "sha256:8dd58d8a0378cea9368537f2ad5084489199d18440f668922af70328bb559583",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
@@ -1130,6 +1145,76 @@
       "ast_sha256": "sha256:1306bad50d0efdb5d9e96c9170c2adaf08ae0f37cb828cd4e6e45aabdbcd91f6",
       "path": "gateway/tee/coordinator_weight_source_v2.py",
       "symbol": "CoordinatorWeightSourceV2"
+    },
+    {
+      "ast_sha256": "sha256:504ca7346c96b0fda87c5baf09adf5331e5301b4ad4e2d85f811613d811cf922",
+      "path": "gateway/tee/egress_framing.py",
+      "symbol": "EgressTunnelFramingError"
+    },
+    {
+      "ast_sha256": "sha256:763808805ac39bec415566b12f03d30ef5d13654a59caad3874ca45a70c9cc50",
+      "path": "gateway/tee/egress_framing.py",
+      "symbol": "TUNNEL_FRAME_BYTES"
+    },
+    {
+      "ast_sha256": "sha256:e3501b44108375e32bdfd875e1d8fa414a611c14c0e0fa4db3a11f5b4becd122",
+      "path": "gateway/tee/egress_framing.py",
+      "symbol": "TUNNEL_FRAMING_HEADER"
+    },
+    {
+      "ast_sha256": "sha256:8e07a9cea7c863bab5cdee15e74baecfb082558d85c26daf4c5a9c8ec8ca0c49",
+      "path": "gateway/tee/egress_framing.py",
+      "symbol": "TUNNEL_FRAMING_MODE"
+    },
+    {
+      "ast_sha256": "sha256:35b09eb4dab4b92626f418fd6cb44f25d5be1b6a5dfea75530efd0fd33dc221d",
+      "path": "gateway/tee/egress_framing.py",
+      "symbol": "_receive_exact_until"
+    },
+    {
+      "ast_sha256": "sha256:5b01c5cf12d75575cf607e5df56c73e3126e8b6f8ee2b98464520e9bfdb1b87f",
+      "path": "gateway/tee/egress_framing.py",
+      "symbol": "receive_tunnel_frame"
+    },
+    {
+      "ast_sha256": "sha256:ad127b1e95added7fb46bc01b414a649c8a51a7b5303a1875a51c3ec6b2b817e",
+      "path": "gateway/tee/egress_framing.py",
+      "symbol": "relay_raw_and_framed"
+    },
+    {
+      "ast_sha256": "sha256:f28e05d7e500d04104eb1e5e5a38d30427a10ae65bf06f49afa04649de505d45",
+      "path": "gateway/tee/egress_framing.py",
+      "symbol": "send_tunnel_frame"
+    },
+    {
+      "ast_sha256": "sha256:f6ee2290d3ab8d8af9ed05e219853eb37fa420faaf0f585d35d541f22fbe271f",
+      "path": "gateway/tee/egress_policy.py",
+      "symbol": "ALLOWED_PORTS"
+    },
+    {
+      "ast_sha256": "sha256:1a83b28d95d0b3d887c4fe2abcaefc61e9e44bc3e39f280083700366e9b2e866",
+      "path": "gateway/tee/egress_policy.py",
+      "symbol": "EGRESS_POLICY_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:5181720540e10a8d42f03f50628ffd48b4ba052e8666f95b31ff09b51d4b4752",
+      "path": "gateway/tee/egress_policy.py",
+      "symbol": "destination_policy_hash"
+    },
+    {
+      "ast_sha256": "sha256:147657632582b604561171ecc68f5eaeb49059008748818f50cb9b088124bdf3",
+      "path": "gateway/tee/egress_policy.py",
+      "symbol": "policy_document"
+    },
+    {
+      "ast_sha256": "sha256:642a5ef042a201315f9f4db6b31607a10838dd09d481f82e7c969c3ee58c38f8",
+      "path": "gateway/tee/egress_proxy.py",
+      "symbol": "EnclaveEgressProxy"
+    },
+    {
+      "ast_sha256": "sha256:f8d670dfe4c6ee6cffbb562941dbcb5bc23c09b7d5f9666428653fb0dfb23843",
+      "path": "gateway/tee/egress_proxy.py",
+      "symbol": "_parse_proxy_request"
     },
     {
       "ast_sha256": "sha256:4e67bf654cb46e0ff990514f49a0ee38b568b30c0d4bd37e525ff78af1ae2ec0",
@@ -1312,7 +1397,7 @@
       "symbol": "write_identity_to_tmpfs"
     },
     {
-      "ast_sha256": "sha256:68c1af4aeb895b6ca97d23c0c680314b6b0ded3b928f2979a3d3304a120c35ec",
+      "ast_sha256": "sha256:8002bf622f687100c756eab43daa68b3e79c76389f5d43237bfda5b3bb80d394",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -1640,6 +1725,16 @@
       "ast_sha256": "sha256:31f445dbb9fd20c62058465d6e0407c19cca53594b523f3661342e4a31ff3791",
       "path": "gateway/utils/arweave_client.py",
       "symbol": "wait_for_confirmation"
+    },
+    {
+      "ast_sha256": "sha256:9e987a307d9feff4319851f13e3cd6c3dd57a0906e27d564ab03ac1f00acba1f",
+      "path": "gateway/utils/tee_egress_forwarder.py",
+      "symbol": "TEEEgressForwarder"
+    },
+    {
+      "ast_sha256": "sha256:701f778d97c58a63c936c1b9c19cd4f2e3d44e61655d0cf079ef09d726ab51b1",
+      "path": "gateway/utils/tee_egress_forwarder.py",
+      "symbol": "_handle_connection"
     },
     {
       "ast_sha256": "sha256:e06e39974f04169a5acca07e59cbe47edb9417b4a5f88e1b2aff99e25d670785",
@@ -2607,7 +2702,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:82bd17b6b66de77731b4cc446cd0fc1b9d2148946afa1cb99787f34b314117e7",
+  "manifest_hash": "sha256:d11a5178b0d41a4593cbca8848981b78cbc557c00067a895e8bc2bff707f5247",
   "protected_source_commit": "58b657e12b3c88ce33500cd0f6b525635d520e9d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

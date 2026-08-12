@@ -25,6 +25,10 @@ from gateway.tee.egress_policy import (
     normalize_destination,
     normalize_proxy_destination,
 )
+from gateway.tee.egress_framing import (
+    TUNNEL_FRAMING_MODE,
+    relay_raw_and_framed,
+)
 from gateway.utils.tee_client import AF_VSOCK, _recv_exact
 
 
@@ -140,7 +144,6 @@ def _relay_bidirectional(
     right: Any,
     *,
     idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
-    defer_right_eof_until_left_close: bool = False,
 ) -> Dict[str, Any]:
     peers = {left: right, right: left}
     active = {left, right}
@@ -167,15 +170,10 @@ def _relay_bidirectional(
                 if not first_closed:
                     first_closed = "enclave" if source is left else "provider"
                 active.discard(source)
-                # AF_VSOCK may expose SHUT_WR before bytes accepted by sendall()
-                # are consumed by the enclave. For explicitly framed enclave
-                # reads, let the authenticated client close after consuming the
-                # declared body instead of racing it with a parent half-close.
-                if not (defer_right_eof_until_left_close and source is right):
-                    try:
-                        destination.shutdown(socket.SHUT_WR)
-                    except Exception:
-                        pass
+                try:
+                    destination.shutdown(socket.SHUT_WR)
+                except Exception:
+                    pass
                 continue
             next_total = transferred[source] + len(data)
             if next_total > MAX_TUNNEL_BYTES_PER_DIRECTION:
@@ -234,7 +232,7 @@ def _handle_connection(
             raise TEEEgressForwarderError("egress control method is invalid")
         params = request["params"]
         base_params = {"host", "port", "policy_hash"}
-        allowed_params = base_params | {"purpose", "defer_remote_eof"}
+        allowed_params = base_params | {"purpose", "tunnel_framing"}
         if (
             not base_params.issubset(params)
             or not set(params).issubset(allowed_params)
@@ -243,22 +241,24 @@ def _handle_connection(
         if params.get("policy_hash") != destination_policy_hash():
             raise TEEEgressForwarderError("egress policy hash mismatch")
         purpose = str(params.get("purpose") or "provider")
-        defer_remote_eof = False
-        if "defer_remote_eof" in params:
-            if params["defer_remote_eof"] is not True:
-                raise TEEEgressForwarderError(
-                    "egress deferred EOF policy is invalid"
-                )
-            defer_remote_eof = True
+        tunnel_framing = str(params.get("tunnel_framing") or "")
+        if tunnel_framing and tunnel_framing != TUNNEL_FRAMING_MODE:
+            raise TEEEgressForwarderError(
+                "egress tunnel framing is invalid"
+            )
+        if "tunnel_framing" in params and not tunnel_framing:
+            raise TEEEgressForwarderError(
+                "egress tunnel framing is invalid"
+            )
         if purpose == "provider":
             host, port = normalize_destination(
                 params.get("host"),
                 params.get("port"),
             )
         elif purpose == "upstream_proxy":
-            if defer_remote_eof:
+            if tunnel_framing:
                 raise TEEEgressForwarderError(
-                    "upstream proxy cannot defer remote EOF"
+                    "upstream proxy cannot use framed parent tunnel"
                 )
             host, port = normalize_proxy_destination(
                 params.get("host"),
@@ -274,16 +274,30 @@ def _handle_connection(
                 "result": {
                     "status": "connected",
                     "policy_hash": destination_policy_hash(),
+                    **(
+                        {"tunnel_framing": tunnel_framing}
+                        if tunnel_framing
+                        else {}
+                    ),
                 }
             },
         )
         connected = True
-        relay = _relay_bidirectional(
-            connection,
-            upstream,
-            idle_timeout_seconds=idle_timeout_seconds,
-            defer_right_eof_until_left_close=defer_remote_eof,
-        )
+        if tunnel_framing == TUNNEL_FRAMING_MODE:
+            relay = relay_raw_and_framed(
+                upstream,
+                connection,
+                idle_timeout_seconds=idle_timeout_seconds,
+                max_bytes_per_direction=MAX_TUNNEL_BYTES_PER_DIRECTION,
+                raw_label="provider",
+                framed_label="enclave",
+            )
+        else:
+            relay = _relay_bidirectional(
+                connection,
+                upstream,
+                idle_timeout_seconds=idle_timeout_seconds,
+            )
         logger.info(
             "gateway_tee_egress_tunnel_closed destination_ref=%s "
             "enclave_to_provider_bytes=%d provider_to_enclave_bytes=%d "

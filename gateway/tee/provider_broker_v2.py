@@ -20,11 +20,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from httpx import SyncByteStream
 
-from gateway.tee.egress_policy import (
-    DEFER_REMOTE_EOF_HEADER,
-    normalize_destination,
-    normalize_proxy_destination,
+from gateway.tee.egress_framing import (
+    TUNNEL_FRAMING_HEADER,
+    TUNNEL_FRAMING_MODE,
 )
+from gateway.tee.egress_policy import normalize_destination, normalize_proxy_destination
 from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
@@ -510,7 +510,7 @@ class HTTPXProviderTransport:
         ca_bundle: Optional[str] = None,
         response_body_ceiling_bytes: int = MAX_RESPONSE_BODY_BYTES,
         allow_authenticated_complete_body_eof: bool = False,
-        defer_remote_eof_until_client_close: bool = False,
+        parent_tunnel_framing: str = "",
     ) -> None:
         if (
             isinstance(response_body_ceiling_bytes, bool)
@@ -526,9 +526,9 @@ class HTTPXProviderTransport:
             raise ProviderBrokerV2Error(
                 "provider transport complete-body EOF policy is invalid"
             )
-        if not isinstance(defer_remote_eof_until_client_close, bool):
+        if parent_tunnel_framing not in {"", TUNNEL_FRAMING_MODE}:
             raise ProviderBrokerV2Error(
-                "provider transport deferred EOF policy is invalid"
+                "provider transport tunnel framing is invalid"
             )
         self.proxy_url = proxy_url
         self.ca_bundle = ca_bundle
@@ -536,9 +536,7 @@ class HTTPXProviderTransport:
         self.allow_authenticated_complete_body_eof = (
             allow_authenticated_complete_body_eof
         )
-        self.defer_remote_eof_until_client_close = (
-            defer_remote_eof_until_client_close
-        )
+        self.parent_tunnel_framing = parent_tunnel_framing
         self._direct_client = None
         self._direct_client_lock = threading.Lock()
 
@@ -553,8 +551,10 @@ class HTTPXProviderTransport:
 
         verify_path = self.ca_bundle or certifi.where()
         normalized_proxy_headers = dict(proxy_headers or {})
-        if self.defer_remote_eof_until_client_close:
-            normalized_proxy_headers[DEFER_REMOTE_EOF_HEADER] = "1"
+        if self.parent_tunnel_framing:
+            normalized_proxy_headers[TUNNEL_FRAMING_HEADER] = (
+                self.parent_tunnel_framing
+            )
         return httpx.Client(
             proxy=httpx.Proxy(
                 self.proxy_url,

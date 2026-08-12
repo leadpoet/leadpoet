@@ -22,8 +22,13 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
+from gateway.tee.egress_framing import (
+    TUNNEL_FRAMING_HEADER,
+    TUNNEL_FRAMING_MODE,
+    relay_raw_and_framed,
+    send_tunnel_frame,
+)
 from gateway.tee.egress_policy import (
-    DEFER_REMOTE_EOF_HEADER,
     destination_policy_hash,
     normalize_destination,
     normalize_proxy_destination,
@@ -207,7 +212,7 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
         raise EnclaveEgressProxyError("proxy HTTP version is unsupported")
     if method == "CONNECT":
         upstream_values = []
-        deferred_eof_values = []
+        tunnel_framing_values = []
         for line in lines[1:]:
             if not line:
                 break
@@ -216,17 +221,17 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
             name, value = line.split(":", 1)
             if name.strip().lower() == UPSTREAM_PROXY_HEADER:
                 upstream_values.append(value.strip())
-            if name.strip().lower() == DEFER_REMOTE_EOF_HEADER:
-                deferred_eof_values.append(value.strip())
+            if name.strip().lower() == TUNNEL_FRAMING_HEADER:
+                tunnel_framing_values.append(value.strip())
         if len(upstream_values) > 1:
             raise EnclaveEgressProxyError("upstream proxy header is duplicated")
-        if len(deferred_eof_values) > 1:
-            raise EnclaveEgressProxyError("deferred EOF header is duplicated")
-        defer_remote_eof = False
-        if deferred_eof_values:
-            if deferred_eof_values != ["1"]:
-                raise EnclaveEgressProxyError("deferred EOF header is invalid")
-            defer_remote_eof = True
+        if len(tunnel_framing_values) > 1:
+            raise EnclaveEgressProxyError("tunnel framing header is duplicated")
+        tunnel_framing = ""
+        if tunnel_framing_values:
+            if tunnel_framing_values != [TUNNEL_FRAMING_MODE]:
+                raise EnclaveEgressProxyError("tunnel framing header is invalid")
+            tunnel_framing = TUNNEL_FRAMING_MODE
         upstream_proxy_url = ""
         if upstream_values:
             try:
@@ -240,9 +245,9 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
                 ) from exc
             if len(upstream_proxy_url.encode("utf-8")) > 16 * 1024:
                 raise EnclaveEgressProxyError("upstream proxy URL exceeds limit")
-        if upstream_proxy_url and defer_remote_eof:
+        if upstream_proxy_url and tunnel_framing:
             raise EnclaveEgressProxyError(
-                "upstream proxy cannot defer remote EOF"
+                "upstream proxy cannot use framed parent tunnel"
             )
         host, port = _parse_authority(target, 443)
         request = {
@@ -252,8 +257,8 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
             "forward_headers": b"",
             "tls_protected": True,
         }
-        if defer_remote_eof:
-            request["defer_remote_eof"] = True
+        if tunnel_framing:
+            request["tunnel_framing"] = tunnel_framing
         if upstream_proxy_url:
             request["upstream_proxy_url"] = upstream_proxy_url
         return request
@@ -452,7 +457,7 @@ class EnclaveEgressProxy:
         port: int,
         *,
         purpose: str = "provider",
-        defer_remote_eof: bool = False,
+        tunnel_framing: str = "",
     ) -> Any:
         parent = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
         try:
@@ -463,15 +468,19 @@ class EnclaveEgressProxy:
                 "policy_hash": destination_policy_hash(),
             }
             if purpose == "upstream_proxy":
-                if defer_remote_eof:
+                if tunnel_framing:
                     raise EnclaveEgressProxyError(
-                        "upstream proxy cannot defer remote EOF"
+                        "upstream proxy cannot use framed parent tunnel"
                     )
                 params["purpose"] = purpose
             elif purpose != "provider":
                 raise EnclaveEgressProxyError("parent egress purpose is invalid")
-            if defer_remote_eof:
-                params["defer_remote_eof"] = True
+            if tunnel_framing:
+                if tunnel_framing != TUNNEL_FRAMING_MODE:
+                    raise EnclaveEgressProxyError(
+                        "parent egress tunnel framing is invalid"
+                    )
+                params["tunnel_framing"] = tunnel_framing
             request = _canonical_json(
                 {
                     "method": "connect",
@@ -496,6 +505,8 @@ class EnclaveEgressProxy:
                 raise EnclaveEgressProxyError("parent refused egress destination")
             if result.get("policy_hash") != destination_policy_hash():
                 raise EnclaveEgressProxyError("parent egress policy hash mismatch")
+            if str(result.get("tunnel_framing") or "") != tunnel_framing:
+                raise EnclaveEgressProxyError("parent egress tunnel framing mismatch")
             return parent
         except Exception:
             try:
@@ -616,11 +627,11 @@ class EnclaveEgressProxy:
                 )
             else:
                 failure_stage = "open_parent_tunnel"
-                if request.get("defer_remote_eof") is True:
+                if request.get("tunnel_framing") == TUNNEL_FRAMING_MODE:
                     parent = self._open_parent_tunnel(
                         host,
                         port,
-                        defer_remote_eof=True,
+                        tunnel_framing=TUNNEL_FRAMING_MODE,
                     )
                 else:
                     parent = self._open_parent_tunnel(host, port)
@@ -630,13 +641,26 @@ class EnclaveEgressProxy:
             else:
                 parent.sendall(request["forward_headers"])
             if remainder:
-                parent.sendall(remainder)
+                if request.get("tunnel_framing") == TUNNEL_FRAMING_MODE:
+                    send_tunnel_frame(parent, remainder)
+                else:
+                    parent.sendall(remainder)
             failure_stage = "relay_tls_tunnel"
-            relay = _relay_bidirectional(
-                client,
-                parent,
-                idle_timeout_seconds=self._idle_timeout_seconds,
-            )
+            if request.get("tunnel_framing") == TUNNEL_FRAMING_MODE:
+                relay = relay_raw_and_framed(
+                    client,
+                    parent,
+                    idle_timeout_seconds=self._idle_timeout_seconds,
+                    max_bytes_per_direction=MAX_TUNNEL_BYTES_PER_DIRECTION,
+                    raw_label="client",
+                    framed_label="parent",
+                )
+            else:
+                relay = _relay_bidirectional(
+                    client,
+                    parent,
+                    idle_timeout_seconds=self._idle_timeout_seconds,
+                )
             with self._status_lock:
                 self._last_tunnel = {
                     "stage": failure_stage,

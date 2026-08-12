@@ -32,6 +32,14 @@ COMPACT_SUBMISSION_HASH = "sha256:" + "1" * 64
 LINEAGE_ID = "sha256:" + "2" * 64
 
 
+@pytest.fixture(autouse=True)
+def _isolate_weight_input_request_state(monkeypatch):
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_AUTHORIZATIONS", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RETRY_GENERATIONS", {})
+
+
 def _request(*, accept_encoding: str = "", query_string: bytes = b"") -> Request:
     headers = []
     if accept_encoding:
@@ -1103,6 +1111,120 @@ async def test_weight_inputs_v2_failed_shared_load_does_not_poison_retry(
         "request_hash"
     ]
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_weight_inputs_v2_dependency_retry_uses_fresh_measured_generation(
+    monkeypatch,
+):
+    from gateway.research_lab import (
+        attested_coordinator_v2,
+        attested_v2_store,
+        attested_weight_inputs_v2,
+    )
+    from gateway.research_lab.attested_scoring_v2 import AttestedScoringV2Error
+    from leadpoet_canonical.weight_authority_v2 import (
+        GATEWAY_WEIGHT_INPUT_CATEGORIES,
+    )
+
+    sequences = []
+
+    async def load_graph(**_kwargs):
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def execute(**kwargs):
+        sequences.append(kwargs["sequence"])
+        if len(sequences) == 1:
+            raise AttestedScoringV2Error(
+                "V2 scoring failed closed: execution_supabasesourcev2error"
+            )
+        return {"status": "succeeded"}
+
+    async def build_inputs(*, execute, **_kwargs):
+        await execute(sequence=0)
+        return {"input_receipt_hashes": {}}
+
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RETRY_GENERATIONS", {})
+    monkeypatch.setattr(attested_v2_store, "load_business_artifact_graph_v2", load_graph)
+    monkeypatch.setattr(attested_coordinator_v2, "execute_coordinator_v2", execute)
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        build_inputs,
+    )
+
+    kwargs = {
+        "request_hash": "sha256:" + "a" * 64,
+        "epoch_id": 300,
+        "allocation_hash": "sha256:" + "9" * 64,
+        "calculation_snapshot": {"epoch_id": 300},
+        "leaderboard_window_start": "2026-07-03T20:00:00Z",
+        "leaderboard_window_end": "2026-07-10T20:00:00Z",
+    }
+    with pytest.raises(AttestedScoringV2Error):
+        await weights_api._build_weight_inputs_v2_singleflight(**kwargs)
+    await asyncio.sleep(0)
+
+    result = await weights_api._build_weight_inputs_v2_singleflight(**kwargs)
+
+    assert result == {"input_receipt_hashes": {}}
+    assert sequences == [0, len(GATEWAY_WEIGHT_INPUT_CATEGORIES)]
+
+
+@pytest.mark.asyncio
+async def test_weight_inputs_v2_snapshot_drift_does_not_advance_generation(
+    monkeypatch,
+):
+    from gateway.research_lab import (
+        attested_coordinator_v2,
+        attested_v2_store,
+        attested_weight_inputs_v2,
+    )
+    from gateway.research_lab.attested_weight_inputs_v2 import (
+        WeightInputSnapshotDriftV2Error,
+    )
+
+    sequences = []
+
+    async def load_graph(**_kwargs):
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def execute(**kwargs):
+        sequences.append(kwargs["sequence"])
+        raise WeightInputSnapshotDriftV2Error(
+            "bans measured input differs from calculation"
+        )
+
+    async def build_inputs(*, execute, **_kwargs):
+        await execute(sequence=0)
+
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RETRY_GENERATIONS", {})
+    monkeypatch.setattr(attested_v2_store, "load_business_artifact_graph_v2", load_graph)
+    monkeypatch.setattr(attested_coordinator_v2, "execute_coordinator_v2", execute)
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        build_inputs,
+    )
+
+    kwargs = {
+        "request_hash": "sha256:" + "b" * 64,
+        "epoch_id": 300,
+        "allocation_hash": "sha256:" + "9" * 64,
+        "calculation_snapshot": {"epoch_id": 300},
+        "leaderboard_window_start": "2026-07-03T20:00:00Z",
+        "leaderboard_window_end": "2026-07-10T20:00:00Z",
+    }
+    for _ in range(2):
+        with pytest.raises(WeightInputSnapshotDriftV2Error):
+            await weights_api._build_weight_inputs_v2_singleflight(**kwargs)
+        await asyncio.sleep(0)
+
+    assert sequences == [0, 0]
 
 
 @pytest.mark.asyncio

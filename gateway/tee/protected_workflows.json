@@ -27,7 +27,7 @@
       "symbol": "get_compact_published_weights_v2"
     },
     {
-      "ast_sha256": "sha256:e298f8e841298f56155a3b51f447c92a87192ce6cbf6ab5d9a7bcdf663bb1aa0",
+      "ast_sha256": "sha256:fe3ced9acc143a93c68f661bfd44e93bf7d61caae14f21d473f03a6e259ecd27",
       "path": "gateway/api/weights.py",
       "symbol": "get_weight_inputs_v2"
     },
@@ -2707,7 +2707,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:cfd72ef54f8f9a2ddf99ae0ab88066defd1aafa3c5afa766839c20b5438ef827",
+  "manifest_hash": "sha256:809f7021eb5f98cc01d263dfcd6738672d4b7dcf8779a51b83e89fdc578f7ca3",
   "protected_source_commit": "2501432f4782582567557c799276a82f9689659b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

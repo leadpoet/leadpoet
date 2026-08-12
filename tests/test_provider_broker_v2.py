@@ -610,6 +610,107 @@ def test_httpx_transport_accepts_complete_chunked_json_before_eof():
     assert result["body"] == body
 
 
+def test_httpx_transport_accepts_complete_http2_json_before_terminal_eof():
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class NetworkStream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    body = b'[{"receipt_hash":"sha256:' + (b"a" * 64) + b'"}]'
+
+    class CompleteJSONThenEOF(httpx.SyncByteStream):
+        def __iter__(self):
+            yield body[:11]
+            yield body[11:]
+            raise httpx.RemoteProtocolError(
+                "peer closed after DATA without relaying END_STREAM"
+            )
+
+        def close(self):
+            return None
+
+    response = httpx.Response(
+        200,
+        headers={"content-type": "application/json; charset=utf-8"},
+        stream=CompleteJSONThenEOF(),
+        extensions={
+            "http_version": b"HTTP/2",
+            "network_stream": NetworkStream(),
+        },
+        request=httpx.Request("GET", "https://example.com/rest/v1/receipts"),
+    )
+
+    class ResponseContext:
+        def __enter__(self):
+            return response
+
+        def __exit__(self, *_args):
+            response.close()
+
+    class Client:
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+    result = HTTPXProviderTransport._execute_with_client(
+        Client(),
+        method="GET",
+        url="https://example.com/rest/v1/receipts",
+        headers={},
+        body=b"",
+        timeout_seconds=1.0,
+        max_response_bytes=1024,
+        allow_authenticated_complete_body_eof=True,
+    )
+
+    assert result["http_status"] == 200
+    assert result["body"] == body
+
+
+@pytest.mark.parametrize(
+    ("http_version", "status", "headers", "body"),
+    (
+        ("HTTP/1.1", 200, {"content-type": "application/json"}, b"[]"),
+        ("HTTP/2", 500, {"content-type": "application/json"}, b"[]"),
+        ("HTTP/2", 200, {"content-type": "text/plain"}, b"[]"),
+        (
+            "HTTP/2",
+            200,
+            {"content-type": "application/json", "content-encoding": "gzip"},
+            b"[]",
+        ),
+        ("HTTP/2", 200, {"content-type": "application/json"}, b'[{"x":1}'),
+        ("HTTP/2", 200, {"content-type": "application/json"}, b"true"),
+    ),
+)
+def test_complete_body_classifier_rejects_ambiguous_unframed_response(
+    http_version,
+    status,
+    headers,
+    body,
+):
+    response = SimpleNamespace(
+        status_code=status,
+        headers=httpx.Headers(headers),
+        http_version=http_version,
+    )
+
+    assert not _authenticated_body_is_complete_after_stream_error(
+        method="GET",
+        response=response,
+        byte_count=len(body),
+        body=body,
+        error=EOFError("terminal stream signal missing"),
+    )
+
+
 @pytest.mark.parametrize(
     ("method", "status", "headers", "body"),
     (

@@ -6135,6 +6135,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         PROVIDER_BROKER_SCHEMA_VERSION,
         PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
         ProviderBrokerV2,
+        _authenticated_body_is_complete_after_stream_error,
         credential_reference_hash,
         credential_value_hash,
         _provider_rpc_response_body_limit,
@@ -6182,6 +6183,35 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         > MAX_FRAME_BYTES
     ):
         raise RuntimeError("provider response can exceed the authenticated RPC frame")
+
+    import httpx
+
+    production_http2_body = b'[{"receipt_hash":"sha256:' + (b"a" * 64) + b'"}]'
+    production_http2_response = SimpleNamespace(
+        status_code=200,
+        headers=httpx.Headers(
+            {"content-type": "application/json; charset=utf-8"}
+        ),
+        http_version="HTTP/2",
+    )
+    if not _authenticated_body_is_complete_after_stream_error(
+        method="GET",
+        response=production_http2_response,
+        byte_count=len(production_http2_body),
+        body=production_http2_body,
+        error=httpx.RemoteProtocolError(
+            "relay lost HTTP/2 END_STREAM after the complete body"
+        ),
+    ):
+        raise RuntimeError("complete authenticated HTTP/2 JSON was not recovered")
+    if _authenticated_body_is_complete_after_stream_error(
+        method="GET",
+        response=production_http2_response,
+        byte_count=len(production_http2_body) - 1,
+        body=production_http2_body[:-1],
+        error=httpx.RemoteProtocolError("relay truncated HTTP/2 JSON"),
+    ):
+        raise RuntimeError("truncated HTTP/2 JSON was accepted")
 
     retry_hashes = {
         provider: sha256_json({"retry": provider})
@@ -7499,6 +7529,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_cross_worker_cache_profile_bound": True,
         "provider_rpc_frame_budget_bound": True,
         "openrouter_body_framing_recomputed": True,
+        "complete_http2_json_eof_recovered": True,
     }
 
 
@@ -8605,6 +8636,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("openrouter_body_framing_recomputed")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("complete_http2_json_eof_recovered")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

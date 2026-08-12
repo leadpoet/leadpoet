@@ -502,12 +502,32 @@ def _authenticated_body_is_complete_after_stream_error(
         for token in str(raw_value).split(",")
     ]
     if not transfer_encoding:
-        if not tokens or any(not token.isdigit() for token in tokens):
+        if tokens:
+            if any(not token.isdigit() for token in tokens):
+                return False
+            declared_lengths = {int(token) for token in tokens}
+            return (
+                len(declared_lengths) == 1
+                and byte_count == next(iter(declared_lengths))
+            )
+        # HTTP/2 carries message completion in DATA-frame END_STREAM rather
+        # than HTTP/1 Content-Length or Transfer-Encoding headers. The parent
+        # relay can lose that terminal signal after delivering every
+        # authenticated TLS byte. A complete JSON document is an objective
+        # application boundary: truncating an array or object before its final
+        # delimiter cannot still parse, and trailing non-whitespace is
+        # rejected by json.loads. Restrict this recovery to authenticated 2xx
+        # HTTP/2 JSON reads; unframed HTTP/1 responses remain ambiguous.
+        try:
+            http_version = str(response.http_version or "").strip().upper()
+        except Exception:
+            http_version = ""
+        if http_version != "HTTP/2":
             return False
-        declared_lengths = {int(token) for token in tokens}
-        return (
-            len(declared_lengths) == 1
-            and byte_count == next(iter(declared_lengths))
+        return _authenticated_json_body_is_complete(
+            response=response,
+            byte_count=byte_count,
+            body=body,
         )
 
     # PostgREST legitimately streams bounded JSON with chunked framing. A
@@ -517,9 +537,22 @@ def _authenticated_body_is_complete_after_stream_error(
     # fail-closed.
     if transfer_encoding != "chunked" or tokens:
         return False
+    return _authenticated_json_body_is_complete(
+        response=response,
+        byte_count=byte_count,
+        body=body,
+    )
+
+
+def _authenticated_json_body_is_complete(
+    *,
+    response: Any,
+    byte_count: int,
+    body: Optional[bytes],
+) -> bool:
     if not 200 <= int(response.status_code) < 300:
         return False
-    content_type = str(response_headers.get("content-type") or "")
+    content_type = str(response.headers.get("content-type") or "")
     media_type = content_type.split(";", 1)[0].strip().lower()
     if media_type != "application/json" and not media_type.endswith("+json"):
         return False

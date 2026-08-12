@@ -205,8 +205,8 @@ def relay_raw_and_framed(
                 touch()
             if not abort.is_set():
                 mark_first_closed(raw_label)
-                send_frame(None)
                 own_eof_sent.set()
+                send_frame(None)
                 touch()
         except BaseException as exc:  # noqa: BLE001 - relay failure must unblock its peer
             record_error(exc)
@@ -293,14 +293,20 @@ def relay_raw_and_framed(
             if idle_expired and not failed:
                 record_error(EgressTunnelFramingError("egress tunnel idle timeout"))
             abort.set()
-            for connection in (raw, framed):
-                try:
-                    connection.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
+            try:
+                framed.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
             break
     for thread in threads:
-        thread.join(timeout=1.0)
+        thread.join(timeout=1.1)
+    if any(thread.is_alive() for thread in threads):
+        try:
+            raw.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        for thread in threads:
+            thread.join(timeout=1.0)
     if any(thread.is_alive() for thread in threads):
         raise EgressTunnelFramingError("egress tunnel relay did not stop")
     if errors:

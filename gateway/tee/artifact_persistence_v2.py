@@ -253,17 +253,20 @@ class _ArtifactVerificationTransportPool:
             raise
 
     def release(self, transport: Any, *, failed: bool = False) -> None:
-        to_close = None
+        to_close = []
         with self._condition:
             if failed:
-                self._transport_count -= 1
-                to_close = transport
+                # A peer-closed pooled generation can leave every idle client
+                # looking reusable even though its framed parent tunnel has
+                # already ended. Discard the failed lease and all idle siblings
+                # so the bounded retry opens a genuinely fresh connection.
+                to_close = [transport, *(item[1] for item in self._idle)]
+                self._transport_count -= len(to_close)
+                self._idle = []
             else:
                 self._idle.append((self._idle_clock(), transport))
-            self._condition.notify()
-        if to_close is not None:
-            with suppress(Exception):
-                to_close.close()
+            self._condition.notify_all()
+        self._close_all(to_close)
 
 
 class _ArtifactVerificationTransportSession:

@@ -7906,6 +7906,35 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     )
     lifecycle_pool.release(replacement_transport, failed=True)
 
+    failed_generation_transports: list[LifecycleTransport] = []
+    failed_generation_pool = _ArtifactVerificationTransportPool(
+        maximum_transports=4,
+        wait_seconds=1,
+    )
+
+    def new_failed_generation_transport() -> LifecycleTransport:
+        instance = LifecycleTransport()
+        failed_generation_transports.append(instance)
+        return instance
+
+    failed_generation_pool._new_transport = (  # type: ignore[method-assign]
+        new_failed_generation_transport
+    )
+    peer_closed_generation = [
+        failed_generation_pool.acquire() for _index in range(4)
+    ]
+    for pooled_transport in peer_closed_generation:
+        failed_generation_pool.release(pooled_transport)
+    failed_lease = failed_generation_pool.acquire()
+    failed_generation_pool.release(failed_lease, failed=True)
+    fresh_after_failure = failed_generation_pool.acquire()
+    failed_generation_evicted = (
+        all(item.closed is True for item in peer_closed_generation)
+        and fresh_after_failure not in peer_closed_generation
+        and fresh_after_failure.closed is False
+    )
+    failed_generation_pool.release(fresh_after_failure, failed=True)
+
     ordinary_transport = HTTPXProviderTransport()
     try:
         ordinary_transport_unchanged = not ordinary_transport.parent_tunnel_framing
@@ -7923,6 +7952,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         or proxy_status.get("last_failure")
         or not ordinary_transport_unchanged
         or not stale_transport_evicted
+        or not failed_generation_evicted
     ):
         raise RuntimeError(
             "sustained artifact egress contract failed: "
@@ -7936,6 +7966,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
                     "proxy_failure": proxy_status.get("last_failure"),
                     "ordinary_transport_unchanged": ordinary_transport_unchanged,
                     "stale_transport_evicted": stale_transport_evicted,
+                    "failed_generation_evicted": failed_generation_evicted,
                 },
                 sort_keys=True,
             )
@@ -7949,6 +7980,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         "truncated_frame_rejected": True,
         "ordinary_provider_transport_unchanged": True,
         "stale_pooled_transport_evicted_before_relay_timeout": True,
+        "failed_pooled_generation_evicted_before_retry": True,
         "request_count": request_count,
         "concurrent_request_count": len(concurrent_requests_seen),
     }
@@ -8622,6 +8654,11 @@ def main() -> int:
                 "artifact-egress-sustained-readback",
                 {},
             ).get("stale_pooled_transport_evicted_before_relay_timeout")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("failed_pooled_generation_evicted_before_retry")
             is True
         ),
         "chain_settlement_state_space_complete": (

@@ -894,7 +894,7 @@ def test_concurrent_transport_failure_does_not_poison_other_verification(
     assert [result["status"] for result in results] == ["persisted", "persisted"]
     assert len(transports) in {2, 3}
     assert transports[0].closed is True
-    assert all(transport.closed is False for transport in transports[1:])
+    assert any(transport.closed is False for transport in transports[1:])
 
 
 def test_transport_pool_bounds_concurrency_and_reuses_released_client(
@@ -973,6 +973,66 @@ def test_transport_pool_replaces_client_before_egress_relay_idle_timeout(
     pool.release(replacement)
     now[0] = 19
     assert pool.acquire() is replacement
+
+
+def test_transport_failure_discards_stale_idle_generation_before_retry(
+    monkeypatch,
+) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    transports = []
+
+    class PeerClosedTransport:
+        def __init__(self, **_options):
+            self.stale = False
+            self.calls = []
+            self.closed = False
+            transports.append(self)
+
+        def __call__(self, **request):
+            self.calls.append(dict(request))
+            if self.stale:
+                raise EOFError("framed parent tunnel already ended")
+            return successful(**request)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        PeerClosedTransport,
+    )
+    pool = _ArtifactVerificationTransportPool(
+        maximum_transports=4,
+        wait_seconds=2,
+    )
+    initial = [pool.acquire() for _index in range(4)]
+    for transport in initial:
+        pool.release(transport)
+        transport.stale = True
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+    verifier._transport_pool = pool
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "persisted"
+    assert len(transports) == 5
+    assert all(transport.closed is True for transport in initial)
+    assert [call["method"] for call in transports[-1].calls] == ["GET", "HEAD"]
+    assert transports[-1].closed is False
 
 
 @pytest.mark.parametrize(

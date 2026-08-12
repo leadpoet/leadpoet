@@ -11,6 +11,10 @@ import httpcore
 import httpx
 import pytest
 
+from gateway.tee.egress_framing import (
+    TUNNEL_FRAMING_HEADER,
+    TUNNEL_FRAMING_MODE,
+)
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
     DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
@@ -976,7 +980,9 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
         SimpleNamespace(where=lambda: "/tmp/test-ca.pem"),
     )
 
-    transport = HTTPXProviderTransport()
+    transport = HTTPXProviderTransport(
+        parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+    )
     request = {
         "method": "GET",
         "url": "https://example.com/artifact",
@@ -1006,7 +1012,7 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
     assert clients[0].closed is False
     assert proxies[0] == {
         "url": "http://127.0.0.1:18080",
-        "headers": None,
+        "headers": {TUNNEL_FRAMING_HEADER: TUNNEL_FRAMING_MODE},
     }
 
     upstream_proxy = "https://worker:test-secret@proxy.example.com:443"

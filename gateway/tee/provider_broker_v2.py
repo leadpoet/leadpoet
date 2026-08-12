@@ -638,7 +638,11 @@ class HTTPXProviderTransport:
 
         verify_path = self.ca_bundle or certifi.where()
         normalized_proxy_headers = dict(proxy_headers or {})
-        if self.parent_tunnel_framing:
+        # The upstream-proxy control path is already an enclave-authenticated
+        # TLS tunnel and explicitly rejects parent framing. Applying both
+        # headers makes the local proxy reject CONNECT before either the
+        # provider or Supabase is contacted.
+        if self.parent_tunnel_framing and not normalized_proxy_headers:
             normalized_proxy_headers[TUNNEL_FRAMING_HEADER] = (
                 self.parent_tunnel_framing
             )

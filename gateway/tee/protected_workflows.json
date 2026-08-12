@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "810c207929632eb78b833b837aee8a09fae1bd36",
+  "baseline_commit": "d8d6118d071895ccdad116af561d775be6b0ff16",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -1162,7 +1162,7 @@
       "symbol": "TUNNEL_FRAMING_HEADER"
     },
     {
-      "ast_sha256": "sha256:8e07a9cea7c863bab5cdee15e74baecfb082558d85c26daf4c5a9c8ec8ca0c49",
+      "ast_sha256": "sha256:10284ba9fe55950564a91948f5c54c62af27e7c4edc3bf223caf6edff04abbf2",
       "path": "gateway/tee/egress_framing.py",
       "symbol": "TUNNEL_FRAMING_MODE"
     },
@@ -1172,12 +1172,12 @@
       "symbol": "_receive_exact_until"
     },
     {
-      "ast_sha256": "sha256:5b01c5cf12d75575cf607e5df56c73e3126e8b6f8ee2b98464520e9bfdb1b87f",
+      "ast_sha256": "sha256:7da74e092a51d741af9ed15c836ecc0d199fdd0fd95929dae444b83edbb1bec2",
       "path": "gateway/tee/egress_framing.py",
       "symbol": "receive_tunnel_frame"
     },
     {
-      "ast_sha256": "sha256:ad127b1e95added7fb46bc01b414a649c8a51a7b5303a1875a51c3ec6b2b817e",
+      "ast_sha256": "sha256:21c2980019763411073db207fdc490a185da93c59dd670ff9af6064e0b714150",
       "path": "gateway/tee/egress_framing.py",
       "symbol": "relay_raw_and_framed"
     },
@@ -2702,7 +2702,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:d08cbb95d1650f13f80f347ddb566c96d90d4499ea2219f1311b567742051d80",
-  "protected_source_commit": "810c207929632eb78b833b837aee8a09fae1bd36",
+  "manifest_hash": "sha256:3c9096c2cde91ed3e7ef93100c0701657008a113fd9db556fd50f79d29e9aab8",
+  "protected_source_commit": "d8d6118d071895ccdad116af561d775be6b0ff16",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

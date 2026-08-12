@@ -338,7 +338,7 @@ def test_parent_forwarder_rejects_policy_mismatch_before_connecting():
     "extra_params",
     (
         {"tunnel_framing": ""},
-        {"tunnel_framing": "length-v2"},
+        {"tunnel_framing": "length-v1"},
         {"tunnel_framing": TUNNEL_FRAMING_MODE, "purpose": "upstream_proxy"},
     ),
 )
@@ -533,6 +533,49 @@ def test_framed_relay_fails_closed_without_forwarding_truncated_frame():
     assert len(errors) == 1
     assert isinstance(errors[0], EgressTunnelFramingError)
     assert "explicit EOF frame" in str(errors[0])
+
+
+def test_framed_relay_waits_for_terminal_ack_before_returning():
+    client, raw = socket.socketpair()
+    framed, peer = socket.socketpair()
+    errors = []
+
+    def run():
+        try:
+            relay_raw_and_framed(
+                raw,
+                framed,
+                idle_timeout_seconds=2,
+                max_bytes_per_direction=1024,
+                raw_label="client",
+                framed_label="parent",
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        client.shutdown(socket.SHUT_WR)
+        assert _recv_exact(peer, 4) == (0).to_bytes(4, byteorder="big")
+
+        peer.sendall((0).to_bytes(4, byteorder="big"))
+        assert _recv_exact(peer, 4) == ((1 << 32) - 1).to_bytes(
+            4,
+            byteorder="big",
+        )
+
+        thread.join(timeout=0.1)
+        assert thread.is_alive()
+
+        peer.sendall(((1 << 32) - 1).to_bytes(4, byteorder="big"))
+        thread.join(timeout=2)
+    finally:
+        for connection in (client, raw, framed, peer):
+            connection.close()
+
+    assert not thread.is_alive()
+    assert errors == []
 
 
 def test_parent_relay_tolerates_late_tls_write_after_provider_full_close():
@@ -1172,7 +1215,10 @@ def test_enclave_proxy_rejects_duplicate_tunnel_framing_opt_in():
         )
 
 
-@pytest.mark.parametrize("value", (b"", b"length-v2", b"length-v1, length-v1"))
+@pytest.mark.parametrize(
+    "value",
+    (b"", b"length-v1", b"length-v2, length-v2"),
+)
 def test_enclave_proxy_rejects_invalid_tunnel_framing_opt_in(value):
     with pytest.raises(EnclaveEgressProxyError, match="tunnel framing header"):
         _parse_proxy_request(

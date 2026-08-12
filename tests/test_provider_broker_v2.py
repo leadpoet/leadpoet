@@ -1201,6 +1201,9 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_name": "Authorization",
         "credential_prefix": "Bearer ",
         "credential_header_aliases": [{"name": "apikey", "prefix": ""}],
+        "request_headers": [
+            {"name": "Accept-Encoding", "value": "identity"}
+        ],
     }
     assert provider_registry_hash().startswith("sha256:")
     assert expected_provider_credential_slots() == (
@@ -1640,7 +1643,25 @@ def test_supabase_service_role_is_injected_only_for_measured_project():
         "Bearer supabase-service-role-secret"
     )
     assert outbound["headers"]["apikey"] == "supabase-service-role-secret"
+    assert outbound["headers"]["Accept-Encoding"] == "identity"
     assert "supabase-service-role-secret" not in str(result)
+
+    broker.execute(
+        _request(
+            logical_operation_id="operation-supabase-encoding",
+            provider_id="supabase",
+            method="GET",
+            url=(
+                "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/"
+                "research_lab_provider_registry?select=registry_hash"
+            ),
+            headers={"accept-encoding": "gzip"},
+            body_b64=base64.b64encode(b"").decode("ascii"),
+        )
+    )
+    encoded_headers = transport.calls[1]["headers"]
+    assert encoded_headers["Accept-Encoding"] == "identity"
+    assert "accept-encoding" not in encoded_headers
 
     with pytest.raises(ProviderBrokerV2Error, match="destination"):
         broker.execute(

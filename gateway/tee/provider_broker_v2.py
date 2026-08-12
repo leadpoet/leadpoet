@@ -121,6 +121,7 @@ class ProviderRouteV2:
     credential_name: str = ""
     credential_prefix: str = ""
     credential_header_aliases: Tuple[Tuple[str, str], ...] = ()
+    request_headers: Tuple[Tuple[str, str], ...] = ()
     allowed_methods: Tuple[str, ...] = ()
     allowed_route_pairs: Tuple[Tuple[str, str], ...] = ()
     job_scoped_only: bool = False
@@ -182,6 +183,10 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
+        # Keep the wire body identical to the body committed by the provider
+        # receipt. This also lets HTTP/2 reads prove JSON completeness when a
+        # relay loses only the terminal END_STREAM signal.
+        request_headers=(("Accept-Encoding", "identity"),),
     ),
     "truelist": ProviderRouteV2(
         provider_id="truelist",
@@ -253,6 +258,11 @@ def provider_registry_document() -> Dict[str, Any]:
         }
         if route.allowed_methods:
             document["allowed_methods"] = list(route.allowed_methods)
+        if route.request_headers:
+            document["request_headers"] = [
+                {"name": name, "value": value}
+                for name, value in route.request_headers
+            ]
         if route.allowed_route_pairs:
             document["allowed_route_pairs"] = [
                 {"method": method, "path": path}
@@ -1488,6 +1498,13 @@ class ProviderBrokerV2:
                 return dict(completed["result"])
 
         outbound_headers = {str(k): str(v) for k, v in headers.items()}
+        for static_name, static_value in route.request_headers:
+            outbound_headers = {
+                name: value
+                for name, value in outbound_headers.items()
+                if name.lower() != static_name.lower()
+            }
+            outbound_headers[static_name] = static_value
         if dynamic_route is not None:
             static_headers = dynamic_route.get("request_headers") or {}
             for static_name, static_value in static_headers.items():

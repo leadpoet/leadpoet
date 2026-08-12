@@ -6183,6 +6183,12 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         > MAX_FRAME_BYTES
     ):
         raise RuntimeError("provider response can exceed the authenticated RPC frame")
+    if dict(BUILTIN_PROVIDER_ROUTES["supabase"].request_headers) != {
+        "Accept-Encoding": "identity"
+    }:
+        raise RuntimeError(
+            "Supabase reads are not bound to identity response encoding"
+        )
 
     import httpx
 
@@ -7530,6 +7536,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_rpc_frame_budget_bound": True,
         "openrouter_body_framing_recomputed": True,
         "complete_http2_json_eof_recovered": True,
+        "supabase_identity_response_encoding_bound": True,
     }
 
 
@@ -8641,6 +8648,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("complete_http2_json_eof_recovered")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("supabase_identity_response_encoding_bound")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

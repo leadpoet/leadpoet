@@ -13,6 +13,7 @@ import pytest
 
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
+    DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
     HTTPXProviderTransport,
     MAX_RESPONSE_BODY_BYTES,
     MAX_TRANSPORT_RESPONSE_BODY_BYTES,
@@ -175,7 +176,7 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
     assert client_options[-1]["limits"] == {
         "max_connections": 64,
         "max_keepalive_connections": 32,
-        "keepalive_expiry": 300.0,
+        "keepalive_expiry": DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
     }
 
     artifact_transport = HTTPXProviderTransport(

@@ -35,6 +35,8 @@ ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS = (
 ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS = 30000
 ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 1.0, 2.0)
 MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES = 96 * 1024 * 1024
+MAX_ARTIFACT_VERIFICATION_TRANSPORTS = 32
+ARTIFACT_VERIFICATION_TRANSPORT_WAIT_SECONDS = 30.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DNS_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -128,6 +130,7 @@ def _transport_failure_code(exc: BaseException) -> str:
         ("too many open files", "proxy_failure"),
         ("no buffer space available", "proxy_failure"),
         ("cannot allocate memory", "proxy_failure"),
+        ("transport pool exhausted", "proxy_failure"),
         ("timeout", "timeout"),
         ("certificate", "tls_failure"),
         ("tls", "tls_failure"),
@@ -144,14 +147,29 @@ def _transport_failure_code(exc: BaseException) -> str:
 
 
 class _ArtifactVerificationTransportPool:
-    """Reuse bounded HTTP clients without reusing a failed generation."""
+    """Lease bounded clients exclusively across concurrent verifications."""
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._transport = None
-        self._generation = 0
-        self._active = {}  # type: Dict[int, int]
-        self._retired = {}  # type: Dict[int, Any]
+    def __init__(
+        self,
+        *,
+        maximum_transports: int = MAX_ARTIFACT_VERIFICATION_TRANSPORTS,
+        wait_seconds: float = ARTIFACT_VERIFICATION_TRANSPORT_WAIT_SECONDS,
+    ) -> None:
+        if (
+            isinstance(maximum_transports, bool)
+            or not isinstance(maximum_transports, int)
+            or maximum_transports < 1
+            or maximum_transports > 128
+            or float(wait_seconds) <= 0
+        ):
+            raise ArtifactPersistenceV2Error(
+                "artifact verification transport pool configuration is invalid"
+            )
+        self._condition = threading.Condition()
+        self._maximum_transports = maximum_transports
+        self._wait_seconds = float(wait_seconds)
+        self._idle = []  # type: list[Any]
+        self._transport_count = 0
 
     @staticmethod
     def _new_transport() -> HTTPXProviderTransport:
@@ -160,27 +178,38 @@ class _ArtifactVerificationTransportPool:
             allow_authenticated_complete_body_eof=True,
         )
 
-    def acquire(self) -> tuple[Callable[..., Mapping[str, Any]], int]:
-        with self._lock:
-            if self._transport is None:
-                self._transport = self._new_transport()
-            generation = self._generation
-            self._active[generation] = self._active.get(generation, 0) + 1
-            return self._transport, generation
+    def acquire(self) -> Callable[..., Mapping[str, Any]]:
+        deadline = time.monotonic() + self._wait_seconds
+        with self._condition:
+            while not self._idle and (
+                self._transport_count >= self._maximum_transports
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ArtifactPersistenceV2Error(
+                        "artifact verification transport pool exhausted"
+                    )
+                self._condition.wait(timeout=remaining)
+            if self._idle:
+                return self._idle.pop()
+            self._transport_count += 1
+        try:
+            return self._new_transport()
+        except BaseException:
+            with self._condition:
+                self._transport_count -= 1
+                self._condition.notify()
+            raise
 
-    def release(self, generation: int, *, failed: bool = False) -> None:
+    def release(self, transport: Any, *, failed: bool = False) -> None:
         to_close = None
-        with self._lock:
-            if failed and generation == self._generation:
-                self._retired[generation] = self._transport
-                self._transport = None
-                self._generation += 1
-            remaining = self._active.get(generation, 0) - 1
-            if remaining > 0:
-                self._active[generation] = remaining
+        with self._condition:
+            if failed:
+                self._transport_count -= 1
+                to_close = transport
             else:
-                self._active.pop(generation, None)
-                to_close = self._retired.pop(generation, None)
+                self._idle.append(transport)
+            self._condition.notify()
         if to_close is not None:
             with suppress(Exception):
                 to_close.close()
@@ -196,13 +225,14 @@ class _ArtifactVerificationTransportSession:
     ) -> None:
         self._transport = transport
         self._transport_pool = transport_pool
-        self._generation = None  # type: Optional[int]
+        self._leased_transport = None
 
     def get(self) -> Callable[..., Mapping[str, Any]]:
         if self._transport is None:
             if self._transport_pool is None:
                 raise RuntimeError("artifact verification transport pool is unavailable")
-            self._transport, self._generation = self._transport_pool.acquire()
+            self._transport = self._transport_pool.acquire()
+            self._leased_transport = self._transport
         return self._transport
 
     def rotate_after_failure(self) -> None:
@@ -212,13 +242,13 @@ class _ArtifactVerificationTransportSession:
         self._release(failed=False)
 
     def _release(self, *, failed: bool) -> None:
-        generation = self._generation
-        if generation is None:
+        leased_transport = self._leased_transport
+        if leased_transport is None:
             return
         self._transport = None
-        self._generation = None
+        self._leased_transport = None
         if self._transport_pool is not None:
-            self._transport_pool.release(generation, failed=failed)
+            self._transport_pool.release(leased_transport, failed=failed)
 
     def __enter__(self) -> "_ArtifactVerificationTransportSession":
         return self
@@ -243,10 +273,10 @@ class ArtifactPersistenceVerifierV2:
         self._policy = validate_artifact_policy(policy)
         self._policy_hash = sha256_json(self._policy)
         # Artifact readbacks can approach the relay's per-tunnel byte budget.
-        # Each verification owns one bounded session; transport failures rotate
-        # the shared client generation before retrying. Reusing healthy clients
-        # avoids exhausting the enclave's loopback TCP endpoints under the
-        # thousands of artifact readbacks in a production rebenchmark.
+        # Each verification exclusively leases one bounded session. Healthy
+        # clients are reused sequentially to avoid exhausting loopback TCP
+        # endpoints, while a failed connection cannot poison unrelated
+        # concurrent persistence jobs.
         self._transport = transport
         self._transport_pool = (
             None if transport is not None else _ArtifactVerificationTransportPool()

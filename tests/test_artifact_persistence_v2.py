@@ -14,6 +14,7 @@ from gateway.tee.artifact_persistence_v2 import (
     MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
     ArtifactPersistenceV2Error,
     ArtifactPersistenceVerifierV2,
+    _ArtifactVerificationTransportPool,
     validate_artifact_policy,
 )
 from gateway.tee.artifact_vault_v2 import (
@@ -759,7 +760,7 @@ def test_default_transport_is_reused_across_verifications(monkeypatch) -> None:
     assert all(transport.closed is False for transport in transports)
 
 
-def test_default_transport_pool_reuses_one_client_under_concurrency(monkeypatch) -> None:
+def test_default_transport_pool_isolates_concurrent_verifications(monkeypatch) -> None:
     vault = _vault()
     descriptor, document = _sealed(vault)
     successful = _Transport(document)
@@ -815,9 +816,117 @@ def test_default_transport_pool_reuses_one_client_under_concurrency(monkeypatch)
 
     assert all(not thread.is_alive() for thread in threads)
     assert [result["status"] for result in results] == ["persisted", "persisted"]
-    assert len(transports) == 1
-    assert len(transports[0].calls) == 4
+    assert len(transports) == 2
+    assert sorted(len(transport.calls) for transport in transports) == [2, 2]
     assert transports[0].closed is False
+
+
+def test_concurrent_transport_failure_does_not_poison_other_verification(
+    monkeypatch,
+) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    transports = []
+    barrier = threading.Barrier(2)
+
+    class IsolatedFailureTransport:
+        def __init__(self, **_options):
+            self.index = len(transports)
+            self.calls = []
+            self.closed = False
+            transports.append(self)
+
+        def __call__(self, **request):
+            self.calls.append(dict(request))
+            if (
+                request["method"] == "GET"
+                and self.index < 2
+                and len(self.calls) == 1
+            ):
+                barrier.wait(timeout=2)
+            if self.index == 0:
+                raise RuntimeError("unexpected eof")
+            return successful(**request)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        IsolatedFailureTransport,
+    )
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+    results = []
+
+    def verify(job_id):
+        results.append(
+            verifier.verify(
+                artifact_id=descriptor["artifact_id"],
+                attestation_job_id=job_id,
+                artifact_ref="s3://immutable.example/item.json",
+                get_url=_url(),
+                head_url=_url(),
+            )
+        )
+
+    threads = [
+        threading.Thread(target=verify, args=("job-1",)),
+        threading.Thread(target=verify, args=("job-2",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert [result["status"] for result in results] == ["persisted", "persisted"]
+    assert len(transports) in {2, 3}
+    assert transports[0].closed is True
+    assert all(transport.closed is False for transport in transports[1:])
+
+
+def test_transport_pool_bounds_concurrency_and_reuses_released_client(
+    monkeypatch,
+) -> None:
+    transports = []
+
+    class BoundedTransport:
+        def __init__(self, **_options):
+            self.closed = False
+            transports.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        BoundedTransport,
+    )
+    pool = _ArtifactVerificationTransportPool(
+        maximum_transports=1,
+        wait_seconds=2,
+    )
+    first = pool.acquire()
+    acquired = []
+
+    thread = threading.Thread(target=lambda: acquired.append(pool.acquire()))
+    thread.start()
+    thread.join(timeout=0.05)
+    assert thread.is_alive()
+
+    pool.release(first)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert acquired == [first]
+    assert transports == [first]
+    assert first.closed is False
 
 
 @pytest.mark.parametrize(

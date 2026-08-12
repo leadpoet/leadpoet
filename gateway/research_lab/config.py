@@ -620,7 +620,7 @@ class ResearchLabGatewayConfig:
     private_baseline_rebenchmark_enabled: bool = True
     private_baseline_concurrency: int = 1
     private_baseline_retry_concurrency: int = 2
-    private_baseline_provider_retry_rounds: int = 2
+    private_baseline_provider_retry_rounds: int = 1
     baseline_start_utc_offset_seconds: int = DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS
     candidate_scoring_quiet_start_utc_seconds: int = DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS
     provider_cost_cap_usd_per_icp: float = DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP
@@ -1069,7 +1069,7 @@ class ResearchLabGatewayConfig:
             ),
             private_baseline_provider_retry_rounds=max(
                 0,
-                _int("RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS", 2),
+                _int("RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS", 1),
             ),
             baseline_start_utc_offset_seconds=_bounded_utc_offset_seconds(
                 "RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS",

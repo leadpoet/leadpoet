@@ -7515,7 +7515,9 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     from cryptography.x509.oid import NameOID
 
     from gateway.tee.artifact_persistence_v2 import (
+        ARTIFACT_VERIFICATION_TRANSPORT_MAX_IDLE_SECONDS,
         MAX_ARTIFACT_VERIFICATION_TRANSPORTS,
+        _ArtifactVerificationTransportPool,
     )
     from gateway.tee.egress_framing import (
         EgressTunnelFramingError,
@@ -7524,6 +7526,9 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         receive_tunnel_frame,
     )
     from gateway.tee.egress_proxy import EnclaveEgressProxy
+    from gateway.tee.egress_proxy import (
+        DEFAULT_IDLE_TIMEOUT_SECONDS as EGRESS_TUNNEL_IDLE_TIMEOUT_SECONDS,
+    )
     from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
     from gateway.utils.tee_client import AF_VSOCK, _recv_exact
     from gateway.utils.tee_egress_forwarder import _handle_connection
@@ -7867,6 +7872,40 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     if not truncated_rejected:
         raise RuntimeError("truncated artifact tunnel frame was accepted")
 
+    class LifecycleTransport:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    idle_now = [0.0]
+    lifecycle_transports: list[LifecycleTransport] = []
+    lifecycle_pool = _ArtifactVerificationTransportPool(
+        maximum_transports=1,
+        wait_seconds=1,
+        idle_clock=lambda: idle_now[0],
+    )
+
+    def new_lifecycle_transport() -> LifecycleTransport:
+        instance = LifecycleTransport()
+        lifecycle_transports.append(instance)
+        return instance
+
+    lifecycle_pool._new_transport = new_lifecycle_transport  # type: ignore[method-assign]
+    stale_transport = lifecycle_pool.acquire()
+    lifecycle_pool.release(stale_transport)
+    idle_now[0] = ARTIFACT_VERIFICATION_TRANSPORT_MAX_IDLE_SECONDS
+    replacement_transport = lifecycle_pool.acquire()
+    stale_transport_evicted = (
+        replacement_transport is not stale_transport
+        and stale_transport.closed is True
+        and replacement_transport.closed is False
+        and ARTIFACT_VERIFICATION_TRANSPORT_MAX_IDLE_SECONDS
+        < EGRESS_TUNNEL_IDLE_TIMEOUT_SECONDS
+    )
+    lifecycle_pool.release(replacement_transport, failed=True)
+
     ordinary_transport = HTTPXProviderTransport()
     try:
         ordinary_transport_unchanged = not ordinary_transport.parent_tunnel_framing
@@ -7883,6 +7922,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         or parent_tunnel_count != 1 + concurrent_workers
         or proxy_status.get("last_failure")
         or not ordinary_transport_unchanged
+        or not stale_transport_evicted
     ):
         raise RuntimeError(
             "sustained artifact egress contract failed: "
@@ -7895,6 +7935,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
                     "parent_tunnel_count": parent_tunnel_count,
                     "proxy_failure": proxy_status.get("last_failure"),
                     "ordinary_transport_unchanged": ordinary_transport_unchanged,
+                    "stale_transport_evicted": stale_transport_evicted,
                 },
                 sort_keys=True,
             )
@@ -7907,6 +7948,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         "provider_first_close_verified": True,
         "truncated_frame_rejected": True,
         "ordinary_provider_transport_unchanged": True,
+        "stale_pooled_transport_evicted_before_relay_timeout": True,
         "request_count": request_count,
         "concurrent_request_count": len(concurrent_requests_seen),
     }
@@ -8575,6 +8617,11 @@ def main() -> int:
                 "artifact-egress-sustained-readback",
                 {},
             ).get("ordinary_provider_transport_unchanged")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("stale_pooled_transport_evicted_before_relay_timeout")
             is True
         ),
         "chain_settlement_state_space_complete": (

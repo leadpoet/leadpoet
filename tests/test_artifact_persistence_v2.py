@@ -935,6 +935,46 @@ def test_transport_pool_bounds_concurrency_and_reuses_released_client(
     assert first.closed is False
 
 
+def test_transport_pool_replaces_client_before_egress_relay_idle_timeout(
+    monkeypatch,
+) -> None:
+    transports = []
+    now = [0.0]
+
+    class BoundedTransport:
+        def __init__(self, **_options):
+            self.closed = False
+            transports.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        BoundedTransport,
+    )
+    pool = _ArtifactVerificationTransportPool(
+        maximum_transports=1,
+        wait_seconds=2,
+        maximum_idle_seconds=10,
+        idle_clock=lambda: now[0],
+    )
+    first = pool.acquire()
+    pool.release(first)
+
+    now[0] = 10
+    replacement = pool.acquire()
+
+    assert replacement is not first
+    assert transports == [first, replacement]
+    assert first.closed is True
+    assert replacement.closed is False
+
+    pool.release(replacement)
+    now[0] = 19
+    assert pool.acquire() is replacement
+
+
 @pytest.mark.parametrize(
     "message",
     [

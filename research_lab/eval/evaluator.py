@@ -467,7 +467,7 @@ def _candidate_provider_retry_rounds() -> int:
     The shared env keeps candidate and rebenchmark scoring comparable:
     initial attempt + N retry rounds for retryable provider/timeouts.
     """
-    return max(0, _env_int("RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS", 2))
+    return max(0, _env_int("RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS", 1))
 
 
 def _work_conserving_enabled() -> bool:

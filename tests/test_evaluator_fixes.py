@@ -162,8 +162,8 @@ async def test_latch_requires_two_consecutive_timeouts():
     # skipped without running.
     assert "candidate_model_runtime_skipped_after_timeout" in rows[2]["failure_reason"]
     assert "candidate_model_runtime_skipped_after_timeout" in rows[3]["failure_reason"]
-    assert runner.call_count("icp-0") == 3  # first attempt + two retry rounds
-    assert runner.call_count("icp-1") == 3
+    assert runner.call_count("icp-0") == 2  # first attempt + one retry round
+    assert runner.call_count("icp-1") == 2
     assert runner.call_count("icp-2") == 0
     assert runner.call_count("icp-3") == 0
 
@@ -212,7 +212,7 @@ async def test_retryable_provider_error_is_retried_then_scored_zero():
         }
     )
     rows = await _score_items(runner, _benchmark_items(3))
-    assert runner.call_count("icp-1") == 3
+    assert runner.call_count("icp-1") == 2
     assert rows[1]["provider_excluded"] is False
     assert "candidate_model_runtime_provider_error" in rows[1]["failure_reason"]
     assert rows[1]["candidate_company_scores"] == []
@@ -318,7 +318,7 @@ async def test_provider_error_never_latches_remaining_icps():
         }
     )
     rows = await _score_items(runner, _benchmark_items(3))
-    assert runner.call_count("icp-0") == 3
+    assert runner.call_count("icp-0") == 2
     assert runner.call_count("icp-1") == 1
     assert runner.call_count("icp-2") == 1
     assert all("skipped_after" not in row["failure_reason"] for row in rows)

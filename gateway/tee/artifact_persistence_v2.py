@@ -17,6 +17,9 @@ from gateway.tee.artifact_vault_v2 import (
     ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES,
     EncryptedArtifactVaultV2,
 )
+from gateway.tee.egress_proxy import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS as EGRESS_TUNNEL_IDLE_TIMEOUT_SECONDS,
+)
 from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
 from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
 from leadpoet_canonical.attested_v2 import (
@@ -38,6 +41,10 @@ ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 1.0, 2.0)
 MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES = 96 * 1024 * 1024
 MAX_ARTIFACT_VERIFICATION_TRANSPORTS = 32
 ARTIFACT_VERIFICATION_TRANSPORT_WAIT_SECONDS = 30.0
+ARTIFACT_VERIFICATION_TRANSPORT_MAX_IDLE_SECONDS = min(
+    120.0,
+    EGRESS_TUNNEL_IDLE_TIMEOUT_SECONDS / 2.0,
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DNS_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -155,6 +162,8 @@ class _ArtifactVerificationTransportPool:
         *,
         maximum_transports: int = MAX_ARTIFACT_VERIFICATION_TRANSPORTS,
         wait_seconds: float = ARTIFACT_VERIFICATION_TRANSPORT_WAIT_SECONDS,
+        maximum_idle_seconds: float = ARTIFACT_VERIFICATION_TRANSPORT_MAX_IDLE_SECONDS,
+        idle_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if (
             isinstance(maximum_transports, bool)
@@ -162,6 +171,8 @@ class _ArtifactVerificationTransportPool:
             or maximum_transports < 1
             or maximum_transports > 128
             or float(wait_seconds) <= 0
+            or float(maximum_idle_seconds) <= 0
+            or float(maximum_idle_seconds) >= EGRESS_TUNNEL_IDLE_TIMEOUT_SECONDS
         ):
             raise ArtifactPersistenceV2Error(
                 "artifact verification transport pool configuration is invalid"
@@ -169,7 +180,9 @@ class _ArtifactVerificationTransportPool:
         self._condition = threading.Condition()
         self._maximum_transports = maximum_transports
         self._wait_seconds = float(wait_seconds)
-        self._idle = []  # type: list[Any]
+        self._maximum_idle_seconds = float(maximum_idle_seconds)
+        self._idle_clock = idle_clock
+        self._idle = []  # type: list[tuple[float, Any]]
         self._transport_count = 0
 
     @staticmethod
@@ -180,21 +193,57 @@ class _ArtifactVerificationTransportPool:
             parent_tunnel_framing=TUNNEL_FRAMING_MODE,
         )
 
+    def _expire_idle_locked(self) -> list[Any]:
+        now = self._idle_clock()
+        reusable = []
+        expired = []
+        for released_at, transport in self._idle:
+            if max(0.0, now - released_at) >= self._maximum_idle_seconds:
+                expired.append(transport)
+                self._transport_count -= 1
+            else:
+                reusable.append((released_at, transport))
+        self._idle = reusable
+        if expired:
+            self._condition.notify_all()
+        return expired
+
+    @staticmethod
+    def _close_all(transports: Sequence[Any]) -> None:
+        for transport in transports:
+            with suppress(Exception):
+                transport.close()
+
     def acquire(self) -> Callable[..., Mapping[str, Any]]:
         deadline = time.monotonic() + self._wait_seconds
+        expired = []
+        selected = None
+        create_new = False
+        timed_out = False
         with self._condition:
-            while not self._idle and (
-                self._transport_count >= self._maximum_transports
-            ):
+            while True:
+                expired.extend(self._expire_idle_locked())
+                if self._idle:
+                    _released_at, selected = self._idle.pop()
+                    break
+                if self._transport_count < self._maximum_transports:
+                    self._transport_count += 1
+                    create_new = True
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise ArtifactPersistenceV2Error(
-                        "artifact verification transport pool exhausted"
-                    )
+                    timed_out = True
+                    break
                 self._condition.wait(timeout=remaining)
-            if self._idle:
-                return self._idle.pop()
-            self._transport_count += 1
+        self._close_all(expired)
+        if timed_out:
+            raise ArtifactPersistenceV2Error(
+                "artifact verification transport pool exhausted"
+            )
+        if selected is not None:
+            return selected
+        if not create_new:
+            raise RuntimeError("artifact verification transport lease is invalid")
         try:
             return self._new_transport()
         except BaseException:
@@ -210,7 +259,7 @@ class _ArtifactVerificationTransportPool:
                 self._transport_count -= 1
                 to_close = transport
             else:
-                self._idle.append(transport)
+                self._idle.append((self._idle_clock(), transport))
             self._condition.notify()
         if to_close is not None:
             with suppress(Exception):

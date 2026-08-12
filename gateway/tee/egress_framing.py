@@ -250,6 +250,20 @@ def relay_raw_and_framed(
                             raw.shutdown(socket.SHUT_WR)
                         except Exception:
                             pass
+                    if terminal_initiator:
+                        # The authenticated upstream EOF proves that no later
+                        # client bytes can reach the provider. A pooled HTTP
+                        # client may otherwise remain idle indefinitely after
+                        # consuming the complete response, leaving both framed
+                        # peers waiting for its directional EOF. Stop that
+                        # impossible direction and complete the authenticated
+                        # terminal handshake without relaxing response-body or
+                        # TLS verification at the application boundary.
+                        stop_raw_read.set()
+                        try:
+                            raw.shutdown(socket.SHUT_RD)
+                        except Exception:
+                            pass
                     touch()
                     continue
                 if peer_eof_received.is_set():

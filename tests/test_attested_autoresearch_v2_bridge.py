@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.research_lab.attested_autoresearch_v2 import (
     AttestedAutoresearchV2Error,
+    _resolve_parent_ancestry_transport_v2,
     derive_autoresearch_job_id_v2,
     execute_autoresearch_v2,
 )
@@ -92,7 +93,7 @@ def _release():
     )
 
 
-def _nested_scoring_authority():
+def _nested_scoring_authority(*, failed=False):
     key = Ed25519PrivateKey.generate()
     pubkey = key.public_key().public_bytes(
         serialization.Encoding.Raw,
@@ -135,8 +136,8 @@ def _nested_scoring_authority():
             host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
             artifact_root=EMPTY_ARTIFACT_ROOT,
             parent_receipt_hashes=(),
-            status="succeeded",
-            failure_code=None,
+            status="failed" if failed else "succeeded",
+            failure_code="provider_retry_exhausted" if failed else None,
             issued_at="2026-07-10T00:00:00Z",
         ),
         enclave_pubkey=pubkey,
@@ -148,6 +149,7 @@ def _nested_scoring_authority():
         receipts=(receipt,),
         transport_attempts=(),
         host_operations=(),
+        allowed_failed_receipt_hashes=(receipt["receipt_hash"],) if failed else (),
     )
     local_delta = {
         "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
@@ -166,6 +168,7 @@ def _nested_scoring_authority():
         sign_digest=key.sign,
         boot_attestation_verifier=lambda identity: identity,
         allowed_issuer_roles=_ANCESTRY_ISSUER_ROLES,
+        allowed_failed_receipt_hashes=(receipt["receipt_hash"],) if failed else (),
         required_purposes=("research_lab.candidate_test.v2",),
     )
     proof = build_compact_ancestry_proof_from_delta_v2(
@@ -182,8 +185,9 @@ def _nested_scoring_graph():
     return _nested_scoring_authority()[0]
 
 
-def _nested_scoring_checkpointed_authority():
-    graph, proof = _nested_scoring_authority()
+def _nested_scoring_checkpointed_authority(*, failed=False):
+    graph, proof = _nested_scoring_authority(failed=failed)
+    allowed_failed = (graph["root_receipt_hash"],) if failed else ()
     checkpointed = build_checkpointed_receipt_graph(
         root_receipt_hash=graph["root_receipt_hash"],
         boot_identities=graph["boot_identities"],
@@ -192,6 +196,7 @@ def _nested_scoring_checkpointed_authority():
         host_operations=graph["host_operations"],
         ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
         ancestry_proof=proof,
+        allowed_failed_receipt_hashes=allowed_failed,
         boot_attestation_verifier=lambda identity: identity,
         require_boot_attestation_verification=True,
     )
@@ -530,6 +535,21 @@ async def test_autoresearch_bridge_retains_checkpoint_envelope_across_generation
     assert claim["parent_authorities"][0]["parent_receipt_hash"] == (
         nested["root_receipt_hash"]
     )
+
+
+@pytest.mark.asyncio
+async def test_autoresearch_bridge_honors_authenticated_failed_parent_policy():
+    nested, nested_proof = _nested_scoring_checkpointed_authority(failed=True)
+    proofs, graphs = await _resolve_parent_ancestry_transport_v2(
+        parent_graphs=(nested,),
+        parent_ancestry_proofs=(nested_proof,),
+        expected_lineage_id=_ANCESTRY_LINEAGE_ID,
+        boot_attestation_verifier=lambda identity: identity,
+        load_ancestry_proofs=None,
+    )
+
+    assert proofs == []
+    assert graphs == [nested]
 
 
 @pytest.mark.asyncio

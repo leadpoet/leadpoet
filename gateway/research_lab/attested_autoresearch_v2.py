@@ -209,8 +209,14 @@ async def _resolve_parent_ancestry_transport_v2(
             and graph.get("schema_version")
             == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
         ):
+            allowed_failed = tuple(
+                proof["certificate"]["claim"]["policy"][
+                    "allowed_failed_receipt_hashes"
+                ]
+            )
             validate_receipt_graph(
                 graph,
+                allowed_failed_receipt_hashes=allowed_failed,
                 boot_attestation_verifier=boot_attestation_verifier,
                 require_boot_attestation_verification=True,
             )

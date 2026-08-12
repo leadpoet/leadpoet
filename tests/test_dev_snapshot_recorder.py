@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from research_lab.eval.snapshot_store import (
+    DevSnapshotStoreError,
     MODE_RECORD,
     SNAPSHOT_MISS_SENTINEL,
     SNAPSHOT_RECORD_REUSE_EXISTING_ENV,
@@ -94,6 +95,35 @@ assert _rl_dev_record(
     assert not (tmp_path / "provider_models.jsonl").exists()
 
 
+def test_recording_bootstrap_allows_openrouter_control_without_model(tmp_path):
+    script = dev_record_bootstrap() + """
+assert _rl_dev_record(
+    "GET",
+    "https://openrouter.ai/api/v1/key",
+    None,
+    200,
+    {"content-type": "application/json"},
+    '{}',
+)
+"""
+    env = {
+        **os.environ,
+        "RESEARCH_LAB_DEV_SNAPSHOT_DIR": str(tmp_path),
+        "RESEARCH_LAB_DEV_RECORD_ICP_REF": "icp-1",
+    }
+    subprocess.run([sys.executable, "-c", script], env=env, check=True)
+    store = ProviderSnapshotStore(str(tmp_path), mode=MODE_RECORD)
+
+    assert store.provider_request_counts() == {"openrouter": 1}
+    assert store.provider_model_request_counts() == {}
+    assert recorder._recorded_provider_model_ids(Path(tmp_path)) == []
+    assert recorder._resolve_snapshot_provider_model_ids(
+        store=store,
+        observed=[],
+        declared=[],
+    ) == []
+
+
 def test_snapshot_runtime_context_finishes_before_host_timeout():
     context = recorder._snapshot_runtime_context(
         "dev_snapshot_recording",
@@ -174,6 +204,70 @@ def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
     ]
     expected = f"{SNAPSHOT_RECORD_REUSE_EXISTING_ENV}=true"
     assert (expected in docker_environment) is reuse_existing
+
+
+def test_snapshot_record_retry_reuses_partial_immutable_capture(
+    monkeypatch,
+) -> None:
+    calls = []
+    delays = []
+
+    def record(**kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            raise RuntimeError("transient container failure")
+        return [{"company": "accepted"}]
+
+    monkeypatch.setattr(recorder, "_record_icp_with_docker", record)
+    monkeypatch.setattr(recorder.time, "sleep", delays.append)
+
+    result = recorder._record_icp_with_retries(
+        image_digest="example.invalid/model@sha256:" + "1" * 64,
+        module_name="research_lab_adapter",
+        callable_name="run_icp",
+        icp={"industry": "Software"},
+        icp_ref="icp-a",
+        snapshot_dir="/tmp/snapshot-test",
+        timeout_seconds=300,
+        reuse_existing=False,
+        item_index=1,
+        item_count=5,
+    )
+
+    assert result == [{"company": "accepted"}]
+    assert [call["reuse_existing"] for call in calls] == [False, True]
+    assert delays == [5.0]
+
+
+def test_snapshot_record_retry_remains_bounded_and_fail_closed(
+    monkeypatch,
+) -> None:
+    calls = []
+    delays = []
+
+    def fail(**kwargs):
+        calls.append(dict(kwargs))
+        raise RuntimeError("persistent container failure")
+
+    monkeypatch.setattr(recorder, "_record_icp_with_docker", fail)
+    monkeypatch.setattr(recorder.time, "sleep", delays.append)
+
+    with pytest.raises(RuntimeError, match="persistent container failure"):
+        recorder._record_icp_with_retries(
+            image_digest="example.invalid/model@sha256:" + "1" * 64,
+            module_name="research_lab_adapter",
+            callable_name="run_icp",
+            icp={"industry": "Software"},
+            icp_ref="icp-a",
+            snapshot_dir="/tmp/snapshot-test",
+            timeout_seconds=300,
+            reuse_existing=False,
+            item_index=1,
+            item_count=5,
+        )
+
+    assert [call["reuse_existing"] for call in calls] == [False, True, True]
+    assert delays == [5.0, 15.0]
 
 
 def test_snapshot_closure_replays_only_icps_that_expose_new_requests(monkeypatch):
@@ -278,6 +372,7 @@ def test_snapshot_closure_reports_runner_failure(monkeypatch):
         raise RuntimeError("bounded recorder failure")
 
     monkeypatch.setattr(recorder, "_record_icp_with_docker", fail)
+    monkeypatch.setattr(recorder.time, "sleep", lambda _seconds: None)
     result = recorder._close_snapshot_request_set(
         items=[{"icp_ref": "icp-a", "icp": {"industry": "Software"}}],
         store=Store(),
@@ -428,6 +523,22 @@ def _store_with_provider_request(tmp_path, provider: str) -> ProviderSnapshotSto
     return store
 
 
+def _store_with_openrouter_control_request(
+    tmp_path,
+    *,
+    method="GET",
+    path="/api/v1/key",
+) -> ProviderSnapshotStore:
+    store = ProviderSnapshotStore(str(tmp_path), mode=MODE_RECORD)
+    request = build_snapshot_request(
+        method,
+        "https://openrouter.ai" + path,
+        body=None,
+    )
+    store.record_response(request, status=200, body_text="{}")
+    return store
+
+
 def test_snapshot_provider_models_are_optional_without_openrouter_requests(tmp_path):
     store = _store_with_provider_request(tmp_path, "exa")
 
@@ -458,10 +569,92 @@ def test_snapshot_provider_models_remain_required_for_openrouter_requests(tmp_pa
     ) == ["openai/gpt-production"]
 
 
+def test_snapshot_provider_models_remain_required_for_openrouter_embeddings(tmp_path):
+    store = ProviderSnapshotStore(str(tmp_path), mode=MODE_RECORD)
+    request = build_snapshot_request(
+        "POST",
+        "https://openrouter.ai/api/v1/embeddings",
+        body={"model": "openai/text-embedding-production", "input": "probe"},
+    )
+    store.record_response(request, status=200, body_text="{}")
+
+    assert store.provider_model_request_counts() == {"openrouter": 1}
+    assert recorder._resolve_snapshot_provider_model_ids(
+        store=store,
+        observed=["openai/text-embedding-production"],
+        declared=[],
+    ) == ["openai/text-embedding-production"]
+
+
+def test_snapshot_provider_models_are_optional_for_openrouter_control_requests(tmp_path):
+    store = _store_with_openrouter_control_request(tmp_path)
+
+    assert store.provider_request_counts() == {"openrouter": 1}
+    assert store.provider_model_request_counts() == {}
+    assert recorder._resolve_snapshot_provider_model_ids(
+        store=store,
+        observed=[],
+        declared=[],
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/v1/keys"),
+        ("PATCH", "/api/v1/workspaces/workspace-id"),
+        ("DELETE", "/api/v1/keys/key-id"),
+    ],
+)
+def test_snapshot_provider_models_allow_approved_openrouter_control_mutations(
+    tmp_path,
+    method,
+    path,
+):
+    store = _store_with_openrouter_control_request(
+        tmp_path,
+        method=method,
+        path=path,
+    )
+
+    assert store.provider_model_request_counts() == {}
+
+
+def test_snapshot_provider_models_reject_unknown_openrouter_mutation(tmp_path):
+    store = _store_with_openrouter_control_request(
+        tmp_path,
+        method="POST",
+        path="/api/v1/unknown-operation",
+    )
+
+    with pytest.raises(
+        DevSnapshotStoreError,
+        match="neither model inference nor an approved control operation",
+    ):
+        store.provider_model_request_counts()
+
+    store.write_dev_icp_items(
+        [
+            {
+                "icp_ref": "test:1",
+                "icp_hash": "sha256:" + "1" * 64,
+                "icp": {"industry": "Software Development"},
+            }
+        ]
+    )
+    manifest = store.build_manifest(
+        icp_set_hash="sha256:" + "2" * 64,
+        provenance={"provider_model_ids": []},
+    )
+    verification = store.verify_manifest(manifest)
+    assert verification["passed"] is False
+    assert "snapshot_record_invalid:DevSnapshotStoreError" in verification["errors"]
+
+
 def test_snapshot_provider_models_reject_unattributed_openrouter_rows(tmp_path):
     store = _store_with_provider_request(tmp_path, "exa")
 
-    with pytest.raises(ValueError, match="has no OpenRouter snapshot request"):
+    with pytest.raises(ValueError, match="has no model-bearing snapshot request"):
         recorder._resolve_snapshot_provider_model_ids(
             store=store,
             observed=["openai/gpt-production"],
@@ -510,8 +703,34 @@ def test_manifest_binds_model_provenance_to_recorded_provider_requests(
     verification = store.verify_manifest(manifest)
 
     assert verification["provider_request_counts"] == {provider: 1}
+    assert verification["provider_model_request_counts"] == (
+        {"openrouter": 1} if provider == "openrouter" else {}
+    )
     if expected_error:
         assert verification["passed"] is False
         assert expected_error in verification["errors"]
     else:
         assert verification["passed"] is True, verification["errors"]
+
+
+def test_manifest_allows_openrouter_control_traffic_without_model_provenance(tmp_path):
+    store = _store_with_openrouter_control_request(tmp_path)
+    store.write_dev_icp_items(
+        [
+            {
+                "icp_ref": "test:1",
+                "icp_hash": "sha256:" + "1" * 64,
+                "icp": {"industry": "Software Development"},
+            }
+        ]
+    )
+    manifest = store.build_manifest(
+        icp_set_hash="sha256:" + "2" * 64,
+        provenance={"provider_model_ids": []},
+    )
+
+    verification = store.verify_manifest(manifest)
+
+    assert verification["passed"] is True, verification["errors"]
+    assert verification["provider_request_counts"] == {"openrouter": 1}
+    assert verification["provider_model_request_counts"] == {}

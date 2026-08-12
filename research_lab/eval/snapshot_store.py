@@ -93,6 +93,20 @@ RECORDED_PROVIDER_MODELS_NAME = "provider_models.jsonl"
 URLLIB_TRANSPORT_OUTCOME = "urllib_transport_error"
 HTTPX_TRANSPORT_OUTCOME = "httpx_transport_error"
 
+_OPENROUTER_MODEL_ENDPOINT_SUFFIXES = frozenset(
+    {
+        "/api/v1/chat/completions",
+        "/api/v1/completions",
+        "/api/v1/embeddings",
+        "/api/v1/responses",
+    }
+)
+_OPENROUTER_CONTROL_ENDPOINTS_BY_METHOD = {
+    "POST": frozenset({"/api/v1/keys"}),
+    "PATCH": frozenset({"/api/v1/key", "/api/v1/keys", "/api/v1/workspaces"}),
+    "DELETE": frozenset({"/api/v1/key", "/api/v1/keys", "/api/v1/workspaces"}),
+}
+
 _HTTPX_TRANSPORT_ERROR_TYPES = frozenset(
     {
         "CloseError",
@@ -951,6 +965,44 @@ class ProviderSnapshotStore:
             counts[provider] = counts.get(provider, 0) + 1
         return dict(sorted(counts.items()))
 
+    def provider_model_request_counts(self) -> dict[str, int]:
+        """Count model-bearing requests without treating provider control calls as inference."""
+
+        counts: dict[str, int] = {}
+        for name in self._list_snapshot_names():
+            raw = self._read_text(f"{SNAPSHOT_SUBDIR}/{name}")
+            if raw is None:
+                continue
+            record = json.loads(raw)
+            if not isinstance(record, Mapping):
+                raise DevSnapshotStoreError("snapshot record must be a JSON object")
+            provider = str(record.get("provider") or "").strip().lower()
+            if provider != "openrouter":
+                continue
+            method = str(record.get("method") or "").strip().upper()
+            endpoint = str(record.get("endpoint") or "").strip().lower()
+            if not method or not endpoint:
+                raise DevSnapshotStoreError(
+                    "OpenRouter snapshot request classification is invalid"
+                )
+            if any(
+                endpoint.endswith(suffix)
+                for suffix in _OPENROUTER_MODEL_ENDPOINT_SUFFIXES
+            ):
+                counts[provider] = counts.get(provider, 0) + 1
+                continue
+            if method in {"GET", "HEAD"}:
+                continue
+            path = "/" + endpoint.split("/", 1)[1] if "/" in endpoint else ""
+            allowed = _OPENROUTER_CONTROL_ENDPOINTS_BY_METHOD.get(method, ())
+            if any(path == base or path.startswith(base + "/") for base in allowed):
+                continue
+            raise DevSnapshotStoreError(
+                "OpenRouter snapshot request is neither model inference nor an "
+                "approved control operation"
+            )
+        return dict(sorted(counts.items()))
+
     def content_hash(self) -> str:
         """Hash over every stored record, keyed and sorted by request key."""
         entries: list[list[str]] = []
@@ -1029,10 +1081,12 @@ class ProviderSnapshotStore:
             stored_content_hash = self.content_hash()
             request_keys = self.request_keys()
             provider_request_counts = self.provider_request_counts()
+            provider_model_request_counts = self.provider_model_request_counts()
         except Exception as exc:
             stored_content_hash = ""
             request_keys = []
             provider_request_counts = {}
+            provider_model_request_counts = {}
             errors.append(f"snapshot_record_invalid:{type(exc).__name__}")
         if str(doc.get("content_hash") or "") != stored_content_hash:
             errors.append("content_hash_mismatch")
@@ -1062,9 +1116,9 @@ class ProviderSnapshotStore:
                 errors.append("snapshot_provenance_invalid:provider_model_ids")
             elif provider_model_ids != sorted(set(provider_model_ids)):
                 errors.append("snapshot_provenance_invalid:provider_model_ids")
-            elif provider_request_counts.get("openrouter", 0) and not provider_model_ids:
+            elif provider_model_request_counts.get("openrouter", 0) and not provider_model_ids:
                 errors.append("snapshot_provenance_missing:provider_model_ids")
-            elif not provider_request_counts.get("openrouter", 0) and provider_model_ids:
+            elif not provider_model_request_counts.get("openrouter", 0) and provider_model_ids:
                 errors.append("snapshot_provenance_unattributed:provider_model_ids")
         items = self.load_dev_icp_items()
         if not items:
@@ -1082,6 +1136,7 @@ class ProviderSnapshotStore:
             "icp_set_hash": str(doc.get("icp_set_hash") or ""),
             "snapshot_count": self.snapshot_count(),
             "provider_request_counts": provider_request_counts,
+            "provider_model_request_counts": provider_model_request_counts,
         }
 
     def build_ready_document(self, manifest: Mapping[str, Any]) -> dict[str, Any]:

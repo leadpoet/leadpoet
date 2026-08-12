@@ -7613,6 +7613,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         TUNNEL_FRAME_BYTES,
         TUNNEL_FRAMING_MODE,
         receive_tunnel_frame,
+        relay_raw_and_framed,
     )
     from gateway.tee.egress_proxy import EnclaveEgressProxy
     from gateway.tee.egress_proxy import (
@@ -7978,6 +7979,84 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     if not truncated_rejected:
         raise RuntimeError("truncated artifact tunnel frame was accepted")
 
+    def exercise_provider_first_idle_client(index: int) -> bool:
+        client, enclave_raw = socket.socketpair()
+        enclave_framed, parent_framed = socket.socketpair()
+        parent_raw, provider = socket.socketpair()
+        relay_errors: list[str] = []
+
+        def run_relay(*args: Any, **kwargs: Any) -> None:
+            try:
+                relay_raw_and_framed(*args, **kwargs)
+            except Exception as exc:
+                relay_errors.append(type(exc).__name__ + ":" + str(exc))
+
+        enclave_thread = threading.Thread(
+            target=run_relay,
+            args=(enclave_raw, enclave_framed),
+            kwargs={
+                "idle_timeout_seconds": 1.0,
+                "max_bytes_per_direction": 1024,
+                "raw_label": "client",
+                "framed_label": "parent",
+                "terminal_initiator": True,
+            },
+            daemon=True,
+        )
+        parent_thread = threading.Thread(
+            target=run_relay,
+            args=(parent_raw, parent_framed),
+            kwargs={
+                "idle_timeout_seconds": 1.0,
+                "max_bytes_per_direction": 1024,
+                "raw_label": "provider",
+                "framed_label": "enclave",
+                "terminal_initiator": False,
+            },
+            daemon=True,
+        )
+        enclave_thread.start()
+        parent_thread.start()
+        request = ("request-%d" % index).encode("ascii")
+        response = ("response-%d" % index).encode("ascii")
+        try:
+            client.sendall(request)
+            if _recv_exact(provider, len(request)) != request:
+                raise RuntimeError("provider-first idle request differs")
+            provider.sendall(response)
+            provider.close()
+            if _recv_exact(client, len(response)) != response or client.recv(1):
+                raise RuntimeError("provider-first idle response differs")
+
+            # Deliberately keep the pooled client write side open. Production
+            # S3 can close an otherwise idle keep-alive connection after the
+            # complete authenticated response, and tunnel termination must not
+            # depend on the HTTP pool making another request.
+            enclave_thread.join(timeout=2)
+            parent_thread.join(timeout=2)
+        finally:
+            for connection in (
+                client,
+                enclave_raw,
+                enclave_framed,
+                parent_framed,
+                parent_raw,
+            ):
+                connection.close()
+        if relay_errors or enclave_thread.is_alive() or parent_thread.is_alive():
+            raise RuntimeError(
+                "provider-first idle framed terminal handshake failed: "
+                + json.dumps(relay_errors, sort_keys=True)
+            )
+        return True
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        provider_first_idle_results = list(
+            executor.map(exercise_provider_first_idle_client, range(32))
+        )
+    if provider_first_idle_results != [True] * 32:
+        raise RuntimeError("provider-first idle framed tunnel result differs")
+
     class LifecycleTransport:
         def __init__(self) -> None:
             self.closed = False
@@ -8083,6 +8162,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         "bounded_concurrent_tunnels_verified": True,
         "multi_frame_response_verified": True,
         "provider_first_close_verified": True,
+        "provider_first_idle_terminal_handshake_verified": True,
         "complete_chunked_json_eof_recovered": True,
         "truncated_frame_rejected": True,
         "ordinary_provider_transport_unchanged": True,
@@ -8761,6 +8841,11 @@ def main() -> int:
                 "artifact-egress-sustained-readback",
                 {},
             ).get("provider_first_close_verified")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("provider_first_idle_terminal_handshake_verified")
             is True
             and behavior_evidence.get(
                 "artifact-egress-sustained-readback",

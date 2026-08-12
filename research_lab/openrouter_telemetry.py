@@ -248,6 +248,21 @@ class _TelemetryTraceUploader:
                 except Exception:  # noqa: BLE001
                     return
 
+    def shutdown(self, timeout_seconds: float = 10.0) -> bool:
+        """Stop accepting uploads and reap the executor when work is drained."""
+
+        with self._lock:
+            self._disabled = True
+        self.flush(timeout_seconds)
+        with self._lock:
+            executor = self._executor
+            self._executor = None
+            drained = not self._pending
+        if executor is None:
+            return drained
+        executor.shutdown(wait=drained, cancel_futures=not drained)
+        return drained
+
     def _warn_once(self, hint: str) -> None:
         with self._lock:
             if self._warned:
@@ -317,6 +332,12 @@ def _safe_capture(*, channel: str, purpose: str, payload: Mapping[str, Any]) -> 
 def flush_telemetry_traces(timeout_seconds: float = 10.0) -> None:
     """Wait for in-flight uploads (tests / orderly teardown only)."""
     _uploader.flush(timeout_seconds)
+
+
+def shutdown_telemetry_traces(timeout_seconds: float = 10.0) -> bool:
+    """Drain trace uploads and stop the uploader during orderly teardown."""
+
+    return _uploader.shutdown(timeout_seconds)
 
 
 # ---------------------------------------------------------------------------

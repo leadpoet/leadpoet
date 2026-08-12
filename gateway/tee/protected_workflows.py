@@ -369,6 +369,8 @@ PROTECTED_SYMBOLS = {
         "_score_dev_items",
     ),
     "research_lab/eval/snapshot_store.py": (
+        "_OPENROUTER_MODEL_ENDPOINT_SUFFIXES",
+        "_OPENROUTER_CONTROL_ENDPOINTS_BY_METHOD",
         "build_snapshot_pointer_document",
         "verify_snapshot_pointer_document",
         "ProviderSnapshotStore",

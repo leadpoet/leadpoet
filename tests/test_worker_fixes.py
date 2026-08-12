@@ -72,6 +72,25 @@ def test_v2_autoresearch_never_resolves_plaintext_openrouter_keys_on_parent():
     assert "verify_openrouter_guard_v2(" in source
 
 
+def test_dev_selection_inputs_are_shared_by_readiness_and_execution():
+    context = _make_context()
+    context.ticket["ticket_doc"] = {
+        "brief_public_summary": "Improve healthcare sourcing coverage"
+    }
+
+    assert worker_mod._dev_selection_inputs(context) == (
+        RUN_ID,
+        "Improve healthcare sourcing coverage",
+    )
+    readiness_source = inspect.getsource(
+        worker_mod.ResearchLabHostedWorker._load_tree_snapshot_readiness
+    )
+    process_source = inspect.getsource(worker_mod.ResearchLabHostedWorker._process_run)
+    shared_call = "dev_selection_seed, miner_direction = _dev_selection_inputs(context)"
+    assert shared_call in readiness_source
+    assert shared_call in process_source
+
+
 def test_tree_policy_owns_topology_and_paid_handoff(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TREE_MODE", "active")
     monkeypatch.setenv("RESEARCH_LAB_TREE_MAX_NODES", "8")

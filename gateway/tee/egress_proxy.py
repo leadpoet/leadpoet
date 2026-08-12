@@ -610,6 +610,7 @@ class EnclaveEgressProxy:
         parent = None
         destination_ref = "unknown"
         failure_stage = "read_client_headers"
+        connect_response_started = False
         try:
             headers, remainder = _read_headers(client)
             failure_stage = "parse_connect_request"
@@ -637,6 +638,10 @@ class EnclaveEgressProxy:
                     parent = self._open_parent_tunnel(host, port)
             failure_stage = "acknowledge_connect"
             if request["method"] == "CONNECT":
+                # Once any CONNECT response bytes are emitted the client owns
+                # an opaque TLS stream. A later plaintext proxy response would
+                # corrupt that stream and can poison otherwise healthy retries.
+                connect_response_started = True
                 client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             else:
                 parent.sendall(request["forward_headers"])
@@ -676,10 +681,13 @@ class EnclaveEgressProxy:
                     "errno": int(getattr(exc, "errno", 0) or 0),
                     "destination_ref": destination_ref,
                 }
-            try:
-                client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
-            except Exception:
-                pass
+            if not connect_response_started:
+                try:
+                    client.sendall(
+                        b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+                    )
+                except Exception:
+                    pass
             print(
                 "[TEE] Egress proxy tunnel failed destination_ref=%s error_type=%s"
                 % (destination_ref, type(exc).__name__),

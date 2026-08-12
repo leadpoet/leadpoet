@@ -2387,16 +2387,7 @@ class ResearchLabHostedWorker:
         artifact: Any,
         pinned_evaluator_commitment: Mapping[str, Any] | None,
     ) -> tuple[dict[str, Any], dict[str, Any], str]:
-        ticket_doc = (
-            context.ticket.get("ticket_doc")
-            if isinstance(context.ticket.get("ticket_doc"), Mapping)
-            else {}
-        )
-        miner_direction = str(
-            ticket_doc.get("brief_public_summary")
-            or context.ticket.get("brief_public_summary")
-            or ""
-        )
+        dev_selection_seed, miner_direction = _dev_selection_inputs(context)
         snapshot_uri = str(
             (
                 pinned_evaluator_commitment.get("resolved_snapshot_uri")
@@ -2410,7 +2401,7 @@ class ResearchLabHostedWorker:
             snapshot_readiness,
             snapshot_uri,
             expected_dev_icp_count=self.tree_policy.live_max_icps_per_node,
-            selection_seed=str(context.run_id),
+            selection_seed=dev_selection_seed,
             miner_direction=miner_direction,
             require_current_day=pinned_evaluator_commitment is None,
         )
@@ -3101,6 +3092,7 @@ class ResearchLabHostedWorker:
                 checkpoint_doc=resume_state,
                 reason=tree_preflight_reason,
             )
+        dev_selection_seed, miner_direction = _dev_selection_inputs(context)
 
         if tree_authority.requires_evaluator_replacement:
             tree_authority = await self._resolve_tree_authority(
@@ -7034,6 +7026,20 @@ def _miner_openrouter_key_ref(context: HostedRunContext) -> str:
     if direct:
         return direct
     raise HostedResearchLabWorkerError("Research Lab run is missing miner OpenRouter key ref")
+
+
+def _dev_selection_inputs(context: HostedRunContext) -> tuple[str, str]:
+    ticket_doc = (
+        context.ticket.get("ticket_doc")
+        if isinstance(context.ticket.get("ticket_doc"), Mapping)
+        else {}
+    )
+    miner_direction = str(
+        ticket_doc.get("brief_public_summary")
+        or context.ticket.get("brief_public_summary")
+        or ""
+    )
+    return str(context.run_id), miner_direction
 
 
 def _utc_day() -> str:

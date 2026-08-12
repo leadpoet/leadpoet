@@ -29,7 +29,8 @@ def fake_boto3(monkeypatch):
     monkeypatch.setitem(sys.modules, "boto3", fake)
     # fresh uploader per test so inert/disabled state never leaks
     monkeypatch.setattr(ot, "_uploader", ot._TelemetryTraceUploader())
-    return puts
+    yield puts
+    assert ot.shutdown_telemetry_traces()
 
 
 @pytest.fixture
@@ -259,3 +260,16 @@ def test_capture_failure_never_breaks_call(trace_env, monkeypatch):
     monkeypatch.setattr(ot._uploader, "capture", _boom)
     result = _call(opener=_opener([_chat_response()]))
     assert result.content == '{"ok": true}'
+
+
+def test_shutdown_reaps_idle_trace_executor(fake_boto3, trace_env):
+    _call(opener=_opener([_chat_response()]))
+    ot.flush_telemetry_traces()
+    executor = ot._uploader._executor
+    assert executor is not None
+    threads = tuple(executor._threads)
+    assert threads and any(thread.is_alive() for thread in threads)
+
+    assert ot.shutdown_telemetry_traces() is True
+    assert ot._uploader._executor is None
+    assert all(not thread.is_alive() for thread in threads)

@@ -49,6 +49,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from typing import Any, Mapping, Sequence
 
@@ -73,6 +74,8 @@ RECORD_ENABLED_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED"
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 MAX_SNAPSHOT_CLOSURE_ROUNDS = 8
 SNAPSHOT_EXECUTION_CONTEXT_MARKER = "dev_snapshot_recording"
+MAX_SNAPSHOT_RECORD_ATTEMPTS = 3
+SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS = (5.0, 15.0)
 
 PROVIDER_KEY_GROUPS = (
     ("EXA_API_KEY",),
@@ -340,6 +343,51 @@ def _record_icp_with_docker(
     return decoded
 
 
+def _record_icp_with_retries(
+    *,
+    image_digest: str,
+    module_name: str,
+    callable_name: str,
+    icp: Mapping[str, Any],
+    icp_ref: str,
+    snapshot_dir: str,
+    timeout_seconds: int,
+    reuse_existing: bool,
+    item_index: int,
+    item_count: int,
+    max_attempts: int = MAX_SNAPSHOT_RECORD_ATTEMPTS,
+) -> list[Mapping[str, Any]]:
+    """Retry one model run without repeating already recorded requests."""
+
+    if max_attempts < 1:
+        raise ValueError("snapshot record attempts must be positive")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _record_icp_with_docker(
+                image_digest=image_digest,
+                module_name=module_name,
+                callable_name=callable_name,
+                icp=icp,
+                icp_ref=icp_ref,
+                snapshot_dir=snapshot_dir,
+                timeout_seconds=timeout_seconds,
+                reuse_existing=reuse_existing or attempt > 1,
+            )
+        except Exception:  # noqa: BLE001 - bounded retry remains fail closed
+            if attempt >= max_attempts:
+                raise
+            delay = SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS[
+                min(attempt - 1, len(SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS) - 1)
+            ]
+            print(
+                "WARNING: snapshot recording attempt "
+                f"{attempt}/{max_attempts} failed for daily ICP "
+                f"{item_index}/{item_count}; retrying after {delay:g}s"
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable snapshot record retry state")
+
+
 def _close_snapshot_request_set(
     *,
     items: Sequence[Mapping[str, Any]],
@@ -365,7 +413,7 @@ def _close_snapshot_request_set(
             ref = str(item["icp_ref"])
             before_count = int(store.snapshot_count())
             try:
-                companies = _record_icp_with_docker(
+                companies = _record_icp_with_retries(
                     image_digest=image_digest,
                     module_name=module_name,
                     callable_name=callable_name,
@@ -374,6 +422,8 @@ def _close_snapshot_request_set(
                     snapshot_dir=snapshot_dir,
                     timeout_seconds=timeout_seconds,
                     reuse_existing=True,
+                    item_index=item_index,
+                    item_count=len(items),
                 )
             except Exception as exc:  # noqa: BLE001 - collect every failed ICP
                 runner_failure_refs.append(ref)
@@ -631,12 +681,14 @@ def _resolve_snapshot_provider_model_ids(
 ) -> list[str]:
     """Bind model provenance only when the snapshots contain OpenRouter traffic."""
 
-    openrouter_request_count = store.provider_request_counts().get("openrouter", 0)
-    if openrouter_request_count:
+    openrouter_model_request_count = store.provider_model_request_counts().get(
+        "openrouter", 0
+    )
+    if openrouter_model_request_count:
         return _resolve_provider_model_ids(observed, declared)
     if any(str(item).strip() for item in observed):
         raise ValueError(
-            "recorded OpenRouter model provenance has no OpenRouter snapshot request"
+            "recorded OpenRouter model provenance has no model-bearing snapshot request"
         )
     return []
 
@@ -696,6 +748,7 @@ def main() -> int:
     from research_lab.canonical import utc_now_iso
     from research_lab.eval.dev_eval import build_current_day_dev_bank
     from research_lab.eval.snapshot_store import (
+        DevSnapshotStoreError,
         MODE_RECORD,
         SNAPSHOT_URI_ENV,
         ProviderSnapshotStore,
@@ -811,7 +864,7 @@ def main() -> int:
         for item_index, item in enumerate(dev_set.items, start=1):
             ref = item["icp_ref"]
             try:
-                companies = _record_icp_with_docker(
+                companies = _record_icp_with_retries(
                     image_digest=args.champion_image,
                     module_name=args.module_name,
                     callable_name=args.callable_name,
@@ -819,6 +872,9 @@ def main() -> int:
                     icp_ref=ref,
                     snapshot_dir=str(staging),
                     timeout_seconds=args.timeout_seconds,
+                    reuse_existing=False,
+                    item_index=item_index,
+                    item_count=len(dev_set.items),
                 )
                 print(
                     f"recorded daily ICP {item_index}/{len(dev_set.items)}: "
@@ -881,7 +937,12 @@ def main() -> int:
                 observed=_recorded_provider_model_ids(staging),
                 declared=declared_provider_model_ids,
             )
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            DevSnapshotStoreError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             print(f"ERROR: could not bind provider-model provenance: {exc}")
             return 1
 

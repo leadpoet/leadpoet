@@ -1004,6 +1004,16 @@ def test_runsc_model_sandbox_rejects_permissive_visible_parent(tmp_path):
             pytest.fail("invalid visible parent must not be entered")
 
 
+def test_visible_workspace_mode_is_independent_of_restrictive_umask(tmp_path):
+    config = _runtime(tmp_path)
+    previous = os.umask(0o077)
+    try:
+        with _sandbox_visible_workspace(config) as workspace:
+            assert workspace.stat().st_mode & 0o777 == 0o711
+    finally:
+        os.umask(previous)
+
+
 def test_runsc_model_sandbox_rejects_missing_visible_parent(tmp_path):
     config = _runtime(tmp_path)
     parent = config.rootfs_path / MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/")

@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "2501432f4782582567557c799276a82f9689659b",
+  "baseline_commit": "38fdd93086f900685335b76baeafb52da702e818",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -132,7 +132,7 @@
       "symbol": "_persist_ancestry_checkpoint_after_graph_v2"
     },
     {
-      "ast_sha256": "sha256:96b3e295f47ffd87207895df8bd8f1761325d4a435404b10b5f550599e876a5b",
+      "ast_sha256": "sha256:45ff1b7e351d8177eb1ab4c2c63e879c69de0e91c2522695486c75c0d35bdf14",
       "path": "gateway/research_lab/attested_autoresearch_v2.py",
       "symbol": "_resolve_parent_ancestry_transport_v2"
     },
@@ -1182,7 +1182,7 @@
       "symbol": "receive_tunnel_frame"
     },
     {
-      "ast_sha256": "sha256:9062d1ea869419897fad67d1b0ea3d3d0c702eafc65d2f52fac572f26c163697",
+      "ast_sha256": "sha256:854f6c607a3962b755b6d9f8ac5240e9b521a878643a189a2f3cd7a80721e406",
       "path": "gateway/tee/egress_framing.py",
       "symbol": "relay_raw_and_framed"
     },
@@ -1212,7 +1212,7 @@
       "symbol": "policy_document"
     },
     {
-      "ast_sha256": "sha256:85dd2128a5f31e31acb13e13e7a47d76bb79464a7c689755f988575686076b53",
+      "ast_sha256": "sha256:530bac39cefd72eb5b632234fbf00a233318f5bc47db4423cc7e210c5a39b799",
       "path": "gateway/tee/egress_proxy.py",
       "symbol": "EnclaveEgressProxy"
     },
@@ -1372,7 +1372,7 @@
       "symbol": "_sandbox_visible_path"
     },
     {
-      "ast_sha256": "sha256:8816e525f23db412ebb8e46776fc503f91479943d0387ff090db7453eebe9c90",
+      "ast_sha256": "sha256:dde388aa5fc73681632fbebabe7fd7ae8c878c8dcef73a637e3eaad61fe60d4d",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_sandbox_visible_workspace"
     },
@@ -2642,9 +2642,19 @@
       "symbol": "merge_evidence_caches"
     },
     {
-      "ast_sha256": "sha256:d0d7aceed4536f8ec81a0cb808f9a48ddf6b3fb5e39d36afd3139ff7eb3f7693",
+      "ast_sha256": "sha256:6e896e4da3debd70bc208e460fade00c1ce70954ec8a00c824ca03e2d674ab71",
       "path": "research_lab/eval/snapshot_store.py",
       "symbol": "ProviderSnapshotStore"
+    },
+    {
+      "ast_sha256": "sha256:c648fab3786be4ee81fd5be7295fc1898729add53c65cedad15991439ae49cf1",
+      "path": "research_lab/eval/snapshot_store.py",
+      "symbol": "_OPENROUTER_CONTROL_ENDPOINTS_BY_METHOD"
+    },
+    {
+      "ast_sha256": "sha256:e520ffa1be7d10c5ddca9e428ce736d84c7a02eeaed057c7b444897c1bd53757",
+      "path": "research_lab/eval/snapshot_store.py",
+      "symbol": "_OPENROUTER_MODEL_ENDPOINT_SUFFIXES"
     },
     {
       "ast_sha256": "sha256:be221d24e7d36c6bd9b87ded2f61d700e0af5b226e8a1b18f2d807c1ec1af433",
@@ -2712,7 +2722,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:4e505b2e2fbee77309ac458abdc27fa332821372835c4461fa9576417d27379f",
-  "protected_source_commit": "2501432f4782582567557c799276a82f9689659b",
+  "manifest_hash": "sha256:0ad7f8961cd349ef80f3ef0876a86ff38a74757876b37d697d72a5066bec00a3",
+  "protected_source_commit": "38fdd93086f900685335b76baeafb52da702e818",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

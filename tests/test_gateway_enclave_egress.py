@@ -501,6 +501,75 @@ def test_framed_relay_preserves_large_bidirectional_payload_and_explicit_eof():
     assert observed["parent"]["provider_to_enclave_bytes"] == len(response)
 
 
+def test_framed_relay_completes_when_provider_closes_before_idle_client():
+    client, enclave_raw = socket.socketpair()
+    enclave_framed, parent_framed = socket.socketpair()
+    parent_raw, provider = socket.socketpair()
+    observed = {}
+    errors = []
+
+    def run(name, *args, **kwargs):
+        try:
+            observed[name] = relay_raw_and_framed(*args, **kwargs)
+        except Exception as exc:
+            errors.append(exc)
+
+    enclave_thread = threading.Thread(
+        target=run,
+        args=("enclave", enclave_raw, enclave_framed),
+        kwargs={
+            "idle_timeout_seconds": 1,
+            "max_bytes_per_direction": 1024,
+            "raw_label": "client",
+            "framed_label": "parent",
+            "terminal_initiator": True,
+        },
+        daemon=True,
+    )
+    parent_thread = threading.Thread(
+        target=run,
+        args=("parent", parent_raw, parent_framed),
+        kwargs={
+            "idle_timeout_seconds": 1,
+            "max_bytes_per_direction": 1024,
+            "raw_label": "provider",
+            "framed_label": "enclave",
+            "terminal_initiator": False,
+        },
+        daemon=True,
+    )
+    enclave_thread.start()
+    parent_thread.start()
+    try:
+        client.sendall(b"request")
+        assert provider.recv(64) == b"request"
+        provider.sendall(b"complete-response")
+        provider.close()
+        assert _recv_exact(client, len(b"complete-response")) == b"complete-response"
+        assert client.recv(1) == b""
+
+        # A pooled HTTP client may remain idle after consuming a complete
+        # provider response. The authenticated provider EOF must still close
+        # the framed tunnel without waiting for that client to write again.
+        enclave_thread.join(timeout=2)
+        parent_thread.join(timeout=2)
+    finally:
+        for connection in (
+            client,
+            enclave_raw,
+            enclave_framed,
+            parent_framed,
+            parent_raw,
+        ):
+            connection.close()
+
+    assert errors == []
+    assert not enclave_thread.is_alive()
+    assert not parent_thread.is_alive()
+    assert observed["enclave"]["first_closed"] == "parent"
+    assert observed["parent"]["first_closed"] == "provider"
+
+
 def test_framed_relay_does_not_deadlock_on_concurrent_large_responses():
     def exercise(index: int) -> None:
         client, enclave_raw = socket.socketpair()
@@ -2026,6 +2095,43 @@ def test_enclave_proxy_health_exposes_bounded_last_failure_stage():
     }
     assert "supabase" not in str(status)
     client.close()
+
+
+def test_enclave_proxy_does_not_inject_http_error_after_connect(monkeypatch):
+    client, proxy_side = socket.socketpair()
+    parent_side, upstream = socket.socketpair()
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+
+    proxy._open_parent_tunnel = lambda _host, _port: parent_side
+
+    def fail_established_tunnel(*_args, **_kwargs):
+        raise EnclaveEgressProxyError("established tunnel failed")
+
+    monkeypatch.setattr(egress_proxy, "_relay_bidirectional", fail_established_tunnel)
+    thread = threading.Thread(
+        target=proxy._handle_client,
+        args=(proxy_side,),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        client.sendall(
+            b"CONNECT qplwoislplkcegvdmbim.supabase.co:443 HTTP/1.1\r\n"
+            b"Host: qplwoislplkcegvdmbim.supabase.co:443\r\n\r\n"
+        )
+        response = bytearray()
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            response.extend(chunk)
+        thread.join(timeout=2)
+    finally:
+        client.close()
+        upstream.close()
+
+    assert not thread.is_alive()
+    assert bytes(response) == b"HTTP/1.1 200 Connection Established\r\n\r\n"
 
 
 def test_enclave_proxy_health_exposes_bounded_clean_tunnel_summary():

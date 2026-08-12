@@ -935,6 +935,7 @@ def _sandbox_visible_workspace(
             raise ModelSandboxV2Error(
                 "model sandbox visible workspace is unavailable"
             ) from exc
+        candidate.chmod(0o711)
         workspace = candidate
         break
     if workspace is None:

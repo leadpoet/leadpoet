@@ -632,6 +632,7 @@ PROTECTED_SYMBOLS = {
         "RunscModelSandboxV2",
     ),
     "gateway/tee/provider_broker_v2.py": (
+        "MEASURED_TRANSPORT_REQUEST_HEADERS",
         "_extract_tls_metadata",
         "HTTPXProviderTransport",
         "ProviderBrokerV2",

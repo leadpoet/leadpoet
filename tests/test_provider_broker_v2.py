@@ -17,6 +17,7 @@ from gateway.tee.provider_broker_v2 import (
     HTTPXProviderTransport,
     MAX_RESPONSE_BODY_BYTES,
     MAX_TRANSPORT_RESPONSE_BODY_BYTES,
+    MEASURED_TRANSPORT_REQUEST_HEADERS,
     PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
@@ -318,7 +319,7 @@ def test_httpx_transport_does_not_hide_incomplete_response_body():
         )
 
 
-@pytest.mark.parametrize("method", ("GET", "HEAD"))
+@pytest.mark.parametrize("method", ("GET", "POST", "PATCH", "HEAD"))
 def test_httpx_transport_accepts_authenticated_complete_body_before_eof(method):
     class TLS:
         def getpeercert(self, binary_form=False, /):
@@ -333,7 +334,7 @@ def test_httpx_transport_accepts_authenticated_complete_body_before_eof(method):
             assert name == "ssl_object"
             return TLS()
 
-    body = b'{"ok":true}' if method == "GET" else b""
+    body = b'{"ok":true}' if method != "HEAD" else b""
 
     class CompleteBodyThenEOF(httpx.SyncByteStream):
         def __iter__(self):
@@ -348,7 +349,7 @@ def test_httpx_transport_accepts_authenticated_complete_body_before_eof(method):
 
     response = httpx.Response(
         200,
-        headers={"content-length": str(len(body) if method == "GET" else 321)},
+        headers={"content-length": str(len(body) if method != "HEAD" else 321)},
         stream=CompleteBodyThenEOF(),
         extensions={"network_stream": NetworkStream()},
         request=httpx.Request(method, "https://example.com/artifact"),
@@ -378,6 +379,46 @@ def test_httpx_transport_accepts_authenticated_complete_body_before_eof(method):
 
     assert result["http_status"] == 200
     assert result["body"] == body
+
+
+@pytest.mark.parametrize("method", ("POST", "PATCH"))
+def test_complete_body_classifier_rejects_ambiguous_mutating_response(method):
+    body = b'{"ok":true}'
+    response = SimpleNamespace(
+        status_code=200,
+        headers=httpx.Headers({"content-type": "application/json"}),
+        http_version="HTTP/2",
+    )
+
+    assert not _authenticated_body_is_complete_after_stream_error(
+        method=method,
+        response=response,
+        byte_count=len(body),
+        body=body,
+        error=EOFError("terminal stream signal missing"),
+    )
+
+
+@pytest.mark.parametrize("method", ("GET", "POST"))
+def test_complete_body_classifier_rejects_encoded_exact_length_response(method):
+    body = b'{"ok":true}'
+    response = SimpleNamespace(
+        status_code=200,
+        headers=httpx.Headers(
+            {
+                "content-encoding": "gzip",
+                "content-length": str(len(body)),
+            }
+        ),
+    )
+
+    assert not _authenticated_body_is_complete_after_stream_error(
+        method=method,
+        response=response,
+        byte_count=len(body),
+        body=body,
+        error=EOFError("compressed stream ended ambiguously"),
+    )
 
 
 @pytest.mark.parametrize(
@@ -987,6 +1028,80 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
     assert clients[0].closed is True
 
 
+def test_job_scoped_client_cleanup_cannot_replace_request_result(monkeypatch):
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        extensions = {"network_stream": Stream()}
+
+        def iter_bytes(self):
+            yield b'{"ok":true}'
+
+    class ResponseContext:
+        def __enter__(self):
+            return Response()
+
+        def __exit__(self, *_args):
+            return False
+
+    class Client:
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+        def close(self):
+            raise EOFError("proxy cleanup lost close_notify")
+
+    transport = HTTPXProviderTransport()
+    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: Client())
+
+    result = transport(
+        method="POST",
+        url="https://api.exa.ai/search",
+        headers={"Accept-Encoding": "identity"},
+        body=b"{}",
+        timeout_ms=1000,
+        upstream_proxy_url="https://worker:secret@proxy.example.com:443",
+    )
+
+    assert result["http_status"] == 200
+    assert result["body"] == b'{"ok":true}'
+
+
+def test_job_scoped_client_cleanup_preserves_request_failure(monkeypatch):
+    class Client:
+        def stream(self, *_args, **_kwargs):
+            raise RuntimeError("provider request failed")
+
+        def close(self):
+            raise EOFError("proxy cleanup also failed")
+
+    transport = HTTPXProviderTransport()
+    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: Client())
+
+    with pytest.raises(RuntimeError, match="provider request failed"):
+        transport(
+            method="POST",
+            url="https://api.exa.ai/search",
+            headers={"Accept-Encoding": "identity"},
+            body=b"{}",
+            timeout_ms=1000,
+            upstream_proxy_url="https://worker:secret@proxy.example.com:443",
+        )
+
+
 def test_httpx_transport_retry_uses_fresh_client_after_direct_failure(monkeypatch):
     clients = []
 
@@ -1156,6 +1271,9 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "port": 443,
         "tls_termination": "gateway_coordinator_enclave",
         "plaintext_external_http": False,
+        "request_headers": [
+            {"name": "Accept-Encoding", "value": "identity"}
+        ],
     }
     assert set(document["routes"]) == set(BUILTIN_PROVIDER_ROUTES)
     assert document["routes"]["openrouter"]["hosts"] == ["openrouter.ai"]
@@ -1201,10 +1319,8 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_name": "Authorization",
         "credential_prefix": "Bearer ",
         "credential_header_aliases": [{"name": "apikey", "prefix": ""}],
-        "request_headers": [
-            {"name": "Accept-Encoding", "value": "identity"}
-        ],
     }
+    assert MEASURED_TRANSPORT_REQUEST_HEADERS == (("Accept-Encoding", "identity"),)
     assert provider_registry_hash().startswith("sha256:")
     assert expected_provider_credential_slots() == (
         "deepline",
@@ -1299,6 +1415,38 @@ def test_authenticated_provider_error_is_recorded_only_with_tls_evidence():
     assert attempt["http_status"] == 503
     assert attempt["tls_protocol"] == "TLSv1.3"
     assert transport.calls[0]["headers"]["Authorization"] == "Bearer openrouter-secret"
+    assert transport.calls[0]["headers"]["Accept-Encoding"] == "identity"
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "url"),
+    (
+        ("exa", "https://api.exa.ai/search"),
+        ("openrouter", "https://openrouter.ai/api/v1/chat/completions"),
+        ("scrapingdog", "https://api.scrapingdog.com/scrape?url=test"),
+    ),
+)
+def test_measured_transport_overrides_compressed_provider_responses(
+    provider_id,
+    url,
+):
+    transport = FakeTransport()
+    broker = _broker(transport)
+
+    broker.execute(
+        _request(
+            provider_id=provider_id,
+            url=url,
+            headers={
+                "content-type": "application/json",
+                "accept-encoding": "gzip, deflate, br",
+            },
+        )
+    )
+
+    outbound_headers = transport.calls[0]["headers"]
+    assert outbound_headers["Accept-Encoding"] == "identity"
+    assert "accept-encoding" not in outbound_headers
 
 
 def test_parent_or_network_error_cannot_masquerade_as_provider_status():

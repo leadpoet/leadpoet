@@ -71,6 +71,7 @@ DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS = min(
     DEFAULT_IDLE_TIMEOUT_SECONDS / 2.0,
 )
 EGRESS_PROXY_CREDENTIAL_SLOT = "egress_proxy"
+MEASURED_TRANSPORT_REQUEST_HEADERS = (("Accept-Encoding", "identity"),)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SECRET_QUERY_NAMES = frozenset(
     {"api_key", "apikey", "key", "token", "access_token"}
@@ -183,10 +184,6 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
-        # Keep the wire body identical to the body committed by the provider
-        # receipt. This also lets HTTP/2 reads prove JSON completeness when a
-        # relay loses only the terminal END_STREAM signal.
-        request_headers=(("Accept-Encoding", "identity"),),
     ),
     "truelist": ProviderRouteV2(
         provider_id="truelist",
@@ -279,6 +276,10 @@ def provider_registry_document() -> Dict[str, Any]:
             "port": 443,
             "tls_termination": "gateway_coordinator_enclave",
             "plaintext_external_http": False,
+            "request_headers": [
+                {"name": name, "value": value}
+                for name, value in MEASURED_TRANSPORT_REQUEST_HEADERS
+            ],
         },
         "routes": {
             provider_id: route_document(route)
@@ -470,6 +471,14 @@ def _make_response_cleanup_nonfatal(response: Any) -> None:
     response.stream = CleanupSafeStream()
 
 
+def _close_client_nonfatal(client: Any) -> None:
+    """Do not let connection cleanup replace authenticated request evidence."""
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
 def _authenticated_body_is_complete_after_stream_error(
     *,
     method: str,
@@ -490,8 +499,6 @@ def _authenticated_body_is_complete_after_stream_error(
     normalized_method = str(method or "").upper()
     if normalized_method == "HEAD":
         return byte_count == 0
-    if normalized_method != "GET":
-        return False
     response_headers = response.headers
     if str(response_headers.get("content-encoding") or "").strip().lower() not in {
         "",
@@ -520,6 +527,8 @@ def _authenticated_body_is_complete_after_stream_error(
                 len(declared_lengths) == 1
                 and byte_count == next(iter(declared_lengths))
             )
+        if normalized_method != "GET":
+            return False
         # HTTP/2 carries message completion in DATA-frame END_STREAM rather
         # than HTTP/1 Content-Length or Transfer-Encoding headers. The parent
         # relay can lose that terminal signal after delivering every
@@ -545,7 +554,7 @@ def _authenticated_body_is_complete_after_stream_error(
     # terminal zero-length chunk. Recover only when the body itself provides
     # an objective completeness boundary; every other chunked response remains
     # fail-closed.
-    if transfer_encoding != "chunked" or tokens:
+    if normalized_method != "GET" or transfer_encoding != "chunked" or tokens:
         return False
     return _authenticated_json_body_is_complete(
         response=response,
@@ -676,7 +685,7 @@ class HTTPXProviderTransport:
                         None,
                     )
             if close_client is not None:
-                close_client.close()
+                _close_client_nonfatal(close_client)
 
     def _retire_direct_client(self, client: Any, generation: int) -> None:
         close_client = None
@@ -691,7 +700,7 @@ class HTTPXProviderTransport:
                 else:
                     close_client = client
         if close_client is not None:
-            close_client.close()
+            _close_client_nonfatal(close_client)
 
     def close(self) -> None:
         with self._direct_client_lock:
@@ -702,7 +711,7 @@ class HTTPXProviderTransport:
             self._direct_client_leases.clear()
             self._retired_direct_clients.clear()
         for client in dict.fromkeys(clients):
-            client.close()
+            _close_client_nonfatal(client)
 
     @staticmethod
     def _execute_with_client(
@@ -830,7 +839,7 @@ class HTTPXProviderTransport:
                 ),
             )
         finally:
-            client.close()
+            _close_client_nonfatal(client)
 
 
 class ProviderBrokerV2:
@@ -1514,6 +1523,16 @@ class ProviderBrokerV2:
                     if name.lower() != str(static_name).lower()
                 }
                 outbound_headers[str(static_name)] = str(static_value)
+        # Bind response framing at the measured transport boundary, after
+        # route-specific headers, so no caller or dynamic route can opt back
+        # into compressed bodies whose decoded bytes cannot prove wire length.
+        for static_name, static_value in MEASURED_TRANSPORT_REQUEST_HEADERS:
+            outbound_headers = {
+                name: value
+                for name, value in outbound_headers.items()
+                if name.lower() != static_name.lower()
+            }
+            outbound_headers[static_name] = static_value
         measured_nonsecret_headers = _nonsecret_headers(outbound_headers)
         query = list(parse_qsl(parsed.query, keep_blank_values=True))
         credential_ref_hash = sha256_bytes(

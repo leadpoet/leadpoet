@@ -6132,6 +6132,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     from gateway.tee.provider_broker_v2 import (
         BUILTIN_PROVIDER_ROUTES,
         MAX_RESPONSE_BODY_BYTES,
+        MEASURED_TRANSPORT_REQUEST_HEADERS,
         PROVIDER_BROKER_SCHEMA_VERSION,
         PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
         ProviderBrokerV2,
@@ -6183,11 +6184,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         > MAX_FRAME_BYTES
     ):
         raise RuntimeError("provider response can exceed the authenticated RPC frame")
-    if dict(BUILTIN_PROVIDER_ROUTES["supabase"].request_headers) != {
+    if dict(MEASURED_TRANSPORT_REQUEST_HEADERS) != {
         "Accept-Encoding": "identity"
     }:
         raise RuntimeError(
-            "Supabase reads are not bound to identity response encoding"
+            "measured provider transport is not bound to identity encoding"
         )
 
     import httpx
@@ -6218,6 +6219,55 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         error=httpx.RemoteProtocolError("relay truncated HTTP/2 JSON"),
     ):
         raise RuntimeError("truncated HTTP/2 JSON was accepted")
+
+    production_exa_body = b'{"results":[{"id":"company-1"}]}'
+    production_exa_response = SimpleNamespace(
+        status_code=200,
+        headers=httpx.Headers(
+            {
+                "content-type": "application/json",
+                "content-length": str(len(production_exa_body)),
+            }
+        ),
+        http_version="HTTP/2",
+    )
+    if not _authenticated_body_is_complete_after_stream_error(
+        method="POST",
+        response=production_exa_response,
+        byte_count=len(production_exa_body),
+        body=production_exa_body,
+        error=httpx.RemoteProtocolError(
+            "relay lost HTTP/2 END_STREAM after the exact Exa body"
+        ),
+    ):
+        raise RuntimeError("exact-length authenticated Exa POST was not recovered")
+    if _authenticated_body_is_complete_after_stream_error(
+        method="POST",
+        response=production_exa_response,
+        byte_count=len(production_exa_body) - 1,
+        body=production_exa_body[:-1],
+        error=httpx.RemoteProtocolError("relay truncated the Exa POST body"),
+    ):
+        raise RuntimeError("truncated Exa POST body was accepted")
+    encoded_exa_response = SimpleNamespace(
+        status_code=200,
+        headers=httpx.Headers(
+            {
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+                "content-length": str(len(production_exa_body)),
+            }
+        ),
+        http_version="HTTP/2",
+    )
+    if _authenticated_body_is_complete_after_stream_error(
+        method="POST",
+        response=encoded_exa_response,
+        byte_count=len(production_exa_body),
+        body=production_exa_body,
+        error=httpx.RemoteProtocolError("compressed Exa body ended ambiguously"),
+    ):
+        raise RuntimeError("compressed Exa POST body was accepted")
 
     retry_hashes = {
         provider: sha256_json({"retry": provider})
@@ -7536,7 +7586,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_rpc_frame_budget_bound": True,
         "openrouter_body_framing_recomputed": True,
         "complete_http2_json_eof_recovered": True,
-        "supabase_identity_response_encoding_bound": True,
+        "measured_provider_identity_response_encoding_bound": True,
+        "exact_length_provider_post_eof_recovered": True,
     }
 
 
@@ -8652,7 +8703,12 @@ def main() -> int:
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",
                 {},
-            ).get("supabase_identity_response_encoding_bound")
+            ).get("measured_provider_identity_response_encoding_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("exact_length_provider_post_eof_recovered")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

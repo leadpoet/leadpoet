@@ -190,7 +190,14 @@ def test_dynamic_provider_uses_only_job_credential_and_exact_route():
     broker = _broker(transport)
     operator_user_agent = "source-owner@example.com SOURCE_ADD probe"
     route = build_source_add_runtime_catalog_v2(
-        [_source_row(request_headers={"User-Agent": operator_user_agent})]
+        [
+            _source_row(
+                request_headers={
+                    "User-Agent": operator_user_agent,
+                    "Accept-Encoding": "gzip",
+                }
+            )
+        ]
     )["routes"][0]
     broker.provision_job_credential(
         job_id="job-source-one",
@@ -222,8 +229,12 @@ def test_dynamic_provider_uses_only_job_credential_and_exact_route():
     assert result["terminal_status"] == "authenticated_response"
     assert calls[0]["headers"]["x-source-key"] == "source-add-secret"
     assert calls[0]["headers"]["User-Agent"] == operator_user_agent
+    assert calls[0]["headers"]["Accept-Encoding"] == "identity"
     assert "generic-gateway-agent" not in str(calls[0]["headers"])
-    assert route["request_headers"] == {"User-Agent": operator_user_agent}
+    assert route["request_headers"] == {
+        "User-Agent": operator_user_agent,
+        "Accept-Encoding": "gzip",
+    }
     assert "source-add-secret" not in str(result)
 
     with pytest.raises(ProviderBrokerV2Error, match="method/path"):

@@ -1402,12 +1402,17 @@
       "symbol": "write_identity_to_tmpfs"
     },
     {
-      "ast_sha256": "sha256:8b6c9c2cb8faf1c037176c4e6bd02d4cfcb3e02eea8d2ac2195aa43a0ee8da32",
+      "ast_sha256": "sha256:33d9bde227407e00446c72e076f614b8c823f1730e9aa72cb03b0325655968c7",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
     {
-      "ast_sha256": "sha256:37e94315cf29aee4f6e8149076f1e392b165a2f7c4f1ca5e9352c25a11f4aa92",
+      "ast_sha256": "sha256:16890f9f127ee4a7f03978bc007e49e3b8d285acbe25253657b176a3540832f4",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "MEASURED_TRANSPORT_REQUEST_HEADERS"
+    },
+    {
+      "ast_sha256": "sha256:1a3cbf1f66995f91d4f20b7aed2d0ec756e3306f54b12bde51caeac1d67e0e15",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -1417,7 +1422,7 @@
       "symbol": "_extract_tls_metadata"
     },
     {
-      "ast_sha256": "sha256:b6afc65353a8f3dce82e8a42b21c16e7b8b387f7ea024fcbf03f26f4b796df3c",
+      "ast_sha256": "sha256:ec208e316a182419627970df6d89a4b7d0bf80a3fa18bde5a5151aa3714ea9a0",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "provider_registry_document"
     },
@@ -2707,7 +2712,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:f6422eb1b951ae63beb05b8b78597a843a435991d99865e113b00898ccd3f163",
+  "manifest_hash": "sha256:b8048d6bc8add499bb25220860df1fb49f0fdcdb1e309c22b30d4a6e35f34221",
   "protected_source_commit": "2501432f4782582567557c799276a82f9689659b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

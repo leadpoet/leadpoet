@@ -1530,7 +1530,10 @@ def get_v2_provider_broker():
     with v2_provider_broker_lock:
         if v2_provider_broker is not None:
             return v2_provider_broker
-        from gateway.tee.provider_broker_v2 import ProviderBrokerV2
+        from gateway.tee.provider_broker_v2 import (
+            HTTPXProviderTransport,
+            ProviderBrokerV2,
+        )
         from gateway.tee.rpc_authority import active_enclave_role
 
         if active_enclave_role() != "gateway_coordinator":
@@ -1552,6 +1555,9 @@ def get_v2_provider_broker():
         v2_provider_broker = ProviderBrokerV2(
             credential_ref_hashes=credential_hashes,
             retry_policy_hashes=retry_hashes,
+            transport=HTTPXProviderTransport(
+                allow_authenticated_complete_body_eof=True,
+            ),
             job_credential_slot_ref_hashes=configuration.get(
                 "job_lease_slot_ref_hashes"
             ),

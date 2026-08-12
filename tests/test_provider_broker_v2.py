@@ -412,7 +412,7 @@ def test_complete_body_classifier_accepts_wrapped_transport_eof(nested_error):
     )
 
 
-def test_complete_body_classifier_rejects_unrelated_wrapped_error():
+def test_complete_body_classifier_accepts_opaque_error_after_exact_body():
     body = b'{"ok":true}'
     wrapped = RuntimeError("stream processing failed")
     wrapped.__cause__ = ValueError("response decoder invariant failed")
@@ -420,12 +420,76 @@ def test_complete_body_classifier_rejects_unrelated_wrapped_error():
         headers=httpx.Headers({"content-length": str(len(body))})
     )
 
-    assert not _authenticated_body_is_complete_after_stream_error(
+    assert _authenticated_body_is_complete_after_stream_error(
         method="GET",
         response=response,
         byte_count=len(body),
         error=wrapped,
     )
+    assert not _authenticated_body_is_complete_after_stream_error(
+        method="GET",
+        response=response,
+        byte_count=len(body) - 1,
+        error=wrapped,
+    )
+
+
+def test_httpx_transport_accepts_opaque_error_after_exact_artifact_body():
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class NetworkStream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    body = b'{"ok":true}'
+
+    class CompleteBodyThenOpaqueError(httpx.SyncByteStream):
+        def __iter__(self):
+            yield body
+            raise RuntimeError("relay stream wrapper terminated")
+
+        def close(self):
+            return None
+
+    response = httpx.Response(
+        200,
+        headers={"content-length": str(len(body))},
+        stream=CompleteBodyThenOpaqueError(),
+        extensions={"network_stream": NetworkStream()},
+        request=httpx.Request("GET", "https://example.com/artifact"),
+    )
+
+    class ResponseContext:
+        def __enter__(self):
+            return response
+
+        def __exit__(self, *_args):
+            response.close()
+
+    class Client:
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+    result = HTTPXProviderTransport._execute_with_client(
+        Client(),
+        method="GET",
+        url="https://example.com/artifact",
+        headers={},
+        body=b"",
+        timeout_seconds=1.0,
+        max_response_bytes=1024,
+        allow_authenticated_complete_body_eof=True,
+    )
+
+    assert result["http_status"] == 200
+    assert result["body"] == body
 
 
 def test_httpx_transport_requires_declared_length_for_eof_recovery():

@@ -18,11 +18,7 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from httpcore import (
-    ReadError as HTTPCoreReadError,
-    RemoteProtocolError as HTTPCoreRemoteProtocolError,
-)
-from httpx import ReadError, RemoteProtocolError, SyncByteStream
+from httpx import SyncByteStream
 
 from gateway.tee.egress_policy import (
     normalize_destination,
@@ -465,35 +461,15 @@ def _authenticated_body_is_complete_after_stream_error(
     byte_count: int,
     error: BaseException,
 ) -> bool:
-    """Recognize only framing errors after an authenticated complete response."""
-    pending = [error]
-    observed = set()
-    recognized_transport_error = False
-    while pending and len(observed) < 8:
-        candidate = pending.pop()
-        candidate_id = id(candidate)
-        if candidate_id in observed:
-            continue
-        observed.add(candidate_id)
-        if isinstance(
-            candidate,
-            (
-                EOFError,
-                ConnectionResetError,
-                ssl.SSLEOFError,
-                HTTPCoreReadError,
-                HTTPCoreRemoteProtocolError,
-                ReadError,
-                RemoteProtocolError,
-            ),
-        ):
-            recognized_transport_error = True
-            break
-        for nested in (candidate.__cause__, candidate.__context__):
-            if isinstance(nested, BaseException):
-                pending.append(nested)
-    if not recognized_transport_error:
-        return False
+    """Accept only an authenticated response whose framing is already complete."""
+    # HTTPX/httpcore may wrap a relay EOF in implementation-specific exception
+    # types. The exception taxonomy is not an integrity boundary: TLS evidence
+    # and response headers have already been authenticated, and callers still
+    # verify the exact canonical body, ciphertext hash, and Object Lock state.
+    # Recover solely from objective HTTP framing so library wrappers cannot turn
+    # an already-complete immutable readback into a permanent availability
+    # failure. Incomplete or ambiguous bodies remain fail-closed.
+    del error
     normalized_method = str(method or "").upper()
     if normalized_method == "HEAD":
         return byte_count == 0

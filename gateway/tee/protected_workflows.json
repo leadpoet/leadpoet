@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "d8d6118d071895ccdad116af561d775be6b0ff16",
+  "baseline_commit": "af9b06f0f211885620f5008c1a3b5962e893e08c",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -1172,12 +1172,12 @@
       "symbol": "_receive_exact_until"
     },
     {
-      "ast_sha256": "sha256:7da74e092a51d741af9ed15c836ecc0d199fdd0fd95929dae444b83edbb1bec2",
+      "ast_sha256": "sha256:0a441f885c333bbca4eafbfe85fa2b5c3b571c25a4ffcbd49b56c71e64441ce7",
       "path": "gateway/tee/egress_framing.py",
       "symbol": "receive_tunnel_frame"
     },
     {
-      "ast_sha256": "sha256:21c2980019763411073db207fdc490a185da93c59dd670ff9af6064e0b714150",
+      "ast_sha256": "sha256:8c3995404b7bfb2e8ceb10b060e0a3b7c31622d79117876bb8bf3ee912866eca",
       "path": "gateway/tee/egress_framing.py",
       "symbol": "relay_raw_and_framed"
     },
@@ -1207,7 +1207,7 @@
       "symbol": "policy_document"
     },
     {
-      "ast_sha256": "sha256:642a5ef042a201315f9f4db6b31607a10838dd09d481f82e7c969c3ee58c38f8",
+      "ast_sha256": "sha256:85dd2128a5f31e31acb13e13e7a47d76bb79464a7c689755f988575686076b53",
       "path": "gateway/tee/egress_proxy.py",
       "symbol": "EnclaveEgressProxy"
     },
@@ -1732,7 +1732,7 @@
       "symbol": "TEEEgressForwarder"
     },
     {
-      "ast_sha256": "sha256:701f778d97c58a63c936c1b9c19cd4f2e3d44e61655d0cf079ef09d726ab51b1",
+      "ast_sha256": "sha256:dc1f473fa7a5261c2ef22f8624a1725e927df3d824c2ac35cd3179e7d7d81a2d",
       "path": "gateway/utils/tee_egress_forwarder.py",
       "symbol": "_handle_connection"
     },
@@ -2702,7 +2702,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:3c9096c2cde91ed3e7ef93100c0701657008a113fd9db556fd50f79d29e9aab8",
-  "protected_source_commit": "d8d6118d071895ccdad116af561d775be6b0ff16",
+  "manifest_hash": "sha256:47daa561cf61ff747af6cae93c11668b414bd5d901b03a79cacbf9eb401cb3c7",
+  "protected_source_commit": "af9b06f0f211885620f5008c1a3b5962e893e08c",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

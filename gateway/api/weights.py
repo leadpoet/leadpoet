@@ -125,8 +125,12 @@ _WEIGHT_INPUT_RESULTS: Dict[
     tuple[int, str],
     tuple[float, Dict[str, Any]],
 ] = {}
+_WEIGHT_INPUT_AUTHORIZATIONS: Dict[tuple[int, str], float] = {}
+_WEIGHT_INPUT_RETRY_GENERATIONS: Dict[tuple[int, str], tuple[float, int]] = {}
 _WEIGHT_INPUT_RESULT_TTL_SECONDS = 120.0
 _WEIGHT_INPUT_RESULT_MAX_ENTRIES = 1
+_WEIGHT_INPUT_AUTHORIZATION_TTL_SECONDS = 1800.0
+_WEIGHT_INPUT_RETRY_MAX_GENERATIONS = 8
 
 
 def _weight_telemetry_fields(
@@ -223,6 +227,10 @@ async def _build_weight_inputs_v2_singleflight(
     from gateway.research_lab.attested_weight_inputs_v2 import (
         build_gateway_weight_inputs_v2,
     )
+    from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
+    from leadpoet_canonical.weight_authority_v2 import (
+        GATEWAY_WEIGHT_INPUT_CATEGORIES,
+    )
 
     loop = asyncio.get_running_loop()
     key = (id(loop), str(request_hash))
@@ -238,7 +246,20 @@ async def _build_weight_inputs_v2_singleflight(
         _WEIGHT_INPUT_LOADS_INFLIGHT.pop(key, None)
         task = None
     if task is None:
+        retry_state = _WEIGHT_INPUT_RETRY_GENERATIONS.get(key)
+        generation = 0
+        if retry_state is not None:
+            retry_expires_at, generation = retry_state
+            if retry_expires_at <= loop.time():
+                _WEIGHT_INPUT_RETRY_GENERATIONS.pop(key, None)
+                generation = 0
+        sequence_base = generation * len(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+
         async def _build() -> Dict[str, Any]:
+            async def _execute_fresh_generation(**kwargs: Any) -> Dict[str, Any]:
+                kwargs["sequence"] = int(kwargs["sequence"]) + sequence_base
+                return await execute_coordinator_v2(**kwargs)
+
             allocation_graph = await load_business_artifact_graph_v2(
                 artifact_kind="allocation",
                 artifact_ref=f"epoch:{int(epoch_id)}",
@@ -249,6 +270,7 @@ async def _build_weight_inputs_v2_singleflight(
                 allocation_graph=allocation_graph,
                 leaderboard_window_start=str(leaderboard_window_start),
                 leaderboard_window_end=str(leaderboard_window_end),
+                execute=_execute_fresh_generation,
             )
 
         task = asyncio.create_task(_build())
@@ -261,8 +283,18 @@ async def _build_weight_inputs_v2_singleflight(
                 return
             try:
                 result = completed.result()
-            except BaseException:
+            except BaseException as exc:
+                if _weight_input_reconstruction_is_retryable(exc):
+                    next_generation = min(
+                        generation + 1,
+                        _WEIGHT_INPUT_RETRY_MAX_GENERATIONS - 1,
+                    )
+                    _WEIGHT_INPUT_RETRY_GENERATIONS[key] = (
+                        loop.time() + _WEIGHT_INPUT_AUTHORIZATION_TTL_SECONDS,
+                        next_generation,
+                    )
                 return
+            _WEIGHT_INPUT_RETRY_GENERATIONS.pop(key, None)
             now = loop.time()
             for cached_key, (expires_at, _cached_result) in list(
                 _WEIGHT_INPUT_RESULTS.items()
@@ -280,11 +312,56 @@ async def _build_weight_inputs_v2_singleflight(
     return await asyncio.shield(task)
 
 
+def _weight_input_reconstruction_is_retryable(exc: BaseException) -> bool:
+    """Retry dependency failures without rerunning deterministic drift errors."""
+
+    from gateway.research_lab.attested_weight_inputs_v2 import (
+        WeightInputSnapshotDriftV2Error,
+    )
+    from gateway.research_lab.store import _is_transient_store_error
+
+    current: Optional[BaseException] = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, WeightInputSnapshotDriftV2Error):
+            return False
+        if type(current).__name__ in {
+            "AttestedScoringV2Error",
+            "SupabaseSourceV2Error",
+            "TEEClientError",
+        }:
+            return True
+        if _is_transient_store_error(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _remember_weight_inputs_v2_authorization(request_hash: str) -> None:
+    """Retain bounded authority only for an exact signed immutable request."""
+
+    loop = asyncio.get_running_loop()
+    key = (id(loop), str(request_hash))
+    now = loop.time()
+    for authorized_key, expires_at in list(_WEIGHT_INPUT_AUTHORIZATIONS.items()):
+        if expires_at <= now:
+            _WEIGHT_INPUT_AUTHORIZATIONS.pop(authorized_key, None)
+    _WEIGHT_INPUT_AUTHORIZATIONS[key] = (
+        now + _WEIGHT_INPUT_AUTHORIZATION_TTL_SECONDS
+    )
+
+
 def _weight_inputs_v2_has_authorized_work(request_hash: str) -> bool:
     """Return whether this process already authorized the exact request."""
 
     loop = asyncio.get_running_loop()
     key = (id(loop), str(request_hash))
+    authorized_until = _WEIGHT_INPUT_AUTHORIZATIONS.get(key)
+    if authorized_until is not None:
+        if authorized_until > loop.time():
+            return True
+        _WEIGHT_INPUT_AUTHORIZATIONS.pop(key, None)
     cached = _WEIGHT_INPUT_RESULTS.get(key)
     if cached is not None:
         expires_at, _result = cached
@@ -1640,6 +1717,7 @@ async def get_weight_inputs_v2(
             submitted_block=request["block"],
             require_submission_window=False,
         )
+        _remember_weight_inputs_v2_authorization(request["request_hash"])
     else:
         record_stage(
             component="gateway",

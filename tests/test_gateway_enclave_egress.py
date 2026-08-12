@@ -20,10 +20,12 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from gateway.tee.egress_policy import (
+    DEFER_REMOTE_EOF_HEADER,
     EgressPolicyError,
     destination_policy_hash,
     normalize_destination,
     normalize_proxy_destination,
+    policy_document,
 )
 from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
 from gateway.tee import egress_proxy
@@ -106,6 +108,7 @@ def _unused_loopback_port() -> int:
 def test_destination_policy_allows_public_dns_https_only():
     assert normalize_destination("API.OpenRouter.AI.", 443) == ("api.openrouter.ai", 443)
     assert destination_policy_hash().startswith("sha256:")
+    assert policy_document()["deferred_remote_eof_requires_enclave_opt_in"] is True
 
 
 def test_destination_policy_allows_proxy_port_without_relaxing_provider_port():
@@ -323,6 +326,50 @@ def test_parent_forwarder_rejects_policy_mismatch_before_connecting():
         thread.join(timeout=2)
 
 
+@pytest.mark.parametrize(
+    "extra_params",
+    (
+        {"defer_remote_eof": False},
+        {"defer_remote_eof": "true"},
+        {"defer_remote_eof": True, "purpose": "upstream_proxy"},
+    ),
+)
+def test_parent_forwarder_rejects_noncanonical_deferred_eof_control(extra_params):
+    client, parent = socket.socketpair()
+    called = []
+
+    def connector(host, port):
+        called.append((host, port))
+        raise AssertionError("must not connect")
+
+    thread = threading.Thread(
+        target=_handle_connection,
+        kwargs={"connection": parent, "connector": connector},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        client.sendall(
+            _frame(
+                {
+                    "method": "connect",
+                    "params": {
+                        "host": "api.openrouter.ai",
+                        "port": 443,
+                        "policy_hash": destination_policy_hash(),
+                        **extra_params,
+                    },
+                }
+            )
+        )
+        response = _read_frame(client)
+        assert response["status"] == "error"
+        assert called == []
+    finally:
+        client.close()
+        thread.join(timeout=2)
+
+
 def test_parent_relay_reports_directional_bytes_and_first_close():
     enclave, parent = socket.socketpair()
     upstream, provider = socket.socketpair()
@@ -351,6 +398,48 @@ def test_parent_relay_reports_directional_bytes_and_first_close():
     assert observed == {
         "enclave_to_provider_bytes": 7,
         "provider_to_enclave_bytes": 8,
+        "first_closed": "provider",
+    }
+    enclave.close()
+    parent.close()
+    upstream.close()
+    provider.close()
+
+
+def test_parent_relay_defers_provider_eof_until_enclave_client_closes():
+    enclave, parent = socket.socketpair()
+    upstream, provider = socket.socketpair()
+    observed = {}
+
+    def run():
+        observed.update(
+            _relay_bidirectional(
+                parent,
+                upstream,
+                idle_timeout_seconds=2,
+                defer_right_eof_until_left_close=True,
+            )
+        )
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    enclave.sendall(b"request")
+    assert provider.recv(64) == b"request"
+    provider.sendall(b"complete-response")
+    provider.shutdown(socket.SHUT_WR)
+    assert enclave.recv(64) == b"complete-response"
+
+    enclave.settimeout(0.1)
+    with pytest.raises(socket.timeout):
+        enclave.recv(1)
+    enclave.settimeout(None)
+    enclave.shutdown(socket.SHUT_WR)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert observed == {
+        "enclave_to_provider_bytes": 7,
+        "provider_to_enclave_bytes": 17,
         "first_closed": "provider",
     }
     enclave.close()
@@ -460,7 +549,10 @@ def test_relays_treat_peer_close_recv_error_as_directional_eof(
     right.close()
 
 
-def test_parent_relay_does_not_turn_incomplete_provider_body_into_success():
+@pytest.mark.parametrize("defer_remote_eof", (False, True))
+def test_parent_relay_does_not_turn_incomplete_provider_body_into_success(
+    defer_remote_eof,
+):
     enclave, parent = socket.socketpair()
     upstream, provider = socket.socketpair()
     errors = []
@@ -471,6 +563,7 @@ def test_parent_relay_does_not_turn_incomplete_provider_body_into_success():
                 parent,
                 upstream,
                 idle_timeout_seconds=2,
+                defer_right_eof_until_left_close=defer_remote_eof,
             )
         except Exception as exc:
             errors.append(exc)
@@ -486,8 +579,14 @@ def test_parent_relay_does_not_turn_incomplete_provider_body_into_success():
 
     response = http.client.HTTPResponse(enclave)
     response.begin()
-    with pytest.raises(http.client.IncompleteRead):
-        response.read()
+    if defer_remote_eof:
+        enclave.settimeout(0.1)
+        with pytest.raises(socket.timeout):
+            response.read()
+        enclave.settimeout(None)
+    else:
+        with pytest.raises(http.client.IncompleteRead):
+            response.read()
     enclave.sendall(b"late-tls-close")
     enclave.shutdown(socket.SHUT_WR)
     thread.join(timeout=2)
@@ -542,7 +641,7 @@ def test_enclave_relay_tolerates_late_client_write_after_parent_full_close():
     parent_side.close()
 
 
-def test_httpx_tls_transport_survives_full_close_through_both_relays(
+def test_httpx_tls_transport_defers_remote_eof_through_both_relays(
     tmp_path: Path,
 ):
     certificate_path, private_key_path = _write_test_server_identity(tmp_path)
@@ -584,7 +683,8 @@ def test_httpx_tls_transport_survives_full_close_through_both_relays(
     origin_thread.start()
     host_threads = []
 
-    def open_parent_tunnel(_host, _port):
+    def open_parent_tunnel(_host, _port, *, defer_remote_eof=False):
+        assert defer_remote_eof is True
         enclave_side, host_side = socket.socketpair()
         host_thread = threading.Thread(
             target=_handle_connection,
@@ -607,6 +707,7 @@ def test_httpx_tls_transport_survives_full_close_through_both_relays(
                     "host": "example.com",
                     "port": 443,
                     "policy_hash": destination_policy_hash(),
+                    "defer_remote_eof": True,
                 },
             }
         )
@@ -629,10 +730,11 @@ def test_httpx_tls_transport_survives_full_close_through_both_relays(
         result = HTTPXProviderTransport(
             proxy_url=f"http://127.0.0.1:{proxy_port}",
             ca_bundle=str(certificate_path),
+            defer_remote_eof_until_client_close=True,
         )(
             method="GET",
             url="https://example.com/artifact",
-            headers={"accept": "application/json"},
+            headers={"accept": "application/json", "connection": "close"},
             body=b"",
             timeout_ms=3000,
         )
@@ -816,6 +918,51 @@ def test_enclave_proxy_parses_connect_without_exposing_http_payload():
         "forward_headers": b"",
         "tls_protected": True,
     }
+
+
+def test_enclave_proxy_accepts_exact_deferred_eof_opt_in():
+    parsed = _parse_proxy_request(
+        b"CONNECT immutable.example:443 HTTP/1.1\r\n"
+        b"Host: immutable.example:443\r\n"
+        + DEFER_REMOTE_EOF_HEADER.encode("ascii")
+        + b": 1\r\n\r\n"
+    )
+
+    assert parsed == {
+        "method": "CONNECT",
+        "host": "immutable.example",
+        "port": 443,
+        "forward_headers": b"",
+        "tls_protected": True,
+        "defer_remote_eof": True,
+    }
+
+
+@pytest.mark.parametrize("value", (b"0", b"true", b"1, 1"))
+def test_enclave_proxy_rejects_invalid_deferred_eof_opt_in(value):
+    with pytest.raises(EnclaveEgressProxyError, match="deferred EOF header"):
+        _parse_proxy_request(
+            b"CONNECT immutable.example:443 HTTP/1.1\r\n"
+            b"Host: immutable.example:443\r\n"
+            + DEFER_REMOTE_EOF_HEADER.encode("ascii")
+            + b": "
+            + value
+            + b"\r\n\r\n"
+        )
+
+
+def test_enclave_proxy_rejects_deferred_eof_with_upstream_proxy():
+    encoded = base64.b64encode(b"https://worker:secret@proxy.example.com:443")
+    with pytest.raises(EnclaveEgressProxyError, match="cannot defer remote EOF"):
+        _parse_proxy_request(
+            b"CONNECT immutable.example:443 HTTP/1.1\r\n"
+            b"Host: immutable.example:443\r\n"
+            b"X-Leadpoet-Upstream-Proxy-B64: "
+            + encoded
+            + b"\r\n"
+            + DEFER_REMOTE_EOF_HEADER.encode("ascii")
+            + b": 1\r\n\r\n"
+        )
 
 
 def test_enclave_proxy_accepts_upstream_proxy_only_as_loopback_control_metadata():

@@ -145,6 +145,10 @@ def test_verifier_fetches_ciphertext_and_lock_headers_inside_tls() -> None:
     assert result["artifact"]["persisted"] is True
     assert len(result["transport_attempts"]) == 2
     assert [call[0] for call in transport.calls] == ["GET", "HEAD"]
+    assert all(
+        call[2] == {"accept": "application/json", "connection": "close"}
+        for call in transport.calls
+    )
     assert transport.calls[0][5] == MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
     assert transport.calls[1][5] == MAX_RESPONSE_BODY_BYTES
 
@@ -661,6 +665,7 @@ def test_default_transport_retries_on_fresh_bounded_sessions(monkeypatch) -> Non
         transport.options == {
             "response_body_ceiling_bytes": MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
             "allow_authenticated_complete_body_eof": True,
+            "defer_remote_eof_until_client_close": True,
         }
         for transport in transports
     )

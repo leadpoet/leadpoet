@@ -176,6 +176,7 @@ class _ArtifactVerificationTransportPool:
         return HTTPXProviderTransport(
             response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
             allow_authenticated_complete_body_eof=True,
+            defer_remote_eof_until_client_close=True,
         )
 
     def acquire(self) -> Callable[..., Mapping[str, Any]]:
@@ -335,7 +336,10 @@ class ArtifactPersistenceVerifierV2:
                 transport_session.get()(
                     method=method,
                     url=url,
-                    headers={"accept": "application/json"},
+                    headers={
+                        "accept": "application/json",
+                        "connection": "close",
+                    },
                     body=b"",
                     timeout_ms=ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
                     **transport_kwargs,
@@ -372,7 +376,9 @@ class ArtifactPersistenceVerifierV2:
             destination_host=str(parsed.hostname or ""),
             destination_port=parsed.port or 443,
             path_hash=sha256_bytes(parsed.path.encode("utf-8")),
-            nonsecret_headers_hash=sha256_json({"accept": "application/json"}),
+            nonsecret_headers_hash=sha256_json(
+                {"accept": "application/json", "connection": "close"}
+            ),
             body_hash=sha256_bytes(b""),
             credential_ref_hash=sha256_json(
                 {"policy_hash": self._policy_hash, "sigv4_query_present": True}

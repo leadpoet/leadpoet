@@ -19,6 +19,7 @@ from typing import Any, Dict, Tuple
 
 
 EGRESS_POLICY_VERSION = "leadpoet.gateway_enclave_egress.v2"
+DEFER_REMOTE_EOF_HEADER = "x-leadpoet-defer-remote-eof"
 ALLOWED_PORTS = (443,)
 BLOCKED_EXACT_HOSTS = (
     "0.0.0.0",
@@ -52,6 +53,7 @@ def policy_document() -> Dict[str, Any]:
         "upstream_proxy_port_range": [1, 65535],
         "upstream_proxy_requires_measured_connect_path": True,
         "upstream_proxy_global_ip_literals_allowed": True,
+        "deferred_remote_eof_requires_enclave_opt_in": True,
         "blocked_exact_hosts": list(BLOCKED_EXACT_HOSTS),
         "blocked_suffixes": list(BLOCKED_SUFFIXES),
         "ip_literals_allowed": False,

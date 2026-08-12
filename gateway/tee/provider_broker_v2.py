@@ -21,6 +21,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from httpx import SyncByteStream
 
 from gateway.tee.egress_policy import (
+    DEFER_REMOTE_EOF_HEADER,
     normalize_destination,
     normalize_proxy_destination,
 )
@@ -509,6 +510,7 @@ class HTTPXProviderTransport:
         ca_bundle: Optional[str] = None,
         response_body_ceiling_bytes: int = MAX_RESPONSE_BODY_BYTES,
         allow_authenticated_complete_body_eof: bool = False,
+        defer_remote_eof_until_client_close: bool = False,
     ) -> None:
         if (
             isinstance(response_body_ceiling_bytes, bool)
@@ -524,11 +526,18 @@ class HTTPXProviderTransport:
             raise ProviderBrokerV2Error(
                 "provider transport complete-body EOF policy is invalid"
             )
+        if not isinstance(defer_remote_eof_until_client_close, bool):
+            raise ProviderBrokerV2Error(
+                "provider transport deferred EOF policy is invalid"
+            )
         self.proxy_url = proxy_url
         self.ca_bundle = ca_bundle
         self.response_body_ceiling_bytes = response_body_ceiling_bytes
         self.allow_authenticated_complete_body_eof = (
             allow_authenticated_complete_body_eof
+        )
+        self.defer_remote_eof_until_client_close = (
+            defer_remote_eof_until_client_close
         )
         self._direct_client = None
         self._direct_client_lock = threading.Lock()
@@ -543,10 +552,13 @@ class HTTPXProviderTransport:
                 return False
 
         verify_path = self.ca_bundle or certifi.where()
+        normalized_proxy_headers = dict(proxy_headers or {})
+        if self.defer_remote_eof_until_client_close:
+            normalized_proxy_headers[DEFER_REMOTE_EOF_HEADER] = "1"
         return httpx.Client(
             proxy=httpx.Proxy(
                 self.proxy_url,
-                headers=dict(proxy_headers) if proxy_headers else None,
+                headers=normalized_proxy_headers or None,
             ),
             verify=verify_path,
             trust_env=False,

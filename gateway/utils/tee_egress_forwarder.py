@@ -140,6 +140,7 @@ def _relay_bidirectional(
     right: Any,
     *,
     idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
+    defer_right_eof_until_left_close: bool = False,
 ) -> Dict[str, Any]:
     peers = {left: right, right: left}
     active = {left, right}
@@ -166,10 +167,15 @@ def _relay_bidirectional(
                 if not first_closed:
                     first_closed = "enclave" if source is left else "provider"
                 active.discard(source)
-                try:
-                    destination.shutdown(socket.SHUT_WR)
-                except Exception:
-                    pass
+                # AF_VSOCK may expose SHUT_WR before bytes accepted by sendall()
+                # are consumed by the enclave. For explicitly framed enclave
+                # reads, let the authenticated client close after consuming the
+                # declared body instead of racing it with a parent half-close.
+                if not (defer_right_eof_until_left_close and source is right):
+                    try:
+                        destination.shutdown(socket.SHUT_WR)
+                    except Exception:
+                        pass
                 continue
             next_total = transferred[source] + len(data)
             if next_total > MAX_TUNNEL_BYTES_PER_DIRECTION:
@@ -228,17 +234,32 @@ def _handle_connection(
             raise TEEEgressForwarderError("egress control method is invalid")
         params = request["params"]
         base_params = {"host", "port", "policy_hash"}
-        if set(params) not in (base_params, base_params | {"purpose"}):
+        allowed_params = base_params | {"purpose", "defer_remote_eof"}
+        if (
+            not base_params.issubset(params)
+            or not set(params).issubset(allowed_params)
+        ):
             raise TEEEgressForwarderError("egress connect parameters are invalid")
         if params.get("policy_hash") != destination_policy_hash():
             raise TEEEgressForwarderError("egress policy hash mismatch")
         purpose = str(params.get("purpose") or "provider")
+        defer_remote_eof = False
+        if "defer_remote_eof" in params:
+            if params["defer_remote_eof"] is not True:
+                raise TEEEgressForwarderError(
+                    "egress deferred EOF policy is invalid"
+                )
+            defer_remote_eof = True
         if purpose == "provider":
             host, port = normalize_destination(
                 params.get("host"),
                 params.get("port"),
             )
         elif purpose == "upstream_proxy":
+            if defer_remote_eof:
+                raise TEEEgressForwarderError(
+                    "upstream proxy cannot defer remote EOF"
+                )
             host, port = normalize_proxy_destination(
                 params.get("host"),
                 params.get("port"),
@@ -261,6 +282,7 @@ def _handle_connection(
             connection,
             upstream,
             idle_timeout_seconds=idle_timeout_seconds,
+            defer_right_eof_until_left_close=defer_remote_eof,
         )
         logger.info(
             "gateway_tee_egress_tunnel_closed destination_ref=%s "

@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
 from gateway.tee.egress_policy import (
+    DEFER_REMOTE_EOF_HEADER,
     destination_policy_hash,
     normalize_destination,
     normalize_proxy_destination,
@@ -206,6 +207,7 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
         raise EnclaveEgressProxyError("proxy HTTP version is unsupported")
     if method == "CONNECT":
         upstream_values = []
+        deferred_eof_values = []
         for line in lines[1:]:
             if not line:
                 break
@@ -214,8 +216,17 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
             name, value = line.split(":", 1)
             if name.strip().lower() == UPSTREAM_PROXY_HEADER:
                 upstream_values.append(value.strip())
+            if name.strip().lower() == DEFER_REMOTE_EOF_HEADER:
+                deferred_eof_values.append(value.strip())
         if len(upstream_values) > 1:
             raise EnclaveEgressProxyError("upstream proxy header is duplicated")
+        if len(deferred_eof_values) > 1:
+            raise EnclaveEgressProxyError("deferred EOF header is duplicated")
+        defer_remote_eof = False
+        if deferred_eof_values:
+            if deferred_eof_values != ["1"]:
+                raise EnclaveEgressProxyError("deferred EOF header is invalid")
+            defer_remote_eof = True
         upstream_proxy_url = ""
         if upstream_values:
             try:
@@ -229,6 +240,10 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
                 ) from exc
             if len(upstream_proxy_url.encode("utf-8")) > 16 * 1024:
                 raise EnclaveEgressProxyError("upstream proxy URL exceeds limit")
+        if upstream_proxy_url and defer_remote_eof:
+            raise EnclaveEgressProxyError(
+                "upstream proxy cannot defer remote EOF"
+            )
         host, port = _parse_authority(target, 443)
         request = {
             "method": method,
@@ -237,6 +252,8 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
             "forward_headers": b"",
             "tls_protected": True,
         }
+        if defer_remote_eof:
+            request["defer_remote_eof"] = True
         if upstream_proxy_url:
             request["upstream_proxy_url"] = upstream_proxy_url
         return request
@@ -435,6 +452,7 @@ class EnclaveEgressProxy:
         port: int,
         *,
         purpose: str = "provider",
+        defer_remote_eof: bool = False,
     ) -> Any:
         parent = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
         try:
@@ -445,9 +463,15 @@ class EnclaveEgressProxy:
                 "policy_hash": destination_policy_hash(),
             }
             if purpose == "upstream_proxy":
+                if defer_remote_eof:
+                    raise EnclaveEgressProxyError(
+                        "upstream proxy cannot defer remote EOF"
+                    )
                 params["purpose"] = purpose
             elif purpose != "provider":
                 raise EnclaveEgressProxyError("parent egress purpose is invalid")
+            if defer_remote_eof:
+                params["defer_remote_eof"] = True
             request = _canonical_json(
                 {
                     "method": "connect",
@@ -592,7 +616,14 @@ class EnclaveEgressProxy:
                 )
             else:
                 failure_stage = "open_parent_tunnel"
-                parent = self._open_parent_tunnel(host, port)
+                if request.get("defer_remote_eof") is True:
+                    parent = self._open_parent_tunnel(
+                        host,
+                        port,
+                        defer_remote_eof=True,
+                    )
+                else:
+                    parent = self._open_parent_tunnel(host, port)
             failure_stage = "acknowledge_connect"
             if request["method"] == "CONNECT":
                 client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")

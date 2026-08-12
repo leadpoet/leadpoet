@@ -219,13 +219,38 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _network_for_attempt(network: str, attempt: int) -> str:
+    """Use the pinned Finney archive after the configured public endpoint fails."""
+
+    normalized = str(network or "").strip()
+    if attempt > 1 and normalized.lower() == "finney":
+        return OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+    return normalized
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
 
     import bittensor as bt
 
     for attempt in range(1, RESTART_EPOCH_READ_ATTEMPTS + 1):
-        subtensor = bt.Subtensor(network=args.network)
+        subtensor = None
+        network = _network_for_attempt(args.network, attempt)
+        try:
+            subtensor = bt.Subtensor(network=network)
+        except Exception as exc:
+            if attempt >= RESTART_EPOCH_READ_ATTEMPTS:
+                raise
+            print(
+                "Transient official subnet epoch connection failed; retrying "
+                "with a fresh chain connection "
+                f"({attempt}/{RESTART_EPOCH_READ_ATTEMPTS}): "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(RESTART_EPOCH_RETRY_DELAY_SECONDS)
+            continue
         try:
             if args.captured_report is not None:
                 result = verify_captured_restart_epoch_start(

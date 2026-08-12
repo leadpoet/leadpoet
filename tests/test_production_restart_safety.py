@@ -128,6 +128,55 @@ def test_restart_gate_retries_transient_epoch_read_with_fresh_connection(
     assert '"restart_allowed": true' in capsys.readouterr().out
 
 
+def test_restart_gate_retries_connection_timeout_via_pinned_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    networks = []
+    subtensors = []
+    sleeps = []
+
+    class Subtensor:
+        def __init__(self, *, network):
+            networks.append(network)
+            if len(networks) == 1:
+                raise TimeoutError("timed out")
+            self.closed = False
+            subtensors.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "bittensor",
+        SimpleNamespace(Subtensor=Subtensor),
+    )
+    monkeypatch.setattr(
+        restart_epoch_gate,
+        "read_subnet_epoch_snapshot",
+        lambda _subtensor, *, netuid: _snapshot(200),
+    )
+    monkeypatch.setattr(
+        restart_epoch_gate.time,
+        "sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+
+    assert restart_epoch_gate.main(["--network", "finney"]) == 0
+
+    assert networks == [
+        "finney",
+        restart_epoch_gate.OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
+    ]
+    assert len(subtensors) == 1
+    assert subtensors[0].closed is True
+    assert sleeps == [restart_epoch_gate.RESTART_EPOCH_RETRY_DELAY_SECONDS]
+    captured = capsys.readouterr()
+    assert "Transient official subnet epoch connection failed" in captured.err
+    assert '"restart_allowed": true' in captured.out
+
+
 def test_restart_gate_fails_closed_after_bounded_transient_read_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

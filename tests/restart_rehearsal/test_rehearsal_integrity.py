@@ -5261,9 +5261,189 @@ def test_rehearsal_scoring_provider_calls_cross_the_coordinator_process() -> Non
 
     assert "rehearsal_inter_enclave_provider_execute" in runtime
     assert "rehearsal_inter_enclave_provider_probe_resolve" in runtime
+    assert "seal_artifact_over_attested_tls_v2" in runtime
+    assert "_PersistentInterEnclaveArtifactClient" in runtime
     assert "handle_inter_enclave_rpc(" in handler
     assert '"provider_execute"' in handler
     assert '"provider_probe_resolve"' in handler
+    assert '"rehearsal_inter_enclave_artifact_call"' in handler
+    assert '"artifact_seal_finish"' in handler
+
+
+def test_rehearsal_artifact_client_crosses_the_coordinator_process(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def call(
+        role: str,
+        method: str,
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        calls.append((role, method, dict(params)))
+        return {"status": "accepted"}
+
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_call_persistent_gateway_enclave",
+        call,
+    )
+    client = rehearsal_sitecustomize._PersistentInterEnclaveArtifactClient(
+        peer_role="gateway_scoring"
+    )
+    params = {"upload_id": "artifact_upload:" + "1" * 32}
+
+    assert client.call(
+        target_physical_role="gateway_coordinator",
+        method="artifact_seal_finish",
+        params=params,
+        channel_id="2" * 32,
+    ) == {"status": "accepted"}
+    assert calls == [
+        (
+            "gateway_coordinator",
+            "rehearsal_inter_enclave_artifact_call",
+            {
+                "peer_role": "gateway_scoring",
+                "method": "artifact_seal_finish",
+                "params": params,
+                "channel_id": "2" * 32,
+            },
+        )
+    ]
+
+    with pytest.raises(ValueError, match="artifact channel differs"):
+        client.call(
+            target_physical_role="gateway_scoring",
+            method="artifact_seal_finish",
+            params=params,
+            channel_id="2" * 32,
+        )
+    with pytest.raises(ValueError, match="artifact channel differs"):
+        client.call(
+            target_physical_role="gateway_coordinator",
+            method="provider_execute",
+            params=params,
+            channel_id="2" * 32,
+        )
+    with pytest.raises(ValueError, match="artifact channel differs"):
+        client.call(
+            target_physical_role="gateway_coordinator",
+            method="artifact_seal_finish",
+            params=params,
+            channel_id="not-a-channel",
+        )
+
+
+def test_rehearsal_coordinator_binds_artifact_calls_to_peer_boot_identity(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object], dict[str, object]]] = []
+
+    class CandidateRuntime:
+        def handle_inter_enclave_rpc(
+            self,
+            method: str,
+            params: dict[str, object],
+            peer: dict[str, object],
+        ) -> dict[str, object]:
+            calls.append((method, dict(params), dict(peer)))
+            return {"status": "candidate"}
+
+    runtime = CandidateRuntime()
+    state = {
+        "roles": {
+            "gateway_coordinator": {
+                "config_hash": "sha256:" + "1" * 64,
+            },
+            "gateway_scoring": {
+                "config_hash": "sha256:" + "2" * 64,
+            },
+        }
+    }
+    boot_identity = {
+        "physical_role": "gateway_scoring",
+        "role": "gateway_scoring",
+        "boot_identity_hash": "sha256:" + "3" * 64,
+    }
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_release_input",
+        lambda: {
+            "gateway_roles": {
+                "gateway_coordinator": {},
+                "gateway_scoring": {},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_enclave_state",
+        lambda _mutate=None: (state, None),
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_runtime_objects",
+        lambda _role, _state: {"tee_service": runtime},
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_local_boot_identity",
+        lambda role, config_hash: {
+            **boot_identity,
+            "physical_role": role,
+            "config_hash": config_hash,
+        },
+    )
+    params = {"upload_id": "artifact_upload:" + "4" * 32}
+
+    assert rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+        "gateway_coordinator",
+        "rehearsal_inter_enclave_artifact_call",
+        {
+            "peer_role": "gateway_scoring",
+            "method": "artifact_seal_finish",
+            "params": params,
+            "channel_id": "5" * 32,
+        },
+    ) == {"status": "candidate"}
+    assert calls == [
+        (
+            "artifact_seal_finish",
+            params,
+            {
+                "physical_role": "gateway_scoring",
+                "service_role": "gateway_scoring",
+                "boot_identity": {
+                    **boot_identity,
+                    "config_hash": "sha256:" + "2" * 64,
+                },
+            },
+        )
+    ]
+
+    with pytest.raises(ValueError, match="artifact peer differs"):
+        rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            "gateway_coordinator",
+            "rehearsal_inter_enclave_artifact_call",
+            {
+                "peer_role": "gateway_scoring",
+                "method": "provider_execute",
+                "params": params,
+                "channel_id": "5" * 32,
+            },
+        )
+    with pytest.raises(ValueError, match="artifact peer differs"):
+        rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            "gateway_coordinator",
+            "rehearsal_inter_enclave_artifact_call",
+            {
+                "peer_role": "gateway_scoring",
+                "method": "artifact_seal_finish",
+                "params": params,
+                "channel_id": "not-a-channel",
+            },
+        )
 
 
 def test_rehearsal_routes_credential_ingress_to_candidate_runtime(

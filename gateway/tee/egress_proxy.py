@@ -654,6 +654,7 @@ class EnclaveEgressProxy:
                     max_bytes_per_direction=MAX_TUNNEL_BYTES_PER_DIRECTION,
                     raw_label="client",
                     framed_label="parent",
+                    terminal_initiator=True,
                 )
             else:
                 relay = _relay_bidirectional(

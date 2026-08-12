@@ -19,7 +19,11 @@ TUNNEL_FRAMING_HEADER = "x-leadpoet-egress-tunnel-framing"
 TUNNEL_FRAMING_MODE = "length-v2"
 TUNNEL_FRAME_BYTES = 64 * 1024
 _TUNNEL_EOF_ACK_SIZE = (1 << 32) - 1
+_TUNNEL_CLOSE_SIZE = (1 << 32) - 2
+_TUNNEL_CLOSE_ACK_SIZE = (1 << 32) - 3
 _TUNNEL_EOF_ACK = object()
+_TUNNEL_CLOSE = object()
+_TUNNEL_CLOSE_ACK = object()
 _PEER_CLOSE_ERRNOS = frozenset(
     value
     for value in (
@@ -83,6 +87,10 @@ def _send_tunnel_eof_ack(connection: Any) -> None:
     connection.sendall(_TUNNEL_EOF_ACK_SIZE.to_bytes(4, byteorder="big"))
 
 
+def _send_tunnel_control(connection: Any, size: int) -> None:
+    connection.sendall(size.to_bytes(4, byteorder="big"))
+
+
 def receive_tunnel_frame(
     connection: Any,
     *,
@@ -102,6 +110,10 @@ def receive_tunnel_frame(
         return None
     if size == _TUNNEL_EOF_ACK_SIZE:
         return _TUNNEL_EOF_ACK
+    if size == _TUNNEL_CLOSE_SIZE:
+        return _TUNNEL_CLOSE
+    if size == _TUNNEL_CLOSE_ACK_SIZE:
+        return _TUNNEL_CLOSE_ACK
     if size > TUNNEL_FRAME_BYTES:
         raise EgressTunnelFramingError("egress tunnel frame exceeds limit")
     return _receive_exact_until(
@@ -120,10 +132,13 @@ def relay_raw_and_framed(
     max_bytes_per_direction: int,
     raw_label: str,
     framed_label: str,
+    terminal_initiator: bool,
     clock: Callable[[], float] = time.monotonic,
 ) -> Dict[str, Any]:
     """Relay a raw full-duplex stream over a length-framed full-duplex stream."""
 
+    if not isinstance(terminal_initiator, bool):
+        raise EgressTunnelFramingError("egress tunnel terminal role is invalid")
     transferred = {raw: 0, framed: 0}
     first_closed = ""
     write_closed = ""
@@ -186,6 +201,10 @@ def relay_raw_and_framed(
                 own_eof_acked = True
                 last_activity = clock()
                 continue
+            if payload in {_TUNNEL_CLOSE, _TUNNEL_CLOSE_ACK}:
+                raise EgressTunnelFramingError(
+                    "egress tunnel close control arrived before stream completion"
+                )
             if payload is None:
                 if peer_eof_received:
                     raise EgressTunnelFramingError(
@@ -226,6 +245,45 @@ def relay_raw_and_framed(
                         own_eof_sent = True
             transferred[framed] = next_total
             last_activity = clock()
+
+    deadline = clock() + idle_timeout_seconds
+    if terminal_initiator:
+        _send_tunnel_control(framed, _TUNNEL_CLOSE_SIZE)
+        if receive_tunnel_frame(framed, deadline=deadline, clock=clock) is not _TUNNEL_CLOSE_ACK:
+            raise EgressTunnelFramingError(
+                "egress tunnel close acknowledgement is invalid"
+            )
+        # The responder deliberately waits for this physical close. It proves
+        # that its final acknowledgement reached the initiator before either
+        # endpoint releases the AF_VSOCK tunnel.
+        framed.close()
+    else:
+        if receive_tunnel_frame(framed, deadline=deadline, clock=clock) is not _TUNNEL_CLOSE:
+            raise EgressTunnelFramingError("egress tunnel close request is invalid")
+        _send_tunnel_control(framed, _TUNNEL_CLOSE_ACK_SIZE)
+        while True:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise EgressTunnelFramingError(
+                    "egress tunnel physical close timed out"
+                )
+            readable, _writable, _exceptional = select.select(
+                [framed], [], [], min(1.0, remaining)
+            )
+            if not readable:
+                continue
+            try:
+                trailing = framed.recv(1)
+            except OSError as exc:
+                if int(getattr(exc, "errno", 0) or 0) in _PEER_CLOSE_ERRNOS:
+                    trailing = b""
+                else:
+                    raise
+            if trailing:
+                raise EgressTunnelFramingError(
+                    "egress tunnel data followed its close acknowledgement"
+                )
+            break
     result = {
         "%s_to_%s_bytes" % (raw_label, framed_label): transferred[raw],
         "%s_to_%s_bytes" % (framed_label, raw_label): transferred[framed],

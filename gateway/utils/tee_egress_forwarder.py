@@ -291,6 +291,7 @@ def _handle_connection(
                 max_bytes_per_direction=MAX_TUNNEL_BYTES_PER_DIRECTION,
                 raw_label="provider",
                 framed_label="enclave",
+                terminal_initiator=False,
             )
         else:
             relay = _relay_bidirectional(

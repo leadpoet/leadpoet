@@ -437,6 +437,7 @@ def test_framed_relay_preserves_large_bidirectional_payload_and_explicit_eof():
             "max_bytes_per_direction": len(request) + len(response),
             "raw_label": "client",
             "framed_label": "parent",
+            "terminal_initiator": True,
         },
         daemon=True,
     )
@@ -448,6 +449,7 @@ def test_framed_relay_preserves_large_bidirectional_payload_and_explicit_eof():
             "max_bytes_per_direction": len(request) + len(response),
             "raw_label": "provider",
             "framed_label": "enclave",
+            "terminal_initiator": False,
         },
         daemon=True,
     )
@@ -511,6 +513,7 @@ def test_framed_relay_fails_closed_without_forwarding_truncated_frame():
                 max_bytes_per_direction=1024,
                 raw_label="client",
                 framed_label="parent",
+                terminal_initiator=True,
             )
         except Exception as exc:
             errors.append(exc)
@@ -549,6 +552,7 @@ def test_framed_relay_waits_for_terminal_ack_before_returning():
                 max_bytes_per_direction=1024,
                 raw_label="client",
                 framed_label="parent",
+                terminal_initiator=True,
             )
         except Exception as exc:
             errors.append(exc)
@@ -569,9 +573,64 @@ def test_framed_relay_waits_for_terminal_ack_before_returning():
         assert thread.is_alive()
 
         peer.sendall(((1 << 32) - 1).to_bytes(4, byteorder="big"))
+        assert _recv_exact(peer, 4) == ((1 << 32) - 2).to_bytes(
+            4,
+            byteorder="big",
+        )
+        thread.join(timeout=0.1)
+        assert thread.is_alive()
+        peer.sendall(((1 << 32) - 3).to_bytes(4, byteorder="big"))
         thread.join(timeout=2)
     finally:
         for connection in (client, raw, framed, peer):
+            connection.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+
+
+def test_framed_responder_waits_for_initiator_physical_close():
+    provider, raw = socket.socketpair()
+    framed, enclave = socket.socketpair()
+    errors = []
+
+    def run():
+        try:
+            relay_raw_and_framed(
+                raw,
+                framed,
+                idle_timeout_seconds=2,
+                max_bytes_per_direction=1024,
+                raw_label="provider",
+                framed_label="enclave",
+                terminal_initiator=False,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        provider.shutdown(socket.SHUT_WR)
+        assert _recv_exact(enclave, 4) == (0).to_bytes(4, byteorder="big")
+        enclave.sendall(((1 << 32) - 1).to_bytes(4, byteorder="big"))
+        enclave.sendall((0).to_bytes(4, byteorder="big"))
+        assert _recv_exact(enclave, 4) == ((1 << 32) - 1).to_bytes(
+            4,
+            byteorder="big",
+        )
+        enclave.sendall(((1 << 32) - 2).to_bytes(4, byteorder="big"))
+        assert _recv_exact(enclave, 4) == ((1 << 32) - 3).to_bytes(
+            4,
+            byteorder="big",
+        )
+
+        thread.join(timeout=0.1)
+        assert thread.is_alive()
+        enclave.close()
+        thread.join(timeout=2)
+    finally:
+        for connection in (provider, raw, framed):
             connection.close()
 
     assert not thread.is_alive()

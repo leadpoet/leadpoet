@@ -52,7 +52,12 @@ def validate_openrouter_key_format(raw_key: str) -> str:
     return value
 
 
-def preflight_openrouter_key(raw_key: str, *, timeout_seconds: int = 12) -> dict[str, Any]:
+def preflight_openrouter_key(
+    raw_key: str,
+    *,
+    timeout_seconds: int = 12,
+    expected_key_hash: str | None = None,
+) -> dict[str, Any]:
     """Verify a raw OpenRouter key and return only non-secret metadata."""
     key = validate_openrouter_key_format(raw_key)
     req = urlrequest.Request(
@@ -82,8 +87,21 @@ def preflight_openrouter_key(raw_key: str, *, timeout_seconds: int = 12) -> dict
         raise OpenRouterKeyVaultError("OpenRouter key preflight returned no key metadata")
     if data.get("disabled") is True:
         raise OpenRouterKeyVaultError("OpenRouter key is disabled")
+    observed_key_hash = str(data.get("hash") or "").strip()
+    if expected_key_hash is not None:
+        if not _OPENROUTER_KEY_HASH_RE.fullmatch(expected_key_hash):
+            raise OpenRouterKeyVaultError(
+                "expected OpenRouter runtime key hash is invalid"
+            )
+        if observed_key_hash and observed_key_hash != expected_key_hash:
+            raise OpenRouterKeyVaultError(
+                "OpenRouter key preflight differs from the expected runtime key"
+            )
+        key_hash = expected_key_hash
+    else:
+        key_hash = observed_key_hash or _local_key_hash(key)
     return {
-        "key_hash": str(data.get("hash") or _local_key_hash(key)),
+        "key_hash": key_hash,
         "key_label_hash": _optional_hash(data.get("label")),
         "creator_user_id_hash": _optional_hash(data.get("creator_user_id")),
         "limit": data.get("limit"),
@@ -103,6 +121,7 @@ def verify_openrouter_workspace_privacy(
     timeout_seconds: int = 15,
     stage: str = "registration",
     request_policy: Mapping[str, Any] | None = None,
+    expected_runtime_key_hash: str | None = None,
 ) -> dict[str, Any]:
     """Require the runtime key's workspace to be controlled by the management key.
 
@@ -112,13 +131,19 @@ def verify_openrouter_workspace_privacy(
     """
     runtime = validate_openrouter_key_format(runtime_key)
     management = validate_openrouter_key_format(management_key)
-    key_doc = preflight_openrouter_key(runtime, timeout_seconds=timeout_seconds)
+    key_doc = preflight_openrouter_key(
+        runtime,
+        timeout_seconds=timeout_seconds,
+        expected_key_hash=expected_runtime_key_hash,
+    )
     runtime_label_hash = key_doc.get("key_label_hash")
     runtime_creator_hash = key_doc.get("creator_user_id_hash")
 
     workspace = _find_runtime_key_workspace(
         management_key=management,
-        runtime_key_hash=_local_key_hash(runtime),
+        runtime_key_hash=(
+            expected_runtime_key_hash or _local_key_hash(runtime)
+        ),
         timeout_seconds=timeout_seconds,
     )
     workspace_id = str(workspace["id"])

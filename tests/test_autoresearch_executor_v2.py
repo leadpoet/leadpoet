@@ -2024,14 +2024,20 @@ def test_openrouter_guard_returns_only_committed_redacted_key_evidence(monkeypat
     run_state_hash = sha256_json(
         {"run_id": run_id, "queue_event_hash": queue_event_hash}
     )
+    observed_preflight_kwargs = {}
     monkeypatch.setattr(
         "gateway.tee.autoresearch_executor_v2.preflight_openrouter_key",
-        lambda _key: {"limit_remaining": "0.00", "usage": 12},
+        lambda _key, **kwargs: observed_preflight_kwargs.update(kwargs) or {
+            "limit_remaining": "0.00",
+            "usage": 12,
+        },
     )
+    observed_privacy_kwargs = {}
     monkeypatch.setattr(
         "gateway.tee.autoresearch_executor_v2.verify_openrouter_workspace_privacy",
-        lambda **_kwargs: {
+        lambda **kwargs: observed_privacy_kwargs.update(kwargs) or {
             "workspace_id_hash": "workspace-hash",
+            "runtime_key_hash": runtime_hash.split(":", 1)[1],
             "management_key_hash": "placeholder-hash",
             "proof_hash": "sha256:" + "7" * 64,
         },
@@ -2073,6 +2079,10 @@ def test_openrouter_guard_returns_only_committed_redacted_key_evidence(monkeypat
                     allowed_purposes=frozenset(
                         ROLE_PURPOSES["gateway_autoresearch"]
                     ),
+                    provider_credential_ref_hashes={
+                        "openrouter": runtime_hash,
+                        "openrouter_management": management_hash,
+                    },
                 ),
             )
         )
@@ -2084,7 +2094,78 @@ def test_openrouter_guard_returns_only_committed_redacted_key_evidence(monkeypat
     assert result.output["privacy_proof_doc"]["management_key_hash"] == (
         management_hash.split(":", 1)[1]
     )
+    assert observed_privacy_kwargs["expected_runtime_key_hash"] == (
+        runtime_hash.split(":", 1)[1]
+    )
+    assert observed_preflight_kwargs["expected_key_hash"] == (
+        runtime_hash.split(":", 1)[1]
+    )
     assert "sk-or-v1-" not in str(result.output)
+
+
+def test_openrouter_guard_rejects_unleased_credential_commitment(monkeypatch):
+    runtime_hash = "sha256:" + "5" * 64
+    management_hash = "sha256:" + "6" * 64
+    key_ref = "encrypted_ref:openrouter:" + "1" * 32
+    run_id = "run-wrong-credential-commitment"
+    queue_event_hash = "sha256:" + "a" * 64
+    payload = {
+        "schema_version": OPENROUTER_GUARD_REQUEST_SCHEMA_VERSION,
+        "key_ref": key_ref,
+        "key_ref_hash": sha256_bytes(key_ref.encode("utf-8")),
+        "miner_hotkey_hash": "sha256:" + "9" * 64,
+        "runtime_credential_value_hash": runtime_hash,
+        "management_credential_value_hash": management_hash,
+        "stage": "autoresearch_v2_authority",
+        "request_policy": {
+            "data_collection": "deny",
+            "allow_fallbacks": False,
+        },
+        "run_id": run_id,
+        "queue_event_hash": queue_event_hash,
+        "run_state_hash": sha256_json(
+            {"run_id": run_id, "queue_event_hash": queue_event_hash}
+        ),
+    }
+    monkeypatch.setattr(
+        "gateway.tee.autoresearch_executor_v2.verify_openrouter_workspace_privacy",
+        lambda **_kwargs: pytest.fail("provider call must not begin"),
+    )
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: pytest.fail("provider call must not begin"),
+        retry_policy_hashes={
+            "openrouter": "sha256:" + "4" * 64,
+            "openrouter_management": "sha256:" + "8" * 64,
+        },
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(
+            AutoresearchExecutorV2Error,
+            match="openrouter credential commitment differs",
+        ):
+            asyncio.run(
+                executor(
+                    OP_VERIFY_OPENROUTER_GUARD,
+                    payload,
+                    ExecutionContextV2(
+                        job_id="autoresearch-v2:guard-wrong-commitment",
+                        purpose="research_lab.openrouter_guard.v2",
+                        epoch_id=1,
+                        provider_credential_ref_hashes={
+                            "openrouter": "sha256:" + "f" * 64,
+                            "openrouter_management": management_hash,
+                        },
+                        allowed_purposes=frozenset(
+                            ROLE_PURPOSES["gateway_autoresearch"]
+                        ),
+                    ),
+                )
+            )
+    finally:
+        executor.close()
 
 
 def _stale_parent_context():

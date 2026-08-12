@@ -2024,6 +2024,18 @@ class AutoresearchExecutorV2:
             raise AutoresearchExecutorV2Error(
                 "OpenRouter guard request policy differs"
             )
+        expected_provider_refs = {
+            "openrouter": runtime_hash,
+            "openrouter_management": management_hash,
+        }
+        for provider_id, expected_hash in expected_provider_refs.items():
+            if (
+                context.provider_credential_ref_hashes.get(provider_id)
+                != expected_hash
+            ):
+                raise AutoresearchExecutorV2Error(
+                    f"OpenRouter guard {provider_id} credential commitment differs"
+                )
 
         preflight_status = "passed"
         preflight_error_type = ""
@@ -2041,6 +2053,7 @@ class AutoresearchExecutorV2:
                     await asyncio.to_thread(
                         preflight_openrouter_key,
                         _RUNTIME_KEY_PLACEHOLDER,
+                        expected_key_hash=runtime_hash.split(":", 1)[1],
                     )
                 )
             except Exception as exc:
@@ -2056,7 +2069,13 @@ class AutoresearchExecutorV2:
                     management_key=_MANAGEMENT_KEY_PLACEHOLDER,
                     stage=stage,
                     request_policy=request_policy,
+                    expected_runtime_key_hash=runtime_hash.split(":", 1)[1],
                 )
+            )
+
+        if privacy_doc.get("runtime_key_hash") != runtime_hash.split(":", 1)[1]:
+            raise AutoresearchExecutorV2Error(
+                "OpenRouter guard runtime key proof commitment differs"
             )
 
         # The exact key never leaves the coordinator.  Replace the placeholder

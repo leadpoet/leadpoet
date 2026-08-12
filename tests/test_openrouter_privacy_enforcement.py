@@ -104,6 +104,86 @@ def test_openrouter_workspace_privacy_verification_patches_and_proves(monkeypatc
     assert management_key not in json.dumps(proof)
 
 
+def test_openrouter_workspace_privacy_uses_attested_runtime_hash_for_placeholder(
+    monkeypatch,
+):
+    runtime_placeholder = "sk-or-v1-" + "0" * 48
+    management_placeholder = "sk-or-v1-" + "1" * 48
+    expected_runtime_hash = "a" * 64
+
+    def fake_urlopen(req, timeout: int):
+        parsed = urlsplit(req.full_url)
+        query = parse_qs(parsed.query)
+        if parsed.path == "/api/v1/key":
+            return _FakeResponse({"data": {"disabled": False}})
+        if parsed.path == "/api/v1/workspaces":
+            return _FakeResponse(
+                {"data": [{"id": "workspace-1"}], "total_count": 1}
+            )
+        if parsed.path == "/api/v1/keys":
+            assert query["workspace_id"] == ["workspace-1"]
+            return _FakeResponse(
+                {"data": [{"hash": expected_runtime_hash}], "total_count": 1}
+            )
+        if (
+            parsed.path == "/api/v1/workspaces/workspace-1"
+            and req.get_method() == "PATCH"
+        ):
+            return _FakeResponse({"data": {"id": "workspace-1"}})
+        if (
+            parsed.path == "/api/v1/workspaces/workspace-1"
+            and req.get_method() == "GET"
+        ):
+            return _FakeResponse(
+                {
+                    "data": {
+                        "id": "workspace-1",
+                        "is_observability_io_logging_enabled": False,
+                        "is_data_discount_logging_enabled": False,
+                        "is_observability_broadcast_enabled": False,
+                    }
+                }
+            )
+        raise AssertionError(
+            f"unexpected OpenRouter URL: {req.get_method()} {req.full_url}"
+        )
+
+    monkeypatch.setattr(key_vault.urlrequest, "urlopen", fake_urlopen)
+
+    proof = key_vault.verify_openrouter_workspace_privacy(
+        runtime_key=runtime_placeholder,
+        management_key=management_placeholder,
+        stage="attested_guard",
+        expected_runtime_key_hash=expected_runtime_hash,
+    )
+
+    assert proof["runtime_key_hash"] == expected_runtime_hash
+
+
+def test_openrouter_workspace_privacy_rejects_provider_hash_commitment_mismatch(
+    monkeypatch,
+):
+    runtime_placeholder = "sk-or-v1-" + "0" * 48
+    management_placeholder = "sk-or-v1-" + "1" * 48
+
+    monkeypatch.setattr(
+        key_vault.urlrequest,
+        "urlopen",
+        lambda _req, timeout: _FakeResponse({"data": {"hash": "b" * 64}}),
+    )
+
+    with pytest.raises(
+        key_vault.OpenRouterKeyVaultError,
+        match="differs from the expected runtime key",
+    ):
+        key_vault.verify_openrouter_workspace_privacy(
+            runtime_key=runtime_placeholder,
+            management_key=management_placeholder,
+            stage="attested_guard",
+            expected_runtime_key_hash="a" * 64,
+        )
+
+
 def test_openrouter_provider_policy_is_routeable_privacy_policy():
     policy = key_vault.strict_openrouter_provider_policy()
 

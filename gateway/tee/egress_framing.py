@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import select
 import socket
+import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -140,29 +141,52 @@ def relay_raw_and_framed(
     if not isinstance(terminal_initiator, bool):
         raise EgressTunnelFramingError("egress tunnel terminal role is invalid")
     transferred = {raw: 0, framed: 0}
-    first_closed = ""
-    write_closed = ""
-    raw_write_available = True
-    raw_read_available = True
-    own_eof_sent = False
-    own_eof_acked = False
-    peer_eof_received = False
-    last_activity = clock()
-    while not (not raw_read_available and own_eof_acked and peer_eof_received):
-        remaining = max(0.0, idle_timeout_seconds - (clock() - last_activity))
-        if remaining <= 0:
-            raise EgressTunnelFramingError("egress tunnel idle timeout")
-        active = [framed]
-        if raw_read_available:
-            active.append(raw)
-        readable, _writable, _exceptional = select.select(
-            active, [], [], min(1.0, remaining)
-        )
-        if not readable:
-            continue
-        for source in readable:
-            deadline = clock() + remaining
-            if source is raw:
+    state_lock = threading.Lock()
+    framed_write_lock = threading.Lock()
+    abort = threading.Event()
+    stop_raw_read = threading.Event()
+    own_eof_sent = threading.Event()
+    own_eof_acked = threading.Event()
+    peer_eof_received = threading.Event()
+    first_closed = [""]
+    write_closed = [""]
+    last_activity = [clock()]
+    errors: list[BaseException] = []
+
+    def touch() -> None:
+        with state_lock:
+            last_activity[0] = clock()
+
+    def mark_first_closed(label: str) -> None:
+        with state_lock:
+            if not first_closed[0]:
+                first_closed[0] = label
+
+    def record_error(exc: BaseException) -> None:
+        with state_lock:
+            if not errors:
+                errors.append(exc)
+        abort.set()
+
+    def send_frame(payload: Optional[bytes]) -> None:
+        with framed_write_lock:
+            send_tunnel_frame(framed, payload)
+
+    def send_eof_ack() -> None:
+        with framed_write_lock:
+            _send_tunnel_eof_ack(framed)
+
+    def relay_raw_to_framed() -> None:
+        try:
+            while not abort.is_set() and not stop_raw_read.is_set():
+                remaining = idle_timeout_seconds - (clock() - last_activity[0])
+                if remaining <= 0:
+                    raise EgressTunnelFramingError("egress tunnel idle timeout")
+                readable, _writable, _exceptional = select.select(
+                    [raw], [], [], min(1.0, remaining)
+                )
+                if not readable:
+                    continue
                 try:
                     payload = raw.recv(TUNNEL_FRAME_BYTES)
                 except OSError as exc:
@@ -170,81 +194,123 @@ def relay_raw_and_framed(
                         raise
                     payload = b""
                 if not payload:
-                    if not first_closed:
-                        first_closed = raw_label
-                    raw_read_available = False
-                    if not own_eof_sent:
-                        send_tunnel_frame(framed, None)
-                        own_eof_sent = True
-                    last_activity = clock()
-                    continue
+                    break
                 next_total = transferred[raw] + len(payload)
                 if next_total > max_bytes_per_direction:
                     raise EgressTunnelFramingError(
                         "egress tunnel byte limit exceeded"
                     )
-                send_tunnel_frame(framed, payload)
+                send_frame(payload)
                 transferred[raw] = next_total
-                last_activity = clock()
-                continue
+                touch()
+            if not abort.is_set():
+                mark_first_closed(raw_label)
+                send_frame(None)
+                own_eof_sent.set()
+                touch()
+        except BaseException as exc:  # noqa: BLE001 - relay failure must unblock its peer
+            record_error(exc)
 
-            payload = receive_tunnel_frame(
-                framed,
-                deadline=deadline,
-                clock=clock,
-            )
-            if payload is _TUNNEL_EOF_ACK:
-                if not own_eof_sent or own_eof_acked:
-                    raise EgressTunnelFramingError(
-                        "egress tunnel EOF acknowledgement is invalid"
-                    )
-                own_eof_acked = True
-                last_activity = clock()
-                continue
-            if payload in {_TUNNEL_CLOSE, _TUNNEL_CLOSE_ACK}:
-                raise EgressTunnelFramingError(
-                    "egress tunnel close control arrived before stream completion"
+    def relay_framed_to_raw() -> None:
+        raw_write_available = True
+        try:
+            while not abort.is_set() and not (
+                own_eof_acked.is_set() and peer_eof_received.is_set()
+            ):
+                remaining = idle_timeout_seconds - (clock() - last_activity[0])
+                if remaining <= 0:
+                    raise EgressTunnelFramingError("egress tunnel idle timeout")
+                payload = receive_tunnel_frame(
+                    framed,
+                    deadline=clock() + remaining,
+                    clock=clock,
                 )
-            if payload is None:
-                if peer_eof_received:
+                if payload is _TUNNEL_EOF_ACK:
+                    if not own_eof_sent.is_set() or own_eof_acked.is_set():
+                        raise EgressTunnelFramingError(
+                            "egress tunnel EOF acknowledgement is invalid"
+                        )
+                    own_eof_acked.set()
+                    touch()
+                    continue
+                if payload in {_TUNNEL_CLOSE, _TUNNEL_CLOSE_ACK}:
                     raise EgressTunnelFramingError(
-                        "egress tunnel EOF frame is duplicated"
+                        "egress tunnel close control arrived before stream completion"
                     )
-                if not first_closed:
-                    first_closed = framed_label
-                peer_eof_received = True
-                _send_tunnel_eof_ack(framed)
+                if payload is None:
+                    if peer_eof_received.is_set():
+                        raise EgressTunnelFramingError(
+                            "egress tunnel EOF frame is duplicated"
+                        )
+                    mark_first_closed(framed_label)
+                    peer_eof_received.set()
+                    send_eof_ack()
+                    if raw_write_available:
+                        try:
+                            raw.shutdown(socket.SHUT_WR)
+                        except Exception:
+                            pass
+                    touch()
+                    continue
+                if peer_eof_received.is_set():
+                    raise EgressTunnelFramingError(
+                        "egress tunnel data followed its EOF frame"
+                    )
+                next_total = transferred[framed] + len(payload)
+                if next_total > max_bytes_per_direction:
+                    raise EgressTunnelFramingError(
+                        "egress tunnel byte limit exceeded"
+                    )
                 if raw_write_available:
                     try:
-                        raw.shutdown(socket.SHUT_WR)
-                    except Exception:
-                        pass
-                last_activity = clock()
-                continue
-            if peer_eof_received:
-                raise EgressTunnelFramingError(
-                    "egress tunnel data followed its EOF frame"
-                )
-            next_total = transferred[framed] + len(payload)
-            if next_total > max_bytes_per_direction:
-                raise EgressTunnelFramingError("egress tunnel byte limit exceeded")
-            if raw_write_available:
+                        raw.sendall(payload)
+                    except OSError as exc:
+                        if int(getattr(exc, "errno", 0) or 0) not in _PEER_CLOSE_ERRNOS:
+                            raise
+                        raw_write_available = False
+                        with state_lock:
+                            write_closed[0] = raw_label
+                        mark_first_closed(raw_label)
+                        stop_raw_read.set()
+                transferred[framed] = next_total
+                touch()
+        except BaseException as exc:  # noqa: BLE001 - relay failure must unblock its peer
+            record_error(exc)
+
+    threads = (
+        threading.Thread(target=relay_raw_to_framed, daemon=True),
+        threading.Thread(target=relay_framed_to_raw, daemon=True),
+    )
+    for thread in threads:
+        thread.start()
+    while any(thread.is_alive() for thread in threads):
+        for thread in threads:
+            thread.join(timeout=0.05)
+        with state_lock:
+            idle_expired = clock() - last_activity[0] >= idle_timeout_seconds
+            failed = bool(errors)
+        if failed or idle_expired:
+            if idle_expired and not failed:
+                record_error(EgressTunnelFramingError("egress tunnel idle timeout"))
+            abort.set()
+            for connection in (raw, framed):
                 try:
-                    raw.sendall(payload)
-                except OSError as exc:
-                    if int(getattr(exc, "errno", 0) or 0) not in _PEER_CLOSE_ERRNOS:
-                        raise
-                    raw_write_available = False
-                    write_closed = raw_label
-                    if not first_closed:
-                        first_closed = raw_label
-                    if raw_read_available:
-                        raw_read_available = False
-                    if not own_eof_sent:
-                        send_tunnel_frame(framed, None)
-                        own_eof_sent = True
-            transferred[framed] = next_total
-            last_activity = clock()
+                    connection.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+            break
+    for thread in threads:
+        thread.join(timeout=1.0)
+    if any(thread.is_alive() for thread in threads):
+        raise EgressTunnelFramingError("egress tunnel relay did not stop")
+    if errors:
+        raise errors[0]
+    if not (
+        own_eof_sent.is_set()
+        and own_eof_acked.is_set()
+        and peer_eof_received.is_set()
+    ):
+        raise EgressTunnelFramingError("egress tunnel terminal state is incomplete")
 
     deadline = clock() + idle_timeout_seconds
     if terminal_initiator:
@@ -287,9 +353,9 @@ def relay_raw_and_framed(
     result = {
         "%s_to_%s_bytes" % (raw_label, framed_label): transferred[raw],
         "%s_to_%s_bytes" % (framed_label, raw_label): transferred[framed],
-        "first_closed": first_closed or "unknown",
+        "first_closed": first_closed[0] or "unknown",
         "framing": TUNNEL_FRAMING_MODE,
     }
-    if write_closed:
-        result["write_closed"] = write_closed
+    if write_closed[0]:
+        result["write_closed"] = write_closed[0]
     return result

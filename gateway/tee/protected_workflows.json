@@ -1182,7 +1182,7 @@
       "symbol": "receive_tunnel_frame"
     },
     {
-      "ast_sha256": "sha256:8c3995404b7bfb2e8ceb10b060e0a3b7c31622d79117876bb8bf3ee912866eca",
+      "ast_sha256": "sha256:d9dd0fc9605fbe6a11fcba316bf265d4af9b7f857bfd633f0133f0d6571a58d1",
       "path": "gateway/tee/egress_framing.py",
       "symbol": "relay_raw_and_framed"
     },
@@ -2707,7 +2707,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:809f7021eb5f98cc01d263dfcd6738672d4b7dcf8779a51b83e89fdc578f7ca3",
+  "manifest_hash": "sha256:7b519e7adc6396dfc3e7b2d4d2c343c2f07434ec1164c80bbdf29e401a99f256",
   "protected_source_commit": "2501432f4782582567557c799276a82f9689659b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

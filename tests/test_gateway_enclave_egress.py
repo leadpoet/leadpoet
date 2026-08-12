@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import concurrent.futures
 from datetime import datetime, timedelta, timezone
 import errno
 import http.client
@@ -498,6 +499,93 @@ def test_framed_relay_preserves_large_bidirectional_payload_and_explicit_eof():
     assert observed["enclave"]["parent_to_client_bytes"] == len(response)
     assert observed["parent"]["enclave_to_provider_bytes"] == len(request)
     assert observed["parent"]["provider_to_enclave_bytes"] == len(response)
+
+
+def test_framed_relay_does_not_deadlock_on_concurrent_large_responses():
+    def exercise(index: int) -> None:
+        client, enclave_raw = socket.socketpair()
+        enclave_framed, parent_framed = socket.socketpair()
+        parent_raw, provider = socket.socketpair()
+        request = bytes((index,)) * (4 * 1024)
+        response = bytes((255 - index,)) * (4 * 1024 * 1024)
+        errors = []
+
+        def run(*args, **kwargs):
+            try:
+                relay_raw_and_framed(*args, **kwargs)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = (
+            threading.Thread(
+                target=run,
+                args=(enclave_raw, enclave_framed),
+                kwargs={
+                    "idle_timeout_seconds": 10,
+                    "max_bytes_per_direction": len(response) + len(request),
+                    "raw_label": "client",
+                    "framed_label": "parent",
+                    "terminal_initiator": True,
+                },
+                daemon=True,
+            ),
+            threading.Thread(
+                target=run,
+                args=(parent_raw, parent_framed),
+                kwargs={
+                    "idle_timeout_seconds": 10,
+                    "max_bytes_per_direction": len(response) + len(request),
+                    "raw_label": "provider",
+                    "framed_label": "enclave",
+                    "terminal_initiator": False,
+                },
+                daemon=True,
+            ),
+        )
+        for thread in threads:
+            thread.start()
+        try:
+            request_sender = threading.Thread(
+                target=client.sendall,
+                args=(request,),
+                daemon=True,
+            )
+            request_sender.start()
+            assert _recv_exact(provider, len(request)) == request
+            request_sender.join(timeout=5)
+            assert not request_sender.is_alive()
+
+            response_sender = threading.Thread(
+                target=provider.sendall,
+                args=(response,),
+                daemon=True,
+            )
+            response_sender.start()
+            assert _recv_exact(client, len(response)) == response
+            response_sender.join(timeout=10)
+            assert not response_sender.is_alive()
+            provider.shutdown(socket.SHUT_WR)
+            assert client.recv(1) == b""
+            client.shutdown(socket.SHUT_WR)
+            for thread in threads:
+                thread.join(timeout=5)
+        finally:
+            for connection in (
+                client,
+                enclave_raw,
+                enclave_framed,
+                parent_framed,
+                parent_raw,
+                provider,
+            ):
+                connection.close()
+        assert errors == []
+        assert all(not thread.is_alive() for thread in threads)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(exercise, index) for index in range(3)]
+        for future in futures:
+            future.result(timeout=30)
 
 
 def test_framed_relay_fails_closed_without_forwarding_truncated_frame():

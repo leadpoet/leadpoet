@@ -1314,6 +1314,7 @@ def test_httpx_framed_transport_reuses_one_tunnel_under_sustained_load(
         response_body_ceiling_bytes=1024,
         allow_authenticated_complete_body_eof=True,
         parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+        reuse_direct_connections=True,
     )
     try:
         results = [
@@ -1466,7 +1467,15 @@ def test_httpx_framed_transport_recovers_complete_chunked_json_before_eof(
     assert result["body"] == body
 
 
-def test_httpx_direct_transport_reuses_and_recovers_enclave_tunnel(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("reuse_direct_connections", "expected_tunnel_count"),
+    ((False, 3), (True, 2)),
+)
+def test_httpx_direct_transport_connection_scope_and_recovery(
+    tmp_path: Path,
+    reuse_direct_connections: bool,
+    expected_tunnel_count: int,
+):
     certificate_path, private_key_path = _write_test_server_identity(tmp_path)
     tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls_context.load_cert_chain(
@@ -1476,7 +1485,7 @@ def test_httpx_direct_transport_reuses_and_recovers_enclave_tunnel(tmp_path: Pat
     origin_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     origin_listener.settimeout(3)
     origin_listener.bind(("127.0.0.1", 0))
-    origin_listener.listen(2)
+    origin_listener.listen(3)
     origin_address = origin_listener.getsockname()
     origin_errors = []
     origin_connections = []
@@ -1573,6 +1582,7 @@ def test_httpx_direct_transport_reuses_and_recovers_enclave_tunnel(tmp_path: Pat
     transport = HTTPXProviderTransport(
         proxy_url=f"http://127.0.0.1:{proxy_port}",
         ca_bundle=str(certificate_path),
+        reuse_direct_connections=reuse_direct_connections,
     )
     try:
         results = [
@@ -1585,7 +1595,6 @@ def test_httpx_direct_transport_reuses_and_recovers_enclave_tunnel(tmp_path: Pat
             )
             for _ in range(2)
         ]
-        assert opened_parent_tunnels == [("example.com", 443)]
         results.append(
             transport(
                 method="GET",
@@ -1605,11 +1614,10 @@ def test_httpx_direct_transport_reuses_and_recovers_enclave_tunnel(tmp_path: Pat
     assert origin_errors == []
     assert len(requests_seen) == 3
     assert all(b"must-not-persist" not in request for request in requests_seen)
-    assert len(origin_connections) == 2
+    assert len(origin_connections) == expected_tunnel_count
     assert opened_parent_tunnels == [
-        ("example.com", 443),
-        ("example.com", 443),
-    ]
+        ("example.com", 443)
+    ] * expected_tunnel_count
     assert [result["body"] for result in results] == [
         b'{"ok":true}',
         b'{"ok":true}',

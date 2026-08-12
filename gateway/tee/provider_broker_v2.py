@@ -595,6 +595,7 @@ class HTTPXProviderTransport:
         response_body_ceiling_bytes: int = MAX_RESPONSE_BODY_BYTES,
         allow_authenticated_complete_body_eof: bool = False,
         parent_tunnel_framing: str = "",
+        reuse_direct_connections: bool = False,
     ) -> None:
         if (
             isinstance(response_body_ceiling_bytes, bool)
@@ -614,6 +615,10 @@ class HTTPXProviderTransport:
             raise ProviderBrokerV2Error(
                 "provider transport tunnel framing is invalid"
             )
+        if not isinstance(reuse_direct_connections, bool):
+            raise ProviderBrokerV2Error(
+                "provider transport connection reuse policy is invalid"
+            )
         self.proxy_url = proxy_url
         self.ca_bundle = ca_bundle
         self.response_body_ceiling_bytes = response_body_ceiling_bytes
@@ -621,6 +626,7 @@ class HTTPXProviderTransport:
             allow_authenticated_complete_body_eof
         )
         self.parent_tunnel_framing = parent_tunnel_framing
+        self.reuse_direct_connections = reuse_direct_connections
         self._direct_client = None
         self._direct_client_lock = threading.Lock()
         self._direct_client_generation = 0
@@ -803,7 +809,7 @@ class HTTPXProviderTransport:
                 ).decode("ascii")
             }
         timeout_seconds = max(0.001, timeout_ms / 1000.0)
-        if proxy_headers is None:
+        if proxy_headers is None and self.reuse_direct_connections:
             with self._lease_direct_client() as (client, generation):
                 try:
                     return self._execute_with_client(
@@ -826,8 +832,11 @@ class HTTPXProviderTransport:
                     self._retire_direct_client(client, generation)
                     raise
 
-        # The upstream proxy URL contains a job-scoped credential. Never retain
-        # it in the process-lifetime direct connection pool after the job lease.
+        # Direct coordinator requests are request-scoped by default. A relay
+        # tunnel can expire between otherwise independent jobs or epochs; one
+        # stale pooled generation must not make their measured retries share a
+        # failure fate. Framed artifact-only callers may explicitly opt into
+        # reuse after proving their terminal handshake contract.
         client = self._new_client(proxy_headers=proxy_headers)
         try:
             return self._execute_with_client(
@@ -855,7 +864,7 @@ class ProviderBrokerV2:
         credential_ref_hashes: Mapping[str, str],
         retry_policy_hashes: Mapping[str, str],
         routes: Mapping[str, ProviderRouteV2] = BUILTIN_PROVIDER_ROUTES,
-        transport: Callable[..., Mapping[str, Any]] = HTTPXProviderTransport(),
+        transport: Optional[Callable[..., Mapping[str, Any]]] = None,
         artifact_sink: Optional[Callable[..., Mapping[str, Any]]] = None,
         job_credential_slot_ref_hashes: Optional[Mapping[str, str]] = None,
         clock: Callable[[], str] = _timestamp,
@@ -885,7 +894,9 @@ class ProviderBrokerV2:
             raise ProviderBrokerV2Error(
                 "job credential slot references differ from measured policy"
             )
-        self._transport = transport
+        self._transport = (
+            transport if transport is not None else HTTPXProviderTransport()
+        )
         if artifact_sink is None:
             raise ProviderBrokerV2Error(
                 "provider broker requires encrypted artifact persistence"

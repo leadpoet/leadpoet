@@ -7889,6 +7889,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
             response_body_ceiling_bytes=2 * TUNNEL_FRAME_BYTES,
             allow_authenticated_complete_body_eof=True,
             parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+            reuse_direct_connections=True,
         )
         results: list[dict[str, Any]] = []
         try:
@@ -7917,6 +7918,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
                     response_body_ceiling_bytes=2 * TUNNEL_FRAME_BYTES,
                     allow_authenticated_complete_body_eof=True,
                     parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+                    reuse_direct_connections=True,
                 )
                 try:
                     for ordinal in range(concurrent_requests_per_worker):
@@ -8120,9 +8122,81 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     )
     failed_generation_pool.release(fresh_after_failure, failed=True)
 
+    ordinary_clients: list[Any] = []
+
+    class OrdinaryTLS:
+        def getpeercert(self, binary_form: bool = False) -> bytes:
+            if not binary_form:
+                raise RuntimeError("binary peer certificate was not requested")
+            return b"ordinary-provider-peer"
+
+        def version(self) -> str:
+            return "TLSv1.3"
+
+    class OrdinaryNetworkStream:
+        def get_extra_info(self, name: str) -> Any:
+            if name != "ssl_object":
+                raise RuntimeError("unexpected network metadata request")
+            return OrdinaryTLS()
+
+    class OrdinaryResponseContext:
+        def __init__(self, *, fail: bool) -> None:
+            self.fail = fail
+
+        def __enter__(self) -> Any:
+            if self.fail:
+                raise RuntimeError("expired relay generation")
+            return SimpleNamespace(
+                status_code=200,
+                headers={"content-type": "application/json"},
+                extensions={"network_stream": OrdinaryNetworkStream()},
+                iter_bytes=lambda: iter((b'{"ok":true}',)),
+            )
+
+        def __exit__(self, *_args: Any) -> bool:
+            return False
+
+    class OrdinaryClient:
+        def __init__(self) -> None:
+            self.index = len(ordinary_clients)
+            self.closed = False
+            ordinary_clients.append(self)
+
+        def stream(self, *_args: Any, **_kwargs: Any) -> OrdinaryResponseContext:
+            return OrdinaryResponseContext(fail=self.index == 0)
+
+        def close(self) -> None:
+            self.closed = True
+
     ordinary_transport = HTTPXProviderTransport()
+    ordinary_transport._new_client = (  # type: ignore[method-assign]
+        lambda **_kwargs: OrdinaryClient()
+    )
+    ordinary_request = {
+        "method": "GET",
+        "url": "https://example.com/weight-input",
+        "headers": {"accept": "application/json"},
+        "body": b"",
+        "timeout_ms": 1_000,
+    }
     try:
-        ordinary_transport_unchanged = not ordinary_transport.parent_tunnel_framing
+        first_direct_failed = False
+        try:
+            ordinary_transport(**ordinary_request)
+        except RuntimeError as exc:
+            first_direct_failed = str(exc) == "expired relay generation"
+        second_direct = ordinary_transport(**ordinary_request)
+        ordinary_transport_unchanged = (
+            not ordinary_transport.parent_tunnel_framing
+            and not ordinary_transport.reuse_direct_connections
+        )
+        ordinary_direct_requests_isolated = (
+            first_direct_failed
+            and second_direct.get("body") == b'{"ok":true}'
+            and len(ordinary_clients) == 2
+            and all(client.closed for client in ordinary_clients)
+            and ordinary_transport._direct_client is None
+        )
     finally:
         ordinary_transport.close()
     if (
@@ -8136,6 +8210,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         or parent_tunnel_count != 1 + concurrent_workers
         or proxy_status.get("last_failure")
         or not ordinary_transport_unchanged
+        or not ordinary_direct_requests_isolated
         or not stale_transport_evicted
         or not failed_generation_evicted
     ):
@@ -8150,6 +8225,9 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
                     "parent_tunnel_count": parent_tunnel_count,
                     "proxy_failure": proxy_status.get("last_failure"),
                     "ordinary_transport_unchanged": ordinary_transport_unchanged,
+                    "ordinary_direct_requests_isolated": (
+                        ordinary_direct_requests_isolated
+                    ),
                     "stale_transport_evicted": stale_transport_evicted,
                     "failed_generation_evicted": failed_generation_evicted,
                 },
@@ -8166,6 +8244,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         "complete_chunked_json_eof_recovered": True,
         "truncated_frame_rejected": True,
         "ordinary_provider_transport_unchanged": True,
+        "ordinary_direct_requests_isolated": True,
         "stale_pooled_transport_evicted_before_relay_timeout": True,
         "failed_pooled_generation_evicted_before_retry": True,
         "request_count": request_count,

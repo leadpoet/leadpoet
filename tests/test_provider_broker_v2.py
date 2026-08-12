@@ -982,6 +982,7 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
 
     transport = HTTPXProviderTransport(
         parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+        reuse_direct_connections=True,
     )
     request = {
         "method": "GET",
@@ -1032,6 +1033,105 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
 
     transport.close()
     assert clients[0].closed is True
+
+
+def test_httpx_transport_does_not_share_direct_failure_fate(monkeypatch):
+    clients = []
+    results = []
+    errors = []
+
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        extensions = {"network_stream": Stream()}
+
+        def iter_bytes(self):
+            yield b'{"ok":true}'
+
+    class ResponseContext:
+        def __init__(self, error):
+            self.error = error
+
+        def __enter__(self):
+            if self.error is not None:
+                raise self.error
+            return Response()
+
+        def __exit__(self, *_args):
+            return False
+
+    class Client:
+        def __init__(self, **_options):
+            self.index = len(clients)
+            self.closed = False
+            clients.append(self)
+
+        def stream(self, *_args, **_kwargs):
+            error = (
+                RuntimeError("relay generation expired")
+                if self.index == 0
+                else None
+            )
+            return ResponseContext(error)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(
+            Client=Client,
+            Limits=lambda **kwargs: kwargs,
+            Proxy=lambda *_args, **_kwargs: object(),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "certifi",
+        SimpleNamespace(where=lambda: "/tmp/test-ca.pem"),
+    )
+
+    transport = HTTPXProviderTransport()
+    request = {
+        "method": "GET",
+        "url": "https://example.com/data",
+        "headers": {},
+        "body": b"",
+        "timeout_ms": 1000,
+    }
+
+    def run_request():
+        try:
+            results.append(transport(**request))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run_request) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(errors) == 1
+    assert str(errors[0]) == "relay generation expired"
+    assert len(results) == 7
+    assert len(clients) == 8
+    assert all(client.closed for client in clients)
 
 
 def test_job_scoped_client_cleanup_cannot_replace_request_result(monkeypatch):
@@ -1236,7 +1336,7 @@ def test_httpx_transport_retires_failed_generation_after_concurrent_leases(
             self.closed = True
 
     client = Client()
-    transport = HTTPXProviderTransport()
+    transport = HTTPXProviderTransport(reuse_direct_connections=True)
     monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: client)
     request = {
         "method": "GET",
@@ -1389,6 +1489,13 @@ def _broker(transport, **broker_kwargs):
     )
     broker.provision_credentials(credentials)
     return broker
+
+
+def test_implicit_provider_transports_are_broker_scoped():
+    first = _broker(None)
+    second = _broker(None)
+
+    assert first._transport is not second._transport
 
 
 def _request(**overrides):

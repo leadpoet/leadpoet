@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "38fdd93086f900685335b76baeafb52da702e818",
+  "baseline_commit": "23a297ebf608d79266c1dea2ce23633ab19e8f68",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -1402,7 +1402,7 @@
       "symbol": "write_identity_to_tmpfs"
     },
     {
-      "ast_sha256": "sha256:e406a8c057e2e2f2b0ec0bfeb4154c430d63597bd6818cfce1720911670838b1",
+      "ast_sha256": "sha256:026d6e2aec9362a3cdae48a572df263b5f7eb4552480166803aecae8a9232132",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -1412,7 +1412,7 @@
       "symbol": "MEASURED_TRANSPORT_REQUEST_HEADERS"
     },
     {
-      "ast_sha256": "sha256:1a3cbf1f66995f91d4f20b7aed2d0ec756e3306f54b12bde51caeac1d67e0e15",
+      "ast_sha256": "sha256:fea7c48a537e01a79db19255821dd1d0c3e58fee68e39373315c1cc7fdcd887b",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -2722,7 +2722,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:0ad7f8961cd349ef80f3ef0876a86ff38a74757876b37d697d72a5066bec00a3",
-  "protected_source_commit": "38fdd93086f900685335b76baeafb52da702e818",
+  "manifest_hash": "sha256:28c5ebae5f41f74d699dbd188cbd3d0293862916515e72d9bfa5fef37440df0a",
+  "protected_source_commit": "23a297ebf608d79266c1dea2ce23633ab19e8f68",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

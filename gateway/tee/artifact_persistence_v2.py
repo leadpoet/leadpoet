@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from contextlib import suppress
 from datetime import datetime, timezone
+import http.client
 import json
 import re
 import secrets
+import ssl
 import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
@@ -19,9 +21,13 @@ from gateway.tee.artifact_vault_v2 import (
 )
 from gateway.tee.egress_proxy import (
     DEFAULT_IDLE_TIMEOUT_SECONDS as EGRESS_TUNNEL_IDLE_TIMEOUT_SECONDS,
+    configured_proxy_ports,
 )
-from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
-from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
+from gateway.tee.egress_framing import (
+    TUNNEL_FRAMING_HEADER,
+    TUNNEL_FRAMING_MODE,
+)
+from gateway.tee.provider_broker_v2 import _decoded_response_headers
 from leadpoet_canonical.attested_v2 import (
     build_transport_attempt,
     canonical_json,
@@ -154,6 +160,186 @@ def _transport_failure_code(exc: BaseException) -> str:
     return "unexpected_eof"
 
 
+class _ArtifactHTTPSProxyTransport:
+    """Bounded HTTP/1.1 readback with TLS terminating inside the enclave."""
+
+    def __init__(
+        self,
+        *,
+        response_body_ceiling_bytes: int = MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
+        ca_bundle: Optional[str] = None,
+    ) -> None:
+        if (
+            isinstance(response_body_ceiling_bytes, bool)
+            or not isinstance(response_body_ceiling_bytes, int)
+            or not 1
+            <= response_body_ceiling_bytes
+            <= MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+        ):
+            raise ArtifactPersistenceV2Error(
+                "artifact transport response ceiling is invalid"
+            )
+        import certifi
+
+        local_port, _forwarder_port = configured_proxy_ports()
+        self._proxy_host = "127.0.0.1"
+        self._proxy_port = local_port
+        self._context = ssl.create_default_context(cafile=ca_bundle or certifi.where())
+        self._response_body_ceiling_bytes = response_body_ceiling_bytes
+        self._connection = None  # type: Optional[http.client.HTTPSConnection]
+        self._destination = None  # type: Optional[tuple[str, int]]
+
+    def close(self) -> None:
+        connection = self._connection
+        self._connection = None
+        self._destination = None
+        if connection is not None:
+            connection.close()
+
+    def _client(
+        self,
+        *,
+        destination: tuple[str, int],
+        timeout_seconds: float,
+    ) -> http.client.HTTPSConnection:
+        connection = self._connection
+        if connection is not None and self._destination != destination:
+            self.close()
+            connection = None
+        if connection is None:
+            connection = http.client.HTTPSConnection(
+                self._proxy_host,
+                self._proxy_port,
+                timeout=timeout_seconds,
+                context=self._context,
+            )
+            connection.set_tunnel(
+                destination[0],
+                port=destination[1],
+                headers={TUNNEL_FRAMING_HEADER: TUNNEL_FRAMING_MODE},
+            )
+            self._connection = connection
+            self._destination = destination
+        elif connection.sock is not None:
+            connection.sock.settimeout(timeout_seconds)
+        return connection
+
+    @staticmethod
+    def _content_length(response: http.client.HTTPResponse) -> int:
+        raw_values = response.msg.get_all("content-length") or []
+        tokens = [
+            token.strip()
+            for raw_value in raw_values
+            for token in str(raw_value).split(",")
+        ]
+        if not tokens or any(not token.isdigit() for token in tokens):
+            raise ArtifactPersistenceV2Error(
+                "artifact response content length is invalid"
+            )
+        lengths = {int(token) for token in tokens}
+        if len(lengths) != 1:
+            raise ArtifactPersistenceV2Error(
+                "artifact response content length is ambiguous"
+            )
+        return next(iter(lengths))
+
+    def __call__(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        timeout_ms: int,
+        upstream_proxy_url: Optional[str] = None,
+        max_response_bytes: int = MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
+    ) -> Dict[str, Any]:
+        normalized_method = str(method or "").upper()
+        parsed = urlsplit(str(url or ""))
+        if (
+            normalized_method not in {"GET", "HEAD"}
+            or parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or bool(parsed.fragment)
+            or upstream_proxy_url is not None
+            or body
+            or isinstance(timeout_ms, bool)
+            or not isinstance(timeout_ms, int)
+            or timeout_ms <= 0
+            or isinstance(max_response_bytes, bool)
+            or not isinstance(max_response_bytes, int)
+            or not 1
+            <= max_response_bytes
+            <= self._response_body_ceiling_bytes
+        ):
+            raise ArtifactPersistenceV2Error("artifact transport request is invalid")
+        destination = (str(parsed.hostname), int(parsed.port or 443))
+        target = parsed.path or "/"
+        if parsed.query:
+            target += "?" + parsed.query
+        timeout_seconds = max(0.001, int(timeout_ms) / 1000.0)
+        connection = self._client(
+            destination=destination,
+            timeout_seconds=timeout_seconds,
+        )
+        response = None  # type: Optional[http.client.HTTPResponse]
+        try:
+            connection.request(
+                normalized_method,
+                target,
+                body=None,
+                headers=dict(headers),
+            )
+            protected = connection.sock
+            certificate = protected.getpeercert(True) if protected is not None else b""
+            protocol = protected.version() if protected is not None else ""
+            if not certificate or not protocol:
+                raise ArtifactPersistenceV2Error(
+                    "authenticated artifact response lacks TLS evidence"
+                )
+            response = connection.getresponse()
+            transfer_encoding = str(
+                response.headers.get("transfer-encoding") or ""
+            ).strip()
+            content_encoding = str(
+                response.headers.get("content-encoding") or ""
+            ).strip().lower()
+            if transfer_encoding or content_encoding not in {"", "identity"}:
+                raise ArtifactPersistenceV2Error(
+                    "artifact response framing is unsupported"
+                )
+            declared_length = self._content_length(response)
+            if declared_length > max_response_bytes:
+                raise ArtifactPersistenceV2Error(
+                    "artifact response exceeds size limit"
+                )
+            if normalized_method == "HEAD":
+                response.read()
+                response_body = b""
+            else:
+                response_body = response.read(declared_length)
+                if len(response_body) != declared_length:
+                    raise ArtifactPersistenceV2Error(
+                        "artifact response body is incomplete"
+                    )
+            result = {
+                "http_status": int(response.status),
+                "headers": _decoded_response_headers(dict(response.getheaders())),
+                "body": response_body,
+                "tls_peer_chain_hash": sha256_bytes(bytes(certificate)),
+                "tls_protocol": str(protocol),
+            }
+            response.close()
+            return result
+        except Exception:
+            if response is not None:
+                response.close()
+            self.close()
+            raise
+
+
 class _ArtifactVerificationTransportPool:
     """Lease bounded clients exclusively across concurrent verifications."""
 
@@ -188,11 +374,9 @@ class _ArtifactVerificationTransportPool:
         self._transport_count = 0
 
     @staticmethod
-    def _new_transport() -> HTTPXProviderTransport:
-        return HTTPXProviderTransport(
+    def _new_transport() -> _ArtifactHTTPSProxyTransport:
+        return _ArtifactHTTPSProxyTransport(
             response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
-            allow_authenticated_complete_body_eof=True,
-            parent_tunnel_framing=TUNNEL_FRAMING_MODE,
         )
 
     def _expire_idle_locked(self) -> list[Any]:

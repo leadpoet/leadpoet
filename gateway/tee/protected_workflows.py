@@ -658,6 +658,7 @@ PROTECTED_SYMBOLS = {
         "EnclaveEgressProxy",
     ),
     "gateway/tee/artifact_persistence_v2.py": (
+        "_ArtifactHTTPSProxyTransport",
         "_ArtifactVerificationTransportPool",
         "_ArtifactVerificationTransportSession",
         "ArtifactPersistenceVerifierV2",

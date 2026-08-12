@@ -992,7 +992,12 @@
       "symbol": "ArtifactPersistenceVerifierV2"
     },
     {
-      "ast_sha256": "sha256:d11fb9ae0cfe5b1386aec025565659c94ebfff2df843de14bc821354b4f52f8f",
+      "ast_sha256": "sha256:c1d14b2ebfe16c5e996a160cf38d8719d8b2f5ae691c27475906d1f20352866a",
+      "path": "gateway/tee/artifact_persistence_v2.py",
+      "symbol": "_ArtifactHTTPSProxyTransport"
+    },
+    {
+      "ast_sha256": "sha256:719535e3fff23d54c9f9f8d8a58aa988b6a4ffa09df9175f368681c60bbc0378",
       "path": "gateway/tee/artifact_persistence_v2.py",
       "symbol": "_ArtifactVerificationTransportPool"
     },
@@ -2702,7 +2707,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:86e6ee5680785f06ba5bec611fe923a89c1545f48e55740a54216626dce0ea2c",
+  "manifest_hash": "sha256:98dd3d9c069e9a841d3df3bd4ea9cf6af390ba44d862099f4fc190d94e7e4175",
   "protected_source_commit": "2501432f4782582567557c799276a82f9689659b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

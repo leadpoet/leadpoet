@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from gateway.tee.artifact_persistence_v2 import _ArtifactHTTPSProxyTransport
 from gateway.tee.egress_framing import (
     EgressTunnelFramingError,
     TUNNEL_FRAME_BYTES,
@@ -933,6 +934,118 @@ def test_httpx_tls_transport_uses_explicit_framing_through_both_relays(
     assert result["tls_protocol"].startswith("TLSv1.")
     assert proxy.status().get("last_failure") is None
     assert proxy.status()["last_tunnel"]["parent_to_client_bytes"] > 0
+
+
+def test_artifact_tls_transport_preserves_large_complete_provider_first_response(
+    tmp_path: Path,
+):
+    certificate_path, private_key_path = _write_test_server_identity(tmp_path)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(
+        certfile=str(certificate_path),
+        keyfile=str(private_key_path),
+    )
+    origin_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    origin_listener.bind(("127.0.0.1", 0))
+    origin_listener.listen(1)
+    origin_address = origin_listener.getsockname()
+    body = b"x" * (8 * 1024 * 1024 + 17)
+    origin_errors = []
+
+    def serve_origin():
+        try:
+            connection, _address = origin_listener.accept()
+            protected = tls_context.wrap_socket(connection, server_side=True)
+            request = bytearray()
+            while b"\r\n\r\n" not in request:
+                request.extend(protected.recv(4096))
+            protected.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: "
+                + str(len(body)).encode("ascii")
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+            protected.close()
+        except Exception as exc:
+            origin_errors.append(exc)
+        finally:
+            origin_listener.close()
+
+    origin_thread = threading.Thread(target=serve_origin, daemon=True)
+    origin_thread.start()
+    host_threads = []
+
+    def open_parent_tunnel(_host, _port, *, tunnel_framing=""):
+        assert tunnel_framing == TUNNEL_FRAMING_MODE
+        enclave_side, host_side = socket.socketpair()
+        host_thread = threading.Thread(
+            target=_handle_connection,
+            kwargs={
+                "connection": host_side,
+                "connector": lambda _name, _number: socket.create_connection(
+                    origin_address,
+                    timeout=2,
+                ),
+                "idle_timeout_seconds": 10,
+            },
+            daemon=True,
+        )
+        host_thread.start()
+        host_threads.append(host_thread)
+        enclave_side.sendall(
+            _frame(
+                {
+                    "method": "connect",
+                    "params": {
+                        "host": "example.com",
+                        "port": 443,
+                        "policy_hash": destination_policy_hash(),
+                        "tunnel_framing": TUNNEL_FRAMING_MODE,
+                    },
+                }
+            )
+        )
+        response = _read_frame(enclave_side)
+        assert response["result"]["tunnel_framing"] == TUNNEL_FRAMING_MODE
+        return enclave_side
+
+    proxy_port = _unused_loopback_port()
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        local_port=proxy_port,
+        loopback_initializer=lambda: None,
+        idle_timeout_seconds=10,
+    )
+    proxy._open_parent_tunnel = open_parent_tunnel
+    proxy._configure_environment = lambda: None
+    proxy.start()
+    transport = _ArtifactHTTPSProxyTransport(
+        ca_bundle=str(certificate_path),
+        response_body_ceiling_bytes=len(body),
+    )
+    transport._proxy_port = proxy_port
+    try:
+        result = transport(
+            method="GET",
+            url="https://example.com/artifact",
+            headers={"accept": "application/json"},
+            body=b"",
+            timeout_ms=10_000,
+            max_response_bytes=len(body),
+        )
+    finally:
+        transport.close()
+        proxy.stop()
+        origin_thread.join(timeout=10)
+        for thread in host_threads:
+            thread.join(timeout=10)
+
+    assert origin_errors == []
+    assert result["http_status"] == 200
+    assert result["body"] == body
+    assert proxy.status().get("last_failure") is None
 
 
 def test_httpx_framed_transport_reuses_one_tunnel_under_sustained_load(

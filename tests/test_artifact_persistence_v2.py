@@ -21,7 +21,6 @@ from gateway.tee.artifact_vault_v2 import (
     MAX_ARTIFACT_BYTES,
     EncryptedArtifactVaultV2,
 )
-from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
 from gateway.tee.provider_broker_v2 import MAX_RESPONSE_BODY_BYTES
 from leadpoet_canonical.attested_v2 import canonical_json
 
@@ -637,7 +636,7 @@ def test_default_transport_retries_on_fresh_bounded_sessions(monkeypatch) -> Non
             self.closed = True
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         OneAttemptTransport,
     )
     verifier = ArtifactPersistenceVerifierV2(
@@ -665,8 +664,6 @@ def test_default_transport_retries_on_fresh_bounded_sessions(monkeypatch) -> Non
     assert all(
         transport.options == {
             "response_body_ceiling_bytes": MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
-            "allow_authenticated_complete_body_eof": True,
-            "parent_tunnel_framing": TUNNEL_FRAMING_MODE,
         }
         for transport in transports
     )
@@ -693,7 +690,7 @@ def test_default_transport_success_keeps_reusable_client_open(
             raise EOFError("tunnel cleanup reached EOF after complete response")
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         CleanupFailureTransport,
     )
     verifier = ArtifactPersistenceVerifierV2(
@@ -740,7 +737,7 @@ def test_default_transport_is_reused_across_verifications(monkeypatch) -> None:
             self.closed = True
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         VerificationTransport,
     )
     verifier = ArtifactPersistenceVerifierV2(
@@ -789,7 +786,7 @@ def test_default_transport_pool_isolates_concurrent_verifications(monkeypatch) -
             self.closed = True
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         ConcurrentTransport,
     )
     verifier = ArtifactPersistenceVerifierV2(
@@ -859,7 +856,7 @@ def test_concurrent_transport_failure_does_not_poison_other_verification(
             self.closed = True
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         IsolatedFailureTransport,
     )
     verifier = ArtifactPersistenceVerifierV2(
@@ -911,7 +908,7 @@ def test_transport_pool_bounds_concurrency_and_reuses_released_client(
             self.closed = True
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         BoundedTransport,
     )
     pool = _ArtifactVerificationTransportPool(
@@ -950,7 +947,7 @@ def test_transport_pool_replaces_client_before_egress_relay_idle_timeout(
             self.closed = True
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         BoundedTransport,
     )
     pool = _ArtifactVerificationTransportPool(
@@ -1000,7 +997,7 @@ def test_transport_failure_discards_stale_idle_generation_before_retry(
             self.closed = True
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         PeerClosedTransport,
     )
     pool = _ArtifactVerificationTransportPool(
@@ -1049,7 +1046,7 @@ def test_transport_failure_retires_siblings_leased_from_failed_generation(
             self.closed = True
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         GenerationTransport,
     )
     pool = _ArtifactVerificationTransportPool(
@@ -1087,7 +1084,7 @@ def test_late_failure_from_retired_generation_does_not_retire_replacement(
             self.closed = True
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         GenerationTransport,
     )
     pool = _ArtifactVerificationTransportPool(
@@ -1161,7 +1158,7 @@ def test_default_transport_cleanup_cannot_mask_request_failure(monkeypatch) -> N
             raise EOFError("tunnel cleanup reached EOF")
 
     monkeypatch.setattr(
-        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
         RequestAndCleanupFailureTransport,
     )
     verifier = ArtifactPersistenceVerifierV2(

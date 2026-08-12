@@ -49,6 +49,31 @@ def _ready(**overrides: Any) -> dict[str, Any]:
     }
 
 
+def _publish_output() -> str:
+    return "snapshot_uri=s3://private-bucket/dev/" + "e" * 64 + "\n"
+
+
+def test_published_snapshot_uri_requires_one_content_addressed_target():
+    expected = "s3://private-bucket/dev/" + "e" * 64
+    assert snapshot_refresh._published_snapshot_uri(
+        _publish_output(), base_uri="s3://private-bucket/dev"
+    ) == expected
+
+    for output in (
+        "",
+        "snapshot_uri=s3://other-bucket/dev/" + "e" * 64,
+        "snapshot_uri=s3://private-bucket/dev/not-a-hash",
+        _publish_output() + _publish_output(),
+    ):
+        try:
+            snapshot_refresh._published_snapshot_uri(
+                output, base_uri="s3://private-bucket/dev"
+            )
+        except RuntimeError:
+            continue
+        raise AssertionError("malformed publisher output was accepted")
+
+
 def _configure(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(snapshot_refresh.AUTO_REFRESH_ENABLED_ENV, "true")
     monkeypatch.setenv(snapshot_refresh.RECORD_ENABLED_ENV, "true")
@@ -89,11 +114,12 @@ def test_any_paid_worker_can_refresh_under_shared_lock(monkeypatch, tmp_path):
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         calls.append(list(command))
-        return "ok"
+        return _publish_output() if "--skip-current-pointer" in command else "ok"
 
     readiness = iter(
         [
             _ready(ready=False, reason="snapshot_not_ready"),
+            _ready(manifest_hash="sha256:" + "e" * 64),
             _ready(manifest_hash="sha256:" + "e" * 64),
         ]
     )
@@ -198,12 +224,19 @@ def test_recent_model_a_check_does_not_delay_model_b_refresh(monkeypatch, tmp_pa
                 private_model_manifest_hash=model_b.artifact.manifest_hash,
                 manifest_hash="sha256:" + "3" * 64,
             ),
+            _ready(
+                champion_image_digest=model_b.artifact.image_digest,
+                source_commit=model_b.artifact.git_commit_sha,
+                model_config_hash=model_b.artifact.config_hash,
+                private_model_manifest_hash=model_b.artifact.manifest_hash,
+                manifest_hash="sha256:" + "3" * 64,
+            ),
         ]
     )
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
-        return "ok"
+        return _publish_output() if "--skip-current-pointer" in command else "ok"
 
     second = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
@@ -373,6 +406,7 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
         [
             _ready(ready=False, reason="snapshot_not_ready"),
             _ready(manifest_hash="sha256:" + "e" * 64),
+            _ready(manifest_hash="sha256:" + "e" * 64),
         ]
     )
 
@@ -382,7 +416,7 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
         command_envs.append(dict(_env))
-        return "ok"
+        return _publish_output() if "--skip-current-pointer" in command else "ok"
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
@@ -421,6 +455,7 @@ def test_due_refresh_uses_observed_model_provenance_without_manual_ids(
         [
             _ready(ready=False, reason="snapshot_not_ready"),
             _ready(manifest_hash="sha256:" + "e" * 64),
+            _ready(manifest_hash="sha256:" + "e" * 64),
         ]
     )
 
@@ -429,7 +464,7 @@ def test_due_refresh_uses_observed_model_provenance_without_manual_ids(
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
-        return "ok"
+        return _publish_output() if "--skip-current-pointer" in command else "ok"
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
@@ -461,7 +496,14 @@ def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_p
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
-        return "ok"
+        return _publish_output() if "--skip-current-pointer" in command else "ok"
+
+    readiness = iter(
+        [
+            _ready(ready=False, reason="active_model_mismatch"),
+            _ready(),
+        ]
+    )
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
@@ -470,15 +512,55 @@ def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_p
             tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
-            readiness_loader=lambda _uri, **_kwargs: _ready(
-                ready=False,
-                reason="active_model_mismatch",
-            ),
+            readiness_loader=lambda _uri, **_kwargs: next(readiness),
             active_loader=active_loader,
         )
     )
     assert result["status"] == "failed"
     assert "active private model changed" in result["last_error"]
+    assert len(commands) == 3
+    assert "--skip-current-pointer" in commands[-1]
+    assert not any(
+        command[1].endswith("publish_research_lab_dev_snapshot.py")
+        and "--skip-current-pointer" not in command
+        for command in commands
+    )
+
+
+def test_utc_rollover_never_promotes_stale_snapshot_pointer(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    commands: list[list[str]] = []
+    readiness = iter(
+        [
+            _ready(ready=False, reason="snapshot_not_ready"),
+            _ready(
+                ready=False,
+                reason="snapshot_is_not_current_day_rebenchmark_bank",
+            ),
+        ]
+    )
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return _active()
+
+    def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
+        commands.append(list(command))
+        return _publish_output() if "--skip-current-pointer" in command else "ok"
+
+    result = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: next(readiness),
+            active_loader=active_loader,
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert "snapshot_is_not_current_day_rebenchmark_bank" in result["last_error"]
     assert len(commands) == 3
     assert "--skip-current-pointer" in commands[-1]
     assert not any(

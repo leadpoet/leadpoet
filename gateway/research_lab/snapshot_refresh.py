@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,8 @@ DEFAULT_REFRESH_INTERVAL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_RETRY_INTERVAL_SECONDS = 60 * 60
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 3 * 60 * 60
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+_IMMUTABLE_SNAPSHOT_SUFFIX_RE = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_REASON_RE = re.compile(r"^[a-z0-9_.:-]{1,120}$")
 
 CommandRunner = Callable[[Sequence[str], Mapping[str, str], int], str]
 ReadinessLoader = Callable[..., Mapping[str, Any]]
@@ -134,6 +137,27 @@ def _s3_base_uri(pointer_uri: str) -> str:
             f"{SNAPSHOT_URI_ENV} must be an s3://.../{POINTER_NAME} pointer"
         )
     return normalized.rsplit("/", 1)[0]
+
+
+def _published_snapshot_uri(output: str, *, base_uri: str) -> str:
+    values = [
+        line.split("=", 1)[1].strip().rstrip("/")
+        for line in str(output or "").splitlines()
+        if line.startswith("snapshot_uri=")
+    ]
+    normalized_base = str(base_uri or "").strip().rstrip("/")
+    prefix = normalized_base + "/"
+    if len(values) != 1 or not values[0].startswith(prefix):
+        raise RuntimeError("immutable snapshot publisher output differs")
+    suffix = values[0][len(prefix) :]
+    if _IMMUTABLE_SNAPSHOT_SUFFIX_RE.fullmatch(suffix) is None:
+        raise RuntimeError("immutable snapshot publisher target differs")
+    return values[0]
+
+
+def _safe_readiness_reason(readiness: Mapping[str, Any]) -> str:
+    reason = str(readiness.get("reason") or "snapshot_not_ready").strip().lower()
+    return reason if _SAFE_REASON_RE.fullmatch(reason) else "snapshot_not_ready"
 
 
 def _runtime_script(source_root: Path, name: str) -> str:
@@ -442,12 +466,31 @@ async def maybe_refresh_dev_snapshot(
                     "--kms-key-id",
                     kms_key_id,
                 ]
-                await asyncio.to_thread(
+                immutable_publish_output = await asyncio.to_thread(
                     command_runner,
                     tuple([*publish_base, "--skip-current-pointer"]),
                     env,
                     timeout_seconds,
                 )
+
+                immutable_uri = _published_snapshot_uri(
+                    immutable_publish_output,
+                    base_uri=base_uri,
+                )
+                immutable_readiness = await asyncio.to_thread(
+                    readiness_loader,
+                    immutable_uri,
+                    expected_dev_icp_count=tree_policy.live_max_icps_per_node,
+                    require_current_day=True,
+                )
+                if not _readiness_matches_artifact(
+                    immutable_readiness,
+                    identity_before,
+                ):
+                    raise RuntimeError(
+                        "immutable snapshot is not eligible for pointer promotion: "
+                        + _safe_readiness_reason(immutable_readiness)
+                    )
 
                 active_after_record = await active_loader(
                     config, register_bootstrap=False

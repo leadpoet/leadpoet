@@ -7533,7 +7533,10 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     from gateway.utils.tee_client import AF_VSOCK, _recv_exact
     from gateway.utils.tee_egress_forwarder import _handle_connection
 
-    request_count = max(64, int(MAX_ARTIFACT_VERIFICATION_TRANSPORTS) * 4)
+    # Keep the last request a GET so the exact relay path also exercises a
+    # complete authenticated PostgREST-shaped JSON body whose terminal chunk
+    # is lost when the provider closes first.
+    request_count = max(65, int(MAX_ARTIFACT_VERIFICATION_TRANSPORTS) * 4 + 1)
     requests_seen: list[str] = []
     concurrent_requests_seen: set[str] = set()
     origin_errors: list[str] = []
@@ -7686,16 +7689,30 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
                             payload = payloads[ordinal]
                             final_response = ordinal + 1 == request_count
                             response_body = payload if method == "GET" else b""
-                            protected.sendall(
-                                b"HTTP/1.1 200 OK\r\n"
-                                b"Content-Type: application/json\r\n"
-                                b"Content-Length: "
-                                + str(len(payload)).encode("ascii")
-                                + b"\r\nConnection: "
-                                + (b"close" if final_response else b"keep-alive")
-                                + b"\r\n\r\n"
-                                + response_body
-                            )
+                            if final_response:
+                                if method != "GET":
+                                    raise RuntimeError(
+                                        "final artifact request must be GET"
+                                    )
+                                protected.sendall(
+                                    b"HTTP/1.1 200 OK\r\n"
+                                    b"Content-Type: application/json\r\n"
+                                    b"Transfer-Encoding: chunked\r\n"
+                                    b"Connection: close\r\n\r\n"
+                                    + format(len(response_body), "x").encode("ascii")
+                                    + b"\r\n"
+                                    + response_body
+                                    + b"\r\n"
+                                )
+                            else:
+                                protected.sendall(
+                                    b"HTTP/1.1 200 OK\r\n"
+                                    b"Content-Type: application/json\r\n"
+                                    b"Content-Length: "
+                                    + str(len(payload)).encode("ascii")
+                                    + b"\r\nConnection: keep-alive\r\n\r\n"
+                                    + response_body
+                                )
                             if final_response:
                                 provider_first_close.set()
                                 return
@@ -7977,6 +7994,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         "bounded_concurrent_tunnels_verified": True,
         "multi_frame_response_verified": True,
         "provider_first_close_verified": True,
+        "complete_chunked_json_eof_recovered": True,
         "truncated_frame_rejected": True,
         "ordinary_provider_transport_unchanged": True,
         "stale_pooled_transport_evicted_before_relay_timeout": True,
@@ -8639,6 +8657,11 @@ def main() -> int:
                 "artifact-egress-sustained-readback",
                 {},
             ).get("provider_first_close_verified")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("complete_chunked_json_eof_recovered")
             is True
             and behavior_evidence.get(
                 "artifact-egress-sustained-readback",

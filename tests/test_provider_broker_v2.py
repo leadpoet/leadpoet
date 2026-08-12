@@ -546,6 +546,136 @@ def test_httpx_transport_requires_declared_length_for_eof_recovery():
         )
 
 
+def test_httpx_transport_accepts_complete_chunked_json_before_eof():
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class NetworkStream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    body = b'[{"provider":"exa"}]'
+
+    class CompleteJSONThenEOF(httpx.SyncByteStream):
+        def __iter__(self):
+            yield body[:7]
+            yield body[7:]
+            raise httpx.RemoteProtocolError(
+                "peer closed before the terminal chunk"
+            )
+
+        def close(self):
+            return None
+
+    response = httpx.Response(
+        200,
+        headers={
+            "content-type": "application/json; charset=utf-8",
+            "transfer-encoding": "chunked",
+        },
+        stream=CompleteJSONThenEOF(),
+        extensions={"network_stream": NetworkStream()},
+        request=httpx.Request("GET", "https://example.com/rest/v1/providers"),
+    )
+
+    class ResponseContext:
+        def __enter__(self):
+            return response
+
+        def __exit__(self, *_args):
+            response.close()
+
+    class Client:
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+    result = HTTPXProviderTransport._execute_with_client(
+        Client(),
+        method="GET",
+        url="https://example.com/rest/v1/providers",
+        headers={},
+        body=b"",
+        timeout_seconds=1.0,
+        max_response_bytes=1024,
+        allow_authenticated_complete_body_eof=True,
+    )
+
+    assert result["http_status"] == 200
+    assert result["body"] == body
+
+
+@pytest.mark.parametrize(
+    ("method", "status", "headers", "body"),
+    (
+        (
+            "GET",
+            200,
+            {"content-type": "application/json", "transfer-encoding": "chunked"},
+            b'[{"provider":',
+        ),
+        (
+            "GET",
+            200,
+            {"content-type": "text/plain", "transfer-encoding": "chunked"},
+            b"[]",
+        ),
+        (
+            "POST",
+            200,
+            {"content-type": "application/json", "transfer-encoding": "chunked"},
+            b"[]",
+        ),
+        (
+            "GET",
+            500,
+            {"content-type": "application/json", "transfer-encoding": "chunked"},
+            b'{"error":"failed"}',
+        ),
+        (
+            "GET",
+            200,
+            {
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+                "transfer-encoding": "chunked",
+            },
+            b"[]",
+        ),
+        (
+            "GET",
+            200,
+            {
+                "content-type": "application/json",
+                "content-length": "2",
+                "transfer-encoding": "chunked",
+            },
+            b"[]",
+        ),
+    ),
+)
+def test_complete_body_classifier_rejects_ambiguous_chunked_response(
+    method,
+    status,
+    headers,
+    body,
+):
+    response = SimpleNamespace(status_code=status, headers=httpx.Headers(headers))
+
+    assert not _authenticated_body_is_complete_after_stream_error(
+        method=method,
+        response=response,
+        byte_count=len(body),
+        body=body,
+        error=EOFError("terminal chunk missing"),
+    )
+
+
 def test_httpx_transport_enforces_artifact_specific_large_response_ceiling(
     monkeypatch,
 ):

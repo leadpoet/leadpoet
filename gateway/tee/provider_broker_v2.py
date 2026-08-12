@@ -465,6 +465,7 @@ def _authenticated_body_is_complete_after_stream_error(
     method: str,
     response: Any,
     byte_count: int,
+    body: Optional[bytes] = None,
     error: BaseException,
 ) -> bool:
     """Accept only an authenticated response whose framing is already complete."""
@@ -487,8 +488,9 @@ def _authenticated_body_is_complete_after_stream_error(
         "identity",
     }:
         return False
-    if str(response_headers.get("transfer-encoding") or "").strip():
-        return False
+    transfer_encoding = str(
+        response_headers.get("transfer-encoding") or ""
+    ).strip().lower()
     try:
         raw_values = response_headers.get_list("content-length")
     except AttributeError:
@@ -499,10 +501,35 @@ def _authenticated_body_is_complete_after_stream_error(
         for raw_value in raw_values
         for token in str(raw_value).split(",")
     ]
-    if not tokens or any(not token.isdigit() for token in tokens):
+    if not transfer_encoding:
+        if not tokens or any(not token.isdigit() for token in tokens):
+            return False
+        declared_lengths = {int(token) for token in tokens}
+        return (
+            len(declared_lengths) == 1
+            and byte_count == next(iter(declared_lengths))
+        )
+
+    # PostgREST legitimately streams bounded JSON with chunked framing. A
+    # relay may preserve the complete authenticated JSON body but lose the
+    # terminal zero-length chunk. Recover only when the body itself provides
+    # an objective completeness boundary; every other chunked response remains
+    # fail-closed.
+    if transfer_encoding != "chunked" or tokens:
         return False
-    declared_lengths = {int(token) for token in tokens}
-    return len(declared_lengths) == 1 and byte_count == next(iter(declared_lengths))
+    if not 200 <= int(response.status_code) < 300:
+        return False
+    content_type = str(response_headers.get("content-type") or "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type != "application/json" and not media_type.endswith("+json"):
+        return False
+    if body is None or len(body) != byte_count:
+        return False
+    try:
+        document = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(document, (dict, list))
 
 
 class HTTPXProviderTransport:
@@ -669,6 +696,7 @@ class HTTPXProviderTransport:
                         )
                     chunks.append(chunk)
             except Exception as exc:
+                response_body = b"".join(chunks)
                 if not (
                     allow_authenticated_complete_body_eof
                     and byte_count <= max_response_bytes
@@ -676,11 +704,13 @@ class HTTPXProviderTransport:
                         method=method,
                         response=response,
                         byte_count=byte_count,
+                        body=response_body,
                         error=exc,
                     )
                 ):
                     raise
-            response_body = b"".join(chunks)
+            else:
+                response_body = b"".join(chunks)
             return {
                 "http_status": int(response.status_code),
                 "headers": _decoded_response_headers(response.headers),

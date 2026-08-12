@@ -1277,6 +1277,126 @@ def test_httpx_framed_transport_reuses_one_tunnel_under_sustained_load(
     assert proxy.status().get("last_failure") is None
 
 
+def test_httpx_framed_transport_recovers_complete_chunked_json_before_eof(
+    tmp_path: Path,
+):
+    certificate_path, private_key_path = _write_test_server_identity(tmp_path)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(
+        certfile=str(certificate_path),
+        keyfile=str(private_key_path),
+    )
+    origin_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    origin_listener.bind(("127.0.0.1", 0))
+    origin_listener.listen(1)
+    origin_address = origin_listener.getsockname()
+    origin_errors = []
+    requests_seen = []
+    body = b"[]"
+
+    def serve_origin():
+        try:
+            connection, _address = origin_listener.accept()
+            protected = tls_context.wrap_socket(connection, server_side=True)
+            try:
+                request = bytearray()
+                while b"\r\n\r\n" not in request:
+                    chunk = protected.recv(4096)
+                    if not chunk:
+                        raise AssertionError("provider client closed early")
+                    request.extend(chunk)
+                requests_seen.append(bytes(request))
+                protected.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json; charset=utf-8\r\n"
+                    b"Transfer-Encoding: chunked\r\n"
+                    b"Connection: close\r\n\r\n"
+                    b"2\r\n[]\r\n"
+                )
+            finally:
+                protected.close()
+        except Exception as exc:
+            origin_errors.append(exc)
+        finally:
+            origin_listener.close()
+
+    origin_thread = threading.Thread(target=serve_origin, daemon=True)
+    origin_thread.start()
+    host_threads = []
+
+    def open_parent_tunnel(_host, _port, *, tunnel_framing=""):
+        assert tunnel_framing == TUNNEL_FRAMING_MODE
+        enclave_side, host_side = socket.socketpair()
+        host_thread = threading.Thread(
+            target=_handle_connection,
+            kwargs={
+                "connection": host_side,
+                "connector": lambda _name, _number: socket.create_connection(
+                    origin_address,
+                    timeout=2,
+                ),
+                "idle_timeout_seconds": 3,
+            },
+            daemon=True,
+        )
+        host_thread.start()
+        host_threads.append(host_thread)
+        enclave_side.sendall(
+            _frame(
+                {
+                    "method": "connect",
+                    "params": {
+                        "host": "example.com",
+                        "port": 443,
+                        "policy_hash": destination_policy_hash(),
+                        "tunnel_framing": TUNNEL_FRAMING_MODE,
+                    },
+                }
+            )
+        )
+        response = _read_frame(enclave_side)
+        assert response["result"]["tunnel_framing"] == TUNNEL_FRAMING_MODE
+        return enclave_side
+
+    proxy_port = _unused_loopback_port()
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        local_port=proxy_port,
+        loopback_initializer=lambda: None,
+        idle_timeout_seconds=3,
+    )
+    proxy._open_parent_tunnel = open_parent_tunnel
+    proxy._configure_environment = lambda: None
+    proxy.start()
+    transport = HTTPXProviderTransport(
+        proxy_url=f"http://127.0.0.1:{proxy_port}",
+        ca_bundle=str(certificate_path),
+        response_body_ceiling_bytes=1024,
+        allow_authenticated_complete_body_eof=True,
+        parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+    )
+    try:
+        result = transport(
+            method="GET",
+            url="https://example.com/rest/v1/source_add_provisioning_eligible",
+            headers={"accept": "application/json"},
+            body=b"",
+            timeout_ms=3000,
+            max_response_bytes=1024,
+        )
+    finally:
+        transport.close()
+        proxy.stop()
+        origin_thread.join(timeout=3)
+        for thread in host_threads:
+            thread.join(timeout=3)
+
+    assert origin_errors == []
+    assert len(requests_seen) == 1
+    assert result["http_status"] == 200
+    assert result["body"] == body
+
+
 def test_httpx_direct_transport_reuses_and_recovers_enclave_tunnel(tmp_path: Path):
     certificate_path, private_key_path = _write_test_server_identity(tmp_path)
     tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

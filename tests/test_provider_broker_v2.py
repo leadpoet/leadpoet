@@ -755,6 +755,168 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
     assert clients[0].closed is True
 
 
+def test_httpx_transport_retry_uses_fresh_client_after_direct_failure(monkeypatch):
+    clients = []
+
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        extensions = {"network_stream": Stream()}
+
+        def iter_bytes(self):
+            yield b'{"ok":true}'
+
+    class ResponseContext:
+        def __init__(self, error=None):
+            self.error = error
+
+        def __enter__(self):
+            if self.error is not None:
+                raise self.error
+            return Response()
+
+        def __exit__(self, *_args):
+            return False
+
+    class Client:
+        def __init__(self, error=None):
+            self.error = error
+            self.closed = False
+            clients.append(self)
+
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext(self.error)
+
+        def close(self):
+            self.closed = True
+
+    planned = [Client(RuntimeError("stale enclave tunnel")), Client()]
+    transport = HTTPXProviderTransport()
+    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: planned.pop(0))
+    request = {
+        "method": "GET",
+        "url": "https://example.com/data",
+        "headers": {},
+        "body": b"",
+        "timeout_ms": 1000,
+    }
+
+    with pytest.raises(RuntimeError, match="stale enclave tunnel"):
+        transport(**request)
+
+    assert clients[0].closed is True
+    assert transport(**request)["body"] == b'{"ok":true}'
+    assert len(clients) == 2
+    transport.close()
+    assert clients[1].closed is True
+
+
+def test_httpx_transport_retires_failed_generation_after_concurrent_leases(
+    monkeypatch,
+):
+    second_started = threading.Event()
+    release_second = threading.Event()
+    first_done = threading.Event()
+    calls_lock = threading.Lock()
+    call_count = 0
+
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        extensions = {"network_stream": Stream()}
+
+        def iter_bytes(self):
+            yield b'{"ok":true}'
+
+    class ResponseContext:
+        def __init__(self, index):
+            self.index = index
+
+        def __enter__(self):
+            if self.index == 0:
+                assert second_started.wait(timeout=2)
+                raise RuntimeError("stale enclave tunnel")
+            second_started.set()
+            assert release_second.wait(timeout=2)
+            return Response()
+
+        def __exit__(self, *_args):
+            return False
+
+    class Client:
+        closed = False
+
+        def stream(self, *_args, **_kwargs):
+            nonlocal call_count
+            with calls_lock:
+                index = call_count
+                call_count += 1
+            return ResponseContext(index)
+
+        def close(self):
+            self.closed = True
+
+    client = Client()
+    transport = HTTPXProviderTransport()
+    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: client)
+    request = {
+        "method": "GET",
+        "url": "https://example.com/data",
+        "headers": {},
+        "body": b"",
+        "timeout_ms": 1000,
+    }
+    errors = []
+
+    def run_request():
+        try:
+            transport(**request)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            if errors:
+                first_done.set()
+
+    threads = [threading.Thread(target=run_request) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    assert first_done.wait(timeout=2)
+    assert client.closed is False
+    release_second.set()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(errors) == 1
+    assert client.closed is True
+
+
 def test_provider_registry_hash_binds_measured_https_routes():
     document = provider_registry_document()
     assert document["transport"] == {

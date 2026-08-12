@@ -25,6 +25,7 @@ from gateway.tee.egress_framing import (
     TUNNEL_FRAMING_MODE,
 )
 from gateway.tee.egress_policy import normalize_destination, normalize_proxy_destination
+from gateway.tee.egress_proxy import DEFAULT_IDLE_TIMEOUT_SECONDS
 from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
@@ -65,6 +66,10 @@ MAX_TRANSPORT_RESPONSE_BODY_BYTES = 96 * 1024 * 1024
 MAX_DEDUPLICATION_RECORDS = 10000
 TERMINAL_RECORD_RETENTION_SECONDS = 3600.0
 MAX_JOB_CREDENTIAL_LEASES = 1024
+DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS = min(
+    120.0,
+    DEFAULT_IDLE_TIMEOUT_SECONDS / 2.0,
+)
 EGRESS_PROXY_CREDENTIAL_SLOT = "egress_proxy"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SECRET_QUERY_NAMES = frozenset(
@@ -539,6 +544,9 @@ class HTTPXProviderTransport:
         self.parent_tunnel_framing = parent_tunnel_framing
         self._direct_client = None
         self._direct_client_lock = threading.Lock()
+        self._direct_client_generation = 0
+        self._direct_client_leases: Dict[int, int] = {}
+        self._retired_direct_clients: Dict[int, Any] = {}
 
     def _new_client(self, *, proxy_headers: Optional[Mapping[str, str]] = None) -> Any:
         import certifi
@@ -566,26 +574,64 @@ class HTTPXProviderTransport:
             limits=httpx.Limits(
                 max_connections=64,
                 max_keepalive_connections=32,
-                keepalive_expiry=300.0,
+                keepalive_expiry=DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
             ),
             cookies=CookieJar(policy=RejectAllCookies()),
             follow_redirects=False,
         )
 
-    def _get_direct_client(self) -> Any:
-        client = self._direct_client
-        if client is not None:
-            return client
+    @contextmanager
+    def _lease_direct_client(self):
         with self._direct_client_lock:
             if self._direct_client is None:
                 self._direct_client = self._new_client()
-            return self._direct_client
+                self._direct_client_generation += 1
+            client = self._direct_client
+            generation = self._direct_client_generation
+            self._direct_client_leases[generation] = (
+                self._direct_client_leases.get(generation, 0) + 1
+            )
+        try:
+            yield client, generation
+        finally:
+            close_client = None
+            with self._direct_client_lock:
+                remaining = self._direct_client_leases.get(generation, 0) - 1
+                if remaining > 0:
+                    self._direct_client_leases[generation] = remaining
+                else:
+                    self._direct_client_leases.pop(generation, None)
+                    close_client = self._retired_direct_clients.pop(
+                        generation,
+                        None,
+                    )
+            if close_client is not None:
+                close_client.close()
+
+    def _retire_direct_client(self, client: Any, generation: int) -> None:
+        close_client = None
+        with self._direct_client_lock:
+            if (
+                self._direct_client is client
+                and self._direct_client_generation == generation
+            ):
+                self._direct_client = None
+                if self._direct_client_leases.get(generation, 0) > 0:
+                    self._retired_direct_clients[generation] = client
+                else:
+                    close_client = client
+        if close_client is not None:
+            close_client.close()
 
     def close(self) -> None:
         with self._direct_client_lock:
-            client = self._direct_client
+            clients = list(self._retired_direct_clients.values())
+            if self._direct_client is not None:
+                clients.append(self._direct_client)
             self._direct_client = None
-        if client is not None:
+            self._direct_client_leases.clear()
+            self._retired_direct_clients.clear()
+        for client in dict.fromkeys(clients):
             client.close()
 
     @staticmethod
@@ -672,18 +718,27 @@ class HTTPXProviderTransport:
             }
         timeout_seconds = max(0.001, timeout_ms / 1000.0)
         if proxy_headers is None:
-            return self._execute_with_client(
-                self._get_direct_client(),
-                method=method,
-                url=url,
-                headers=headers,
-                body=body,
-                timeout_seconds=timeout_seconds,
-                max_response_bytes=max_response_bytes,
-                allow_authenticated_complete_body_eof=(
-                    self.allow_authenticated_complete_body_eof
-                ),
-            )
+            with self._lease_direct_client() as (client, generation):
+                try:
+                    return self._execute_with_client(
+                        client,
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        body=body,
+                        timeout_seconds=timeout_seconds,
+                        max_response_bytes=max_response_bytes,
+                        allow_authenticated_complete_body_eof=(
+                            self.allow_authenticated_complete_body_eof
+                        ),
+                    )
+                except BaseException:
+                    # The measured caller owns retry accounting. Retire only
+                    # this transport generation so its next measured attempt
+                    # cannot inherit a dead relay tunnel. Existing leases may
+                    # finish before the failed generation is closed.
+                    self._retire_direct_client(client, generation)
+                    raise
 
         # The upstream proxy URL contains a job-scoped credential. Never retain
         # it in the process-lifetime direct connection pool after the job lease.

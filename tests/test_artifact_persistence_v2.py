@@ -1035,6 +1035,80 @@ def test_transport_failure_discards_stale_idle_generation_before_retry(
     assert transports[-1].closed is False
 
 
+def test_transport_failure_retires_siblings_leased_from_failed_generation(
+    monkeypatch,
+) -> None:
+    transports = []
+
+    class GenerationTransport:
+        def __init__(self, **_options):
+            self.closed = False
+            transports.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        GenerationTransport,
+    )
+    pool = _ArtifactVerificationTransportPool(
+        maximum_transports=3,
+        wait_seconds=2,
+    )
+    failed = pool.acquire()
+    in_flight_sibling = pool.acquire()
+
+    pool.release(failed, failed=True)
+    replacement = pool.acquire()
+    pool.release(in_flight_sibling)
+    pool.release(replacement)
+
+    reused = pool.acquire()
+
+    assert failed.closed is True
+    assert in_flight_sibling.closed is True
+    assert replacement.closed is False
+    assert reused is replacement
+    assert transports == [failed, in_flight_sibling, replacement]
+
+
+def test_late_failure_from_retired_generation_does_not_retire_replacement(
+    monkeypatch,
+) -> None:
+    transports = []
+
+    class GenerationTransport:
+        def __init__(self, **_options):
+            self.closed = False
+            transports.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2.HTTPXProviderTransport",
+        GenerationTransport,
+    )
+    pool = _ArtifactVerificationTransportPool(
+        maximum_transports=3,
+        wait_seconds=2,
+    )
+    first_failure = pool.acquire()
+    late_old_failure = pool.acquire()
+
+    pool.release(first_failure, failed=True)
+    replacement = pool.acquire()
+    pool.release(late_old_failure, failed=True)
+    pool.release(replacement)
+
+    assert pool.acquire() is replacement
+    assert first_failure.closed is True
+    assert late_old_failure.closed is True
+    assert replacement.closed is False
+    assert transports == [first_failure, late_old_failure, replacement]
+
+
 @pytest.mark.parametrize(
     "message",
     [

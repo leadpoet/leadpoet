@@ -182,7 +182,9 @@ class _ArtifactVerificationTransportPool:
         self._wait_seconds = float(wait_seconds)
         self._maximum_idle_seconds = float(maximum_idle_seconds)
         self._idle_clock = idle_clock
-        self._idle = []  # type: list[tuple[float, Any]]
+        self._generation = 0
+        self._idle = []  # type: list[tuple[float, int, Any]]
+        self._leased_generations = {}  # type: dict[int, int]
         self._transport_count = 0
 
     @staticmethod
@@ -197,12 +199,15 @@ class _ArtifactVerificationTransportPool:
         now = self._idle_clock()
         reusable = []
         expired = []
-        for released_at, transport in self._idle:
-            if max(0.0, now - released_at) >= self._maximum_idle_seconds:
+        for released_at, generation, transport in self._idle:
+            if (
+                generation != self._generation
+                or max(0.0, now - released_at) >= self._maximum_idle_seconds
+            ):
                 expired.append(transport)
                 self._transport_count -= 1
             else:
-                reusable.append((released_at, transport))
+                reusable.append((released_at, generation, transport))
         self._idle = reusable
         if expired:
             self._condition.notify_all()
@@ -224,7 +229,8 @@ class _ArtifactVerificationTransportPool:
             while True:
                 expired.extend(self._expire_idle_locked())
                 if self._idle:
-                    _released_at, selected = self._idle.pop()
+                    _released_at, generation, selected = self._idle.pop()
+                    self._leased_generations[id(selected)] = generation
                     break
                 if self._transport_count < self._maximum_transports:
                     self._transport_count += 1
@@ -245,26 +251,43 @@ class _ArtifactVerificationTransportPool:
         if not create_new:
             raise RuntimeError("artifact verification transport lease is invalid")
         try:
-            return self._new_transport()
+            selected = self._new_transport()
         except BaseException:
             with self._condition:
                 self._transport_count -= 1
                 self._condition.notify()
             raise
+        with self._condition:
+            # Construction performs no network I/O. If another lease failed
+            # while this client was being built, it belongs to the new healthy
+            # generation rather than the retired one.
+            self._leased_generations[id(selected)] = self._generation
+        return selected
 
     def release(self, transport: Any, *, failed: bool = False) -> None:
         to_close = []
         with self._condition:
-            if failed:
-                # A peer-closed pooled generation can leave every idle client
-                # looking reusable even though its framed parent tunnel has
-                # already ended. Discard the failed lease and all idle siblings
-                # so the bounded retry opens a genuinely fresh connection.
-                to_close = [transport, *(item[1] for item in self._idle)]
+            generation = self._leased_generations.pop(id(transport), None)
+            if generation is None:
+                raise ArtifactPersistenceV2Error(
+                    "artifact verification transport lease is invalid"
+                )
+            if failed and generation == self._generation:
+                # Retire the complete generation, including siblings that were
+                # leased when this failure occurred. Those siblings may finish
+                # their current authenticated request, but they must not return
+                # later and repopulate the pool with dead framed connections.
+                self._generation += 1
+                to_close = [transport, *(item[2] for item in self._idle)]
                 self._transport_count -= len(to_close)
                 self._idle = []
+            elif failed or generation != self._generation:
+                to_close = [transport]
+                self._transport_count -= 1
             else:
-                self._idle.append((self._idle_clock(), transport))
+                self._idle.append(
+                    (self._idle_clock(), self._generation, transport)
+                )
             self._condition.notify_all()
         self._close_all(to_close)
 

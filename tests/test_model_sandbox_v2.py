@@ -1169,14 +1169,15 @@ def test_runsc_model_sandbox_distinguishes_transport_outage_from_empty_result(
     raises,
 ):
     request = _request(tmp_path)
+    icp = canonicalize_private_model_icp(
+        {"industry": "Software", "intent_signal": "Hiring"}
+    )
     request.update(
         {
             "operation": "run_icp",
             "callable_name": "run_icp",
             "input": {
-                "icp": canonicalize_private_model_icp(
-                    {"industry": "Software", "intent_signal": "Hiring"}
-                ),
+                "icp": icp,
                 "context": {
                     "mode": "private_baseline",
                     "runtime_options": {
@@ -1186,6 +1187,7 @@ def test_runsc_model_sandbox_distinguishes_transport_outage_from_empty_result(
                     },
                 },
             },
+            "provider_evidence_cache_ref": icp_evidence_cache_key(icp),
         }
     )
 

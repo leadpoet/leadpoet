@@ -1559,7 +1559,7 @@ def get_v2_provider_broker():
             transport=HTTPXProviderTransport(
                 allow_authenticated_complete_body_eof=True,
                 upstream_parent_tunnel_framing=TUNNEL_FRAMING_MODE,
-                reuse_direct_connections=False,
+                reuse_direct_connections=True,
             ),
             job_credential_slot_ref_hashes=configuration.get(
                 "job_lease_slot_ref_hashes"

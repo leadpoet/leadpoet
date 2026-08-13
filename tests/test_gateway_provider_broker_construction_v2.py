@@ -59,6 +59,6 @@ def test_coordinator_provider_broker_frames_only_assigned_proxy_transport(
     assert captured["transport"] == {
         "allow_authenticated_complete_body_eof": True,
         "upstream_parent_tunnel_framing": TUNNEL_FRAMING_MODE,
-        "reuse_direct_connections": False,
+        "reuse_direct_connections": True,
     }
     assert captured["broker"]["transport"].__class__ is Transport

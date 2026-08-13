@@ -250,6 +250,38 @@ def test_completed_v2_icp_requires_exact_model_and_scorer_roots(raw_hashes) -> N
         sw._record_baseline_attempt_parent_receipts(set(), row)
 
 
+def test_completed_provider_backed_empty_icp_requires_only_model_root() -> None:
+    model_receipt = _receipt_hash(500)
+    frontier: set[str] = set()
+
+    observed = sw._record_baseline_attempt_parent_receipts(
+        frontier,
+        {
+            "icp_ref": "icp:empty",
+            "_nonempty": False,
+            sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [model_receipt],
+        },
+    )
+
+    assert observed == (model_receipt,)
+    assert frontier == {model_receipt}
+
+
+def test_completed_provider_backed_empty_icp_rejects_extra_root() -> None:
+    with pytest.raises(RuntimeError, match="causal receipt roots"):
+        sw._record_baseline_attempt_parent_receipts(
+            set(),
+            {
+                "icp_ref": "icp:empty",
+                "_nonempty": False,
+                sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [
+                    _receipt_hash(500),
+                    _receipt_hash(501),
+                ],
+            },
+        )
+
+
 def test_unresolved_final_attempt_keeps_only_its_available_receipt_roots() -> None:
     final_model_receipt = _receipt_hash(500)
     frontier: set[str] = set()

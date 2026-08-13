@@ -580,8 +580,16 @@ def _record_baseline_attempt_parent_receipts(
     normalized = tuple(
         sorted(str(value or "").strip().lower() for value in raw_hashes)
     )
+    # A completed non-empty ICP has one measured-model receipt and one scorer
+    # receipt. A provider-backed empty retry never invokes the scorer, so its
+    # complete causal frontier is the single measured-model receipt.
+    expected_count = (
+        1
+        if require_complete and row.get("_nonempty") is False
+        else _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
+    )
     invalid_count = (
-        len(normalized) != _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
+        len(normalized) != expected_count
         if require_complete
         else len(normalized) > _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
     )

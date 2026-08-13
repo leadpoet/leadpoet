@@ -808,7 +808,7 @@ class LeadScoreBreakdown(BaseModel):
     # breakdown readers are unaffected.
     verifier_gate_receipts: Optional[List[Dict[str, Any]]] = Field(
         default=None,
-        description="Durable industry-gate audit receipts (taxonomy/semantic); None when gates disabled",
+        description="Durable company-fit gate receipts; None when no gate receipt is needed",
     )
 
     @model_validator(mode='after')

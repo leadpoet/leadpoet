@@ -46,9 +46,9 @@ import json
 import re
 import logging
 from datetime import date, datetime
-from typing import Any, Set, Optional, Tuple, List
+from typing import Any, Set, Optional, Tuple, List, Mapping
 from collections import Counter
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import (
@@ -57,7 +57,11 @@ from gateway.qualification.models import (
     LeadScoreBreakdown,
     CompanyOutput,
 )
-from qualification.scoring.pre_checks import run_company_zero_checks
+from qualification.scoring.pre_checks import (
+    check_country_match,
+    run_company_zero_checks,
+)
+from qualification.scoring.country_data import US_STATES
 from qualification.scoring.verification_helpers import (
     is_generic_intent_description,
     check_future_date,
@@ -65,7 +69,23 @@ from qualification.scoring.verification_helpers import (
     openrouter_chat,
 )
 from qualification.scoring.intent_signal_gate import check_evidence_freshness, judge_intent_signal
-from qualification.scoring.company_verification import verify_company_exists
+from qualification.scoring.company_verification import (
+    _registrable_domain,
+    verify_company_exists,
+)
+from qualification.scoring.company_fit_decision import (
+    COMPANY_FIT_MATCH,
+    COMPANY_FIT_MISMATCH,
+    COMPANY_FIT_UNAVAILABLE,
+    CompanyFitDecisionResult,
+    aggregate_company_fit_decisions,
+    company_fit_match,
+    company_fit_mismatch,
+    company_fit_unavailable,
+    evaluate_company_identity,
+    reconcile_company_fit_decisions,
+    strict_company_fit_boolean,
+)
 
 # Feature flag for the strict LLM judge (Layer 4 of intent_signal_gate).
 # On by default.  Set INTENT_GATE_STRICT_JUDGE_ENABLED=false to disable
@@ -110,6 +130,15 @@ MAX_INTENT_SIGNAL_SCORE = MAX_COMPANY_INTENT_SIGNAL_SCORE
 
 # LLM temperature for scoring (slightly higher for nuanced scoring)
 SCORING_TEMPERATURE = 0.4
+
+
+def _company_fit_failure_reason(
+    gate: str, result: CompanyFitDecisionResult
+) -> str:
+    detail = str(result.reason or "no verified decision")
+    if result.decision == COMPANY_FIT_UNAVAILABLE:
+        return f"{gate} unavailable: {detail}"
+    return f"{gate} failed: {detail}"
 
 
 # =============================================================================
@@ -158,17 +187,17 @@ async def score_company(
       1. ``run_company_zero_checks`` — country/geo match, duplicate
          company tracking, cost / time hard limits.  Skips role /
          seniority / DB-row checks.
-      2. ``verify_company_exists`` — HTTP fetch of the company's
-         website to confirm it's a real page that mentions the
-         claimed company name and isn't a parked / for-sale domain.
-         Hard gate: failure -> score 0.
-      3. ``score_company_icp_fit`` — single LLM call, 0-40 score
+      2. ``_run_company_binary_fit_checks`` — exact employee-size,
+         exclusion, required-attribute, and conditional stage gates.
+      3. ``verify_company_exists`` — first-party homepage binding of
+         the name, website, and submitted LinkedIn company identity.
+      4. ``score_company_icp_fit`` — single LLM call, 0-40 score
          (richer prompt than lead-mode ICP fit).
-      4. ``score_company_intent_signal`` — per-signal verification +
+      5. ``score_company_intent_signal`` — per-signal verification +
          time decay, identical algorithm to lead-mode.  Fabrication
          detection: if all signals are fabricated, zero entire score.
-      5. Cost variability penalty (same rules as lead-mode).
-      6. ``final_score = max(0, icp_fit + intent_final - cost_penalty)``.
+      6. Cost variability penalty (same rules as lead-mode).
+      7. ``final_score = max(0, icp_fit + intent_final - cost_penalty)``.
     """
     if force_fail_reason:
         logger.info(
@@ -186,56 +215,22 @@ async def score_company(
             failure_reason=force_fail_reason,
         )
 
-    # -----------------------------------------------------------------
-    # STEP 1: Company-mode pre-checks (deterministic, no LLM)
-    # -----------------------------------------------------------------
-    passes, failure_reason = await run_company_zero_checks(
-        company, icp, run_cost_usd, run_time_seconds, seen_companies
+    company_fit = await _verify_company_fit(
+        company,
+        icp,
+        run_cost_usd,
+        run_time_seconds,
+        seen_companies,
+        require_https_transport=True,
     )
-    if not passes:
-        logger.info(f"Company failed company-mode pre-checks: {failure_reason}")
-        return LeadScoreBreakdown(
-            icp_fit=0,
-            decision_maker=0,
-            intent_signal_raw=0,
-            time_decay_multiplier=1.0,
-            intent_signal_final=0,
-            cost_penalty=0,
-            time_penalty=0,
-            final_score=0,
-            failure_reason=failure_reason,
+    gate_receipts = [company_fit.receipt("company_fit")]
+    if company_fit.decision != COMPANY_FIT_MATCH:
+        failure_reason = _company_fit_failure_reason("Company fit", company_fit)
+        logger.info("Company failed shared fit verifier: %s", failure_reason)
+        return _zero_company_breakdown(
+            failure_reason,
+            verifier_gate_receipts=gate_receipts,
         )
-
-    # -----------------------------------------------------------------
-    # STEP 2: Company-existence verification (web fetch — hard gate)
-    # -----------------------------------------------------------------
-    try:
-        co_verified, co_reason = await verify_company_exists(
-            company.company_name, company.company_website
-        )
-    except Exception as e:
-        # Never let a transient web error crash the scorer; log and
-        # treat as a soft failure so the model just gets a 0 on this
-        # ICP (rather than wedging the whole evaluation batch).
-        logger.error(f"Company verification raised: {e}")
-        co_verified, co_reason = False, f"company verification error: {str(e)[:120]}"
-    if not co_verified:
-        logger.info(
-            f"Company failed existence check: {co_reason} "
-            f"(name={company.company_name!r}, url={company.company_website!r})"
-        )
-        return LeadScoreBreakdown(
-            icp_fit=0,
-            decision_maker=0,
-            intent_signal_raw=0,
-            time_decay_multiplier=1.0,
-            intent_signal_final=0,
-            cost_penalty=0,
-            time_penalty=0,
-            final_score=0,
-            failure_reason=f"Company verification failed: {co_reason}",
-        )
-    logger.debug(f"Company existence verified: {co_reason}")
 
     # -----------------------------------------------------------------
     # STEP 3: Mark company as seen (first lead per company wins)
@@ -264,32 +259,15 @@ async def score_company(
                 f"❌ ALL INTENT SIGNALS FABRICATED for company "
                 f"{company.company_name!r} — zeroing entire score"
             )
-            return LeadScoreBreakdown(
-                icp_fit=0,
-                decision_maker=0,
-                intent_signal_raw=0,
-                time_decay_multiplier=1.0,
-                intent_signal_final=0,
-                cost_penalty=0,
-                time_penalty=0,
-                final_score=0,
-                failure_reason=(
-                    "Intent fabrication detected (hardcoded date or "
-                    "generic claim)"
-                ),
+            return _zero_company_breakdown(
+                "Intent fabrication detected (hardcoded date or generic claim)",
+                verifier_gate_receipts=gate_receipts,
             )
     except Exception as e:
         logger.error(f"Company-mode LLM scoring failed: {e}")
-        return LeadScoreBreakdown(
-            icp_fit=0,
-            decision_maker=0,
-            intent_signal_raw=0,
-            time_decay_multiplier=1.0,
-            intent_signal_final=0,
-            cost_penalty=0,
-            time_penalty=0,
-            final_score=0,
-            failure_reason=f"LLM scoring error: {str(e)[:100]}",
+        return _zero_company_breakdown(
+            f"LLM scoring error: {str(e)[:100]}",
+            verifier_gate_receipts=gate_receipts,
         )
 
     # -----------------------------------------------------------------
@@ -362,6 +340,7 @@ async def score_company(
         time_penalty=time_penalty,
         final_score=final_score,
         failure_reason=None,
+        verifier_gate_receipts=gate_receipts,
     )
 
 
@@ -369,42 +348,423 @@ _SCORER_REVERIFY_MODEL = "perplexity/sonar"
 _SCORER_REVERIFY_TIMEOUT_S = 45.0
 
 
-def _reverify_decision(verdict: dict, icp_attribute: str, icp_stage: str) -> Tuple[bool, str]:
-    """Zero only on an affirmative false from the web-grounded judge; missing
-    or non-boolean answers keep the company (fail-open)."""
-    if icp_attribute and verdict.get("attribute_satisfied") is False:
-        return False, (f"required_attribute refuted by web re-verification: "
-                       f"{str(verdict.get('reason') or '')[:160]}")
-    if icp_stage and verdict.get("stage_matches") is False:
-        return False, (f"company_stage refuted by web re-verification: "
-                       f"{str(verdict.get('reason') or '')[:160]}")
-    return True, ""
+def _decision_from_observed_employee_size(verdict: dict, icp: ICPPrompt) -> str:
+    observed = str(verdict.get("observed_employee_count") or "").strip()
+    flag = strict_company_fit_boolean(verdict.get("employee_size_matches"))
+    if not observed:
+        return COMPANY_FIT_UNAVAILABLE
+    bucket = _normalize_linkedin_employee_bucket(observed)
+    targets, targets_verified = _normalize_icp_employee_buckets(icp.employee_count)
+    if not bucket or not targets_verified:
+        return COMPANY_FIT_UNAVAILABLE
+    if bucket not in targets or flag is False:
+        return COMPANY_FIT_MISMATCH
+    return COMPANY_FIT_MATCH if flag is True else COMPANY_FIT_UNAVAILABLE
 
 
-async def _llm_reverify_company(company: "CompanyOutput", icp: "ICPPrompt") -> Tuple[bool, str]:
+def _industry_evidence_decision(
+    candidate_industry: str,
+    candidate_subindustry: str,
+    requested_industry: str,
+    semantic_flag: Any = None,
+) -> str:
+    """Apply the same deterministic-first industry semantics as upstream."""
+
+    evidence = str(candidate_industry or "").strip()
+    if not evidence or not str(requested_industry or "").strip():
+        return COMPANY_FIT_UNAVAILABLE
+    flag = strict_company_fit_boolean(semantic_flag)
+    try:
+        from leadpoet_verifier.industry_fit import industry_fit
+
+        passed, detail = industry_fit(
+            requested_industry,
+            evidence,
+            candidate_subindustry,
+        )
+    except Exception:
+        return COMPANY_FIT_UNAVAILABLE
+    taxonomy = detail.get("leadpoet_taxonomy") or {}
+    requested = set(detail.get("requested_concepts") or [])
+    candidate = set(detail.get("candidate_concepts") or [])
+    matched = set(detail.get("matched_concepts") or [])
+    explicit_conflict = taxonomy.get("decision") == "rejected" or bool(
+        requested and candidate and not matched
+    )
+    if explicit_conflict or flag is False:
+        return COMPANY_FIT_MISMATCH
+    if passed or flag is True:
+        return COMPANY_FIT_MATCH
+    return COMPANY_FIT_UNAVAILABLE
+
+
+def _canonical_us_state(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) == 2 and text.isupper():
+        return str(US_STATES.get(text) or "")
+    return str(US_STATES.get(text.casefold()) or "")
+
+
+def _requested_us_states(value: Any) -> frozenset[str]:
+    """Return only explicit, unambiguous US state constraints."""
+
+    tokens = [
+        token.strip()
+        for token in re.split(
+            r"\s*(?:[,;|/]|\bor\b|\band\b)\s*",
+            str(value or ""),
+            flags=re.I,
+        )
+        if token.strip()
+    ]
+    normalized = {
+        re.sub(r"[^a-z0-9]+", " ", token.casefold()).strip()
+        for token in tokens
+    }
+    explicit_us = bool(normalized.intersection({
+        "united states",
+        "united states of america",
+        "us",
+        "usa",
+    }))
+    requested = frozenset(
+        state for token in tokens if (state := _canonical_us_state(token))
+    )
+    if not requested:
+        return frozenset()
+    if explicit_us:
+        return requested
+    named = frozenset(
+        str(US_STATES.get(token.casefold()) or "")
+        for token in tokens
+        if US_STATES.get(token.casefold())
+    )
+    non_state_tokens = [
+        token for token in tokens if not US_STATES.get(token.casefold())
+    ]
+    return named if named and not non_state_tokens else frozenset()
+
+
+def _decision_from_observed_geography(verdict: dict, icp: ICPPrompt) -> str:
+    observed = str(verdict.get("observed_hq_country") or "").strip()
+    flag = strict_company_fit_boolean(verdict.get("geography_matches"))
+    requested_values = list(dict.fromkeys(
+        value
+        for value in (
+            str(icp.country or "").strip(),
+            str(icp.geography or "").strip(),
+        )
+        if value
+    ))
+    if not observed or not requested_values:
+        return COMPANY_FIT_UNAVAILABLE
+    requested_states = frozenset().union(
+        *(_requested_us_states(value) for value in requested_values)
+    )
+    if requested_states:
+        observed_state = _canonical_us_state(verdict.get("observed_hq_state"))
+        if not observed_state:
+            return COMPANY_FIT_UNAVAILABLE
+        if observed_state not in requested_states:
+            return COMPANY_FIT_MISMATCH
+    if (
+        any(
+            not check_country_match(observed, requested).passed
+            for requested in requested_values
+        )
+        or flag is False
+    ):
+        return COMPANY_FIT_MISMATCH
+    return COMPANY_FIT_MATCH if flag is True else COMPANY_FIT_UNAVAILABLE
+
+
+def _decision_from_observed_stage(verdict: dict, icp_stage: str) -> str:
+    if not icp_stage:
+        return COMPANY_FIT_MATCH
+    observed = _normalize_company_stage(verdict.get("observed_company_stage"))
+    flag = strict_company_fit_boolean(verdict.get("stage_matches"))
+    if not observed:
+        return COMPANY_FIT_UNAVAILABLE
+    if observed != icp_stage or flag is False:
+        return COMPANY_FIT_MISMATCH
+    return COMPANY_FIT_MATCH if flag is True else COMPANY_FIT_UNAVAILABLE
+
+
+def _valid_web_evidence_url(value: Any) -> str:
+    """Accept only absolute HTTP(S) sources as web-verification evidence."""
+
+    raw = str(value or "").strip()
+    try:
+        parsed = urlsplit(raw)
+    except (TypeError, ValueError):
+        return ""
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return ""
+    return raw
+
+
+def _dimension_web_evidence(verdict: Mapping[str, Any], dimension: str) -> dict[str, str]:
+    """Extract the URL and quote required to make one web claim auditable."""
+
+    nested = verdict.get("dimension_evidence")
+    nested_value = nested.get(dimension) if isinstance(nested, Mapping) else None
+    nested_value = nested_value if isinstance(nested_value, Mapping) else {}
+    url = (
+        verdict.get(f"{dimension}_evidence_url")
+        or nested_value.get("url")
+        or nested_value.get("evidence_url")
+        or ""
+    )
+    quote = (
+        verdict.get(f"{dimension}_evidence_quote")
+        or nested_value.get("quote")
+        or nested_value.get("evidence_quote")
+        or (
+            verdict.get("attribute_evidence")
+            if dimension == "required_attribute"
+            else ""
+        )
+        or ""
+    )
+    return {
+        "url": _valid_web_evidence_url(url),
+        "quote": str(quote or "").strip(),
+    }
+
+
+def _decision_with_web_evidence(
+    decision: str,
+    evidence: Mapping[str, Any],
+) -> str:
+    """A claimed match or conflict is unusable without a source URL and quote."""
+
+    if not str(evidence.get("url") or "").strip() or not str(
+        evidence.get("quote") or ""
+    ).strip():
+        return COMPANY_FIT_UNAVAILABLE
+    return decision
+
+
+def _web_identity_receipt(
+    company: CompanyOutput,
+    verdict: Mapping[str, Any],
+) -> dict[str, str]:
+    """Bind the independently observed web identity to the submitted company."""
+
+    return evaluate_company_identity(
+        submitted_name=company.company_name,
+        submitted_website=company.company_website,
+        submitted_linkedin=company.company_linkedin,
+        observed_name=(
+            verdict.get("observed_company_name")
+            or verdict.get("observed_name")
+            or ""
+        ),
+        observed_website=(
+            verdict.get("observed_company_website")
+            or verdict.get("observed_website")
+            or ""
+        ),
+        observed_linkedin=(
+            verdict.get("observed_company_linkedin")
+            or verdict.get("observed_linkedin")
+            or ""
+        ),
+        evidence_source="company_web_reverification",
+    )
+
+
+def _reverify_decision(
+    verdict: dict,
+    icp_attribute: str,
+    icp_stage: str,
+    *,
+    icp: Optional[ICPPrompt] = None,
+    company: Optional[CompanyOutput] = None,
+) -> CompanyFitDecisionResult:
+    """Classify web proof as a match, conflict, or unavailable outcome.
+
+    In production, ``company`` is always supplied. That activates the strict
+    receipt: each active dimension needs an evidence URL and quote, and the
+    observed identity triplet must bind to the submitted company through the
+    shared model-owned primitive. The legacy no-company helper remains useful
+    for isolated Boolean semantics tests only.
+    """
+
+    strict_web_proof = company is not None
+    identity_receipt: dict[str, str] = {}
+    identity_decision = COMPANY_FIT_MATCH
+    if company is not None:
+        identity_receipt = _web_identity_receipt(company, verdict)
+        identity_decision = str(identity_receipt.get("decision") or "")
+        if identity_decision not in {
+            COMPANY_FIT_MATCH,
+            COMPANY_FIT_MISMATCH,
+            COMPANY_FIT_UNAVAILABLE,
+        }:
+            identity_decision = COMPANY_FIT_UNAVAILABLE
+
+    if icp is None:
+        required = []
+        if icp_attribute:
+            required.append(("attribute_satisfied", "required_attribute"))
+        if icp_stage:
+            required.append(("stage_matches", "stage"))
+        decisions: list[str] = [identity_decision]
+        evidence: dict[str, dict[str, str]] = {}
+        for field, dimension in required:
+            value = strict_company_fit_boolean(verdict.get(field))
+            if value is None:
+                decision = COMPANY_FIT_UNAVAILABLE
+            elif value is False:
+                decision = COMPANY_FIT_MISMATCH
+            else:
+                decision = COMPANY_FIT_MATCH
+            evidence[dimension] = _dimension_web_evidence(verdict, dimension)
+            if strict_web_proof:
+                decision = _decision_with_web_evidence(decision, evidence[dimension])
+            decisions.append(decision)
+        decision = reconcile_company_fit_decisions(decisions)
+        details = {
+            "identity_decision": identity_decision,
+            "identity_receipt": identity_receipt,
+            "dimension_evidence": evidence,
+        }
+        reason = str(verdict.get("reason") or "web company-fit verification")[:300]
+        if decision == COMPANY_FIT_MATCH:
+            return company_fit_match(reason, details=details)
+        if decision == COMPANY_FIT_MISMATCH:
+            return company_fit_mismatch(reason, details=details)
+        return company_fit_unavailable(reason, details=details)
+
+    dimensions = {
+        "employee_size": _decision_from_observed_employee_size(verdict, icp),
+        "industry": _industry_evidence_decision(
+            str(verdict.get("observed_industry") or ""),
+            str(verdict.get("observed_subindustry") or ""),
+            icp.industry,
+            verdict.get("industry_matches"),
+        ),
+        "geography": _decision_from_observed_geography(verdict, icp),
+        "stage": _decision_from_observed_stage(verdict, icp_stage),
+    }
+    active_dimensions = {"employee_size", "industry", "geography"}
+    if icp_stage:
+        active_dimensions.add("stage")
+    evidence = {
+        dimension: _dimension_web_evidence(verdict, dimension)
+        for dimension in active_dimensions
+    }
+    if strict_web_proof:
+        for dimension in active_dimensions:
+            dimensions[dimension] = _decision_with_web_evidence(
+                dimensions[dimension], evidence[dimension]
+            )
+
+    attribute_decision = COMPANY_FIT_MATCH
+    if icp_attribute:
+        attribute_flag = strict_company_fit_boolean(
+            verdict.get("attribute_satisfied")
+        )
+        if attribute_flag is False:
+            attribute_decision = COMPANY_FIT_MISMATCH
+        elif attribute_flag is not True or not str(
+            verdict.get("attribute_evidence")
+            or verdict.get("required_attribute_evidence_quote")
+            or ""
+        ).strip():
+            attribute_decision = COMPANY_FIT_UNAVAILABLE
+        evidence["required_attribute"] = _dimension_web_evidence(
+            verdict, "required_attribute"
+        )
+        if strict_web_proof:
+            attribute_decision = _decision_with_web_evidence(
+                attribute_decision, evidence["required_attribute"]
+            )
+
+    decisions = [*dimensions.values(), attribute_decision, identity_decision]
+    decision = reconcile_company_fit_decisions(decisions)
+    details = {
+        "dimension_decisions": dimensions,
+        "required_attribute_decision": attribute_decision,
+        "identity_decision": identity_decision,
+        "identity_receipt": identity_receipt,
+        "dimension_evidence": evidence,
+        "provider_observations": {
+            key: verdict.get(key)
+            for key in (
+                "observed_company_name",
+                "observed_company_website",
+                "observed_company_linkedin",
+                "observed_employee_count",
+                "observed_industry",
+                "observed_subindustry",
+                "observed_hq_country",
+                "observed_hq_state",
+                "observed_company_stage",
+                "attribute_evidence",
+            )
+        },
+    }
+    reason = str(verdict.get("reason") or "web company-fit verification")[:300]
+    if decision == COMPANY_FIT_MATCH:
+        return company_fit_match(reason, details=details)
+    if decision == COMPANY_FIT_MISMATCH:
+        return company_fit_mismatch(reason, details=details)
+    return company_fit_unavailable(reason, details=details)
+
+
+async def _llm_reverify_company(
+    company: "CompanyOutput",
+    icp: "ICPPrompt",
+    *,
+    require_company_fit_dimensions: bool = False,
+) -> CompanyFitDecisionResult:
     """Web-grounded re-verification of the model-REPORTED attribute claim and
     stage label — the two dimensions where the scorer otherwise trusts model
     text. One Sonar call per company, only when the ICP pins either dimension.
 
-    This check is MANDATORY whenever the ICP pins either dimension — the
-    attribute's direct evidence URL is optional, but the LLM verification of
-    the claim is not. Fail semantics: zero ONLY on an affirmative web-grounded
-    mismatch; an indeterminate answer or any provider/parse failure keeps the
-    company (fail-open, loudly logged) — a provider outage must never zero a
-    whole benchmark."""
+    This check is MANDATORY whenever the ICP pins either dimension. Every
+    active dimension must return a source URL and quote, plus one observed
+    name/domain/LinkedIn identity triplet. Fail semantics: a supported
+    contradiction is a mismatch; missing proof or provider/parse failure is
+    unavailable, so Research Lab can retry it without recording a miner false
+    positive."""
     icp_attribute = str(getattr(icp, "required_attribute", "") or "").strip()
     icp_stage = _normalize_company_stage(getattr(icp, "company_stage", ""))
-    if not icp_attribute and not icp_stage:
-        return True, ""
+    if not require_company_fit_dimensions and not icp_attribute and not icp_stage:
+        return company_fit_match()
     import os
     key = (os.environ.get("OPENROUTER_API_KEY")
            or os.environ.get("QUALIFICATION_OPENROUTER_API_KEY")
            or os.environ.get("OPENROUTER_KEY") or "")
     if not key:
         logger.warning("scorer_reverify_skipped reason=no_openrouter_key")
-        return True, ""
+        return company_fit_unavailable("no_openrouter_key")
     claim = getattr(company, "required_attribute", None)
     checks = []
+    if require_company_fit_dimensions:
+        checks.extend([
+            (
+                "employee_size_matches: independently find the company's current "
+                f"employee-count band and test it against {icp.employee_count!r}."
+            ),
+            (
+                "industry_matches: independently find the company's industry and "
+                f"test it against {icp.industry!r}."
+            ),
+            (
+                "geography_matches: independently find the company's headquarters "
+                f"and test it against {(icp.country or icp.geography)!r}."
+            ),
+        ])
     if icp_attribute:
         checks.append(
             f'attribute_satisfied: does this company actually satisfy: "{icp_attribute}"? '
@@ -420,9 +780,28 @@ async def _llm_reverify_company(company: "CompanyOutput", icp: "ICPPrompt") -> T
         f'Company: "{company.company_name}" — website {company.company_website} '
         f'— LinkedIn {company.company_linkedin or "(none)"}.\n'
         + "\n".join(f"- {c}" for c in checks)
-        + '\nReturn STRICT JSON only: {"attribute_satisfied": true/false, '
-          '"stage_matches": true/false, "reason": "one sentence"}. '
-          "Use true for any check you cannot confidently resolve."
+        + '\nIndependently observe the exact company name, company website, and '
+          'LinkedIn company URL before scoring any dimension. For EVERY active '
+          'dimension, return one absolute source URL and a direct supporting or '
+          'contradicting quote. Do not copy submitted identity values unless the '
+          'source proves them. Return STRICT JSON only with these keys: '
+          '{"observed_company_name":"", "observed_company_website":"", '
+          '"observed_company_linkedin":"", "observed_employee_count":"", '
+          '"employee_size_matches":true/false/null, '
+          '"employee_size_evidence_url":"", "employee_size_evidence_quote":"", '
+          '"observed_industry":"", "observed_subindustry":"", '
+          '"industry_matches":true/false/null, "industry_evidence_url":"", '
+          '"industry_evidence_quote":"", "observed_hq_country":"", '
+          '"observed_hq_state":"", "geography_matches":true/false/null, '
+          '"geography_evidence_url":"", "geography_evidence_quote":"", '
+          '"observed_company_stage":"", "stage_matches":true/false/null, '
+          '"stage_evidence_url":"", "stage_evidence_quote":"", '
+          '"attribute_satisfied":true/false/null, '
+          '"required_attribute_evidence_url":"", '
+          '"required_attribute_evidence_quote":"", "reason":"one sentence"}. '
+          "Return true only for verified support, false only for a verified "
+          "contradiction, and null with empty observed values and evidence when "
+          "the requested check cannot be resolved."
     )
     try:
         timeout = aiohttp.ClientTimeout(total=_SCORER_REVERIFY_TIMEOUT_S)
@@ -437,7 +816,9 @@ async def _llm_reverify_company(company: "CompanyOutput", icp: "ICPPrompt") -> T
             ) as resp:
                 if resp.status != 200:
                     logger.warning("scorer_reverify_unavailable status=%s", resp.status)
-                    return True, ""
+                    return company_fit_unavailable(
+                        f"provider HTTP {resp.status}"
+                    )
                 body = await resp.json()
         # Re-verification verdicts are training labels — capture the exchange
         # (never affects the business result).
@@ -458,11 +839,355 @@ async def _llm_reverify_company(company: "CompanyOutput", icp: "ICPPrompt") -> T
             pass
         content = body["choices"][0]["message"]["content"]
         match = re.search(r"\{.*\}", content, re.S)
-        verdict = json.loads(match.group(0)) if match else {}
-    except Exception as exc:  # noqa: BLE001 - fail-open on infrastructure error
+        if match is None:
+            return company_fit_unavailable("provider response contained no JSON object")
+        verdict = json.loads(match.group(0))
+        if not isinstance(verdict, dict):
+            return company_fit_unavailable("provider response JSON was not an object")
+    except Exception as exc:  # noqa: BLE001
         logger.warning("scorer_reverify_failed error=%s", str(exc)[:120])
-        return True, ""
-    return _reverify_decision(verdict, icp_attribute, icp_stage)
+        return company_fit_unavailable(
+            f"provider or parse error: {type(exc).__name__}: {str(exc)[:120]}"
+        )
+    return _reverify_decision(
+        verdict,
+        icp_attribute,
+        icp_stage,
+        icp=icp if require_company_fit_dimensions else None,
+        company=company,
+    )
+
+
+def _submitted_employee_size_decision(company: CompanyOutput, icp: ICPPrompt) -> str:
+    bucket = _normalize_linkedin_employee_bucket(company.employee_count)
+    targets, targets_verified = _normalize_icp_employee_buckets(icp.employee_count)
+    if not bucket or not targets_verified:
+        return COMPANY_FIT_UNAVAILABLE
+    return COMPANY_FIT_MATCH if bucket in targets else COMPANY_FIT_MISMATCH
+
+
+def _submitted_geography_decision(company: CompanyOutput, icp: ICPPrompt) -> str:
+    submitted = str(company.country or "").strip()
+    requested = str(icp.country or icp.geography or "").strip()
+    if not submitted or not requested:
+        return COMPANY_FIT_UNAVAILABLE
+    return (
+        COMPANY_FIT_MATCH
+        if check_country_match(submitted, requested).passed
+        else COMPANY_FIT_MISMATCH
+    )
+
+
+def _submitted_stage_decision(company: CompanyOutput, icp: ICPPrompt) -> str:
+    requested = _normalize_company_stage(icp.company_stage)
+    if not requested:
+        return COMPANY_FIT_MATCH
+    submitted = _normalize_company_stage(company.company_stage)
+    if not submitted:
+        return COMPANY_FIT_UNAVAILABLE
+    return COMPANY_FIT_MATCH if submitted == requested else COMPANY_FIT_MISMATCH
+
+
+def _combine_submitted_and_observed(
+    submitted: str, observed: str
+) -> str:
+    """Require provider proof while retaining every explicit contradiction."""
+
+    if COMPANY_FIT_MISMATCH in {submitted, observed}:
+        return COMPANY_FIT_MISMATCH
+    if observed == COMPANY_FIT_MATCH:
+        return COMPANY_FIT_MATCH
+    return COMPANY_FIT_UNAVAILABLE
+
+
+def _complete_company_fit_result(
+    decision: str,
+    reason: str,
+    *,
+    dimensions: dict[str, str],
+    dimension_evidence: dict[str, Any],
+    stage_required: bool,
+    required_attribute_decision: str = COMPANY_FIT_MATCH,
+    supporting_receipts: Optional[List[dict]] = None,
+) -> CompanyFitDecisionResult:
+    details = {
+        "company_fit_decision": decision,
+        "company_fit_dimensions": dict(dimensions),
+        "company_fit_stage_required": stage_required,
+        "dimension_evidence": dimension_evidence,
+        "required_attribute_decision": required_attribute_decision,
+        "supporting_receipts": list(supporting_receipts or []),
+    }
+    if decision == COMPANY_FIT_MATCH:
+        return company_fit_match(reason, details=details)
+    if decision == COMPANY_FIT_MISMATCH:
+        return company_fit_mismatch(reason, details=details)
+    return company_fit_unavailable(reason, details=details)
+
+
+async def _verify_company_fit(
+    company: CompanyOutput,
+    icp: ICPPrompt,
+    run_cost_usd: float,
+    run_time_seconds: float,
+    seen_companies: Set[str],
+    *,
+    require_https_transport: bool,
+) -> CompanyFitDecisionResult:
+    """One official public/Research Lab company-fit verifier.
+
+    Submitted fields may establish an explicit conflict, but they cannot prove
+    a match. Identity comes from the fetched homepage and final URL. The other
+    dimensions require independent web observations. Every result persists the
+    complete upstream dimension map and uses the upstream aggregate helper.
+    """
+
+    stage_required = bool(_normalize_company_stage(icp.company_stage))
+    dimensions = {
+        "identity": COMPANY_FIT_UNAVAILABLE,
+        "employee_size": COMPANY_FIT_UNAVAILABLE,
+        "industry": COMPANY_FIT_UNAVAILABLE,
+        "geography": COMPANY_FIT_UNAVAILABLE,
+        "stage": (
+            COMPANY_FIT_UNAVAILABLE if stage_required else COMPANY_FIT_MATCH
+        ),
+    }
+    evidence: dict[str, Any] = {
+        dimension: {"decision": value}
+        for dimension, value in dimensions.items()
+    }
+    supporting_receipts: List[dict] = []
+    precheck = await run_company_zero_checks(
+        company,
+        icp,
+        run_cost_usd,
+        run_time_seconds,
+        seen_companies,
+        gate_receipts=supporting_receipts,
+        defer_fit_dimensions=True,
+    )
+    if precheck.decision != COMPANY_FIT_MATCH:
+        return _complete_company_fit_result(
+            precheck.decision,
+            precheck.reason or "company pre-check did not pass",
+            dimensions=dimensions,
+            dimension_evidence=evidence,
+            stage_required=stage_required,
+            supporting_receipts=supporting_receipts,
+        )
+
+    if _matches_exclusion_list(company, getattr(icp, "excluded_companies", None)):
+        return _complete_company_fit_result(
+            COMPANY_FIT_MISMATCH,
+            f"Company {company.company_name!r} matches the ICP exclusion list",
+            dimensions=dimensions,
+            dimension_evidence=evidence,
+            stage_required=stage_required,
+            supporting_receipts=supporting_receipts,
+        )
+
+    submitted = {
+        "employee_size": _submitted_employee_size_decision(company, icp),
+        "industry": _industry_evidence_decision(
+            company.industry,
+            company.sub_industry,
+            icp.industry,
+        ),
+        "geography": _submitted_geography_decision(company, icp),
+        "stage": _submitted_stage_decision(company, icp),
+    }
+    submitted_conflicts = [
+        name for name, submitted_decision in submitted.items()
+        if submitted_decision == COMPANY_FIT_MISMATCH
+    ]
+    if submitted_conflicts:
+        for dimension in submitted_conflicts:
+            dimensions[dimension] = COMPANY_FIT_MISMATCH
+            evidence[dimension] = {
+                "decision": COMPANY_FIT_MISMATCH,
+                "submitted_decision": COMPANY_FIT_MISMATCH,
+                "observed_decision": COMPANY_FIT_UNAVAILABLE,
+            }
+        aggregate = aggregate_company_fit_decisions(
+            dimensions, stage_required=stage_required
+        )
+        return _complete_company_fit_result(
+            aggregate,
+            f"submitted company fit conflicts with ICP: "
+            f"{', '.join(submitted_conflicts)}",
+            dimensions=dimensions,
+            dimension_evidence=evidence,
+            stage_required=stage_required,
+            supporting_receipts=supporting_receipts,
+        )
+
+    try:
+        identity = await verify_company_exists(
+            company.company_name,
+            company.company_website,
+            company_linkedin=company.company_linkedin,
+            require_https_transport=require_https_transport,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Company identity verification raised: %s", exc)
+        identity = company_fit_unavailable(
+            f"company identity provider error: {type(exc).__name__}: {str(exc)[:120]}"
+        )
+    dimensions["identity"] = identity.decision
+    evidence["identity"] = {
+        "decision": identity.decision,
+        "reason": identity.reason,
+        **dict(identity.details),
+    }
+    if identity.decision != COMPANY_FIT_MATCH:
+        aggregate = aggregate_company_fit_decisions(
+            dimensions, stage_required=stage_required
+        )
+        return _complete_company_fit_result(
+            aggregate,
+            identity.reason or "company identity not proven",
+            dimensions=dimensions,
+            dimension_evidence=evidence,
+            stage_required=stage_required,
+            supporting_receipts=supporting_receipts,
+        )
+
+    web = await _llm_reverify_company(
+        company,
+        icp,
+        require_company_fit_dimensions=True,
+    )
+    web_details = web.details if isinstance(web.details, Mapping) else {}
+    observed_raw = web_details.get("dimension_decisions") or {}
+    observed = dict(observed_raw) if isinstance(observed_raw, Mapping) else {}
+    web_identity_receipt = web_details.get("identity_receipt")
+    web_identity_mapping = (
+        dict(web_identity_receipt)
+        if isinstance(web_identity_receipt, Mapping)
+        else {}
+    )
+    identity_receipt_complete = isinstance(web_identity_receipt, Mapping) and all(
+        str(web_identity_receipt.get(field) or "").strip()
+        for field in (
+            "submitted_name",
+            "submitted_domain",
+            "submitted_linkedin_slug",
+            "observed_name",
+            "observed_domain",
+            "observed_linkedin_slug",
+        )
+    ) and str(web_identity_receipt.get("evidence_source") or "") == (
+        "company_web_reverification"
+    )
+    web_identity_decision = str(
+        web_details.get("identity_decision", COMPANY_FIT_UNAVAILABLE)
+    )
+    if (
+        not identity_receipt_complete
+        or web_identity_decision not in {
+            COMPANY_FIT_MATCH,
+            COMPANY_FIT_MISMATCH,
+            COMPANY_FIT_UNAVAILABLE,
+        }
+        or web_identity_decision != str(
+            web_identity_mapping.get("decision") or ""
+        )
+    ):
+        web_identity_decision = COMPANY_FIT_UNAVAILABLE
+    dimensions["identity"] = web_identity_decision
+    evidence["identity"] = {
+        **dict(evidence.get("identity") or {}),
+        "decision": web_identity_decision,
+        "web_identity_decision": web_identity_decision,
+        "web_identity_receipt": web_identity_mapping,
+    }
+    web_dimension_evidence = web_details.get("dimension_evidence") or {}
+    if not isinstance(web_dimension_evidence, Mapping):
+        web_dimension_evidence = {}
+    active_web_dimensions = {"employee_size", "industry", "geography"}
+    if stage_required:
+        active_web_dimensions.add("stage")
+    for dimension in ("employee_size", "industry", "geography", "stage"):
+        observed_decision = str(
+            observed.get(dimension, COMPANY_FIT_UNAVAILABLE)
+        )
+        raw_web_evidence = web_dimension_evidence.get(dimension)
+        web_evidence = (
+            dict(raw_web_evidence)
+            if isinstance(raw_web_evidence, Mapping)
+            else {}
+        )
+        if dimension in active_web_dimensions and (
+            not _valid_web_evidence_url(web_evidence.get("url"))
+            or not str(web_evidence.get("quote") or "").strip()
+        ):
+            observed_decision = COMPANY_FIT_UNAVAILABLE
+        decision = _combine_submitted_and_observed(
+            submitted[dimension], observed_decision
+        )
+        dimensions[dimension] = decision
+        evidence[dimension] = {
+            "decision": decision,
+            "submitted_decision": submitted[dimension],
+            "observed_decision": observed_decision,
+            "web_evidence": web_evidence,
+        }
+    evidence["web_observations"] = dict(
+        web_details.get("provider_observations") or {}
+    )
+    required_attribute_decision = str(
+        web_details.get(
+            "required_attribute_decision",
+            COMPANY_FIT_UNAVAILABLE
+            if str(icp.required_attribute or "").strip()
+            else COMPANY_FIT_MATCH,
+        )
+    )
+    if str(icp.required_attribute or "").strip():
+        raw_attribute_evidence = web_dimension_evidence.get("required_attribute")
+        attribute_web_evidence = (
+            dict(raw_attribute_evidence)
+            if isinstance(raw_attribute_evidence, Mapping)
+            else {}
+        )
+        if (
+            not _valid_web_evidence_url(attribute_web_evidence.get("url"))
+            or not str(attribute_web_evidence.get("quote") or "").strip()
+        ):
+            required_attribute_decision = COMPANY_FIT_UNAVAILABLE
+        evidence["required_attribute"] = {
+            "decision": required_attribute_decision,
+            "web_evidence": attribute_web_evidence,
+        }
+    aggregate = aggregate_company_fit_decisions(
+        dimensions, stage_required=stage_required
+    )
+    decision = reconcile_company_fit_decisions(
+        [aggregate, required_attribute_decision]
+        if str(icp.required_attribute or "").strip()
+        else [aggregate]
+    )
+    failed = [
+        name for name, dimension_decision in dimensions.items()
+        if dimension_decision != COMPANY_FIT_MATCH
+        and (name != "stage" or stage_required)
+    ]
+    if required_attribute_decision != COMPANY_FIT_MATCH:
+        failed.append("required_attribute")
+    reason = (
+        "company fit verified from independent identity and web evidence"
+        if decision == COMPANY_FIT_MATCH
+        else f"company fit not proven: {', '.join(failed)}; {web.reason or ''}".strip()
+    )
+    return _complete_company_fit_result(
+        decision,
+        reason,
+        dimensions=dimensions,
+        dimension_evidence=evidence,
+        stage_required=stage_required,
+        required_attribute_decision=required_attribute_decision,
+        supporting_receipts=supporting_receipts,
+    )
 
 
 async def score_company_autoresearch_intent_v2(
@@ -476,9 +1201,8 @@ async def score_company_autoresearch_intent_v2(
 ) -> LeadScoreBreakdown:
     """Opt-in Research Lab scorer: binary fit gates, 0-100 intent-only score.
 
-    This intentionally leaves ``score_company`` unchanged for the public model
-    competition and fulfillment-adjacent imports.  The Research Lab private
-    evaluator opts into this function explicitly.
+    This keeps Research Lab intent-only scoring separate from the public score
+    shape. Both paths use the same deterministic company-fit hard gates.
     """
     if force_fail_reason:
         logger.info(
@@ -486,40 +1210,19 @@ async def score_company_autoresearch_intent_v2(
         )
         return _zero_company_breakdown(force_fail_reason)
 
-    gate_receipts: List[dict] = []
-    passes, failure_reason = await run_company_zero_checks(
-        company, icp, run_cost_usd, run_time_seconds, seen_companies,
-        gate_receipts=gate_receipts,
+    company_fit = await _verify_company_fit(
+        company,
+        icp,
+        run_cost_usd,
+        run_time_seconds,
+        seen_companies,
+        require_https_transport=True,
     )
-    if not passes:
-        logger.info(f"Autoresearch company failed pre-checks: {failure_reason}")
+    gate_receipts = [company_fit.receipt("company_fit")]
+    if company_fit.decision != COMPANY_FIT_MATCH:
         return _zero_company_breakdown(
-            failure_reason, verifier_gate_receipts=gate_receipts or None
-        )
-
-    binary_passed, binary_reason = _run_autoresearch_binary_fit_checks(company, icp)
-    if not binary_passed:
-        logger.info(f"Autoresearch company failed binary fit: {binary_reason}")
-        return _zero_company_breakdown(
-            binary_reason, verifier_gate_receipts=gate_receipts or None
-        )
-
-    try:
-        co_verified, co_reason = await verify_company_exists(
-            company.company_name,
-            company.company_website,
-            require_https_transport=True,
-        )
-    except Exception as e:
-        logger.error(f"Autoresearch company verification raised: {e}")
-        co_verified, co_reason = False, f"company verification error: {str(e)[:120]}"
-    if not co_verified:
-        return _zero_company_breakdown(f"Company verification failed: {co_reason}")
-
-    reverify_ok, reverify_reason = await _llm_reverify_company(company, icp)
-    if not reverify_ok:
-        return _zero_company_breakdown(
-            reverify_reason, verifier_gate_receipts=gate_receipts or None
+            _company_fit_failure_reason("Company fit", company_fit),
+            verifier_gate_receipts=gate_receipts,
         )
 
     if company.company_name:
@@ -686,7 +1389,7 @@ def _zero_company_breakdown(
     )
 
 
-def _run_autoresearch_binary_fit_checks(
+def _run_company_binary_fit_checks(
     company: CompanyOutput, icp: ICPPrompt
 ) -> Tuple[bool, Optional[str]]:
     company_bucket = _normalize_linkedin_employee_bucket(company.employee_count)
@@ -745,6 +1448,14 @@ def _run_autoresearch_binary_fit_checks(
                 f"Company stage mismatch: '{company.company_stage}' vs '{icp.company_stage}'",
             )
     return True, None
+
+
+def _run_autoresearch_binary_fit_checks(
+    company: CompanyOutput, icp: ICPPrompt
+) -> Tuple[bool, Optional[str]]:
+    """Backward-compatible name for the shared public/Research Lab gate."""
+
+    return _run_company_binary_fit_checks(company, icp)
 
 
 def _normalize_linkedin_employee_bucket(value) -> str:
@@ -816,22 +1527,37 @@ _EXCLUSION_NAME_SUFFIXES = {
 
 
 def _exclusion_domain_key(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw or " " in raw:
+    raw = str(value or "").strip()
+    if not raw or any(character.isspace() for character in raw):
         return ""
-    raw = re.sub(r"^https?://", "", raw).split("/")[0].split("?")[0]
-    if raw.startswith("www."):
-        raw = raw[4:]
-    if "." not in raw or not re.match(r"^[a-z0-9.-]+$", raw):
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    try:
+        return _registrable_domain(raw)
+    except Exception:
         return ""
-    return raw
 
 
 def _exclusion_linkedin_key(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    if "/company/" not in raw:
+    raw = str(value or "").strip()
+    if not raw:
         return ""
-    return raw.split("/company/")[1].strip("/").split("/")[0].split("?")[0]
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return ""
+    host = str(parsed.hostname or "").casefold().removeprefix("www.")
+    parts = [part for part in parsed.path.split("/") if part]
+    if (
+        not (host == "linkedin.com" or host.endswith(".linkedin.com"))
+        or len(parts) < 2
+        or parts[0].casefold() != "company"
+    ):
+        return ""
+    slug = parts[1].casefold()
+    return slug if re.fullmatch(r"[a-z0-9][a-z0-9._%+-]{0,99}", slug) else ""
 
 
 def _exclusion_name_key(value: str) -> str:
@@ -849,7 +1575,8 @@ def _matches_exclusion_list(company: "CompanyOutput", entries) -> bool:
     if not entries:
         return False
     domains, slugs, names = set(), set(), set()
-    for entry in list(entries)[:50]:
+    values = (entries,) if isinstance(entries, (str, bytes)) else entries
+    for entry in values:
         raw = str(entry or "").strip()
         if not raw:
             continue

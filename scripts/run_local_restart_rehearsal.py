@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from decimal import Decimal, InvalidOperation
 import fcntl
 from functools import partial
 import hashlib
@@ -27,13 +28,14 @@ import json
 import os
 import platform
 from pathlib import Path
+import re
 import signal
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Callable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 from urllib.request import urlopen
 
 
@@ -118,6 +120,125 @@ def _runtime_profile(cli_profile: str) -> str:
     if cli_profile == "prepush":
         return cli_profile
     raise ValueError(f"unsupported rehearsal profile: {cli_profile}")
+
+
+def _positive_cpu(value: str, *, field: str) -> tuple[Decimal, str]:
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise SystemExit(f"{field} is invalid") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise SystemExit(f"{field} must be positive and finite")
+    return parsed, format(parsed.normalize(), "f")
+
+
+def _memory_bytes(value: str, *, field: str) -> int:
+    match = re.fullmatch(r"([1-9][0-9]*)([bkmg]?)", str(value).strip().lower())
+    if match is None:
+        raise SystemExit(f"{field} is invalid")
+    multiplier = {
+        "": 1,
+        "b": 1,
+        "k": 1024,
+        "m": 1024**2,
+        "g": 1024**3,
+    }[match.group(2)]
+    return int(match.group(1)) * multiplier
+
+
+def _resolve_docker_resources(profile: str) -> dict[str, Any]:
+    """Read Docker capacity once and clamp only profile container resources."""
+
+    limits = PROFILE_LIMITS[profile]
+    requested_cpu, requested_cpu_text = _positive_cpu(
+        str(limits["cpus"]),
+        field="requested rehearsal CPU capacity",
+    )
+    requested_memory = str(limits["memory"])
+    requested_memory_bytes = _memory_bytes(
+        requested_memory,
+        field="requested rehearsal memory capacity",
+    )
+    try:
+        result = _run(
+            [
+                "docker",
+                "info",
+                "--format",
+                "{{.NCPU}} {{.MemTotal}}",
+            ],
+            capture=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit("unable to read Docker CPU and memory capacity") from exc
+    fields = result.stdout.strip().split()
+    if len(fields) != 2:
+        raise SystemExit("Docker CPU and memory capacity output is invalid")
+    available_cpu, available_cpu_text = _positive_cpu(
+        fields[0],
+        field="Docker CPU capacity",
+    )
+    if re.fullmatch(r"[1-9][0-9]*", fields[1]) is None:
+        raise SystemExit("Docker memory capacity is invalid")
+    available_memory_bytes = int(fields[1])
+    effective_cpu = min(requested_cpu, available_cpu)
+    return {
+        "available_cpus": available_cpu_text,
+        "available_memory_bytes": available_memory_bytes,
+        "effective_cpus": format(effective_cpu.normalize(), "f"),
+        "effective_memory_bytes": min(
+            requested_memory_bytes,
+            available_memory_bytes,
+        ),
+        "requested_cpus": requested_cpu_text,
+        "requested_memory": requested_memory,
+        "requested_memory_bytes": requested_memory_bytes,
+    }
+
+
+def _docker_resource_args(
+    docker_resources: Mapping[str, Any],
+    *,
+    fixed_cpus: str | None = None,
+    fixed_memory: str | None = None,
+) -> list[str]:
+    """Return validated Docker run resource arguments."""
+
+    if (fixed_cpus is None) != (fixed_memory is None):
+        raise ValueError("fixed Docker CPU and memory must be supplied together")
+    if fixed_cpus is None:
+        return [
+            "--cpus",
+            str(docker_resources["effective_cpus"]),
+            "--memory",
+            str(docker_resources["effective_memory_bytes"]),
+        ]
+    fixed_cpu, fixed_cpu_text = _positive_cpu(
+        fixed_cpus,
+        field="fixed utility CPU capacity",
+    )
+    available_cpu, _ = _positive_cpu(
+        str(docker_resources["available_cpus"]),
+        field="Docker CPU capacity",
+    )
+    fixed_memory_bytes = _memory_bytes(
+        fixed_memory,
+        field="fixed utility memory capacity",
+    )
+    if (
+        fixed_cpu > available_cpu
+        or fixed_memory_bytes
+        > int(docker_resources["available_memory_bytes"])
+    ):
+        raise SystemExit(
+            "Docker capacity cannot satisfy fixed utility container resources"
+        )
+    return [
+        "--cpus",
+        fixed_cpu_text,
+        "--memory",
+        fixed_memory,
+    ]
 
 
 @contextmanager
@@ -536,8 +657,8 @@ def _run_component(
     durable_schema_sha: str,
     run_ordinal: int,
     gateway_worker_fleet_mode: str,
+    docker_resources: Mapping[str, Any],
 ) -> None:
-    limits = PROFILE_LIMITS[profile]
     launcher_log = evidence_root / (
         f"{run_ordinal}-{component}-{transition}-{candidate_sha}-launcher.log"
     )
@@ -549,10 +670,7 @@ def _run_component(
         docker_platform,
         "--network",
         "none",
-        "--cpus",
-        str(limits["cpus"]),
-        "--memory",
-        str(limits["memory"]),
+        *_docker_resource_args(docker_resources),
         "--pids-limit",
         "2048",
         "--security-opt",
@@ -837,6 +955,7 @@ def _write_stage_summary(
     elapsed_seconds: float,
     profile: str,
     stages: Sequence[dict[str, Any]],
+    docker_resources: Mapping[str, Any],
 ) -> Path:
     failed = sum(item.get("status") == "failed" for item in stages)
     unexercised = sum(
@@ -849,6 +968,7 @@ def _write_stage_summary(
         json.dumps(
             {
                 "candidate_sha": candidate_sha,
+                "docker_resources": dict(docker_resources),
                 "elapsed_seconds": round(elapsed_seconds, 3),
                 "failure_count": failed,
                 "profile": profile,
@@ -913,10 +1033,10 @@ def _prepared_fixture_seed(
     drand_artifact_root: Path,
     docker_platform: str,
     profile: str,
+    docker_resources: Mapping[str, Any],
 ) -> Iterator[Path]:
     """Build immutable sanitized release fixtures once per target SHA."""
 
-    limits = PROFILE_LIMITS[profile]
     with tempfile.TemporaryDirectory(
         prefix=f"leadpoet-rehearsal-fixture-{candidate_sha[:12]}-"
     ) as raw:
@@ -936,10 +1056,7 @@ def _prepared_fixture_seed(
                 docker_platform,
                 "--network",
                 "none",
-                "--cpus",
-                str(limits["cpus"]),
-                "--memory",
-                str(limits["memory"]),
+                *_docker_resource_args(docker_resources),
                 "--pids-limit",
                 "2048",
                 "--security-opt",
@@ -1036,6 +1153,7 @@ def _run_workflow(
     candidate_sha: str,
     profile: str,
     docker_platform: str,
+    docker_resources: Mapping[str, Any],
 ) -> None:
     limits = PROFILE_LIMITS[profile]
     command = [
@@ -1046,10 +1164,7 @@ def _run_workflow(
         docker_platform,
         "--network",
         "none",
-        "--cpus",
-        str(limits["cpus"]),
-        "--memory",
-        str(limits["memory"]),
+        *_docker_resource_args(docker_resources),
         "--pids-limit",
         "2048",
         "--security-opt",
@@ -1106,6 +1221,7 @@ def _join_evidence(
     candidate_sha: str,
     profile: str,
     docker_platform: str,
+    docker_resources: Mapping[str, Any],
 ) -> Path:
     output = evidence_root / (
         f"leadpoet-restart-rehearsal-{candidate_sha}-{profile}.json"
@@ -1118,10 +1234,11 @@ def _join_evidence(
             docker_platform,
             "--network",
             "none",
-            "--cpus",
-            "1",
-            "--memory",
-            "1g",
+            *_docker_resource_args(
+                docker_resources,
+                fixed_cpus="1",
+                fixed_memory="1g",
+            ),
             "--pids-limit",
             "128",
             "--security-opt",
@@ -1162,7 +1279,11 @@ def _join_evidence(
     return output
 
 
-def _run_python37_finalization_probe(source_root: Path) -> None:
+def _run_python37_finalization_probe(
+    source_root: Path,
+    *,
+    docker_resources: Mapping[str, Any],
+) -> None:
     """Exercise the measured enclave's post-broadcast path under CPython 3.7."""
 
     _run(
@@ -1174,10 +1295,11 @@ def _run_python37_finalization_probe(source_root: Path) -> None:
             "linux/amd64",
             "--network",
             "none",
-            "--cpus",
-            "1",
-            "--memory",
-            "512m",
+            *_docker_resource_args(
+                docker_resources,
+                fixed_cpus="1",
+                fixed_memory="512m",
+            ),
             "--pids-limit",
             "128",
             "--security-opt",
@@ -1254,6 +1376,19 @@ def _run_profile(args: argparse.Namespace) -> int:
         f"profile={args.profile} target_seconds={target_seconds or 'unbounded'}",
         flush=True,
     )
+    capacity_started = time.monotonic()
+    docker_resources = _resolve_docker_resources(args.profile)
+    capacity_duration = round(time.monotonic() - capacity_started, 3)
+    print(
+        "REHEARSAL_DOCKER_CAPACITY "
+        f"requested_cpus={docker_resources['requested_cpus']} "
+        f"effective_cpus={docker_resources['effective_cpus']} "
+        "requested_memory_bytes="
+        f"{docker_resources['requested_memory_bytes']} "
+        "effective_memory_bytes="
+        f"{docker_resources['effective_memory_bytes']}",
+        flush=True,
+    )
     from_sha = _git_sha(args.from_sha)
     candidate_sha = _git_sha(args.candidate_sha)
     transition = _resolve_transition(
@@ -1287,14 +1422,24 @@ def _run_profile(args: argparse.Namespace) -> int:
             prefix="leadpoet-restart-evidence-"
         ) as evidence_raw:
             evidence_root = Path(evidence_raw)
-            stage_results: list[dict[str, Any]] = []
+            stage_results: list[dict[str, Any]] = [
+                {
+                    "duration_seconds": capacity_duration,
+                    "stage": "docker-capacity",
+                    "status": "passed",
+                    **docker_resources,
+                }
+            ]
             print(
                 "Running validator enclave finalization proof under CPython 3.7",
                 flush=True,
             )
             _run_independent_stage(
                 stage="python37-finalization",
-                action=lambda: _run_python37_finalization_probe(source_root),
+                action=lambda: _run_python37_finalization_probe(
+                    source_root,
+                    docker_resources=docker_resources,
+                ),
                 stages=stage_results,
             )
             transitions = (transition,)
@@ -1339,6 +1484,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                                 drand_artifact_root=drand_artifacts[target],
                                 docker_platform=docker_platform,
                                 profile=args.profile,
+                                docker_resources=docker_resources,
                             )
                         ),
                         stages=stage_results,
@@ -1426,6 +1572,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                                     gateway_worker_fleet_mode=(
                                         args.gateway_worker_fleet_mode
                                     ),
+                                    docker_resources=docker_resources,
                                 ),
                             )
                         )
@@ -1473,6 +1620,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                     evidence_root=evidence_root,
                     profile=args.profile,
                     docker_platform=docker_platform,
+                    docker_resources=docker_resources,
                 ),
                 stages=stage_results,
             )
@@ -1511,6 +1659,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                         candidate_sha=candidate_sha,
                         profile=args.profile,
                         docker_platform=docker_platform,
+                        docker_resources=docker_resources,
                     ),
                     stages=stage_results,
                 )
@@ -1525,6 +1674,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                         else "failed"
                     ),
                     "target_seconds": target_seconds,
+                    **docker_resources,
                 }
                 if elapsed_seconds > target_seconds:
                     budget_result["error"] = (
@@ -1545,6 +1695,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                 elapsed_seconds=elapsed_seconds,
                 profile=args.profile,
                 stages=stage_results,
+                docker_resources=docker_resources,
             )
             incomplete = [
                 item

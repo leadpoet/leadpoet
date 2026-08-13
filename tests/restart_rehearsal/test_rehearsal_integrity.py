@@ -4206,6 +4206,12 @@ def test_workflow_uses_the_strict_exact_external_boundaries(
         candidate_sha=candidate_sha,
         profile="prepush",
         docker_platform="linux/amd64",
+        docker_resources={
+            "available_cpus": "2",
+            "available_memory_bytes": 2053640192,
+            "effective_cpus": "2",
+            "effective_memory_bytes": 2053640192,
+        },
     )
 
     command = captured["command"]
@@ -5814,13 +5820,26 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
     monkeypatch.setattr(rehearsal, "_image_exists", lambda _tag: True)
     monkeypatch.setattr(
         rehearsal,
+        "_resolve_docker_resources",
+        lambda _profile: {
+            "available_cpus": "2",
+            "available_memory_bytes": 2053640192,
+            "effective_cpus": "2",
+            "effective_memory_bytes": 2053640192,
+            "requested_cpus": "4",
+            "requested_memory": "7g",
+            "requested_memory_bytes": 7 * 1024**3,
+        },
+    )
+    monkeypatch.setattr(
+        rehearsal,
         "_isolated_source_snapshot",
         source_snapshot,
     )
     monkeypatch.setattr(
         rehearsal,
         "_run_python37_finalization_probe",
-        lambda _root: None,
+        lambda _root, **_kwargs: None,
     )
     monkeypatch.setattr(
         rehearsal,
@@ -5876,6 +5895,10 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
     by_stage = {
         item["stage"]: item for item in captured["stages"]
     }
+    assert by_stage["docker-capacity"]["requested_cpus"] == "4"
+    assert by_stage["docker-capacity"]["effective_cpus"] == "2"
+    assert by_stage["docker-capacity"]["requested_memory_bytes"] == 7 * 1024**3
+    assert by_stage["docker-capacity"]["effective_memory_bytes"] == 2053640192
     assert by_stage["gateway-forward-1"]["status"] == "failed"
     assert by_stage["validator-forward-1"]["status"] == "passed"
     assert by_stage["workflow-prepush"]["status"] == "failed"
@@ -5884,6 +5907,10 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
         "stage": "evidence-join-prepush",
         "status": "unexercised",
     }
+    assert by_stage["time-budget"]["requested_cpus"] == "4"
+    assert by_stage["time-budget"]["effective_cpus"] == "2"
+    assert by_stage["time-budget"]["requested_memory_bytes"] == 7 * 1024**3
+    assert by_stage["time-budget"]["effective_memory_bytes"] == 2053640192
 
 
 def _durable_interval(

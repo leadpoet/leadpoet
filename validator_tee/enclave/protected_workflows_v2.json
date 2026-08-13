@@ -572,12 +572,12 @@
       "symbol": "VERIFIED_BUNDLE_FALLBACK_BLOCK"
     },
     {
-      "ast_sha256": "sha256:c11ab6f1fdefbc6ffb89455a017c63bc0bdc032ff76f41dbc279229510ec8e53",
+      "ast_sha256": "sha256:8de5ed02a37cd1c98b26fadd936b038f8d65c534889826cca0a955713bd68919",
       "path": "neurons/validator.py",
       "symbol": "Validator.__init__"
     },
     {
-      "ast_sha256": "sha256:a2ef59d8313296fb8585028a99fcb322825111211dde7f52f9e2dd13aeb4833d",
+      "ast_sha256": "sha256:fb9aa6fe82141c33bbb67232380bb94288e536e121ae935034cf74ef3e2b47a6",
       "path": "neurons/validator.py",
       "symbol": "Validator._authorize_and_set_weights_v2"
     },
@@ -607,7 +607,7 @@
       "symbol": "Validator._set_weights_until_epoch_end"
     },
     {
-      "ast_sha256": "sha256:c86bc94ae685539cf1c6b9a3b8b0f8f6d217e4cc5d86e644b4405ed5ec20d431",
+      "ast_sha256": "sha256:9d686179edf6e98cdd11a45c23ad791265091dc8564ac013c2b6a336223fc3c2",
       "path": "neurons/validator.py",
       "symbol": "Validator._submit_weights_at_epoch_end_locked"
     },
@@ -747,7 +747,7 @@
       "symbol": "finalize_authoritative_weight_publication_v2"
     },
     {
-      "ast_sha256": "sha256:68a8e63a76912bc3e1301bacc437ea88f3606cb6123eb78019987cea2b73ef7c",
+      "ast_sha256": "sha256:93f435443a815ea6e756d997420e47009b04eb6d4b2b3ad04f11db821a3ef036",
       "path": "validator_tee/host/authoritative_weight_flow_v2.py",
       "symbol": "prepare_authoritative_weight_publication_v2"
     },
@@ -807,7 +807,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:e3f3a9e6e167eba77af46b321e83c794a1b40dddaf154c1de6a6ff7b665f92df",
-  "protected_source_commit": "a3ead32ee99776e0af3d80c29a9de19ebf2df17d",
+  "manifest_hash": "sha256:3f00f8976ce7c066a08e016d9170f9adc579f12b74ef0da5623503007f1b7d2a",
+  "protected_source_commit": "778d50295418d990f442bd6abdb0bd2b05af9669",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

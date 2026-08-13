@@ -1736,6 +1736,26 @@ def test_measured_upstream_proxy_framing_scenario(monkeypatch):
     }
 
 
+def test_measured_coordinator_raw_transport_scenario(monkeypatch):
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).parent / "restart_rehearsal")
+    )
+    from production_workflow_runner import (
+        _exercise_measured_coordinator_raw_transport,
+    )
+
+    evidence = _exercise_measured_coordinator_raw_transport()
+
+    assert evidence == {
+        "exact_httpx_enclave_parent_proxy_provider_path": True,
+        "nested_tls_verified": True,
+        "proxy_auth_remained_in_enclave": True,
+        "provider_first_close_verified": True,
+        "bounded_cleanup_verified": True,
+        "raw_parent_tunnel_verified": True,
+    }
+
+
 def test_coordinator_direct_transport_rehearsal_contract(monkeypatch):
     monkeypatch.syspath_prepend(
         str(Path(__file__).parent / "restart_rehearsal")

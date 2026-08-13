@@ -2,10 +2,9 @@ import importlib
 from pathlib import Path
 
 from gateway.tee import provider_broker_v2, rpc_authority
-from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
 
 
-def test_coordinator_provider_broker_separates_direct_and_upstream_framing(
+def test_coordinator_provider_broker_uses_raw_isolated_transport(
     monkeypatch,
 ):
     monkeypatch.syspath_prepend(
@@ -58,7 +57,6 @@ def test_coordinator_provider_broker_separates_direct_and_upstream_framing(
     assert isinstance(broker, Broker)
     assert captured["transport"] == {
         "allow_authenticated_complete_body_eof": True,
-        "upstream_parent_tunnel_framing": TUNNEL_FRAMING_MODE,
         "reuse_direct_connections": False,
     }
     assert captured["broker"]["transport"].__class__ is Transport

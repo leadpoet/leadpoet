@@ -8170,7 +8170,6 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
 
     ordinary_transport = HTTPXProviderTransport(
         allow_authenticated_complete_body_eof=True,
-        upstream_parent_tunnel_framing=TUNNEL_FRAMING_MODE,
         reuse_direct_connections=False,
     )
     ordinary_transport._new_client = (  # type: ignore[method-assign]
@@ -8193,8 +8192,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         ordinary_transport_unchanged = (
             ordinary_transport.allow_authenticated_complete_body_eof
             and ordinary_transport.parent_tunnel_framing == ""
-            and ordinary_transport.upstream_parent_tunnel_framing
-            == TUNNEL_FRAMING_MODE
+            and ordinary_transport.upstream_parent_tunnel_framing == ""
             and not ordinary_transport.reuse_direct_connections
         )
         ordinary_direct_requests_isolated = (
@@ -8259,8 +8257,11 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     }
 
 
-def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
-    """Exercise the exact worker HTTPS-proxy path through framed VSOCK."""
+def _exercise_measured_upstream_proxy_transport(
+    *,
+    parent_tunnel_framing: str,
+) -> dict[str, Any]:
+    """Exercise the exact worker HTTPS-proxy path through parent VSOCK."""
 
     from datetime import timedelta
     import socket
@@ -8427,6 +8428,9 @@ def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
             def close(self) -> None:
                 self._connection.close()
 
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._connection, name)
+
         def connect_upstream(host: str, port: int) -> socket.socket:
             parent_destinations.append((host, port))
             return socket.create_connection(upstream_address, timeout=2)
@@ -8471,7 +8475,7 @@ def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
             proxy_url=f"http://127.0.0.1:{local_proxy_port}",
             ca_bundle=str(certificate_path),
             allow_authenticated_complete_body_eof=True,
-            parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+            parent_tunnel_framing=parent_tunnel_framing,
             reuse_direct_connections=False,
         )
         original_certifi_where = certifi.where
@@ -8515,7 +8519,7 @@ def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
         or any(thread.is_alive() for thread in parent_threads)
     ):
         raise RuntimeError(
-            "measured upstream proxy framing contract failed: "
+            "measured upstream proxy transport contract failed: "
             + json.dumps(
                 {
                     "errors": errors,
@@ -8538,12 +8542,34 @@ def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
         raise RuntimeError("upstream proxy credential escaped Basic auth encoding")
     return {
         "exact_httpx_enclave_parent_proxy_provider_path": True,
-        "framed_parent_tunnel_verified": True,
+        "parent_tunnel_framing": parent_tunnel_framing,
         "nested_tls_verified": True,
         "proxy_auth_remained_in_enclave": True,
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
     }
+
+
+def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
+    from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
+
+    evidence = _exercise_measured_upstream_proxy_transport(
+        parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+    )
+    if evidence.pop("parent_tunnel_framing") != TUNNEL_FRAMING_MODE:
+        raise RuntimeError("measured upstream proxy framing was not exercised")
+    evidence["framed_parent_tunnel_verified"] = True
+    return evidence
+
+
+def _exercise_measured_coordinator_raw_transport() -> dict[str, Any]:
+    evidence = _exercise_measured_upstream_proxy_transport(
+        parent_tunnel_framing="",
+    )
+    if evidence.pop("parent_tunnel_framing"):
+        raise RuntimeError("measured coordinator raw transport was not exercised")
+    evidence["raw_parent_tunnel_verified"] = True
+    return evidence
 
 
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
@@ -8561,6 +8587,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     ),
     "measured-upstream-proxy-framing": (
         _exercise_measured_upstream_proxy_framing
+    ),
+    "measured-coordinator-raw-transport": (
+        _exercise_measured_coordinator_raw_transport
     ),
     "artifact-egress-sustained-readback": (
         _exercise_artifact_egress_sustained_readback
@@ -9220,6 +9249,38 @@ def main() -> int:
             is True
             and behavior_evidence.get(
                 "measured-upstream-proxy-framing",
+                {},
+            ).get("bounded_cleanup_verified")
+            is True
+        ),
+        "measured_coordinator_raw_transport_verified": (
+            behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("exact_httpx_enclave_parent_proxy_provider_path")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("raw_parent_tunnel_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("nested_tls_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("proxy_auth_remained_in_enclave")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("provider_first_close_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
                 {},
             ).get("bounded_cleanup_verified")
             is True

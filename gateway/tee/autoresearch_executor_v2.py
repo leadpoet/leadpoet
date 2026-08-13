@@ -1524,6 +1524,25 @@ class AutoresearchExecutorV2:
     def close(self) -> None:
         self._transport.restore()
 
+    def _verify_component_registry_boot(
+        self,
+        identity: Mapping[str, Any],
+    ) -> Any:
+        physical_role = str(identity.get("physical_role") or "")
+        if physical_role == "gateway_scoring":
+            verifier = self._scoring_graph_verifier
+        elif physical_role == "gateway_coordinator":
+            verifier = self._coordinator_boot_verifier
+        else:
+            raise AutoresearchExecutorV2Error(
+                "component registry ancestry contains an unsupported role"
+            )
+        if verifier is None:
+            raise AutoresearchExecutorV2Error(
+                "component registry ancestry verifier is unavailable"
+            )
+        return verifier(identity)
+
     async def _seal_hidden_artifact(
         self,
         *,
@@ -2595,15 +2614,19 @@ class AutoresearchExecutorV2:
             component_evidence.get("root_receipt_hash"),
             "component registry receipt hash",
         )
+        component_boot_verification_enabled = (
+            self._scoring_graph_verifier is not None
+            or self._coordinator_boot_verifier is not None
+        )
         validate_receipt_graph(
             component_graph,
             required_purposes=("research_lab.private_model_run.v2",),
             require_boot_attestation_verification=(
-                self._scoring_graph_verifier is not None
+                component_boot_verification_enabled
             ),
             boot_attestation_verifier=(
-                (lambda identity: self._scoring_graph_verifier(identity))
-                if self._scoring_graph_verifier is not None
+                self._verify_component_registry_boot
+                if component_boot_verification_enabled
                 else None
             ),
         )

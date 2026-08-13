@@ -441,7 +441,7 @@ def _stale_parent_payload(tmp_path: Path):
     }, draft
 
 
-def _component_registry_graph(component_result):
+def _component_registry_graph(component_result, *, parent_graph=None):
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key().public_bytes_raw().hex()
     boot = create_boot_identity(
@@ -462,6 +462,11 @@ def _component_registry_graph(component_result):
         ),
         attestation_document_b64=base64.b64encode(b"attestation").decode("ascii"),
     )
+    parent_receipt_hashes = (
+        (str(parent_graph["root_receipt_hash"]),)
+        if parent_graph is not None
+        else ()
+    )
     receipt = create_signed_execution_receipt(
         body=build_execution_receipt_body(
             role="gateway_scoring",
@@ -480,7 +485,7 @@ def _component_registry_graph(component_result):
             transport_root_hash=EMPTY_TRANSPORT_ROOT,
             host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
             artifact_root=EMPTY_ARTIFACT_ROOT,
-            parent_receipt_hashes=(),
+            parent_receipt_hashes=parent_receipt_hashes,
             status="succeeded",
             failure_code=None,
             issued_at="2026-07-10T20:00:00Z",
@@ -488,12 +493,32 @@ def _component_registry_graph(component_result):
         enclave_pubkey=public_key,
         sign_digest=private_key.sign,
     )
+    parent_boot_identities = (
+        tuple(parent_graph["boot_identities"])
+        if parent_graph is not None
+        else ()
+    )
+    parent_receipts = (
+        tuple(parent_graph["receipts"])
+        if parent_graph is not None
+        else ()
+    )
+    parent_transport_attempts = (
+        tuple(parent_graph["transport_attempts"])
+        if parent_graph is not None
+        else ()
+    )
+    parent_host_operations = (
+        tuple(parent_graph["host_operations"])
+        if parent_graph is not None
+        else ()
+    )
     return build_receipt_graph(
         root_receipt_hash=receipt["receipt_hash"],
-        boot_identities=(boot,),
-        receipts=(receipt,),
-        transport_attempts=(),
-        host_operations=(),
+        boot_identities=(*parent_boot_identities, boot),
+        receipts=(*parent_receipts, receipt),
+        transport_attempts=parent_transport_attempts,
+        host_operations=parent_host_operations,
     )
 
 
@@ -840,6 +865,16 @@ def test_autoresearch_executor_verifies_input_evidence_with_its_source_role(
     _FakeEngine.instances.clear()
     _artifact_seal.records.clear()
     payload = _payload(tmp_path)
+    component_result = payload["component_registry_evidence"]["result"]
+    payload["component_registry_evidence"]["receipt_graph"] = (
+        _component_registry_graph(
+            component_result,
+            parent_graph=payload["active_model_evidence"]["receipt_graph"],
+        )
+    )
+    payload["component_registry_evidence"]["root_receipt_hash"] = payload[
+        "component_registry_evidence"
+    ]["receipt_graph"]["root_receipt_hash"]
     context = ExecutionContextV2(
         job_id="autoresearch-v2:source-role-verification",
         purpose="research_lab.candidate_decision.v2",
@@ -878,11 +913,59 @@ def test_autoresearch_executor_verifies_input_evidence_with_its_source_role(
 
     assert result.output["status"] == "failed"
     assert verified_roles == [
+        "gateway_coordinator",
         "gateway_scoring",
         "gateway_coordinator",
         "gateway_coordinator",
         "gateway_coordinator",
     ]
+
+
+def test_autoresearch_executor_rejects_unsupported_component_ancestry_role(
+    tmp_path,
+):
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: {},
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        scoring_graph_verifier=lambda _identity: None,
+        coordinator_boot_verifier=lambda _identity: None,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(
+            AutoresearchExecutorV2Error,
+            match="component registry ancestry contains an unsupported role",
+        ):
+            executor._verify_component_registry_boot(
+                {"physical_role": "gateway_autoresearch"}
+            )
+    finally:
+        executor.close()
+
+
+def test_autoresearch_executor_requires_component_ancestry_role_verifier(
+    tmp_path,
+):
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: {},
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        scoring_graph_verifier=lambda _identity: None,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(
+            AutoresearchExecutorV2Error,
+            match="component registry ancestry verifier is unavailable",
+        ):
+            executor._verify_component_registry_boot(
+                {"physical_role": "gateway_coordinator"}
+            )
+    finally:
+        executor.close()
 
 
 def test_autoresearch_executor_accepts_conservative_interrupted_evaluation_recovery(

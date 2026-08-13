@@ -2405,6 +2405,14 @@ async def test_v2_bridge_ignores_uncommitted_orphans_and_persists_failure(
         "failure_code": "execution_valueerror",
     }
     assert persisted[0] == authority["receipt_graph"]
+    # The diagnostic side-channel names the exception type and raise site but
+    # never carries enclave exception message text, and it stays out of the
+    # exception message so message-based classifiers are unaffected.
+    assert captured.value.failure_detail
+    assert "ValueError" in captured.value.failure_detail
+    assert "test_attested_scoring_v2_bridge.py" in captured.value.failure_detail
+    assert "measured scoring failure" not in captured.value.failure_detail
+    assert str(captured.value) == "V2 scoring failed closed: execution_valueerror"
 
 
 @pytest.mark.asyncio

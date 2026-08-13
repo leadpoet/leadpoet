@@ -121,6 +121,18 @@ class AttestedScoringV2Error(RuntimeError):
     def __init__(self, message: str, *, authority: Optional[Mapping[str, Any]] = None):
         super().__init__(message)
         self.authority = dict(authority) if isinstance(authority, Mapping) else None
+        # Diagnostic-only text from the enclave job status side-channel; never
+        # part of the attested failure document or the exception message.
+        self.failure_detail: Optional[str] = None
+
+
+def bounded_status_failure_detail(value: Any) -> str:
+    """Defensively bound the diagnostic detail read from a job status."""
+
+    if not isinstance(value, str):
+        return ""
+    detail = "".join(ch if ch.isprintable() else " " for ch in value)
+    return detail[:220]
 
 
 def scoring_enclave_shard_for_worker(worker_index: int) -> int:
@@ -1618,6 +1630,7 @@ async def execute_scoring_v2(
             raise AttestedScoringV2Error("V2 scoring receipt output mismatch")
     else:
         failure_code = str(status.get("error_code") or state)
+        failure_detail = bounded_status_failure_detail(status.get("error_detail"))
         result = {"status": "failed", "failure_code": failure_code}
         if (
             receipt.get("status") != "failed"
@@ -1851,10 +1864,22 @@ async def execute_scoring_v2(
             outcome["ancestry_compact_proof"] = dict(
                 ancestry_compact_proof
             )
-        raise AttestedScoringV2Error(
+        if failure_detail:
+            logger.error(
+                "attested_scoring_v2_failure_detail job_id=%s operation=%s "
+                "purpose=%s failure_code=%s detail=%s",
+                job_id,
+                operation,
+                purpose,
+                result["failure_code"],
+                failure_detail,
+            )
+        failure_error = AttestedScoringV2Error(
             "V2 scoring failed closed: %s" % result["failure_code"],
             authority=outcome,
         )
+        failure_error.failure_detail = failure_detail or None
+        raise failure_error
     sealed_model_artifacts = result.get("sealed_artifacts") or []
     if not isinstance(sealed_model_artifacts, list) or any(
         not isinstance(item, Mapping) for item in sealed_model_artifacts

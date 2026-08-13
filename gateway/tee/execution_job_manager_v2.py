@@ -51,6 +51,10 @@ from leadpoet_canonical.allocation_settlement_frontier_v2 import (
 
 
 JOB_SCHEMA_VERSION = "leadpoet.enclave_execution_job.v2"
+# Diagnostic-only failure detail exposed through the job status side-channel.
+# It never enters the canonical failure result document or any receipt, so the
+# attested surface (failure_code, output_root, receipt graph) is unchanged.
+MAX_FAILURE_DETAIL_CHARS = 300
 PARENT_RECEIPT_GRAPHS_FIELD = "_v2_parent_receipt_graphs"
 PARENT_RECEIPT_GRAPH_SET_FIELD = "_v2_parent_receipt_graph_set"
 LEGACY_PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION = (
@@ -704,6 +708,45 @@ def _canonical_bytes(value: Any) -> bytes:
     return canonical_json(value).encode("utf-8")
 
 
+def structural_failure_detail(exc: BaseException) -> str:
+    """Type-chain and raise-site fingerprint for a failed execution job.
+
+    Contains only exception class names plus file, line, and function names
+    of the innermost raise site -- never exception message text -- so
+    confidential payload or credential data cannot leave the enclave through
+    this side-channel. Exception messages are intentionally discarded, exactly
+    as they are for the canonical ``failure_code``.
+
+    Format: ``Outer<-Inner @ pkg/module.py:123:func < pkg/other.py:45:helper``
+    where the frames are the innermost exception's deepest call sites.
+    """
+
+    chain = []
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    deepest: BaseException = exc
+    while current is not None and id(current) not in seen and len(chain) < 4:
+        seen.add(id(current))
+        chain.append(type(current).__name__)
+        deepest = current
+        current = current.__cause__ or current.__context__
+    frames = []
+    traceback = deepest.__traceback__
+    while traceback is not None:
+        code = traceback.tb_frame.f_code
+        path_tail = code.co_filename.replace("\\", "/").rsplit("/", 3)[-2:]
+        frames.append(
+            "%s:%s:%s"
+            % ("/".join(path_tail), traceback.tb_lineno, code.co_name)
+        )
+        traceback = traceback.tb_next
+    detail = "<-".join(chain)
+    if frames:
+        detail = "%s @ %s" % (detail, " < ".join(frames[-3:]))
+    detail = "".join(ch if ch.isprintable() else " " for ch in detail)
+    return detail[:MAX_FAILURE_DETAIL_CHARS]
+
+
 def _hash(value: Any, field: str) -> str:
     normalized = str(value or "").strip().lower()
     if not _HASH_RE.fullmatch(normalized):
@@ -1297,6 +1340,7 @@ class ExecutionJobManagerV2:
                 "ancestry_compact_proof": None,
                 "host_operation_channel": None,
                 "error_code": None,
+                "error_detail": None,
                 "cancel_requested": False,
                 "created_at": now,
                 "updated_at": now,
@@ -1526,6 +1570,7 @@ class ExecutionJobManagerV2:
                     if job is not None and job["state"] not in TERMINAL_STATES:
                         job["state"] = "failed"
                         job["error_code"] = "receipt_unavailable"
+                        job["error_detail"] = structural_failure_detail(exc)
                         job["input"] = bytearray()
                         job["updated_at"] = self._clock()
                 print(
@@ -2025,6 +2070,7 @@ class ExecutionJobManagerV2:
                 job["updated_at"] = self._clock()
         except Exception as exc:
             failure_code = "execution_%s" % type(exc).__name__.lower()[:80]
+            failure_detail = structural_failure_detail(exc)
             failure_bytes = _canonical_bytes(
                 {"status": "failed", "failure_code": failure_code}
             )
@@ -2080,6 +2126,7 @@ class ExecutionJobManagerV2:
                 if job is not None:
                     job["state"] = "failed"
                     job["error_code"] = failure_code
+                    job["error_detail"] = failure_detail
                     job["result"] = failure_bytes
                     job["result_hash"] = sha256_bytes(failure_bytes)
                     job["receipt"] = receipt
@@ -2263,6 +2310,7 @@ class ExecutionJobManagerV2:
                 else None
             ),
             "error_code": job["error_code"],
+            "error_detail": job.get("error_detail"),
             "cancel_requested": bool(job["cancel_requested"]),
         }
 

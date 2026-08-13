@@ -1482,7 +1482,6 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_name": "Authorization",
         "credential_prefix": "Bearer ",
         "credential_header_aliases": [{"name": "apikey", "prefix": ""}],
-        "http_versions": ["HTTP/1.1"],
     }
     assert MEASURED_TRANSPORT_REQUEST_HEADERS == (("Accept-Encoding", "identity"),)
     assert provider_registry_hash().startswith("sha256:")
@@ -1963,7 +1962,7 @@ def test_supabase_service_role_is_injected_only_for_measured_project():
     )
     assert outbound["headers"]["apikey"] == "supabase-service-role-secret"
     assert outbound["headers"]["Accept-Encoding"] == "identity"
-    assert outbound["allow_http2"] is False
+    assert outbound.get("allow_http2", True) is True
     assert "supabase-service-role-secret" not in str(result)
 
     broker.execute(

@@ -1648,8 +1648,15 @@ def _local_provider_transport(
     normalized_method = str(method).upper()
     response_headers: dict[str, str] = {"content-type": "application/json"}
     if host == "qplwoislplkcegvdmbim.supabase.co":
-        if allow_http2:
-            raise ValueError("local Supabase provider route requires HTTP/1.1")
+        provider_broker = __import__(
+            "gateway.tee.provider_broker_v2",
+            fromlist=["BUILTIN_PROVIDER_ROUTES"],
+        )
+        expected_http2 = bool(
+            provider_broker.BUILTIN_PROVIDER_ROUTES["supabase"].allow_http2
+        )
+        if allow_http2 is not expected_http2:
+            raise ValueError("local Supabase provider route protocol differs")
         local_url = urlunsplit(
             ("http", "127.0.0.1:54321", parsed.path, parsed.query, "")
         )

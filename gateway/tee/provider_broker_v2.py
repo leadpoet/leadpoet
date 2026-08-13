@@ -185,11 +185,10 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
-        # Supabase's edge may terminate otherwise valid HTTP/2 streams with a
-        # GOAWAY/reset while the framed enclave tunnel is still reading the
-        # response. Match the repository's normal Supabase clients and use
-        # verified TLS over HTTP/1.1 for this measured route.
-        allow_http2=False,
+        # The coordinator's direct provider path is a raw TLS tunnel. Preserve
+        # ALPN negotiation here; the former HTTP/1.1 pin belonged to the
+        # removed framed-tunnel implementation and causes current Supabase
+        # responses to terminate before headers are received.
     ),
     "truelist": ProviderRouteV2(
         provider_id="truelist",

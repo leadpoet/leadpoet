@@ -1007,7 +1007,7 @@
       "symbol": "_ArtifactVerificationTransportSession"
     },
     {
-      "ast_sha256": "sha256:e5f309248a37dbdf77b04c6e2cbf702b45cab55e2af50d3d05f18b9433896460",
+      "ast_sha256": "sha256:aa0e3507ddc3c47235210b9f1efb6fa465546ad966b9c890975cd1bdd4db3347",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
     },
@@ -2752,7 +2752,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:e0faee7f67bfb92b1454e7dadc5e322883f89b2a5b45dd376fd00bddc0233183",
-  "protected_source_commit": "39d53302ebbd509b747ebba8a0314abb2cd27d72",
+  "manifest_hash": "sha256:39d2067f9bc73a8d0152ba34bbe31f3e4f037ee573922eb91e1b61b12ec9b2d6",
+  "protected_source_commit": "088b415aa8d5827ea06a5808512b20a758d82b50",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

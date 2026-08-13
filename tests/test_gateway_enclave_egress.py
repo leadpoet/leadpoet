@@ -6,6 +6,7 @@ import base64
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 import errno
+import gzip
 import http.client
 import json
 from pathlib import Path
@@ -1633,6 +1634,143 @@ def test_httpx_direct_transport_connection_scope_and_recovery(
         b'{"ok":true}',
     ]
     assert all(result["tls_protocol"].startswith("TLSv1.") for result in results)
+
+
+def test_httpx_raw_relays_preserve_complete_gzip_http2_json_before_origin_close(
+    tmp_path: Path,
+):
+    from h2.config import H2Configuration
+    from h2.connection import H2Connection
+    from h2.events import RequestReceived
+
+    certificate_path, private_key_path = _write_test_server_identity(tmp_path)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(
+        certfile=str(certificate_path),
+        keyfile=str(private_key_path),
+    )
+    tls_context.set_alpn_protocols(["h2"])
+    origin_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    origin_listener.bind(("127.0.0.1", 0))
+    origin_listener.listen(1)
+    origin_address = origin_listener.getsockname()
+    origin_errors = []
+    request_seen = threading.Event()
+    body = b'[{"bundle_hash":"sha256:' + (b"a" * 64) + b'"}]'
+    wire_body = gzip.compress(body)
+
+    def serve_origin():
+        try:
+            connection, _address = origin_listener.accept()
+            protected = tls_context.wrap_socket(connection, server_side=True)
+            assert protected.selected_alpn_protocol() == "h2"
+            h2_connection = H2Connection(
+                config=H2Configuration(client_side=False, header_encoding="utf-8")
+            )
+            h2_connection.initiate_connection()
+            protected.sendall(h2_connection.data_to_send())
+            while not request_seen.is_set():
+                payload = protected.recv(64 * 1024)
+                if not payload:
+                    raise AssertionError("HTTP/2 client closed before request")
+                for event in h2_connection.receive_data(payload):
+                    if not isinstance(event, RequestReceived):
+                        continue
+                    request_seen.set()
+                    h2_connection.send_headers(
+                        event.stream_id,
+                        [
+                            (":status", "200"),
+                            ("content-type", "application/json; charset=utf-8"),
+                            ("content-encoding", "gzip"),
+                            ("content-length", str(len(wire_body))),
+                        ],
+                    )
+                    h2_connection.send_data(
+                        event.stream_id,
+                        wire_body,
+                        end_stream=True,
+                    )
+                    protected.sendall(h2_connection.data_to_send())
+            # Match the production failure boundary: a complete HTTP/2 stream
+            # reaches the enclave, then the origin closes without TLS unwrap.
+            protected.close()
+        except Exception as exc:
+            origin_errors.append(exc)
+        finally:
+            origin_listener.close()
+
+    origin_thread = threading.Thread(target=serve_origin, daemon=True)
+    origin_thread.start()
+    host_threads = []
+
+    def open_parent_tunnel(_host, _port, *, tunnel_framing=""):
+        assert tunnel_framing == ""
+        enclave_side, host_side = socket.socketpair()
+        host_thread = threading.Thread(
+            target=_handle_connection,
+            kwargs={
+                "connection": host_side,
+                "connector": lambda _name, _number: socket.create_connection(
+                    origin_address,
+                    timeout=2,
+                ),
+                "idle_timeout_seconds": 3,
+            },
+            daemon=True,
+        )
+        host_thread.start()
+        host_threads.append(host_thread)
+        enclave_side.sendall(
+            _frame(
+                {
+                    "method": "connect",
+                    "params": {
+                        "host": "example.com",
+                        "port": 443,
+                        "policy_hash": destination_policy_hash(),
+                    },
+                }
+            )
+        )
+        assert _read_frame(enclave_side)["result"]["status"] == "connected"
+        return enclave_side
+
+    proxy_port = _unused_loopback_port()
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        local_port=proxy_port,
+        loopback_initializer=lambda: None,
+        idle_timeout_seconds=3,
+    )
+    proxy._open_parent_tunnel = open_parent_tunnel
+    proxy._configure_environment = lambda: None
+    proxy.start()
+    try:
+        result = HTTPXProviderTransport(
+            proxy_url=f"http://127.0.0.1:{proxy_port}",
+            ca_bundle=str(certificate_path),
+            allow_authenticated_complete_body_eof=True,
+            reuse_direct_connections=False,
+        )(
+            method="GET",
+            url="https://example.com/rest/v1/finalized",
+            headers={"Accept-Encoding": "gzip"},
+            body=b"",
+            timeout_ms=3000,
+        )
+    finally:
+        proxy.stop()
+        origin_thread.join(timeout=3)
+        for thread in host_threads:
+            thread.join(timeout=3)
+
+    assert origin_errors == []
+    assert request_seen.is_set()
+    assert result["http_status"] == 200
+    assert result["body"] == body
+    assert result["tls_protocol"].startswith("TLSv1.")
+    assert proxy.status().get("last_failure") is None
 
 
 def test_enclave_proxy_parses_connect_without_exposing_http_payload():

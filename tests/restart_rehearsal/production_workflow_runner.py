@@ -6190,6 +6190,19 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         raise RuntimeError(
             "measured provider transport is not bound to identity encoding"
         )
+    if dict(BUILTIN_PROVIDER_ROUTES["supabase"].request_headers) != {
+        "Accept-Encoding": "gzip"
+    }:
+        raise RuntimeError(
+            "measured Supabase route does not retain its known-good gzip wire profile"
+        )
+    if any(
+        route.provider_id != "supabase" and route.request_headers
+        for route in BUILTIN_PROVIDER_ROUTES.values()
+    ):
+        raise RuntimeError(
+            "an unrelated provider route overrides measured response framing"
+        )
 
     import httpx
 

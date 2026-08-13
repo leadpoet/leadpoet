@@ -185,6 +185,11 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
+        # PostgREST's compressed HTTP/2 response keeps the terminal DATA frame
+        # on the known-good measured wire path used before the August transport
+        # hardening. A compressed stream is never eligible for EOF recovery:
+        # httpx must observe normal authenticated message completion.
+        request_headers=(("Accept-Encoding", "gzip"),),
         # The coordinator's direct provider path is a raw TLS tunnel. Preserve
         # ALPN negotiation here; the former HTTP/1.1 pin belonged to the
         # removed framed-tunnel implementation and causes current Supabase
@@ -1560,13 +1565,6 @@ class ProviderBrokerV2:
                 return dict(completed["result"])
 
         outbound_headers = {str(k): str(v) for k, v in headers.items()}
-        for static_name, static_value in route.request_headers:
-            outbound_headers = {
-                name: value
-                for name, value in outbound_headers.items()
-                if name.lower() != static_name.lower()
-            }
-            outbound_headers[static_name] = static_value
         if dynamic_route is not None:
             static_headers = dynamic_route.get("request_headers") or {}
             for static_name, static_value in static_headers.items():
@@ -1576,10 +1574,21 @@ class ProviderBrokerV2:
                     if name.lower() != str(static_name).lower()
                 }
                 outbound_headers[str(static_name)] = str(static_value)
-        # Bind response framing at the measured transport boundary, after
-        # route-specific headers, so no caller or dynamic route can opt back
-        # into compressed bodies whose decoded bytes cannot prove wire length.
+        # Bind the default response framing at the measured transport boundary
+        # so no caller or dynamic route can opt into compressed bodies whose
+        # decoded bytes cannot prove wire length after an EOF.
         for static_name, static_value in MEASURED_TRANSPORT_REQUEST_HEADERS:
+            outbound_headers = {
+                name: value
+                for name, value in outbound_headers.items()
+                if name.lower() != static_name.lower()
+            }
+            outbound_headers[static_name] = static_value
+        # A built-in route may select a stricter, statically measured wire
+        # profile after the global default. Dynamic routes cannot override it.
+        # Compressed responses still require ordinary authenticated stream
+        # completion; the EOF recovery predicate rejects content encodings.
+        for static_name, static_value in route.request_headers:
             outbound_headers = {
                 name: value
                 for name, value in outbound_headers.items()

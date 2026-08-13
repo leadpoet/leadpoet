@@ -1483,6 +1483,9 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_name": "Authorization",
         "credential_prefix": "Bearer ",
         "credential_header_aliases": [{"name": "apikey", "prefix": ""}],
+        "request_headers": [
+            {"name": "Accept-Encoding", "value": "gzip"}
+        ],
     }
     assert MEASURED_TRANSPORT_REQUEST_HEADERS == (("Accept-Encoding", "identity"),)
     assert provider_registry_hash().startswith("sha256:")
@@ -1974,7 +1977,7 @@ def test_supabase_service_role_is_injected_only_for_measured_project():
         "Bearer supabase-service-role-secret"
     )
     assert outbound["headers"]["apikey"] == "supabase-service-role-secret"
-    assert outbound["headers"]["Accept-Encoding"] == "identity"
+    assert outbound["headers"]["Accept-Encoding"] == "gzip"
     assert outbound.get("allow_http2", True) is True
     assert "supabase-service-role-secret" not in str(result)
 
@@ -1987,12 +1990,12 @@ def test_supabase_service_role_is_injected_only_for_measured_project():
                 "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/"
                 "research_lab_provider_registry?select=registry_hash"
             ),
-            headers={"accept-encoding": "gzip"},
+            headers={"accept-encoding": "br"},
             body_b64=base64.b64encode(b"").decode("ascii"),
         )
     )
     encoded_headers = transport.calls[1]["headers"]
-    assert encoded_headers["Accept-Encoding"] == "identity"
+    assert encoded_headers["Accept-Encoding"] == "gzip"
     assert "accept-encoding" not in encoded_headers
 
     with pytest.raises(ProviderBrokerV2Error, match="destination"):

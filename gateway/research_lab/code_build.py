@@ -314,6 +314,16 @@ def validate_private_code_edit_diff_artifact(
                 "candidate model manifest is invalid: "
                 + "; ".join(manifest_errors)
             )
+        candidate_source_tree_hash = str(
+            candidate_build_doc.get("candidate_source_tree_hash") or ""
+        )
+        if candidate_source_tree_hash and (
+            not _SHA256_REF_RE.fullmatch(candidate_source_tree_hash)
+            or candidate_manifest.model_artifact_hash != candidate_source_tree_hash
+        ):
+            raise CodeEditBuildError(
+                "candidate model source hash differs from committed build"
+            )
         if (
             str(candidate_build_doc.get("candidate_model_artifact_hash") or "")
             != candidate_manifest.model_artifact_hash
@@ -1028,6 +1038,10 @@ class CodeEditCandidateBuilder:
                 timeout_seconds=120,
             )
             git_commit_sha = _run(["git", "rev-parse", "HEAD"], cwd=repo_dir, timeout_seconds=60).strip()
+            # The manifest is evidence about the candidate source.  Keep its
+            # generated output outside that source tree so the output cannot
+            # change the source hash it claims to describe.
+            manifest_path = tmp_dir / "candidate_manifest.json"
             recorded_commit_sha, recorded_commit_sha_source = _resolve_recorded_commit_sha(
                 workspace_sha=git_commit_sha,
                 parent_artifact=parent_artifact,
@@ -1061,17 +1075,21 @@ class CodeEditCandidateBuilder:
                         include_aws=True,
                     ),
                     "RESEARCH_LAB_PRIVATE_COMMIT_SHA": recorded_commit_sha,
-                    "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT": self.config.private_artifact_manifest_output,
+                    "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT": str(manifest_path),
                 },
                 timeout_seconds=self.config.code_edit_build_timeout_seconds,
             )
-            manifest_path = Path(self.config.private_artifact_manifest_output)
-            if not manifest_path.is_absolute():
-                manifest_path = repo_dir / manifest_path
             if not manifest_path.exists():
                 raise CodeEditArtifactMissingError("private build did not produce artifact manifest output")
             candidate_manifest = PrivateModelArtifactManifest.from_mapping(
                 json.loads(manifest_path.read_text(encoding="utf-8"))
+            )
+            candidate_pipeline_structure = _post_private_build_source_integrity_gate(
+                repo_dir,
+                expected_source_tree_hash=candidate_source_tree_hash_before_tests,
+                expected_pipeline_structure=candidate_pipeline_structure,
+                expected_git_commit_sha=git_commit_sha,
+                candidate_manifest=candidate_manifest,
             )
             _verify_built_candidate_artifact(candidate_manifest)
             if candidate_manifest.model_artifact_hash == parent_artifact.model_artifact_hash:
@@ -1091,6 +1109,7 @@ class CodeEditCandidateBuilder:
                 "candidate_model_artifact_hash": candidate_manifest.model_artifact_hash,
                 "candidate_model_manifest_hash": candidate_manifest.manifest_hash,
                 "candidate_git_commit_sha": candidate_manifest.git_commit_sha,
+                "candidate_source_tree_hash": candidate_source_tree_hash_before_tests,
                 "build_workspace_git_commit_sha": git_commit_sha,
                 "recorded_git_commit_sha": recorded_commit_sha,
                 "recorded_git_commit_sha_source": recorded_commit_sha_source,
@@ -2192,6 +2211,42 @@ def _post_private_test_source_integrity_gate(
     if observed_source_tree_hash != expected_source_tree_hash:
         raise CodeEditBuildError("private tests changed the candidate source tree")
     return observed_pipeline_structure
+
+
+def _post_private_build_source_integrity_gate(
+    repo_dir: Path,
+    *,
+    expected_source_tree_hash: str,
+    expected_pipeline_structure: Mapping[str, Any],
+    expected_git_commit_sha: str,
+    candidate_manifest: PrivateModelArtifactManifest,
+) -> dict[str, Any]:
+    """Bind the signed build artifact to the source verified before tests.
+
+    The private build command is an external boundary.  Re-measure after it
+    completes because it can run hooks or arbitrary build tooling in the
+    candidate checkout.  Its generated manifest is written outside that
+    checkout, so this hash is the exact source passed to the artifact builder.
+    """
+
+    observed_source_tree_hash = compute_private_source_tree_hash(repo_dir)
+    if observed_source_tree_hash != expected_source_tree_hash:
+        raise CodeEditImageBuildError("private build changed the candidate source tree")
+    if candidate_manifest.model_artifact_hash != expected_source_tree_hash:
+        raise CodeEditImageBuildError(
+            "candidate artifact source hash differs from verified candidate source tree"
+        )
+    observed_git_commit_sha = _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        timeout_seconds=60,
+    ).strip()
+    if observed_git_commit_sha != expected_git_commit_sha:
+        raise CodeEditImageBuildError("private build changed the candidate Git commit")
+    return _sourcing_pipeline_structure_gate(
+        repo_dir,
+        expected=expected_pipeline_structure,
+    )
 
 
 def _git_ignored_paths(repo_dir: Path) -> list[str]:

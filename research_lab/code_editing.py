@@ -116,7 +116,7 @@ DEFAULT_ALLOWED_SUFFIXES = (".py", ".json", ".yaml", ".yml", ".toml", ".txt", ".
 # PR1 uses a positive, data-only edit surface. Arbitrary Python tool bodies run
 # in the coordinator process and cannot be proven unable to mutate that
 # coordinator. They stay immutable until tools have a typed process boundary.
-# The four paths below permit only independently checked prompt strings,
+# The paths below permit only independently checked prompt strings,
 # declarative routing data, paired same-stage tool records, approved SOURCE_ADD
 # registrations, and typed tool catalog entries. Every other private-model
 # path is default-deny.
@@ -124,6 +124,7 @@ SOURCING_PIPELINE_EDITABLE_PATHS = frozenset(
     {
         "sourcing_model/discovery.py",
         "sourcing_model/routing/defaults.py",
+        "sourcing_model/routing/guidance.py",
         "sourcing_model/routing/runtime.py",
         "sourcing_model/scrapingdog_signal_contract.py",
     }
@@ -480,7 +481,7 @@ def build_loop_direction_planner_messages(
         "- If the ticket names a concrete file/path/function that is not present in runtime_source_index, do not invent it or silently translate it. Return no_new_safe_path=true and list only the exact missing path/identifier in unresolved_references so the gateway can perform one bounded clarification pass.\n"
         "- A provider endpoint absent from source inventory is viable only through an exact approved_provider_capabilities SOURCE_ADD registration request and its separate reviewed host binding.\n"
         "- Never edit a provider implementation body, host, credential/env reference, dependency, or network client in this loop.\n"
-        "- The sourcing pipeline topology is immutable. Target only sourcing_model/discovery.py, sourcing_model/routing/defaults.py, sourcing_model/routing/runtime.py, or sourcing_model/scrapingdog_signal_contract.py. Within them, change only prompt text, inert routing metadata, a paired same-stage tool record, an approved SOURCE_ADD registration, or a typed catalog entry. Existing tool ids must stay in their current stage, and each stage must keep one reviewed viable route. Arbitrary Python function bodies are not editable.\n"
+        "- The sourcing pipeline topology is immutable. Target only sourcing_model/discovery.py, sourcing_model/routing/defaults.py, sourcing_model/routing/guidance.py, sourcing_model/routing/runtime.py, or sourcing_model/scrapingdog_signal_contract.py. In guidance.py only the reviewed GUIDANCE_SYSTEM_PROMPT string literal is editable. In the other paths change only reviewed prompt output text/data, inert routing metadata, a paired same-stage tool record, an approved SOURCE_ADD registration, or a typed catalog entry. Existing tool ids must stay in their current stage, and each stage must keep one reviewed viable route. Arbitrary Python function bodies are not editable.\n"
         "- candidate_edit_constraints is binding. Never require a new file. If it reports no editable test files, use validation_mode=runtime_checks and do not require adding tests.\n"
         "- success_criteria must describe observable behavior and existing validation, not repository work such as creating a test file.\n"
         "- Return exactly Context JSON required_root_branch_count independently safe, source-feasible ranked paths whenever that many genuinely distinct mechanisms exist. Return fewer only when another safe independent mechanism does not exist; never duplicate or paraphrase one path to fill the count.\n"
@@ -765,6 +766,7 @@ def build_code_edit_auto_research_messages(
         "Allowed edit scope:\n"
         "- sourcing_model/discovery.py (prompt/query strings and reviewed prompt data only)\n"
         "- sourcing_model/routing/defaults.py (declarative routing metadata and paired same-stage tool records only)\n"
+        "- sourcing_model/routing/guidance.py (the reviewed routing system-prompt literal only)\n"
         "- sourcing_model/routing/runtime.py (declarative routing metadata, paired same-stage tool records, and approved SOURCE_ADD registrations only)\n"
         "- sourcing_model/scrapingdog_signal_contract.py (typed inert TOOL_CATALOG entries only)\n\n"
         "Active extracted source rules:\n"
@@ -789,7 +791,8 @@ def build_code_edit_auto_research_messages(
         "- The compile_*_route handoff wrapper bodies in routing/defaults.py and routing/runtime.py are immutable. Put selection, ranking, and fallback improvements in the existing runtime/default policy surfaces.\n"
         "- Keep every existing tool id in its current stage. A new tool must declare exactly one existing stage and a same-stage policy step; it cannot create a stage or bridge stages.\n"
         "- Routing eligibility, category, priority, ranking, and fallback metadata may change, but each existing stage must keep at least one reviewed viable route.\n"
-        "- New tool records are declarative and remain unavailable until the consumer has a separately reviewed binding for the exact tool id.\n"
+        "- New tool records are declarative only. They do not add an implementation, credential, or consumer binding; execution requires a separately reviewed binding for the exact tool id.\n"
+        "- The current paid scorer measures company fit and intent evidence, not contact quality. Do not propose or promote a contact-only routing change without a separate contact-quality evaluation commitment.\n"
         "- Allowed work is inside an existing stage: prompt strings, routing metadata, approved SOURCE_ADD registration, a paired ToolDefinition/PolicyStep, or an inert typed catalog entry. Do not edit arbitrary Python tool bodies; those require a separate-process tool boundary.\n\n"
         "Diff requirements:\n"
         "- Produce a small git unified diff that applies to the active runtime source extracted from the current ECR image.\n"

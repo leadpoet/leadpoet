@@ -866,6 +866,31 @@ def test_loop_direction_planner_prompt_allows_source_routing_and_query_construct
     assert '"allowed_lanes":["provider_fallback"]' not in content
 
 
+def test_loop_direction_planner_prompt_states_sourcing_pipeline_boundary():
+    messages = code_editing.build_loop_direction_planner_messages(
+        ticket={
+            "ticket_id": "ticket-pipeline-boundary",
+            "brief_public_summary": "Improve same-stage routing safely.",
+        },
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_index={
+            "editable_files": ["sourcing_model/routing/guidance.py"]
+        },
+        budget_context={},
+    )
+    content = messages[-1]["content"]
+
+    assert "sourcing_model/routing/guidance.py" in content
+    assert (
+        "only the reviewed GUIDANCE_SYSTEM_PROMPT string literal is editable"
+        in content
+    )
+    assert "paired same-stage tool record" in content
+    assert "Arbitrary Python function bodies are not editable" in content
+
+
 def test_loop_direction_planner_binds_approved_source_to_model_registration():
     source_context = {
         "schema_version": "1.0",
@@ -956,6 +981,48 @@ def test_code_edit_prompt_names_source_routing_lane():
 
     assert "source_routing" in context["allowed_lanes"]
     assert "source routing" in content
+
+
+def test_code_edit_prompt_states_sourcing_pipeline_and_scoring_boundaries():
+    messages = code_editing.build_code_edit_auto_research_messages(
+        ticket={
+            "ticket_id": "ticket-pipeline-boundary",
+            "brief_public_summary": "Improve same-stage routing safely.",
+        },
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_context={
+            "editable_files": ["sourcing_model/routing/guidance.py"]
+        },
+        source_inspection_context={
+            "read_files": ["sourcing_model/routing/guidance.py"]
+        },
+        budget_context={},
+        max_candidates=1,
+    )
+    content = messages[-1]["content"]
+
+    assert (
+        "sourcing_model/routing/guidance.py "
+        "(the reviewed routing system-prompt literal only)"
+    ) in content
+    assert (
+        "A new tool must declare exactly one existing stage and a same-stage "
+        "policy step"
+    ) in content
+    assert (
+        "Do not edit arbitrary Python tool bodies; those require a "
+        "separate-process tool boundary."
+    ) in content
+    assert (
+        "The current paid scorer measures company fit and intent evidence, "
+        "not contact quality."
+    ) in content
+    assert (
+        "Do not propose or promote a contact-only routing change without a "
+        "separate contact-quality evaluation commitment."
+    ) in content
 
 
 def test_code_edit_prompt_requires_source_add_registration_not_host_wiring():
@@ -1562,4 +1629,46 @@ def test_post_private_test_source_integrity_gate_fails_closed(
             expected_changed_files=["sourcing_model/discovery.py"],
             expected_source_tree_hash="sha256:" + "2" * 64,
             expected_pipeline_structure=expected_structure,
+        )
+
+
+def test_post_private_build_source_integrity_binds_manifest_to_pretest_hash(
+    tmp_path,
+    monkeypatch,
+):
+    source_hash = "sha256:" + "2" * 64
+    expected_structure = {"document_hash": "sha256:" + "1" * 64}
+    candidate_manifest = SimpleNamespace(model_artifact_hash=source_hash)
+    monkeypatch.setattr(
+        code_build,
+        "compute_private_source_tree_hash",
+        lambda _root: source_hash,
+    )
+    monkeypatch.setattr(
+        code_build,
+        "_sourcing_pipeline_structure_gate",
+        lambda _root, *, expected: expected,
+    )
+    monkeypatch.setattr(code_build, "_run", lambda *_args, **_kwargs: "a" * 40)
+
+    assert code_build._post_private_build_source_integrity_gate(
+        tmp_path,
+        expected_source_tree_hash=source_hash,
+        expected_pipeline_structure=expected_structure,
+        expected_git_commit_sha="a" * 40,
+        candidate_manifest=candidate_manifest,
+    ) == expected_structure
+
+    with pytest.raises(
+        code_build.CodeEditImageBuildError,
+        match="artifact source hash differs",
+    ):
+        code_build._post_private_build_source_integrity_gate(
+            tmp_path,
+            expected_source_tree_hash=source_hash,
+            expected_pipeline_structure=expected_structure,
+            expected_git_commit_sha="a" * 40,
+            candidate_manifest=SimpleNamespace(
+                model_artifact_hash="sha256:" + "3" * 64
+            ),
         )

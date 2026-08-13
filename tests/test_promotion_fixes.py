@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import shutil
 import subprocess
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -65,7 +66,11 @@ def _git(cmd, *, cwd=None):
     ).stdout.strip()
 
 
-def _private_source_push_fixture():
+def _private_source_push_fixture(
+    *,
+    parent_artifact_hash: str = "sha256:" + "1" * 64,
+    candidate_artifact_hash: str = "sha256:" + "4" * 64,
+):
     unified_diff = (
         "diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py\n"
         "--- a/sourcing_model/discovery.py\n"
@@ -79,7 +84,7 @@ def _private_source_push_fixture():
         "artifact_type": "research_lab_code_edit_source_diff",
         "run_id": "run-private-source-push",
         "candidate_index": 0,
-        "parent_artifact_hash": "sha256:" + "1" * 64,
+        "parent_artifact_hash": parent_artifact_hash,
         "parent_manifest_hash": "sha256:" + "2" * 64,
         "source_diff_hash": sha256_json({"unified_diff": unified_diff}),
         "target_files": ["sourcing_model/discovery.py"],
@@ -91,7 +96,7 @@ def _private_source_push_fixture():
         "artifact_hash": sha256_json(artifact_payload),
     }
     candidate_manifest_payload = {
-        "model_artifact_hash": "sha256:" + "4" * 64,
+        "model_artifact_hash": candidate_artifact_hash,
         "git_commit_sha": "5" * 40,
         "image_digest": (
             "123456789012.dkr.ecr.us-east-1.amazonaws.com/candidate@sha256:"
@@ -119,6 +124,7 @@ def _private_source_push_fixture():
         "source_diff_artifact_uri": "s3://fixture/candidates/run-private-source-push/0/source_diff.json",
         "source_diff_artifact_hash": artifact["artifact_hash"],
         "changed_files": ["sourcing_model/discovery.py"],
+        "candidate_source_tree_hash": candidate_artifact_hash,
     }
     build_doc = {
         **build_payload,
@@ -148,6 +154,21 @@ def _private_source_push_fixture():
         "manifest_hash": sha256_json(patch_payload),
     }
     return artifact, build_doc, patch_manifest, candidate_manifest
+
+
+def _source_tree_hashes_for_diff(
+    source: Path,
+    tmp_path: Path,
+    unified_diff: str,
+) -> tuple[str, str]:
+    parent_hash = promotion.compute_private_source_tree_hash(source)
+    candidate = tmp_path / "candidate-hash-source"
+    shutil.copytree(source, candidate, ignore=shutil.ignore_patterns(".git"))
+    _git(["init", "-q"], cwd=candidate)
+    patch_path = tmp_path / "candidate-hash.patch"
+    patch_path.write_text(unified_diff, encoding="utf-8")
+    _git(["apply", str(patch_path)], cwd=candidate)
+    return parent_hash, promotion.compute_private_source_tree_hash(candidate)
 
 
 def _retarget_private_source_push_fixture(path: str):
@@ -230,8 +251,15 @@ def test_private_source_push_verifies_artifact_before_git_and_pushes_exact_diff(
     remote = tmp_path / "remote.git"
     _git(["clone", "-q", "--bare", str(source), str(remote)])
 
+    fixture = _private_source_push_fixture()
+    parent_hash, candidate_hash = _source_tree_hashes_for_diff(
+        source, tmp_path, fixture[0]["unified_diff"]
+    )
     artifact, build_doc, patch_manifest, candidate_manifest = (
-        _private_source_push_fixture()
+        _private_source_push_fixture(
+            parent_artifact_hash=parent_hash,
+            candidate_artifact_hash=candidate_hash,
+        )
     )
     original_run_command = promotion._run_command
 
@@ -268,6 +296,154 @@ def test_private_source_push_verifies_artifact_before_git_and_pushes_exact_diff(
     ) == "VALUE = 2"
 
 
+def test_private_source_push_accepts_exact_candidate_replay_when_head_mismatches(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    (source / "sourcing_model").mkdir(parents=True)
+    _git(["init", "-q", "-b", "main"], cwd=source)
+    _git(["config", "user.name", "Fixture"], cwd=source)
+    _git(["config", "user.email", "fixture@example.test"], cwd=source)
+    model_path = source / "sourcing_model" / "discovery.py"
+    model_path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(["add", "sourcing_model/discovery.py"], cwd=source)
+    _git(["commit", "-q", "-m", "candidate parent"], cwd=source)
+    active_manifest_sha = _git(["rev-parse", "HEAD"], cwd=source)
+
+    fixture = _private_source_push_fixture()
+    parent_hash, candidate_hash = _source_tree_hashes_for_diff(
+        source, tmp_path, fixture[0]["unified_diff"]
+    )
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text(fixture[0]["unified_diff"], encoding="utf-8")
+    _git(["apply", str(patch_path)], cwd=source)
+    _git(["add", "sourcing_model/discovery.py"], cwd=source)
+    _git(["commit", "-q", "-m", "candidate already applied"], cwd=source)
+    candidate_head = _git(["rev-parse", "HEAD"], cwd=source)
+    remote = tmp_path / "remote.git"
+    _git(["clone", "-q", "--bare", str(source), str(remote)])
+
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture(
+            parent_artifact_hash=parent_hash,
+            candidate_artifact_hash=candidate_hash,
+        )
+    )
+    original_run_command = promotion._run_command
+
+    def run_command(cmd, **kwargs):
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        return original_run_command(cmd, **kwargs)
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    monkeypatch.setattr(
+        promotion,
+        "_verify_promoted_source_tree_contract",
+        lambda _source_root, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "research_lab.sourcing_model_contract_check."
+        "sourcing_pipeline_preservation_errors",
+        lambda _parent, _candidate: [],
+    )
+
+    result = promotion._push_candidate_source_diff_to_repo(
+        repo_url=str(remote),
+        branch_name="main",
+        active_git_commit_sha=active_manifest_sha,
+        candidate_id="candidate:exact-replay",
+        score_bundle_id="bundle:exact-replay",
+        candidate_build_doc=build_doc,
+        candidate_patch_manifest=patch_manifest,
+        candidate_model_manifest_doc=candidate_manifest,
+        expected_candidate_patch_hash=sha256_json(patch_manifest),
+        expected_source_diff_hash=artifact["source_diff_hash"],
+        expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+        expected_run_id=artifact["run_id"],
+    )
+
+    assert result["status"] == "already_applied"
+    assert result["git_commit_sha"] == candidate_head
+    assert _git(["--git-dir", str(remote), "rev-parse", "main"]) == candidate_head
+    assert _git(
+        ["--git-dir", str(remote), "show", "main:sourcing_model/discovery.py"]
+    ) == "VALUE = 2"
+
+
+def test_private_source_push_legacy_build_cannot_recover_head_mismatch(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    (source / "sourcing_model").mkdir(parents=True)
+    _git(["init", "-q", "-b", "main"], cwd=source)
+    _git(["config", "user.name", "Fixture"], cwd=source)
+    _git(["config", "user.email", "fixture@example.test"], cwd=source)
+    model_path = source / "sourcing_model" / "discovery.py"
+    model_path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(["add", "sourcing_model/discovery.py"], cwd=source)
+    _git(["commit", "-q", "-m", "candidate parent"], cwd=source)
+    candidate_parent_sha = _git(["rev-parse", "HEAD"], cwd=source)
+    fixture = _private_source_push_fixture()
+    parent_hash, candidate_hash = _source_tree_hashes_for_diff(
+        source,
+        tmp_path,
+        fixture[0]["unified_diff"],
+    )
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture(
+            parent_artifact_hash=parent_hash,
+            candidate_artifact_hash=candidate_hash,
+        )
+    )
+    model_path.write_text("VALUE = 1\nNEWER_ACTIVE = True\n", encoding="utf-8")
+    _git(["add", "sourcing_model/discovery.py"], cwd=source)
+    _git(["commit", "-q", "-m", "newer active model"], cwd=source)
+    newer_active_sha = _git(["rev-parse", "HEAD"], cwd=source)
+    remote = tmp_path / "remote.git"
+    _git(["clone", "-q", "--bare", str(source), str(remote)])
+
+    assert "pipeline_structure" not in build_doc
+    original_run_command = promotion._run_command
+
+    def run_command(cmd, **kwargs):
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        return original_run_command(cmd, **kwargs)
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    monkeypatch.setenv(promotion.AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV, "true")
+    monkeypatch.setattr(
+        promotion,
+        "_verify_promoted_source_tree_contract",
+        lambda _source_root, **_kwargs: {},
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="legacy candidate build has no pipeline structure commitment",
+    ):
+        promotion._push_candidate_source_diff_to_repo(
+            repo_url=str(remote),
+            branch_name="main",
+            active_git_commit_sha=candidate_parent_sha,
+            candidate_id="candidate:legacy-replay",
+            score_bundle_id="bundle:legacy-replay",
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+            candidate_model_manifest_doc=candidate_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+            expected_source_diff_hash=artifact["source_diff_hash"],
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+
+    assert _git(["--git-dir", str(remote), "rev-parse", "main"]) == newer_active_sha
+    assert _git(
+        ["--git-dir", str(remote), "show", "main:sourcing_model/discovery.py"]
+    ) == "VALUE = 1\nNEWER_ACTIVE = True"
+
+
 def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
     tmp_path, monkeypatch
 ):
@@ -291,9 +467,6 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
     remote = tmp_path / "remote.git"
     _git(["clone", "-q", "--bare", str(source), str(remote)])
 
-    base_artifact, _base_build, _base_patch, candidate_manifest = (
-        _private_source_push_fixture()
-    )
     first_patch = (
         "diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py\n"
         "--- a/sourcing_model/discovery.py\n"
@@ -312,6 +485,15 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
         "+VALUE = 2\n"
     )
     cumulative_patch = first_patch + incremental_patch
+    parent_hash, candidate_hash = _source_tree_hashes_for_diff(
+        source, tmp_path, cumulative_patch
+    )
+    base_artifact, _base_build, _base_patch, candidate_manifest = (
+        _private_source_push_fixture(
+            parent_artifact_hash=parent_hash,
+            candidate_artifact_hash=candidate_hash,
+        )
+    )
     source_diff_hash = sha256_json({"unified_diff": cumulative_patch})
     incremental_hash = sha256_json({"unified_diff": incremental_patch})
     artifact_payload = {
@@ -341,6 +523,7 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
         "parent_manifest_hash": artifact["parent_manifest_hash"],
         "candidate_model_artifact_hash": candidate_manifest["model_artifact_hash"],
         "candidate_model_manifest_hash": candidate_manifest["manifest_hash"],
+        "candidate_source_tree_hash": candidate_hash,
         "source_diff_hash": source_diff_hash,
         "source_diff_artifact_uri": "s3://fixture/legacy-depth-two/source_diff.json",
         "source_diff_artifact_hash": artifact["artifact_hash"],
@@ -518,8 +701,15 @@ def test_private_source_push_rechecks_applied_tree_before_commit(
     active_sha = _git(["rev-parse", "HEAD"], cwd=source)
     remote = tmp_path / "remote.git"
     _git(["clone", "-q", "--bare", str(source), str(remote)])
+    fixture = _private_source_push_fixture()
+    parent_hash, candidate_hash = _source_tree_hashes_for_diff(
+        source, tmp_path, fixture[0]["unified_diff"]
+    )
     artifact, build_doc, patch_manifest, candidate_manifest = (
-        _private_source_push_fixture()
+        _private_source_push_fixture(
+            parent_artifact_hash=parent_hash,
+            candidate_artifact_hash=candidate_hash,
+        )
     )
     original_run_command = promotion._run_command
 
@@ -564,6 +754,149 @@ def test_private_source_push_rechecks_applied_tree_before_commit(
         ["--git-dir", str(remote), "show", "main:sourcing_model/discovery.py"]
     ) == "VALUE = 1"
     assert contract_checks == 2
+
+
+def test_private_source_push_rejects_clean_filter_mutation_after_staging(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    (source / "sourcing_model").mkdir(parents=True)
+    _git(["init", "-q", "-b", "main"], cwd=source)
+    _git(["config", "user.name", "Fixture"], cwd=source)
+    _git(["config", "user.email", "fixture@example.test"], cwd=source)
+    (source / ".gitattributes").write_text(
+        "sourcing_model/discovery.py filter=mutate\n",
+        encoding="utf-8",
+    )
+    (source / "sourcing_model" / "discovery.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+    _git(["add", ".gitattributes", "sourcing_model/discovery.py"], cwd=source)
+    _git(["commit", "-q", "-m", "root"], cwd=source)
+    active_sha = _git(["rev-parse", "HEAD"], cwd=source)
+    remote = tmp_path / "remote.git"
+    _git(["clone", "-q", "--bare", str(source), str(remote)])
+    fixture = _private_source_push_fixture()
+    parent_hash, candidate_hash = _source_tree_hashes_for_diff(
+        source, tmp_path, fixture[0]["unified_diff"]
+    )
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture(
+            parent_artifact_hash=parent_hash,
+            candidate_artifact_hash=candidate_hash,
+        )
+    )
+    original_run_command = promotion._run_command
+
+    def run_command(cmd, **kwargs):
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        result = original_run_command(cmd, **kwargs)
+        if cmd[:3] == ["git", "config", "user.email"]:
+            original_run_command(
+                [
+                    "git",
+                    "config",
+                    "filter.mutate.clean",
+                    "sed 's/VALUE = 2/VALUE = 3/'",
+                ],
+                cwd=kwargs["cwd"],
+                timeout_seconds=10,
+            )
+        return result
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    monkeypatch.setattr(
+        promotion,
+        "_verify_promoted_source_tree_contract",
+        lambda _source_root, **_kwargs: {},
+    )
+    with pytest.raises(RuntimeError, match="source tree changed while staging"):
+        promotion._push_candidate_source_diff_to_repo(
+            repo_url=str(remote),
+            branch_name="main",
+            active_git_commit_sha=active_sha,
+            candidate_id="candidate:staged-filter",
+            score_bundle_id="bundle:staged-filter",
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+            candidate_model_manifest_doc=candidate_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+            expected_source_diff_hash=artifact["source_diff_hash"],
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+    assert _git(
+        ["--git-dir", str(remote), "show", "main:sourcing_model/discovery.py"]
+    ) == "VALUE = 1"
+
+
+def test_private_source_push_rejects_commit_hook_mutation_before_push(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    (source / "sourcing_model").mkdir(parents=True)
+    _git(["init", "-q", "-b", "main"], cwd=source)
+    _git(["config", "user.name", "Fixture"], cwd=source)
+    _git(["config", "user.email", "fixture@example.test"], cwd=source)
+    (source / "sourcing_model" / "discovery.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+    _git(["add", "sourcing_model/discovery.py"], cwd=source)
+    _git(["commit", "-q", "-m", "root"], cwd=source)
+    active_sha = _git(["rev-parse", "HEAD"], cwd=source)
+    remote = tmp_path / "remote.git"
+    _git(["clone", "-q", "--bare", str(source), str(remote)])
+    fixture = _private_source_push_fixture()
+    parent_hash, candidate_hash = _source_tree_hashes_for_diff(
+        source, tmp_path, fixture[0]["unified_diff"]
+    )
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture(
+            parent_artifact_hash=parent_hash,
+            candidate_artifact_hash=candidate_hash,
+        )
+    )
+    original_run_command = promotion._run_command
+
+    def run_command(cmd, **kwargs):
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        result = original_run_command(cmd, **kwargs)
+        if cmd[:3] == ["git", "config", "user.email"]:
+            hook = kwargs["cwd"] / ".git" / "hooks" / "pre-commit"
+            hook.write_text(
+                "#!/bin/sh\nprintf 'VALUE = 3\\n' > sourcing_model/discovery.py\n"
+                "git add sourcing_model/discovery.py\n",
+                encoding="utf-8",
+            )
+            hook.chmod(0o755)
+        return result
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    monkeypatch.setattr(
+        promotion,
+        "_verify_promoted_source_tree_contract",
+        lambda _source_root, **_kwargs: {},
+    )
+    with pytest.raises(RuntimeError, match="source tree changed while committing"):
+        promotion._push_candidate_source_diff_to_repo(
+            repo_url=str(remote),
+            branch_name="main",
+            active_git_commit_sha=active_sha,
+            candidate_id="candidate:commit-hook",
+            score_bundle_id="bundle:commit-hook",
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+            candidate_model_manifest_doc=candidate_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+            expected_source_diff_hash=artifact["source_diff_hash"],
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+    assert _git(
+        ["--git-dir", str(remote), "show", "main:sourcing_model/discovery.py"]
+    ) == "VALUE = 1"
 
 
 def test_pipeline_structure_commitment_matches_measured_parent_and_candidate():
@@ -1650,6 +1983,63 @@ async def test_private_source_upgrade_defaults_to_leadpoet_lab(store, monkeypatc
     assert {
         event["branch_name"] for event in commit_events
     } == {DEFAULT_PRIVATE_REPO_BRANCH}
+
+
+async def test_private_source_push_replay_blocks_candidate_older_than_active_model(
+    store, monkeypatch
+):
+    push_calls: list[dict[str, Any]] = []
+
+    def _unexpected_push(**kwargs: Any) -> dict[str, Any]:
+        push_calls.append(kwargs)
+        raise AssertionError("an older candidate must not reach the Git push path")
+
+    monkeypatch.setattr(
+        promotion,
+        "_push_candidate_source_diff_to_repo",
+        _unexpected_push,
+    )
+
+    parent_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "1" * 64,
+    )
+    candidate_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "2" * 64,
+    )
+    newer_active_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "3" * 64,
+    )
+    controller = ResearchLabPromotionController(
+        _controller_config(
+            auto_commit_enabled=True,
+            private_repo_url="https://github.com/leadpoet/Sourcing_model.git",
+        ),
+        worker_ref="test-worker",
+    )
+
+    result = await controller._maybe_finalize_missing_private_source_push(
+        candidate={
+            "candidate_id": "cand-legacy-replay",
+            "candidate_source_diff_hash": "sha256:" + "4" * 64,
+            "candidate_build_doc": {},
+            "candidate_model_manifest_doc": candidate_artifact.to_dict(),
+        },
+        score_bundle_row={"score_bundle_id": "bundle-legacy-replay"},
+        score_bundle={},
+        active=ActivePrivateModel(artifact=newer_active_artifact),
+        candidate_parent=parent_artifact.model_artifact_hash,
+        rolling_window_hash="sha256:" + "5" * 64,
+        improvement_points=2.0,
+        threshold=1.0,
+    )
+
+    assert result == {
+        "status": "stale_active_model_source_push_blocked",
+        "active_model_artifact_hash": newer_active_artifact.model_artifact_hash,
+        "candidate_parent_artifact_hash": parent_artifact.model_artifact_hash,
+        "candidate_model_artifact_hash": candidate_artifact.model_artifact_hash,
+    }
+    assert push_calls == []
 
 
 def _bridge_baseline_row(window_hash: str, baseline_bundle_id: str) -> dict[str, Any]:

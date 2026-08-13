@@ -178,6 +178,7 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         "tls_protocol": "TLSv1.3",
     }
     assert client_options[-1]["http2"] is True
+    assert client_options[-1]["http1"] is True
     assert client_options[-1]["limits"] == {
         "max_connections": 64,
         "max_keepalive_connections": 32,
@@ -197,6 +198,19 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         max_response_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES,
     )
     assert artifact_result["body"] == b'{"ok":true}'
+
+    response.stream.ssl_object = TLS()
+    http1_result = artifact_transport(
+        method="GET",
+        url="https://example.com/artifact",
+        headers={},
+        body=b"",
+        timeout_ms=1000,
+        allow_http2=False,
+    )
+    assert http1_result["body"] == b'{"ok":true}'
+    assert client_options[-1]["http1"] is True
+    assert client_options[-1]["http2"] is False
 
     with pytest.raises(ProviderBrokerV2Error, match="response limit"):
         HTTPXProviderTransport()(
@@ -1426,6 +1440,7 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_name": "Authorization",
         "credential_prefix": "Bearer ",
         "credential_header_aliases": [{"name": "apikey", "prefix": ""}],
+        "http_versions": ["HTTP/1.1"],
     }
     assert MEASURED_TRANSPORT_REQUEST_HEADERS == (("Accept-Encoding", "identity"),)
     assert provider_registry_hash().startswith("sha256:")
@@ -1906,6 +1921,7 @@ def test_supabase_service_role_is_injected_only_for_measured_project():
     )
     assert outbound["headers"]["apikey"] == "supabase-service-role-secret"
     assert outbound["headers"]["Accept-Encoding"] == "identity"
+    assert outbound["allow_http2"] is False
     assert "supabase-service-role-secret" not in str(result)
 
     broker.execute(

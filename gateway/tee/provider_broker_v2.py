@@ -126,6 +126,7 @@ class ProviderRouteV2:
     allowed_methods: Tuple[str, ...] = ()
     allowed_route_pairs: Tuple[Tuple[str, str], ...] = ()
     job_scoped_only: bool = False
+    allow_http2: bool = True
 
 
 BUILTIN_PROVIDER_ROUTES = {
@@ -184,6 +185,11 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
+        # Supabase's edge may terminate otherwise valid HTTP/2 streams with a
+        # GOAWAY/reset while the framed enclave tunnel is still reading the
+        # response. Match the repository's normal Supabase clients and use
+        # verified TLS over HTTP/1.1 for this measured route.
+        allow_http2=False,
     ),
     "truelist": ProviderRouteV2(
         provider_id="truelist",
@@ -267,6 +273,8 @@ def provider_registry_document() -> Dict[str, Any]:
             ]
         if route.job_scoped_only:
             document["job_scoped_only"] = True
+        if not route.allow_http2:
+            document["http_versions"] = ["HTTP/1.1"]
         return document
 
     return {
@@ -633,7 +641,12 @@ class HTTPXProviderTransport:
         self._direct_client_leases: Dict[int, int] = {}
         self._retired_direct_clients: Dict[int, Any] = {}
 
-    def _new_client(self, *, proxy_headers: Optional[Mapping[str, str]] = None) -> Any:
+    def _new_client(
+        self,
+        *,
+        proxy_headers: Optional[Mapping[str, str]] = None,
+        allow_http2: bool = True,
+    ) -> Any:
         import certifi
         import httpx
         from http.cookiejar import CookieJar, DefaultCookiePolicy
@@ -658,7 +671,8 @@ class HTTPXProviderTransport:
             ),
             verify=verify_path,
             trust_env=False,
-            http2=True,
+            http1=True,
+            http2=allow_http2,
             limits=httpx.Limits(
                 max_connections=64,
                 max_keepalive_connections=32,
@@ -790,6 +804,7 @@ class HTTPXProviderTransport:
         timeout_ms: int,
         upstream_proxy_url: Optional[str] = None,
         max_response_bytes: int = MAX_RESPONSE_BODY_BYTES,
+        allow_http2: bool = True,
     ) -> Dict[str, Any]:
         if (
             isinstance(max_response_bytes, bool)
@@ -799,6 +814,8 @@ class HTTPXProviderTransport:
             <= self.response_body_ceiling_bytes
         ):
             raise ProviderBrokerV2Error("provider response limit is invalid")
+        if not isinstance(allow_http2, bool):
+            raise ProviderBrokerV2Error("provider HTTP/2 policy is invalid")
 
         proxy_headers = None
         if upstream_proxy_url:
@@ -808,7 +825,7 @@ class HTTPXProviderTransport:
                 ).decode("ascii")
             }
         timeout_seconds = max(0.001, timeout_ms / 1000.0)
-        if proxy_headers is None and self.reuse_direct_connections:
+        if proxy_headers is None and self.reuse_direct_connections and allow_http2:
             with self._lease_direct_client() as (client, generation):
                 try:
                     return self._execute_with_client(
@@ -836,7 +853,10 @@ class HTTPXProviderTransport:
         # stale pooled generation must not make their measured retries share a
         # failure fate. Framed artifact-only callers may explicitly opt into
         # reuse after proving their terminal handshake contract.
-        client = self._new_client(proxy_headers=proxy_headers)
+        client = self._new_client(
+            proxy_headers=proxy_headers,
+            allow_http2=allow_http2,
+        )
         try:
             return self._execute_with_client(
                 client,
@@ -1679,6 +1699,8 @@ class ProviderBrokerV2:
                 "body": body,
                 "timeout_ms": timeout_ms,
             }
+            if not route.allow_http2:
+                transport_kwargs["allow_http2"] = False
             if egress_proxy_url is not None:
                 transport_kwargs["upstream_proxy_url"] = egress_proxy_url
             if max_response_bytes != MAX_RESPONSE_BODY_BYTES:

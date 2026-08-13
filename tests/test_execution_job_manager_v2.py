@@ -952,6 +952,60 @@ def test_executor_failure_has_signed_failure_receipt_and_canonical_terminal_resu
     )
 
 
+def test_failure_status_exposes_structural_detail_without_message_text():
+    def _executor(_operation, _payload, _context):
+        try:
+            raise ValueError("inner secret token sk-test-1234567890")
+        except ValueError as inner:
+            raise RuntimeError("outer private detail") from inner
+
+    manager, _ = _manager(_executor)
+    status = _run(manager, _payload())
+    assert status["state"] == "failed"
+    detail = status["error_detail"]
+    assert detail
+    assert detail.startswith("RuntimeError<-ValueError")
+    assert "test_execution_job_manager_v2.py" in detail
+    assert "_executor" in detail
+    # Message text never leaves the enclave through any status field.
+    assert "private detail" not in str(status)
+    assert "secret token" not in str(status)
+    assert "sk-test" not in str(status)
+    # The attested terminal result and receipt are unchanged by the detail.
+    receipt = manager.receipt("score-job-1")
+    assert "error_detail" not in receipt
+    result = manager.result_chunk(job_id="score-job-1")
+    terminal = json.loads(base64.b64decode(result["data_b64"]))
+    assert terminal == {
+        "status": "failed",
+        "failure_code": "execution_runtimeerror",
+    }
+    assert receipt["output_root"] == sha256_bytes(
+        json.dumps(terminal, sort_keys=True, separators=(",", ":")).encode()
+    )
+
+
+def test_structural_failure_detail_is_bounded_and_cycle_safe():
+    plain = job_manager_v2.structural_failure_detail(ValueError("x" * 4096))
+    assert plain == "ValueError"
+    assert len(plain) <= job_manager_v2.MAX_FAILURE_DETAIL_CHARS
+
+    first = ValueError("a")
+    second = TypeError("b")
+    first.__cause__ = second
+    second.__cause__ = first
+    cyclic = job_manager_v2.structural_failure_detail(first)
+    assert cyclic == "ValueError<-TypeError"
+
+    chained = ValueError("v")
+    for name in ("B", "C", "D", "E", "F"):
+        outer = type(name, (RuntimeError,), {})("m")
+        outer.__cause__ = chained
+        chained = outer
+    capped = job_manager_v2.structural_failure_detail(chained)
+    assert capped.count("<-") == 3
+
+
 def test_stage_receipts_form_a_measured_chain_before_root_receipt():
     def _executor(_operation, payload, context):
         context.record_stage(

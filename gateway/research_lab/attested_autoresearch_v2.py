@@ -12,6 +12,7 @@ import asyncio
 import base64
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Sequence
@@ -63,6 +64,8 @@ from leadpoet_canonical.ancestry_checkpoint_v2 import (
 from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover
 
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_RELEASE_MANIFEST_PATH = Path(
     "/home/ec2-user/tee/gateway-v2-release-manifest.json"
 )
@@ -88,6 +91,9 @@ class AttestedAutoresearchV2Error(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.authority = dict(authority or {})
+        # Diagnostic-only text from the enclave job status side-channel; never
+        # part of the attested failure document or the exception message.
+        self.failure_detail: Optional[str] = None
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -869,7 +875,12 @@ async def execute_autoresearch_v2(
                 "autoresearch receipt output differs"
             )
     else:
+        from gateway.research_lab.attested_scoring_v2 import (
+            bounded_status_failure_detail,
+        )
+
         failure_code = str(status.get("error_code") or state)
+        failure_detail = bounded_status_failure_detail(status.get("error_detail"))
         result = {"status": "failed", "failure_code": failure_code}
         if (
             receipt.get("status") != "failed"
@@ -1031,10 +1042,21 @@ async def execute_autoresearch_v2(
             "physical_role": "gateway_autoresearch",
         }
         if not succeeded:
-            raise AttestedAutoresearchV2Error(
+            if failure_detail:
+                logger.error(
+                    "attested_autoresearch_v2_failure_detail job_id=%s "
+                    "purpose=%s failure_code=%s detail=%s",
+                    job_id,
+                    purpose,
+                    result["failure_code"],
+                    failure_detail,
+                )
+            failure_error = AttestedAutoresearchV2Error(
                 "autoresearch enclave failed closed: %s" % result["failure_code"],
                 authority=outcome,
             )
+            failure_error.failure_detail = failure_detail or None
+            raise failure_error
         return outcome
 
     if persist_graph is None:
@@ -1078,8 +1100,19 @@ async def execute_autoresearch_v2(
         "physical_role": "gateway_autoresearch",
     }
     if not succeeded:
-        raise AttestedAutoresearchV2Error(
+        if failure_detail:
+            logger.error(
+                "attested_autoresearch_v2_failure_detail job_id=%s "
+                "purpose=%s failure_code=%s detail=%s",
+                job_id,
+                purpose,
+                result["failure_code"],
+                failure_detail,
+            )
+        failure_error = AttestedAutoresearchV2Error(
             "autoresearch enclave failed closed: %s" % result["failure_code"],
             authority=outcome,
         )
+        failure_error.failure_detail = failure_detail or None
+        raise failure_error
     return outcome

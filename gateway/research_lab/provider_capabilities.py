@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import base64
 import binascii
+import copy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -67,6 +68,20 @@ _ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _SOURCE_ADD_MANIFEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _ROUTING_FEATURE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
 _SOURCE_ADD_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
+_SOURCE_ADD_MUTABLE_RUNTIME_FUNCTIONS = frozenset(
+    {
+        "candidate_enrichment_for_tool",
+        "candidate_lane_for_tool",
+        "candidate_route_eligibility",
+        "contact_binding_role_for_tool",
+        "enhanced_scrapingdog_tool_definitions",
+        "intent_tier_for_tool",
+        "runtime_catalog",
+        "runtime_policy",
+        "runtime_routing_metadata",
+        "runtime_tool_definitions",
+    }
+)
 _SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION = (
     "leadpoet.intent-source-binding-manifest:v1"
 )
@@ -1779,9 +1794,10 @@ def validate_source_add_registration_diff(
         The registry assignment is the only code an approved registration diff
         may alter. Bind the complete enclosing node whenever it references a
         protected SOURCE_ADD symbol or Python namespace-reflection primitive.
-        The caller also compares every non-registry node because arbitrary
-        Python reflection cannot otherwise be proven unable to mutate the
-        registry after this static review.
+        Mutable routing/tool functions are checked for registry access and
+        Python namespace reflection here. Their ordinary bodies are allowed
+        to change and are constrained separately by the pipeline structure
+        gate and the candidate evaluation.
         """
 
         sensitive_names = protected_names | {
@@ -1809,12 +1825,24 @@ def validate_source_add_registration_diff(
             "setattr",
             "vars",
         }
-        guarded_names = sensitive_names | dynamic_namespace_names
         match_as_type = getattr(ast, "MatchAs", ())
         signature: list[str] = []
         for node in tree.body:
             if is_canonical_registry_assignment(node):
                 continue
+            guarded_names = sensitive_names | dynamic_namespace_names
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in _SOURCE_ADD_MUTABLE_RUNTIME_FUNCTIONS
+            ):
+                # Routing/tool bodies are intentionally mutable.  Keep exact
+                # protection for registry access and namespace reflection;
+                # router stage ownership is enforced by the independent
+                # sourcing pipeline structure gate.
+                guarded_names = {
+                    "SOURCE_ADD_ROUTING_REGISTRATIONS",
+                    "SourceAddRoutingRegistration",
+                } | dynamic_namespace_names
             sensitive = False
             for descendant in ast.walk(node):
                 if (
@@ -1858,11 +1886,18 @@ def validate_source_add_registration_diff(
     def non_registry_signature(tree: ast.Module) -> tuple[str, ...]:
         signature: list[str] = []
         for node in tree.body:
-            signature.append(
-                canonical_registry_assignment_signature(node)
-                if is_canonical_registry_assignment(node)
-                else ast.dump(node, include_attributes=False)
-            )
+            if is_canonical_registry_assignment(node):
+                signature.append(canonical_registry_assignment_signature(node))
+                continue
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in _SOURCE_ADD_MUTABLE_RUNTIME_FUNCTIONS
+            ):
+                skeleton = copy.deepcopy(node)
+                skeleton.body = [ast.Pass()]
+                signature.append(ast.dump(skeleton, include_attributes=False))
+                continue
+            signature.append(ast.dump(node, include_attributes=False))
         return tuple(signature)
 
     def registrations_from_source(

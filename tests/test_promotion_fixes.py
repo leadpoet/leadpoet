@@ -150,6 +150,69 @@ def _private_source_push_fixture():
     return artifact, build_doc, patch_manifest, candidate_manifest
 
 
+def _retarget_private_source_push_fixture(path: str):
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture()
+    )
+    unified_diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+    source_diff_hash = sha256_json({"unified_diff": unified_diff})
+    artifact_payload = {
+        **{key: value for key, value in artifact.items() if key != "artifact_hash"},
+        "source_diff_hash": source_diff_hash,
+        "target_files": [path],
+        "unified_diff": unified_diff,
+    }
+    artifact = {
+        **artifact_payload,
+        "artifact_hash": sha256_json(artifact_payload),
+    }
+    unhashed_annotations = {
+        "conditional_validation_policy",
+        "loop_dev_score",
+        "loop_dev_score_version",
+        "loop_direction_plan_hash",
+        "loop_node_id",
+        "plan_alignment",
+        "selected_path_id",
+        "stale_parent_rebase",
+    }
+    build_doc = {
+        **build_doc,
+        "source_diff_hash": source_diff_hash,
+        "source_diff_artifact_hash": artifact["artifact_hash"],
+        "changed_files": [path],
+    }
+    build_payload = {
+        key: value
+        for key, value in build_doc.items()
+        if key != "build_doc_hash" and key not in unhashed_annotations
+    }
+    build_doc["build_doc_hash"] = sha256_json(build_payload)
+    patch_payload = {
+        **{
+            key: value
+            for key, value in patch_manifest.items()
+            if key != "manifest_hash"
+        },
+        "patch_payload_hash": source_diff_hash,
+        "candidate_source_diff_hash": source_diff_hash,
+        "candidate_build_doc_hash": build_doc["build_doc_hash"],
+        "patch_doc": {"target_files": [path]},
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+    return artifact, build_doc, patch_manifest, candidate_manifest
+
+
 def test_private_source_push_verifies_artifact_before_git_and_pushes_exact_diff(
     tmp_path, monkeypatch
 ):
@@ -176,6 +239,11 @@ def test_private_source_push_verifies_artifact_before_git_and_pushes_exact_diff(
         return original_run_command(cmd, **kwargs)
 
     monkeypatch.setattr(promotion, "_run_command", run_command)
+    monkeypatch.setattr(
+        promotion,
+        "_verify_promoted_source_tree_contract",
+        lambda _source_root, **_kwargs: {},
+    )
     result = promotion._push_candidate_source_diff_to_repo(
         repo_url=str(remote),
         branch_name="main",
@@ -306,6 +374,11 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
         return original_run_command(cmd, **kwargs)
 
     monkeypatch.setattr(promotion, "_run_command", run_command)
+    monkeypatch.setattr(
+        promotion,
+        "_verify_promoted_source_tree_contract",
+        lambda _source_root, **_kwargs: {},
+    )
     result = promotion._push_candidate_source_diff_to_repo(
         repo_url=str(remote),
         branch_name="main",
@@ -367,6 +440,136 @@ def test_private_source_push_rejects_tampered_s3_body_before_git(
     assert calls == [
         ("aws", "s3", "cp", build_doc["source_diff_artifact_uri"], "-")
     ]
+
+
+def test_private_source_push_rejects_pipeline_spine_before_git(monkeypatch):
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _retarget_private_source_push_fixture("sourcing_model/orchestrator.py")
+    )
+    calls = []
+
+    def run_command(cmd, **_kwargs):
+        calls.append(tuple(cmd))
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        raise AssertionError("Git must not run for an immutable pipeline edit")
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "code_edit_immutable_sourcing_pipeline_path:"
+            "sourcing_model/orchestrator.py"
+        ),
+    ):
+        promotion._push_candidate_source_diff_to_repo(
+            repo_url="unused",
+            branch_name="main",
+            active_git_commit_sha="",
+            candidate_id="candidate:pipeline-edit",
+            score_bundle_id="bundle:pipeline-edit",
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+            candidate_model_manifest_doc=candidate_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+            expected_source_diff_hash=artifact["source_diff_hash"],
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+    assert calls == [
+        ("aws", "s3", "cp", build_doc["source_diff_artifact_uri"], "-")
+    ]
+
+
+def test_private_source_push_rechecks_applied_tree_before_commit(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=source)
+    _git(["config", "user.name", "Fixture"], cwd=source)
+    _git(["config", "user.email", "fixture@example.test"], cwd=source)
+    (source / "sourcing_model.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(["add", "sourcing_model.py"], cwd=source)
+    _git(["commit", "-q", "-m", "root"], cwd=source)
+    active_sha = _git(["rev-parse", "HEAD"], cwd=source)
+    remote = tmp_path / "remote.git"
+    _git(["clone", "-q", "--bare", str(source), str(remote)])
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture()
+    )
+    original_run_command = promotion._run_command
+
+    def run_command(cmd, **kwargs):
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        return original_run_command(cmd, **kwargs)
+
+    contract_checks = 0
+
+    def reject_tree(_source_root, **_kwargs):
+        nonlocal contract_checks
+        contract_checks += 1
+        if contract_checks > 1:
+            raise RuntimeError(
+                "promoted sourcing contract violation: pipeline drift"
+            )
+        return {}
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    monkeypatch.setattr(
+        promotion,
+        "_verify_promoted_source_tree_contract",
+        reject_tree,
+    )
+    with pytest.raises(RuntimeError, match="promoted sourcing contract violation"):
+        promotion._push_candidate_source_diff_to_repo(
+            repo_url=str(remote),
+            branch_name="main",
+            active_git_commit_sha=active_sha,
+            candidate_id="candidate:contract-recheck",
+            score_bundle_id="bundle:contract-recheck",
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+            candidate_model_manifest_doc=candidate_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+            expected_source_diff_hash=artifact["source_diff_hash"],
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+    assert _git(
+        ["--git-dir", str(remote), "show", "main:sourcing_model.py"]
+    ) == "VALUE = 1"
+    assert contract_checks == 2
+
+
+def test_pipeline_structure_commitment_matches_measured_parent_and_candidate():
+    parent = {
+        "schema_version": "leadpoet.sourcing_pipeline_structure.v1",
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v13",
+        "document_hash": "sha256:" + "1" * 64,
+    }
+    candidate = {
+        **parent,
+        "document_hash": "sha256:" + "2" * 64,
+    }
+    commitment = {
+        "schema_version": parent["schema_version"],
+        "contract_id": parent["contract_id"],
+        "parent_hash": parent["document_hash"],
+        "candidate_hash": candidate["document_hash"],
+    }
+
+    assert promotion._pipeline_structure_commitment_errors(
+        commitment,
+        parent=parent,
+        candidate=candidate,
+    ) == []
+    assert promotion._pipeline_structure_commitment_errors(
+        {**commitment, "candidate_hash": "sha256:" + "3" * 64},
+        parent=parent,
+        candidate=candidate,
+    ) == ["candidate pipeline structure commitment differs"]
 
 
 def test_private_source_push_rejects_hash_consistent_mode_change_before_git(

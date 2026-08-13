@@ -112,6 +112,29 @@ DEFAULT_ALLOWED_EXACT_PATHS = (
     "research_lab_adapter.py",
 )
 DEFAULT_ALLOWED_SUFFIXES = (".py", ".json", ".yaml", ".yml", ".toml", ".txt", ".md")
+
+# The loop may improve stage-local routing policy, prompts, provider/tool
+# implementations, and approved SOURCE_ADD registrations.  It must not edit
+# the files that define sourcing coordination, its public handoffs, or
+# the parity/verification boundary used to prove those handoffs.  Keep this an
+# exact-path contract: broad directory bans would also block the intended
+# routing and tool work.
+IMMUTABLE_SOURCING_PIPELINE_PATHS = frozenset(
+    {
+        "research_lab_adapter.py",
+        "sourcing_model/__init__.py",
+        "sourcing_model/consumer_contract.json",
+        "sourcing_model/consumer_parity.py",
+        "sourcing_model/consumer_parity_fixtures.json",
+        "sourcing_model/contact_verification.py",
+        "sourcing_model/contact_verification_contract_v1.json",
+        "sourcing_model/core.py",
+        "sourcing_model/orchestrator.py",
+        "sourcing_model/routing/__init__.py",
+        "sourcing_model/routing/compiler.py",
+        "sourcing_model/routing/contracts.py",
+    }
+)
 LOOP_DIRECTION_ALLOWED_LANES = (
     "icp_normalization",
     "query_construction",
@@ -451,6 +474,7 @@ def build_loop_direction_planner_messages(
         "- If the ticket names a concrete file/path/function that is not present in runtime_source_index, do not invent it or silently translate it. Return no_new_safe_path=true and list only the exact missing path/identifier in unresolved_references so the gateway can perform one bounded clarification pass.\n"
         "- A provider endpoint or text model absent from source inventory is viable only when approved_provider_capabilities explicitly permits its provider family/policy and runtime_source_index shows an existing editable provider module.\n"
         "- Capability expansion may edit that existing provider module only; never introduce a new host, credential/env reference, dependency, or network client.\n"
+        "- The sourcing pipeline topology is immutable. Never edit research_lab_adapter.py, sourcing_model/core.py, sourcing_model/orchestrator.py, routing/compiler.py, routing/contracts.py, package routing exports, consumer/contact verification contract and parity files, or the compile_*_route handoff wrapper bodies in routing/defaults.py and routing/runtime.py. Improve only stage-local prompts, runtime/default routing policy, approved tool registrations, or tool implementations.\n"
         "- candidate_edit_constraints is binding. Never require a new file. If it reports no editable test files, use validation_mode=runtime_checks and do not require adding tests.\n"
         "- success_criteria must describe observable behavior and existing validation, not repository work such as creating a test file.\n"
         "- Return exactly Context JSON required_root_branch_count independently safe, source-feasible ranked paths whenever that many genuinely distinct mechanisms exist. Return fewer only when another safe independent mechanism does not exist; never duplicate or paraphrase one path to fill the count.\n"
@@ -770,6 +794,11 @@ def build_code_edit_auto_research_messages(
         "- copying private provider aliases, endpoint names, hosts, or model IDs into redacted_summary or other public-facing prose; describe the mechanism generically\n"
         "- subprocess/shell execution additions\n"
         "- hidden ICP access, raw judge prompts, raw model responses, secrets, or key handling changes\n\n"
+        "Immutable pipeline boundary:\n"
+        "- Do not edit the adapter, core, orchestrator, routing compiler/contracts/exports, consumer parity, or contact-verification boundary files.\n"
+        "- Do not add, remove, merge, bypass, reorder, or newly connect sourcing stages. Keep each router bound to its current stage and preserve the existing callers and handoffs, including stages that are evaluated independently.\n"
+        "- The compile_*_route handoff wrapper bodies in routing/defaults.py and routing/runtime.py are immutable. Put selection, ranking, and fallback improvements in the existing runtime/default policy surfaces.\n"
+        "- Allowed work is inside an existing stage: prompts, selection/ranking/fallback policy, approved tool registration, or tool implementation.\n\n"
         "Diff requirements:\n"
         "- Produce a small git unified diff that applies to the active runtime source extracted from the current ECR image.\n"
         "- The unified_diff string must begin with 'diff --git a/<path> b/<path>'.\n"
@@ -2409,6 +2438,7 @@ def validate_code_edit_draft(
         errors.append(
             f"code_edit_too_many_target_files:{len(all_paths)}>{int(max_target_files)}"
         )
+    errors.extend(sourcing_pipeline_guard_errors(all_paths))
     for path in all_paths:
         errors.extend(_validate_repo_path(
             path,
@@ -2425,6 +2455,21 @@ def validate_code_edit_draft(
     if errors:
         raise ValueError("; ".join(errors))
     return []
+
+
+def sourcing_pipeline_guard_errors(paths: Sequence[str]) -> list[str]:
+    """Reject edits to the immutable sourcing orchestration spine.
+
+    The caller supplies paths derived from both the signed target-file list and
+    the unified diff.  Exact path matching leaves stage-local routing policy,
+    prompts, tools, and the separately validated SOURCE_ADD registry mutable.
+    """
+
+    return [
+        f"code_edit_immutable_sourcing_pipeline_path:{path}"
+        for path in sorted(set(str(item or "") for item in paths))
+        if path in IMMUTABLE_SOURCING_PIPELINE_PATHS
+    ]
 
 
 def code_edit_candidate_manifest(

@@ -108,6 +108,21 @@ def test_git_tree_source_authority_boundaries_are_protected():
     assert "_push_candidate_source_diff_to_repo" in PROTECTED_SYMBOLS[
         "gateway/research_lab/promotion.py"
     ]
+    assert {
+        "IMMUTABLE_SOURCING_PIPELINE_PATHS",
+        "sourcing_pipeline_guard_errors",
+    } <= set(PROTECTED_SYMBOLS["research_lab/code_editing.py"])
+    assert {
+        "_ROUTER_STAGE_BINDINGS",
+        "_DEFAULT_ROUTER_STAGE_BINDINGS",
+        "_router_stage_binding_violations",
+        "verify_sourcing_pipeline_structure",
+    } <= set(
+        PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]
+    )
+    assert "_sourcing_pipeline_structure_gate" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/code_build.py"
+    ]
     assert "_load_candidate_source_diff" in PROTECTED_SYMBOLS[
         "gateway/research_lab/scoring_worker.py"
     ]

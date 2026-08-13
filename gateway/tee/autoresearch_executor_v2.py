@@ -21,6 +21,7 @@ import threading
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from gateway.research_lab.code_build import (
+    CodeEditBuildError,
     CodeEditBuildResult,
     CodeEditPatchApplyError,
     CodeEditCandidateBuilder,
@@ -29,6 +30,7 @@ from gateway.research_lab.code_build import (
     _editable_runtime_files,
     _initialize_temporary_git_repo,
     _run_git_apply,
+    _sourcing_pipeline_structure_gate,
     _source_file_previews,
     _top_level_paths,
     _prepare_parent_image_workspace,
@@ -1371,11 +1373,24 @@ class _HostCandidateBuilder:
             )
             diff_path = Path(tmp) / "candidate.diff"
             diff_path.write_text(draft.unified_diff, encoding="utf-8")
+            try:
+                parent_pipeline_structure = _sourcing_pipeline_structure_gate(
+                    measured_repo
+                )
+            except CodeEditBuildError as exc:
+                raise AutoresearchExecutorV2Error(str(exc)) from exc
             _run(
                 ["git", "apply", "--recount", str(diff_path)],
                 cwd=measured_repo,
                 timeout_seconds=120,
             )
+            try:
+                _sourcing_pipeline_structure_gate(
+                    measured_repo,
+                    expected=parent_pipeline_structure,
+                )
+            except CodeEditBuildError as exc:
+                raise AutoresearchExecutorV2Error(str(exc)) from exc
             expected_candidate_artifact_hash = compute_private_source_tree_hash(
                 measured_repo
             )

@@ -31,6 +31,9 @@ from research_lab.sourcing_model_contract_check import (
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
     reviewed_consumer_snapshots,
+    sourcing_pipeline_preservation_errors,
+    sourcing_pipeline_structure_document,
+    verify_sourcing_pipeline_structure,
     verify_source_tree_contract,
 )
 
@@ -195,6 +198,13 @@ def _conforming_tree(
             return None
     """)
     _write(root, "sourcing_model/routing/defaults.py", """
+        from .compiler import compile_route
+        from .contracts import (
+            RouteContext,
+            STAGE_CANDIDATE_ACQUISITION,
+            STAGE_INTENT_EVIDENCE,
+        )
+
         DEFAULT_CATALOG_VERSION = "sourcing-model-tools:v2"
         DEFAULT_POLICY_VERSION = "sourcing-model-routing:v2"
 
@@ -207,7 +217,11 @@ def _conforming_tree(
             remaining_results, credit_cap, cohort="control",
             catalog=None, policy=None
         ):
-            return None
+            return compile_route(
+                None,
+                None,
+                RouteContext(stage=STAGE_CANDIDATE_ACQUISITION),
+            )
 
         def compile_intent_route(
             category, *, existing_evidence=False, available_tools=None,
@@ -215,7 +229,11 @@ def _conforming_tree(
             remaining_results=1, credit_cap=8, cohort="control",
             catalog=None, policy=None
         ):
-            return None
+            return compile_route(
+                None,
+                None,
+                RouteContext(stage=STAGE_INTENT_EVIDENCE),
+            )
 
         def default_catalog(
             availability=None, *, state_overrides=None, additional_tools=(),
@@ -247,6 +265,13 @@ def _conforming_tree(
     """)
     _write(root, "sourcing_model/routing/policy.py", "POLICY = True\n")
     _write(root, "sourcing_model/routing/runtime.py", """
+        from .compiler import compile_route
+        from .contracts import (
+            RouteContext,
+            STAGE_CANDIDATE_ACQUISITION,
+            STAGE_INTENT_EVIDENCE,
+        )
+
         RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v__RUNTIME_VERSION__"
         RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v__RUNTIME_VERSION__"
 
@@ -276,14 +301,22 @@ def _conforming_tree(
             remaining_calls, remaining_results, credit_cap, cohort="control",
             catalog=None, policy=None
         ):
-            return None
+            return compile_route(
+                None,
+                None,
+                RouteContext(stage=STAGE_CANDIDATE_ACQUISITION),
+            )
 
         def compile_intent_evidence_route(
             category, *, existing_evidence, available_tools,
             remaining_seconds, remaining_calls, credit_cap, cohort="control",
             catalog=None, policy=None
         ):
-            return None
+            return compile_route(
+                None,
+                None,
+                RouteContext(stage=STAGE_INTENT_EVIDENCE),
+            )
 
         def candidate_lane_for_tool(tool_id):
             return None
@@ -776,6 +809,131 @@ def test_annotated_constant_assignment_conforms(tmp_path: Path) -> None:
     assert verify_source_tree_contract(tmp_path) == []
 
 
+def test_router_stage_binding_drift_fails_closed(tmp_path: Path) -> None:
+    _conforming_tree(tmp_path)
+    runtime = tmp_path / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert any(
+        item.startswith(
+            "router stage binding drift "
+            "sourcing_model/routing/runtime.py:"
+            "compile_candidate_acquisition_route"
+        )
+        for item in violations
+    )
+
+
+def test_default_router_stage_binding_drift_fails_closed(tmp_path: Path) -> None:
+    _conforming_tree(tmp_path)
+    defaults = tmp_path / "sourcing_model" / "routing" / "defaults.py"
+    defaults.write_text(
+        defaults.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert any(
+        item.startswith(
+            "router stage binding drift "
+            "sourcing_model/routing/defaults.py:compile_candidate_route"
+        )
+        for item in violations
+    )
+
+
+def test_router_compiler_rebinding_fails_closed(tmp_path: Path) -> None:
+    _conforming_tree(tmp_path)
+    runtime = tmp_path / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8")
+        + "\ncompile_route = unreviewed_compile_route\n",
+        encoding="utf-8",
+    )
+
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert (
+        "router compiler binding drift sourcing_model/routing/runtime.py"
+        in violations
+    )
+    assert verify_sourcing_pipeline_structure(tmp_path) == [
+        "router compiler binding drift sourcing_model/routing/runtime.py"
+    ]
+
+
+def test_router_handoff_wrapper_body_is_immutable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext("
+            "stage=STAGE_CANDIDATE_ACQUISITION, changed=True)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert errors == [
+        "immutable pipeline router changed: "
+        "sourcing_model/routing/runtime.py:"
+        "compile_candidate_acquisition_route"
+    ]
+
+
+def test_runtime_policy_body_remains_editable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            "def runtime_policy():\n    return None",
+            "def runtime_policy():\n    return {'priority': 20}",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    defaults = candidate / "sourcing_model" / "routing" / "defaults.py"
+    defaults.write_text(
+        defaults.read_text(encoding="utf-8").replace(
+            "def default_policy():\n    return None",
+            "def default_policy():\n    return {'priority': 20}",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
 def test_non_utf8_coding_header_is_violation_not_crash(tmp_path: Path) -> None:
     """A legal PEP 263 latin-1 module must parse like the interpreter parses
     it; a truly undecodable file must surface as a violation — never as an
@@ -1035,6 +1193,59 @@ def test_build_gate_disabled_and_enforce_fails_closed(tmp_path: Path, monkeypatc
     monkeypatch.setattr(check_mod, "verify_source_tree_contract", _boom)
     with pytest.raises(cb.CodeEditPrivateTestError, match="failed internally"):
         cb._sourcing_contract_gate(tmp_path)
+
+
+def test_pipeline_structure_gate_is_not_disabled_by_contract_rollout_flag(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import gateway.research_lab.code_build as cb
+
+    monkeypatch.setenv("RESEARCH_LAB_SOURCING_CONTRACT_CHECK", "disabled")
+    _conforming_tree(tmp_path)
+    runtime = tmp_path / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        cb.CodeEditPrivateTestError,
+        match="sourcing pipeline structure violation",
+    ):
+        cb._sourcing_pipeline_structure_gate(tmp_path)
+
+
+def test_pipeline_structure_gate_rejects_same_stage_wrapper_body_change(
+    tmp_path: Path,
+) -> None:
+    import gateway.research_lab.code_build as cb
+
+    _conforming_tree(tmp_path)
+    parent_structure = cb._sourcing_pipeline_structure_gate(tmp_path)
+    runtime = tmp_path / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext("
+            "stage=STAGE_CANDIDATE_ACQUISITION, changed=True)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        cb.CodeEditPrivateTestError,
+        match="immutable pipeline router changed",
+    ):
+        cb._sourcing_pipeline_structure_gate(
+            tmp_path,
+            expected=parent_structure,
+        )
 
 
 # ---------------------------------------------------------------------------

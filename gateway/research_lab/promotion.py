@@ -63,6 +63,7 @@ from research_lab.eval.promotion_metric import (
     promotion_gate_decision,
     promotion_improvement_metric,
 )
+from research_lab.code_editing import sourcing_pipeline_guard_errors
 
 
 logger = logging.getLogger(__name__)
@@ -4605,8 +4606,18 @@ def _push_candidate_source_diff_to_repo(
     target_files = list(source_diff_doc["target_files"])
     if _safe_target_files(target_files) != target_files:
         raise RuntimeError("candidate source diff artifact has unsafe target files")
+    pipeline_errors = sourcing_pipeline_guard_errors(target_files)
+    if pipeline_errors:
+        raise RuntimeError("; ".join(pipeline_errors))
     source_diff_hash = str(source_diff_doc["source_diff_hash"])
     candidate_manifest_sha = str(candidate_model_manifest_doc.get("git_commit_sha") or "")
+    pipeline_structure_commitment = candidate_build_doc.get(
+        "pipeline_structure"
+    )
+    if pipeline_structure_commitment is not None and not isinstance(
+        pipeline_structure_commitment, Mapping
+    ):
+        raise RuntimeError("candidate pipeline structure commitment is invalid")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="research-lab-private-source-push-"))
     try:
@@ -4637,6 +4648,9 @@ def _push_candidate_source_diff_to_repo(
                 )
             else:
                 raise RepoHeadMismatchError(head=head, expected_sha=active_sha)
+        current_pipeline_structure = _verify_promoted_source_tree_contract(
+            worktree
+        )
 
         patch_path = tmp_dir / "candidate.patch"
         patch_text = unified_diff
@@ -4661,6 +4675,36 @@ def _push_candidate_source_diff_to_repo(
                 timeout_seconds=30,
             )
             if reverse.returncode == 0:
+                _run_command(
+                    ["git", "apply", "--reverse", str(patch_path)],
+                    cwd=worktree,
+                    timeout_seconds=30,
+                )
+                reversed_pipeline_structure = (
+                    _verify_promoted_source_tree_contract(worktree)
+                )
+                try:
+                    from research_lab.sourcing_model_contract_check import (
+                        sourcing_pipeline_preservation_errors,
+                    )
+
+                    preservation_errors = sourcing_pipeline_preservation_errors(
+                        reversed_pipeline_structure,
+                        current_pipeline_structure,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- promotion fails closed
+                    raise RuntimeError(
+                        "promoted sourcing pipeline comparison failed internally"
+                    ) from exc
+                if preservation_errors:
+                    raise RuntimeError("; ".join(preservation_errors[:8]))
+                commitment_errors = _pipeline_structure_commitment_errors(
+                    pipeline_structure_commitment,
+                    parent=reversed_pipeline_structure,
+                    candidate=current_pipeline_structure,
+                )
+                if commitment_errors:
+                    raise RuntimeError("; ".join(commitment_errors))
                 return {
                     "status": "already_applied",
                     "git_commit_sha": head,
@@ -4685,6 +4729,17 @@ def _push_candidate_source_diff_to_repo(
             raise RuntimeError(
                 "candidate source diff changed files differ from committed targets"
             )
+        candidate_pipeline_structure = _verify_promoted_source_tree_contract(
+            worktree,
+            expected=current_pipeline_structure,
+        )
+        commitment_errors = _pipeline_structure_commitment_errors(
+            pipeline_structure_commitment,
+            parent=current_pipeline_structure,
+            candidate=candidate_pipeline_structure,
+        )
+        if commitment_errors:
+            raise RuntimeError("; ".join(commitment_errors))
         status = _run_command(["git", "status", "--porcelain"], cwd=worktree, timeout_seconds=10)
         if not status.strip():
             return {
@@ -4739,6 +4794,69 @@ def _push_candidate_source_diff_to_repo(
         }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _verify_promoted_source_tree_contract(
+    source_root: Path,
+    *,
+    expected: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Recheck the applied private source tree before any commit or push."""
+
+    try:
+        from research_lab.sourcing_model_contract_check import (
+            sourcing_pipeline_preservation_errors,
+            sourcing_pipeline_structure_document,
+            verify_source_tree_contract,
+        )
+
+        violations = verify_source_tree_contract(source_root)
+        structure = sourcing_pipeline_structure_document(source_root)
+        if expected is not None:
+            violations.extend(
+                sourcing_pipeline_preservation_errors(expected, structure)
+            )
+    except ValueError as exc:
+        raise RuntimeError(
+            "promoted sourcing contract violation: " + str(exc)[:800]
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 -- promotion must fail closed
+        raise RuntimeError(
+            "promoted sourcing contract verification failed internally"
+        ) from exc
+    if violations:
+        raise RuntimeError(
+            "promoted sourcing contract violation: " + "; ".join(violations[:8])
+        )
+    return structure
+
+
+def _pipeline_structure_commitment_errors(
+    commitment: Any,
+    *,
+    parent: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> list[str]:
+    """Bind promotion measurements to new build documents when available."""
+
+    if commitment is None:
+        return []
+    if not isinstance(commitment, Mapping) or set(commitment) != {
+        "schema_version",
+        "contract_id",
+        "parent_hash",
+        "candidate_hash",
+    }:
+        return ["candidate pipeline structure commitment is invalid"]
+    expected = {
+        "schema_version": parent.get("schema_version"),
+        "contract_id": parent.get("contract_id"),
+        "parent_hash": parent.get("document_hash"),
+        "candidate_hash": candidate.get("document_hash"),
+    }
+    if dict(commitment) != expected:
+        return ["candidate pipeline structure commitment differs"]
+    return []
 
 
 def _normalize_unified_diff_hunk_headers(unified_diff: str) -> str:

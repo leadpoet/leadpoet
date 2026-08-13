@@ -833,11 +833,24 @@ class CodeEditCandidateBuilder:
             diff_path = tmp_dir / "candidate.diff"
             diff_path.write_text(draft.unified_diff, encoding="utf-8")
             try:
+                parent_pipeline_structure = _sourcing_pipeline_structure_gate(
+                    repo_dir
+                )
                 _run_git_apply(
                     diff_path,
                     cwd=repo_dir,
                     timeout_seconds=120,
                     check=True,
+                )
+                _run_git_apply(
+                    diff_path,
+                    cwd=repo_dir,
+                    timeout_seconds=120,
+                    check=False,
+                )
+                _sourcing_pipeline_structure_gate(
+                    repo_dir,
+                    expected=parent_pipeline_structure,
                 )
             except CodeEditBuildError as exc:
                 raise CodeEditPatchApplyError(
@@ -934,6 +947,9 @@ class CodeEditCandidateBuilder:
             draft_path.write_text(json.dumps(draft.to_dict(), sort_keys=True), encoding="utf-8")
             parent_manifest_path.write_text(json.dumps(parent_artifact.to_dict(), sort_keys=True), encoding="utf-8")
             try:
+                parent_pipeline_structure = _sourcing_pipeline_structure_gate(
+                    repo_dir
+                )
                 _run_git_apply(
                     diff_path,
                     cwd=repo_dir,
@@ -957,6 +973,10 @@ class CodeEditCandidateBuilder:
             if not changed_files:
                 raise CodeEditEmptyOrNoopPatchError("code edit produced no repository changes")
             try:
+                candidate_pipeline_structure = _sourcing_pipeline_structure_gate(
+                    repo_dir,
+                    expected=parent_pipeline_structure,
+                )
                 _py_compile_changed_files(repo_dir, changed_files)
                 _sourcing_contract_gate(repo_dir)
                 _run_shell(
@@ -1066,6 +1086,16 @@ class CodeEditCandidateBuilder:
                 "test_command_hash": canonical_hash({"cmd": self.config.private_test_cmd}),
                 "build_command_hash": canonical_hash({"cmd": self.config.private_build_cmd}),
                 "build_validation": "passed",
+                "pipeline_structure": {
+                    "schema_version": candidate_pipeline_structure[
+                        "schema_version"
+                    ],
+                    "contract_id": candidate_pipeline_structure["contract_id"],
+                    "parent_hash": parent_pipeline_structure["document_hash"],
+                    "candidate_hash": candidate_pipeline_structure[
+                        "document_hash"
+                    ],
+                },
             }
             build_doc.update(
                 _write_private_code_edit_diff_artifact(
@@ -2399,6 +2429,41 @@ def _sourcing_contract_gate(repo_dir: Path) -> None:
     raise CodeEditPrivateTestError(
         "sourcing wrapper contract violation: " + "; ".join(violations[:8])
     )
+
+
+def _sourcing_pipeline_structure_gate(
+    repo_dir: Path,
+    *,
+    expected: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Enforce router stage ownership and immutable handoff wrappers."""
+
+    try:
+        from research_lab.sourcing_model_contract_check import (
+            sourcing_pipeline_preservation_errors,
+            sourcing_pipeline_structure_document,
+        )
+
+        document = sourcing_pipeline_structure_document(repo_dir)
+        violations = (
+            sourcing_pipeline_preservation_errors(expected, document)
+            if expected is not None
+            else []
+        )
+    except ValueError as exc:
+        raise CodeEditPrivateTestError(
+            "sourcing pipeline structure violation: " + str(exc)[:800]
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 -- structure checks fail closed
+        raise CodeEditPrivateTestError(
+            "sourcing pipeline structure verification failed internally"
+        ) from exc
+    if violations:
+        raise CodeEditPrivateTestError(
+            "sourcing pipeline structure violation: "
+            + "; ".join(violations[:8])
+        )
+    return document
 
 
 def _run_git_apply(

@@ -124,6 +124,22 @@ REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
     },
 )
 
+# These wrappers may change ranking, fallback, and tool selection inside their
+# existing stage.  They may not redirect a plan into another stage.  The
+# projection is checked from source AST and does not import untrusted model
+# code.
+_ROUTER_STAGE_BINDINGS = {
+    "compile_candidate_acquisition_route": "STAGE_CANDIDATE_ACQUISITION",
+    "compile_candidate_enrichment_route": "STAGE_CANDIDATE_ENRICHMENT",
+    "compile_intent_evidence_route": "STAGE_INTENT_EVIDENCE",
+    "compile_contact_acquisition_route": "STAGE_CONTACT_ACQUISITION",
+}
+_DEFAULT_ROUTER_STAGE_BINDINGS = {
+    "compile_candidate_route": "STAGE_CANDIDATE_ACQUISITION",
+    "compile_intent_route": "STAGE_INTENT_EVIDENCE",
+}
+_PIPELINE_STRUCTURE_SCHEMA_VERSION = "leadpoet.sourcing_pipeline_structure.v1"
+
 
 def load_wrapper_contract(path: Path | None = None) -> Dict[str, Any]:
     """Load and shape-check the reviewed model-owned contract snapshot."""
@@ -467,6 +483,284 @@ def _same_literal(actual: Any, expected: Any) -> bool:
     return type(actual) is type(expected) and actual == expected
 
 
+def _call_name(node: ast.Call) -> str:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return ""
+
+
+def _has_single_unaliased_relative_import(
+    tree: ast.Module,
+    *,
+    module: str,
+    name: str,
+) -> bool:
+    bindings = []
+    valid = []
+    for node in tree.body:
+        if name in _module_scope_bindings(node):
+            bindings.append(node)
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 1
+            and node.module == module
+            and any(
+                alias.name == name and alias.asname is None
+                for alias in node.names
+            )
+        ):
+            valid.append(node)
+    return len(bindings) == 1 and len(valid) == 1 and bindings == valid
+
+
+def _function_rebinds(function: ast.AST, names: set[str]) -> bool:
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and node.id in names and isinstance(
+            node.ctx, (ast.Store, ast.Del)
+        ):
+            return True
+        if isinstance(node, ast.arg) and node.arg in names:
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node is not function and node.name in names:
+                return True
+        if isinstance(node, ast.ExceptHandler) and node.name in names:
+            return True
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if (alias.asname or alias.name.split(".", 1)[0]) in names:
+                    return True
+    return False
+
+
+def _compile_route_context(call: ast.Call) -> ast.Call | None:
+    context: ast.AST | None = call.args[2] if len(call.args) >= 3 else None
+    keyword_context = [
+        keyword.value for keyword in call.keywords if keyword.arg == "context"
+    ]
+    if keyword_context:
+        if context is not None or len(keyword_context) != 1:
+            return None
+        context = keyword_context[0]
+    if (
+        not isinstance(context, ast.Call)
+        or _call_name(context) != "RouteContext"
+    ):
+        return None
+    return context
+
+
+def _router_stage_binding_violations(
+    tree: ast.Module,
+    *,
+    relative_path: str,
+    expected_stage_bindings: Mapping[str, str],
+    required_functions: set[str],
+) -> List[str]:
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    violations: List[str] = []
+    if not _has_single_unaliased_relative_import(
+        tree, module="compiler", name="compile_route"
+    ) or not _has_single_unaliased_relative_import(
+        tree, module="contracts", name="RouteContext"
+    ):
+        violations.append(
+            f"router compiler binding drift {relative_path}"
+        )
+    expected_bindings = {
+        name: stage
+        for name, stage in expected_stage_bindings.items()
+        if name in required_functions
+    }
+    for function_name, expected_stage in expected_bindings.items():
+        function = functions.get(function_name)
+        if function is None:
+            continue
+        if not _has_single_unaliased_relative_import(
+            tree, module="contracts", name=expected_stage
+        ):
+            violations.append(
+                "router stage constant binding drift "
+                f"{relative_path}:{function_name}"
+            )
+            continue
+        guarded_names = {"compile_route", "RouteContext", expected_stage}
+        if _function_rebinds(function, guarded_names):
+            violations.append(
+                "router stage binding drift "
+                f"{relative_path}:{function_name}: "
+                f"expected {expected_stage}"
+            )
+            continue
+        compile_route_calls: list[ast.Call] = []
+        cross_stage_calls = False
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = _call_name(node)
+            if callee == "compile_route":
+                compile_route_calls.append(node)
+            if callee in expected_bindings and callee != function_name:
+                cross_stage_calls = True
+        observed_stages: list[str] = []
+        for call in compile_route_calls:
+            context = _compile_route_context(call)
+            if context is None:
+                observed_stages.append("<dynamic>")
+                continue
+            stage_keywords = [
+                keyword.value
+                for keyword in context.keywords
+                if keyword.arg == "stage"
+            ]
+            if len(stage_keywords) != 1:
+                observed_stages.append("<dynamic>")
+                continue
+            value = stage_keywords[0]
+            observed_stages.append(
+                value.id if isinstance(value, ast.Name) else "<dynamic>"
+            )
+        if (
+            not compile_route_calls
+            or cross_stage_calls
+            or any(stage != expected_stage for stage in observed_stages)
+        ):
+            violations.append(
+                "router stage binding drift "
+                f"{relative_path}:{function_name}: "
+                f"expected {expected_stage}"
+            )
+    return violations
+
+
+def verify_sourcing_pipeline_structure(root: Path) -> List[str]:
+    """Validate immutable router-to-stage bindings for a reviewed model tree."""
+
+    root = Path(root)
+    snapshot = resolve_reviewed_consumer_snapshot(root)
+    if snapshot is None:
+        return ["sourcing pipeline contract/parity pair is not reviewed"]
+    violations: List[str] = []
+    for relative_path, stage_bindings in (
+        ("sourcing_model/routing/defaults.py", _DEFAULT_ROUTER_STAGE_BINDINGS),
+        ("sourcing_model/routing/runtime.py", _ROUTER_STAGE_BINDINGS),
+    ):
+        try:
+            tree = ast.parse((root / relative_path).read_bytes())
+        except SyntaxError as exc:
+            violations.append(
+                f"unparseable pipeline module {relative_path}: "
+                f"{exc.msg} (line {exc.lineno})"
+            )
+            continue
+        except (ValueError, UnicodeDecodeError, OSError) as exc:
+            violations.append(
+                f"unreadable pipeline module {relative_path}: "
+                f"{type(exc).__name__}"
+            )
+            continue
+        required_functions = set(
+            snapshot["contract"].get("functions", {}).get(relative_path, {})
+        )
+        violations.extend(
+            _router_stage_binding_violations(
+                tree,
+                relative_path=relative_path,
+                expected_stage_bindings=stage_bindings,
+                required_functions=required_functions,
+            )
+        )
+    return violations
+
+
+def sourcing_pipeline_structure_document(root: Path) -> Dict[str, Any]:
+    """Commit the reviewed router handoff wrappers without executing source."""
+
+    root = Path(root)
+    snapshot = resolve_reviewed_consumer_snapshot(root)
+    if snapshot is None:
+        raise ValueError("sourcing pipeline contract/parity pair is not reviewed")
+    violations = verify_sourcing_pipeline_structure(root)
+    if violations:
+        raise ValueError("; ".join(violations))
+    protected_hashes: Dict[str, str] = {}
+    for relative_path, stage_bindings in (
+        ("sourcing_model/routing/defaults.py", _DEFAULT_ROUTER_STAGE_BINDINGS),
+        ("sourcing_model/routing/runtime.py", _ROUTER_STAGE_BINDINGS),
+    ):
+        tree = ast.parse((root / relative_path).read_bytes())
+        functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        required_functions = set(
+            snapshot["contract"].get("functions", {}).get(relative_path, {})
+        )
+        for name in sorted(set(stage_bindings) & required_functions):
+            node = functions.get(name)
+            if node is None:
+                raise ValueError(f"missing pipeline router function: {name}")
+            encoded = ast.dump(
+                node,
+                annotate_fields=True,
+                include_attributes=False,
+            ).encode("utf-8")
+            protected_hashes[
+                f"{relative_path}:{name}"
+            ] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    body = {
+        "schema_version": _PIPELINE_STRUCTURE_SCHEMA_VERSION,
+        "contract_id": str(snapshot["contract"]["contract_id"]),
+        "protected_symbol_hashes": protected_hashes,
+    }
+    encoded_body = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return {
+        **body,
+        "document_hash": "sha256:" + hashlib.sha256(encoded_body).hexdigest(),
+    }
+
+
+def sourcing_pipeline_preservation_errors(
+    parent: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> List[str]:
+    """Compare two independently measured pipeline structure documents."""
+
+    if parent.get("schema_version") != _PIPELINE_STRUCTURE_SCHEMA_VERSION:
+        return ["parent sourcing pipeline structure document is invalid"]
+    if candidate.get("schema_version") != _PIPELINE_STRUCTURE_SCHEMA_VERSION:
+        return ["candidate sourcing pipeline structure document is invalid"]
+    if parent.get("contract_id") != candidate.get("contract_id"):
+        return ["sourcing pipeline contract id changed"]
+    parent_hashes = parent.get("protected_symbol_hashes")
+    candidate_hashes = candidate.get("protected_symbol_hashes")
+    if not isinstance(parent_hashes, Mapping) or not isinstance(
+        candidate_hashes, Mapping
+    ):
+        return ["sourcing pipeline protected symbol document is invalid"]
+    changed = sorted(
+        set(parent_hashes) | set(candidate_hashes),
+    )
+    changed = [
+        name
+        for name in changed
+        if parent_hashes.get(name) != candidate_hashes.get(name)
+    ]
+    return [f"immutable pipeline router changed: {name}" for name in changed]
+
+
 def verify_source_tree_contract(root: Path) -> List[str]:
     """Return every contract violation for the model source tree at ``root``.
 
@@ -687,5 +981,34 @@ def verify_source_tree_contract(root: Path) -> List[str]:
                     f"{expected!r}, found "
                     f"{None if actual is missing else actual!r}"
                 )
+
+    runtime_tree = _tree("sourcing_model/routing/runtime.py")
+    if runtime_tree is not None and detected_snapshot is not None:
+        violations.extend(
+            _router_stage_binding_violations(
+                runtime_tree,
+                relative_path="sourcing_model/routing/runtime.py",
+                expected_stage_bindings=_ROUTER_STAGE_BINDINGS,
+                required_functions=set(
+                    document.get("functions", {}).get(
+                        "sourcing_model/routing/runtime.py", {}
+                    )
+                ),
+            )
+        )
+    defaults_tree = _tree("sourcing_model/routing/defaults.py")
+    if defaults_tree is not None and detected_snapshot is not None:
+        violations.extend(
+            _router_stage_binding_violations(
+                defaults_tree,
+                relative_path="sourcing_model/routing/defaults.py",
+                expected_stage_bindings=_DEFAULT_ROUTER_STAGE_BINDINGS,
+                required_functions=set(
+                    document.get("functions", {}).get(
+                        "sourcing_model/routing/defaults.py", {}
+                    )
+                ),
+            )
+        )
 
     return violations

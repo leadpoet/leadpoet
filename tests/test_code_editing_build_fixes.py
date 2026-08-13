@@ -487,6 +487,54 @@ def test_forbidden_api_and_path_remain_blocked():
         code_editing.validate_code_edit_draft(path_draft)
 
 
+@pytest.mark.parametrize(
+    "path",
+    sorted(code_editing.IMMUTABLE_SOURCING_PIPELINE_PATHS),
+)
+def test_sourcing_pipeline_spine_is_immutable(path):
+    draft = _draft(
+        target_files=(path,),
+        unified_diff=(
+            f"diff --git a/{path} b/{path}\n"
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2\n"
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"code_edit_immutable_sourcing_pipeline_path:{path}",
+    ):
+        code_editing.validate_code_edit_draft(draft)
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "sourcing_model/routing/defaults.py",
+        "sourcing_model/routing/policy.py",
+        "sourcing_model/routing/runtime.py",
+        "sourcing_model/discovery.py",
+        "sourcing_model/scrapingdog_intent.py",
+    ),
+)
+def test_stage_local_routing_prompt_and_tool_paths_remain_editable(path):
+    draft = _draft(
+        target_files=(path,),
+        unified_diff=(
+            f"diff --git a/{path} b/{path}\n"
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2\n"
+        ),
+    )
+    assert code_editing.validate_code_edit_draft(draft) == []
+
+
 def test_new_and_unread_source_paths_remain_blocked():
     builder = object.__new__(code_build.CodeEditCandidateBuilder)
     source_context = SimpleNamespace(editable_files=("sourcing_model/existing.py",))

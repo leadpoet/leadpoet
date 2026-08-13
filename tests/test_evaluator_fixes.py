@@ -551,6 +551,22 @@ def test_empty_run_with_transport_failure_raises():
         )
 
 
+def test_empty_run_can_defer_retryable_transport_failure_but_not_credit_failure():
+    private_runtime._raise_on_empty_provider_error(
+        [],
+        _stderr(TIMEOUT_LINE, PROXY_500_LINE),
+        context_label="V2 private baseline",
+        defer_retryable_errors=True,
+    )
+    with pytest.raises(PrivateModelRuntimeError):
+        private_runtime._raise_on_empty_provider_error(
+            [],
+            _stderr(TIMEOUT_LINE, EXA_402_LINE),
+            context_label="V2 private baseline",
+            defer_retryable_errors=True,
+        )
+
+
 def test_non_empty_run_never_raises_on_provider_errors():
     private_runtime._raise_on_empty_provider_error(
         [{"company_name": "Acme"}], _stderr(EXA_402_LINE), context_label="docker private model"

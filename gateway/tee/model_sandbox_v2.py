@@ -2247,11 +2247,19 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             raise ModelSandboxV2Error("model sandbox output is invalid JSON") from exc
         if operation == "run_icp":
             stderr = str(completed.stderr or "")
+            raw_input = value.get("input")
+            context = raw_input.get("context") if isinstance(raw_input, Mapping) else None
+            defer_retryable_errors = bool(
+                value.get("model_kind") == "private"
+                and isinstance(context, Mapping)
+                and context.get("mode") == "private_baseline"
+            )
             try:
                 _raise_on_empty_provider_error(
                     decoded,
                     stderr,
                     context_label="V2 model sandbox",
+                    defer_retryable_errors=defer_retryable_errors,
                 )
             except PrivateModelRuntimeError as exc:
                 raise ModelSandboxV2Error(str(exc)) from exc

@@ -1438,7 +1438,26 @@ def _provider_error_line_is_loop_ending(line: str) -> bool:
     return any(marker in lowered for marker in _PROVIDER_OUTAGE_TEXT_MARKERS)
 
 
-def _raise_on_empty_provider_error(decoded: Any, stderr: str, *, context_label: str) -> None:
+def _provider_error_line_is_terminal(line: str) -> bool:
+    """True when retrying cannot make the provider request admissible."""
+    lowered = line.lower()
+    if any(marker in lowered for marker in _PROVIDER_CREDIT_MARKERS):
+        return True
+    return any(
+        f"http error {code}" in lowered
+        or f"status={code}" in lowered
+        or f'"status":{code}' in lowered
+        for code in (401, 402, 403)
+    )
+
+
+def _raise_on_empty_provider_error(
+    decoded: Any,
+    stderr: str,
+    *,
+    context_label: str,
+    defer_retryable_errors: bool = False,
+) -> None:
     if decoded != []:
         return
     provider_error = _provider_error_text(stderr)
@@ -1447,6 +1466,19 @@ def _raise_on_empty_provider_error(decoded: Any, stderr: str, *, context_label: 
     loop_ending_lines = [
         line for line in provider_error.splitlines() if _provider_error_line_is_loop_ending(line)
     ]
+    if defer_retryable_errors and loop_ending_lines:
+        terminal_lines = [
+            line for line in loop_ending_lines if _provider_error_line_is_terminal(line)
+        ]
+        if not terminal_lines:
+            logger.warning(
+                "research_lab_private_runtime_empty_run_retryable_errors_deferred "
+                "context=%s provider_error_lines=%d",
+                context_label,
+                len(loop_ending_lines),
+            )
+            return
+        loop_ending_lines = terminal_lines
     if not loop_ending_lines:
         # Only request-shaped provider rejections (invalid model-generated
         # URLs and the like): the empty result is scored as-is instead of

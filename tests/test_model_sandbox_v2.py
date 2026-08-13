@@ -1159,7 +1159,11 @@ def test_private_baseline_builds_exact_measured_provider_evidence_tape(tmp_path)
 @pytest.mark.parametrize(
     ("provider_error", "raises"),
     (
-        ("attested transport failure: unexpected_eof", True),
+        ("attested transport failure: unexpected_eof", False),
+        ("HTTPError: HTTP Error 500: Internal Server Error; status=500", False),
+        ("HTTPError: too many requests; status=429", False),
+        ("HTTPError: HTTP Error 402: Payment Required; status=402", True),
+        ("HTTPError: HTTP Error 400: Bad Request; status=400; request quota exceeded", True),
         ("HTTPError: HTTP Error 404: Not Found; status=404", False),
     ),
 )
@@ -1235,6 +1239,58 @@ def test_runsc_model_sandbox_distinguishes_transport_outage_from_empty_result(
                 artifact_sink=lambda _artifact: None,
             )
             assert result["output"] == []
+    finally:
+        transport.restore()
+
+
+def test_runsc_candidate_model_keeps_transport_outage_terminal(tmp_path):
+    request = _request(tmp_path)
+    icp = canonicalize_private_model_icp(
+        {"industry": "Software", "intent_signal": "Hiring"}
+    )
+    request.update(
+        {
+            "model_kind": "candidate",
+            "operation": "run_icp",
+            "callable_name": "run_icp",
+            "input": {"icp": icp, "context": {"mode": "candidate"}},
+            "provider_evidence_cache_ref": icp_evidence_cache_key(icp),
+        }
+    )
+
+    def runner(command, **_kwargs):
+        if "run" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="[]",
+                stderr=(
+                    "research_lab_private_runtime_provider_error "
+                    "attested transport failure: unexpected_eof; "
+                    "url=https://api.exa.ai/search\n"
+                ),
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=runner,
+    )
+    try:
+        with pytest.raises(
+            ModelSandboxV2Error,
+            match="provider-backed sourcing failed before returning companies",
+        ):
+            sandbox.execute(
+                request,
+                job_id="candidate-job-1",
+                purpose="research_lab.candidate_model_run.v2",
+                retry_policy_hashes={"exa": "sha256:" + "1" * 64},
+                terminal_sink=lambda _attempt: None,
+                artifact_sink=lambda _artifact: None,
+            )
     finally:
         transport.restore()
 

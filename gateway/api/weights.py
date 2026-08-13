@@ -2004,6 +2004,7 @@ async def get_weight_inputs_v2(
         )
         if (
             not live_result_or_task
+            and not authorized_work
             and int(epoch_authority.get("gateway_epoch_block") or 0)
             >= WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK
         ):

@@ -8572,6 +8572,331 @@ def _exercise_measured_coordinator_raw_transport() -> dict[str, Any]:
     return evidence
 
 
+def _persistent_weight_recovery_endpoint_process_v2(
+    config: Mapping[str, Any],
+    connection: Any,
+) -> None:
+    """Run one fresh gateway process for the persistence rehearsal."""
+
+    try:
+        import asyncio
+
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        from gateway.api import weights as weights_api
+        from gateway.research_lab import (
+            attested_coordinator_v2,
+            attested_v2_store,
+            attested_weight_inputs_v2,
+        )
+        from gateway.research_lab.weight_input_authorization_v2 import (
+            load_gateway_weight_release_identity_v2,
+        )
+        from gateway.tee.coordinator_executor_v2 import OP_ATTEST_WEIGHT_INPUT
+        from leadpoet_canonical.hotkey_authority_v2 import (
+            weight_inputs_request_message_v2,
+        )
+        from leadpoet_canonical.weight_authority_v2 import (
+            GATEWAY_WEIGHT_INPUT_CATEGORIES,
+            WEIGHT_INPUT_PURPOSES,
+        )
+
+        mode = str(config["mode"])
+        candidate_sha = str(config["candidate_sha"])
+        request = dict(config["request"])
+        calculation_snapshot = dict(config["calculation_snapshot"])
+        allocation_graph = dict(config["allocation_graph"])
+        expected_documents = dict(config["expected_documents"])
+        candidate_manifest = dict(config["candidate_manifest"])
+        candidate_gateway = dict(config["candidate_gateway"])
+        validator_hotkey = str(config["validator_hotkey"])
+        netuid = int(config["netuid"])
+        epoch_id = int(config["epoch_id"])
+        candidate_signature = str(config["candidate_signature"])
+        rotated_signature = str(config["rotated_signature"])
+        cutoff_signature = str(config["cutoff_signature"])
+        cutoff_request = dict(config["cutoff_request"])
+        gateway_config_hash = str(config["gateway_config_hash"])
+
+        os.environ["GATEWAY_V2_RELEASE_MANIFEST"] = str(
+            config["release_manifest_path"]
+        )
+        os.environ["GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR"] = str(
+            config["gateway_root"]
+        )
+        os.environ["GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED"] = "false"
+
+        loaded_release = load_gateway_weight_release_identity_v2()
+        if (
+            loaded_release != candidate_gateway
+            or loaded_release["commit_sha"] != candidate_sha
+            or candidate_manifest["commit_sha"] != candidate_sha
+        ):
+            raise RuntimeError("gateway child loaded a non-candidate release")
+
+        endpoint_routes = [
+            route
+            for route in weights_api.router.routes
+            if getattr(route, "endpoint", None)
+            is weights_api.get_weight_inputs_v2
+        ]
+        if len(endpoint_routes) != 1 or "POST" not in (
+            endpoint_routes[0].methods or set()
+        ):
+            raise RuntimeError("production weight input endpoint is not registered")
+        endpoint = endpoint_routes[0].endpoint
+        endpoint_path = Path(endpoint.__code__.co_filename).resolve()
+        endpoint_hash = hashlib.sha256(endpoint_path.read_bytes()).hexdigest()
+        if (
+            endpoint_path != Path(config["endpoint_path"]).resolve()
+            or endpoint_hash != str(config["endpoint_sha256"])
+        ):
+            raise RuntimeError("gateway child endpoint source differs from candidate")
+
+        weights_api.PRIMARY_VALIDATOR_HOTKEYS = {validator_hotkey}
+        weights_api.ALLOWED_NETUIDS = {netuid}
+        weights_api._WEIGHT_INPUT_LOADS_INFLIGHT = {}
+        weights_api._WEIGHT_INPUT_RESULTS = {}
+        weights_api._WEIGHT_INPUT_AUTHORIZATIONS = {}
+        weights_api._WEIGHT_INPUT_RETRY_GENERATIONS = {}
+        weights_api._WEIGHT_PRECOMPUTE_SIDECAR_TASKS = {}
+
+        def request_transport() -> Request:
+            return Request(
+                {
+                    "type": "http",
+                    "http_version": "1.1",
+                    "method": "POST",
+                    "scheme": "https",
+                    "path": "/weights/inputs/v2",
+                    "raw_path": b"/weights/inputs/v2",
+                    "query_string": b"",
+                    "headers": [(b"accept-encoding", b"identity")],
+                    "client": ("127.0.0.1", os.getpid()),
+                    "server": ("rehearsal.invalid", 443),
+                }
+            )
+
+        valid_messages = {
+            weight_inputs_request_message_v2(request): {
+                candidate_signature,
+                rotated_signature,
+            },
+            weight_inputs_request_message_v2(cutoff_request): {
+                cutoff_signature,
+            },
+        }
+
+        def verify_signature(message: str, signature: str, hotkey: str) -> bool:
+            if (
+                hotkey != validator_hotkey
+                or signature not in valid_messages.get(message, set())
+            ):
+                raise RuntimeError("gateway child signature boundary differs")
+            return True
+
+        async def epoch_authority(**kwargs: Any) -> dict[str, Any]:
+            if (
+                kwargs.get("netuid") != netuid
+                or kwargs.get("epoch_id") != epoch_id
+                or kwargs.get("submitted_block") != calculation_snapshot["block"]
+                or kwargs.get("require_current_epoch") is not True
+            ):
+                raise RuntimeError("gateway child epoch authority scope differs")
+            return {
+                "settlement_epoch_id": epoch_id,
+                "gateway_epoch_block": int(config["gateway_epoch_block"]),
+                "epoch_ref": "rehearsal:%d" % epoch_id,
+            }
+
+        weights_api.verify_wallet_signature = verify_signature
+        weights_api._verify_epoch_block_authority = epoch_authority
+
+        candidate_fixture = SanitizedWeightFixture(
+            candidate_sha=candidate_sha,
+            epoch_id=epoch_id,
+        )
+        candidate_boot = candidate_fixture._boot(
+            role="gateway_coordinator",
+            key=candidate_fixture.coordinator_key,
+            config_hash=gateway_config_hash,
+            release_identity=candidate_manifest["roles"][
+                "gateway_coordinator"
+            ],
+        )
+        source_calls: list[str] = []
+        executed_categories: list[str] = []
+
+        async def stop_before_checkpoint(**kwargs: Any) -> dict[str, Any]:
+            if kwargs != {
+                "artifact_kind": "allocation",
+                "artifact_ref": "epoch:%d" % epoch_id,
+                "artifact_hash": str(config["allocation_hash"]),
+            }:
+                raise RuntimeError("authorization process source scope differs")
+            connection.send(
+                {
+                    "event": "authorization_persisted_source_blocked",
+                    "candidate_release": loaded_release,
+                    "endpoint_sha256": endpoint_hash,
+                    "pid": os.getpid(),
+                }
+            )
+            await asyncio.Event().wait()
+            raise RuntimeError("authorization process source wait returned")
+
+        async def load_allocation_graph(**kwargs: Any) -> dict[str, Any]:
+            if kwargs != {
+                "artifact_kind": "allocation",
+                "artifact_ref": "epoch:%d" % epoch_id,
+                "artifact_hash": str(config["allocation_hash"]),
+            }:
+                raise RuntimeError("recovery process allocation scope differs")
+            source_calls.append("allocation")
+            return allocation_graph
+
+        async def load_sourcing_graphs(**kwargs: Any) -> list[Any]:
+            if kwargs != {"current_epoch": epoch_id}:
+                raise RuntimeError("recovery process sourcing scope differs")
+            source_calls.append("sourcing")
+            return []
+
+        async def measured_execute(**kwargs: Any) -> dict[str, Any]:
+            payload = kwargs.get("payload")
+            category = (
+                str(payload.get("category") or "")
+                if isinstance(payload, Mapping)
+                else ""
+            )
+            if (
+                category not in GATEWAY_WEIGHT_INPUT_CATEGORIES
+                or kwargs.get("operation") != OP_ATTEST_WEIGHT_INPUT
+                or kwargs.get("purpose") != WEIGHT_INPUT_PURPOSES[category][1]
+                or kwargs.get("epoch_id") != epoch_id
+                or payload.get("calculation_snapshot") != calculation_snapshot
+                or payload.get("gateway_authority_event_hash")
+                != str(config["allocation_receipt_hash"])
+            ):
+                raise RuntimeError("recovery process measured execution differs")
+            role, purpose = WEIGHT_INPUT_PURPOSES[category]
+            document = expected_documents[category]
+            receipt = candidate_fixture.receipt(
+                role=role,
+                purpose=purpose,
+                job_id="rehearsal-persistent-weight-" + category,
+                key=candidate_fixture.coordinator_key,
+                boot=candidate_boot,
+                config_hash=gateway_config_hash,
+                output_root=sha256_json(document),
+                sequence=100 + int(kwargs["sequence"]),
+            )
+            graph = build_receipt_graph(
+                root_receipt_hash=receipt["receipt_hash"],
+                boot_identities=(candidate_boot,),
+                receipts=(receipt,),
+                transport_attempts=(),
+            )
+            executed_categories.append(category)
+            return {
+                "status": "succeeded",
+                "result": document,
+                "receipt": receipt,
+                "execution_receipt": receipt,
+                "receipt_graph": graph,
+                "execution_receipt_graph": graph,
+            }
+
+        async def forbidden_live_work(**_kwargs: Any) -> Any:
+            raise RuntimeError("checkpoint replay attempted live work")
+
+        def forbidden_client() -> Any:
+            raise RuntimeError("checkpoint replay attempted enclave work")
+
+        original_builder_defaults = dict(
+            attested_weight_inputs_v2.build_gateway_weight_inputs_v2.__kwdefaults__
+            or {}
+        )
+        if mode == "authorize_stop":
+            attested_v2_store.load_business_artifact_graph_v2 = (
+                stop_before_checkpoint
+            )
+        elif mode == "resume":
+            attested_v2_store.load_business_artifact_graph_v2 = (
+                load_allocation_graph
+            )
+            attested_coordinator_v2.execute_coordinator_v2 = measured_execute
+            attested_weight_inputs_v2.build_gateway_weight_inputs_v2.__kwdefaults__ = {
+                **original_builder_defaults,
+                "load_sourcing_graphs": load_sourcing_graphs,
+                "coordinator_client_factory": object,
+            }
+        elif mode == "replay":
+            attested_v2_store.load_business_artifact_graph_v2 = forbidden_live_work
+            attested_coordinator_v2.execute_coordinator_v2 = forbidden_live_work
+            attested_weight_inputs_v2.build_gateway_weight_inputs_v2.__kwdefaults__ = {
+                **original_builder_defaults,
+                "load_sourcing_graphs": forbidden_live_work,
+                "coordinator_client_factory": forbidden_client,
+            }
+        else:
+            raise RuntimeError("gateway recovery child mode is invalid")
+
+        async def run_endpoint() -> dict[str, Any]:
+            signature = (
+                candidate_signature if mode == "authorize_stop" else rotated_signature
+            )
+            authorization = weights_api.WeightInputsV2Authorization(
+                request=request,
+                calculation_snapshot=calculation_snapshot,
+                validator_hotkey_signature=signature,
+            )
+            response = await endpoint(authorization, request_transport())
+            result = json.loads(response.body)
+            cutoff_rejected = None
+            if mode == "replay":
+                new_authorization = weights_api.WeightInputsV2Authorization(
+                    request=cutoff_request,
+                    calculation_snapshot=calculation_snapshot,
+                    validator_hotkey_signature=cutoff_signature,
+                )
+                try:
+                    await endpoint(new_authorization, request_transport())
+                except HTTPException as exc:
+                    cutoff_rejected = exc.status_code == 409
+                else:
+                    cutoff_rejected = False
+                if not cutoff_rejected:
+                    raise RuntimeError("fresh post-cutoff request was not rejected")
+            return {
+                "candidate_release": loaded_release,
+                "cutoff_rejected": cutoff_rejected,
+                "endpoint_sha256": endpoint_hash,
+                "executed_categories": executed_categories,
+                "pid": os.getpid(),
+                "response": result,
+                "source_calls": source_calls,
+            }
+
+        result = asyncio.run(run_endpoint())
+        connection.send({"event": "complete", "result": result})
+    except BaseException as exc:
+        try:
+            connection.send(
+                {
+                    "error": str(exc)[:2000],
+                    "error_type": type(exc).__name__,
+                    "event": "failed",
+                    "traceback": traceback.format_exc(limit=20)[-12000:],
+                }
+            )
+        except BaseException:
+            pass
+        raise
+    finally:
+        connection.close()
+
+
 def _exercise_persistent_weight_input_recovery(
     *,
     candidate_sha: str,
@@ -8580,23 +8905,13 @@ def _exercise_persistent_weight_input_recovery(
 ) -> dict[str, Any]:
     """Drive the candidate endpoint through a persistent process replacement."""
 
-    from fastapi import HTTPException
-    from starlette.requests import Request
-
     from gateway.api import weights as weights_api
-    from gateway.research_lab import (
-        attested_coordinator_v2,
-        attested_v2_store,
-        attested_weight_inputs_v2,
-    )
     from gateway.research_lab.weight_input_authorization_v2 import (
         GatewayWeightInputAuthorizationStoreV2,
-        load_gateway_weight_release_identity_v2,
     )
     from gateway.research_lab.weight_input_checkpoint_v2 import (
         GatewayWeightInputCheckpointStoreV2,
     )
-    from gateway.tee.coordinator_executor_v2 import OP_ATTEST_WEIGHT_INPUT
     from gateway.tee.release_manifest_v2 import (
         BUILD_EVIDENCE_SCHEMA_VERSION,
         build_release_manifest,
@@ -8606,11 +8921,9 @@ def _exercise_persistent_weight_input_recovery(
     from leadpoet_canonical.constants import WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK
     from leadpoet_canonical.hotkey_authority_v2 import (
         build_weight_inputs_request_v2,
-        weight_inputs_request_message_v2,
     )
     from leadpoet_canonical.weight_authority_v2 import (
         GATEWAY_WEIGHT_INPUT_CATEGORIES,
-        WEIGHT_INPUT_PURPOSES,
         gateway_weight_input_value_documents_v2,
     )
     from leadpoet_canonical.weight_computation import (
@@ -8820,11 +9133,6 @@ def _exercise_persistent_weight_input_recovery(
     candidate_signature = "ab" * 64
     rotated_signature = "cd" * 64
     cutoff_signature = "ef" * 64
-    candidate_authorization = weights_api.WeightInputsV2Authorization(
-        request=request,
-        calculation_snapshot=calculation_snapshot,
-        validator_hotkey_signature=candidate_signature,
-    )
     checkpoint_scope = {
         "request_hash": request["request_hash"],
         "netuid": netuid,
@@ -8854,24 +9162,55 @@ def _exercise_persistent_weight_input_recovery(
     candidate_validator = validator_release(validator_boot)
     rotated_validator = validator_release(rotated_validator_boot)
 
+    # Use spawn rather than fork so every gateway phase imports a fresh copy
+    # of the production endpoint and has no inherited process-local cache.
+    import multiprocessing
+
+    cutoff_request = build_weight_inputs_request_v2(
+        validator_hotkey=validator_hotkey,
+        netuid=netuid,
+        epoch_id=epoch_id,
+        block=calculation_snapshot["block"],
+        calculation_snapshot_hash=sha256_json(calculation_snapshot),
+        allocation_hash=allocation_hash,
+        leaderboard_window_start=leaderboard_window_start,
+        leaderboard_window_end="2026-07-09T00:00:00Z",
+    )
+    endpoint_routes = [
+        route
+        for route in weights_api.router.routes
+        if getattr(route, "endpoint", None) is weights_api.get_weight_inputs_v2
+    ]
+    if len(endpoint_routes) != 1 or "POST" not in (
+        endpoint_routes[0].methods or set()
+    ):
+        raise RuntimeError("production weight input endpoint is not registered")
+    endpoint = endpoint_routes[0].endpoint
+    endpoint_path = Path(endpoint.__code__.co_filename).resolve()
+    endpoint_sha256 = hashlib.sha256(endpoint_path.read_bytes()).hexdigest()
+
     with tempfile.TemporaryDirectory(
-        prefix="leadpoet-weight-recovery-rehearsal-"
-    ) as raw_root:
-        persistent_root = Path(raw_root)
-        gateway_root = persistent_root / "gateway"
-        validator_root = persistent_root / "validator"
-        release_manifest_path = persistent_root / "gateway-release.json"
+        prefix="leadpoet-weight-recovery-process-rehearsal-"
+    ) as raw_process_root:
+        process_root = Path(raw_process_root)
+        gateway_process_root = process_root / "gateway"
+        validator_process_root = process_root / "validator"
+        process_release_manifest_path = process_root / "gateway-release.json"
+        temporary_manifest = process_release_manifest_path.with_suffix(".next")
+        temporary_manifest.write_text(
+            json.dumps(
+                candidate_manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        temporary_manifest.chmod(0o600)
+        os.replace(temporary_manifest, process_release_manifest_path)
 
-        def activate_release(value: Mapping[str, Any]) -> None:
-            temporary = release_manifest_path.with_suffix(".next")
-            temporary.write_text(
-                json.dumps(value, sort_keys=True, separators=(",", ":")),
-                encoding="utf-8",
-            )
-            temporary.chmod(0o600)
-            os.replace(temporary, release_manifest_path)
-
-        candidate_journal = AuthoritativeWeightInputJournalV2(validator_root)
+        candidate_journal = AuthoritativeWeightInputJournalV2(
+            validator_process_root
+        )
         planned = candidate_journal.record_plan(
             release_identity=candidate_validator,
             validator_hotkey=validator_hotkey,
@@ -8887,476 +9226,255 @@ def _exercise_persistent_weight_input_recovery(
         )
         del candidate_journal
 
-        endpoint_routes = [
-            route
-            for route in weights_api.router.routes
-            if getattr(route, "endpoint", None)
-            is weights_api.get_weight_inputs_v2
-        ]
-        if len(endpoint_routes) != 1 or "POST" not in (
-            endpoint_routes[0].methods or set()
-        ):
-            raise RuntimeError("production weight input endpoint is not registered")
-        endpoint = endpoint_routes[0].endpoint
-        endpoint_source = Path(endpoint.__code__.co_filename).resolve()
-        mounted_endpoint_source = SOURCE_ROOT / "gateway/api/weights.py"
-        if endpoint_source != Path(weights_api.__file__).resolve() or (
-            mounted_endpoint_source.is_file()
-            and endpoint_source != mounted_endpoint_source.resolve()
-        ):
-            raise RuntimeError("weight recovery did not load the candidate endpoint")
-
-        original_environment = {
-            name: os.environ.get(name)
-            for name in (
-                "GATEWAY_V2_RELEASE_MANIFEST",
-                "GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR",
-                "GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED",
-            )
+        process_config = {
+            "allocation_graph": allocation_graph,
+            "allocation_hash": allocation_hash,
+            "allocation_receipt_hash": allocation_receipt["receipt_hash"],
+            "calculation_snapshot": calculation_snapshot,
+            "candidate_gateway": candidate_gateway,
+            "candidate_manifest": candidate_manifest,
+            "candidate_sha": candidate_sha,
+            "candidate_signature": candidate_signature,
+            "cutoff_request": cutoff_request,
+            "cutoff_signature": cutoff_signature,
+            "endpoint_path": str(endpoint_path),
+            "endpoint_sha256": endpoint_sha256,
+            "epoch_id": epoch_id,
+            "expected_documents": expected_documents,
+            "gateway_config_hash": gateway_config_hash,
+            "gateway_root": str(gateway_process_root),
+            "netuid": netuid,
+            "release_manifest_path": str(process_release_manifest_path),
+            "request": request,
+            "rotated_signature": rotated_signature,
+            "validator_hotkey": validator_hotkey,
         }
-        patched_attributes = {
-            "PRIMARY_VALIDATOR_HOTKEYS": weights_api.PRIMARY_VALIDATOR_HOTKEYS,
-            "ALLOWED_NETUIDS": weights_api.ALLOWED_NETUIDS,
-            "verify_wallet_signature": weights_api.verify_wallet_signature,
-            "_verify_epoch_block_authority": (
-                weights_api._verify_epoch_block_authority
-            ),
-            "_WEIGHT_INPUT_LOADS_INFLIGHT": (
-                weights_api._WEIGHT_INPUT_LOADS_INFLIGHT
-            ),
-            "_WEIGHT_INPUT_RESULTS": weights_api._WEIGHT_INPUT_RESULTS,
-            "_WEIGHT_INPUT_AUTHORIZATIONS": (
-                weights_api._WEIGHT_INPUT_AUTHORIZATIONS
-            ),
-            "_WEIGHT_INPUT_RETRY_GENERATIONS": (
-                weights_api._WEIGHT_INPUT_RETRY_GENERATIONS
-            ),
-            "_WEIGHT_PRECOMPUTE_SIDECAR_TASKS": (
-                weights_api._WEIGHT_PRECOMPUTE_SIDECAR_TASKS
-            ),
-        }
-        original_allocation_loader = (
-            attested_v2_store.load_business_artifact_graph_v2
-        )
-        original_coordinator_execute = (
-            attested_coordinator_v2.execute_coordinator_v2
-        )
-        original_builder_defaults = dict(
-            attested_weight_inputs_v2.build_gateway_weight_inputs_v2.__kwdefaults__
-            or {}
-        )
-        phase = {
-            "name": "candidate-build",
-            "epoch_block": max(0, WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK - 1),
-        }
-        source_boundary_calls: list[str] = []
-        executed_categories: list[str] = []
-        valid_request_hashes = {request["request_hash"]}
-        source_started: asyncio.Event
-        release_source: asyncio.Event
+        process_context = multiprocessing.get_context("spawn")
+        children: list[tuple[Any, Any]] = []
 
-        def request_transport() -> Request:
-            return Request(
-                {
-                    "type": "http",
-                    "http_version": "1.1",
-                    "method": "POST",
-                    "scheme": "https",
-                    "path": "/weights/inputs/v2",
-                    "raw_path": b"/weights/inputs/v2",
-                    "query_string": b"",
-                    "headers": [(b"accept-encoding", b"identity")],
-                    "client": ("127.0.0.1", 1),
-                    "server": ("rehearsal.invalid", 443),
-                }
+        def start_gateway_process(
+            mode: str,
+            gateway_epoch_block: int,
+        ) -> tuple[Any, Any]:
+            receive_connection, send_connection = process_context.Pipe(
+                duplex=False
             )
-
-        async def epoch_authority(**kwargs: Any) -> dict[str, Any]:
-            if (
-                kwargs.get("netuid") != netuid
-                or kwargs.get("epoch_id") != epoch_id
-                or kwargs.get("submitted_block") != calculation_snapshot["block"]
-                or kwargs.get("require_current_epoch") is not True
-            ):
-                raise RuntimeError("endpoint epoch authority scope differs")
-            return {
-                "settlement_epoch_id": epoch_id,
-                "gateway_epoch_block": phase["epoch_block"],
-                "epoch_ref": "rehearsal:%d" % epoch_id,
-            }
-
-        def verify_signature(
-            message: str,
-            signature: str,
-            hotkey: str,
-        ) -> bool:
-            try:
-                message_hash = next(
-                    request_hash
-                    for request_hash in valid_request_hashes
-                    if message
-                    == weight_inputs_request_message_v2(
-                        request
-                        if request_hash == request["request_hash"]
-                        else cutoff_request
-                    )
-                )
-            except (StopIteration, NameError):
-                raise RuntimeError("endpoint signature message differs")
-            if (
-                message_hash not in valid_request_hashes
-                or hotkey != validator_hotkey
-                or signature
-                not in {
-                    candidate_signature,
-                    rotated_signature,
-                    cutoff_signature,
-                }
-            ):
-                raise RuntimeError("endpoint signature boundary differs")
-            return True
-
-        async def load_allocation_graph(**kwargs: Any) -> dict[str, Any]:
-            if phase["name"] != "candidate-build" or kwargs != {
-                "artifact_kind": "allocation",
-                "artifact_ref": "epoch:%d" % epoch_id,
-                "artifact_hash": allocation_hash,
-            }:
-                raise RuntimeError("live allocation source escaped its boundary")
-            source_boundary_calls.append("allocation")
-            source_started.set()
-            await release_source.wait()
-            return allocation_graph
-
-        async def load_sourcing_graphs(**kwargs: Any) -> list[Any]:
-            if phase["name"] != "candidate-build" or kwargs != {
-                "current_epoch": epoch_id
-            }:
-                raise RuntimeError("live sourcing source escaped its boundary")
-            source_boundary_calls.append("sourcing")
-            return []
-
-        async def measured_execute(**kwargs: Any) -> dict[str, Any]:
-            payload = kwargs.get("payload")
-            category = (
-                str(payload.get("category") or "")
-                if isinstance(payload, Mapping)
-                else ""
-            )
-            if (
-                phase["name"] != "candidate-build"
-                or category not in GATEWAY_WEIGHT_INPUT_CATEGORIES
-                or kwargs.get("operation") != OP_ATTEST_WEIGHT_INPUT
-                or kwargs.get("purpose") != WEIGHT_INPUT_PURPOSES[category][1]
-                or kwargs.get("epoch_id") != epoch_id
-                or payload.get("calculation_snapshot") != calculation_snapshot
-                or payload.get("gateway_authority_event_hash")
-                != allocation_receipt["receipt_hash"]
-            ):
-                raise RuntimeError("measured input execution escaped its boundary")
-            role, purpose = WEIGHT_INPUT_PURPOSES[category]
-            document = expected_documents[category]
-            execution_receipt = candidate_fixture.receipt(
-                role=role,
-                purpose=purpose,
-                job_id="rehearsal-persistent-weight-" + category,
-                key=candidate_fixture.coordinator_key,
-                boot=candidate_boot,
-                config_hash=gateway_config_hash,
-                output_root=sha256_json(document),
-                sequence=100 + int(kwargs["sequence"]),
-            )
-            graph = build_receipt_graph(
-                root_receipt_hash=execution_receipt["receipt_hash"],
-                boot_identities=(candidate_boot,),
-                receipts=(execution_receipt,),
-                transport_attempts=(),
-            )
-            executed_categories.append(category)
-            return {
-                "status": "succeeded",
-                "result": document,
-                "receipt": execution_receipt,
-                "execution_receipt": execution_receipt,
-                "receipt_graph": graph,
-                "execution_receipt_graph": graph,
-            }
-
-        async def forbidden_live_boundary(**_kwargs: Any) -> Any:
-            raise RuntimeError("post-cutoff replay attempted live source work")
-
-        def forbidden_coordinator_client() -> Any:
-            raise RuntimeError("post-cutoff replay attempted enclave work")
-
-        async def drive_endpoint_replacement() -> dict[str, Any]:
-            nonlocal source_started, release_source
-            source_started = asyncio.Event()
-            release_source = asyncio.Event()
-            activate_release(candidate_manifest)
-            loaded_candidate = load_gateway_weight_release_identity_v2()
-            if loaded_candidate != candidate_gateway:
-                raise RuntimeError("candidate release manifest identity differs")
-
-            only_waiter = asyncio.create_task(
-                endpoint(candidate_authorization, request_transport())
-            )
-            try:
-                await asyncio.wait_for(source_started.wait(), timeout=2)
-                if len(weights_api._WEIGHT_INPUT_LOADS_INFLIGHT) != 1:
-                    raise RuntimeError("endpoint shielded build task is unavailable")
-                shielded_build_task = next(
-                    iter(weights_api._WEIGHT_INPUT_LOADS_INFLIGHT.values())
-                )
-                only_waiter.cancel()
-                try:
-                    await only_waiter
-                except asyncio.CancelledError:
-                    pass
-                else:
-                    raise RuntimeError("shielded endpoint waiter was not cancelled")
-                release_source.set()
-                await asyncio.wait_for(
-                    asyncio.shield(shielded_build_task),
-                    timeout=2,
-                )
-                checkpoint_path = gateway_root / (
-                    request["request_hash"].removeprefix("sha256:") + ".json"
-                )
-                for _ in range(200):
-                    if (
-                        checkpoint_path.is_file()
-                        and not weights_api._WEIGHT_INPUT_LOADS_INFLIGHT
-                    ):
-                        break
-                    await asyncio.sleep(0.01)
-                else:
-                    raise RuntimeError("shielded endpoint checkpoint did not finish")
-
-                authorization_store = GatewayWeightInputAuthorizationStoreV2(
-                    gateway_root
-                )
-                authorization = authorization_store.load(
-                    release_identity=loaded_candidate,
-                    request=request,
-                    calculation_snapshot=calculation_snapshot,
-                    source_cutoff_block=WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK,
-                )
-                candidate_checkpoint_store = GatewayWeightInputCheckpointStoreV2(
-                    gateway_root
-                )
-                candidate_checkpoint = candidate_checkpoint_store.load(
-                    release_identity=loaded_candidate,
-                    **checkpoint_scope,
-                )
-                if authorization is None or candidate_checkpoint is None:
-                    raise RuntimeError("endpoint persistence did not survive cancellation")
-
-                old_process_state = tuple(
-                    id(getattr(weights_api, name))
-                    for name in (
-                        "_WEIGHT_INPUT_LOADS_INFLIGHT",
-                        "_WEIGHT_INPUT_RESULTS",
-                        "_WEIGHT_INPUT_AUTHORIZATIONS",
-                        "_WEIGHT_INPUT_RETRY_GENERATIONS",
-                    )
-                )
-                for name in (
-                    "_WEIGHT_INPUT_LOADS_INFLIGHT",
-                    "_WEIGHT_INPUT_RESULTS",
-                    "_WEIGHT_INPUT_AUTHORIZATIONS",
-                    "_WEIGHT_INPUT_RETRY_GENERATIONS",
-                    "_WEIGHT_PRECOMPUTE_SIDECAR_TASKS",
-                ):
-                    setattr(weights_api, name, {})
-                new_process_state = tuple(
-                    id(getattr(weights_api, name))
-                    for name in (
-                        "_WEIGHT_INPUT_LOADS_INFLIGHT",
-                        "_WEIGHT_INPUT_RESULTS",
-                        "_WEIGHT_INPUT_AUTHORIZATIONS",
-                        "_WEIGHT_INPUT_RETRY_GENERATIONS",
-                    )
-                )
-                if any(
-                    old == new
-                    for old, new in zip(old_process_state, new_process_state)
-                ):
-                    raise RuntimeError("endpoint process-local state was not replaced")
-
-                reloaded_candidate = load_gateway_weight_release_identity_v2()
-                if reloaded_candidate != loaded_candidate:
-                    raise RuntimeError("candidate release changed across process replacement")
-                phase.update(
+            child = process_context.Process(
+                target=_persistent_weight_recovery_endpoint_process_v2,
+                args=(
                     {
-                        "name": "candidate-replay",
-                        "epoch_block": WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK + 1,
-                    }
-                )
-                attested_v2_store.load_business_artifact_graph_v2 = (
-                    forbidden_live_boundary
-                )
-                attested_coordinator_v2.execute_coordinator_v2 = (
-                    forbidden_live_boundary
-                )
-                attested_weight_inputs_v2.build_gateway_weight_inputs_v2.__kwdefaults__ = {
-                    **original_builder_defaults,
-                    "load_sourcing_graphs": forbidden_live_boundary,
-                    "coordinator_client_factory": forbidden_coordinator_client,
-                }
-                rotated_authorization = weights_api.WeightInputsV2Authorization(
-                    request=request,
-                    calculation_snapshot=calculation_snapshot,
-                    validator_hotkey_signature=rotated_signature,
-                )
-                replay_response = await endpoint(
-                    rotated_authorization,
-                    request_transport(),
-                )
-                replay = json.loads(replay_response.body)
+                        **process_config,
+                        "gateway_epoch_block": gateway_epoch_block,
+                        "mode": mode,
+                    },
+                    send_connection,
+                ),
+                name="persistent-weight-recovery-" + mode,
+            )
+            child.start()
+            send_connection.close()
+            children.append((child, receive_connection))
+            return child, receive_connection
 
-                nonlocal cutoff_request
-                cutoff_request = build_weight_inputs_request_v2(
-                    validator_hotkey=validator_hotkey,
-                    netuid=netuid,
-                    epoch_id=epoch_id,
-                    block=calculation_snapshot["block"],
-                    calculation_snapshot_hash=sha256_json(calculation_snapshot),
-                    allocation_hash=allocation_hash,
-                    leaderboard_window_start=leaderboard_window_start,
-                    leaderboard_window_end="2026-07-09T00:00:00Z",
+        def receive_gateway_message(
+            child: Any,
+            connection: Any,
+            *,
+            timeout: float,
+        ) -> dict[str, Any]:
+            if not connection.poll(timeout):
+                raise RuntimeError(
+                    "%s did not return bounded recovery evidence"
+                    % child.name
                 )
-                valid_request_hashes.add(cutoff_request["request_hash"])
-                cutoff_authorization = weights_api.WeightInputsV2Authorization(
-                    request=cutoff_request,
-                    calculation_snapshot=calculation_snapshot,
-                    validator_hotkey_signature=cutoff_signature,
-                )
-                try:
-                    await endpoint(cutoff_authorization, request_transport())
-                except HTTPException as exc:
-                    cutoff_rejected = exc.status_code == 409
-                else:
-                    cutoff_rejected = False
-                if not cutoff_rejected:
-                    raise RuntimeError("post-cutoff endpoint accepted new source work")
-
-                restarted_checkpoint_store = GatewayWeightInputCheckpointStoreV2(
-                    gateway_root
-                )
-                restarted_checkpoint = restarted_checkpoint_store.load(
-                    release_identity=reloaded_candidate,
-                    **checkpoint_scope,
-                )
-                if restarted_checkpoint is None:
-                    raise RuntimeError("candidate endpoint lost its checkpoint")
-                expected_response = {
-                    "request_hash": request["request_hash"],
-                    "calculation_snapshot_hash": request[
-                        "calculation_snapshot_hash"
-                    ],
-                    "input_receipt_hashes": restarted_checkpoint["result"][
-                        "input_receipt_hashes"
-                    ],
-                    "gateway_authority_event_hash": restarted_checkpoint["result"][
-                        "gateway_authority_event_hash"
-                    ],
-                    "upstream_receipt_set": restarted_checkpoint["result"][
-                        "upstream_receipt_set"
-                    ],
-                }
-                if replay != expected_response:
-                    raise RuntimeError("candidate endpoint replay differs from checkpoint")
-                candidate_boots = restarted_checkpoint["result"][
-                    "upstream_receipt_set"
-                ]["boot_identities"]
-                candidate_output_release_exact = any(
-                    all(
-                        boot.get(field) == reloaded_candidate[field]
-                        for field in (
-                            "physical_role",
-                            "commit_sha",
-                            "pcr0",
-                            "build_manifest_hash",
-                            "dependency_lock_hash",
-                        )
+            try:
+                message = connection.recv()
+            except EOFError as exc:
+                raise RuntimeError(
+                    "%s exited before recovery evidence" % child.name
+                ) from exc
+            if not isinstance(message, dict):
+                raise RuntimeError("gateway recovery IPC evidence is invalid")
+            if message.get("event") == "failed":
+                raise RuntimeError(
+                    "%s failed: %s\n%s"
+                    % (
+                        child.name,
+                        message.get("error"),
+                        message.get("traceback"),
                     )
-                    for boot in candidate_boots
                 )
-                if (
-                    authorization["release_identity"] != reloaded_candidate
-                    or restarted_checkpoint["release_identity"]
-                    != reloaded_candidate
-                    or not candidate_output_release_exact
-                ):
-                    raise RuntimeError("candidate endpoint authority identity differs")
-                return {
-                    "authorization": authorization,
-                    "candidate_checkpoint": restarted_checkpoint,
-                    "candidate_output_release_exact": (
-                        candidate_output_release_exact
-                    ),
-                    "cutoff_rejected": cutoff_rejected,
-                    "loaded_candidate": reloaded_candidate,
-                    "process_state_replaced": True,
-                    "replay": replay,
-                }
-            finally:
-                release_source.set()
+            return message
 
-        cutoff_request: dict[str, Any]
+        def join_completed_gateway(child: Any, timeout: float = 10.0) -> None:
+            child.join(timeout)
+            if child.is_alive():
+                raise RuntimeError("%s did not exit after IPC" % child.name)
+            if child.exitcode != 0:
+                raise RuntimeError(
+                    "%s exited with status %s" % (child.name, child.exitcode)
+                )
+
+        authorization_evidence: dict[str, Any]
+        resume_evidence: dict[str, Any]
+        replay_evidence: dict[str, Any]
+        authorization: dict[str, Any]
+        candidate_checkpoint: dict[str, Any]
         try:
-            os.environ["GATEWAY_V2_RELEASE_MANIFEST"] = str(
-                release_manifest_path
+            process_a, connection_a = start_gateway_process(
+                "authorize_stop",
+                WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK - 1,
             )
-            os.environ["GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR"] = str(
-                gateway_root
+            authorization_evidence = receive_gateway_message(
+                process_a,
+                connection_a,
+                timeout=30.0,
             )
-            os.environ["GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED"] = "false"
-            weights_api.PRIMARY_VALIDATOR_HOTKEYS = {validator_hotkey}
-            weights_api.ALLOWED_NETUIDS = {netuid}
-            weights_api.verify_wallet_signature = verify_signature
-            weights_api._verify_epoch_block_authority = epoch_authority
-            weights_api._WEIGHT_INPUT_LOADS_INFLIGHT = {}
-            weights_api._WEIGHT_INPUT_RESULTS = {}
-            weights_api._WEIGHT_INPUT_AUTHORIZATIONS = {}
-            weights_api._WEIGHT_INPUT_RETRY_GENERATIONS = {}
-            weights_api._WEIGHT_PRECOMPUTE_SIDECAR_TASKS = {}
-            attested_v2_store.load_business_artifact_graph_v2 = (
-                load_allocation_graph
+            if (
+                authorization_evidence.get("event")
+                != "authorization_persisted_source_blocked"
+                or authorization_evidence.get("candidate_release")
+                != candidate_gateway
+                or authorization_evidence.get("endpoint_sha256")
+                != endpoint_sha256
+            ):
+                raise RuntimeError(
+                    "authorization process did not reach the exact endpoint boundary"
+                )
+
+            authorization_store = GatewayWeightInputAuthorizationStoreV2(
+                gateway_process_root
             )
-            attested_coordinator_v2.execute_coordinator_v2 = measured_execute
-            attested_weight_inputs_v2.build_gateway_weight_inputs_v2.__kwdefaults__ = {
-                **original_builder_defaults,
-                "load_sourcing_graphs": load_sourcing_graphs,
-                "coordinator_client_factory": object,
-            }
-            endpoint_evidence = asyncio.run(drive_endpoint_replacement())
+            checkpoint_store = GatewayWeightInputCheckpointStoreV2(
+                gateway_process_root
+            )
+            authorization = authorization_store.load(
+                release_identity=candidate_gateway,
+                request=request,
+                calculation_snapshot=calculation_snapshot,
+                source_cutoff_block=WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK,
+            )
+            checkpoint_before_stop = checkpoint_store.load(
+                release_identity=candidate_gateway,
+                **checkpoint_scope,
+            )
+            checkpoint_path = gateway_process_root / (
+                request["request_hash"].removeprefix("sha256:") + ".json"
+            )
+            if (
+                authorization is None
+                or checkpoint_before_stop is not None
+                or checkpoint_path.exists()
+            ):
+                raise RuntimeError(
+                    "authorization process did not persist authorization only"
+                )
+            process_a.terminate()
+            process_a.join(10.0)
+            if process_a.is_alive():
+                process_a.kill()
+                process_a.join(5.0)
+            if process_a.is_alive() or process_a.exitcode == 0:
+                raise RuntimeError("authorization process was not stopped")
+            if checkpoint_store.load(
+                release_identity=candidate_gateway,
+                **checkpoint_scope,
+            ) is not None:
+                raise RuntimeError("stopped process unexpectedly left a checkpoint")
+
+            process_b, connection_b = start_gateway_process(
+                "resume",
+                WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK + 1,
+            )
+            resume_message = receive_gateway_message(
+                process_b,
+                connection_b,
+                timeout=30.0,
+            )
+            if resume_message.get("event") != "complete":
+                raise RuntimeError("recovery process evidence is incomplete")
+            resume_evidence = dict(resume_message["result"])
+            join_completed_gateway(process_b)
+            candidate_checkpoint = checkpoint_store.load(
+                release_identity=candidate_gateway,
+                **checkpoint_scope,
+            )
+            if candidate_checkpoint is None or not checkpoint_path.is_file():
+                raise RuntimeError("recovery process did not persist its checkpoint")
+
+            process_c, connection_c = start_gateway_process(
+                "replay",
+                WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK + 1,
+            )
+            replay_message = receive_gateway_message(
+                process_c,
+                connection_c,
+                timeout=30.0,
+            )
+            if replay_message.get("event") != "complete":
+                raise RuntimeError("replay process evidence is incomplete")
+            replay_evidence = dict(replay_message["result"])
+            join_completed_gateway(process_c)
         finally:
-            attested_v2_store.load_business_artifact_graph_v2 = (
-                original_allocation_loader
-            )
-            attested_coordinator_v2.execute_coordinator_v2 = (
-                original_coordinator_execute
-            )
-            attested_weight_inputs_v2.build_gateway_weight_inputs_v2.__kwdefaults__ = (
-                original_builder_defaults
-            )
-            for name, value in patched_attributes.items():
-                setattr(weights_api, name, value)
-            for name, value in original_environment.items():
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
+            for child, connection in children:
+                if child.is_alive():
+                    child.terminate()
+                    child.join(5.0)
+                if child.is_alive():
+                    child.kill()
+                    child.join(5.0)
+                connection.close()
 
+        process_ids = {
+            int(authorization_evidence["pid"]),
+            int(resume_evidence["pid"]),
+            int(replay_evidence["pid"]),
+        }
         if (
-            source_boundary_calls != ["allocation", "sourcing"]
-            or set(executed_categories) != set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
-            or len(executed_categories) != len(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+            len(process_ids) != 3
+            or os.getpid() in process_ids
+            or resume_evidence["candidate_release"] != candidate_gateway
+            or replay_evidence["candidate_release"] != candidate_gateway
+            or resume_evidence["endpoint_sha256"] != endpoint_sha256
+            or replay_evidence["endpoint_sha256"] != endpoint_sha256
+            or resume_evidence["source_calls"] != ["allocation", "sourcing"]
+            or set(resume_evidence["executed_categories"])
+            != set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+            or len(resume_evidence["executed_categories"])
+            != len(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+            or replay_evidence["source_calls"]
+            or replay_evidence["executed_categories"]
+            or replay_evidence["response"] != resume_evidence["response"]
+            or replay_evidence["cutoff_rejected"] is not True
         ):
-            raise RuntimeError("endpoint did not complete one measured input build")
+            raise RuntimeError("spawned gateway recovery evidence is incomplete")
 
-        restarted_journal = AuthoritativeWeightInputJournalV2(validator_root)
+        candidate_boots = candidate_checkpoint["result"][
+            "upstream_receipt_set"
+        ]["boot_identities"]
+        candidate_output_release_exact = any(
+            all(
+                boot.get(field) == candidate_gateway[field]
+                for field in (
+                    "physical_role",
+                    "commit_sha",
+                    "pcr0",
+                    "build_manifest_hash",
+                    "dependency_lock_hash",
+                )
+            )
+            for boot in candidate_boots
+        )
+        if (
+            authorization["release_identity"] != candidate_gateway
+            or candidate_checkpoint["release_identity"] != candidate_gateway
+            or not candidate_output_release_exact
+        ):
+            raise RuntimeError("spawned gateway authority identity differs")
+
+        restarted_journal = AuthoritativeWeightInputJournalV2(
+            validator_process_root
+        )
         resumed_plan = restarted_journal.load_epoch(
             release_identity=rotated_validator,
             validator_hotkey=validator_hotkey,
@@ -9376,10 +9494,10 @@ def _exercise_persistent_weight_input_recovery(
             epoch_id=epoch_id,
             plan_hash=planned["plan_hash"],
             gateway_inputs={
-                "input_receipt_hashes": endpoint_evidence["replay"][
+                "input_receipt_hashes": replay_evidence["response"][
                     "input_receipt_hashes"
                 ],
-                "gateway_authority_event_hash": endpoint_evidence["replay"][
+                "gateway_authority_event_hash": replay_evidence["response"][
                     "gateway_authority_event_hash"
                 ],
                 "request_authorization": {
@@ -9388,13 +9506,13 @@ def _exercise_persistent_weight_input_recovery(
                         {"signature": rotated_signature}
                     ),
                 },
-                "upstream_receipt_set": endpoint_evidence["replay"][
+                "upstream_receipt_set": replay_evidence["response"][
                     "upstream_receipt_set"
                 ],
             },
         )
         resumed_verified = AuthoritativeWeightInputJournalV2(
-            validator_root
+            validator_process_root
         ).load_epoch(
             release_identity=rotated_validator,
             validator_hotkey=validator_hotkey,
@@ -9415,51 +9533,49 @@ def _exercise_persistent_weight_input_recovery(
             )
         except WeightInputJournalV2Error:
             reordered_metagraph_rejected = True
-
-        if (
-            verified != resumed_verified
-            or not reordered_metagraph_rejected
-        ):
-            raise RuntimeError("persistent weight input recovery evidence is incomplete")
+        if verified != resumed_verified or not reordered_metagraph_rejected:
+            raise RuntimeError(
+                "persistent weight input recovery evidence is incomplete"
+            )
 
         return {
             "candidate_release_derived": (
-                endpoint_evidence["loaded_candidate"]["commit_sha"]
+                resume_evidence["candidate_release"]["commit_sha"]
                 == candidate_sha
             ),
             "candidate_endpoint_release_exact": (
                 endpoint is weights_api.get_weight_inputs_v2
-                and endpoint_evidence["loaded_candidate"]
-                == candidate_gateway
+                and resume_evidence["candidate_release"] == candidate_gateway
+                and resume_evidence["endpoint_sha256"] == endpoint_sha256
             ),
             "predecessor_transition_bound": from_sha != candidate_sha,
+            "separate_gateway_processes_exercised": len(process_ids) == 3,
+            "authorization_only_survived_stopped_process": (
+                authorization["release_identity"] == candidate_gateway
+                and process_a.exitcode != 0
+            ),
+            "authorized_post_cutoff_reconstruction_resumed": (
+                resume_evidence["response"]["request_hash"]
+                == request["request_hash"]
+            ),
             "measured_source_invocations_exact": (
-                source_boundary_calls == ["allocation", "sourcing"]
-                and len(executed_categories)
+                resume_evidence["source_calls"] == ["allocation", "sourcing"]
+                and len(resume_evidence["executed_categories"])
                 == len(GATEWAY_WEIGHT_INPUT_CATEGORIES)
             ),
-            "candidate_authorization_durable": (
-                endpoint_evidence["authorization"]["release_identity"]
-                == endpoint_evidence["loaded_candidate"]
-            ),
             "candidate_plan_durable": resumed_plan == planned,
-            "persistent_directory_shared_across_process_replacement": (
-                endpoint_evidence["process_state_replaced"]
-                and GatewayWeightInputAuthorizationStoreV2(gateway_root).directory
-                == GatewayWeightInputCheckpointStoreV2(gateway_root).directory
-            ),
-            "shielded_equivalent_checkpoint_durable": (
-                endpoint_evidence["candidate_checkpoint"] is not None
-            ),
             "candidate_checkpoint_release_exact": (
-                endpoint_evidence["candidate_output_release_exact"]
+                candidate_output_release_exact
             ),
-            "post_cutoff_new_work_rejected": endpoint_evidence[
+            "checkpoint_replayed_in_fresh_process": (
+                replay_evidence["response"] == resume_evidence["response"]
+            ),
+            "post_cutoff_new_work_rejected": replay_evidence[
                 "cutoff_rejected"
             ],
             "post_cutoff_replay_without_live_source": (
-                endpoint_evidence["replay"]["request_hash"]
-                == request["request_hash"]
+                not replay_evidence["source_calls"]
+                and not replay_evidence["executed_categories"]
             ),
             "validator_journal_reused": (
                 resumed_plan["plan_hash"] == planned["plan_hash"]
@@ -9467,7 +9583,6 @@ def _exercise_persistent_weight_input_recovery(
             ),
             "exact_metagraph_order_enforced": reordered_metagraph_rejected,
         }
-
 
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "signed-private-model-contract-transition": (
@@ -10403,7 +10518,7 @@ def main() -> int:
             is True
             and behavior_evidence.get(
                 "persistent-weight-input-recovery", {}
-            ).get("candidate_authorization_durable")
+            ).get("separate_gateway_processes_exercised")
             is True
             and behavior_evidence.get(
                 "persistent-weight-input-recovery", {}
@@ -10411,15 +10526,19 @@ def main() -> int:
             is True
             and behavior_evidence.get(
                 "persistent-weight-input-recovery", {}
-            ).get("persistent_directory_shared_across_process_replacement")
+            ).get("authorization_only_survived_stopped_process")
             is True
             and behavior_evidence.get(
                 "persistent-weight-input-recovery", {}
-            ).get("shielded_equivalent_checkpoint_durable")
+            ).get("authorized_post_cutoff_reconstruction_resumed")
             is True
             and behavior_evidence.get(
                 "persistent-weight-input-recovery", {}
             ).get("candidate_checkpoint_release_exact")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("checkpoint_replayed_in_fresh_process")
             is True
             and behavior_evidence.get(
                 "persistent-weight-input-recovery", {}

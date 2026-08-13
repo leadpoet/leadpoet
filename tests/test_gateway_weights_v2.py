@@ -1139,6 +1139,122 @@ async def test_weight_inputs_v2_sole_waiter_cancellation_still_checkpoints_for_l
 
 
 @pytest.mark.asyncio
+async def test_weight_inputs_v2_durable_authorization_resumes_after_cutoff(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.research_lab import (
+        attested_v2_store,
+        attested_weight_inputs_v2,
+        weight_input_authorization_v2,
+    )
+
+    authorization = _weight_inputs_authorization()
+    release = _gateway_release_identity(
+        commit="a" * 40,
+        release_digit="4",
+    )
+    checkpoint_directory = tmp_path / "weight-inputs"
+    gateway_epoch_block = {"value": 200}
+    source_attempts = []
+
+    async def epoch_authority(**_kwargs):
+        return {
+            "settlement_epoch_id": 300,
+            "gateway_epoch_block": gateway_epoch_block["value"],
+        }
+
+    async def interrupted_source(**_kwargs):
+        source_attempts.append("interrupted")
+        raise TimeoutError("process stopped before checkpoint completion")
+
+    async def resumed_source(**_kwargs):
+        source_attempts.append("resumed")
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def build_inputs(**_kwargs):
+        return _complete_gateway_weight_inputs(release)
+
+    monkeypatch.setenv(
+        "GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR",
+        str(checkpoint_directory),
+    )
+    monkeypatch.delenv(
+        "GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_verify_epoch_block_authority",
+        epoch_authority,
+    )
+    monkeypatch.setattr(
+        weight_input_authorization_v2,
+        "load_gateway_weight_release_identity_v2",
+        lambda: release,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {VALIDATOR_HOTKEY},
+    )
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(
+        weights_api,
+        "verify_wallet_signature",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        interrupted_source,
+    )
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        build_inputs,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_weight_inputs_v2(authorization, _request())
+    assert exc.value.status_code == 503
+    await asyncio.sleep(0)
+
+    authorization_files = list(checkpoint_directory.glob("*.authorized.json"))
+    checkpoint_path = checkpoint_directory / (
+        authorization.request["request_hash"].removeprefix("sha256:")
+        + ".json"
+    )
+    assert len(authorization_files) == 1
+    assert not checkpoint_path.exists()
+
+    # Model a fresh gateway process after the source cutoff. The exact durable
+    # authorization must allow reconstruction to resume, while the separate
+    # new-request test below continues to prove the cutoff remains fail closed.
+    weights_api._WEIGHT_INPUT_LOADS_INFLIGHT.clear()
+    weights_api._WEIGHT_INPUT_RESULTS.clear()
+    weights_api._WEIGHT_INPUT_AUTHORIZATIONS.clear()
+    weights_api._WEIGHT_INPUT_RETRY_GENERATIONS.clear()
+    gateway_epoch_block["value"] = (
+        weights_api.WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK + 20
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        resumed_source,
+    )
+
+    response = await weights_api.get_weight_inputs_v2(
+        authorization,
+        _request(),
+    )
+
+    assert response.status_code == 200
+    assert source_attempts == ["interrupted", "resumed"]
+    assert checkpoint_path.is_file()
+
+
+@pytest.mark.asyncio
 async def test_weight_inputs_v2_cutoff_rejects_before_source_or_authorization(
     monkeypatch,
     tmp_path,

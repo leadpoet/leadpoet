@@ -8259,7 +8259,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
 
 def _exercise_measured_upstream_proxy_transport(
     *,
-    parent_tunnel_framing: str,
+    upstream_parent_tunnel_framing: str,
 ) -> dict[str, Any]:
     """Exercise the exact worker HTTPS-proxy path through parent VSOCK."""
 
@@ -8475,7 +8475,8 @@ def _exercise_measured_upstream_proxy_transport(
             proxy_url=f"http://127.0.0.1:{local_proxy_port}",
             ca_bundle=str(certificate_path),
             allow_authenticated_complete_body_eof=True,
-            parent_tunnel_framing=parent_tunnel_framing,
+            parent_tunnel_framing="",
+            upstream_parent_tunnel_framing=upstream_parent_tunnel_framing,
             reuse_direct_connections=False,
         )
         original_certifi_where = certifi.where
@@ -8542,7 +8543,10 @@ def _exercise_measured_upstream_proxy_transport(
         raise RuntimeError("upstream proxy credential escaped Basic auth encoding")
     return {
         "exact_httpx_enclave_parent_proxy_provider_path": True,
-        "parent_tunnel_framing": parent_tunnel_framing,
+        "parent_tunnel_framing": transport.parent_tunnel_framing,
+        "upstream_parent_tunnel_framing": (
+            transport.upstream_parent_tunnel_framing
+        ),
         "nested_tls_verified": True,
         "proxy_auth_remained_in_enclave": True,
         "provider_first_close_verified": True,
@@ -8554,9 +8558,14 @@ def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
     from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
 
     evidence = _exercise_measured_upstream_proxy_transport(
-        parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+        upstream_parent_tunnel_framing=TUNNEL_FRAMING_MODE,
     )
-    if evidence.pop("parent_tunnel_framing") != TUNNEL_FRAMING_MODE:
+    if evidence.pop("parent_tunnel_framing"):
+        raise RuntimeError("direct coordinator transport was not raw")
+    if (
+        evidence.pop("upstream_parent_tunnel_framing")
+        != TUNNEL_FRAMING_MODE
+    ):
         raise RuntimeError("measured upstream proxy framing was not exercised")
     evidence["framed_parent_tunnel_verified"] = True
     return evidence
@@ -8564,10 +8573,12 @@ def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
 
 def _exercise_measured_coordinator_raw_transport() -> dict[str, Any]:
     evidence = _exercise_measured_upstream_proxy_transport(
-        parent_tunnel_framing="",
+        upstream_parent_tunnel_framing="",
     )
     if evidence.pop("parent_tunnel_framing"):
         raise RuntimeError("measured coordinator raw transport was not exercised")
+    if evidence.pop("upstream_parent_tunnel_framing"):
+        raise RuntimeError("measured coordinator upstream transport was not raw")
     evidence["raw_parent_tunnel_verified"] = True
     return evidence
 

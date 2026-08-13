@@ -169,6 +169,9 @@ PROTECTED_SYMBOLS = {
     "research_lab/eval/private_runtime.py": (
         "EXPECTED_ROUTING_COMPILER_VERSION",
         "_REVIEWED_CONSUMER_MANIFEST_PAIRS",
+        "_PROVIDER_OUTAGE_TEXT_MARKERS",
+        "_provider_error_line_is_loop_ending",
+        "_raise_on_empty_provider_error",
         "_private_manifest_hash_payload",
         "_verify_consumer_contract_manifest",
         "verify_private_artifact_manifest_signature",

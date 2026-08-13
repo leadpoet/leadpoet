@@ -1156,6 +1156,87 @@ def test_private_baseline_builds_exact_measured_provider_evidence_tape(tmp_path)
     assert result["output"] == []
 
 
+@pytest.mark.parametrize(
+    ("provider_error", "raises"),
+    (
+        ("attested transport failure: unexpected_eof", True),
+        ("HTTPError: HTTP Error 404: Not Found; status=404", False),
+    ),
+)
+def test_runsc_model_sandbox_distinguishes_transport_outage_from_empty_result(
+    tmp_path,
+    provider_error,
+    raises,
+):
+    request = _request(tmp_path)
+    request.update(
+        {
+            "operation": "run_icp",
+            "callable_name": "run_icp",
+            "input": {
+                "icp": canonicalize_private_model_icp(
+                    {"industry": "Software", "intent_signal": "Hiring"}
+                ),
+                "context": {
+                    "mode": "private_baseline",
+                    "runtime_options": {
+                        "runtime_cap_seconds": 60.0,
+                        "finalization_reserve_seconds": 6.0,
+                        "agent_timeout_seconds": 54,
+                    },
+                },
+            },
+        }
+    )
+
+    def runner(command, **_kwargs):
+        if "run" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="[]",
+                stderr=(
+                    "research_lab_private_runtime_provider_error "
+                    + provider_error
+                    + "; url=https://api.exa.ai/search\n"
+                ),
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=runner,
+    )
+    try:
+        if raises:
+            with pytest.raises(
+                ModelSandboxV2Error,
+                match="provider-backed sourcing failed before returning companies",
+            ):
+                sandbox.execute(
+                    request,
+                    job_id="model-job-1",
+                    purpose="research_lab.private_model_run.v2",
+                    retry_policy_hashes={"exa": "sha256:" + "1" * 64},
+                    terminal_sink=lambda _attempt: None,
+                    artifact_sink=lambda _artifact: None,
+                )
+        else:
+            result = sandbox.execute(
+                request,
+                job_id="model-job-1",
+                purpose="research_lab.private_model_run.v2",
+                retry_policy_hashes={"exa": "sha256:" + "1" * 64},
+                terminal_sink=lambda _attempt: None,
+                artifact_sink=lambda _artifact: None,
+            )
+            assert result["output"] == []
+    finally:
+        transport.restore()
+
+
 def test_model_sandbox_accepts_measured_transport_failure_after_model_fallback(
     tmp_path, monkeypatch
 ):

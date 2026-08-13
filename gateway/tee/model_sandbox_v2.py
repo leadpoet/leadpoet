@@ -41,6 +41,7 @@ from research_lab.eval import (
 from research_lab.eval.private_runtime import (
     _DOCKER_ADAPTER_BOOTSTRAP,
     _DOCKER_METADATA_BOOTSTRAP,
+    _raise_on_empty_provider_error,
     SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS,
     canonicalize_private_model_icp,
     context_with_runtime_options,
@@ -2245,6 +2246,15 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
         except json.JSONDecodeError as exc:
             raise ModelSandboxV2Error("model sandbox output is invalid JSON") from exc
         if operation == "run_icp":
+            stderr = str(completed.stderr or "")
+            try:
+                _raise_on_empty_provider_error(
+                    decoded,
+                    stderr,
+                    context_label="V2 model sandbox",
+                )
+            except PrivateModelRuntimeError as exc:
+                raise ModelSandboxV2Error(str(exc)) from exc
             output = list(
                 ensure_private_model_outputs(
                     decoded,
@@ -2252,7 +2262,6 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                     require_non_empty=False,
                 )
             )
-            stderr = str(completed.stderr or "")
             return output, [
                 *parse_incontainer_trace_lines(stderr),
                 *parse_sourcing_runtime_lines(stderr),

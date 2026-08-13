@@ -63,6 +63,11 @@ def test_scoring_receipt_failure_policy_is_protected():
     assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
         "gateway/research_lab/attested_scoring_v2.py"
     ]
+    assert {
+        "_PROVIDER_OUTAGE_TEXT_MARKERS",
+        "_provider_error_line_is_loop_ending",
+        "_raise_on_empty_provider_error",
+    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
 
 
 def test_inter_enclave_replay_and_identity_boundaries_are_protected():

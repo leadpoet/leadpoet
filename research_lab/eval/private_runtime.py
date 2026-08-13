@@ -1408,6 +1408,9 @@ _PROVIDER_OUTAGE_TEXT_MARKERS = (
     "temporarily unavailable",
     "remotedisconnected",
     "incompleteread",
+    "unexpected_eof",
+    "unexpected eof",
+    "peer closed connection without sending complete message body",
 )
 _PROVIDER_ERROR_STATUS_CODES = (400, 401, 402, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504)
 

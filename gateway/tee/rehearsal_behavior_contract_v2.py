@@ -105,6 +105,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/tee/egress_policy.py",
     "gateway/tee/egress_proxy.py",
     "gateway/tee/provider_broker_v2.py",
+    "gateway/tee/tee_service.py",
     "gateway/utils/tee_egress_forwarder.py",
     "research_lab/eval/private_runtime.py",
     "research_lab/sourcing_model_contract.json",

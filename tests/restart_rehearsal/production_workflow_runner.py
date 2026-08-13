@@ -8168,7 +8168,11 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         def close(self) -> None:
             self.closed = True
 
-    ordinary_transport = HTTPXProviderTransport()
+    ordinary_transport = HTTPXProviderTransport(
+        allow_authenticated_complete_body_eof=True,
+        parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+        reuse_direct_connections=False,
+    )
     ordinary_transport._new_client = (  # type: ignore[method-assign]
         lambda **_kwargs: OrdinaryClient()
     )
@@ -8187,7 +8191,8 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
             first_direct_failed = str(exc) == "expired relay generation"
         second_direct = ordinary_transport(**ordinary_request)
         ordinary_transport_unchanged = (
-            not ordinary_transport.parent_tunnel_framing
+            ordinary_transport.allow_authenticated_complete_body_eof
+            and ordinary_transport.parent_tunnel_framing == TUNNEL_FRAMING_MODE
             and not ordinary_transport.reuse_direct_connections
         )
         ordinary_direct_requests_isolated = (

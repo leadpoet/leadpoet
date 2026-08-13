@@ -89,6 +89,7 @@ def test_inter_enclave_replay_and_identity_boundaries_are_protected():
     } <= set(PROTECTED_SYMBOLS["gateway/tee/inter_enclave_tls.py"])
     assert {
         "handle_v2_runtime_rpc",
+        "get_v2_provider_broker",
         "get_v2_inter_enclave_client",
         "execute_v2_provider_request",
         "handle_inter_enclave_rpc",

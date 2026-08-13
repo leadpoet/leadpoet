@@ -700,6 +700,7 @@ PROTECTED_SYMBOLS = {
         "acknowledge_checkpoint",
         "build_checkpoint",
         "handle_v2_runtime_rpc",
+        "get_v2_provider_broker",
         "get_v2_inter_enclave_client",
         "execute_v2_provider_request",
         "handle_inter_enclave_rpc",

@@ -1212,12 +1212,22 @@
       "symbol": "policy_document"
     },
     {
-      "ast_sha256": "sha256:530bac39cefd72eb5b632234fbf00a233318f5bc47db4423cc7e210c5a39b799",
+      "ast_sha256": "sha256:f0694a151dc7e54318dd770c04ac9baeb32d680eb2573d0d0a7b46208c29ceb8",
       "path": "gateway/tee/egress_proxy.py",
       "symbol": "EnclaveEgressProxy"
     },
     {
-      "ast_sha256": "sha256:f8d670dfe4c6ee6cffbb562941dbcb5bc23c09b7d5f9666428653fb0dfb23843",
+      "ast_sha256": "sha256:cbc7eebb8e84a0468433384457fa8126ed17c59e1f7279c0c606da697acf85f4",
+      "path": "gateway/tee/egress_proxy.py",
+      "symbol": "_FramedParentBridge"
+    },
+    {
+      "ast_sha256": "sha256:7ca3357462ad780873bc179aa26e0cd6e07ab875f71f01b38709421269eb3ace",
+      "path": "gateway/tee/egress_proxy.py",
+      "symbol": "_ManagedProxyStream"
+    },
+    {
+      "ast_sha256": "sha256:23c9fa7bc01a510a8f12667db1479f2b6d2b92e4dd74ee8278301c8b8e63baf7",
       "path": "gateway/tee/egress_proxy.py",
       "symbol": "_parse_proxy_request"
     },
@@ -1402,7 +1412,7 @@
       "symbol": "write_identity_to_tmpfs"
     },
     {
-      "ast_sha256": "sha256:026d6e2aec9362a3cdae48a572df263b5f7eb4552480166803aecae8a9232132",
+      "ast_sha256": "sha256:336837519b24c4d888ab1d8ed309d61e0eb9cbcba129c92d48685cbbc583d97d",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -1747,7 +1757,7 @@
       "symbol": "TEEEgressForwarder"
     },
     {
-      "ast_sha256": "sha256:dc1f473fa7a5261c2ef22f8624a1725e927df3d824c2ac35cd3179e7d7d81a2d",
+      "ast_sha256": "sha256:8322cbdc131239348a23fc0c351ffb4eba5cd7b0b0329ba608baf11c1ce18306",
       "path": "gateway/utils/tee_egress_forwarder.py",
       "symbol": "_handle_connection"
     },
@@ -2727,7 +2737,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:f0ea069f9d2078799708d84964105a67d8b2754ed16ea0cfaee84cecef4298cb",
-  "protected_source_commit": "626d4820191c4d58b54a0cf0d4a949902837e4bd",
+  "manifest_hash": "sha256:37572d42ca0908c4b2d0f9a8444cd84059f0b98accfefbe3b8f6fb3e54b0c9ec",
+  "protected_source_commit": "5ee99cd7a064cfa259cdee5e90164880af4d2fda",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

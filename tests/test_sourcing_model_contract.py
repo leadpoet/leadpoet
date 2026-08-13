@@ -20,11 +20,13 @@ from research_lab.sourcing_model_contract_check import (
     CONTRACT_V11_PATH,
     CONTRACT_V12_PATH,
     CONTRACT_V13_PATH,
+    CONTRACT_V26_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
     PARITY_FIXTURE_V11_PATH,
     PARITY_FIXTURE_V12_PATH,
     PARITY_FIXTURE_V13_PATH,
+    PARITY_FIXTURE_V26_PATH,
     PARITY_FIXTURE_V7_PATH,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
@@ -440,7 +442,43 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
         "leadpoet-sourcing-wrapper-contract-v11",
         "leadpoet-sourcing-wrapper-contract-v12",
         "leadpoet-sourcing-wrapper-contract-v13",
+        "leadpoet-sourcing-wrapper-contract-v26",
     }
+
+
+def test_exact_v26_contract_pair_and_keyword_only_surface_are_reviewed(
+    tmp_path: Path,
+) -> None:
+    contract = json.loads(CONTRACT_V26_PATH.read_text(encoding="utf-8"))
+    contract_path = tmp_path / contract["canonical_path"]
+    parity_path = tmp_path / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V26_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V26_PATH.read_bytes())
+    _write(
+        tmp_path,
+        "sourcing_model/intent_freshness.py",
+        """
+        def build_source_date_proof(
+            *, source_url, source_snapshot_sha256, source_metadata_sha256,
+            fetched_at, category, source_kind, source_class, provenance,
+            raw_date, evaluated_on, requested_maximum_age_days
+        ):
+            return None
+        """,
+    )
+
+    resolved = resolve_reviewed_consumer_snapshot(tmp_path)
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v26"
+    )
+    assert not any(
+        "intent_freshness.py:build_source_date_proof" in item
+        for item in violations
+    )
 
 
 def test_exact_v12_contact_contract_and_parity_pair_is_reviewed(

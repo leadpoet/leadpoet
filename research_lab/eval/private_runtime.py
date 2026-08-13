@@ -87,7 +87,10 @@ SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS = 1500.0
 SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
 # Match the adapter's result/receipt finalization window before sandbox kill.
 SOURCING_MODEL_MAX_FINALIZATION_RESERVE_SECONDS = 60.0
-EXPECTED_SOURCING_ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v3"
+EXPECTED_SOURCING_ADAPTER_VERSIONS = frozenset(
+    str(snapshot["contract"]["exact_constants"]["research_lab_adapter.py"]["ADAPTER_VERSION"])
+    for snapshot in reviewed_consumer_snapshots().values()
+)
 EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
 EXPECTED_ROUTING_COMPILER_VERSION = "routing-compiler-v2"
 REQUIRED_RUNTIME_CANDIDATE_TOOLS = {
@@ -1071,9 +1074,9 @@ def validate_sourcing_adapter_metadata(
     """Fail closed unless an artifact declares the Lab runtime contract."""
 
     document = dict(metadata)
-    if document.get("adapter_version") != EXPECTED_SOURCING_ADAPTER_VERSION:
+    if document.get("adapter_version") not in EXPECTED_SOURCING_ADAPTER_VERSIONS:
         raise PrivateModelRuntimeError(
-            "private model does not declare the supported adapter v3 contract"
+            "private model does not declare a reviewed adapter contract"
         )
     if (
         document.get("component_registry_version")

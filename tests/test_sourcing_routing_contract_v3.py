@@ -18,8 +18,9 @@ from tests.private_model_artifact_fixtures import install_reviewed_consumer_snap
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_private_model_commands_require_routing_adapter_v3() -> None:
+def test_private_model_commands_require_reviewed_routing_adapters() -> None:
     assert "sourcing-model-research-lab-adapter:v3" in DEFAULT_PRIVATE_TEST_CMD
+    assert "sourcing-model-research-lab-adapter:v6" in DEFAULT_PRIVATE_TEST_CMD
     assert "sourcing-model-components:v2" in DEFAULT_PRIVATE_TEST_CMD
     assert "routing-compiler-v2" in DEFAULT_PRIVATE_TEST_CMD
     assert "SubprocessPrivateModelRunner" in DEFAULT_PRIVATE_BUILD_CMD

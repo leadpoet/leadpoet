@@ -352,6 +352,9 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
         },
     }
     assert private_runtime.validate_sourcing_adapter_metadata(ready) == ready
+    reviewed_v6 = dict(ready)
+    reviewed_v6["adapter_version"] = "sourcing-model-research-lab-adapter:v6"
+    assert private_runtime.validate_sourcing_adapter_metadata(reviewed_v6) == reviewed_v6
     broken = dict(ready)
     broken.pop("industry_taxonomy")
     with pytest.raises(PrivateModelRuntimeError, match="taxonomy hash"):
@@ -359,7 +362,12 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
 
     broken = dict(ready)
     broken["adapter_version"] = "sourcing-model-research-lab-adapter:v2"
-    with pytest.raises(PrivateModelRuntimeError, match="adapter v3"):
+    with pytest.raises(PrivateModelRuntimeError, match="reviewed adapter"):
+        private_runtime.validate_sourcing_adapter_metadata(broken)
+
+    broken = dict(ready)
+    broken["adapter_version"] = "sourcing-model-research-lab-adapter:v5"
+    with pytest.raises(PrivateModelRuntimeError, match="reviewed adapter"):
         private_runtime.validate_sourcing_adapter_metadata(broken)
 
     broken = dict(ready)

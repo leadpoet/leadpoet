@@ -1,6 +1,6 @@
 """Sourcing-model consumer-contract conformance checks.
 
-The reviewed model-owned v7/v8/v11/v12/v13 contracts are snapshotted byte-for-byte under
+The reviewed model-owned v7/v8/v11/v12/v13/v26 contracts are snapshotted byte-for-byte under
 ``research_lab/``. The exact function signatures
 the Lab and production harness call
 (``research_lab_adapter.run_icp``/``adapter_metadata``,
@@ -51,7 +51,22 @@ CONTRACT_V13_PATH = Path(__file__).with_name("sourcing_model_contract_v13.json")
 PARITY_FIXTURE_V13_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v13.json"
 )
+CONTRACT_V26_PATH = Path(__file__).with_name("sourcing_model_contract_v26.json")
+PARITY_FIXTURE_V26_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v26.json"
+)
 REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v26",
+        "contract_path": CONTRACT_V26_PATH,
+        "contract_sha256": (
+            "sha256:fb20751ddbc068d754913f5a6aea35d2330572acd267dd0e3a2906ff5c221a83"
+        ),
+        "parity_path": PARITY_FIXTURE_V26_PATH,
+        "parity_sha256": (
+            "sha256:28fd84abd9a0af578590c0744744a0e817624a5effe37f5449916b40e8557675"
+        ),
+    },
     {
         "contract_id": "leadpoet-sourcing-wrapper-contract-v13",
         "contract_path": CONTRACT_V13_PATH,
@@ -577,15 +592,24 @@ def verify_source_tree_contract(root: Path) -> List[str]:
                     f"(positional_only={actual['positional_only']}, "
                     f"vararg={actual['vararg']!r}, kwarg={actual['kwarg']!r})"
                 )
+            # Newer contracts separate the exact positional surface in
+            # ``functions`` from the complete keyword-only surface in
+            # ``full_parameters``. Older snapshots retain the original
+            # all-parameter exactness.
+            exact_actual = (
+                actual["params"]
+                if expected_full is not None
+                else actual["all_params"]
+            )
             if contract_key in exact_signatures and (
-                actual["all_params"] != expected
+                exact_actual != expected
                 or actual["positional_only"]
                 or actual["vararg"] is not None
                 or actual["kwarg"] is not None
             ):
                 violations.append(
                     f"exact parameter drift {relative}:{name}: expected "
-                    f"{expected}, found {actual['all_params']} "
+                    f"{expected}, found {exact_actual} "
                     f"(positional_only={actual['positional_only']}, "
                     f"vararg={actual['vararg']!r}, kwarg={actual['kwarg']!r})"
                 )

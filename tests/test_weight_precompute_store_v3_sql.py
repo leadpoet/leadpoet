@@ -106,7 +106,21 @@ def test_weight_precompute_store_is_append_only_service_only_and_idempotent() ->
                 text=True,
                 timeout=5,
             )
-            if ready.returncode == 0:
+            logs = subprocess.run(
+                ["docker", "logs", container],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            # initdb starts a temporary server that accepts pg_isready, then
+            # shuts it down before the final server starts. Wait for both.
+            if (
+                ready.returncode == 0
+                and logs.returncode == 0
+                and (logs.stdout + logs.stderr).count(
+                    "database system is ready to accept connections"
+                ) >= 2
+            ):
                 break
             time.sleep(0.25)
         else:
@@ -155,6 +169,14 @@ SELECT precompute_run_id FROM public.record_research_lab_weight_precompute_input
             "'{\"chain_state\":\"%s\"}'::jsonb);" % _sha("4")
         )
         assert incomplete_input_set.stdout.strip().endswith("f")
+
+        # The production read follows the complete-input-set write before the
+        # first stage event is appended. It must return an empty JSON array.
+        zero_event_readback = psql(
+            "SET ROLE service_role; SELECT public.research_lab_weight_precompute_readback_v3("
+            "'%s')->'stage_events';" % run_id
+        )
+        assert zero_event_readback.stdout.strip().splitlines()[-1] == "[]"
 
         append_event = """
 SET ROLE service_role;

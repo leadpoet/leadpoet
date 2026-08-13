@@ -73,9 +73,15 @@ def _reject_unsafe_values(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
             key_text = str(key)
+            is_canonical_nonsecret_headers_hash = (
+                key_text == "nonsecret_headers_hash"
+                and isinstance(child, str)
+                and bool(_HASH_RE.fullmatch(child))
+            )
             if (
                 _UNSAFE_KEY_RE.search(key_text)
                 and not _SAFE_CREDENTIAL_PROOF_KEY_RE.fullmatch(key_text)
+                and not is_canonical_nonsecret_headers_hash
             ):
                 raise GatewayWeightPrecomputeStoreV3Error(
                     "gateway result contains a secret or authorization field"

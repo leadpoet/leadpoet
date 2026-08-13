@@ -393,7 +393,8 @@ BEGIN
         'complete_input_set', pg_catalog.to_jsonb(input_set_row),
         'stage_events', COALESCE(
             pg_catalog.jsonb_agg(pg_catalog.to_jsonb(stage_row)
-                ORDER BY stage_row.stage_sequence, stage_row.occurred_at, stage_row.stage_event_id),
+                ORDER BY stage_row.stage_sequence, stage_row.occurred_at, stage_row.stage_event_id)
+                FILTER (WHERE stage_row.stage_event_id IS NOT NULL),
             '[]'::JSONB
         )
     ) INTO output_doc

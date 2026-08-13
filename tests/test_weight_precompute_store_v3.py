@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 
 from gateway.research_lab import weight_precompute_store_v3 as precompute
+from leadpoet_canonical.attested_v2 import build_transport_attempt
 from leadpoet_canonical.weight_authority_v2 import GATEWAY_WEIGHT_INPUT_CATEGORIES
 
 
@@ -57,6 +58,36 @@ def _kwargs(*, compact: bool = False) -> dict:
         "source_input_root": _sha(34),
         "gateway_result": _result(compact=compact),
     }
+
+
+def _canonical_transport_attempt() -> dict:
+    return build_transport_attempt(
+        request_id="d" * 32,
+        logical_operation_id="weight-precompute-provider-call",
+        job_id="weight-precompute-run",
+        purpose="research_lab.candidate_score.v2",
+        provider_id="openrouter",
+        attempt_number=0,
+        method="POST",
+        destination_host="openrouter.ai",
+        destination_port=443,
+        path_hash=_sha(40),
+        nonsecret_headers_hash=_sha(41),
+        body_hash=_sha(42),
+        credential_ref_hash=_sha(43),
+        retry_policy_hash=_sha(44),
+        timeout_ms=30_000,
+        started_at="2026-08-13T00:00:00Z",
+        terminal_status="authenticated_response",
+        http_status=200,
+        response_hash=_sha(45),
+        request_artifact_hash=_sha(46),
+        response_artifact_hash=_sha(47),
+        tls_peer_chain_hash=_sha(48),
+        tls_protocol="TLSv1.3",
+        failure_code=None,
+        completed_at="2026-08-13T00:00:01Z",
+    )
 
 
 @pytest.mark.asyncio
@@ -160,6 +191,35 @@ def test_gateway_frontier_requires_exactly_nine_inputs_and_no_authorization():
 
     arguments = _kwargs()
     arguments["gateway_result"]["authorization"] = "forbidden"
+    with pytest.raises(
+        precompute.GatewayWeightPrecomputeStoreV3Error,
+        match="secret or authorization",
+    ):
+        precompute.GatewayWeightPrecomputeStoreV3._request(**arguments)
+
+
+def test_gateway_frontier_allows_canonical_transport_nonsecret_headers_hash():
+    arguments = _kwargs()
+    attempt = _canonical_transport_attempt()
+    arguments["gateway_result"]["upstream_receipt_set"]["transport_attempts"] = [
+        attempt
+    ]
+
+    request = precompute.GatewayWeightPrecomputeStoreV3._request(**arguments)
+
+    assert request["input_set_doc"]["gateway_result"]["upstream_receipt_set"][
+        "transport_attempts"
+    ] == [attempt]
+
+
+def test_gateway_frontier_rejects_raw_nonsecret_headers_hash_value():
+    arguments = _kwargs()
+    attempt = _canonical_transport_attempt()
+    attempt["nonsecret_headers_hash"] = "raw-secret-value"
+    arguments["gateway_result"]["upstream_receipt_set"]["transport_attempts"] = [
+        attempt
+    ]
+
     with pytest.raises(
         precompute.GatewayWeightPrecomputeStoreV3Error,
         match="secret or authorization",

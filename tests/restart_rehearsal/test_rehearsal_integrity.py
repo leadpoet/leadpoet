@@ -5795,10 +5795,6 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
     def source_snapshot(**_kwargs):
         yield tmp_path
 
-    @contextmanager
-    def fixture_seed(*_args, **_kwargs):
-        yield tmp_path
-
     monkeypatch.setattr(
         rehearsal,
         "_git_sha",
@@ -5846,7 +5842,13 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
         "_prepare_drand_artifact",
         lambda **_kwargs: tmp_path,
     )
-    monkeypatch.setattr(rehearsal, "_prepared_fixture_seed", fixture_seed)
+    monkeypatch.setattr(
+        rehearsal,
+        "_prepare_fixture_seeds",
+        lambda _tag, *, targets, **_kwargs: {
+            target: tmp_path for target in targets
+        },
+    )
 
     def run_component(_tag, *, component, **_kwargs):
         calls.append(component)

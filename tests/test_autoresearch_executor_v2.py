@@ -5,6 +5,7 @@ import base64
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -2274,6 +2275,102 @@ def test_openrouter_guard_returns_only_committed_redacted_key_evidence(monkeypat
         runtime_hash.split(":", 1)[1]
     )
     assert "sk-or-v1-" not in str(result.output)
+
+
+def test_loop_privacy_verifier_binds_placeholder_to_committed_runtime_key_hash(
+    monkeypatch,
+):
+    runtime_hash = "sha256:" + "5" * 64
+    management_hash = "sha256:" + "6" * 64
+    observed_privacy_kwargs = {}
+
+    def verify_privacy(**kwargs):
+        observed_privacy_kwargs.update(kwargs)
+        return {
+            "workspace_id_hash": "workspace-hash",
+            "runtime_key_hash": kwargs["expected_runtime_key_hash"],
+            "runtime_key_label_hash": "label-hash",
+            "runtime_key_creator_user_id_hash": "creator-hash",
+            "management_key_hash": "placeholder-hash",
+            "proof_hash": "sha256:" + "7" * 64,
+        }
+
+    class FakeWorker:
+        def __init__(self, _config, *, worker_ref):
+            assert worker_ref == "enclave:autoresearch-v2"
+
+        def _auto_research_max_tokens_for_call(self, **_kwargs):
+            return 32
+
+        async def _call_openrouter(self, **kwargs):
+            kwargs["privacy_verifier"](
+                runtime_key=kwargs["api_key"],
+                management_key=kwargs["privacy_management_key"],
+                stage=kwargs["capture_stage"],
+                request_policy={
+                    "data_collection": "deny",
+                    "allow_fallbacks": False,
+                },
+            )
+            return SimpleNamespace(
+                content="ok",
+                provider_usage={},
+                cost_microusd=1,
+            )
+
+    monkeypatch.setattr(
+        "gateway.tee.autoresearch_executor_v2.verify_openrouter_workspace_privacy",
+        verify_privacy,
+    )
+    monkeypatch.setattr(
+        "gateway.research_lab.worker.ResearchLabHostedWorker", FakeWorker
+    )
+    monkeypatch.setattr(
+        "gateway.research_lab.worker._resolve_code_edit_loop_stage_model_request",
+        lambda *_args, **_kwargs: {
+            "stage": "code_edit_draft",
+            "model_id": "model/test",
+            "model_ids": ("model/test",),
+            "reasoning_effort": "low",
+            "max_tokens": 32,
+            "temperature": 0.0,
+            "allow_non_zdr": False,
+        },
+    )
+    context = ExecutionContextV2(
+        job_id="autoresearch-v2:loop-privacy",
+        purpose="research_lab.patch_draft.v2",
+        epoch_id=1,
+    )
+    openrouter_context = {
+        "key_ref": "encrypted_ref:openrouter:" + "1" * 32,
+        "miner_hotkey": "miner-hotkey",
+        "runtime_credential_value_hash": runtime_hash,
+        "management_credential_value_hash": management_hash,
+        "privacy_proof_doc": {
+            "workspace_id_hash": "workspace-hash",
+            "runtime_key_hash": runtime_hash.split(":", 1)[1],
+            "runtime_key_label_hash": "label-hash",
+            "runtime_key_creator_user_id_hash": "creator-hash",
+            "management_key_hash": management_hash.split(":", 1)[1],
+        },
+    }
+    executor = AutoresearchExecutorV2.__new__(AutoresearchExecutorV2)
+    caller = executor._loop_model_caller(
+        context=context,
+        config=_config(),
+        run_id="run-loop-privacy",
+        model_id="model/test",
+        model_doc={},
+        openrouter_context=openrouter_context,
+    )
+
+    result = asyncio.run(caller([{"role": "user", "content": "test"}], 30, 32))
+
+    assert result.content == "ok"
+    assert observed_privacy_kwargs["expected_runtime_key_hash"] == (
+        runtime_hash.split(":", 1)[1]
+    )
 
 
 def test_openrouter_guard_rejects_unleased_credential_commitment(monkeypatch):

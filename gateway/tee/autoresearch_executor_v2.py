@@ -3641,6 +3641,9 @@ class AutoresearchExecutorV2:
                     request_policy=_mapping(
                         kwargs.get("request_policy"), "request_policy"
                     ),
+                    expected_runtime_key_hash=str(
+                        openrouter_context["runtime_credential_value_hash"]
+                    ).split(":", 1)[1],
                 )
             )
             proof["management_key_hash"] = str(

@@ -1687,6 +1687,11 @@
       "symbol": "get_v2_inter_enclave_client"
     },
     {
+      "ast_sha256": "sha256:82eb5791e94f0fddb97ae68d1f1c29d48ed590327bd097020dac4b62178be372",
+      "path": "gateway/tee/tee_service.py",
+      "symbol": "get_v2_provider_broker"
+    },
+    {
       "ast_sha256": "sha256:47796daac692b577bacb18c2fd0c610144a05031a2059731b74d7d27a899d50a",
       "path": "gateway/tee/tee_service.py",
       "symbol": "handle_inter_enclave_rpc"
@@ -2722,7 +2727,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:2487e8cd2b56aa901a4fa5d5468639dce72e4494f072ce0c1cf621e45d002fcf",
-  "protected_source_commit": "4bb6160df78db235ec7488b616325ac46173a2be",
+  "manifest_hash": "sha256:f0ea069f9d2078799708d84964105a67d8b2754ed16ea0cfaee84cecef4298cb",
+  "protected_source_commit": "626d4820191c4d58b54a0cf0d4a949902837e4bd",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

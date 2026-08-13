@@ -26,6 +26,8 @@ from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
     CodeEditDraft,
     CodeEditSourceInspectionRequest,
+    LOOP_DIRECTION_ALLOWED_LANES,
+    SOURCING_PIPELINE_EDITABLE_PATHS,
     code_edit_candidate_manifest,
     extract_unified_diff_paths,
     git_diff_structural_metadata,
@@ -361,6 +363,11 @@ def validate_private_code_edit_diff_artifact(
         patch_doc = patch_manifest.get("patch_doc")
         if not isinstance(patch_doc, Mapping):
             raise CodeEditBuildError("candidate patch manifest document is invalid")
+        patch_lane = str(patch_doc.get("lane") or "").strip().lower()
+        if patch_lane not in LOOP_DIRECTION_ALLOWED_LANES:
+            raise CodeEditBuildError(
+                f"candidate patch lane is outside sourcing scope:{patch_lane[:120]}"
+            )
         patch_target_files = patch_doc.get("target_files")
         if (
             not isinstance(patch_target_files, list)
@@ -751,7 +758,7 @@ class CodeEditCandidateBuilder:
         source_tree_hash: str,
         top_level_paths: Sequence[str],
     ) -> ParentImageSourceContext:
-        editable_files = _editable_runtime_files(
+        editable_files = _sourcing_loop_visible_files(
             source_root,
             allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
             allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
@@ -802,6 +809,11 @@ class CodeEditCandidateBuilder:
         read = set(read_paths or ())
         paths = set(draft.target_files) | extract_unified_diff_paths(draft.unified_diff)
         errors: list[str] = []
+        normalized_lane = str(draft.lane or "").strip().lower()
+        if normalized_lane not in LOOP_DIRECTION_ALLOWED_LANES:
+            errors.append(
+                f"code_edit_lane_outside_sourcing_scope:{normalized_lane[:120]}"
+            )
         for path in sorted(paths):
             if path not in allowed:
                 errors.append(f"code_edit_path_not_in_extracted_source:{path}")
@@ -1676,6 +1688,38 @@ def _editable_runtime_files(
             if rel.endswith(tuple(allowed_suffixes)):
                 allowed.append(rel)
     return sorted(allowed)[:_SOURCE_CONTEXT_MAX_FILES]
+
+
+def _sourcing_loop_visible_files(
+    source_dir: Path,
+    *,
+    allowed_prefixes: Sequence[str],
+    allowed_exact_paths: Sequence[str],
+    allowed_suffixes: Sequence[str],
+) -> list[str]:
+    """Return only reviewed declarative files that a sourcing loop may inspect."""
+
+    allowed_exact = set(allowed_exact_paths)
+    visible: list[str] = []
+    for relative_path in sorted(SOURCING_PIPELINE_EDITABLE_PATHS):
+        if relative_path not in allowed_exact and not any(
+            relative_path.startswith(prefix) for prefix in allowed_prefixes
+        ):
+            continue
+        if not relative_path.endswith(tuple(allowed_suffixes)):
+            continue
+        if _source_path_disallowed(relative_path):
+            continue
+        candidate = source_dir
+        path_is_plain = True
+        for part in Path(relative_path).parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                path_is_plain = False
+                break
+        if path_is_plain and candidate.is_file():
+            visible.append(relative_path)
+    return visible
 
 
 # Sentinel end-line marking full-file coverage: an unranged repeat read of a

@@ -2600,23 +2600,23 @@ def _normalized_prompt_output_expression(node: ast.AST) -> ast.AST:
         normalized.values = normalized_values
         return normalized
     if isinstance(node, ast.BinOp):
+        if not isinstance(node.op, ast.Add):
+            return copy.deepcopy(node)
         normalized = copy.deepcopy(node)
         normalized.left = _normalized_prompt_output_expression(node.left)
         normalized.right = _normalized_prompt_output_expression(node.right)
         return normalized
     if isinstance(node, ast.BoolOp):
-        normalized = copy.deepcopy(node)
-        normalized.values = [
-            _normalized_prompt_output_expression(value) for value in node.values
-        ]
-        return normalized
+        # String truthiness controls which operands execute. Keep the complete
+        # expression exact instead of treating it as rendered prompt text.
+        return copy.deepcopy(node)
     if isinstance(node, ast.IfExp):
         normalized = copy.deepcopy(node)
         normalized.test = copy.deepcopy(node.test)
         normalized.body = _normalized_prompt_output_expression(node.body)
         normalized.orelse = _normalized_prompt_output_expression(node.orelse)
         return normalized
-    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+    if isinstance(node, (ast.List, ast.Tuple)):
         normalized = copy.deepcopy(node)
         normalized.elts = [
             _normalized_prompt_output_expression(value) for value in node.elts
@@ -2742,10 +2742,20 @@ def _module_edit_surface_projection(
     }
     for node in tree.body:
         name, value = _assigned_name_and_value(node)
-        if name.startswith("TOOL_") and isinstance(value, ast.Constant) and isinstance(
-            value.value,
-            str,
-        ):
+        if name.startswith("TOOL_") and name != "TOOL_CATALOG":
+            if not (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            ):
+                violations.append(
+                    "routing tool constant is not a plain string assignment "
+                    f"{relative_path}:{name}"
+                )
+                normalized_body.append(copy.deepcopy(node))
+                continue
             if name in imported_bindings:
                 violations.append(
                     f"routing tool constant shadows import {relative_path}:{name}"
@@ -2768,12 +2778,16 @@ def _module_edit_surface_projection(
                 "RUNTIME_POLICY_VERSION",
             }
         ):
-            if not isinstance(value, ast.Constant) or not isinstance(
-                value.value,
-                str,
-            ) or not _PIPELINE_VERSION_RE.fullmatch(str(value.value)):
+            if not (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+                and _PIPELINE_VERSION_RE.fullmatch(str(value.value))
+            ):
                 violations.append(
-                    f"routing version is not literal {relative_path}:{name}"
+                    f"routing version is not a plain literal {relative_path}:{name}"
                 )
             normalized_body.append(_assignment_with_sentinel(node, "<version>"))
             continue
@@ -2781,6 +2795,10 @@ def _module_edit_surface_projection(
             relative_path == "sourcing_model/routing/runtime.py"
             and name == "SOURCE_ADD_ROUTING_REGISTRATIONS"
         ):
+            if not isinstance(node, ast.Assign):
+                violations.append(
+                    f"SOURCE_ADD registry is not a plain assignment {relative_path}:{name}"
+                )
             normalized_body.append(
                 _assignment_with_sentinel(node, "<approved-source-add-registry>")
             )
@@ -2789,11 +2807,21 @@ def _module_edit_surface_projection(
             relative_path == "sourcing_model/scrapingdog_signal_contract.py"
             and name == "TOOL_CATALOG"
         ):
+            if not isinstance(node, ast.Assign):
+                violations.append(
+                    f"tool catalog is not a plain assignment {relative_path}:{name}"
+                )
             normalized_body.append(
                 _assignment_with_sentinel(node, "<tool-catalog>")
             )
             continue
         if name in prompt_bindings:
+            if not isinstance(node, ast.Assign):
+                violations.append(
+                    f"prompt binding is not a plain assignment {relative_path}:{name}"
+                )
+                normalized_body.append(copy.deepcopy(node))
+                continue
             string_only = name in _PIPELINE_LITERAL_STRING_BINDINGS.get(
                 relative_path,
                 frozenset(),

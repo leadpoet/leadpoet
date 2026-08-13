@@ -31,7 +31,7 @@ def _draft(**overrides):
         mechanism="widen fan-out",
         expected_improvement="+2 companies",
         risk="slower",
-        lane="provider",
+        lane="source_routing",
         target_files=("sourcing_model.py",),
         unified_diff="--- a/sourcing_model.py\n+++ b/sourcing_model.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n",
         redacted_summary="widen provider fan-out for recall",
@@ -110,6 +110,7 @@ def _candidate_patch_manifest_for(
         "patch_doc": {},
     }
     payload["patch_doc"] = {
+        "lane": "source_routing",
         "target_files": list(artifact["target_files"]),
     }
     return {**payload, "manifest_hash": sha256_json(payload)}
@@ -125,6 +126,39 @@ def test_private_source_diff_artifact_binds_full_build_authority():
         expected_parent_artifact_hash=artifact["parent_artifact_hash"],
         expected_run_id=artifact["run_id"],
     ) == artifact
+
+
+@pytest.mark.parametrize("lane", (None, "output_ranking"))
+def test_private_source_diff_rejects_missing_or_out_of_scope_patch_lane(lane):
+    artifact, build_doc = _private_source_diff_fixture()
+    patch_manifest = _candidate_patch_manifest_for(artifact, build_doc)
+    patch_doc = dict(patch_manifest["patch_doc"])
+    if lane is None:
+        patch_doc.pop("lane")
+    else:
+        patch_doc["lane"] = lane
+    patch_payload = {
+        **{
+            key: value
+            for key, value in patch_manifest.items()
+            if key != "manifest_hash"
+        },
+        "patch_doc": patch_doc,
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+
+    with pytest.raises(
+        CodeEditBuildError,
+        match="candidate patch lane is outside sourcing scope",
+    ):
+        validate_private_code_edit_diff_artifact(
+            artifact,
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+        )
 
 
 def test_private_source_diff_rejects_hash_consistent_structural_git_metadata():
@@ -508,6 +542,202 @@ def test_sourcing_pipeline_spine_is_immutable(path):
         match=f"code_edit_immutable_sourcing_pipeline_path:{path}",
     ):
         code_editing.validate_code_edit_draft(draft)
+
+
+def test_sourcing_pipeline_edit_surface_is_exact_allowlist():
+    assert code_editing.LOOP_DIRECTION_ALLOWED_LANES == (
+        "query_construction",
+        "source_routing",
+        "provider_fallback",
+        "intent_evidence_quality",
+    )
+    assert code_editing.SOURCING_PIPELINE_EDITABLE_PATHS == frozenset(
+        {
+            "sourcing_model/discovery.py",
+            "sourcing_model/routing/defaults.py",
+            "sourcing_model/routing/guidance.py",
+            "sourcing_model/routing/runtime.py",
+            "sourcing_model/scrapingdog_signal_contract.py",
+        }
+    )
+    assert code_editing.IMMUTABLE_SOURCING_PIPELINE_PATHS == frozenset(
+        {
+            "research_lab_adapter.py",
+            "sourcing_model/__init__.py",
+            "sourcing_model/consumer_contract.json",
+            "sourcing_model/consumer_parity.py",
+            "sourcing_model/consumer_parity_fixtures.json",
+            "sourcing_model/contact_verification.py",
+            "sourcing_model/contact_verification_contract_v1.json",
+            "sourcing_model/core.py",
+            "sourcing_model/orchestrator.py",
+            "sourcing_model/routing/__init__.py",
+            "sourcing_model/routing/compiler.py",
+            "sourcing_model/routing/contracts.py",
+            "sourcing_model/routing/policy.py",
+        }
+    )
+
+
+def test_allowed_target_cannot_mask_denied_diff_path():
+    draft = _draft(
+        target_files=("sourcing_model/discovery.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/core.py b/sourcing_model/core.py\n"
+            "--- a/sourcing_model/core.py\n"
+            "+++ b/sourcing_model/core.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        code_editing.validate_code_edit_draft(draft)
+
+    message = str(excinfo.value)
+    assert "code_edit_target_files_differ_from_unified_diff" in message
+    assert (
+        "code_edit_immutable_sourcing_pipeline_path:sourcing_model/core.py"
+        in message
+    )
+
+
+def test_planless_draft_cannot_restore_lane_outside_exact_sourcing_scope():
+    path = "sourcing_model/discovery.py"
+    draft = _draft(
+        lane="output_ranking",
+        target_files=(path,),
+        unified_diff=(
+            f"diff --git a/{path} b/{path}\n"
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+    )
+    assert code_editing.code_edit_plan_alignment_errors(
+        draft,
+        loop_direction_plan=None,
+    ) == []
+
+    with pytest.raises(
+        ValueError,
+        match="code_edit_lane_outside_sourcing_scope:output_ranking",
+    ):
+        code_editing.validate_code_edit_draft(draft)
+
+
+def test_local_builder_rejects_out_of_scope_lane_before_source_checkout():
+    builder = object.__new__(code_build.CodeEditCandidateBuilder)
+    builder.config = SimpleNamespace(
+        code_edit_allowed_path_prefixes=lambda: ("sourcing_model/",),
+        code_edit_allowed_exact_paths=lambda: (),
+        code_edit_allowed_suffixes=lambda: (".py",),
+    )
+    path = "sourcing_model/discovery.py"
+    draft = _draft(
+        lane="output_ranking",
+        target_files=(path,),
+        unified_diff=(
+            f"diff --git a/{path} b/{path}\n"
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+    )
+
+    with pytest.raises(
+        code_build.CodeEditPatchApplyError,
+        match="code_edit_lane_outside_sourcing_scope:output_ranking",
+    ):
+        builder.check_patch_applies(
+            draft=draft,
+            parent_artifact=SimpleNamespace(image_digest="not-used"),
+        )
+
+
+def test_local_loop_source_context_exposes_only_exact_declarative_surface(
+    tmp_path: Path,
+):
+    source_root = tmp_path / "source"
+    for relative_path in (
+        *sorted(code_editing.SOURCING_PIPELINE_EDITABLE_PATHS),
+        "sourcing_model/core.py",
+        "sourcing_model/orchestrator.py",
+        "qualification/scoring/company_match.py",
+        "gateway/research_lab/private_client.py",
+    ):
+        path = source_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+    for index in range(150):
+        path = source_root / "gateway" / f"unrelated_{index:03d}.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    builder = object.__new__(code_build.CodeEditCandidateBuilder)
+    builder.config = SimpleNamespace(
+        code_edit_allowed_path_prefixes=lambda: (
+            "gateway/",
+            "qualification/",
+            "sourcing_model/",
+        ),
+        code_edit_allowed_exact_paths=lambda: ("research_lab_adapter.py",),
+        code_edit_allowed_suffixes=lambda: (".py",),
+        planner_symbol_index_enabled=False,
+    )
+    context = builder._source_context_from_root(
+        parent_artifact=SimpleNamespace(image_digest="repo@sha256:" + "1" * 64),
+        source_root=source_root,
+        source_mode="test",
+        source_tree_hash="sha256:" + "2" * 64,
+        top_level_paths=("gateway", "qualification", "sourcing_model"),
+    )
+
+    expected = tuple(sorted(code_editing.SOURCING_PIPELINE_EDITABLE_PATHS))
+    assert context.editable_files == expected
+    assert {item["path"] for item in context.file_previews} <= set(expected)
+    assert context.prompt_context()["editable_files"] == list(expected)
+    assert context.inspection_index()["editable_files"] == list(expected)
+
+    with pytest.raises(
+        CodeEditBuildError,
+        match="source_inspection_path_not_editable:sourcing_model/core.py",
+    ):
+        code_build.resolve_source_inspection_requests(
+            context,
+            (
+                code_editing.CodeEditSourceInspectionRequest(
+                    operation="read_file",
+                    path="sourcing_model/core.py",
+                ),
+            ),
+            already_read_paths=(),
+            max_files=1,
+            max_file_bytes=1024,
+            max_total_bytes=1024,
+            max_search_matches=10,
+        )
+
+
+def test_sourcing_loop_visibility_rejects_symlinked_allowed_paths(tmp_path: Path):
+    source_root = tmp_path / "source"
+    target = source_root / "sourcing_model" / "core.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    discovery = source_root / "sourcing_model" / "discovery.py"
+    discovery.symlink_to(target)
+
+    assert code_build._sourcing_loop_visible_files(
+        source_root,
+        allowed_prefixes=("sourcing_model/",),
+        allowed_exact_paths=(),
+        allowed_suffixes=(".py",),
+    ) == []
 
 
 @pytest.mark.parametrize(
@@ -1175,6 +1405,22 @@ def test_loop_direction_v1_0_checkpoint_remains_compatible():
     assert code_editing.loop_direction_plan_contract_errors(plan) == []
 
 
+def test_loop_direction_v1_0_checkpoint_cannot_restore_removed_lane():
+    plan = code_editing.loop_direction_plan_from_mapping(
+        {
+            "schema_version": "1.0",
+            "required_lane": "output_ranking",
+            "required_mechanism": "rerank output",
+            "ranked_paths": [{"path_id": "legacy-path"}],
+            "selected_path_id": "legacy-path",
+        }
+    )
+
+    assert code_editing.loop_direction_plan_contract_errors(plan) == [
+        "loop_direction_plan_lane_outside_sourcing_scope:output_ranking"
+    ]
+
+
 def test_loop_direction_v1_1_round_trip_and_contract_validation():
     plan = code_editing.parse_loop_direction_plan_response(json.dumps(_v1_1_plan()))
     first_doc = plan.to_dict()
@@ -1186,11 +1432,11 @@ def test_loop_direction_v1_1_round_trip_and_contract_validation():
 
 def test_loop_direction_v1_1_selected_path_overrides_duplicate_cover_fields():
     payload = _v1_1_plan(
-        required_lane="output_ranking",
+        required_lane="source_routing",
         required_mechanism="different top-level mechanism",
         target_behavior=["different top-level behavior"],
         must_inspect=["sourcing_model/other.py"],
-        allowed_lanes=["output_ranking"],
+        allowed_lanes=["source_routing"],
         disallowed_lanes=["query_construction"],
         must_not_try=["different top-level safety rule"],
         success_criteria=["different top-level success rule"],
@@ -1217,6 +1463,18 @@ def test_loop_direction_v1_1_selected_path_overrides_duplicate_cover_fields():
         assert getattr(plan, field) == tuple(selected[field])
     assert plan.validation_mode == selected["validation_mode"]
     assert code_editing.loop_direction_plan_contract_errors(plan) == []
+
+
+def test_loop_direction_v1_1_rejects_lane_outside_exact_sourcing_scope():
+    payload = _v1_1_plan()
+    payload["ranked_paths"][0]["lane"] = "output_ranking"
+    payload["ranked_paths"][0]["allowed_lanes"] = ["output_ranking"]
+    plan = code_editing.loop_direction_plan_from_mapping(payload)
+
+    assert code_editing.loop_direction_plan_contract_errors(plan) == [
+        "loop_direction_plan_lane_outside_sourcing_scope:output_ranking",
+        "ranked_path_lane_outside_sourcing_scope:query-recall:output_ranking",
+    ]
 
 
 def test_loop_direction_v1_1_rejects_inconsistent_selected_path():

@@ -1396,6 +1396,49 @@ def test_discovery_control_string_is_not_a_prompt_edit(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("parent_expression", "candidate_expression"),
+    (
+        ('"SAFE" or print("SIDE_EFFECT")', '"" or print("SIDE_EFFECT")'),
+        ('"company %s" % source', '"company %d" % source'),
+    ),
+)
+def test_prompt_text_cannot_change_expression_control_semantics(
+    tmp_path: Path,
+    parent_expression: str,
+    candidate_expression: str,
+) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+
+    for root in (parent, candidate):
+        discovery = root / "sourcing_model" / "discovery.py"
+        source = discovery.read_text(encoding="utf-8")
+        changed = source.replace(
+            'f"find companies with {source} evidence"',
+            parent_expression,
+            1,
+        )
+        assert changed != source
+        discovery.write_text(changed, encoding="utf-8")
+
+    discovery = candidate / "sourcing_model" / "discovery.py"
+    source = discovery.read_text(encoding="utf-8")
+    changed = source.replace(parent_expression, candidate_expression, 1)
+    assert changed != source
+    discovery.write_text(changed, encoding="utf-8")
+
+    assert (
+        "non-declarative sourcing edit changed: sourcing_model/discovery.py"
+        in sourcing_pipeline_preservation_errors(
+            sourcing_pipeline_structure_document(parent),
+            sourcing_pipeline_structure_document(candidate),
+        )
+    )
+
+
 def test_discovery_lookup_key_is_not_a_prompt_edit(tmp_path: Path) -> None:
     parent = tmp_path / "parent"
     candidate = tmp_path / "candidate"
@@ -1451,6 +1494,62 @@ def test_policy_executable_metadata_is_rejected(tmp_path: Path) -> None:
 
     assert any("RoutingPolicy policy_version must be inert data" in error
                for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "before", "after", "expected_error"),
+    (
+        (
+            "sourcing_model/routing/runtime.py",
+            'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"',
+            'TOOL_RUNTIME_INTENT: side_effect() = "intent.fixture_runtime"',
+            "routing tool constant is not a plain string assignment",
+        ),
+        (
+            "sourcing_model/routing/runtime.py",
+            'RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v7"',
+            'RUNTIME_POLICY_VERSION: side_effect() = "sourcing-model-runtime-routing:v7"',
+            "routing version is not a plain literal",
+        ),
+        (
+            "sourcing_model/routing/runtime.py",
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+            "SOURCE_ADD_ROUTING_REGISTRATIONS: side_effect() = ()",
+            "SOURCE_ADD registry is not a plain assignment",
+        ),
+        (
+            "sourcing_model/scrapingdog_signal_contract.py",
+            "TOOL_CATALOG = ()",
+            "TOOL_CATALOG: side_effect() = ()",
+            "tool catalog is not a plain assignment",
+        ),
+        (
+            "sourcing_model/discovery.py",
+            '_INTENT_PHRASE_FAMILIES = {"HIRING": ("active hiring",)}',
+            '_INTENT_PHRASE_FAMILIES: side_effect() = {"HIRING": ("active hiring",)}',
+            "prompt binding is not a plain assignment",
+        ),
+    ),
+)
+def test_declarative_bindings_reject_executable_annotations(
+    tmp_path: Path,
+    relative_path: str,
+    before: str,
+    after: str,
+    expected_error: str,
+) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    path = candidate / relative_path
+    source = path.read_text(encoding="utf-8")
+    changed = source.replace(before, after, 1)
+    assert changed != source
+    path.write_text(changed, encoding="utf-8")
+
+    assert any(
+        expected_error in error
+        for error in verify_sourcing_pipeline_structure(candidate)
+    )
 
 
 def test_prompt_function_code_is_not_editable(tmp_path: Path) -> None:
@@ -2594,6 +2693,84 @@ def test_pipeline_structure_gate_rejects_same_stage_wrapper_body_change(
         cb._sourcing_pipeline_structure_gate(
             tmp_path,
             expected=parent_structure,
+        )
+
+
+def test_local_candidate_builder_rejects_allowed_path_topology_mutation(
+    tmp_path: Path,
+) -> None:
+    import difflib
+    from types import SimpleNamespace
+
+    import gateway.research_lab.code_build as cb
+    from research_lab.code_editing import CodeEditDraft
+    from research_lab.eval.private_runtime import compute_private_source_tree_hash
+
+    parent = tmp_path / "parent"
+    _conforming_tree(parent)
+    for required_directory in ("gateway", "qualification", "validator_models"):
+        path = parent / required_directory / "runtime.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+    relative_path = "sourcing_model/routing/runtime.py"
+    runtime = parent / relative_path
+    before = runtime.read_text(encoding="utf-8")
+    after = before.replace(
+        "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+        "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+        1,
+    )
+    assert after != before
+    unified_diff = "diff --git a/{0} b/{0}\n".format(relative_path) + "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{relative_path}",
+            tofile=f"b/{relative_path}",
+        )
+    )
+    draft = CodeEditDraft(
+        failure_mode="wrong stage",
+        mechanism="change wrapper stage",
+        expected_improvement="none",
+        risk="pipeline mutation",
+        lane="source_routing",
+        target_files=(relative_path,),
+        unified_diff=unified_diff,
+        redacted_summary="attempt topology mutation",
+        test_plan="pipeline structure gate",
+        rollback_plan="revert",
+    )
+    context = cb.ParentImageSourceContext(
+        source_root=parent,
+        source_mode="test",
+        parent_image_digest_hash="sha256:" + "1" * 64,
+        source_tree_hash=compute_private_source_tree_hash(parent),
+        top_level_paths=("research_lab_adapter.py", "sourcing_model"),
+        editable_files=(relative_path,),
+        file_previews=(),
+    )
+    builder = object.__new__(cb.CodeEditCandidateBuilder)
+    builder.config = SimpleNamespace(
+        code_edit_allowed_path_prefixes=lambda: ("sourcing_model/",),
+        code_edit_allowed_exact_paths=lambda: ("research_lab_adapter.py",),
+        code_edit_allowed_suffixes=lambda: (".py", ".json"),
+        code_edit_build_timeout_seconds=120,
+    )
+
+    with pytest.raises(
+        cb.CodeEditPatchApplyError,
+        match="router stage binding drift",
+    ):
+        builder.check_patch_applies(
+            draft=draft,
+            parent_artifact=SimpleNamespace(
+                image_digest=(
+                    "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:"
+                    + "2" * 64
+                )
+            ),
+            source_context=context,
         )
 
 

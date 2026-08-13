@@ -1189,9 +1189,16 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
 def loop_direction_plan_contract_errors(plan: LoopDirectionPlan) -> list[str]:
     """Validate the strict v1.1 path contract without rejecting v1.0 checkpoints."""
 
-    if str(plan.schema_version or "1.0") != "1.1" or plan.no_new_safe_path:
+    if plan.no_new_safe_path:
         return []
     errors: list[str] = []
+    if plan.required_lane not in LOOP_DIRECTION_ALLOWED_LANES:
+        errors.append(
+            "loop_direction_plan_lane_outside_sourcing_scope:"
+            f"{plan.required_lane[:120]}"
+        )
+    if str(plan.schema_version or "1.0") != "1.1":
+        return errors
     if not plan.ranked_paths:
         errors.append("loop_direction_plan_v1_1_requires_ranked_paths")
         return errors
@@ -1228,6 +1235,11 @@ def loop_direction_plan_contract_errors(plan: LoopDirectionPlan) -> list[str]:
             seen_ids.add(path_id)
         if not lane:
             errors.append(f"ranked_path_missing_lane:{path_id[:120]}")
+        elif lane not in LOOP_DIRECTION_ALLOWED_LANES:
+            errors.append(
+                "ranked_path_lane_outside_sourcing_scope:"
+                f"{path_id[:120]}:{lane[:120]}"
+            )
         if not mechanism:
             errors.append(f"ranked_path_missing_mechanism:{path_id[:120]}")
         for field_name, aliases in required_path_fields.items():
@@ -2413,6 +2425,9 @@ def validate_code_edit_draft(
 ) -> list[str]:
     errors: list[str] = []
     payload = draft.to_dict()
+    normalized_lane = str(draft.lane or "").strip().lower()
+    if normalized_lane not in LOOP_DIRECTION_ALLOWED_LANES:
+        errors.append(f"code_edit_lane_outside_sourcing_scope:{normalized_lane[:120]}")
     if _contains_forbidden_material_diff_aware(payload):
         errors.append("code_edit_contains_forbidden_material")
     stripped_diff = draft.unified_diff.lstrip()

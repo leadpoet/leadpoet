@@ -110,6 +110,8 @@ def test_git_tree_source_authority_boundaries_are_protected():
     ]
     assert {
         "IMMUTABLE_SOURCING_PIPELINE_PATHS",
+        "LOOP_DIRECTION_ALLOWED_LANES",
+        "loop_direction_plan_contract_errors",
         "sourcing_pipeline_guard_errors",
     } <= set(PROTECTED_SYMBOLS["research_lab/code_editing.py"])
     assert {
@@ -133,6 +135,16 @@ def test_git_tree_source_authority_boundaries_are_protected():
     assert "_sourcing_pipeline_structure_gate" in PROTECTED_SYMBOLS[
         "gateway/research_lab/code_build.py"
     ]
+    assert "_sourcing_loop_visible_files" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/code_build.py"
+    ]
+    assert "CodeEditCandidateBuilder._source_context_from_root" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/code_build.py"
+    ]
+    assert (
+        "CodeEditCandidateBuilder.validate_draft_against_source_context"
+        in PROTECTED_SYMBOLS["gateway/research_lab/code_build.py"]
+    )
     assert "_post_private_build_source_integrity_gate" in PROTECTED_SYMBOLS[
         "gateway/research_lab/code_build.py"
     ]
@@ -146,6 +158,7 @@ def test_git_tree_source_authority_boundaries_are_protected():
         "gateway/research_lab/scoring_worker.py"
     ]
     assert {
+        "_source_context",
         "_HostGitTreeRepository",
         "_HostCandidateBuilder",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/autoresearch_executor_v2.py"])

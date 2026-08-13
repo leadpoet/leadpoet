@@ -148,6 +148,7 @@ PROTECTED_SYMBOLS = {
         "IMMUTABLE_SOURCING_PIPELINE_PATHS",
         "LOOP_DIRECTION_ALLOWED_LANES",
         "LOOP_DIRECTION_VALIDATION_MODES",
+        "loop_direction_plan_contract_errors",
         "_GIT_STRUCTURAL_DIFF_PREFIXES",
         "git_diff_structural_metadata",
         "sourcing_pipeline_guard_errors",
@@ -294,11 +295,14 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/research_lab/code_build.py": (
         "validate_private_code_edit_diff_artifact",
+        "_sourcing_loop_visible_files",
         "_verify_built_candidate_artifact",
         "_sourcing_pipeline_structure_gate",
         "_changed_files",
         "_post_private_test_source_integrity_gate",
         "_post_private_build_source_integrity_gate",
+        "CodeEditCandidateBuilder._source_context_from_root",
+        "CodeEditCandidateBuilder.validate_draft_against_source_context",
         "CodeEditCandidateBuilder._build_under_deadline",
     ),
     "gateway/research_lab/provider_capabilities.py": (
@@ -459,6 +463,7 @@ PROTECTED_SYMBOLS = {
         "maybe_refresh_dev_snapshot",
     ),
     "gateway/tee/autoresearch_executor_v2.py": (
+        "_source_context",
         "_HostGitTreeRepository",
         "_HostCandidateBuilder",
         "AutoresearchExecutorV2",

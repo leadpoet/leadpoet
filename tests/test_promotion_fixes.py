@@ -147,7 +147,10 @@ def _private_source_push_fixture(
         "candidate_build_doc_hash": build_doc["build_doc_hash"],
         "redacted_summary": "fixture",
         "validation_result": "passed",
-        "patch_doc": {"target_files": list(artifact["target_files"])},
+        "patch_doc": {
+            "lane": "source_routing",
+            "target_files": list(artifact["target_files"]),
+        },
     }
     patch_manifest = {
         **patch_payload,
@@ -225,7 +228,7 @@ def _retarget_private_source_push_fixture(path: str):
         "patch_payload_hash": source_diff_hash,
         "candidate_source_diff_hash": source_diff_hash,
         "candidate_build_doc_hash": build_doc["build_doc_hash"],
-        "patch_doc": {"target_files": [path]},
+        "patch_doc": {"lane": "source_routing", "target_files": [path]},
     }
     patch_manifest = {
         **patch_payload,
@@ -556,7 +559,10 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
         "candidate_build_doc_hash": build_doc["build_doc_hash"],
         "redacted_summary": "legacy depth-two fixture",
         "validation_result": "passed",
-        "patch_doc": {"target_files": ["sourcing_model/routing/defaults.py"]},
+        "patch_doc": {
+            "lane": "source_routing",
+            "target_files": ["sourcing_model/routing/defaults.py"],
+        },
     }
     patch_manifest = {
         **patch_payload,
@@ -672,6 +678,63 @@ def test_private_source_push_rejects_pipeline_spine_before_git(monkeypatch):
             active_git_commit_sha="",
             candidate_id="candidate:pipeline-edit",
             score_bundle_id="bundle:pipeline-edit",
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+            candidate_model_manifest_doc=candidate_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+            expected_source_diff_hash=artifact["source_diff_hash"],
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+    assert calls == [
+        ("aws", "s3", "cp", build_doc["source_diff_artifact_uri"], "-")
+    ]
+
+
+@pytest.mark.parametrize("lane", (None, "output_ranking"))
+def test_private_source_push_rejects_missing_or_out_of_scope_lane_before_git(
+    monkeypatch,
+    lane,
+):
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture()
+    )
+    patch_doc = dict(patch_manifest["patch_doc"])
+    if lane is None:
+        patch_doc.pop("lane")
+    else:
+        patch_doc["lane"] = lane
+    patch_payload = {
+        **{
+            key: value
+            for key, value in patch_manifest.items()
+            if key != "manifest_hash"
+        },
+        "patch_doc": patch_doc,
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+    calls = []
+
+    def run_command(cmd, **_kwargs):
+        calls.append(tuple(cmd))
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        raise AssertionError("Git must not run for an invalid loop lane")
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    with pytest.raises(
+        RuntimeError,
+        match="candidate patch lane is outside sourcing scope",
+    ):
+        promotion._push_candidate_source_diff_to_repo(
+            repo_url="unused",
+            branch_name="main",
+            active_git_commit_sha="",
+            candidate_id="candidate:invalid-lane",
+            score_bundle_id="bundle:invalid-lane",
             candidate_build_doc=build_doc,
             candidate_patch_manifest=patch_manifest,
             candidate_model_manifest_doc=candidate_manifest,
@@ -4053,3 +4116,149 @@ async def test_reward_reconciler_skips_already_created(store, monkeypatch):
     )
     assert result["results"][0]["status"] == "already_created"
     assert store.promotion_event_writes == []
+
+
+def test_promotion_rejects_allowed_path_router_mutation_with_real_structure_gate(
+    tmp_path,
+    monkeypatch,
+):
+    """Promotion must recheck semantics before a candidate can be pushed."""
+
+    from difflib import unified_diff
+
+    from tests.test_sourcing_model_contract import _v26_pipeline_tree
+
+    source = tmp_path / "source"
+    _v26_pipeline_tree(source)
+    _git(["init", "-q", "-b", "main"], cwd=source)
+    _git(["config", "user.name", "Fixture"], cwd=source)
+    _git(["config", "user.email", "fixture@example.test"], cwd=source)
+    _git(["add", "."], cwd=source)
+    _git(["commit", "-q", "-m", "conforming parent"], cwd=source)
+    active_sha = _git(["rev-parse", "HEAD"], cwd=source)
+    remote = tmp_path / "remote.git"
+    _git(["clone", "-q", "--bare", str(source), str(remote)])
+
+    relative_path = "sourcing_model/routing/runtime.py"
+    runtime_path = source / relative_path
+    original = runtime_path.read_text(encoding="utf-8")
+    changed = original.replace(
+        "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+        "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+        1,
+    )
+    assert changed != original
+    source_diff = "diff --git a/{0} b/{0}\n".format(relative_path) + "".join(
+        unified_diff(
+            original.splitlines(keepends=True),
+            changed.splitlines(keepends=True),
+            fromfile=f"a/{relative_path}",
+            tofile=f"b/{relative_path}",
+        )
+    )
+    parent_hash = promotion.compute_private_source_tree_hash(source)
+    runtime_path.write_text(changed, encoding="utf-8")
+    candidate_hash = promotion.compute_private_source_tree_hash(source)
+    runtime_path.write_text(original, encoding="utf-8")
+
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture()
+    )
+    source_diff_hash = sha256_json({"unified_diff": source_diff})
+    artifact_payload = {
+        **{key: value for key, value in artifact.items() if key != "artifact_hash"},
+        "parent_artifact_hash": parent_hash,
+        "source_diff_hash": source_diff_hash,
+        "target_files": [relative_path],
+        "unified_diff": source_diff,
+    }
+    artifact = {
+        **artifact_payload,
+        "artifact_hash": sha256_json(artifact_payload),
+    }
+    candidate_manifest_payload = {
+        key: value
+        for key, value in candidate_manifest.items()
+        if key != "manifest_hash"
+    }
+    candidate_manifest_payload["model_artifact_hash"] = candidate_hash
+    candidate_manifest = {
+        **candidate_manifest_payload,
+        "manifest_hash": sha256_json(candidate_manifest_payload),
+    }
+    build_doc = {
+        **build_doc,
+        "parent_artifact_hash": parent_hash,
+        "candidate_model_artifact_hash": candidate_hash,
+        "candidate_model_manifest_hash": candidate_manifest["manifest_hash"],
+        "source_diff_hash": source_diff_hash,
+        "source_diff_artifact_hash": artifact["artifact_hash"],
+        "changed_files": [relative_path],
+        "candidate_source_tree_hash": candidate_hash,
+    }
+    unhashed_annotations = {
+        "conditional_validation_policy",
+        "loop_dev_score",
+        "loop_dev_score_version",
+        "loop_direction_plan_hash",
+        "loop_node_id",
+        "plan_alignment",
+        "selected_path_id",
+        "stale_parent_rebase",
+    }
+    build_payload = {
+        key: value
+        for key, value in build_doc.items()
+        if key != "build_doc_hash" and key not in unhashed_annotations
+    }
+    build_doc["build_doc_hash"] = sha256_json(build_payload)
+    patch_payload = {
+        **{
+            key: value
+            for key, value in patch_manifest.items()
+            if key != "manifest_hash"
+        },
+        "parent_artifact_hash": parent_hash,
+        "candidate_artifact_hash": candidate_hash,
+        "candidate_model_manifest_hash": candidate_manifest["manifest_hash"],
+        "patch_payload_hash": source_diff_hash,
+        "candidate_source_diff_hash": source_diff_hash,
+        "candidate_build_doc_hash": build_doc["build_doc_hash"],
+        "patch_doc": {
+            "lane": "source_routing",
+            "target_files": [relative_path],
+        },
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+    original_run_command = promotion._run_command
+
+    def run_command(cmd, **kwargs):
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        return original_run_command(cmd, **kwargs)
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+
+    with pytest.raises(
+        RuntimeError,
+        match="promoted sourcing contract violation",
+    ):
+        promotion._push_candidate_source_diff_to_repo(
+            repo_url=str(remote),
+            branch_name="main",
+            active_git_commit_sha=active_sha,
+            candidate_id="candidate:allowed-path-wrapper-mutation",
+            score_bundle_id="bundle:allowed-path-wrapper-mutation",
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+            candidate_model_manifest_doc=candidate_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+            expected_source_diff_hash=source_diff_hash,
+            expected_parent_artifact_hash=parent_hash,
+            expected_run_id=artifact["run_id"],
+        )
+
+    assert _git(["--git-dir", str(remote), "rev-parse", "main"]) == active_sha

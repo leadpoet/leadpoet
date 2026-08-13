@@ -142,7 +142,7 @@
       "symbol": "_trusted_parent_authorities_v2"
     },
     {
-      "ast_sha256": "sha256:487385875807da1971d0a296f76035a3a57123e0c9fbae100ac0848242f4639e",
+      "ast_sha256": "sha256:2515cf8dc10571fa439e03161e1af37e2d3a4b7ee7a78db78d319ece60cedf39",
       "path": "gateway/research_lab/attested_autoresearch_v2.py",
       "symbol": "execute_autoresearch_v2"
     },
@@ -187,7 +187,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:9e206701884452554f6c263622f1f8e0e48ff3c123d793768c9b9648d48a7aab",
+      "ast_sha256": "sha256:8ff959410c61375e41af5bc151d538932b88f52ee3b999fd7f6ad34dcbce6ec3",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -1232,7 +1232,7 @@
       "symbol": "_parse_proxy_request"
     },
     {
-      "ast_sha256": "sha256:4e67bf654cb46e0ff990514f49a0ee38b568b30c0d4bd37e525ff78af1ae2ec0",
+      "ast_sha256": "sha256:46237886044818c4b99a4b6a46d2a7543ece8926ce254ba62a35591115c71a61",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
     },
@@ -2737,7 +2737,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:37572d42ca0908c4b2d0f9a8444cd84059f0b98accfefbe3b8f6fb3e54b0c9ec",
-  "protected_source_commit": "5ee99cd7a064cfa259cdee5e90164880af4d2fda",
+  "manifest_hash": "sha256:9c678c5c7a9a748ecb2e69d3ca8558edd582857631e04572da0e7d44d41293a1",
+  "protected_source_commit": "ab4c7ad287050261de8cfa51d1c73d872d5f22ee",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

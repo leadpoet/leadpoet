@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,16 @@ EVENT = "sha256:" + "1" * 64
 OLD_AUTHORIZATION = "sha256:" + "2" * 64
 NEW_AUTHORIZATION = "sha256:" + "3" * 64
 HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
+
+
+def _calculation_snapshot(epoch_id: int) -> dict:
+    return {
+        "netuid": 71,
+        "epoch_id": int(epoch_id),
+        "block": 10_000,
+        "commit_sha": validator_module._current_validator_commit_sha(),
+        "metagraph_hotkeys": ["5MinerOne", "5MinerTwo"],
+    }
 
 
 def _record(*, published, signatures):
@@ -110,6 +122,16 @@ class _Client:
         self.finalization_only = bool(finalization_only)
         self.calls = []
 
+    def get_authoritative_v2_boot_identity(self):
+        return {
+            "commit_sha": validator_module._current_validator_commit_sha(),
+            "pcr0": "a" * 96,
+            "build_manifest_hash": "sha256:" + "b" * 64,
+            "dependency_lock_hash": "sha256:" + "c" * 64,
+            "config_hash": "sha256:" + "d" * 64,
+            "boot_identity_hash": "sha256:" + "e" * 64,
+        }
+
     def recover_weight_publication_v2(self, **kwargs):
         self.calls.append(("recover", kwargs))
         return {
@@ -141,6 +163,13 @@ def _validator(journal, client):
     validator = validator_module.Validator.__new__(validator_module.Validator)
     validator._weight_publication_journal_v2 = journal
     validator._validator_v2_client = client
+    input_directory = tempfile.TemporaryDirectory()
+    validator._weight_input_test_directory = input_directory
+    validator._weight_input_journal_v2 = (
+        validator_module.AuthoritativeWeightInputJournalV2(
+            Path(input_directory.name)
+        )
+    )
     validator._epoch_cutover = SubnetEpochCutover(
         network_genesis_hash="0x" + "1" * 64,
         netuid=71,
@@ -152,6 +181,10 @@ def _validator(journal, client):
     )
     validator.wallet = SimpleNamespace(
         hotkey=SimpleNamespace(ss58_address=HOTKEY)
+    )
+    validator.config = SimpleNamespace(netuid=71)
+    validator.metagraph = SimpleNamespace(
+        hotkeys=["5MinerOne", "5MinerTwo"]
     )
     substrate_calls = []
 
@@ -723,7 +756,7 @@ async def test_closed_signed_journal_does_not_block_next_epoch_preparation(
     with pytest.raises(NextEpochPreparationReached):
         await validator._authorize_and_set_weights_v2(
             epoch_state=SimpleNamespace(subnet_epoch_index=51),
-            snapshot={"epoch_id": 101},
+            snapshot=_calculation_snapshot(101),
             host_uids=[0, 1],
             host_weights=[0.8, 0.2],
             allocation_hash="sha256:" + "4" * 64,
@@ -900,7 +933,7 @@ async def test_next_epoch_retires_revalidated_finalized_publication(
     with pytest.raises(NextEpochPreparationReached):
         await validator._authorize_and_set_weights_v2(
             epoch_state=SimpleNamespace(subnet_epoch_index=51),
-            snapshot={"epoch_id": 101},
+            snapshot=_calculation_snapshot(101),
             host_uids=[0, 1],
             host_weights=[0.8, 0.2],
             allocation_hash="sha256:" + "6" * 64,

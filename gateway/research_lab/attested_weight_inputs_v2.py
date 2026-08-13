@@ -383,12 +383,26 @@ async def build_gateway_weight_inputs_v2(
     # inputs. Run those jobs together so their mandatory encrypted artifact
     # persistence does not consume the submission window serially.
     # The anomaly job remains ordered after all of its receipt parents exist.
-    await asyncio.gather(
+    independent_results = await asyncio.gather(
         *(
             execute_category(category, sequence)
             for sequence, category in enumerate(independent_categories)
-        )
+        ),
+        return_exceptions=True,
     )
+    independent_failures = [
+        (category, result)
+        for category, result in zip(
+            independent_categories,
+            independent_results,
+        )
+        if isinstance(result, BaseException)
+    ]
+    if independent_failures:
+        _failed_category, failure = independent_failures[0]
+        if isinstance(failure, asyncio.CancelledError):
+            raise failure
+        raise failure
     await execute_category("anomaly_adjustments", len(independent_categories))
 
     all_graphs = []

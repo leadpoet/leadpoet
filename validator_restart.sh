@@ -15,6 +15,7 @@ VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST="${VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST:-
 VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE="${VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE:-/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json}"
 VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
+VALIDATOR_V2_INPUT_JOURNAL_HOST_DIR="${VALIDATOR_V2_INPUT_JOURNAL_HOST_DIR:-$VALIDATOR_ROOT/validator_weights/authoritative_weight_inputs_v2}"
 VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS="${VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS:-86400}"
 VALIDATOR_RESTART_CLEANUP_MAX_CANDIDATES="${VALIDATOR_RESTART_CLEANUP_MAX_CANDIDATES:-64}"
 VALIDATOR_V2_HOTKEY_CONFIG="${VALIDATOR_V2_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
@@ -1004,6 +1005,23 @@ PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
   --timeout-seconds 1800 \
   --interval-seconds 3
 run_bounded_validator_restart_artifact_cleanup
+
+echo "Validating durable weight input journal storage before validator shutdown"
+if ! PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
+    -m validator_tee.host.weight_input_journal_v2 \
+    --verify-storage-ready \
+    --directory "$VALIDATOR_V2_INPUT_JOURNAL_HOST_DIR"; then
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
+echo "Validating the live destructive restart window before validator shutdown"
+if ! "$VALIDATOR_PYTHON_BIN" -m Leadpoet.utils.restart_epoch_gate \
+    "${VALIDATOR_RESTART_GATE_ARGS[@]}" \
+    --destructive-phase; then
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
 
 VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
 VALIDATOR_DEPLOY_STAGE="runtime_rebuild"

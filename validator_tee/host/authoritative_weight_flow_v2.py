@@ -309,6 +309,8 @@ async def prepare_authoritative_weight_publication_v2(
         [str, Mapping[str, Any], float], Awaitable[Mapping[str, Any]]
     ] = _post_json,
     before_publish: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+    prepared_gateway_inputs: Optional[Mapping[str, Any]] = None,
+    on_inputs_verified: Optional[Callable[[Mapping[str, Any]], Any]] = None,
     input_timeout_seconds: float = 90.0,
     publication_timeout_seconds: float = 600.0,
 ) -> Dict[str, Any]:
@@ -321,16 +323,23 @@ async def prepare_authoritative_weight_publication_v2(
     except Exception as exc:
         raise AuthoritativeWeightFlowV2Error(str(exc)) from exc
     try:
-        gateway_inputs = await fetch_inputs(
-            gateway_url=gateway_url,
-            calculation_snapshot=calculation,
-            validator_hotkey=validator_hotkey,
-            allocation_hash=allocation_hash,
-            leaderboard_window_start=leaderboard_window_start,
-            leaderboard_window_end=leaderboard_window_end,
-            client=enclave_client,
-            timeout_seconds=input_timeout_seconds,
-        )
+        if prepared_gateway_inputs is None:
+            gateway_inputs = await fetch_inputs(
+                gateway_url=gateway_url,
+                calculation_snapshot=calculation,
+                validator_hotkey=validator_hotkey,
+                allocation_hash=allocation_hash,
+                leaderboard_window_start=leaderboard_window_start,
+                leaderboard_window_end=leaderboard_window_end,
+                client=enclave_client,
+                timeout_seconds=input_timeout_seconds,
+            )
+            if on_inputs_verified is not None:
+                callback_result = on_inputs_verified(gateway_inputs)
+                if asyncio.iscoroutine(callback_result):
+                    await callback_result
+        else:
+            gateway_inputs = dict(prepared_gateway_inputs)
         weight_request = {
             "validator_hotkey": validator_hotkey,
             "calculation_snapshot": calculation,

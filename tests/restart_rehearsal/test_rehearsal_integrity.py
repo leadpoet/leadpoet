@@ -124,6 +124,60 @@ def test_git_tree_rehearsal_ticket_seed_includes_required_miner() -> None:
     }
 
 
+def test_persistent_weight_input_recovery_stage_uses_candidate_bound_state(
+) -> None:
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parent
+            / "fixtures"
+            / "production_shaped_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    result = production_workflow_runner._exercise_persistent_weight_input_recovery(
+        candidate_sha=COMMIT,
+        from_sha="2" * 40,
+        fixture=fixture,
+    )
+
+    assert result == {
+        "candidate_release_derived": True,
+        "n_minus_one_authorization_durable": True,
+        "n_minus_one_plan_durable": True,
+        "persistent_directory_shared_across_releases": True,
+        "shielded_equivalent_checkpoint_durable": True,
+        "producer_release_ancestry_validated": True,
+        "missing_producer_ancestry_rejected": True,
+        "post_cutoff_replay_without_live_source": True,
+        "validator_journal_reused": True,
+        "exact_metagraph_order_enforced": True,
+    }
+
+
+def test_rehearsal_contract_requires_persistent_weight_input_recovery() -> None:
+    contract = build_rehearsal_behavior_contract_v2(
+        source_root=Path(__file__).resolve().parents[2],
+        candidate_sha=COMMIT,
+        profile="prepush",
+        epoch_count=1,
+    )
+
+    assert "persistent-weight-input-recovery" in contract[
+        "behavior_scenarios"
+    ]
+    assert "behavior:persistent-weight-input-recovery" in contract[
+        "required_stage_ids"
+    ]
+    assert "persistent_weight_input_recovery_verified" in contract[
+        "required_invariant_ids"
+    ]
+    assert {
+        "gateway/research_lab/weight_input_authorization_v2.py",
+        "gateway/research_lab/weight_input_checkpoint_v2.py",
+        "validator_tee/host/weight_input_journal_v2.py",
+    }.issubset(contract["production_source_paths"])
+
+
 def _provider_persistence_batch_fixture() -> dict[str, Any]:
     return {
         "batch_size": 5,

@@ -11,7 +11,7 @@ def test_coordinator_provider_broker_uses_raw_isolated_transport(
         str(Path(__file__).resolve().parents[1] / "gateway" / "tee")
     )
     tee_service = importlib.import_module("gateway.tee.tee_service")
-    captured = {}
+    captured = {"transports": []}
 
     class RuntimeIdentity:
         @staticmethod
@@ -34,7 +34,8 @@ def test_coordinator_provider_broker_uses_raw_isolated_transport(
 
     class Transport:
         def __init__(self, **kwargs):
-            captured["transport"] = dict(kwargs)
+            self.options = dict(kwargs)
+            captured["transports"].append(self)
 
     class Broker:
         def __init__(self, **kwargs):
@@ -55,8 +56,18 @@ def test_coordinator_provider_broker_uses_raw_isolated_transport(
     broker = tee_service.get_v2_provider_broker()
 
     assert isinstance(broker, Broker)
-    assert captured["transport"] == {
-        "allow_authenticated_complete_body_eof": True,
-        "reuse_direct_connections": False,
-    }
-    assert captured["broker"]["transport"].__class__ is Transport
+    assert len(captured["transports"]) == 2
+    assert all(
+        transport.options
+        == {
+            "allow_authenticated_complete_body_eof": True,
+            "reuse_direct_connections": False,
+        }
+        for transport in captured["transports"]
+    )
+    assert captured["broker"]["transport"] is captured["transports"][0]
+    assert (
+        captured["broker"]["reserved_weight_transport"]
+        is captured["transports"][1]
+    )
+    assert captured["broker"]["reserved_weight_transport_slots"] == 1

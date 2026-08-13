@@ -27,6 +27,14 @@ class _Client:
             "job_credential_slot_ref_hashes": (
                 expected_job_credential_slot_ref_hashes()
             ),
+            "reserved_lanes": {
+                "weight_submission": {
+                    "dedicated_transport": True,
+                    "reserved_capacity": True,
+                    "capacity": 1,
+                    "active": 0,
+                }
+            },
         }
 
     async def v2_provider_semantics_health(self):
@@ -44,7 +52,7 @@ class _Client:
             "gateway_scoring": 25,
             "gateway_autoresearch": 10,
         }[self.role]
-        return {
+        result = {
             "authority": "v2_only",
             "physical_role": self.role,
             "role": ROLE_SPECS[self.role]["service_role"],
@@ -53,6 +61,16 @@ class _Client:
             "workers_alive": True,
             "boot_identity_hash": "sha256:" + "a" * 64,
         }
+        if self.role == "gateway_coordinator":
+            result["reserved_lanes"] = {
+                "weight_submission": {
+                    "dedicated_worker": True,
+                    "reserved_capacity": True,
+                    "worker_count": 1,
+                    "queue_depth": 0,
+                }
+            }
+        return result
 
     async def coordinator_v2_health(self):
         return self._health(1)
@@ -67,8 +85,9 @@ class _Client:
 @pytest.mark.asyncio
 async def test_runtime_ready_requires_every_manager_and_provider_slot():
     clients = {role: _Client(role) for role in ROLE_SPECS}
-    result = await verify_v2_runtime_ready(clients)
+    result = await verify_v2_runtime_ready(clients, storage_probe=lambda: None)
     assert result["status"] == "ready"
+    assert result["weight_input_storage"] == "ready"
     assert len(result["roles"]) == 3
 
 
@@ -83,7 +102,7 @@ async def test_runtime_ready_fails_when_shared_scoring_runner_is_dead():
 
     clients["gateway_scoring"].scoring_v2_health = dead
     with pytest.raises(V2RuntimeReadinessError, match="gateway_scoring"):
-        await verify_v2_runtime_ready(clients)
+        await verify_v2_runtime_ready(clients, storage_probe=lambda: None)
 
 
 @pytest.mark.asyncio
@@ -101,4 +120,38 @@ async def test_runtime_ready_fails_when_provider_semantics_is_not_ready():
 
     clients["gateway_coordinator"].v2_provider_semantics_health = unavailable
     with pytest.raises(V2RuntimeReadinessError, match="semantics"):
+        await verify_v2_runtime_ready(clients, storage_probe=lambda: None)
+
+
+@pytest.mark.asyncio
+async def test_runtime_ready_fails_when_checkpoint_storage_is_unconfigured(
+    monkeypatch,
+):
+    monkeypatch.delenv("GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR", raising=False)
+    clients = {role: _Client(role) for role in ROLE_SPECS}
+    with pytest.raises(V2RuntimeReadinessError, match="not configured"):
         await verify_v2_runtime_ready(clients)
+
+
+@pytest.mark.asyncio
+async def test_runtime_ready_fails_when_checkpoint_storage_probe_fails():
+    clients = {role: _Client(role) for role in ROLE_SPECS}
+
+    def failed_probe():
+        raise OSError("disk unavailable")
+
+    with pytest.raises(V2RuntimeReadinessError, match="not ready"):
+        await verify_v2_runtime_ready(clients, storage_probe=failed_probe)
+
+
+@pytest.mark.asyncio
+async def test_runtime_ready_runs_real_checkpoint_storage_probe(
+    tmp_path,
+    monkeypatch,
+):
+    directory = tmp_path / "checkpoint"
+    monkeypatch.setenv("GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR", str(directory))
+    clients = {role: _Client(role) for role in ROLE_SPECS}
+    result = await verify_v2_runtime_ready(clients)
+    assert result["weight_input_storage"] == "ready"
+    assert directory.stat().st_mode & 0o777 == 0o700

@@ -8572,6 +8572,362 @@ def _exercise_measured_coordinator_raw_transport() -> dict[str, Any]:
     return evidence
 
 
+def _exercise_persistent_weight_input_recovery(
+    *,
+    candidate_sha: str,
+    from_sha: str,
+    fixture: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exercise the real N-1-to-N weight-input persistence boundary."""
+
+    from gateway.research_lab.weight_input_authorization_v2 import (
+        GatewayWeightInputAuthorizationStoreV2,
+    )
+    from gateway.research_lab.weight_input_checkpoint_v2 import (
+        GatewayWeightInputCheckpointStoreV2,
+        WeightInputCheckpointV2Error,
+    )
+    from leadpoet_canonical.constants import WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK
+    from leadpoet_canonical.hotkey_authority_v2 import (
+        build_weight_inputs_request_v2,
+    )
+    from leadpoet_canonical.weight_authority_v2 import (
+        GATEWAY_WEIGHT_INPUT_CATEGORIES,
+    )
+    from validator_tee.host.weight_input_journal_v2 import (
+        AuthoritativeWeightInputJournalV2,
+        WeightInputJournalV2Error,
+        require_weight_input_metagraph_match_v2,
+        require_weight_input_plan_metagraph_match_v2,
+    )
+
+    def release_hash(label: str) -> str:
+        return sha256_json(
+            {
+                "candidate_sha": candidate_sha,
+                "from_sha": from_sha,
+                "label": label,
+            }
+        )
+
+    def pcr0(label: str) -> str:
+        return hashlib.sha384(
+            (candidate_sha + ":" + from_sha + ":" + label).encode("ascii")
+        ).hexdigest()
+
+    def gateway_release(commit_sha: str, label: str) -> dict[str, str]:
+        return {
+            "physical_role": "gateway_coordinator",
+            "service_role": "gateway_coordinator",
+            "commit_sha": commit_sha,
+            "pcr0": pcr0(label + ":pcr0"),
+            "build_manifest_hash": release_hash(label + ":manifest"),
+            "dependency_lock_hash": release_hash(label + ":dependencies"),
+            "build_identity_hash": release_hash(label + ":build"),
+            "release_hash": release_hash(label + ":release"),
+        }
+
+    def validator_release(
+        commit_sha: str,
+        label: str,
+        *,
+        boot_label: str,
+    ) -> dict[str, str]:
+        return {
+            "commit_sha": commit_sha,
+            "pcr0": pcr0(label + ":pcr0"),
+            "build_manifest_hash": release_hash(label + ":manifest"),
+            "dependency_lock_hash": release_hash(label + ":dependencies"),
+            "config_hash": release_hash(label + ":config"),
+            "boot_identity_hash": release_hash(boot_label),
+        }
+
+    if (
+        len(candidate_sha) != 40
+        or len(from_sha) != 40
+        or candidate_sha == from_sha
+        or any(value not in "0123456789abcdef" for value in candidate_sha)
+        or any(value not in "0123456789abcdef" for value in from_sha)
+    ):
+        raise RuntimeError("weight recovery rehearsal release identities are invalid")
+    network = fixture.get("network")
+    validator_fixture = fixture.get("validator")
+    metagraph = fixture.get("metagraph")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (network, validator_fixture, metagraph)
+    ):
+        raise RuntimeError("weight recovery rehearsal fixture is incomplete")
+    netuid = int(network["netuid"])
+    validator_hotkey = str(validator_fixture["hotkey"])
+    metagraph_hotkeys = [str(value) for value in metagraph["hotkeys"]]
+    if len(metagraph_hotkeys) < 2:
+        raise RuntimeError("weight recovery rehearsal metagraph is incomplete")
+
+    n_minus_one_gateway = gateway_release(from_sha, "gateway-n-minus-one")
+    candidate_gateway = gateway_release(candidate_sha, "gateway-candidate")
+    n_minus_one_validator = validator_release(
+        from_sha,
+        "validator-n-minus-one",
+        boot_label="validator-n-minus-one:boot-1",
+    )
+    rotated_validator = validator_release(
+        from_sha,
+        "validator-n-minus-one",
+        boot_label="validator-n-minus-one:boot-2",
+    )
+    epoch_id = 30_000
+    calculation_snapshot = {
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "block": int(network["current_block"]),
+        "commit_sha": from_sha,
+        "metagraph_hotkeys": metagraph_hotkeys,
+    }
+    allocation_hash = release_hash("allocation")
+    request = build_weight_inputs_request_v2(
+        validator_hotkey=validator_hotkey,
+        netuid=netuid,
+        epoch_id=epoch_id,
+        block=calculation_snapshot["block"],
+        calculation_snapshot_hash=sha256_json(calculation_snapshot),
+        allocation_hash=allocation_hash,
+        leaderboard_window_start="2026-07-01T00:00:00Z",
+        leaderboard_window_end="2026-07-08T00:00:00Z",
+    )
+    signature = "ab" * 64
+    receipt_hashes = {
+        category: release_hash("gateway-input:" + category)
+        for category in sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+    }
+    producer_boot = {
+        "role": n_minus_one_gateway["service_role"],
+        "physical_role": n_minus_one_gateway["physical_role"],
+        "commit_sha": n_minus_one_gateway["commit_sha"],
+        "pcr0": n_minus_one_gateway["pcr0"],
+        "build_manifest_hash": n_minus_one_gateway["build_manifest_hash"],
+        "dependency_lock_hash": n_minus_one_gateway["dependency_lock_hash"],
+    }
+    checkpoint_result = {
+        "input_receipt_hashes": receipt_hashes,
+        "gateway_authority_event_hash": release_hash("gateway-authority"),
+        "upstream_receipt_set": {
+            "boot_identities": [producer_boot],
+            "receipts": [],
+            "transport_attempts": [],
+            "host_operations": [],
+        },
+        "compact_ancestry": None,
+    }
+    checkpoint_scope = {
+        "request_hash": request["request_hash"],
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "allocation_hash": allocation_hash,
+        "calculation_snapshot_hash": request["calculation_snapshot_hash"],
+        "leaderboard_window_start": request["leaderboard_window_start"],
+        "leaderboard_window_end": request["leaderboard_window_end"],
+    }
+
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-weight-recovery-rehearsal-"
+    ) as raw_root:
+        persistent_root = Path(raw_root)
+        gateway_root = persistent_root / "gateway"
+        validator_root = persistent_root / "validator"
+
+        authorization_store_n_minus_one = GatewayWeightInputAuthorizationStoreV2(
+            gateway_root
+        )
+        checkpoint_store_n_minus_one = GatewayWeightInputCheckpointStoreV2(
+            gateway_root
+        )
+        authorization = authorization_store_n_minus_one.persist(
+            release_identity=n_minus_one_gateway,
+            request=request,
+            calculation_snapshot=calculation_snapshot,
+            validator_hotkey_signature=signature,
+            source_cutoff_block=WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK,
+        )
+        checkpoint = checkpoint_store_n_minus_one.persist(
+            release_identity=n_minus_one_gateway,
+            result=checkpoint_result,
+            **checkpoint_scope,
+        )
+
+        journal_n_minus_one = AuthoritativeWeightInputJournalV2(validator_root)
+        planned = journal_n_minus_one.record_plan(
+            release_identity=n_minus_one_validator,
+            validator_hotkey=validator_hotkey,
+            netuid=netuid,
+            epoch_id=epoch_id,
+            calculation_snapshot=calculation_snapshot,
+            host_uids=list(range(len(metagraph_hotkeys))),
+            host_weights=[1.0 / len(metagraph_hotkeys)]
+            * len(metagraph_hotkeys),
+            allocation_hash=allocation_hash,
+            leaderboard_window_start=request["leaderboard_window_start"],
+            leaderboard_window_end=request["leaderboard_window_end"],
+        )
+
+        shared_persistent_directory = (
+            authorization_store_n_minus_one.directory
+            == checkpoint_store_n_minus_one.directory
+            == gateway_root
+            and journal_n_minus_one.directory == validator_root
+        )
+        del authorization_store_n_minus_one
+        del checkpoint_store_n_minus_one
+        del journal_n_minus_one
+
+        # New store instances model cleared process memory. The candidate
+        # release can use the completed N-1 result only because its producer
+        # identity remains in the measured ancestry.
+        authorization_store_after_restart = (
+            GatewayWeightInputAuthorizationStoreV2(gateway_root)
+        )
+        checkpoint_store_candidate = GatewayWeightInputCheckpointStoreV2(
+            gateway_root
+        )
+        reloaded_authorization = authorization_store_after_restart.load(
+            release_identity=n_minus_one_gateway,
+            request=request,
+            calculation_snapshot=calculation_snapshot,
+            source_cutoff_block=WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK,
+        )
+        candidate_checkpoint = checkpoint_store_candidate.load(
+            release_identity=candidate_gateway,
+            **checkpoint_scope,
+        )
+        live_source_calls = 0
+        simulated_epoch_block = WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK + 1
+        if candidate_checkpoint is None:
+            live_source_calls += 1
+            raise RuntimeError("post-cutoff replay attempted live source work")
+        if simulated_epoch_block <= WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK:
+            raise RuntimeError("weight recovery cutoff was not exercised")
+
+        missing_ancestry_rejected = False
+        invalid_root = persistent_root / "missing-producer-ancestry"
+        GatewayWeightInputCheckpointStoreV2(invalid_root).persist(
+            release_identity=n_minus_one_gateway,
+            result={
+                **checkpoint_result,
+                "upstream_receipt_set": {
+                    "boot_identities": [],
+                    "receipts": [],
+                    "transport_attempts": [],
+                    "host_operations": [],
+                },
+            },
+            **checkpoint_scope,
+        )
+        try:
+            GatewayWeightInputCheckpointStoreV2(invalid_root).load(
+                release_identity=candidate_gateway,
+                **checkpoint_scope,
+            )
+        except WeightInputCheckpointV2Error:
+            missing_ancestry_rejected = True
+
+        restarted_journal = AuthoritativeWeightInputJournalV2(validator_root)
+        resumed_plan = restarted_journal.load_epoch(
+            release_identity=rotated_validator,
+            validator_hotkey=validator_hotkey,
+            netuid=netuid,
+            epoch_id=epoch_id,
+        )
+        if resumed_plan is None:
+            raise RuntimeError("validator plan did not survive process replacement")
+        require_weight_input_plan_metagraph_match_v2(
+            resumed_plan,
+            metagraph_hotkeys,
+        )
+        verified = restarted_journal.record_gateway_inputs(
+            release_identity=rotated_validator,
+            validator_hotkey=validator_hotkey,
+            netuid=netuid,
+            epoch_id=epoch_id,
+            plan_hash=planned["plan_hash"],
+            gateway_inputs={
+                "input_receipt_hashes": receipt_hashes,
+                "gateway_authority_event_hash": checkpoint_result[
+                    "gateway_authority_event_hash"
+                ],
+                "request_authorization": {
+                    "request_hash": request["request_hash"],
+                    "signature_hash": sha256_json({"signature": signature}),
+                },
+                "upstream_receipt_set": checkpoint_result[
+                    "upstream_receipt_set"
+                ],
+            },
+        )
+        resumed_verified = AuthoritativeWeightInputJournalV2(
+            validator_root
+        ).load_epoch(
+            release_identity=rotated_validator,
+            validator_hotkey=validator_hotkey,
+            netuid=netuid,
+            epoch_id=epoch_id,
+        )
+        if resumed_verified is None:
+            raise RuntimeError("verified validator inputs were not durable")
+        require_weight_input_metagraph_match_v2(
+            resumed_verified,
+            metagraph_hotkeys,
+        )
+        reordered_metagraph_rejected = False
+        try:
+            require_weight_input_metagraph_match_v2(
+                resumed_verified,
+                list(reversed(metagraph_hotkeys)),
+            )
+        except WeightInputJournalV2Error:
+            reordered_metagraph_rejected = True
+
+        if (
+            reloaded_authorization != authorization
+            or candidate_checkpoint != checkpoint
+            or verified != resumed_verified
+            or not shared_persistent_directory
+            or live_source_calls != 0
+            or not missing_ancestry_rejected
+            or not reordered_metagraph_rejected
+        ):
+            raise RuntimeError("persistent weight input recovery evidence is incomplete")
+
+        return {
+            "candidate_release_derived": (
+                candidate_gateway["commit_sha"] == candidate_sha
+            ),
+            "n_minus_one_authorization_durable": (
+                reloaded_authorization == authorization
+            ),
+            "n_minus_one_plan_durable": resumed_plan == planned,
+            "persistent_directory_shared_across_releases": (
+                shared_persistent_directory
+                and checkpoint_store_candidate.directory == gateway_root
+                and authorization_store_after_restart.directory == gateway_root
+            ),
+            "shielded_equivalent_checkpoint_durable": (
+                candidate_checkpoint == checkpoint
+            ),
+            "producer_release_ancestry_validated": (
+                checkpoint["release_identity"] == n_minus_one_gateway
+                and checkpoint["release_identity"] != candidate_gateway
+                and candidate_checkpoint == checkpoint
+            ),
+            "missing_producer_ancestry_rejected": missing_ancestry_rejected,
+            "post_cutoff_replay_without_live_source": live_source_calls == 0,
+            "validator_journal_reused": (
+                resumed_plan["plan_hash"] == planned["plan_hash"]
+                and verified == resumed_verified
+            ),
+            "exact_metagraph_order_enforced": reordered_metagraph_rejected,
+        }
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "signed-private-model-contract-transition": (
         _exercise_signed_private_model_contract_transition
@@ -8714,7 +9070,14 @@ def main() -> int:
         else []
     )
     for scenario in behavior_scenarios:
-        action = BEHAVIOR_ACTIONS.get(scenario)
+        if scenario == "persistent-weight-input-recovery":
+            action = lambda: _exercise_persistent_weight_input_recovery(
+                candidate_sha=args.candidate_sha,
+                from_sha=str(os.environ.get("REHEARSAL_FROM_SHA") or ""),
+                fixture=fixture or {},
+            )
+        else:
+            action = BEHAVIOR_ACTIONS.get(scenario)
         if action is None:
             _run_workflow_stage(
                 stage=f"behavior:{scenario}",
@@ -9478,6 +9841,48 @@ def main() -> int:
             and behavior_evidence.get(
                 "fresh-weight-input-lineage", {}
             ).get("mismatched_execution_rejected")
+            is True
+        ),
+        "persistent_weight_input_recovery_verified": (
+            behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("candidate_release_derived")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("n_minus_one_authorization_durable")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("n_minus_one_plan_durable")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("persistent_directory_shared_across_releases")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("shielded_equivalent_checkpoint_durable")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("producer_release_ancestry_validated")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("missing_producer_ancestry_rejected")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("post_cutoff_replay_without_live_source")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("validator_journal_reused")
+            is True
+            and behavior_evidence.get(
+                "persistent-weight-input-recovery", {}
+            ).get("exact_metagraph_order_enforced")
             is True
         ),
         "stateful_compact_graph_readback_verified": (

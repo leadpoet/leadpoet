@@ -38,6 +38,7 @@ def _isolate_weight_input_request_state(monkeypatch):
     monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
     monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_AUTHORIZATIONS", {})
     monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RETRY_GENERATIONS", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_PRECOMPUTE_SIDECAR_TASKS", {})
 
 
 def _request(*, accept_encoding: str = "", query_string: bytes = b"") -> Request:
@@ -242,6 +243,55 @@ def _weight_inputs_authorization(
         calculation_snapshot=calculation,
         validator_hotkey_signature="1" * 128,
     )
+
+
+def _gateway_release_identity(*, commit: str, release_digit: str) -> dict:
+    return {
+        "physical_role": "gateway_coordinator",
+        "service_role": "gateway_coordinator",
+        "commit_sha": commit,
+        "pcr0": "b" * 96,
+        "build_manifest_hash": "sha256:" + "1" * 64,
+        "dependency_lock_hash": "sha256:" + "2" * 64,
+        "build_identity_hash": "sha256:" + "3" * 64,
+        "release_hash": "sha256:" + release_digit * 64,
+    }
+
+
+def _complete_gateway_weight_inputs(producer_release: dict) -> dict:
+    from leadpoet_canonical.weight_authority_v2 import (
+        GATEWAY_WEIGHT_INPUT_CATEGORIES,
+    )
+
+    return {
+        "input_receipt_hashes": {
+            category: "sha256:" + format(index + 10, "064x")
+            for index, category in enumerate(
+                sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+            )
+        },
+        "gateway_authority_event_hash": "sha256:" + "6" * 64,
+        "upstream_receipt_set": {
+            "boot_identities": [
+                {
+                    "role": producer_release["service_role"],
+                    "physical_role": producer_release["physical_role"],
+                    "commit_sha": producer_release["commit_sha"],
+                    "pcr0": producer_release["pcr0"],
+                    "build_manifest_hash": producer_release[
+                        "build_manifest_hash"
+                    ],
+                    "dependency_lock_hash": producer_release[
+                        "dependency_lock_hash"
+                    ],
+                }
+            ],
+            "receipts": [],
+            "transport_attempts": [],
+            "host_operations": [],
+        },
+        "compact_ancestry": None,
+    }
 
 
 def _patch_epoch_authority(monkeypatch):
@@ -820,6 +870,363 @@ async def test_weight_inputs_v2_authenticates_and_returns_complete_measured_set(
 
 
 @pytest.mark.asyncio
+async def test_weight_inputs_v2_replays_completed_checkpoint_after_release_change(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.research_lab import (
+        attested_v2_store,
+        attested_weight_inputs_v2,
+        weight_input_authorization_v2,
+    )
+
+    authorization = _weight_inputs_authorization()
+    producer_release = _gateway_release_identity(
+        commit="a" * 40,
+        release_digit="4",
+    )
+    replacement_release = _gateway_release_identity(
+        commit="c" * 40,
+        release_digit="5",
+    )
+    current_release = {"value": producer_release}
+    gateway_epoch_block = {"value": 200}
+    source_calls = 0
+    sidecar_releases = []
+
+    async def epoch_authority(**_kwargs):
+        return {
+            "settlement_epoch_id": 300,
+            "gateway_epoch_block": gateway_epoch_block["value"],
+        }
+
+    async def load_graph(**_kwargs):
+        nonlocal source_calls
+        source_calls += 1
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def build_inputs(**_kwargs):
+        return _complete_gateway_weight_inputs(producer_release)
+
+    def schedule_sidecar(**kwargs):
+        sidecar_releases.append(kwargs["release_identity"])
+
+    monkeypatch.setenv(
+        "GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR",
+        str(tmp_path / "weight-inputs"),
+    )
+    monkeypatch.delenv(
+        "GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_verify_epoch_block_authority",
+        epoch_authority,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_schedule_weight_precompute_sidecar_v3",
+        schedule_sidecar,
+    )
+    monkeypatch.setattr(
+        weight_input_authorization_v2,
+        "load_gateway_weight_release_identity_v2",
+        lambda: current_release["value"],
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {VALIDATOR_HOTKEY},
+    )
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(
+        weights_api,
+        "verify_wallet_signature",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        load_graph,
+    )
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        build_inputs,
+    )
+
+    first = await weights_api.get_weight_inputs_v2(authorization, _request())
+    assert source_calls == 1
+
+    # Model a process and release replacement. A valid new sr25519 signature
+    # can differ for the same canonical request.
+    weights_api._WEIGHT_INPUT_LOADS_INFLIGHT.clear()
+    weights_api._WEIGHT_INPUT_RESULTS.clear()
+    weights_api._WEIGHT_INPUT_AUTHORIZATIONS.clear()
+    current_release["value"] = replacement_release
+    gateway_epoch_block["value"] = (
+        weights_api.WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK + 20
+    )
+    rotated = weights_api.WeightInputsV2Authorization(
+        request=authorization.request,
+        calculation_snapshot=authorization.calculation_snapshot,
+        validator_hotkey_signature="2" * 128,
+    )
+
+    async def source_must_not_run(**_kwargs):
+        raise AssertionError("completed checkpoint replay read a live source")
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        source_must_not_run,
+    )
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        source_must_not_run,
+    )
+    replay = await weights_api.get_weight_inputs_v2(rotated, _request())
+
+    assert json.loads(replay.body) == json.loads(first.body)
+    assert source_calls == 1
+    assert sidecar_releases == [producer_release, producer_release]
+
+
+@pytest.mark.asyncio
+async def test_weight_inputs_v2_sole_waiter_cancellation_still_checkpoints_for_late_replay(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.research_lab import (
+        attested_v2_store,
+        attested_weight_inputs_v2,
+        weight_input_authorization_v2,
+    )
+
+    authorization = _weight_inputs_authorization()
+    producer_release = _gateway_release_identity(
+        commit="a" * 40,
+        release_digit="4",
+    )
+    replacement_release = _gateway_release_identity(
+        commit="c" * 40,
+        release_digit="5",
+    )
+    checkpoint_directory = tmp_path / "weight-inputs"
+    current_release = {"value": producer_release}
+    gateway_epoch_block = {"value": 200}
+    source_started = asyncio.Event()
+    release_source = asyncio.Event()
+    source_calls = 0
+
+    async def epoch_authority(**_kwargs):
+        return {
+            "settlement_epoch_id": 300,
+            "gateway_epoch_block": gateway_epoch_block["value"],
+        }
+
+    async def load_graph(**_kwargs):
+        nonlocal source_calls
+        source_calls += 1
+        source_started.set()
+        await release_source.wait()
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def build_inputs(**_kwargs):
+        return _complete_gateway_weight_inputs(producer_release)
+
+    monkeypatch.setenv(
+        "GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR",
+        str(checkpoint_directory),
+    )
+    monkeypatch.delenv(
+        "GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_verify_epoch_block_authority",
+        epoch_authority,
+    )
+    monkeypatch.setattr(
+        weight_input_authorization_v2,
+        "load_gateway_weight_release_identity_v2",
+        lambda: current_release["value"],
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {VALIDATOR_HOTKEY},
+    )
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(
+        weights_api,
+        "verify_wallet_signature",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        load_graph,
+    )
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        build_inputs,
+    )
+
+    only_waiter = asyncio.create_task(
+        weights_api.get_weight_inputs_v2(authorization, _request())
+    )
+    await asyncio.wait_for(source_started.wait(), timeout=1)
+    only_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await only_waiter
+
+    release_source.set()
+    checkpoint_path = checkpoint_directory / (
+        authorization.request["request_hash"].removeprefix("sha256:") + ".json"
+    )
+    async def checkpoint_finished() -> None:
+        for _ in range(100):
+            if checkpoint_path.is_file() and not weights_api._WEIGHT_INPUT_LOADS_INFLIGHT:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("shielded weight input checkpoint did not finish")
+
+    await checkpoint_finished()
+
+    # Model process-local state loss and a replacement release after the source
+    # cutoff. The completed producer-bound checkpoint is now the only usable
+    # result, and replay must not read a live source.
+    weights_api._WEIGHT_INPUT_LOADS_INFLIGHT.clear()
+    weights_api._WEIGHT_INPUT_RESULTS.clear()
+    weights_api._WEIGHT_INPUT_AUTHORIZATIONS.clear()
+    current_release["value"] = replacement_release
+    gateway_epoch_block["value"] = (
+        weights_api.WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK + 20
+    )
+    rotated = weights_api.WeightInputsV2Authorization(
+        request=authorization.request,
+        calculation_snapshot=authorization.calculation_snapshot,
+        validator_hotkey_signature="2" * 128,
+    )
+
+    async def source_must_not_run(**_kwargs):
+        raise AssertionError("late checkpoint replay read a live source")
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        source_must_not_run,
+    )
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        source_must_not_run,
+    )
+
+    replay = await weights_api.get_weight_inputs_v2(rotated, _request())
+    response = json.loads(replay.body)
+    expected = _complete_gateway_weight_inputs(producer_release)
+    assert response["input_receipt_hashes"] == expected["input_receipt_hashes"]
+    assert response["gateway_authority_event_hash"] == expected[
+        "gateway_authority_event_hash"
+    ]
+    assert source_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_weight_inputs_v2_cutoff_rejects_before_source_or_authorization(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.research_lab import weight_input_authorization_v2
+
+    checkpoint_directory = tmp_path / "weight-inputs"
+
+    async def epoch_authority(**_kwargs):
+        return {
+            "settlement_epoch_id": 300,
+            "gateway_epoch_block": weights_api.WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK,
+        }
+
+    monkeypatch.setenv(
+        "GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR",
+        str(checkpoint_directory),
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_verify_epoch_block_authority",
+        epoch_authority,
+    )
+    monkeypatch.setattr(
+        weight_input_authorization_v2,
+        "load_gateway_weight_release_identity_v2",
+        lambda: _gateway_release_identity(
+            commit="a" * 40,
+            release_digit="4",
+        ),
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {VALIDATOR_HOTKEY},
+    )
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(
+        weights_api,
+        "verify_wallet_signature",
+        lambda *_args: True,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_weight_inputs_v2(
+            _weight_inputs_authorization(),
+            _request(),
+        )
+
+    assert exc.value.status_code == 409
+    assert not checkpoint_directory.exists()
+
+
+@pytest.mark.asyncio
+async def test_weight_precompute_sidecar_scheduler_does_not_wait_for_supabase(
+    monkeypatch,
+):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_sidecar(**_kwargs):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(
+        weights_api,
+        "_persist_weight_precompute_sidecar_v3",
+        blocked_sidecar,
+    )
+    monkeypatch.setenv("GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED", "true")
+
+    sidecar_request = {"request_hash": "sha256:" + "a" * 64}
+    weights_api._schedule_weight_precompute_sidecar_v3(
+        request=sidecar_request,
+    )
+    weights_api._schedule_weight_precompute_sidecar_v3(
+        request=sidecar_request,
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert len(weights_api._WEIGHT_PRECOMPUTE_SIDECAR_TASKS) == 1
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert not weights_api._WEIGHT_PRECOMPUTE_SIDECAR_TASKS
+
+
+@pytest.mark.asyncio
 async def test_weight_inputs_v2_compact_request_never_falls_back_to_full_graph(
     monkeypatch,
 ):
@@ -1005,12 +1412,12 @@ async def test_weight_inputs_v2_exact_retry_reuses_authorized_work_after_block_d
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def epoch_authority(**_kwargs):
+    async def epoch_authority(**kwargs):
         nonlocal authority_calls
         authority_calls += 1
-        if authority_calls > 1:
+        if authority_calls > 1 and not kwargs.get("allow_block_drift"):
             raise HTTPException(status_code=400, detail="block drift is too large")
-        return {"settlement_epoch_id": 300}
+        return {"settlement_epoch_id": 300, "gateway_epoch_block": 200}
 
     async def load_graph(**_kwargs):
         started.set()
@@ -1055,7 +1462,7 @@ async def test_weight_inputs_v2_exact_retry_reuses_authorized_work_after_block_d
     first_response, retry_response = await asyncio.gather(first, retry)
 
     assert json.loads(first_response.body) == json.loads(retry_response.body)
-    assert authority_calls == 1
+    assert authority_calls == 2
 
 
 @pytest.mark.asyncio
@@ -1126,6 +1533,9 @@ async def test_weight_inputs_v2_dependency_retry_uses_fresh_measured_generation(
     from leadpoet_canonical.weight_authority_v2 import (
         GATEWAY_WEIGHT_INPUT_CATEGORIES,
     )
+    from leadpoet_canonical.constants import (
+        WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS,
+    )
 
     sequences = []
 
@@ -1134,7 +1544,7 @@ async def test_weight_inputs_v2_dependency_retry_uses_fresh_measured_generation(
 
     async def execute(**kwargs):
         sequences.append(kwargs["sequence"])
-        if len(sequences) == 1:
+        if len(sequences) < WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS:
             raise AttestedScoringV2Error(
                 "V2 scoring failed closed: execution_supabasesourcev2error"
             )
@@ -1163,14 +1573,22 @@ async def test_weight_inputs_v2_dependency_retry_uses_fresh_measured_generation(
         "leaderboard_window_start": "2026-07-03T20:00:00Z",
         "leaderboard_window_end": "2026-07-10T20:00:00Z",
     }
-    with pytest.raises(AttestedScoringV2Error):
-        await weights_api._build_weight_inputs_v2_singleflight(**kwargs)
-    await asyncio.sleep(0)
+    for _generation in range(
+        WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS - 1
+    ):
+        with pytest.raises(AttestedScoringV2Error):
+            await weights_api._build_weight_inputs_v2_singleflight(**kwargs)
+        await asyncio.sleep(0)
 
     result = await weights_api._build_weight_inputs_v2_singleflight(**kwargs)
 
     assert result == {"input_receipt_hashes": {}}
-    assert sequences == [0, len(GATEWAY_WEIGHT_INPUT_CATEGORIES)]
+    assert sequences == [
+        generation * len(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+        for generation in range(
+            WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS
+        )
+    ]
 
 
 @pytest.mark.asyncio

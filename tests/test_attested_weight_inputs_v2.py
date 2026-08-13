@@ -203,6 +203,53 @@ async def test_gateway_weight_input_builder_runs_only_independent_categories_con
 
 
 @pytest.mark.asyncio
+async def test_gateway_weight_input_builder_joins_all_failed_siblings_before_raising(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: (),
+    )
+    independent = set(GATEWAY_WEIGHT_INPUT_CATEGORIES) - {
+        "anomaly_adjustments"
+    }
+    finished = set()
+    anomaly_called = False
+
+    async def execute(**kwargs):
+        nonlocal anomaly_called
+        category = kwargs["payload"]["category"]
+        if category == "anomaly_adjustments":
+            anomaly_called = True
+            raise AssertionError("anomaly must not run after sibling failure")
+        try:
+            if category == "bans":
+                await asyncio.sleep(0.02)
+            else:
+                await asyncio.sleep(0)
+            raise RuntimeError("failure:%s" % category)
+        finally:
+            finished.add(category)
+
+    with pytest.raises(
+        RuntimeError,
+        match="failure:bans",
+    ):
+        await build_gateway_weight_inputs_v2(
+            calculation_snapshot=_snapshot(),
+            allocation_graph=_allocation_graph(),
+            leaderboard_window_start="2026-07-03T00:00:00Z",
+            leaderboard_window_end="2026-07-10T00:00:00Z",
+            execute=execute,
+            load_sourcing_graphs=lambda **_kwargs: _async_value([]),
+        )
+
+    assert finished == independent
+    assert anomaly_called is False
+
+
+@pytest.mark.asyncio
 async def test_gateway_weight_input_builder_gives_each_live_job_one_client(
     monkeypatch,
 ):

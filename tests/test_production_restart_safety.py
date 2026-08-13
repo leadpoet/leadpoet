@@ -9,9 +9,11 @@ import pytest
 
 from Leadpoet.utils import restart_epoch_gate
 from Leadpoet.utils.restart_epoch_gate import (
+    MAXIMUM_DESTRUCTIVE_RESTART_EPOCH_BLOCK,
     MAXIMUM_RESTART_EPOCH_BLOCK,
     RestartEpochGateError,
     verify_captured_restart_epoch_start,
+    verify_destructive_restart_epoch_window,
     verify_restart_epoch_window,
     write_restart_epoch_start,
 )
@@ -78,6 +80,40 @@ def test_restart_gate_rejects_official_epoch_block_after_300(
 
     with pytest.raises(RestartEpochGateError, match="observed 301"):
         verify_restart_epoch_window(object(), netuid=71)
+
+
+@pytest.mark.parametrize("epoch_block", [0, 178, 179])
+def test_destructive_restart_gate_accepts_only_before_allocation_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+    epoch_block: int,
+) -> None:
+    monkeypatch.setattr(
+        restart_epoch_gate,
+        "read_subnet_epoch_snapshot",
+        lambda subtensor, *, netuid: _snapshot(epoch_block),
+    )
+
+    result = verify_destructive_restart_epoch_window(object(), netuid=71)
+
+    assert MAXIMUM_DESTRUCTIVE_RESTART_EPOCH_BLOCK == 179
+    assert result["destructive_phase"] is True
+    assert result["restart_allowed"] is True
+
+
+def test_destructive_restart_gate_rejects_allocation_preparation_or_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        restart_epoch_gate,
+        "read_subnet_epoch_snapshot",
+        lambda subtensor, *, netuid: _snapshot(180),
+    )
+
+    with pytest.raises(
+        RestartEpochGateError,
+        match="block 179 or earlier; observed 180",
+    ):
+        verify_destructive_restart_epoch_window(object(), netuid=71)
 
 
 def test_restart_gate_retries_transient_epoch_read_with_fresh_connection(
@@ -279,6 +315,43 @@ def test_captured_restart_start_is_not_rechecked_after_block_300(
     assert result["deadline_reapplied"] is False
 
 
+def test_captured_restart_start_rechecks_destructive_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured = _snapshot(100)
+    current = _snapshot(180)
+    path = tmp_path / "restart-start.json"
+    write_restart_epoch_start(
+        path,
+        {
+            "schema_version": "leadpoet.restart_epoch_start.v1",
+            "maximum_restart_epoch_block": 300,
+            "restart_allowed": True,
+            "snapshot": captured.to_dict(),
+        },
+    )
+
+    monkeypatch.setattr(
+        restart_epoch_gate,
+        "read_subnet_epoch_snapshot",
+        lambda _subtensor, *, netuid, block_hash=None: (
+            captured if block_hash is not None else current
+        ),
+    )
+
+    with pytest.raises(
+        RestartEpochGateError,
+        match="block 179 or earlier; observed 180",
+    ):
+        verify_captured_restart_epoch_start(
+            object(),
+            path=path,
+            netuid=71,
+            reapply_current_deadline=True,
+        )
+
+
 def test_captured_restart_start_survives_epoch_transition_and_pruned_primary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -371,6 +444,55 @@ def test_gateway_captures_start_gate_and_validator_gates_before_shutdown() -> No
     ).read_text(encoding="utf-8")
     assert "--maximum" not in gateway
     assert "--maximum" not in validator
+    assert "--destructive-phase" in gateway
+    assert "--destructive-phase" in validator
+    assert gateway.rindex("--destructive-phase") < gateway_shutdown
+    assert validator.rindex("--destructive-phase") < validator_shutdown
+    gateway_storage_probe = gateway.rindex(
+        "gateway.research_lab.weight_input_authorization_v2"
+    )
+    validator_storage_probe = validator.rindex(
+        "validator_tee.host.weight_input_journal_v2"
+    )
+    assert gateway_storage_probe < gateway.rindex("--destructive-phase")
+    assert validator_storage_probe < validator.rindex("--destructive-phase")
+    assert gateway_storage_probe < gateway_shutdown
+    assert validator_storage_probe < validator_shutdown
+    assert '--directory "$GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR"' in gateway
+    assert '--directory "$VALIDATOR_V2_INPUT_JOURNAL_HOST_DIR"' in validator
+    assert (
+        gateway.index(
+            "Validating durable weight input checkpoint storage before gateway shutdown"
+        )
+        < gateway_shutdown
+    )
+    assert gateway.rindex('rm -rf "$GATEWAY_PREFLIGHT_TREE"') > gateway.rindex(
+        "--destructive-phase"
+    )
+
+
+def test_weight_input_recovery_state_is_wired_to_persistent_restart_storage() -> None:
+    root = Path(__file__).resolve().parents[1]
+    gateway = (root / "gw_restart.sh").read_text(encoding="utf-8")
+    validator_deploy = (
+        root / "validator_models" / "containerizing" / "deploy_dynamic.sh"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "/home/ec2-user/.config/leadpoet/weight-input-checkpoints-v2"
+        in gateway
+    )
+    assert "export GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR=" in gateway
+    assert "export GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED=true" in gateway
+    assert (
+        "VALIDATOR_V2_INPUT_JOURNAL_DIR="
+        "/app/validator_weights/authoritative_weight_inputs_v2"
+        in validator_deploy
+    )
+    assert (
+        '-v "$REPO_ROOT/validator_weights:/app/validator_weights"'
+        in validator_deploy
+    )
 
 
 def test_validator_restart_is_fail_closed_and_postflight_verified() -> None:

@@ -165,6 +165,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
 )
 from leadpoet_canonical.constants import (
     ALLOCATION_PREPARATION_BLOCK,
+    WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK,
     WEIGHT_SUBMISSION_BLOCK,
 )
 from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT
@@ -387,6 +388,12 @@ try:
     )
     from validator_tee.host.publication_journal_v2 import (
         AuthoritativeWeightPublicationJournalV2,
+    )
+    from validator_tee.host.weight_input_journal_v2 import (
+        AuthoritativeWeightInputJournalV2,
+        decode_host_weight_bits_v2,
+        require_weight_input_metagraph_match_v2,
+        require_weight_input_plan_metagraph_match_v2,
     )
     from validator_tee.host.vsock_client import ValidatorEnclaveClient
     V2_TEE_AVAILABLE = True
@@ -1322,6 +1329,16 @@ class Validator(BaseValidatorNeuron):
         ).expanduser()
         self._weight_publication_journal_v2 = (
             AuthoritativeWeightPublicationJournalV2(journal_path)
+        )
+        input_journal_directory = Path(
+            os.environ.get("VALIDATOR_V2_INPUT_JOURNAL_DIR")
+            or (
+                Path(self.config.neuron.full_path)
+                / "authoritative_weight_inputs_v2"
+            )
+        ).expanduser()
+        self._weight_input_journal_v2 = AuthoritativeWeightInputJournalV2(
+            input_journal_directory
         )
         
         # Add async subtensor (initialized later in run())
@@ -4342,6 +4359,77 @@ class Validator(BaseValidatorNeuron):
             tasks.pop(epoch, None)
         return result
 
+    def _weight_input_release_identity_v2(self) -> Dict[str, str]:
+        """Return the exact measured validator release for durable input state."""
+
+        boot = dict(
+            self._validator_v2_client.get_authoritative_v2_boot_identity()
+        )
+        release = {
+            "commit_sha": str(boot.get("commit_sha") or "").lower(),
+            "pcr0": str(boot.get("pcr0") or "").lower(),
+            "build_manifest_hash": str(
+                boot.get("build_manifest_hash") or ""
+            ).lower(),
+            "dependency_lock_hash": str(
+                boot.get("dependency_lock_hash") or ""
+            ).lower(),
+            "config_hash": str(boot.get("config_hash") or "").lower(),
+            "boot_identity_hash": str(
+                boot.get("boot_identity_hash") or ""
+            ).lower(),
+        }
+        if release["commit_sha"] != _current_validator_commit_sha():
+            raise RuntimeError(
+                "validator weight input journal release differs from host commit"
+            )
+        return release
+
+    async def _resume_weight_input_plan_before_live_sources_v2(
+        self,
+        *,
+        epoch_state: _ValidatorEpochState,
+    ) -> Optional[bool]:
+        """Resume one exact durable plan without reading mutable source state."""
+
+        journal = self._weight_input_journal_v2
+        release = self._weight_input_release_identity_v2()
+        validator_hotkey = self.wallet.hotkey.ss58_address
+        record = journal.load_epoch(
+            release_identity=release,
+            validator_hotkey=validator_hotkey,
+            netuid=int(self.config.netuid),
+            epoch_id=int(epoch_state.workflow_epoch_id),
+        )
+        if record is None:
+            return None
+        record = require_weight_input_plan_metagraph_match_v2(
+            record,
+            list(self.metagraph.hotkeys),
+        )
+        if record["state"] == "inputs_verified":
+            require_weight_input_metagraph_match_v2(
+                record,
+                list(self.metagraph.hotkeys),
+            )
+        plan = record["plan"]
+        bt.logging.info(
+            "weight_input_plan_resume "
+            f"epoch={record['epoch_id']} state={record['state']} "
+            f"plan_hash={record['plan_hash']}"
+        )
+        return await self._publish_and_set_weights(
+            epoch_state=epoch_state,
+            snapshot=dict(plan["calculation_snapshot"]),
+            host_uids=list(plan["host_uids"]),
+            host_weights=decode_host_weight_bits_v2(
+                plan["host_weight_float_bits"]
+            ),
+            allocation_hash=str(plan["allocation_hash"]),
+            leaderboard_window_start=str(plan["leaderboard_window_start"]),
+            leaderboard_window_end=str(plan["leaderboard_window_end"]),
+        )
+
     async def _publish_and_set_weights(
         self,
         *,
@@ -4424,6 +4512,44 @@ class Validator(BaseValidatorNeuron):
             gateway_url=gateway_url,
         ):
             return True
+        input_release = self._weight_input_release_identity_v2()
+        input_journal = self._weight_input_journal_v2
+        input_record = input_journal.record_plan(
+            release_identity=input_release,
+            validator_hotkey=self.wallet.hotkey.ss58_address,
+            netuid=int(snapshot["netuid"]),
+            epoch_id=int(snapshot["epoch_id"]),
+            calculation_snapshot=snapshot,
+            host_uids=host_uids,
+            host_weights=host_weights,
+            allocation_hash=allocation_hash,
+            leaderboard_window_start=leaderboard_window_start,
+            leaderboard_window_end=leaderboard_window_end,
+        )
+        input_record = require_weight_input_plan_metagraph_match_v2(
+            input_record,
+            list(self.metagraph.hotkeys),
+        )
+        prepared_gateway_inputs = None
+        if input_record["state"] == "inputs_verified":
+            input_record = require_weight_input_metagraph_match_v2(
+                input_record,
+                list(self.metagraph.hotkeys),
+            )
+            prepared_gateway_inputs = input_record["gateway_inputs"]
+
+        def _record_verified_gateway_inputs(
+            gateway_inputs: Mapping[str, Any],
+        ) -> Dict[str, Any]:
+            return input_journal.record_gateway_inputs(
+                release_identity=input_release,
+                validator_hotkey=self.wallet.hotkey.ss58_address,
+                netuid=int(snapshot["netuid"]),
+                epoch_id=int(snapshot["epoch_id"]),
+                plan_hash=input_record["plan_hash"],
+                gateway_inputs=gateway_inputs,
+            )
+
         journal = self._weight_publication_journal_v2
         try:
             with _sentry_stage(
@@ -4444,6 +4570,8 @@ class Validator(BaseValidatorNeuron):
                     expected_chain=expected_chain,
                     client=self._validator_v2_client,
                     before_publish=journal.record_prepared,
+                    prepared_gateway_inputs=prepared_gateway_inputs,
+                    on_inputs_verified=_record_verified_gateway_inputs,
                 )
         except Exception as exc:
             code = _sentry_failure_code_for_exception(
@@ -5230,6 +5358,46 @@ class Validator(BaseValidatorNeuron):
                 ):
                     self._last_weight_submission_epoch = current_epoch
                     return True
+
+                resumed_input_plan = (
+                    await self._resume_weight_input_plan_before_live_sources_v2(
+                        epoch_state=epoch_state,
+                    )
+                )
+                if resumed_input_plan is not None:
+                    if resumed_input_plan:
+                        self._last_weight_submission_epoch = current_epoch
+                    return bool(resumed_input_plan)
+
+                # A late process replacement may resume an exact durable plan,
+                # but it must not rebuild mutable scoring and allocation state
+                # after the declared source cutoff. Normal epoch work starts at
+                # block 240, leaving 60 blocks to complete the checkpoint.
+                if blocks_into_epoch >= WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK:
+                    _capture_sentry_failure(
+                        "weight.input_checkpoint_missing",
+                        component="validator",
+                        stage="weight_input_source_cutoff",
+                        terminal=True,
+                        retryable=False,
+                        fail_closed=True,
+                        epoch_id=current_epoch,
+                        epoch_block=blocks_into_epoch,
+                        netuid=int(self.config.netuid),
+                        validator_role="primary",
+                        blocked_stages=[
+                            "weight_input_reconstruction",
+                            "bundle_generation",
+                            "signing",
+                            "broadcast",
+                            "finalization",
+                        ],
+                    )
+                    bt.logging.critical(
+                        "weight_input_source_cutoff_without_checkpoint "
+                        f"epoch={current_epoch} block={blocks_into_epoch}"
+                    )
+                    return False
             
             if epoch_state.deadline_reached(ALLOCATION_PREPARATION_BLOCK):
                 prepared = await self._prepare_research_lab_allocation(

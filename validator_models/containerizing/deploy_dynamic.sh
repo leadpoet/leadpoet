@@ -440,9 +440,11 @@ start_container() {
     local PRIVILEGED_ARG=""
     local LOG_DRIVER_ARGS=""
     local PUBLICATION_JOURNAL_ARG=""
+    local INPUT_JOURNAL_ARG=""
     if [ "$CONTAINER_ID" -eq 0 ]; then
         MODE_ARG="--mode coordinator"
         PUBLICATION_JOURNAL_ARG="-e VALIDATOR_V2_PUBLICATION_JOURNAL_PATH=/app/validator_weights/authoritative_weight_publication_v2.json"
+        INPUT_JOURNAL_ARG="-e VALIDATOR_V2_INPUT_JOURNAL_DIR=/app/validator_weights/authoritative_weight_inputs_v2"
         # Coordinator needs vsock access for Nitro Enclave TEE signing
         # Requires --privileged for vsock socket creation permissions
         if [ -e /dev/vsock ]; then
@@ -484,6 +486,7 @@ start_container() {
       -e GIT_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
       -e VALIDATOR_V2_GATEWAY_URL="${VALIDATOR_V2_GATEWAY_URL:-}" \
       $PUBLICATION_JOURNAL_ARG \
+      $INPUT_JOURNAL_ARG \
       -e EXPECTED_CHAIN="${EXPECTED_CHAIN:-}" \
       -e MEV_API_KEY="$MEV_API_KEY" \
       -e TRUELIST_API_KEY="$TRUELIST_API_KEY" \

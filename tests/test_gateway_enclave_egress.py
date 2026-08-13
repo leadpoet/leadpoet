@@ -1467,13 +1467,22 @@ def test_httpx_framed_transport_recovers_complete_chunked_json_before_eof(
 
 
 @pytest.mark.parametrize(
-    ("reuse_direct_connections", "expected_tunnel_count"),
-    ((False, 3), (True, 2)),
+    (
+        "reuse_direct_connections",
+        "expected_tunnel_count",
+        "parent_tunnel_framing",
+    ),
+    (
+        (False, 3, ""),
+        (True, 2, ""),
+        (False, 3, TUNNEL_FRAMING_MODE),
+    ),
 )
 def test_httpx_direct_transport_connection_scope_and_recovery(
     tmp_path: Path,
     reuse_direct_connections: bool,
     expected_tunnel_count: int,
+    parent_tunnel_framing: str,
 ):
     certificate_path, private_key_path = _write_test_server_identity(tmp_path)
     tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -1535,7 +1544,8 @@ def test_httpx_direct_transport_connection_scope_and_recovery(
     host_threads = []
     opened_parent_tunnels = []
 
-    def open_parent_tunnel(_host, _port):
+    def open_parent_tunnel(_host, _port, *, tunnel_framing=""):
+        assert tunnel_framing == parent_tunnel_framing
         opened_parent_tunnels.append((_host, _port))
         enclave_side, host_side = socket.socketpair()
         host_thread = threading.Thread(
@@ -1552,20 +1562,19 @@ def test_httpx_direct_transport_connection_scope_and_recovery(
         )
         host_thread.start()
         host_threads.append(host_thread)
-        enclave_side.sendall(
-            _frame(
-                {
-                    "method": "connect",
-                    "params": {
-                        "host": "example.com",
-                        "port": 443,
-                        "policy_hash": destination_policy_hash(),
-                    },
-                }
-            )
-        )
+        params = {
+            "host": "example.com",
+            "port": 443,
+            "policy_hash": destination_policy_hash(),
+        }
+        if parent_tunnel_framing:
+            params["tunnel_framing"] = parent_tunnel_framing
+        enclave_side.sendall(_frame({"method": "connect", "params": params}))
         response = _read_frame(enclave_side)
         assert response["result"]["status"] == "connected"
+        assert (
+            response["result"].get("tunnel_framing") or ""
+        ) == parent_tunnel_framing
         return enclave_side
 
     proxy_port = _unused_loopback_port()
@@ -1582,6 +1591,7 @@ def test_httpx_direct_transport_connection_scope_and_recovery(
         proxy_url=f"http://127.0.0.1:{proxy_port}",
         ca_bundle=str(certificate_path),
         reuse_direct_connections=reuse_direct_connections,
+        parent_tunnel_framing=parent_tunnel_framing,
     )
     try:
         results = [

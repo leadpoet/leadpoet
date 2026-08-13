@@ -9,6 +9,8 @@ VALIDATOR_HOST="${LEADPOET_VALIDATOR_SSH_HOST:-ec2-user@100.59.201.156}"
 GATEWAY_RESTART="${LEADPOET_GATEWAY_RESTART_PATH:-/home/ec2-user/gw_restart.sh}"
 VALIDATOR_RESTART="${LEADPOET_VALIDATOR_RESTART_PATH:-/home/ec2-user/validator_restart.sh}"
 VALIDATOR_REPO_ROOT="${LEADPOET_VALIDATOR_REPO_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
+GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-}"
+VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-}"
 # Three-second retries allow up to 2.5 hours for the gateway rebuild, plus a
 # five-minute margin for the final bounded release probes.
 VALIDATOR_COORDINATION_ATTEMPTS=3000
@@ -150,6 +152,13 @@ for key in "$GATEWAY_KEY" "$VALIDATOR_KEY"; do
     exit 1
   fi
 done
+for secret_id in "$GATEWAY_ENV_SECRET_ID" "$VALIDATOR_ENV_SECRET_ID"; do
+  if [ -n "$secret_id" ] \
+      && ! [[ "$secret_id" =~ ^[A-Za-z0-9/_+=.@-]+$ ]]; then
+    echo "ERROR: environment secret id contains unsupported characters" >&2
+    exit 2
+  fi
+done
 
 temporary_root="$(mktemp -d /tmp/leadpoet-attested-restart.XXXXXX)"
 helper="$temporary_root/exact_commit_restart_v2.py"
@@ -214,8 +223,12 @@ validator_active_commit() {
 }
 
 run_gateway_restart() {
+  local secret_environment=""
+  if [ -n "$GATEWAY_ENV_SECRET_ID" ]; then
+    secret_environment="LEADPOET_GATEWAY_ENV_SECRET_ID='$GATEWAY_ENV_SECRET_ID'"
+  fi
   ssh -tt "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
-    "exec bash '$GATEWAY_RESTART' --commit '$commit'"
+    "exec env $secret_environment bash '$GATEWAY_RESTART' --commit '$commit'"
 }
 
 run_validator_restart() {
@@ -262,6 +275,7 @@ run_validator_restart() {
       VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS='$VALIDATOR_COORDINATION_ATTEMPTS' \
       VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS='$VALIDATOR_COORDINATION_TIMEOUT_SECONDS' \
       VALIDATOR_COORDINATED_EXPECTED_COMMIT='$expected_forward_commit' \
+      LEADPOET_VALIDATOR_ENV_SECRET_ID='$VALIDATOR_ENV_SECRET_ID' \
       bash -c $launcher_command_quoted"
   )
   if [ "${VALIDATOR_RESTART_EXEC_SSH:-0}" = "1" ]; then

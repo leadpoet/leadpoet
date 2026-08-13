@@ -1327,7 +1327,7 @@
       "symbol": "MODEL_SANDBOX_VISIBLE_ROOT"
     },
     {
-      "ast_sha256": "sha256:28bcf72bcfaa1e20ba3eb286c611f07d8ee5032e23ad6758fe7683ced0299303",
+      "ast_sha256": "sha256:5fdd05fca670305f18e7687d30b5e413c421e2e70ff8c2c0c55a10c1827d4f6a",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
@@ -2582,7 +2582,7 @@
       "symbol": "_provider_error_line_is_loop_ending"
     },
     {
-      "ast_sha256": "sha256:b5c0955cb63e6661e56a17181eaec74866455fb2a5b790dbcf611454a4834822",
+      "ast_sha256": "sha256:a64698301ae510d05b808d2d081264b58f89b61d662ca5bf0bca3dee902f5d42",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_raise_on_empty_provider_error"
     },
@@ -2752,7 +2752,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:0e6f9980e463287d2bc489124c8d0d02577ce8c69e7fc18cd761d7c24632a1d9",
+  "manifest_hash": "sha256:f68ea9dfd49ad8fb6233d0f24ee476cd96905dbff3105f30c4231382ffd43e3a",
   "protected_source_commit": "aa6b8a167144b4cb9a345a3b0bb8b94e4f3f273e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

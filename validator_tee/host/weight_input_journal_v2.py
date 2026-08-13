@@ -55,7 +55,45 @@ _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 _FLOAT_BITS_RE = re.compile(r"^[0-9a-f]{16}$")
 _STORE_LOCK_NAME = ".weight-input-journal-v2.lock"
 _DEFAULT_MIN_FREE_BYTES = 256 * 1024 * 1024
-_JOURNAL_WRITE_RESERVE_BYTES = MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES
+MAX_WEIGHT_INPUT_PLAN_CANONICAL_BYTES = MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES
+MAX_WEIGHT_INPUT_JOURNAL_ENVELOPE_BYTES = 1024 * 1024
+WEIGHT_INPUT_JOURNAL_ATOMIC_WRITE_OVERHEAD_BYTES = 1024 * 1024
+
+
+def _base64_encoded_length(byte_count: int) -> int:
+    return 4 * ((byte_count + 2) // 3)
+
+
+def maximum_weight_input_journal_file_bytes_v2() -> int:
+    """Return the exact accepted journal-file cap.
+
+    The journal preserves both each canonical object and its base64 canonical
+    bytes. The envelope allowance covers every other field. Validation rejects
+    a larger record, so readiness and the accepted file shape cannot drift.
+    """
+
+    gateway_input_storage = (
+        MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES
+        + _base64_encoded_length(MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES)
+    )
+    plan_storage = (
+        MAX_WEIGHT_INPUT_PLAN_CANONICAL_BYTES
+        + _base64_encoded_length(MAX_WEIGHT_INPUT_PLAN_CANONICAL_BYTES)
+    )
+    return (
+        gateway_input_storage
+        + plan_storage
+        + MAX_WEIGHT_INPUT_JOURNAL_ENVELOPE_BYTES
+    )
+
+
+def weight_input_journal_atomic_write_reserve_bytes_v2() -> int:
+    """Return free bytes needed while the maximum temporary file exists."""
+
+    return (
+        maximum_weight_input_journal_file_bytes_v2()
+        + WEIGHT_INPUT_JOURNAL_ATOMIC_WRITE_OVERHEAD_BYTES
+    )
 
 
 class WeightInputJournalV2Error(RuntimeError):
@@ -162,8 +200,18 @@ def _canonical_bytes(value: Mapping[str, Any]) -> bytes:
     return canonical_json(dict(value)).encode("utf-8")
 
 
-def _canonical_bytes_b64(value: Mapping[str, Any]) -> str:
-    return base64.b64encode(_canonical_bytes(value)).decode("ascii")
+def _canonical_bytes_b64(
+    value: Mapping[str, Any],
+    *,
+    field: str,
+    maximum_bytes: int,
+) -> str:
+    canonical = _canonical_bytes(value)
+    if len(canonical) > maximum_bytes:
+        raise WeightInputJournalV2Error(
+            "%s canonical bytes exceed the maximum" % field
+        )
+    return base64.b64encode(canonical).decode("ascii")
 
 
 def _validate_canonical_bytes(
@@ -172,15 +220,24 @@ def _validate_canonical_bytes(
     encoded: Any,
     expected_hash: Any,
     field: str,
+    maximum_bytes: int,
 ) -> tuple[str, str]:
     if not isinstance(encoded, str) or not encoded:
         raise WeightInputJournalV2Error("%s canonical bytes are invalid" % field)
+    if len(encoded) > _base64_encoded_length(maximum_bytes):
+        raise WeightInputJournalV2Error(
+            "%s canonical bytes exceed the maximum" % field
+        )
     try:
         decoded = base64.b64decode(encoded, validate=True)
     except (TypeError, ValueError) as exc:
         raise WeightInputJournalV2Error(
             "%s canonical bytes are invalid" % field
         ) from exc
+    if len(decoded) > maximum_bytes:
+        raise WeightInputJournalV2Error(
+            "%s canonical bytes exceed the maximum" % field
+        )
     if decoded != _canonical_bytes(value):
         raise WeightInputJournalV2Error(
             "%s canonical bytes differ" % field
@@ -399,6 +456,7 @@ def validate_weight_input_journal_v2(
         encoded=value.get("plan_canonical_bytes_b64"),
         expected_hash=value.get("plan_hash"),
         field="weight input plan",
+        maximum_bytes=MAX_WEIGHT_INPUT_PLAN_CANONICAL_BYTES,
     )
     gateway_inputs = value.get("gateway_inputs")
     gateway_inputs_bytes = value.get("gateway_inputs_canonical_bytes_b64")
@@ -425,6 +483,7 @@ def validate_weight_input_journal_v2(
             encoded=gateway_inputs_bytes,
             expected_hash=gateway_inputs_hash,
             field="gateway inputs",
+            maximum_bytes=MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
         )
     for field in ("created_at", "updated_at"):
         if not isinstance(value.get(field), str) or not value[field]:
@@ -453,7 +512,12 @@ def validate_weight_input_journal_v2(
     journal_hash = _hash(value.get("journal_hash"), "journal hash")
     if journal_hash != sha256_json(body):
         raise WeightInputJournalV2Error("weight input journal hash differs")
-    return {**body, "journal_hash": journal_hash}
+    record = {**body, "journal_hash": journal_hash}
+    if len(_canonical_bytes(record)) > maximum_weight_input_journal_file_bytes_v2():
+        raise WeightInputJournalV2Error(
+            "weight input journal exceeds the maximum file size"
+        )
+    return record
 
 
 def require_weight_input_metagraph_match_v2(
@@ -559,6 +623,9 @@ class AuthoritativeWeightInputJournalV2:
         *,
         encoded_size: int,
         replacing_path: Path,
+        atomic_write_reserve_bytes: int = (
+            WEIGHT_INPUT_JOURNAL_ATOMIC_WRITE_OVERHEAD_BYTES
+        ),
     ) -> None:
         """Fail closed at configured bounds; never prune authority journals."""
 
@@ -595,7 +662,7 @@ class AuthoritativeWeightInputJournalV2:
                 and projected_bytes > self.max_bytes
             )
             or shutil.disk_usage(self.directory).free
-            < self.min_free_bytes + encoded_size
+            < self.min_free_bytes + encoded_size + atomic_write_reserve_bytes
         ):
             raise WeightInputJournalV2Error(
                 "weight input journal storage capacity is insufficient"
@@ -606,7 +673,7 @@ class AuthoritativeWeightInputJournalV2:
 
         with self._lock, self._exclusive_store_lock():
             self._ensure_storage_capacity(
-                encoded_size=_JOURNAL_WRITE_RESERVE_BYTES,
+                encoded_size=maximum_weight_input_journal_file_bytes_v2(),
                 replacing_path=self.directory / ".next-journal-reservation",
             )
 
@@ -699,7 +766,11 @@ class AuthoritativeWeightInputJournalV2:
                 calculation.get("metagraph_hotkeys")
             ),
         }
-        plan_bytes = _canonical_bytes_b64(plan)
+        plan_bytes = _canonical_bytes_b64(
+            plan,
+            field="weight input plan",
+            maximum_bytes=MAX_WEIGHT_INPUT_PLAN_CANONICAL_BYTES,
+        )
         plan_hash = sha256_bytes(base64.b64decode(plan_bytes))
         now = _timestamp()
         body = {
@@ -760,7 +831,11 @@ class AuthoritativeWeightInputJournalV2:
         normalized_epoch = _scope_integer(epoch_id, "epoch", positive=False)
         expected_plan_hash = _hash(plan_hash, "plan hash")
         normalized_inputs = _validate_gateway_inputs(gateway_inputs)
-        inputs_bytes = _canonical_bytes_b64(normalized_inputs)
+        inputs_bytes = _canonical_bytes_b64(
+            normalized_inputs,
+            field="gateway inputs",
+            maximum_bytes=MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
+        )
         inputs_hash = sha256_bytes(base64.b64decode(inputs_bytes))
         path = self._path(
             release_identity=release,
@@ -837,6 +912,10 @@ class AuthoritativeWeightInputJournalV2:
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
         encoded = canonical_json(dict(value)).encode("utf-8")
+        if len(encoded) > maximum_weight_input_journal_file_bytes_v2():
+            raise WeightInputJournalV2Error(
+                "weight input journal exceeds the maximum file size"
+            )
         self._ensure_storage_capacity(
             encoded_size=len(encoded),
             replacing_path=path,
@@ -884,7 +963,10 @@ def _main(argv: Optional[list[str]] = None) -> int:
         parser.error("--verify-storage-ready is required")
     directory = Path(args.directory).expanduser()
     if not directory.is_absolute():
-        print("ERROR: validator weight-input storage path must be absolute", file=sys.stderr)
+        print(
+            "ERROR: validator weight-input storage path must be absolute",
+            file=sys.stderr,
+        )
         return 1
     try:
         AuthoritativeWeightInputJournalV2(

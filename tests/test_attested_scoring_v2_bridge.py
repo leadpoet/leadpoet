@@ -680,6 +680,24 @@ class _AbandonedPollClient(_Client):
         return {"job_id": job_id, "state": "cancelled"}
 
 
+class _AbandonedCoordinatorPollClient(_CoordinatorClient):
+    def __init__(self, release):
+        super().__init__(release)
+        self.cancelled_jobs = []
+        self.cancelled = False
+
+    async def coordinator_v2_get_status(self, job_id):
+        if self.cancelled:
+            return {"job_id": job_id, "state": "cancelled"}
+        raise RuntimeError("coordinator weight status relay failed")
+
+    async def coordinator_v2_cancel_job(self, job_id):
+        self.cancelled_jobs.append(job_id)
+        self.cancelled = True
+        self.manager.cancel(job_id)
+        return {"job_id": job_id, "state": "cancelled"}
+
+
 @pytest.mark.asyncio
 async def test_v2_bridge_returns_only_durable_release_verified_result():
     release = _release()
@@ -753,6 +771,66 @@ async def test_v2_bridge_cancels_remote_job_when_status_rpc_fails():
         )
 
     assert len(client.cancelled_jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_default_profile_weight_failure_releases_reserved_provider_records(
+    monkeypatch,
+):
+    from gateway.research_lab.attested_coordinator_v2 import (
+        execute_coordinator_v2,
+    )
+
+    release = _release()
+    client = _AbandonedCoordinatorPollClient(release)
+
+    async def no_durable_replay(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_execution_result_v2",
+        no_durable_replay,
+    )
+
+    class _ReservedProviderRecords:
+        def __init__(self):
+            self.active = 1
+            self.release_calls = []
+
+        async def v2_release_job_credentials(self, job_id):
+            self.release_calls.append(job_id)
+            released = self.active
+            self.active = 0
+            return {
+                "status": "released",
+                "job_id": job_id,
+                "released_slot_count": 0,
+                "released_terminal_count": released,
+            }
+
+    provider_records = _ReservedProviderRecords()
+
+    with pytest.raises(
+        RuntimeError,
+        match="coordinator weight status relay failed",
+    ):
+        await execute_coordinator_v2(
+            operation="attest_weight_input",
+            purpose="research_lab.ban_input.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"category": "bans", "value": {"banned_hotkeys": []}},
+            credential_coordinator_client=provider_records,
+            release_manifest=release,
+            client=client,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+    assert len(client.cancelled_jobs) == 1
+    assert provider_records.release_calls == client.cancelled_jobs
+    assert provider_records.active == 0
 
 
 @pytest.mark.asyncio

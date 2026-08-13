@@ -142,12 +142,15 @@ def test_persistent_weight_input_recovery_stage_uses_candidate_bound_state(
 
     assert result == {
         "candidate_release_derived": True,
-        "n_minus_one_authorization_durable": True,
-        "n_minus_one_plan_durable": True,
-        "persistent_directory_shared_across_releases": True,
+        "candidate_endpoint_release_exact": True,
+        "predecessor_transition_bound": True,
+        "measured_source_invocations_exact": True,
+        "candidate_authorization_durable": True,
+        "candidate_plan_durable": True,
+        "persistent_directory_shared_across_process_replacement": True,
         "shielded_equivalent_checkpoint_durable": True,
-        "producer_release_ancestry_validated": True,
-        "missing_producer_ancestry_rejected": True,
+        "candidate_checkpoint_release_exact": True,
+        "post_cutoff_new_work_rejected": True,
         "post_cutoff_replay_without_live_source": True,
         "validator_journal_reused": True,
         "exact_metagraph_order_enforced": True,
@@ -172,6 +175,8 @@ def test_rehearsal_contract_requires_persistent_weight_input_recovery() -> None:
         "required_invariant_ids"
     ]
     assert {
+        "gateway/api/weights.py",
+        "gateway/research_lab/attested_weight_inputs_v2.py",
         "gateway/research_lab/weight_input_authorization_v2.py",
         "gateway/research_lab/weight_input_checkpoint_v2.py",
         "validator_tee/host/weight_input_journal_v2.py",

@@ -10,15 +10,23 @@ import sys
 import pytest
 
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
+from leadpoet_canonical.hotkey_authority_v2 import (
+    MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
 )
 from validator_tee.host.weight_input_journal_v2 import (
     AuthoritativeWeightInputJournalV2,
+    MAX_WEIGHT_INPUT_JOURNAL_ENVELOPE_BYTES,
+    MAX_WEIGHT_INPUT_PLAN_CANONICAL_BYTES,
+    WEIGHT_INPUT_JOURNAL_ATOMIC_WRITE_OVERHEAD_BYTES,
     WeightInputJournalV2Error,
+    maximum_weight_input_journal_file_bytes_v2,
     require_weight_input_metagraph_match_v2,
     require_weight_input_plan_metagraph_match_v2,
     validate_weight_input_release_identity_v2,
+    weight_input_journal_atomic_write_reserve_bytes_v2,
 )
 
 
@@ -285,6 +293,40 @@ def test_journal_fails_before_write_when_free_space_is_low(tmp_path, monkeypatch
     ):
         _record_plan(journal)
     assert not list(tmp_path.glob("*.json"))
+
+
+def test_journal_readiness_reserves_maximum_duplicated_atomic_write(
+    tmp_path,
+    monkeypatch,
+):
+    base64_input = 4 * ((MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES + 2) // 3)
+    base64_plan = 4 * ((MAX_WEIGHT_INPUT_PLAN_CANONICAL_BYTES + 2) // 3)
+    maximum_file = (
+        MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES
+        + base64_input
+        + MAX_WEIGHT_INPUT_PLAN_CANONICAL_BYTES
+        + base64_plan
+        + MAX_WEIGHT_INPUT_JOURNAL_ENVELOPE_BYTES
+    )
+    atomic_reserve = (
+        maximum_file + WEIGHT_INPUT_JOURNAL_ATOMIC_WRITE_OVERHEAD_BYTES
+    )
+    assert maximum_weight_input_journal_file_bytes_v2() == maximum_file
+    assert weight_input_journal_atomic_write_reserve_bytes_v2() == atomic_reserve
+
+    free = {"bytes": atomic_reserve}
+    monkeypatch.setattr(
+        "validator_tee.host.weight_input_journal_v2.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": free["bytes"]})(),
+    )
+    journal = AuthoritativeWeightInputJournalV2(tmp_path, min_free_bytes=1)
+    with pytest.raises(
+        WeightInputJournalV2Error,
+        match="storage capacity is insufficient",
+    ):
+        journal.verify_storage_ready()
+    free["bytes"] = atomic_reserve + 1
+    journal.verify_storage_ready()
 
 
 @pytest.mark.parametrize(

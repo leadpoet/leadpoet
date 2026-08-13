@@ -334,10 +334,6 @@ async def prepare_authoritative_weight_publication_v2(
                 client=enclave_client,
                 timeout_seconds=input_timeout_seconds,
             )
-            if on_inputs_verified is not None:
-                callback_result = on_inputs_verified(gateway_inputs)
-                if asyncio.iscoroutine(callback_result):
-                    await callback_result
         else:
             gateway_inputs = dict(prepared_gateway_inputs)
         weight_request = {
@@ -372,6 +368,15 @@ async def prepare_authoritative_weight_publication_v2(
             host_weights=host_weights,
             enclave_result=enclave_response["weight_result"],
         )
+        # Host validation of the gateway response only bounds and normalizes
+        # untrusted input. Persist it for restart replay only after the
+        # validator enclave has accepted its exact ancestry and returned the
+        # expected authoritative vector. Otherwise a shape-valid but
+        # enclave-invalid response could poison the durable retry path.
+        if prepared_gateway_inputs is None and on_inputs_verified is not None:
+            callback_result = on_inputs_verified(gateway_inputs)
+            if asyncio.iscoroutine(callback_result):
+                await callback_result
         boot = enclave_response["boot_identity"]
         compact = "receipt_graph_delta" in enclave_response
         graph = (

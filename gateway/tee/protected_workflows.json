@@ -1422,7 +1422,7 @@
       "symbol": "MEASURED_TRANSPORT_REQUEST_HEADERS"
     },
     {
-      "ast_sha256": "sha256:c42a9162be5cf7875310f4dea936ea6d36cd50e7eb1d34d236d939f82de699f6",
+      "ast_sha256": "sha256:a973d778639927486ca62c5d6fc233afdfbb8bc791360ee4f54a00d98611361b",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -2752,7 +2752,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:d8f677db812fa6092cb6196c042b24cfd0223aa23aeafd68a565435b06bb6634",
-  "protected_source_commit": "f7e0f13b26f30c1fc9cd327e6f42ad29fcd17593",
+  "manifest_hash": "sha256:e0faee7f67bfb92b1454e7dadc5e322883f89b2a5b45dd376fd00bddc0233183",
+  "protected_source_commit": "39d53302ebbd509b747ebba8a0314abb2cd27d72",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

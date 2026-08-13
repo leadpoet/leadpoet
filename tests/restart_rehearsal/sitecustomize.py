@@ -1637,7 +1637,10 @@ def _local_provider_transport(
     timeout_ms: int,
     upstream_proxy_url: Optional[str] = None,
     max_response_bytes: int = 8 * 1024 * 1024,
+    allow_http2: bool = True,
 ) -> dict[str, Any]:
+    if not isinstance(allow_http2, bool):
+        raise ValueError("local provider HTTP/2 policy is invalid")
     parsed = urlsplit(url)
     if parsed.scheme != "https" or parsed.port not in {None, 443}:
         raise ValueError("local provider boundary requires production HTTPS")
@@ -1645,6 +1648,8 @@ def _local_provider_transport(
     normalized_method = str(method).upper()
     response_headers: dict[str, str] = {"content-type": "application/json"}
     if host == "qplwoislplkcegvdmbim.supabase.co":
+        if allow_http2:
+            raise ValueError("local Supabase provider route requires HTTP/1.1")
         local_url = urlunsplit(
             ("http", "127.0.0.1:54321", parsed.path, parsed.query, "")
         )
@@ -1741,6 +1746,7 @@ def _local_provider_transport(
         method=normalized_method,
         host=host,
         path=parsed.path,
+        http2_allowed=allow_http2,
         status=status,
         response_bytes=len(response_body),
     )

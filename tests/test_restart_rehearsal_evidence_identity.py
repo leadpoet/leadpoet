@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 from pathlib import Path
@@ -151,6 +152,35 @@ def test_gateway_enclave_measured_runtime_adapter_is_strict() -> None:
     assert 'item.get("type") == "bind"' in service
     assert 'model sandbox measured rootfs inputs differ' in service
     assert 'raise ValueError("model sandbox runsc operation differs")' in service
+
+
+def test_gateway_provider_adapter_tracks_production_transport_interface() -> None:
+    production = ast.parse(
+        (ROOT / "gateway/tee/provider_broker_v2.py").read_text(encoding="utf-8")
+    )
+    rehearsal = ast.parse(
+        (ROOT / "tests/restart_rehearsal/sitecustomize.py").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    production_call = next(
+        item
+        for node in production.body
+        if isinstance(node, ast.ClassDef) and node.name == "HTTPXProviderTransport"
+        for item in node.body
+        if isinstance(item, ast.FunctionDef) and item.name == "__call__"
+    )
+    rehearsal_call = next(
+        node
+        for node in rehearsal.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_local_provider_transport"
+    )
+
+    production_keywords = {arg.arg for arg in production_call.args.kwonlyargs}
+    rehearsal_keywords = {arg.arg for arg in rehearsal_call.args.kwonlyargs}
+    assert production_keywords <= rehearsal_keywords
 
 
 def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:

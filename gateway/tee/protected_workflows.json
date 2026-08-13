@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "eb93b79a6fd82ff05f56aa003758997e14d75d10",
+  "baseline_commit": "ef97f7d1bee4b9feb89d9d187539f3a4aa5cf036",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -1697,7 +1697,7 @@
       "symbol": "get_v2_inter_enclave_client"
     },
     {
-      "ast_sha256": "sha256:e06f560b623834547e25c3f34abbb475983067b50a8a254be3faf85b59cd718d",
+      "ast_sha256": "sha256:664efdca70eba729ac2dcca4957a047098561c7fc9a75cc68e591dcd4f9a33c1",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_provider_broker"
     },
@@ -2737,7 +2737,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:d2366c6ab1f48472c597f6017f875293c9041e6dc321d221e998dbc286b0d35b",
-  "protected_source_commit": "eb93b79a6fd82ff05f56aa003758997e14d75d10",
+  "manifest_hash": "sha256:2f2a85466e2fed18078952277593b6239b882899cfdc3053984215f22d4d62f6",
+  "protected_source_commit": "ef97f7d1bee4b9feb89d9d187539f3a4aa5cf036",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

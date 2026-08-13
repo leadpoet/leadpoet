@@ -1686,7 +1686,13 @@ def _run_profile(args: argparse.Namespace) -> int:
                     "REHEARSAL_TIME_BUDGET_RESULT "
                     f"status={budget_result['status']} "
                     f"elapsed_seconds={budget_result['duration_seconds']} "
-                    f"target_seconds={target_seconds}",
+                    f"target_seconds={target_seconds} "
+                    f"requested_cpus={docker_resources['requested_cpus']} "
+                    f"effective_cpus={docker_resources['effective_cpus']} "
+                    "requested_memory_bytes="
+                    f"{docker_resources['requested_memory_bytes']} "
+                    "effective_memory_bytes="
+                    f"{docker_resources['effective_memory_bytes']}",
                     flush=True,
                 )
             stage_summary = _write_stage_summary(

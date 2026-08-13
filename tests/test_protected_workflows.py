@@ -147,6 +147,8 @@ def test_artifact_egress_transport_boundaries_are_protected():
     } <= set(PROTECTED_SYMBOLS["gateway/tee/egress_policy.py"])
     assert {
         "_parse_proxy_request",
+        "_FramedParentBridge",
+        "_ManagedProxyStream",
         "EnclaveEgressProxy",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/egress_proxy.py"])
     assert {

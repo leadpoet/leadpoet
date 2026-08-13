@@ -8257,6 +8257,293 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     }
 
 
+def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
+    """Exercise the exact worker HTTPS-proxy path through framed VSOCK."""
+
+    from datetime import timedelta
+    import socket
+    import ssl
+
+    import certifi
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
+    from gateway.tee.egress_proxy import EnclaveEgressProxy, _relay_bidirectional
+    from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
+    from gateway.utils.tee_client import AF_VSOCK, _recv_exact
+    from gateway.utils.tee_egress_forwarder import _handle_connection
+
+    observed: dict[str, Any] = {}
+    errors: list[str] = []
+    parent_destinations: list[tuple[str, int]] = []
+    parent_threads: list[threading.Thread] = []
+
+    with tempfile.TemporaryDirectory(prefix="leadpoet-upstream-proxy-") as root:
+        root_path = Path(root)
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, "example.com")]
+        )
+        now = datetime.now(timezone.utc)
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now.replace(microsecond=0) - timedelta(minutes=1))
+            .not_valid_after(now.replace(microsecond=0) + timedelta(hours=1))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("example.com")]),
+                critical=False,
+            )
+            .sign(private_key, hashes.SHA256())
+        )
+        certificate_path = root_path / "transport-cert.pem"
+        private_key_path = root_path / "transport-key.pem"
+        certificate_path.write_bytes(
+            certificate.public_bytes(serialization.Encoding.PEM)
+        )
+        private_key_path.write_bytes(
+            private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        proxy_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        proxy_tls.load_cert_chain(
+            certfile=str(certificate_path),
+            keyfile=str(private_key_path),
+        )
+        provider_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        provider_tls.load_cert_chain(
+            certfile=str(certificate_path),
+            keyfile=str(private_key_path),
+        )
+        provider_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        provider_listener.bind(("127.0.0.1", 0))
+        provider_listener.listen(1)
+        provider_address = provider_listener.getsockname()
+        upstream_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        upstream_listener.bind(("127.0.0.1", 0))
+        upstream_listener.listen(1)
+        upstream_address = upstream_listener.getsockname()
+
+        def serve_provider() -> None:
+            try:
+                connection, _address = provider_listener.accept()
+                protected = provider_tls.wrap_socket(connection, server_side=True)
+                request = bytearray()
+                while b"\r\n\r\n" not in request:
+                    chunk = protected.recv(4096)
+                    if not chunk:
+                        raise RuntimeError("provider request ended early")
+                    request.extend(chunk)
+                observed["provider_request"] = bytes(request)
+                protected.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 11\r\n"
+                    b"Connection: close\r\n\r\n"
+                    b'{"ok":true}'
+                )
+                protected.close()
+            except Exception as exc:
+                errors.append(type(exc).__name__ + ":" + str(exc))
+            finally:
+                provider_listener.close()
+
+        def serve_upstream_proxy() -> None:
+            provider = None
+            protected = None
+            try:
+                connection, _address = upstream_listener.accept()
+                protected = proxy_tls.wrap_socket(connection, server_side=True)
+                headers = bytearray()
+                while b"\r\n\r\n" not in headers:
+                    chunk = protected.recv(4096)
+                    if not chunk:
+                        raise RuntimeError("proxy CONNECT ended early")
+                    headers.extend(chunk)
+                observed["proxy_headers"] = bytes(headers)
+                protected.sendall(
+                    b"HTTP/1.1 200 Connection Established\r\n\r\n"
+                )
+                provider = socket.create_connection(provider_address, timeout=2)
+                _relay_bidirectional(
+                    protected,
+                    provider,
+                    idle_timeout_seconds=5,
+                )
+            except Exception as exc:
+                errors.append(type(exc).__name__ + ":" + str(exc))
+            finally:
+                for candidate in (protected, provider):
+                    if candidate is not None:
+                        try:
+                            candidate.close()
+                        except Exception:
+                            pass
+                upstream_listener.close()
+
+        provider_thread = threading.Thread(
+            target=serve_provider,
+            name="rehearsal-measured-provider",
+            daemon=True,
+        )
+        upstream_thread = threading.Thread(
+            target=serve_upstream_proxy,
+            name="rehearsal-measured-https-proxy",
+            daemon=True,
+        )
+        provider_thread.start()
+        upstream_thread.start()
+
+        class ConnectedVsock:
+            def __init__(self, connection: socket.socket) -> None:
+                self._connection = connection
+
+            def connect(self, _address: Any) -> None:
+                return None
+
+            def fileno(self) -> int:
+                return self._connection.fileno()
+
+            def recv(self, size: int) -> bytes:
+                return self._connection.recv(size)
+
+            def sendall(self, payload: bytes) -> None:
+                self._connection.sendall(payload)
+
+            def shutdown(self, how: int) -> None:
+                self._connection.shutdown(how)
+
+            def close(self) -> None:
+                self._connection.close()
+
+        def connect_upstream(host: str, port: int) -> socket.socket:
+            parent_destinations.append((host, port))
+            return socket.create_connection(upstream_address, timeout=2)
+
+        def socket_factory(
+            family: int,
+            socket_type: int,
+            protocol: int = 0,
+        ) -> Any:
+            if family != AF_VSOCK:
+                return socket.socket(family, socket_type, protocol)
+            enclave_side, parent_side = socket.socketpair()
+            thread = threading.Thread(
+                target=_handle_connection,
+                kwargs={
+                    "connection": parent_side,
+                    "connector": connect_upstream,
+                    "idle_timeout_seconds": 5,
+                },
+                name="rehearsal-measured-parent-forwarder",
+                daemon=True,
+            )
+            parent_threads.append(thread)
+            thread.start()
+            return ConnectedVsock(enclave_side)
+
+        port_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            port_probe.bind(("127.0.0.1", 0))
+            local_proxy_port = int(port_probe.getsockname()[1])
+        finally:
+            port_probe.close()
+        enclave_proxy = EnclaveEgressProxy(
+            recv_exact=_recv_exact,
+            local_port=local_proxy_port,
+            socket_factory=socket_factory,
+            loopback_initializer=lambda: None,
+            idle_timeout_seconds=5,
+        )
+        enclave_proxy._configure_environment = lambda: None  # type: ignore[method-assign]
+        transport = HTTPXProviderTransport(
+            proxy_url=f"http://127.0.0.1:{local_proxy_port}",
+            ca_bundle=str(certificate_path),
+            allow_authenticated_complete_body_eof=True,
+            parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+            reuse_direct_connections=False,
+        )
+        original_certifi_where = certifi.where
+        try:
+            certifi.where = lambda: str(certificate_path)  # type: ignore[assignment]
+            enclave_proxy.start()
+            result = transport(
+                method="GET",
+                url="https://example.com/search",
+                headers={"accept": "application/json"},
+                body=b"",
+                timeout_ms=5_000,
+                upstream_proxy_url=(
+                    "https://rehearsal-worker:rehearsal-secret@example.com:443"
+                ),
+            )
+        finally:
+            certifi.where = original_certifi_where  # type: ignore[assignment]
+            transport.close()
+            proxy_status = enclave_proxy.status()
+            enclave_proxy.stop()
+            provider_thread.join(timeout=5)
+            upstream_thread.join(timeout=5)
+            for thread in parent_threads:
+                thread.join(timeout=5)
+
+    proxy_headers = bytes(observed.get("proxy_headers") or b"")
+    provider_request = bytes(observed.get("provider_request") or b"")
+    if (
+        errors
+        or result.get("http_status") != 200
+        or result.get("body") != b'{"ok":true}'
+        or not str(result.get("tls_protocol") or "").startswith("TLSv1.")
+        or parent_destinations != [("example.com", 443)]
+        or not proxy_headers.startswith(b"CONNECT example.com:443 HTTP/1.1")
+        or b"Proxy-Authorization: Basic " not in proxy_headers
+        or not provider_request.startswith(b"GET /search HTTP/")
+        or proxy_status.get("last_failure")
+        or provider_thread.is_alive()
+        or upstream_thread.is_alive()
+        or any(thread.is_alive() for thread in parent_threads)
+    ):
+        raise RuntimeError(
+            "measured upstream proxy framing contract failed: "
+            + json.dumps(
+                {
+                    "errors": errors,
+                    "http_status": result.get("http_status"),
+                    "parent_destinations": parent_destinations,
+                    "proxy_connect_seen": proxy_headers.startswith(
+                        b"CONNECT example.com:443 HTTP/1.1"
+                    ),
+                    "proxy_auth_seen": b"Proxy-Authorization: Basic "
+                    in proxy_headers,
+                    "provider_request_seen": provider_request.startswith(
+                        b"GET /search HTTP/"
+                    ),
+                    "proxy_failure": proxy_status.get("last_failure"),
+                },
+                sort_keys=True,
+            )
+        )
+    if b"rehearsal-secret" in proxy_headers:
+        raise RuntimeError("upstream proxy credential escaped Basic auth encoding")
+    return {
+        "exact_httpx_enclave_parent_proxy_provider_path": True,
+        "framed_parent_tunnel_verified": True,
+        "nested_tls_verified": True,
+        "proxy_auth_remained_in_enclave": True,
+        "provider_first_close_verified": True,
+        "bounded_cleanup_verified": True,
+    }
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "signed-private-model-contract-transition": (
         _exercise_signed_private_model_contract_transition
@@ -8269,6 +8556,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "rebenchmark-sandbox-retry": _exercise_rebenchmark_sandbox_retry_contract,
     "rebenchmark-provider-transport-evidence": (
         _exercise_rebenchmark_provider_transport_evidence
+    ),
+    "measured-upstream-proxy-framing": (
+        _exercise_measured_upstream_proxy_framing
     ),
     "artifact-egress-sustained-readback": (
         _exercise_artifact_egress_sustained_readback
@@ -8898,6 +9188,38 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("baseline_pause_checkpoint_resume_complete")
+            is True
+        ),
+        "measured_upstream_proxy_framing_verified": (
+            behavior_evidence.get(
+                "measured-upstream-proxy-framing",
+                {},
+            ).get("exact_httpx_enclave_parent_proxy_provider_path")
+            is True
+            and behavior_evidence.get(
+                "measured-upstream-proxy-framing",
+                {},
+            ).get("framed_parent_tunnel_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-upstream-proxy-framing",
+                {},
+            ).get("nested_tls_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-upstream-proxy-framing",
+                {},
+            ).get("proxy_auth_remained_in_enclave")
+            is True
+            and behavior_evidence.get(
+                "measured-upstream-proxy-framing",
+                {},
+            ).get("provider_first_close_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-upstream-proxy-framing",
+                {},
+            ).get("bounded_cleanup_verified")
             is True
         ),
         "artifact_egress_sustained_readback_verified": (

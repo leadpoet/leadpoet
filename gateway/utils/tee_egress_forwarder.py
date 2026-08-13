@@ -256,10 +256,6 @@ def _handle_connection(
                 params.get("port"),
             )
         elif purpose == "upstream_proxy":
-            if tunnel_framing:
-                raise TEEEgressForwarderError(
-                    "upstream proxy cannot use framed parent tunnel"
-                )
             host, port = normalize_proxy_destination(
                 params.get("host"),
                 params.get("port"),

@@ -341,7 +341,6 @@ def test_parent_forwarder_rejects_policy_mismatch_before_connecting():
     (
         {"tunnel_framing": ""},
         {"tunnel_framing": "length-v1"},
-        {"tunnel_framing": TUNNEL_FRAMING_MODE, "purpose": "upstream_proxy"},
     ),
 )
 def test_parent_forwarder_rejects_noncanonical_tunnel_framing(extra_params):
@@ -1688,22 +1687,43 @@ def test_enclave_proxy_rejects_invalid_tunnel_framing_opt_in(value):
         )
 
 
-def test_enclave_proxy_rejects_tunnel_framing_with_upstream_proxy():
+def test_enclave_proxy_accepts_tunnel_framing_with_upstream_proxy():
     encoded = base64.b64encode(b"https://worker:secret@proxy.example.com:443")
-    with pytest.raises(EnclaveEgressProxyError, match="cannot use framed"):
-        _parse_proxy_request(
-            b"CONNECT immutable.example:443 HTTP/1.1\r\n"
-            b"Host: immutable.example:443\r\n"
-            b"X-Leadpoet-Upstream-Proxy-B64: "
-            + encoded
-            + b"\r\n"
-            + TUNNEL_FRAMING_HEADER.encode("ascii")
-            + b": "
-            + TUNNEL_FRAMING_MODE.encode("ascii")
-            + b"\r\n\r\n"
-        )
+    parsed = _parse_proxy_request(
+        b"CONNECT immutable.example:443 HTTP/1.1\r\n"
+        b"Host: immutable.example:443\r\n"
+        b"X-Leadpoet-Upstream-Proxy-B64: "
+        + encoded
+        + b"\r\n"
+        + TUNNEL_FRAMING_HEADER.encode("ascii")
+        + b": "
+        + TUNNEL_FRAMING_MODE.encode("ascii")
+        + b"\r\n\r\n"
+    )
+
+    assert parsed["host"] == "immutable.example"
+    assert parsed["tunnel_framing"] == TUNNEL_FRAMING_MODE
+    assert parsed["upstream_proxy_url"].startswith("https://worker:secret@")
 
 
+def test_measured_upstream_proxy_framing_scenario(monkeypatch):
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).parent / "restart_rehearsal")
+    )
+    from production_workflow_runner import (
+        _exercise_measured_upstream_proxy_framing,
+    )
+
+    evidence = _exercise_measured_upstream_proxy_framing()
+
+    assert evidence == {
+        "exact_httpx_enclave_parent_proxy_provider_path": True,
+        "framed_parent_tunnel_verified": True,
+        "nested_tls_verified": True,
+        "proxy_auth_remained_in_enclave": True,
+        "provider_first_close_verified": True,
+        "bounded_cleanup_verified": True,
+    }
 def test_enclave_proxy_accepts_upstream_proxy_only_as_loopback_control_metadata():
     proxy_url = "https://worker-7:password@proxy.example.com:443"
     encoded = base64.b64encode(proxy_url.encode("utf-8"))

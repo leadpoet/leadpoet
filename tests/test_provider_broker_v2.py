@@ -1027,7 +1027,8 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
         "ascii"
     )
     assert proxies[1]["headers"] == {
-        "X-Leadpoet-Upstream-Proxy-B64": expected_proxy_header
+        "X-Leadpoet-Upstream-Proxy-B64": expected_proxy_header,
+        TUNNEL_FRAMING_HEADER: TUNNEL_FRAMING_MODE,
     }
     assert proxies[2]["headers"] == proxies[1]["headers"]
 

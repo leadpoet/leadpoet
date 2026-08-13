@@ -658,6 +658,8 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/tee/egress_proxy.py": (
         "_parse_proxy_request",
+        "_FramedParentBridge",
+        "_ManagedProxyStream",
         "EnclaveEgressProxy",
     ),
     "gateway/tee/artifact_persistence_v2.py": (

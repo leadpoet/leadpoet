@@ -245,10 +245,6 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
                 ) from exc
             if len(upstream_proxy_url.encode("utf-8")) > 16 * 1024:
                 raise EnclaveEgressProxyError("upstream proxy URL exceeds limit")
-        if upstream_proxy_url and tunnel_framing:
-            raise EnclaveEgressProxyError(
-                "upstream proxy cannot use framed parent tunnel"
-            )
         host, port = _parse_authority(target, 443)
         request = {
             "method": method,
@@ -331,6 +327,105 @@ def _relay_bidirectional(
     if write_closed:
         result["write_closed"] = write_closed
     return result
+
+
+class _FramedParentBridge:
+    """Expose one framed parent tunnel as a local raw stream."""
+
+    def __init__(self, framed: Any, *, idle_timeout_seconds: float) -> None:
+        application, relay = socket.socketpair()
+        self._application = application
+        self._relay = relay
+        self._framed = framed
+        self._idle_timeout_seconds = float(idle_timeout_seconds)
+        self._done = threading.Event()
+        self._error = None  # type: Optional[BaseException]
+        self._thread = threading.Thread(
+            target=self._run,
+            name="gateway-enclave-framed-upstream-proxy",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def take_stream(self) -> Any:
+        if self._application is None:
+            raise EnclaveEgressProxyError("framed parent stream was already claimed")
+        application = self._application
+        self._application = None
+        return application
+
+    def _run(self) -> None:
+        try:
+            relay_raw_and_framed(
+                self._relay,
+                self._framed,
+                idle_timeout_seconds=self._idle_timeout_seconds,
+                max_bytes_per_direction=MAX_TUNNEL_BYTES_PER_DIRECTION,
+                raw_label="upstream_proxy",
+                framed_label="parent",
+                terminal_initiator=True,
+            )
+        except BaseException as exc:  # noqa: BLE001 - bridge failure closes its stream
+            self._error = exc
+        finally:
+            for candidate in (self._relay, self._framed):
+                try:
+                    candidate.close()
+                except Exception:
+                    pass
+            self._done.set()
+
+    def close(self) -> None:
+        if self._application is not None:
+            try:
+                self._application.close()
+            except Exception:
+                pass
+            self._application = None
+        if not self._done.wait(timeout=1.0):
+            for candidate in (self._relay, self._framed):
+                try:
+                    candidate.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+            self._done.wait(timeout=1.5)
+
+    @property
+    def stopped(self) -> bool:
+        return self._done.is_set() and not self._thread.is_alive()
+
+
+class _ManagedProxyStream:
+    """Close a TLS/plain proxy stream together with its framing bridge."""
+
+    def __init__(self, stream: Any, bridge: _FramedParentBridge) -> None:
+        self._stream = stream
+        self._bridge = bridge
+        self._closed = False
+
+    def fileno(self) -> int:
+        return int(self._stream.fileno())
+
+    def recv(self, size: int) -> bytes:
+        return self._stream.recv(size)
+
+    def sendall(self, payload: bytes) -> None:
+        self._stream.sendall(payload)
+
+    def shutdown(self, how: int) -> None:
+        self._stream.shutdown(how)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._stream.close()
+        finally:
+            self._bridge.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
 
 
 class EnclaveEgressProxy:
@@ -468,10 +563,6 @@ class EnclaveEgressProxy:
                 "policy_hash": destination_policy_hash(),
             }
             if purpose == "upstream_proxy":
-                if tunnel_framing:
-                    raise EnclaveEgressProxyError(
-                        "upstream proxy cannot use framed parent tunnel"
-                    )
                 params["purpose"] = purpose
             elif purpose != "provider":
                 raise EnclaveEgressProxyError("parent egress purpose is invalid")
@@ -521,6 +612,7 @@ class EnclaveEgressProxy:
         proxy_url: str,
         destination_host: str,
         destination_port: int,
+        tunnel_framing: str = "",
     ) -> Any:
         parsed = urlsplit(str(proxy_url or ""))
         proxy_scheme = parsed.scheme.lower()
@@ -554,18 +646,27 @@ class EnclaveEgressProxy:
             ) from exc
         if (parsed.username is None) != (parsed.password is None):
             raise EnclaveEgressProxyError("upstream proxy credentials are incomplete")
-        parent = self._open_parent_tunnel(
-            proxy_host,
-            proxy_port,
-            purpose="upstream_proxy",
-        )
+        parent_kwargs = {"purpose": "upstream_proxy"}
+        if tunnel_framing:
+            parent_kwargs["tunnel_framing"] = tunnel_framing
+        parent = self._open_parent_tunnel(proxy_host, proxy_port, **parent_kwargs)
+        bridge = None
+        protected = parent
         try:
-            protected = parent
+            if tunnel_framing:
+                bridge = _FramedParentBridge(
+                    parent,
+                    idle_timeout_seconds=self._idle_timeout_seconds,
+                )
+                protected = bridge.take_stream()
             if proxy_scheme == "https":
                 import certifi
 
                 context = ssl.create_default_context(cafile=certifi.where())
-                protected = context.wrap_socket(parent, server_hostname=proxy_host)
+                protected = context.wrap_socket(
+                    protected,
+                    server_hostname=proxy_host,
+                )
             lines = [
                 "CONNECT %s:%s HTTP/1.1" % (destination_host, destination_port),
                 "Host: %s:%s" % (destination_host, destination_port),
@@ -598,12 +699,21 @@ class EnclaveEgressProxy:
                 raise EnclaveEgressProxyError(
                     "upstream proxy returned unexpected CONNECT payload"
                 )
+            if bridge is not None:
+                return _ManagedProxyStream(protected, bridge)
             return protected
         except Exception:
             try:
-                parent.close()
+                protected.close()
             except Exception:
                 pass
+            if bridge is not None:
+                bridge.close()
+            elif protected is not parent:
+                try:
+                    parent.close()
+                except Exception:
+                    pass
             raise
 
     def _handle_client(self, client: Any) -> None:
@@ -619,12 +729,17 @@ class EnclaveEgressProxy:
             port = int(request["port"])
             destination_ref = _destination_ref(host, port)
             upstream_proxy_url = str(request.get("upstream_proxy_url") or "")
+            parent_stream_is_framed = bool(
+                request.get("tunnel_framing") == TUNNEL_FRAMING_MODE
+                and not upstream_proxy_url
+            )
             if upstream_proxy_url:
                 failure_stage = "open_upstream_proxy_tunnel"
                 parent = self._open_upstream_proxy_tunnel(
                     proxy_url=upstream_proxy_url,
                     destination_host=host,
                     destination_port=port,
+                    tunnel_framing=str(request.get("tunnel_framing") or ""),
                 )
             else:
                 failure_stage = "open_parent_tunnel"
@@ -646,12 +761,12 @@ class EnclaveEgressProxy:
             else:
                 parent.sendall(request["forward_headers"])
             if remainder:
-                if request.get("tunnel_framing") == TUNNEL_FRAMING_MODE:
+                if parent_stream_is_framed:
                     send_tunnel_frame(parent, remainder)
                 else:
                     parent.sendall(remainder)
             failure_stage = "relay_tls_tunnel"
-            if request.get("tunnel_framing") == TUNNEL_FRAMING_MODE:
+            if parent_stream_is_framed:
                 relay = relay_raw_and_framed(
                     client,
                     parent,

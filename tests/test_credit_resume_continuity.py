@@ -387,7 +387,13 @@ def test_atomic_credit_resume_migration_is_expected_head_and_idempotent() -> Non
         "scripts/148-research-lab-atomic-credit-resume.sql",
         "resume_research_lab_credit_blocked_run_v1",
     ) in REQUIRED_SUPABASE_V2_RPCS
-    assert ATOMIC_CREDIT_RESUME_MIGRATION == EXPECTED_APPLIED_MIGRATIONS[-1]
+    assert ATOMIC_CREDIT_RESUME_MIGRATION in EXPECTED_APPLIED_MIGRATIONS
+    assert (
+        EXPECTED_APPLIED_MIGRATIONS.index(ATOMIC_CREDIT_RESUME_MIGRATION)
+        < EXPECTED_APPLIED_MIGRATIONS.index(
+            "149-research-lab-weight-precompute-store.sql"
+        )
+    )
 
 
 @pytest.mark.asyncio

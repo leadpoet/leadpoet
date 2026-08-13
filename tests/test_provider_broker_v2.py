@@ -19,6 +19,7 @@ from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
     DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
     HTTPXProviderTransport,
+    MAX_RESERVED_DEDUPLICATION_RECORDS,
     MAX_RESPONSE_BODY_BYTES,
     MAX_TRANSPORT_RESPONSE_BODY_BYTES,
     MEASURED_TRANSPORT_REQUEST_HEADERS,
@@ -26,6 +27,8 @@ from gateway.tee.provider_broker_v2 import (
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
     ProviderBrokerV2Error,
+    WEIGHT_SUBMISSION_PROVIDER_PURPOSES,
+    WEIGHT_INPUT_PROVIDER_HEADROOM_GENERATIONS,
     _authenticated_body_is_complete_after_stream_error,
     _extract_tls_metadata,
     _provider_rpc_response_body_limit,
@@ -36,6 +39,10 @@ from gateway.tee.provider_broker_v2 import (
     measured_retry_policy_hashes,
     provider_registry_document,
     provider_registry_hash,
+)
+from gateway.tee.supabase_source_v2 import (
+    WEIGHT_INPUT_PROVIDER_ATTEMPTS_PER_GENERATION_MAX,
+    weight_input_provider_attempt_upper_bound_v2,
 )
 from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
 from leadpoet_canonical.attested_v2 import validate_transport_attempt
@@ -1556,6 +1563,255 @@ def test_implicit_provider_transports_are_broker_scoped():
     assert first._transport is not second._transport
 
 
+def test_provider_broker_has_no_reserved_lane_without_explicit_configuration():
+    assert "reserved_lanes" not in _broker(FakeTransport()).health()
+
+
+def test_reserved_weight_ledger_covers_measured_query_retry_envelope():
+    assert weight_input_provider_attempt_upper_bound_v2() == 537
+    assert WEIGHT_INPUT_PROVIDER_ATTEMPTS_PER_GENERATION_MAX == 537
+    assert WEIGHT_INPUT_PROVIDER_HEADROOM_GENERATIONS == 1
+    assert MAX_RESERVED_DEDUPLICATION_RECORDS == 1074
+
+
+def test_reserved_weight_transport_requires_a_separate_custom_transport():
+    with pytest.raises(
+        ProviderBrokerV2Error,
+        match="reserved weight transport must be separate",
+    ):
+        _broker(FakeTransport(), reserved_weight_transport_slots=1)
+
+
+def test_reserved_weight_transport_runs_while_general_transport_is_busy():
+    general_started = threading.Event()
+    release_general = threading.Event()
+
+    class BlockingTransport(FakeTransport):
+        def __call__(self, **request):
+            general_started.set()
+            assert release_general.wait(timeout=2)
+            return super().__call__(**request)
+
+    general_transport = BlockingTransport()
+    weight_transport = FakeTransport()
+    broker = _broker(
+        general_transport,
+        reserved_weight_transport_slots=1,
+        reserved_weight_transport=weight_transport,
+    )
+    general_result = []
+
+    def execute_general():
+        general_result.append(broker.execute(_request()))
+
+    general_thread = threading.Thread(target=execute_general)
+    general_thread.start()
+    assert general_started.wait(timeout=2)
+
+    weight_result = broker.execute(
+        _request(
+            logical_operation_id="weight-operation-1",
+            job_id="weight-job-1",
+            purpose="research_lab.allocation.v2",
+        )
+    )
+
+    assert weight_result["terminal_status"] == "authenticated_response"
+    assert len(weight_transport.calls) == 1
+    assert general_thread.is_alive()
+    lane = broker.health()["reserved_lanes"]["weight_submission"]
+    assert lane == {
+        "dedicated_transport": True,
+        "reserved_capacity": True,
+        "capacity": 1,
+        "active": 0,
+        "terminal_capacity": MAX_RESERVED_DEDUPLICATION_RECORDS,
+        "terminal_count": 1,
+        "purposes": sorted(WEIGHT_SUBMISSION_PROVIDER_PURPOSES),
+    }
+    release_general.set()
+    general_thread.join(timeout=2)
+    assert not general_thread.is_alive()
+    assert general_result[0]["terminal_status"] == "authenticated_response"
+
+
+def test_reserved_weight_transport_capacity_is_not_shared_by_general_requests():
+    weight_started = threading.Event()
+    release_weight = threading.Event()
+
+    class BlockingWeightTransport(FakeTransport):
+        def __call__(self, **request):
+            weight_started.set()
+            assert release_weight.wait(timeout=2)
+            return super().__call__(**request)
+
+    general_transport = FakeTransport()
+    weight_transport = BlockingWeightTransport()
+    broker = _broker(
+        general_transport,
+        reserved_weight_transport_slots=1,
+        reserved_weight_transport=weight_transport,
+    )
+    first_result = []
+
+    def execute_weight():
+        first_result.append(
+            broker.execute(
+                _request(
+                    logical_operation_id="weight-operation-1",
+                    job_id="weight-job-1",
+                    purpose="research_lab.allocation.v2",
+                )
+            )
+        )
+
+    weight_thread = threading.Thread(target=execute_weight)
+    weight_thread.start()
+    assert weight_started.wait(timeout=2)
+
+    exhausted = broker.execute(
+        _request(
+            logical_operation_id="weight-operation-2",
+            job_id="weight-job-2",
+            purpose="research_lab.champion_input.v2",
+            timeout_ms=1,
+        )
+    )
+    assert exhausted["terminal_status"] == "transport_failure"
+    assert exhausted["failure_code"] == "timeout"
+    assert len(general_transport.calls) == 0
+    assert len(weight_transport.calls) == 0
+    assert (
+        broker.health()["reserved_lanes"]["weight_submission"]["active"]
+        == 1
+    )
+
+    release_weight.set()
+    weight_thread.join(timeout=2)
+    assert not weight_thread.is_alive()
+    assert first_result[0]["terminal_status"] == "authenticated_response"
+    assert len(weight_transport.calls) == 1
+
+
+def test_reserved_weight_admission_survives_saturated_general_terminal_ledger(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "gateway.tee.provider_broker_v2.MAX_DEDUPLICATION_RECORDS",
+        2,
+    )
+    monkeypatch.setattr(
+        "gateway.tee.provider_broker_v2.MAX_RESERVED_DEDUPLICATION_RECORDS",
+        1,
+    )
+    general_transport = FakeTransport()
+    weight_transport = FakeTransport()
+    broker = _broker(
+        general_transport,
+        reserved_weight_transport_slots=1,
+        reserved_weight_transport=weight_transport,
+    )
+    for index in range(2):
+        result = broker.execute(
+            _request(
+                job_id="general-job-%d" % index,
+                logical_operation_id="general-operation-%d" % index,
+            )
+        )
+        assert result["terminal_status"] == "authenticated_response"
+
+    with pytest.raises(
+        ProviderBrokerV2Error,
+        match="provider terminal ledger is full",
+    ):
+        broker.execute(
+            _request(
+                job_id="general-job-3",
+                logical_operation_id="general-operation-3",
+            )
+        )
+
+    reserved = broker.execute(
+        _request(
+            job_id="weight-job-1",
+            logical_operation_id="weight-operation-1",
+            purpose="research_lab.allocation.v2",
+        )
+    )
+    assert reserved["terminal_status"] == "authenticated_response"
+    assert len(general_transport.calls) == 2
+    assert len(weight_transport.calls) == 1
+    lane = broker.health()["reserved_lanes"]["weight_submission"]
+    assert lane["terminal_capacity"] == 1
+    assert lane["terminal_count"] == 1
+
+    with pytest.raises(
+        ProviderBrokerV2Error,
+        match="reserved weight provider terminal ledger is full",
+    ):
+        broker.execute(
+            _request(
+                job_id="weight-job-2",
+                logical_operation_id="weight-operation-2",
+                purpose="research_lab.champion_input.v2",
+            )
+        )
+
+
+def test_reserved_weight_admission_limit_counts_inflight_attempts(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.tee.provider_broker_v2.MAX_RESERVED_DEDUPLICATION_RECORDS",
+        1,
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingWeightTransport(FakeTransport):
+        def __call__(self, **request):
+            started.set()
+            assert release.wait(timeout=2)
+            return super().__call__(**request)
+
+    broker = _broker(
+        FakeTransport(),
+        reserved_weight_transport_slots=1,
+        reserved_weight_transport=BlockingWeightTransport(),
+    )
+    results = []
+
+    def execute_first():
+        results.append(
+            broker.execute(
+                _request(
+                    job_id="weight-job-1",
+                    logical_operation_id="weight-operation-1",
+                    purpose="research_lab.allocation.v2",
+                )
+            )
+        )
+
+    thread = threading.Thread(target=execute_first)
+    thread.start()
+    assert started.wait(timeout=2)
+
+    with pytest.raises(
+        ProviderBrokerV2Error,
+        match="reserved weight provider terminal ledger is full",
+    ):
+        broker.execute(
+            _request(
+                job_id="weight-job-2",
+                logical_operation_id="weight-operation-2",
+                purpose="research_lab.champion_input.v2",
+            )
+        )
+
+    release.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert results[0]["terminal_status"] == "authenticated_response"
+
+
 def _request(**overrides):
     request = {
         "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
@@ -1724,6 +1980,7 @@ def test_owner_failure_releases_waiters_and_allows_safe_pretransport_retry():
             inflight[0],
             ObservedWaitEvent(),
             inflight[2],
+            inflight[3],
         )
 
     waiter = threading.Thread(target=_call)
@@ -2180,6 +2437,7 @@ def test_concurrent_duplicate_cannot_read_uncommitted_terminal_record(commit):
             inflight[0],
             ObservedWaitEvent(),
             inflight[2],
+            inflight[3],
         )
 
     waiter = threading.Thread(target=_waiter)

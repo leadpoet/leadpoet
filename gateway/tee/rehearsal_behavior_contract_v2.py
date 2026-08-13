@@ -44,6 +44,7 @@ BEHAVIOR_SCENARIOS = (
     "receipt-graph-aggregate-pagination",
     "receipt-graph-transport-deduplication",
     "fresh-weight-input-lineage",
+    "persistent-weight-input-recovery",
     "stateful-compact-graph-readback",
     "research-lab-allocation-conservation",
     "settlement-frontier-terminal-retirement",
@@ -79,6 +80,7 @@ BEHAVIORAL_INVARIANTS = (
     "receipt_graph_aggregate_evidence_paged",
     "receipt_graph_transport_deduplicated_and_verified",
     "fresh_weight_input_lineage_verified",
+    "persistent_weight_input_recovery_verified",
     "stateful_compact_graph_readback_verified",
     "research_lab_allocation_policy_config_bound",
     "research_lab_allocation_conserved",
@@ -120,6 +122,8 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/research_lab/champion_settlement_v2.py",
     "gateway/research_lab/allocations.py",
     "gateway/research_lab/stateful_epoch_authority_v1.py",
+    "gateway/research_lab/weight_input_authorization_v2.py",
+    "gateway/research_lab/weight_input_checkpoint_v2.py",
     "gateway/research_lab/model_authority_v2.py",
     "gateway/research_lab/scoring_worker.py",
     "gateway/research_lab/worker.py",
@@ -142,6 +146,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "neurons/auditor_validator.py",
     "validator_models/containerizing/deploy_dynamic.sh",
     "validator_tee/scripts/verify_pinned_gateway_release_v2.sh",
+    "validator_tee/host/weight_input_journal_v2.py",
     "tests/restart_rehearsal/production_workflow_runner.py",
 )
 

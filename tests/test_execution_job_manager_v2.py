@@ -11,6 +11,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
+    MAX_RESERVED_JOB_COUNT,
+    MAX_RESERVED_PUBLICATION_JOB_COUNT,
     PARENT_RECEIPT_GRAPH_SET_FIELD,
     PARENT_RECEIPT_GRAPHS_FIELD,
     ExecutionContextV2,
@@ -20,6 +22,12 @@ from gateway.tee.execution_job_manager_v2 import (
     TransitionSpecV2,
     pack_parent_receipt_graph_set_v2,
     unpack_parent_receipt_graph_set_v2,
+)
+from leadpoet_canonical.constants import (
+    WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS,
+)
+from leadpoet_canonical.weight_authority_v2 import (
+    GATEWAY_WEIGHT_INPUT_CATEGORIES,
 )
 from gateway.tee import execution_job_manager_v2 as job_manager_v2
 from gateway.tee.host_operation_channel_v2 import HostOperationChannelV2
@@ -55,6 +63,9 @@ def _manager(
     checkpoint_lineage=False,
     role="gateway_scoring",
     operations=None,
+    reserved_operation_purposes=(),
+    reserved_worker_count=0,
+    reserved_lane_name=None,
 ):
     key = Ed25519PrivateKey.generate()
     pubkey = key.public_key().public_bytes(
@@ -101,6 +112,9 @@ def _manager(
         ),
         executor=executor,
         worker_count=1,
+        reserved_operation_purposes=reserved_operation_purposes,
+        reserved_worker_count=reserved_worker_count,
+        reserved_lane_name=reserved_lane_name,
         **checkpoint_kwargs,
     )
     return manager, boot
@@ -427,6 +441,17 @@ def _run(manager, payload, manifest=None):
             return status
         time.sleep(0.01)
     raise AssertionError("V2 job did not terminate")
+
+
+def _submit_and_seal(manager, payload, manifest):
+    manager.submit(manifest)
+    manager.put_chunk(
+        job_id=manifest["job_id"],
+        offset=0,
+        data_b64=base64.b64encode(payload).decode("ascii"),
+        chunk_sha256=sha256_bytes(payload),
+    )
+    return manager.seal(manifest["job_id"])
 
 
 def _checkpointed_parent_graph():
@@ -889,6 +914,225 @@ def test_capacity_does_not_evict_recent_terminal_jobs(monkeypatch):
 
     assert manager.status("score-job-1")["state"] == "succeeded"
     assert manager.health()["terminal_eviction_count"] == 0
+
+
+def test_reserved_execution_lane_runs_while_default_worker_is_busy():
+    ordinary_started = threading.Event()
+    release_ordinary = threading.Event()
+    execution_order = []
+
+    def executor(operation, payload, _context):
+        execution_order.append(operation)
+        if operation == "ordinary":
+            ordinary_started.set()
+            assert release_ordinary.wait(timeout=2)
+        return {"operation": operation, "value": payload["input"]}
+
+    operations = {
+        "ordinary": {"research_lab.allocation.v2"},
+        "weight": {"gateway.weights.publication.v2"},
+    }
+    manager, _ = _manager(
+        executor,
+        role="gateway_coordinator",
+        operations=operations,
+        reserved_operation_purposes=(
+            ("weight", "gateway.weights.publication.v2"),
+        ),
+        reserved_worker_count=1,
+        reserved_lane_name="weight_submission",
+    )
+    payload = _payload()
+    ordinary = _manifest(
+        payload,
+        job_id="ordinary-1",
+        operation="ordinary",
+        purpose="research_lab.allocation.v2",
+    )
+    weight = _manifest(
+        payload,
+        job_id="weight-1",
+        operation="weight",
+        purpose="gateway.weights.publication.v2",
+    )
+
+    assert _submit_and_seal(manager, payload, ordinary)["state"] == "queued"
+    assert ordinary_started.wait(timeout=2)
+    assert _run(manager, payload, weight)["state"] == "succeeded"
+    assert manager.status(ordinary["job_id"])["state"] == "running"
+
+    lane = manager.health()["reserved_lanes"]["weight_submission"]
+    assert lane == {
+        "dedicated_worker": True,
+        "reserved_capacity": True,
+        "worker_count": 1,
+        "queue_depth": 0,
+        "job_capacity": MAX_RESERVED_JOB_COUNT,
+        "job_count": 1,
+        "operation_purposes": [
+            {
+                "operation": "weight",
+                "purpose": "gateway.weights.publication.v2",
+            }
+        ],
+    }
+    assert execution_order[:2] == ["ordinary", "weight"]
+    release_ordinary.set()
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        if manager.status(ordinary["job_id"])["state"] == "succeeded":
+            break
+        time.sleep(0.01)
+    assert manager.status(ordinary["job_id"])["state"] == "succeeded"
+
+
+def test_reserved_job_capacity_covers_full_weight_retry_envelope():
+    assert WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS == 8
+    assert len(GATEWAY_WEIGHT_INPUT_CATEGORIES) == 9
+    assert MAX_RESERVED_PUBLICATION_JOB_COUNT == 1
+    assert MAX_RESERVED_JOB_COUNT == (
+        WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS
+        * len(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+        + MAX_RESERVED_PUBLICATION_JOB_COUNT
+    )
+    assert MAX_RESERVED_JOB_COUNT == 73
+
+
+def test_reserved_job_admission_survives_saturated_general_job_capacity(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "gateway.tee.execution_job_manager_v2.MAX_JOB_COUNT",
+        2,
+    )
+    monkeypatch.setattr(
+        "gateway.tee.execution_job_manager_v2.MAX_RESERVED_JOB_COUNT",
+        1,
+    )
+    manager, _ = _manager(
+        lambda operation, payload, _context: {
+            "operation": operation,
+            "value": payload["input"],
+        },
+        role="gateway_coordinator",
+        operations={
+            "ordinary": {"research_lab.allocation.v2"},
+            "weight": {"gateway.weights.publication.v2"},
+        },
+        reserved_operation_purposes=(
+            ("weight", "gateway.weights.publication.v2"),
+        ),
+        reserved_worker_count=1,
+        reserved_lane_name="weight_submission",
+    )
+    payload = _payload()
+    for index in range(2):
+        manager.submit(
+            _manifest(
+                payload,
+                job_id="ordinary-%d" % index,
+                operation="ordinary",
+                purpose="research_lab.allocation.v2",
+            )
+        )
+
+    with pytest.raises(ExecutionJobV2Error, match="V2 job capacity is full"):
+        manager.submit(
+            _manifest(
+                payload,
+                job_id="ordinary-3",
+                operation="ordinary",
+                purpose="research_lab.allocation.v2",
+            )
+        )
+
+    reserved = manager.submit(
+        _manifest(
+            payload,
+            job_id="weight-1",
+            operation="weight",
+            purpose="gateway.weights.publication.v2",
+        )
+    )
+    assert reserved["state"] == "uploading"
+    assert manager.health()["reserved_lanes"]["weight_submission"] == {
+        "dedicated_worker": True,
+        "reserved_capacity": True,
+        "worker_count": 1,
+        "queue_depth": 0,
+        "job_capacity": 1,
+        "job_count": 1,
+        "operation_purposes": [
+            {
+                "operation": "weight",
+                "purpose": "gateway.weights.publication.v2",
+            }
+        ],
+    }
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="weight_submission job capacity is full",
+    ):
+        manager.submit(
+            _manifest(
+                payload,
+                job_id="weight-2",
+                operation="weight",
+                purpose="gateway.weights.publication.v2",
+            )
+        )
+
+
+def test_cancelled_reserved_job_is_not_executed_after_reserved_worker_unblocks():
+    reserved_started = threading.Event()
+    release_reserved = threading.Event()
+    executed = []
+
+    def executor(operation, payload, _context):
+        executed.append(operation)
+        if operation == "weight":
+            reserved_started.set()
+            assert release_reserved.wait(timeout=2)
+        return {"operation": operation, "value": payload["input"]}
+
+    manager, _ = _manager(
+        executor,
+        role="gateway_coordinator",
+        operations={"weight": {"gateway.weights.publication.v2"}},
+        reserved_operation_purposes=(
+            ("weight", "gateway.weights.publication.v2"),
+        ),
+        reserved_worker_count=1,
+        reserved_lane_name="weight_submission",
+    )
+    payload = _payload()
+    first = _manifest(
+        payload,
+        job_id="weight-1",
+        operation="weight",
+        purpose="gateway.weights.publication.v2",
+    )
+    second = _manifest(
+        payload,
+        job_id="weight-2",
+        operation="weight",
+        purpose="gateway.weights.publication.v2",
+    )
+
+    _submit_and_seal(manager, payload, first)
+    assert reserved_started.wait(timeout=2)
+    assert _submit_and_seal(manager, payload, second)["state"] == "queued"
+    assert manager.cancel(second["job_id"])["state"] == "cancelled"
+
+    release_reserved.set()
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        if manager.status(first["job_id"])["state"] == "succeeded":
+            break
+        time.sleep(0.01)
+    assert manager.status(first["job_id"])["state"] == "succeeded"
+    assert manager.status(second["job_id"])["state"] == "cancelled"
+    assert executed == ["weight"]
 
 
 def test_receipt_output_projection_binds_authoritative_result_only():

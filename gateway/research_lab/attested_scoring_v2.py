@@ -1409,7 +1409,11 @@ async def execute_scoring_v2(
         "provider_credential_profile": normalized_profile,
         "provider_credential_ref_hashes": dict(sorted(credential_refs.items())),
     }
+    job_submission_attempted = False
+
     async def run_remote_job() -> tuple[dict[str, Any], str, dict[str, Any]]:
+        nonlocal job_submission_attempted
+
         async def cancel_abandoned_job() -> None:
             cleanup_seconds = max(1.0, min(15.0, float(timeout_seconds)))
             loop = asyncio.get_running_loop()
@@ -1444,10 +1448,9 @@ async def execute_scoring_v2(
                     type(cleanup_error).__name__,
                 )
 
-        submission_attempted = False
         try:
             try:
-                submission_attempted = True
+                job_submission_attempted = True
                 await upload_attested_execution_job_v2(
                     manifest=manifest,
                     payload=payload_bytes,
@@ -1473,7 +1476,7 @@ async def execute_scoring_v2(
             receipt = await rpc_method("get_receipt")(job_id)
             return dict(status), state, dict(receipt)
         except BaseException:
-            if submission_attempted:
+            if job_submission_attempted:
                 cleanup_task = asyncio.create_task(cancel_abandoned_job())
                 try:
                     await asyncio.shield(cleanup_task)
@@ -1549,7 +1552,7 @@ async def execute_scoring_v2(
                 leased_slot_count += 1
         status, state, receipt = await run_remote_job()
     except BaseException:
-        if credential_provisioning_started:
+        if credential_provisioning_started or job_submission_attempted:
             try:
                 await asyncio.shield(
                     credential_coordinator_client.v2_release_job_credentials(
@@ -1564,7 +1567,8 @@ async def execute_scoring_v2(
         raise
     else:
         if (
-            leased_credentials
+            job_submission_attempted
+            or leased_credentials
             or receipt.get("transport_root") != EMPTY_TRANSPORT_ROOT
         ):
             released = await credential_coordinator_client.v2_release_job_credentials(

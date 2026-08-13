@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from decimal import Decimal, InvalidOperation
 import fcntl
 from functools import partial
 import hashlib
@@ -27,13 +28,14 @@ import json
 import os
 import platform
 from pathlib import Path
+import re
 import signal
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Callable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 from urllib.request import urlopen
 
 
@@ -118,6 +120,125 @@ def _runtime_profile(cli_profile: str) -> str:
     if cli_profile == "prepush":
         return cli_profile
     raise ValueError(f"unsupported rehearsal profile: {cli_profile}")
+
+
+def _positive_cpu(value: str, *, field: str) -> tuple[Decimal, str]:
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise SystemExit(f"{field} is invalid") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise SystemExit(f"{field} must be positive and finite")
+    return parsed, format(parsed.normalize(), "f")
+
+
+def _memory_bytes(value: str, *, field: str) -> int:
+    match = re.fullmatch(r"([1-9][0-9]*)([bkmg]?)", str(value).strip().lower())
+    if match is None:
+        raise SystemExit(f"{field} is invalid")
+    multiplier = {
+        "": 1,
+        "b": 1,
+        "k": 1024,
+        "m": 1024**2,
+        "g": 1024**3,
+    }[match.group(2)]
+    return int(match.group(1)) * multiplier
+
+
+def _resolve_docker_resources(profile: str) -> dict[str, Any]:
+    """Read Docker capacity once and clamp only profile container resources."""
+
+    limits = PROFILE_LIMITS[profile]
+    requested_cpu, requested_cpu_text = _positive_cpu(
+        str(limits["cpus"]),
+        field="requested rehearsal CPU capacity",
+    )
+    requested_memory = str(limits["memory"])
+    requested_memory_bytes = _memory_bytes(
+        requested_memory,
+        field="requested rehearsal memory capacity",
+    )
+    try:
+        result = _run(
+            [
+                "docker",
+                "info",
+                "--format",
+                "{{.NCPU}} {{.MemTotal}}",
+            ],
+            capture=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit("unable to read Docker CPU and memory capacity") from exc
+    fields = result.stdout.strip().split()
+    if len(fields) != 2:
+        raise SystemExit("Docker CPU and memory capacity output is invalid")
+    available_cpu, available_cpu_text = _positive_cpu(
+        fields[0],
+        field="Docker CPU capacity",
+    )
+    if re.fullmatch(r"[1-9][0-9]*", fields[1]) is None:
+        raise SystemExit("Docker memory capacity is invalid")
+    available_memory_bytes = int(fields[1])
+    effective_cpu = min(requested_cpu, available_cpu)
+    return {
+        "available_cpus": available_cpu_text,
+        "available_memory_bytes": available_memory_bytes,
+        "effective_cpus": format(effective_cpu.normalize(), "f"),
+        "effective_memory_bytes": min(
+            requested_memory_bytes,
+            available_memory_bytes,
+        ),
+        "requested_cpus": requested_cpu_text,
+        "requested_memory": requested_memory,
+        "requested_memory_bytes": requested_memory_bytes,
+    }
+
+
+def _docker_resource_args(
+    docker_resources: Mapping[str, Any],
+    *,
+    fixed_cpus: str | None = None,
+    fixed_memory: str | None = None,
+) -> list[str]:
+    """Return validated Docker run resource arguments."""
+
+    if (fixed_cpus is None) != (fixed_memory is None):
+        raise ValueError("fixed Docker CPU and memory must be supplied together")
+    if fixed_cpus is None:
+        return [
+            "--cpus",
+            str(docker_resources["effective_cpus"]),
+            "--memory",
+            str(docker_resources["effective_memory_bytes"]),
+        ]
+    fixed_cpu, fixed_cpu_text = _positive_cpu(
+        fixed_cpus,
+        field="fixed utility CPU capacity",
+    )
+    available_cpu, _ = _positive_cpu(
+        str(docker_resources["available_cpus"]),
+        field="Docker CPU capacity",
+    )
+    fixed_memory_bytes = _memory_bytes(
+        fixed_memory,
+        field="fixed utility memory capacity",
+    )
+    if (
+        fixed_cpu > available_cpu
+        or fixed_memory_bytes
+        > int(docker_resources["available_memory_bytes"])
+    ):
+        raise SystemExit(
+            "Docker capacity cannot satisfy fixed utility container resources"
+        )
+    return [
+        "--cpus",
+        fixed_cpu_text,
+        "--memory",
+        fixed_memory,
+    ]
 
 
 @contextmanager
@@ -536,8 +657,8 @@ def _run_component(
     durable_schema_sha: str,
     run_ordinal: int,
     gateway_worker_fleet_mode: str,
+    docker_resources: Mapping[str, Any],
 ) -> None:
-    limits = PROFILE_LIMITS[profile]
     launcher_log = evidence_root / (
         f"{run_ordinal}-{component}-{transition}-{candidate_sha}-launcher.log"
     )
@@ -549,10 +670,7 @@ def _run_component(
         docker_platform,
         "--network",
         "none",
-        "--cpus",
-        str(limits["cpus"]),
-        "--memory",
-        str(limits["memory"]),
+        *_docker_resource_args(docker_resources),
         "--pids-limit",
         "2048",
         "--security-opt",
@@ -837,6 +955,7 @@ def _write_stage_summary(
     elapsed_seconds: float,
     profile: str,
     stages: Sequence[dict[str, Any]],
+    docker_resources: Mapping[str, Any],
 ) -> Path:
     failed = sum(item.get("status") == "failed" for item in stages)
     unexercised = sum(
@@ -849,6 +968,7 @@ def _write_stage_summary(
         json.dumps(
             {
                 "candidate_sha": candidate_sha,
+                "docker_resources": dict(docker_resources),
                 "elapsed_seconds": round(elapsed_seconds, 3),
                 "failure_count": failed,
                 "profile": profile,
@@ -905,126 +1025,413 @@ def _recording_fixture_stack(
 
 
 @contextmanager
-def _prepared_fixture_seed(
+def _fixture_seed_workspace(candidate_sha: str) -> Iterator[Path]:
+    with tempfile.TemporaryDirectory(
+        prefix=f"leadpoet-rehearsal-fixture-{candidate_sha[:12]}-"
+    ) as raw:
+        yield Path(raw)
+
+
+def _fixture_seed_command(
     tag: str,
     *,
+    root: Path,
     source_root: Path,
     candidate_sha: str,
     drand_artifact_root: Path,
     docker_platform: str,
-    profile: str,
-) -> Iterator[Path]:
-    """Build immutable sanitized release fixtures once per target SHA."""
+    docker_resources: Mapping[str, Any],
+    container_name: str,
+) -> list[str]:
+    """Build one exact, named Docker fixture-generation command."""
 
-    limits = PROFILE_LIMITS[profile]
-    with tempfile.TemporaryDirectory(
-        prefix=f"leadpoet-rehearsal-fixture-{candidate_sha[:12]}-"
-    ) as raw:
-        root = Path(raw)
-        generated_state = root / "generated-state"
-        generated_config = root / "generated-config"
-        seed = root / "seed"
-        generated_state.mkdir()
-        generated_config.mkdir()
-        seed.mkdir()
-        _run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--platform",
-                docker_platform,
-                "--network",
-                "none",
-                "--cpus",
-                str(limits["cpus"]),
-                "--memory",
-                str(limits["memory"]),
-                "--pids-limit",
-                "2048",
-                "--security-opt",
-                "no-new-privileges",
-                "--tmpfs",
-                "/tmp:rw,exec,nosuid,size=2g",
-                "--mount",
-                f"type=bind,src={source_root},dst=/source,readonly",
-                "--mount",
-                (
-                    f"type=bind,src={drand_artifact_root},"
-                    "dst=/opt/leadpoet/drand-cabi-v2,readonly"
-                ),
-                "--mount",
-                (
-                    f"type=bind,src={generated_state},"
-                    "dst=/rehearsal-state"
-                ),
-                "--mount",
-                (
-                    f"type=bind,src={generated_config},"
-                    "dst=/fixture-config"
-                ),
-                "--env",
-                "REHEARSAL_COMPONENT=validator",
-                "--env",
-                f"REHEARSAL_CANDIDATE_SHA={candidate_sha}",
-                "--env",
-                "REHEARSAL_SCOPE=exact",
-                "--env",
-                "REHEARSAL_STATE_ROOT=/rehearsal-state",
-                "--env",
-                "PYTHONPATH=/source:/harness",
-                "--entrypoint",
-                "/usr/bin/python3.11",
-                tag,
-                "/harness/prepare_host_fixtures.py",
-                "--output-dir",
-                "/fixture-config",
-                "--candidate-sha",
-                candidate_sha,
-            ]
+    generated_state = root / "generated-state"
+    generated_config = root / "generated-config"
+    return [
+            "docker",
+            "run",
+            "--rm",
+            "--name",
+            container_name,
+            "--platform",
+            docker_platform,
+            "--network",
+            "none",
+            *_docker_resource_args(docker_resources),
+            "--pids-limit",
+            "2048",
+            "--security-opt",
+            "no-new-privileges",
+            "--tmpfs",
+            "/tmp:rw,exec,nosuid,size=2g",
+            "--mount",
+            f"type=bind,src={source_root},dst=/source,readonly",
+            "--mount",
+            (
+                f"type=bind,src={drand_artifact_root},"
+                "dst=/opt/leadpoet/drand-cabi-v2,readonly"
+            ),
+            "--mount",
+            f"type=bind,src={generated_state},dst=/rehearsal-state",
+            "--mount",
+            f"type=bind,src={generated_config},dst=/fixture-config",
+            "--env",
+            "REHEARSAL_COMPONENT=validator",
+            "--env",
+            f"REHEARSAL_CANDIDATE_SHA={candidate_sha}",
+            "--env",
+            "REHEARSAL_SCOPE=exact",
+            "--env",
+            "REHEARSAL_STATE_ROOT=/rehearsal-state",
+            "--env",
+            "PYTHONPATH=/source:/harness",
+            "--entrypoint",
+            "/usr/bin/python3.11",
+            tag,
+            "/harness/prepare_host_fixtures.py",
+            "--output-dir",
+            "/fixture-config",
+            "--candidate-sha",
+            candidate_sha,
+        ]
+
+
+def _finalize_fixture_seed(root: Path, candidate_sha: str) -> Path:
+    """Validate and copy a completed fixture in the parent thread."""
+
+    generated_state = root / "generated-state"
+    generated_config = root / "generated-config"
+    seed = root / "seed"
+    release_input = generated_state / "release-build-input.json"
+    validator_app = generated_state / "validator-app"
+    gateway_identities = generated_state / "gateway-enclave-build-identities"
+    gateway_attested_runtime = generated_state / "gateway-attested-runtime"
+    if (
+        not release_input.is_file()
+        or not validator_app.is_dir()
+        or not gateway_identities.is_dir()
+        or not gateway_attested_runtime.is_dir()
+    ):
+        raise SystemExit("sanitized fixture seed is incomplete")
+    release = json.loads(release_input.read_text(encoding="utf-8"))
+    if release.get("commit_sha") != candidate_sha:
+        raise SystemExit("sanitized fixture seed commit differs")
+    shutil.copytree(generated_config, seed / "config-v2")
+    shutil.copy2(release_input, seed / release_input.name)
+    shutil.copytree(validator_app, seed / validator_app.name)
+    shutil.copytree(gateway_identities, seed / gateway_identities.name)
+    shutil.copytree(
+        gateway_attested_runtime,
+        seed / gateway_attested_runtime.name,
+    )
+    (seed / "fixture-seed.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "leadpoet.local_fixture_seed.v1",
+                "candidate_sha": candidate_sha,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
-        release_input = generated_state / "release-build-input.json"
-        validator_app = generated_state / "validator-app"
-        gateway_identities = (
-            generated_state / "gateway-enclave-build-identities"
+        + "\n",
+        encoding="utf-8",
+    )
+    return seed
+
+
+def _fixture_seed_worker_count(
+    target_count: int,
+    docker_resources: Mapping[str, Any],
+) -> int:
+    if target_count <= 0:
+        return 0
+    effective_cpus, _ = _positive_cpu(
+        str(docker_resources["effective_cpus"]),
+        field="effective rehearsal CPU capacity",
+    )
+    workers = min(target_count, int(effective_cpus), 2)
+    if workers < 1:
+        raise SystemExit(
+            "effective Docker CPU capacity cannot run fixture preparation"
         )
-        gateway_attested_runtime = (
-            generated_state / "gateway-attested-runtime"
-        )
-        if (
-            not release_input.is_file()
-            or not validator_app.is_dir()
-            or not gateway_identities.is_dir()
-            or not gateway_attested_runtime.is_dir()
-        ):
-            raise SystemExit("sanitized fixture seed is incomplete")
-        release = json.loads(release_input.read_text(encoding="utf-8"))
-        if release.get("commit_sha") != candidate_sha:
-            raise SystemExit("sanitized fixture seed commit differs")
-        shutil.copytree(generated_config, seed / "config-v2")
-        shutil.copy2(release_input, seed / release_input.name)
-        shutil.copytree(validator_app, seed / validator_app.name)
-        shutil.copytree(
-            gateway_identities,
-            seed / gateway_identities.name,
-        )
-        shutil.copytree(
-            gateway_attested_runtime,
-            seed / gateway_attested_runtime.name,
-        )
-        (seed / "fixture-seed.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": "leadpoet.local_fixture_seed.v1",
-                    "candidate_sha": candidate_sha,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
+    return workers
+
+
+@contextmanager
+def _fixture_seed_launch_signal_mask() -> Iterator[None]:
+    """Defer parent interruption until a launched client is registered."""
+
+    if os.name != "posix" or not hasattr(signal, "pthread_sigmask"):
+        yield
+        return
+    blocked = {signal.SIGALRM, signal.SIGINT}
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def _stop_fixture_seed_processes(
+    active: Mapping[str, tuple[str, subprocess.Popen[Any]]],
+    attempted_names: Mapping[str, str] | None = None,
+) -> None:
+    """Bound cleanup of exact named fixture clients and containers."""
+
+    failures: list[str] = []
+    cleanup_names = list((attempted_names or {}).items())
+    known_names = {name for _target, name in cleanup_names}
+    for target, (_name, process) in active.items():
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except OSError as exc:
+                failures.append(f"{target}: terminate failed: {exc}")
+    deadline = time.monotonic() + 5.0
+    for target, (_name, process) in active.items():
+        if process.poll() is not None:
+            continue
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=2.0)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                failures.append(f"{target}: kill failed: {exc}")
+    for target, (name, _process) in active.items():
+        if name not in known_names:
+            cleanup_names.append((target, name))
+            known_names.add(name)
+    for target, name in cleanup_names:
+        try:
+            result = subprocess.run(
+                ["docker", "rm", "--force", name],
+                cwd=str(REPO_ROOT),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10.0,
             )
-            + "\n",
-            encoding="utf-8",
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"{target}: container cleanup failed: {exc}")
+            continue
+        error = (result.stderr or "").strip()
+        absent = "No such container" in error or "No such object" in error
+        if result.returncode != 0 and not absent:
+            failures.append(
+                f"{target}: container cleanup returned "
+                f"{result.returncode}: {error[:500]}"
+            )
+    if failures:
+        raise RuntimeError("; ".join(failures))
+
+
+def _prepare_fixture_seeds(
+    tag: str,
+    *,
+    source_root: Path,
+    targets: Sequence[str],
+    drand_artifacts: Mapping[str, Path],
+    docker_platform: str,
+    profile: str,
+    docker_resources: Mapping[str, Any],
+    fixture_stack: ExitStack,
+    stages: list[dict[str, Any]],
+) -> dict[str, Path]:
+    """Build independent target seeds concurrently with parent-owned cleanup."""
+
+    ordered_targets = sorted(set(targets))
+    eligible_targets: list[str] = []
+    workspaces: dict[str, Path] = {}
+    for target in ordered_targets:
+        stage = f"fixture-seed-{target[:12]}"
+        if target not in drand_artifacts:
+            _mark_stage_unexercised(
+                stage=stage,
+                blocked_by=[f"drand-artifact-{target[:12]}"],
+                stages=stages,
+            )
+            continue
+        workspaces[target] = fixture_stack.enter_context(
+            _fixture_seed_workspace(target)
         )
-        yield seed
+        for name in ("generated-state", "generated-config", "seed"):
+            (workspaces[target] / name).mkdir()
+        eligible_targets.append(target)
+    if not eligible_targets:
+        return {}
+
+    worker_count = (
+        _fixture_seed_worker_count(len(eligible_targets), docker_resources)
+        if profile == "prepush"
+        else 1
+    )
+    effective_cpus, _ = _positive_cpu(
+        str(docker_resources["effective_cpus"]),
+        field="effective rehearsal CPU capacity",
+    )
+    effective_memory_bytes = int(docker_resources["effective_memory_bytes"])
+    if effective_memory_bytes < worker_count:
+        raise SystemExit(
+            "effective Docker memory capacity cannot run fixture preparation"
+        )
+    worker_resources = {
+        **docker_resources,
+        "effective_cpus": format(
+            (effective_cpus / Decimal(worker_count)).normalize(),
+            "f",
+        ),
+        "effective_memory_bytes": effective_memory_bytes // worker_count,
+    }
+    container_names = {
+        target: (
+            "leadpoet-fixture-"
+            f"{os.getpid()}-"
+            + hashlib.sha256(
+                str(workspaces[target]).encode("utf-8")
+            ).hexdigest()[:12]
+        )
+        for target in eligible_targets
+    }
+    pending = list(eligible_targets)
+    active: dict[str, tuple[str, subprocess.Popen[Any]]] = {}
+    attempted_names: dict[str, str] = {}
+    started_at: dict[str, float] = {}
+    completed: dict[str, tuple[BaseException | None, float]] = {}
+
+    try:
+        while pending or active:
+            while pending and len(active) < worker_count:
+                target = pending.pop(0)
+                name = container_names[target]
+                command = _fixture_seed_command(
+                    tag,
+                    root=workspaces[target],
+                    source_root=source_root,
+                    candidate_sha=target,
+                    drand_artifact_root=drand_artifacts[target],
+                    docker_platform=docker_platform,
+                    docker_resources=worker_resources,
+                    container_name=name,
+                )
+                started_at[target] = time.monotonic()
+                attempted_names[target] = name
+                try:
+                    with _fixture_seed_launch_signal_mask():
+                        process = subprocess.Popen(command, cwd=str(REPO_ROOT))
+                        active[target] = (name, process)
+                except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+                    raise
+                except BaseException as exc:
+                    completed[target] = (
+                        exc,
+                        time.monotonic() - started_at[target],
+                    )
+
+            completed_any = False
+            for target in sorted(tuple(active)):
+                _name, process = active[target]
+                returncode = process.poll()
+                if returncode is None:
+                    continue
+                active.pop(target)
+                error = (
+                    subprocess.CalledProcessError(
+                        returncode,
+                        _fixture_seed_command(
+                            tag,
+                            root=workspaces[target],
+                            source_root=source_root,
+                            candidate_sha=target,
+                            drand_artifact_root=drand_artifacts[target],
+                            docker_platform=docker_platform,
+                            docker_resources=worker_resources,
+                            container_name=container_names[target],
+                        ),
+                    )
+                    if returncode
+                    else None
+                )
+                completed[target] = (
+                    error,
+                    time.monotonic() - started_at[target],
+                )
+                completed_any = True
+            if active and not completed_any:
+                time.sleep(0.05)
+    except (KeyboardInterrupt, RehearsalTimeBudgetExceeded) as exc:
+        try:
+            _stop_fixture_seed_processes(active, attempted_names)
+        except BaseException as cleanup_exc:
+            print(
+                "REHEARSAL_FIXTURE_CLEANUP_FAILED "
+                f"error_type={type(cleanup_exc).__name__} "
+                f"error={str(cleanup_exc)!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if hasattr(exc, "add_note"):
+                exc.add_note(f"fixture cleanup failed: {cleanup_exc}")
+        raise
+    except BaseException as exc:
+        try:
+            _stop_fixture_seed_processes(active, attempted_names)
+        except BaseException as cleanup_exc:
+            raise cleanup_exc from exc
+        raise
+
+    fixture_seeds: dict[str, Path] = {}
+    for target in eligible_targets:
+        stage = f"fixture-seed-{target[:12]}"
+        error, docker_duration = completed[target]
+        finalize_duration = 0.0
+        if error is None:
+            finalized_started = time.monotonic()
+            try:
+                seed_path = _finalize_fixture_seed(
+                    workspaces[target],
+                    target,
+                )
+                identity = json.loads(
+                    (seed_path / "fixture-seed.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                if identity.get("candidate_sha") != target:
+                    raise SystemExit("fixture seed worker identity differs")
+            except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+                raise
+            except BaseException as exc:
+                error = exc
+            finalize_duration = time.monotonic() - finalized_started
+        duration = round(docker_duration + finalize_duration, 3)
+        if error is not None:
+            result = _stage_result_from_exception(stage=stage, exc=error)
+            result["duration_seconds"] = duration
+            stages.append(result)
+            print(
+                "REHEARSAL_STAGE_FAILED_CONTINUING "
+                f"stage={stage} error_type={result['error_type']} "
+                f"duration_seconds={duration} error={result['error']!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        fixture_seeds[target] = seed_path
+        stages.append(
+            {
+                "duration_seconds": duration,
+                "stage": stage,
+                "status": "passed",
+            }
+        )
+        print(
+            f"REHEARSAL_STAGE_PASSED stage={stage} "
+            f"duration_seconds={duration}",
+            flush=True,
+        )
+    return fixture_seeds
 
 
 def _run_workflow(
@@ -1036,6 +1443,7 @@ def _run_workflow(
     candidate_sha: str,
     profile: str,
     docker_platform: str,
+    docker_resources: Mapping[str, Any],
 ) -> None:
     limits = PROFILE_LIMITS[profile]
     command = [
@@ -1046,10 +1454,7 @@ def _run_workflow(
         docker_platform,
         "--network",
         "none",
-        "--cpus",
-        str(limits["cpus"]),
-        "--memory",
-        str(limits["memory"]),
+        *_docker_resource_args(docker_resources),
         "--pids-limit",
         "2048",
         "--security-opt",
@@ -1106,6 +1511,7 @@ def _join_evidence(
     candidate_sha: str,
     profile: str,
     docker_platform: str,
+    docker_resources: Mapping[str, Any],
 ) -> Path:
     output = evidence_root / (
         f"leadpoet-restart-rehearsal-{candidate_sha}-{profile}.json"
@@ -1118,10 +1524,11 @@ def _join_evidence(
             docker_platform,
             "--network",
             "none",
-            "--cpus",
-            "1",
-            "--memory",
-            "1g",
+            *_docker_resource_args(
+                docker_resources,
+                fixed_cpus="1",
+                fixed_memory="1g",
+            ),
             "--pids-limit",
             "128",
             "--security-opt",
@@ -1162,7 +1569,11 @@ def _join_evidence(
     return output
 
 
-def _run_python37_finalization_probe(source_root: Path) -> None:
+def _run_python37_finalization_probe(
+    source_root: Path,
+    *,
+    docker_resources: Mapping[str, Any],
+) -> None:
     """Exercise the measured enclave's post-broadcast path under CPython 3.7."""
 
     _run(
@@ -1174,10 +1585,11 @@ def _run_python37_finalization_probe(source_root: Path) -> None:
             "linux/amd64",
             "--network",
             "none",
-            "--cpus",
-            "1",
-            "--memory",
-            "512m",
+            *_docker_resource_args(
+                docker_resources,
+                fixed_cpus="1",
+                fixed_memory="512m",
+            ),
             "--pids-limit",
             "128",
             "--security-opt",
@@ -1254,6 +1666,19 @@ def _run_profile(args: argparse.Namespace) -> int:
         f"profile={args.profile} target_seconds={target_seconds or 'unbounded'}",
         flush=True,
     )
+    capacity_started = time.monotonic()
+    docker_resources = _resolve_docker_resources(args.profile)
+    capacity_duration = round(time.monotonic() - capacity_started, 3)
+    print(
+        "REHEARSAL_DOCKER_CAPACITY "
+        f"requested_cpus={docker_resources['requested_cpus']} "
+        f"effective_cpus={docker_resources['effective_cpus']} "
+        "requested_memory_bytes="
+        f"{docker_resources['requested_memory_bytes']} "
+        "effective_memory_bytes="
+        f"{docker_resources['effective_memory_bytes']}",
+        flush=True,
+    )
     from_sha = _git_sha(args.from_sha)
     candidate_sha = _git_sha(args.candidate_sha)
     transition = _resolve_transition(
@@ -1287,14 +1712,24 @@ def _run_profile(args: argparse.Namespace) -> int:
             prefix="leadpoet-restart-evidence-"
         ) as evidence_raw:
             evidence_root = Path(evidence_raw)
-            stage_results: list[dict[str, Any]] = []
+            stage_results: list[dict[str, Any]] = [
+                {
+                    "duration_seconds": capacity_duration,
+                    "stage": "docker-capacity",
+                    "status": "passed",
+                    **docker_resources,
+                }
+            ]
             print(
                 "Running validator enclave finalization proof under CPython 3.7",
                 flush=True,
             )
             _run_independent_stage(
                 stage="python37-finalization",
-                action=lambda: _run_python37_finalization_probe(source_root),
+                action=lambda: _run_python37_finalization_probe(
+                    source_root,
+                    docker_resources=docker_resources,
+                ),
                 stages=stage_results,
             )
             transitions = (transition,)
@@ -1319,32 +1754,19 @@ def _run_profile(args: argparse.Namespace) -> int:
                     )
                     if passed:
                         drand_artifacts[target] = artifact
-                for target in sorted(target_shas):
-                    stage = f"fixture-seed-{target[:12]}"
-                    dependency = f"drand-artifact-{target[:12]}"
-                    if target not in drand_artifacts:
-                        _mark_stage_unexercised(
-                            stage=stage,
-                            blocked_by=[dependency],
-                            stages=stage_results,
-                        )
-                        continue
-                    passed, seed = _run_independent_stage(
-                        stage=stage,
-                        action=lambda target=target: fixture_stack.enter_context(
-                            _prepared_fixture_seed(
-                                tag,
-                                source_root=source_root,
-                                candidate_sha=target,
-                                drand_artifact_root=drand_artifacts[target],
-                                docker_platform=docker_platform,
-                                profile=args.profile,
-                            )
-                        ),
+                fixture_seeds.update(
+                    _prepare_fixture_seeds(
+                        tag,
+                        source_root=source_root,
+                        targets=tuple(target_shas),
+                        drand_artifacts=drand_artifacts,
+                        docker_platform=docker_platform,
+                        profile=args.profile,
+                        docker_resources=docker_resources,
+                        fixture_stack=fixture_stack,
                         stages=stage_results,
                     )
-                    if passed:
-                        fixture_seeds[target] = seed
+                )
                 durable_state_root = evidence_root / "durable-boundary-state"
                 durable_state_root.mkdir(mode=0o700)
                 for ordinal, run_transition in enumerate(transitions):
@@ -1426,6 +1848,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                                     gateway_worker_fleet_mode=(
                                         args.gateway_worker_fleet_mode
                                     ),
+                                    docker_resources=docker_resources,
                                 ),
                             )
                         )
@@ -1473,6 +1896,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                     evidence_root=evidence_root,
                     profile=args.profile,
                     docker_platform=docker_platform,
+                    docker_resources=docker_resources,
                 ),
                 stages=stage_results,
             )
@@ -1511,6 +1935,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                         candidate_sha=candidate_sha,
                         profile=args.profile,
                         docker_platform=docker_platform,
+                        docker_resources=docker_resources,
                     ),
                     stages=stage_results,
                 )
@@ -1525,6 +1950,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                         else "failed"
                     ),
                     "target_seconds": target_seconds,
+                    **docker_resources,
                 }
                 if elapsed_seconds > target_seconds:
                     budget_result["error"] = (
@@ -1536,7 +1962,13 @@ def _run_profile(args: argparse.Namespace) -> int:
                     "REHEARSAL_TIME_BUDGET_RESULT "
                     f"status={budget_result['status']} "
                     f"elapsed_seconds={budget_result['duration_seconds']} "
-                    f"target_seconds={target_seconds}",
+                    f"target_seconds={target_seconds} "
+                    f"requested_cpus={docker_resources['requested_cpus']} "
+                    f"effective_cpus={docker_resources['effective_cpus']} "
+                    "requested_memory_bytes="
+                    f"{docker_resources['requested_memory_bytes']} "
+                    "effective_memory_bytes="
+                    f"{docker_resources['effective_memory_bytes']}",
                     flush=True,
                 )
             stage_summary = _write_stage_summary(
@@ -1545,6 +1977,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                 elapsed_seconds=elapsed_seconds,
                 profile=args.profile,
                 stages=stage_results,
+                docker_resources=docker_resources,
             )
             incomplete = [
                 item

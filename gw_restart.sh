@@ -35,6 +35,7 @@ GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120
 GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS=360
 GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS="${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS:-3}"
 GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS="${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS:-5}"
+GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR="${GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR:-/home/ec2-user/.config/leadpoet/weight-input-checkpoints-v2}"
 GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="${GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT:-}"
 GATEWAY_RESTART_STARTED_EPOCH="${GATEWAY_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
 GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$}"
@@ -457,6 +458,7 @@ follow_superseding_gateway_release() {
     GATEWAY_RELEASE_FOLLOW_ROOT="$GATEWAY_RELEASE_FOLLOW_ROOT" \
     GATEWAY_RELEASE_SUPERSESSION_COUNT="$next_count" \
     GATEWAY_RELEASE_SUPERSESSION_MAX="$GATEWAY_RELEASE_SUPERSESSION_MAX" \
+    GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR="$GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR" \
     GATEWAY_DEPLOY_PLAN_FILE="$GATEWAY_DEPLOY_PLAN_FILE" \
     GATEWAY_DEPLOYMENT_DIR="$GATEWAY_DEPLOYMENT_DIR" \
     GATEWAY_DEPLOYMENT_MANIFEST="$GATEWAY_DEPLOYMENT_MANIFEST" \
@@ -1165,6 +1167,30 @@ validate_runtime_secret_paths() {
   done
 }
 
+verify_gateway_weight_input_checkpoint_directory() {
+  if [[ "$GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR" != /* ]]; then
+    echo "ERROR: gateway weight input checkpoint directory must be absolute" >&2
+    return 1
+  fi
+  if ! mkdir -p "$GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR" \
+      || ! chmod 700 "$GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR"; then
+    echo "ERROR: gateway weight input checkpoint directory is unavailable" >&2
+    return 1
+  fi
+  local checkpoint_probe
+  checkpoint_probe="$(mktemp \
+    "$GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR/.restart-probe.XXXXXX")" \
+    || return 1
+  if ! chmod 600 "$checkpoint_probe" \
+      || ! printf '%s\n' "leadpoet-weight-input-checkpoint-probe" > "$checkpoint_probe" \
+      || ! grep -qx "leadpoet-weight-input-checkpoint-probe" "$checkpoint_probe"; then
+    rm -f "$checkpoint_probe"
+    echo "ERROR: gateway weight input checkpoint directory is not durable read-write storage" >&2
+    return 1
+  fi
+  rm -f "$checkpoint_probe"
+}
+
 enforce_deployment_environment() {
   unset BUILD_ID BUILD_TIME_UTC BUILD_TIMESTAMP GITHUB_TAG GIT_TAG
   export LEADPOET_REPO_ROOT GATEWAY_ROOT GATEWAY_LOG_ROOT GATEWAY_LOG_FILE
@@ -1179,6 +1205,9 @@ enforce_deployment_environment() {
   export GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT
   export RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
+  verify_gateway_weight_input_checkpoint_directory || return 1
+  export GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR="$GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR"
+  export GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED=true
   export PYTHONPATH="$LEADPOET_REPO_ROOT"
   export GITHUB_SHA="$GATEWAY_DEPLOY_SHA"
   export GITHUB_COMMIT="$GATEWAY_DEPLOY_SHA"
@@ -2342,6 +2371,36 @@ wait_for_foreign_docker_builds
 wait_for_gateway_build_memory
 record_gateway_restart_timing "pre_shutdown_checks_complete"
 
+echo "Validating durable weight input checkpoint storage before gateway shutdown"
+if ! verify_gateway_weight_input_checkpoint_directory; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+if ! run_prepared_gateway_module \
+    gateway.research_lab.weight_input_authorization_v2 \
+    --verify-storage-ready \
+    --directory "$GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR"; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
+DESTRUCTIVE_RESTART_GATE_ARGS=(
+  --network "${BITTENSOR_NETWORK:-finney}"
+  --netuid "${BITTENSOR_NETUID:-71}"
+)
+if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
+  DESTRUCTIVE_RESTART_GATE_ARGS+=(
+    --captured-report "$GATEWAY_RESTART_START_PATH"
+  )
+fi
+echo "Validating the live destructive restart window before gateway shutdown"
+if ! run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
+    "${DESTRUCTIVE_RESTART_GATE_ARGS[@]}" \
+    --destructive-phase; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
@@ -2426,6 +2485,7 @@ exec env \
   GATEWAY_RELEASE_FOLLOW_ROOT="$GATEWAY_RELEASE_FOLLOW_ROOT" \
   GATEWAY_RELEASE_SUPERSESSION_COUNT="$GATEWAY_RELEASE_SUPERSESSION_COUNT" \
   GATEWAY_RELEASE_SUPERSESSION_MAX="$GATEWAY_RELEASE_SUPERSESSION_MAX" \
+  GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR="$GATEWAY_RESTART_WEIGHT_INPUT_CHECKPOINT_DIR" \
   GATEWAY_ANCESTRY_SAFE_EPOCH="$GATEWAY_ANCESTRY_SAFE_EPOCH" \
   RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \

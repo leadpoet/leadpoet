@@ -8,6 +8,7 @@ import sys
 
 import pytest
 
+from gateway.tee import scoring_import_closure
 from gateway.tee.scoring_import_closure import (
     AUTORESEARCH_ENTRYPOINT_MODULES,
     DYNAMIC_IMPORT_MODULES,
@@ -24,6 +25,111 @@ from gateway.tee.build_identity import build_identity, load_identity, write_iden
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _synthetic_closure_roots(tmp_path: Path) -> tuple[Path, Path]:
+    source_root = tmp_path / "source"
+    gateway_root = source_root / "gateway"
+    for package in scoring_import_closure.PACKAGE_NAMES:
+        package_root = (
+            gateway_root if package == "gateway" else source_root / package
+        )
+        package_root.mkdir(parents=True, exist_ok=True)
+        (package_root / "__init__.py").write_text("", encoding="utf-8")
+    (gateway_root / "alpha.py").write_text(
+        "from gateway import shared\n",
+        encoding="utf-8",
+    )
+    (gateway_root / "beta.py").write_text(
+        "from gateway import shared\n",
+        encoding="utf-8",
+    )
+    (gateway_root / "shared.py").write_text(
+        "import os\nVALUE = os.getenv('SHARED_SETTING')\n",
+        encoding="utf-8",
+    )
+    return gateway_root, source_root
+
+
+def _configure_synthetic_closure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        scoring_import_closure,
+        "ROLE_ENTRYPOINT_MODULES",
+        {
+            "gateway_alpha": ("gateway.alpha",),
+            "gateway_beta": ("gateway.beta",),
+        },
+    )
+    monkeypatch.setattr(scoring_import_closure, "ENTRYPOINT_MODULES", ())
+    monkeypatch.setattr(
+        scoring_import_closure,
+        "AUTORESEARCH_ENTRYPOINT_MODULES",
+        (),
+    )
+    monkeypatch.setattr(scoring_import_closure, "DYNAMIC_IMPORT_MODULES", ())
+    monkeypatch.setattr(scoring_import_closure, "MEASURED_DATA_PATHS", ())
+
+
+def test_scoring_import_closure_build_cache_preserves_exact_manifest_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gateway_root, source_root = _synthetic_closure_roots(tmp_path)
+    _configure_synthetic_closure(monkeypatch)
+
+    legacy = scoring_import_closure._build_manifest(
+        gateway_root=gateway_root,
+        source_root=source_root,
+        candidate_imports=scoring_import_closure._candidate_imports,
+        literal_environment_names=(
+            scoring_import_closure._literal_environment_names
+        ),
+    )
+    cached = scoring_import_closure.build_manifest(
+        gateway_root=gateway_root,
+        source_root=source_root,
+    )
+    legacy_path = tmp_path / "legacy.json"
+    cached_path = tmp_path / "cached.json"
+    write_manifest(legacy, legacy_path)
+    write_manifest(cached, cached_path)
+
+    assert cached == legacy
+    assert cached["manifest_hash"] == legacy["manifest_hash"]
+    assert cached_path.read_bytes() == legacy_path.read_bytes()
+
+
+def test_scoring_import_closure_build_parses_each_module_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gateway_root, source_root = _synthetic_closure_roots(tmp_path)
+    _configure_synthetic_closure(monkeypatch)
+    original_parse = scoring_import_closure.ast.parse
+    parse_calls: dict[Path, int] = {}
+
+    def counted_parse(source, filename="<unknown>", mode="exec", **kwargs):
+        path = Path(filename)
+        parse_calls[path] = parse_calls.get(path, 0) + 1
+        return original_parse(source, filename=filename, mode=mode, **kwargs)
+
+    with monkeypatch.context() as parse_patch:
+        parse_patch.setattr(scoring_import_closure.ast, "parse", counted_parse)
+        manifest = scoring_import_closure.build_manifest(
+            gateway_root=gateway_root,
+            source_root=source_root,
+        )
+    modules = {item["module"] for item in manifest["files"]}
+    expected_paths = {
+        scoring_import_closure.build_module_index(
+            gateway_root=gateway_root,
+            source_root=source_root,
+        )[module]
+        for module in modules
+    }
+
+    assert set(parse_calls) == expected_paths
+    assert set(parse_calls.values()) == {1}
 
 
 def _stage_manifest_files(manifest: dict, destination: Path) -> None:

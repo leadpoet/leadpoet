@@ -32,6 +32,17 @@ EPOCH_LENGTH = 360
 # the validator when this value changes.
 WEIGHT_SUBMISSION_BLOCK = 240
 
+# No new gateway-owned weight source reconstruction starts at or after this
+# epoch position. Exact in-flight work and a release-bound ready checkpoint may
+# still complete or replay. This gives chain publication at least 60 blocks of
+# recovery time without changing the block-240 scoring snapshot semantics.
+WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK = 300
+
+# One exact signed input request may retry measured reconstruction with fresh
+# coordinator sequence numbers after a transient dependency failure. Every
+# runtime capacity bound for that retry envelope derives from this value.
+WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS = 8
+
 # Begin the expensive, deterministic Research Lab allocation preparation well
 # before the submission window. This does not authorize or publish weights; it
 # only gives the primary time to reconstruct and validate durable ancestry.
@@ -93,6 +104,10 @@ BINDING_MESSAGE_PREFIX = "LEADPOET_VALIDATOR_BINDING"
 
 # Current binding message version
 BINDING_MESSAGE_VERSION = "1"
+
+# Canonical provider RPC schema shared by the broker and measured Supabase
+# source without making either transport module import the other.
+PROVIDER_BROKER_SCHEMA_VERSION = "leadpoet.provider_broker.v2"
 
 
 # =============================================================================

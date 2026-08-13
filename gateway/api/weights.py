@@ -50,6 +50,8 @@ from leadpoet_canonical.timestamps import canonical_timestamp
 from leadpoet_canonical.constants import (
     EPOCH_LENGTH,
     MAX_BLOCK_DRIFT,
+    WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS,
+    WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK,
     WEIGHT_SUBMISSION_BLOCK,
 )
 from leadpoet_canonical.attested_receipts import SCORING_PURPOSES, WEIGHT_PURPOSE
@@ -127,10 +129,184 @@ _WEIGHT_INPUT_RESULTS: Dict[
 ] = {}
 _WEIGHT_INPUT_AUTHORIZATIONS: Dict[tuple[int, str], float] = {}
 _WEIGHT_INPUT_RETRY_GENERATIONS: Dict[tuple[int, str], tuple[float, int]] = {}
+_WEIGHT_PRECOMPUTE_SIDECAR_TASKS: Dict[str, asyncio.Task] = {}
 _WEIGHT_INPUT_RESULT_TTL_SECONDS = 120.0
 _WEIGHT_INPUT_RESULT_MAX_ENTRIES = 1
 _WEIGHT_INPUT_AUTHORIZATION_TTL_SECONDS = 1800.0
-_WEIGHT_INPUT_RETRY_MAX_GENERATIONS = 8
+
+
+def _gateway_weight_input_checkpoint_directory() -> Optional[Path]:
+    configured = str(
+        os.environ.get("GATEWAY_WEIGHT_INPUT_CHECKPOINT_DIR") or ""
+    ).strip()
+    return Path(configured).expanduser() if configured else None
+
+
+def _gateway_weight_input_stores_v2() -> tuple[Any, Any]:
+    """Return local authorization and ready stores when durability is enabled."""
+
+    directory = _gateway_weight_input_checkpoint_directory()
+    if directory is None:
+        return None, None
+    from gateway.research_lab.weight_input_authorization_v2 import (
+        GatewayWeightInputAuthorizationStoreV2,
+    )
+    from gateway.research_lab.weight_input_checkpoint_v2 import (
+        GatewayWeightInputCheckpointStoreV2,
+    )
+
+    return (
+        GatewayWeightInputAuthorizationStoreV2(directory),
+        GatewayWeightInputCheckpointStoreV2(directory),
+    )
+
+
+def _weight_input_checkpoint_result_v2(result: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project the exact public response material from an internal build."""
+
+    return {
+        "input_receipt_hashes": dict(result["input_receipt_hashes"]),
+        "gateway_authority_event_hash": str(
+            result["gateway_authority_event_hash"]
+        ),
+        "upstream_receipt_set": dict(result["upstream_receipt_set"]),
+        "compact_ancestry": (
+            dict(result["compact_ancestry"])
+            if isinstance(result.get("compact_ancestry"), Mapping)
+            else None
+        ),
+    }
+
+
+def _weight_input_checkpoint_scope_v2(
+    request: Mapping[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "request_hash": str(request["request_hash"]),
+        "netuid": int(request["netuid"]),
+        "epoch_id": int(request["epoch_id"]),
+        "allocation_hash": str(request["allocation_hash"]),
+        "calculation_snapshot_hash": str(
+            request["calculation_snapshot_hash"]
+        ),
+        "leaderboard_window_start": str(
+            request["leaderboard_window_start"]
+        ),
+        "leaderboard_window_end": str(request["leaderboard_window_end"]),
+    }
+
+
+async def _persist_weight_precompute_sidecar_v3(
+    *,
+    request: Mapping[str, Any],
+    result: Mapping[str, Any],
+    release_identity: Mapping[str, Any],
+    epoch_authority: Mapping[str, Any],
+    telemetry: Mapping[str, Any],
+) -> None:
+    """Best-effort central readback for a locally durable ready checkpoint.
+
+    The local producer-bound checkpoint is the availability authority. The
+    Supabase sidecar is a second append-only audit copy and must not put the
+    submission path back behind the transport that this change isolates.
+    """
+
+    enabled = str(
+        os.environ.get("GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return
+    try:
+        from gateway.research_lab.weight_precompute_store_v3 import (
+            persist_gateway_weight_precompute_v3,
+        )
+
+        cutover = load_subnet_epoch_cutover()
+        if cutover is None:
+            raise RuntimeError(
+                "subnet epoch cutover is required for weight precompute"
+            )
+        input_hashes = dict(result["input_receipt_hashes"])
+        source_input_root = sha256_json(
+            {
+                "input_receipt_hashes": input_hashes,
+                "gateway_authority_event_hash": result[
+                    "gateway_authority_event_hash"
+                ],
+            }
+        )
+        await persist_gateway_weight_precompute_v3(
+            request_hash=str(request["request_hash"]),
+            release_commit_sha=str(release_identity["commit_sha"]),
+            release_manifest_hash=str(release_identity["release_hash"]),
+            cutover=cutover.to_dict(),
+            epoch_id=int(request["epoch_id"]),
+            epoch_ref=str(epoch_authority["epoch_ref"]),
+            planned_submission_block=WEIGHT_SUBMISSION_BLOCK,
+            calculation_snapshot_hash=str(
+                request["calculation_snapshot_hash"]
+            ),
+            source_input_root=source_input_root,
+            gateway_result=dict(result),
+        )
+    except Exception as exc:
+        capture_failure(
+            "authority.dependency_unreadable",
+            component="gateway",
+            stage="weight_precompute_sidecar_readback",
+            exception=exc,
+            terminal=False,
+            retryable=True,
+            fail_closed=False,
+            **dict(telemetry),
+        )
+        logger.warning(
+            "weight_precompute_sidecar_unavailable epoch=%s type=%s error=%s",
+            request["epoch_id"],
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        return
+    record_stage(
+        component="gateway",
+        stage="weight_precompute_sidecar_readback",
+        status="passed",
+        **dict(telemetry),
+    )
+
+
+def _schedule_weight_precompute_sidecar_v3(**kwargs: Any) -> None:
+    """Run the optional Supabase audit copy outside the response path."""
+
+    enabled = str(
+        os.environ.get("GATEWAY_WEIGHT_PRECOMPUTE_STORE_V3_ENABLED") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return
+    request = kwargs.get("request")
+    if not isinstance(request, Mapping):
+        raise RuntimeError("weight precompute sidecar request is required")
+    request_hash = str(request.get("request_hash") or "")
+    existing = _WEIGHT_PRECOMPUTE_SIDECAR_TASKS.get(request_hash)
+    if existing is not None and not existing.done():
+        return
+    task = asyncio.create_task(_persist_weight_precompute_sidecar_v3(**kwargs))
+    _WEIGHT_PRECOMPUTE_SIDECAR_TASKS[request_hash] = task
+
+    def _complete(completed: asyncio.Task) -> None:
+        if _WEIGHT_PRECOMPUTE_SIDECAR_TASKS.get(request_hash) is completed:
+            _WEIGHT_PRECOMPUTE_SIDECAR_TASKS.pop(request_hash, None)
+        if completed.cancelled():
+            return
+        exception = completed.exception()
+        if exception is not None:
+            logger.error(
+                "weight_precompute_sidecar_task_failed type=%s error=%s",
+                type(exception).__name__,
+                str(exception)[:300],
+            )
+
+    task.add_done_callback(_complete)
 
 
 def _weight_telemetry_fields(
@@ -218,8 +394,11 @@ async def _build_weight_inputs_v2_singleflight(
     calculation_snapshot: Dict[str, Any],
     leaderboard_window_start: str,
     leaderboard_window_end: str,
+    checkpoint_store: Any = None,
+    checkpoint_release_identity: Optional[Mapping[str, Any]] = None,
+    checkpoint_scope: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Share one exact immutable input reconstruction across HTTP retries."""
+    """Share one exact reconstruction and its durable checkpoint across retries."""
 
     from gateway.research_lab.attested_v2_store import (
         load_business_artifact_graph_v2,
@@ -231,6 +410,24 @@ async def _build_weight_inputs_v2_singleflight(
     from leadpoet_canonical.weight_authority_v2 import (
         GATEWAY_WEIGHT_INPUT_CATEGORIES,
     )
+
+    checkpoint_enabled = checkpoint_store is not None
+    if checkpoint_enabled:
+        if not isinstance(checkpoint_release_identity, Mapping) or not isinstance(
+            checkpoint_scope, Mapping
+        ):
+            raise RuntimeError(
+                "weight input checkpoint release and scope are required"
+            )
+        durable_release_identity = dict(checkpoint_release_identity)
+        durable_checkpoint_scope = dict(checkpoint_scope)
+    else:
+        if checkpoint_release_identity is not None or checkpoint_scope is not None:
+            raise RuntimeError(
+                "weight input checkpoint store is required for durable scope"
+            )
+        durable_release_identity = None
+        durable_checkpoint_scope = None
 
     loop = asyncio.get_running_loop()
     key = (id(loop), str(request_hash))
@@ -265,13 +462,24 @@ async def _build_weight_inputs_v2_singleflight(
                 artifact_ref=f"epoch:{int(epoch_id)}",
                 artifact_hash=str(allocation_hash),
             )
-            return await build_gateway_weight_inputs_v2(
+            built_result = await build_gateway_weight_inputs_v2(
                 calculation_snapshot=calculation_snapshot,
                 allocation_graph=allocation_graph,
                 leaderboard_window_start=str(leaderboard_window_start),
                 leaderboard_window_end=str(leaderboard_window_end),
                 execute=_execute_fresh_generation,
             )
+            if not checkpoint_enabled:
+                return built_result
+            checkpoint_result = _weight_input_checkpoint_result_v2(
+                built_result
+            )
+            checkpoint = checkpoint_store.persist(
+                release_identity=durable_release_identity,
+                result=checkpoint_result,
+                **durable_checkpoint_scope,
+            )
+            return dict(checkpoint["result"])
 
         task = asyncio.create_task(_build())
         _WEIGHT_INPUT_LOADS_INFLIGHT[key] = task
@@ -287,7 +495,7 @@ async def _build_weight_inputs_v2_singleflight(
                 if _weight_input_reconstruction_is_retryable(exc):
                     next_generation = min(
                         generation + 1,
-                        _WEIGHT_INPUT_RETRY_MAX_GENERATIONS - 1,
+                        WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS - 1,
                     )
                     _WEIGHT_INPUT_RETRY_GENERATIONS[key] = (
                         loop.time() + _WEIGHT_INPUT_AUTHORIZATION_TTL_SECONDS,
@@ -362,6 +570,26 @@ def _weight_inputs_v2_has_authorized_work(request_hash: str) -> bool:
         if authorized_until > loop.time():
             return True
         _WEIGHT_INPUT_AUTHORIZATIONS.pop(key, None)
+    cached = _WEIGHT_INPUT_RESULTS.get(key)
+    if cached is not None:
+        expires_at, _result = cached
+        if expires_at > loop.time():
+            return True
+        _WEIGHT_INPUT_RESULTS.pop(key, None)
+    task = _WEIGHT_INPUT_LOADS_INFLIGHT.get(key)
+    if task is None:
+        return False
+    if task.get_loop() is not loop or task.done():
+        _WEIGHT_INPUT_LOADS_INFLIGHT.pop(key, None)
+        return False
+    return True
+
+
+def _weight_inputs_v2_has_live_result_or_task(request_hash: str) -> bool:
+    """Return true only for a live result or reconstruction in this process."""
+
+    loop = asyncio.get_running_loop()
+    key = (id(loop), str(request_hash))
     cached = _WEIGHT_INPUT_RESULTS.get(key)
     if cached is not None:
         expires_at, _result = cached
@@ -500,6 +728,8 @@ async def _verify_epoch_block_authority(
     epoch_id: int,
     submitted_block: int,
     require_submission_window: bool,
+    allow_block_drift: bool = False,
+    require_current_epoch: bool = False,
 ) -> Dict[str, Any]:
     """Verify a workflow epoch against one exact on-chain scheduler state.
 
@@ -523,7 +753,10 @@ async def _verify_epoch_block_authority(
             subtensor,
             netuid=int(netuid),
         )
-        if abs(current.current_block - int(submitted_block)) > MAX_BLOCK_DRIFT:
+        if (
+            not allow_block_drift
+            and abs(current.current_block - int(submitted_block)) > MAX_BLOCK_DRIFT
+        ):
             capture_failure(
                 "weight.block_drift_exhausted",
                 component="gateway",
@@ -575,6 +808,11 @@ async def _verify_epoch_block_authority(
                 f"epoch {submitted.subnet_epoch_index} at block {submitted_block}"
             ),
         )
+    if require_current_epoch and current_epoch != expected_epoch:
+        raise HTTPException(
+            status_code=400,
+            detail="weight input request is not in the live official subnet epoch",
+        )
     if require_submission_window:
         live_window = current.tempo - WEIGHT_SUBMISSION_BLOCK
         if live_window <= 0:
@@ -620,6 +858,7 @@ async def _verify_epoch_block_authority(
         "official_subnet_epoch_id": submitted.subnet_epoch_index,
         "epoch_ref": submitted.epoch_ref,
         "epoch_block": submitted.epoch_block,
+        "gateway_epoch_block": current.epoch_block,
         "blocks_remaining": submitted.blocks_remaining,
         "block_hash": submitted.block_hash,
         "cutover_mapping_hash": cutover.mapping_hash,
@@ -1706,43 +1945,147 @@ async def get_weight_inputs_v2(
     ):
         raise HTTPException(status_code=403, detail="Invalid V2 weight input signature")
 
-    # An exact signed retry may arrive after the original authorized build has
-    # outlived MAX_BLOCK_DRIFT. Attach it to that same immutable work/result;
-    # all new request hashes must still pass current chain authority.
-    authorized_work = _weight_inputs_v2_has_authorized_work(request["request_hash"])
-    if not authorized_work:
-        await _verify_epoch_block_authority(
-            netuid=request["netuid"],
-            epoch_id=request["epoch_id"],
-            submitted_block=request["block"],
-            require_submission_window=False,
+    # The exact signed request becomes durable before any measured source read.
+    # Incomplete authorization is release-bound. A completed checkpoint keeps
+    # its producer identity and may cross a release replacement because the
+    # validator enclave revalidates all receipt and release proofs before use.
+    authorization_store, checkpoint_store = _gateway_weight_input_stores_v2()
+    release_identity = None
+    if authorization_store is not None or checkpoint_store is not None:
+        from gateway.research_lab.weight_input_authorization_v2 import (
+            load_gateway_weight_release_identity_v2,
         )
-        _remember_weight_inputs_v2_authorization(request["request_hash"])
+
+        release_identity = load_gateway_weight_release_identity_v2()
+    checkpoint = (
+        checkpoint_store.load(
+            release_identity=release_identity,
+            **_weight_input_checkpoint_scope_v2(request),
+        )
+        if checkpoint_store is not None
+        else None
+    )
+    durable_authorization = (
+        authorization_store.load(
+            release_identity=release_identity,
+            request=request,
+            calculation_snapshot=calculation,
+            source_cutoff_block=WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK,
+        )
+        if authorization_store is not None and checkpoint is None
+        else None
+    )
+    authorized_work = (
+        checkpoint is not None
+        or durable_authorization is not None
+        or _weight_inputs_v2_has_authorized_work(request["request_hash"])
+    )
+    epoch_authority = await _verify_epoch_block_authority(
+        netuid=request["netuid"],
+        epoch_id=request["epoch_id"],
+        submitted_block=request["block"],
+        require_submission_window=False,
+        allow_block_drift=authorized_work,
+        require_current_epoch=True,
+    )
+    if checkpoint is not None:
+        result = dict(checkpoint["result"])
+        record_stage(
+            component="gateway",
+            stage="weight_input_checkpoint_readback",
+            status="passed",
+            cache_hit=True,
+            checkpoint_hash=checkpoint["checkpoint_hash"],
+            **telemetry,
+        )
     else:
+        live_result_or_task = _weight_inputs_v2_has_live_result_or_task(
+            request["request_hash"]
+        )
+        if (
+            not live_result_or_task
+            and not authorized_work
+            and int(epoch_authority.get("gateway_epoch_block") or 0)
+            >= WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "New V2 weight input reconstruction is closed at the "
+                    "declared source cutoff"
+                ),
+            )
+        if durable_authorization is None and authorization_store is not None:
+            durable_authorization = authorization_store.persist(
+                release_identity=release_identity,
+                request=request,
+                calculation_snapshot=calculation,
+                validator_hotkey_signature=authorization.validator_hotkey_signature,
+                source_cutoff_block=WEIGHT_INPUT_SOURCE_CUTOFF_BLOCK,
+            )
+            record_stage(
+                component="gateway",
+                stage="weight_input_authorization_readback",
+                status="passed",
+                authorization_hash=durable_authorization["authorization_hash"],
+                **telemetry,
+            )
+        _remember_weight_inputs_v2_authorization(request["request_hash"])
         record_stage(
             component="gateway",
             stage="weight_input_authorized_retry_join",
             status="passed",
-            cache_hit=True,
+            cache_hit=authorized_work,
             **telemetry,
         )
 
     try:
-        with sentry_stage(
-            component="gateway",
-            operation="weight_bundle",
-            stage="weight_input_reconstruction",
-            cache_hit=authorized_work,
-            **telemetry,
-        ):
-            result = await _build_weight_inputs_v2_singleflight(
-                request_hash=request["request_hash"],
-                epoch_id=request["epoch_id"],
-                allocation_hash=request["allocation_hash"],
-                calculation_snapshot=calculation,
-                leaderboard_window_start=request["leaderboard_window_start"],
-                leaderboard_window_end=request["leaderboard_window_end"],
-            )
+        if checkpoint is None:
+            with sentry_stage(
+                component="gateway",
+                operation="weight_bundle",
+                stage="weight_input_reconstruction",
+                cache_hit=authorized_work,
+                **telemetry,
+            ):
+                built_result = await _build_weight_inputs_v2_singleflight(
+                    request_hash=request["request_hash"],
+                    epoch_id=request["epoch_id"],
+                    allocation_hash=request["allocation_hash"],
+                    calculation_snapshot=calculation,
+                    leaderboard_window_start=request["leaderboard_window_start"],
+                    leaderboard_window_end=request["leaderboard_window_end"],
+                    **(
+                        {
+                            "checkpoint_store": checkpoint_store,
+                            "checkpoint_release_identity": release_identity,
+                            "checkpoint_scope": (
+                                _weight_input_checkpoint_scope_v2(request)
+                            ),
+                        }
+                        if checkpoint_store is not None
+                        else {}
+                    ),
+                )
+            result = _weight_input_checkpoint_result_v2(built_result)
+            if checkpoint_store is not None:
+                checkpoint = checkpoint_store.load(
+                    release_identity=release_identity,
+                    **_weight_input_checkpoint_scope_v2(request),
+                )
+                if checkpoint is None:
+                    raise RuntimeError(
+                        "completed weight input checkpoint is unavailable"
+                    )
+                result = dict(checkpoint["result"])
+                record_stage(
+                    component="gateway",
+                    stage="weight_input_checkpoint_readback",
+                    status="passed",
+                    cache_hit=False,
+                    checkpoint_hash=checkpoint["checkpoint_hash"],
+                    **telemetry,
+                )
     except HTTPException:
         raise
     except Exception as exc:
@@ -1798,6 +2141,20 @@ async def get_weight_inputs_v2(
             status_code=503,
             detail="Authoritative V2 weight input reconstruction failed closed",
         ) from exc
+
+    if release_identity is not None:
+        producer_release_identity = (
+            checkpoint["release_identity"]
+            if checkpoint is not None
+            else release_identity
+        )
+        _schedule_weight_precompute_sidecar_v3(
+            request=request,
+            result=result,
+            release_identity=producer_release_identity,
+            epoch_authority=epoch_authority,
+            telemetry=telemetry,
+        )
 
     # ASGI servers always provide ``query_string``; strict local adapters and
     # direct Request unit fixtures may omit the optional key.  Parsing the

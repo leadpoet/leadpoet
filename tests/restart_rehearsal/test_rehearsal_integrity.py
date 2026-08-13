@@ -124,6 +124,66 @@ def test_git_tree_rehearsal_ticket_seed_includes_required_miner() -> None:
     }
 
 
+def test_persistent_weight_input_recovery_stage_uses_candidate_bound_state(
+) -> None:
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parent
+            / "fixtures"
+            / "production_shaped_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    result = production_workflow_runner._exercise_persistent_weight_input_recovery(
+        candidate_sha=COMMIT,
+        from_sha="2" * 40,
+        fixture=fixture,
+    )
+
+    assert result == {
+        "candidate_release_derived": True,
+        "candidate_endpoint_release_exact": True,
+        "predecessor_transition_bound": True,
+        "separate_gateway_processes_exercised": True,
+        "authorization_only_survived_stopped_process": True,
+        "authorized_post_cutoff_reconstruction_resumed": True,
+        "measured_source_invocations_exact": True,
+        "candidate_plan_durable": True,
+        "candidate_checkpoint_release_exact": True,
+        "checkpoint_replayed_in_fresh_process": True,
+        "post_cutoff_new_work_rejected": True,
+        "post_cutoff_replay_without_live_source": True,
+        "validator_journal_reused": True,
+        "exact_metagraph_order_enforced": True,
+    }
+
+
+def test_rehearsal_contract_requires_persistent_weight_input_recovery() -> None:
+    contract = build_rehearsal_behavior_contract_v2(
+        source_root=Path(__file__).resolve().parents[2],
+        candidate_sha=COMMIT,
+        profile="prepush",
+        epoch_count=1,
+    )
+
+    assert "persistent-weight-input-recovery" in contract[
+        "behavior_scenarios"
+    ]
+    assert "behavior:persistent-weight-input-recovery" in contract[
+        "required_stage_ids"
+    ]
+    assert "persistent_weight_input_recovery_verified" in contract[
+        "required_invariant_ids"
+    ]
+    assert {
+        "gateway/api/weights.py",
+        "gateway/research_lab/attested_weight_inputs_v2.py",
+        "gateway/research_lab/weight_input_authorization_v2.py",
+        "gateway/research_lab/weight_input_checkpoint_v2.py",
+        "validator_tee/host/weight_input_journal_v2.py",
+    }.issubset(contract["production_source_paths"])
+
+
 def _provider_persistence_batch_fixture() -> dict[str, Any]:
     return {
         "batch_size": 5,
@@ -4146,6 +4206,12 @@ def test_workflow_uses_the_strict_exact_external_boundaries(
         candidate_sha=candidate_sha,
         profile="prepush",
         docker_platform="linux/amd64",
+        docker_resources={
+            "available_cpus": "2",
+            "available_memory_bytes": 2053640192,
+            "effective_cpus": "2",
+            "effective_memory_bytes": 2053640192,
+        },
     )
 
     command = captured["command"]
@@ -5729,10 +5795,6 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
     def source_snapshot(**_kwargs):
         yield tmp_path
 
-    @contextmanager
-    def fixture_seed(*_args, **_kwargs):
-        yield tmp_path
-
     monkeypatch.setattr(
         rehearsal,
         "_git_sha",
@@ -5754,20 +5816,39 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
     monkeypatch.setattr(rehearsal, "_image_exists", lambda _tag: True)
     monkeypatch.setattr(
         rehearsal,
+        "_resolve_docker_resources",
+        lambda _profile: {
+            "available_cpus": "2",
+            "available_memory_bytes": 2053640192,
+            "effective_cpus": "2",
+            "effective_memory_bytes": 2053640192,
+            "requested_cpus": "4",
+            "requested_memory": "7g",
+            "requested_memory_bytes": 7 * 1024**3,
+        },
+    )
+    monkeypatch.setattr(
+        rehearsal,
         "_isolated_source_snapshot",
         source_snapshot,
     )
     monkeypatch.setattr(
         rehearsal,
         "_run_python37_finalization_probe",
-        lambda _root: None,
+        lambda _root, **_kwargs: None,
     )
     monkeypatch.setattr(
         rehearsal,
         "_prepare_drand_artifact",
         lambda **_kwargs: tmp_path,
     )
-    monkeypatch.setattr(rehearsal, "_prepared_fixture_seed", fixture_seed)
+    monkeypatch.setattr(
+        rehearsal,
+        "_prepare_fixture_seeds",
+        lambda _tag, *, targets, **_kwargs: {
+            target: tmp_path for target in targets
+        },
+    )
 
     def run_component(_tag, *, component, **_kwargs):
         calls.append(component)
@@ -5816,6 +5897,10 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
     by_stage = {
         item["stage"]: item for item in captured["stages"]
     }
+    assert by_stage["docker-capacity"]["requested_cpus"] == "4"
+    assert by_stage["docker-capacity"]["effective_cpus"] == "2"
+    assert by_stage["docker-capacity"]["requested_memory_bytes"] == 7 * 1024**3
+    assert by_stage["docker-capacity"]["effective_memory_bytes"] == 2053640192
     assert by_stage["gateway-forward-1"]["status"] == "failed"
     assert by_stage["validator-forward-1"]["status"] == "passed"
     assert by_stage["workflow-prepush"]["status"] == "failed"
@@ -5824,6 +5909,10 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
         "stage": "evidence-join-prepush",
         "status": "unexercised",
     }
+    assert by_stage["time-budget"]["requested_cpus"] == "4"
+    assert by_stage["time-budget"]["effective_cpus"] == "2"
+    assert by_stage["time-budget"]["requested_memory_bytes"] == 7 * 1024**3
+    assert by_stage["time-budget"]["effective_memory_bytes"] == 2053640192
 
 
 def _durable_interval(

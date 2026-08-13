@@ -1552,13 +1552,20 @@ def get_v2_provider_broker():
         if configuration.get("provider_registry_hash") != provider_registry_hash():
             raise RuntimeError("provider registry differs from measured routes")
         get_provider_egress_proxy()
+        general_transport = HTTPXProviderTransport(
+            allow_authenticated_complete_body_eof=True,
+            reuse_direct_connections=False,
+        )
+        reserved_weight_transport = HTTPXProviderTransport(
+            allow_authenticated_complete_body_eof=True,
+            reuse_direct_connections=False,
+        )
         v2_provider_broker = ProviderBrokerV2(
             credential_ref_hashes=credential_hashes,
             retry_policy_hashes=retry_hashes,
-            transport=HTTPXProviderTransport(
-                allow_authenticated_complete_body_eof=True,
-                reuse_direct_connections=False,
-            ),
+            transport=general_transport,
+            reserved_weight_transport_slots=1,
+            reserved_weight_transport=reserved_weight_transport,
             job_credential_slot_ref_hashes=configuration.get(
                 "job_lease_slot_ref_hashes"
             ),
@@ -1950,10 +1957,15 @@ def get_v2_coordinator_job_manager():
 
         from gateway.tee.coordinator_executor_v2 import (
             COORDINATOR_OPERATIONS_V2,
+            OP_ATTEST_WEIGHT_INPUT,
+            OP_ATTEST_WEIGHT_PUBLICATION,
             CoordinatorExecutorV2,
             coordinator_failed_parent_graph_policy_v2,
         )
         from gateway.tee.execution_job_manager_v2 import ExecutionJobManagerV2
+        from leadpoet_canonical.weight_authority_v2 import (
+            WEIGHT_INPUT_PURPOSES,
+        )
         from gateway.tee.openrouter_credential_v2 import (
             OpenRouterRegistrationAuthorityV2,
         )
@@ -2157,6 +2169,19 @@ def get_v2_coordinator_job_manager():
             ),
             worker_count=1,
             configured_worker_count=0,
+            reserved_operation_purposes=(
+                *(
+                    (OP_ATTEST_WEIGHT_INPUT, purpose)
+                    for role, purpose in WEIGHT_INPUT_PURPOSES.values()
+                    if role == "gateway_coordinator"
+                ),
+                (
+                    OP_ATTEST_WEIGHT_PUBLICATION,
+                    "gateway.weights.publication.v2",
+                ),
+            ),
+            reserved_worker_count=1,
+            reserved_lane_name="weight_submission",
             failed_parent_graph_policy=coordinator_failed_parent_graph_policy_v2,
             **_gateway_ancestry_manager_kwargs(runtime),
         )

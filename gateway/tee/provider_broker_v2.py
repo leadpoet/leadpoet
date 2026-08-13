@@ -27,6 +27,9 @@ from gateway.tee.egress_framing import (
 from gateway.tee.egress_policy import normalize_destination, normalize_proxy_destination
 from gateway.tee.egress_proxy import DEFAULT_IDLE_TIMEOUT_SECONDS
 from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
+from gateway.tee.supabase_source_v2 import (
+    WEIGHT_INPUT_PROVIDER_ATTEMPTS_PER_GENERATION_MAX,
+)
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
     build_transport_attempt,
@@ -34,6 +37,7 @@ from leadpoet_canonical.attested_v2 import (
     sha256_bytes,
     sha256_json,
 )
+from leadpoet_canonical.constants import PROVIDER_BROKER_SCHEMA_VERSION
 from gateway.tee.source_add_runtime_v2 import (
     source_add_dynamic_job_slot,
     source_add_dynamic_retry_policy_hash,
@@ -41,7 +45,6 @@ from gateway.tee.source_add_runtime_v2 import (
 )
 
 
-PROVIDER_BROKER_SCHEMA_VERSION = "leadpoet.provider_broker.v2"
 MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 PROVIDER_RPC_RESPONSE_RESERVE_BYTES = 8 * 1024 * 1024
 
@@ -64,8 +67,30 @@ MAX_RESPONSE_BODY_BYTES = _provider_rpc_response_body_limit(
 )
 MAX_TRANSPORT_RESPONSE_BODY_BYTES = 96 * 1024 * 1024
 MAX_DEDUPLICATION_RECORDS = 10000
+# Completed jobs release their broker records before the next measured
+# generation starts. Keep one additional complete generation as headroom for
+# sibling completion and the allocation operation that shares one purpose.
+WEIGHT_INPUT_PROVIDER_HEADROOM_GENERATIONS = 1
+MAX_RESERVED_DEDUPLICATION_RECORDS = (
+    WEIGHT_INPUT_PROVIDER_ATTEMPTS_PER_GENERATION_MAX
+    * (1 + WEIGHT_INPUT_PROVIDER_HEADROOM_GENERATIONS)
+)
 TERMINAL_RECORD_RETENTION_SECONDS = 3600.0
 MAX_JOB_CREDENTIAL_LEASES = 1024
+WEIGHT_SUBMISSION_RESERVED_LANE = "weight_submission"
+WEIGHT_SUBMISSION_PROVIDER_PURPOSES = frozenset(
+    {
+        "research_lab.allocation.v2",
+        "research_lab.champion_input.v2",
+        "research_lab.reimbursement_input.v2",
+        "research_lab.source_add_reward_input.v2",
+        "research_lab.fulfillment_input.v2",
+        "research_lab.leaderboard_input.v2",
+        "research_lab.ban_input.v2",
+        "research_lab.sourcing_input.v2",
+        "research_lab.anomaly_adjustment_input.v2",
+    }
+)
 DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS = min(
     120.0,
     DEFAULT_IDLE_TIMEOUT_SECONDS / 2.0,
@@ -905,6 +930,10 @@ class ProviderBrokerV2:
         transport: Optional[Callable[..., Mapping[str, Any]]] = None,
         artifact_sink: Optional[Callable[..., Mapping[str, Any]]] = None,
         job_credential_slot_ref_hashes: Optional[Mapping[str, str]] = None,
+        reserved_weight_transport_slots: int = 0,
+        reserved_weight_transport: Optional[
+            Callable[..., Mapping[str, Any]]
+        ] = None,
         clock: Callable[[], str] = _timestamp,
         monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -935,6 +964,38 @@ class ProviderBrokerV2:
         self._transport = (
             transport if transport is not None else HTTPXProviderTransport()
         )
+        if (
+            isinstance(reserved_weight_transport_slots, bool)
+            or not isinstance(reserved_weight_transport_slots, int)
+            or not 0 <= reserved_weight_transport_slots <= 500
+        ):
+            raise ProviderBrokerV2Error(
+                "reserved weight transport capacity is invalid"
+            )
+        if reserved_weight_transport_slots == 0:
+            if reserved_weight_transport is not None:
+                raise ProviderBrokerV2Error(
+                    "reserved weight transport is not configured"
+                )
+            self._reserved_weight_transport = None
+            self._reserved_weight_transport_slots = None
+        else:
+            if reserved_weight_transport is None and transport is not None:
+                raise ProviderBrokerV2Error(
+                    "reserved weight transport must be separate from general transport"
+                )
+            self._reserved_weight_transport = (
+                reserved_weight_transport
+                if reserved_weight_transport is not None
+                else HTTPXProviderTransport()
+            )
+            self._reserved_weight_transport_slots = threading.BoundedSemaphore(
+                reserved_weight_transport_slots
+            )
+        self._reserved_weight_transport_capacity = int(
+            reserved_weight_transport_slots
+        )
+        self._reserved_weight_transport_active = 0
         if artifact_sink is None:
             raise ProviderBrokerV2Error(
                 "provider broker requires encrypted artifact persistence"
@@ -947,7 +1008,7 @@ class ProviderBrokerV2:
         self._records = {}  # type: Dict[Tuple[str, int], Dict[str, Any]]
         self._pending_records = {}  # type: Dict[Tuple[str, int], Dict[str, Any]]
         self._record_keys_by_job = {}  # type: Dict[str, set[Tuple[str, int]]]
-        self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event, object]]
+        self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event, object, bool]]
         self._released_terminal_count = 0
         self._expired_terminal_count = 0
         self._lock = threading.Lock()
@@ -1021,6 +1082,58 @@ class ProviderBrokerV2:
         self._expired_terminal_count += len(expired)
         return len(expired)
 
+    def _terminal_record_count_for_lane_locked(
+        self,
+        *,
+        reserved_weight_lane: bool,
+    ) -> int:
+        committed = sum(
+            1
+            for record in self._records.values()
+            if bool(record.get("reserved_weight_lane"))
+            is reserved_weight_lane
+        )
+        pending = sum(
+            1
+            for pending_record in self._pending_records.values()
+            if bool(
+                pending_record.get("record", {}).get(
+                    "reserved_weight_lane"
+                )
+            )
+            is reserved_weight_lane
+        )
+        return committed + pending
+
+    def _admission_count_for_lane_locked(
+        self,
+        *,
+        reserved_weight_lane: bool,
+    ) -> int:
+        keys = {
+            key
+            for key, record in self._records.items()
+            if bool(record.get("reserved_weight_lane"))
+            is reserved_weight_lane
+        }
+        keys.update(
+            key
+            for key, pending_record in self._pending_records.items()
+            if bool(
+                pending_record.get("record", {}).get(
+                    "reserved_weight_lane"
+                )
+            )
+            is reserved_weight_lane
+        )
+        keys.update(
+            key
+            for key, inflight in self._inflight.items()
+            if len(inflight) >= 4
+            and bool(inflight[3]) is reserved_weight_lane
+        )
+        return len(keys)
+
     def health(self) -> Dict[str, Any]:
         expected_slots = set(expected_provider_credential_slots())
         with self._lock:
@@ -1030,6 +1143,12 @@ class ProviderBrokerV2:
             job_lease_count = len(self._job_credentials)
             released_terminal_count = self._released_terminal_count
             expired_terminal_count = self._expired_terminal_count
+            reserved_transport_active = self._reserved_weight_transport_active
+            reserved_terminal_count = (
+                self._terminal_record_count_for_lane_locked(
+                    reserved_weight_lane=True,
+                )
+            )
         missing = sorted(expected_slots - configured_slots)
         return {
             "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
@@ -1045,7 +1164,57 @@ class ProviderBrokerV2:
             "job_credential_slot_ref_hashes": dict(
                 sorted(self.job_credential_slot_ref_hashes.items())
             ),
+            **(
+                {
+                    "reserved_lanes": {
+                        WEIGHT_SUBMISSION_RESERVED_LANE: {
+                            "dedicated_transport": (
+                                self._reserved_weight_transport is not None
+                                and self._reserved_weight_transport
+                                is not self._transport
+                            ),
+                            "reserved_capacity": (
+                                self._reserved_weight_transport_capacity > 0
+                            ),
+                            "capacity": self._reserved_weight_transport_capacity,
+                            "active": reserved_transport_active,
+                            "terminal_capacity": (
+                                MAX_RESERVED_DEDUPLICATION_RECORDS
+                            ),
+                            "terminal_count": reserved_terminal_count,
+                            "purposes": sorted(
+                                WEIGHT_SUBMISSION_PROVIDER_PURPOSES
+                            ),
+                        }
+                    }
+                }
+                if self._reserved_weight_transport_slots is not None
+                else {}
+            ),
         }
+
+    @contextmanager
+    def _transport_for_request(self, *, purpose: str, timeout_ms: int):
+        if purpose not in WEIGHT_SUBMISSION_PROVIDER_PURPOSES:
+            yield self._transport
+            return
+        semaphore = self._reserved_weight_transport_slots
+        transport = self._reserved_weight_transport
+        if semaphore is None or transport is None:
+            yield self._transport
+            return
+        if not semaphore.acquire(timeout=max(0.001, timeout_ms / 1000.0)):
+            raise TimeoutError(
+                "reserved weight provider transport timed out waiting for capacity"
+            )
+        with self._lock:
+            self._reserved_weight_transport_active += 1
+        try:
+            yield transport
+        finally:
+            with self._lock:
+                self._reserved_weight_transport_active -= 1
+            semaphore.release()
 
     def _abandon_inflight(
         self,
@@ -1471,6 +1640,8 @@ class ProviderBrokerV2:
         if retry_policy_hash != expected_retry_policy_hash:
             raise ProviderBrokerV2Error("provider retry policy hash mismatch")
         logical_operation_id = str(request["logical_operation_id"] or "")
+        purpose = str(request["purpose"] or "")
+        reserved_weight_lane = purpose in WEIGHT_SUBMISSION_PROVIDER_PURPOSES
         deduplication_key = (logical_operation_id, attempt_number)
         request_fingerprint = sha256_json(
             {
@@ -1511,17 +1682,24 @@ class ProviderBrokerV2:
                 wait_event = inflight[1]
                 owns_attempt = False
             else:
-                if (
-                    len(self._records) + len(self._pending_records)
-                    >= MAX_DEDUPLICATION_RECORDS
-                ):
+                lane_capacity = (
+                    MAX_RESERVED_DEDUPLICATION_RECORDS
+                    if reserved_weight_lane
+                    else MAX_DEDUPLICATION_RECORDS
+                )
+                if self._admission_count_for_lane_locked(
+                    reserved_weight_lane=reserved_weight_lane,
+                ) >= lane_capacity:
                     self._purge_expired_records_locked(
                         self._monotonic_clock()
                     )
-                    if (
-                        len(self._records) + len(self._pending_records)
-                        >= MAX_DEDUPLICATION_RECORDS
-                    ):
+                    if self._admission_count_for_lane_locked(
+                        reserved_weight_lane=reserved_weight_lane,
+                    ) >= lane_capacity:
+                        if reserved_weight_lane:
+                            raise ProviderBrokerV2Error(
+                                "reserved weight provider terminal ledger is full"
+                            )
                         raise ProviderBrokerV2Error(
                             "provider terminal ledger is full"
                         )
@@ -1545,6 +1723,7 @@ class ProviderBrokerV2:
                     request_fingerprint,
                     wait_event,
                     owner_token,
+                    reserved_weight_lane,
                 )
                 owns_attempt = True
         if not owns_attempt:
@@ -1724,7 +1903,11 @@ class ProviderBrokerV2:
                 transport_kwargs["upstream_proxy_url"] = egress_proxy_url
             if max_response_bytes != MAX_RESPONSE_BODY_BYTES:
                 transport_kwargs["max_response_bytes"] = max_response_bytes
-            response = dict(self._transport(**transport_kwargs))
+            with self._transport_for_request(
+                purpose=purpose,
+                timeout_ms=timeout_ms,
+            ) as selected_transport:
+                response = dict(selected_transport(**transport_kwargs))
             response_body = bytes(response["body"])
             if len(response_body) > max_response_bytes:
                 raise ProviderBrokerV2Error("provider response exceeds size limit")
@@ -1842,6 +2025,7 @@ class ProviderBrokerV2:
                 return dict(existing["result"])
             record = {
                 "job_id": str(request["job_id"] or ""),
+                "reserved_weight_lane": reserved_weight_lane,
                 "request_fingerprint": request_fingerprint,
                 "result": dict(result),
                 "completed_monotonic": self._monotonic_clock(),

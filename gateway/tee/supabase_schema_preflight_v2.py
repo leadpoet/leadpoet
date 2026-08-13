@@ -570,6 +570,62 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "current_reward_status",
         ),
     ),
+    (
+        "scripts/149-research-lab-weight-precompute-store.sql",
+        "research_lab_weight_precompute_runs_v3",
+        (
+            "precompute_run_id",
+            "network_genesis_hash",
+            "netuid",
+            "epoch_id",
+            "epoch_ref",
+            "request_hash",
+            "planned_submission_block",
+            "release_commit_sha",
+            "release_manifest_hash",
+            "run_doc",
+        ),
+    ),
+    (
+        "scripts/149-research-lab-weight-precompute-store.sql",
+        "research_lab_weight_precompute_input_sets_v3",
+        (
+            "precompute_run_id",
+            "input_set_hash",
+            "source_input_root",
+            "calculation_snapshot_hash",
+            "input_receipt_hashes",
+            "input_set_doc",
+            "completed_at",
+        ),
+    ),
+    (
+        "scripts/149-research-lab-weight-precompute-store.sql",
+        "research_lab_weight_precompute_stage_events_v3",
+        (
+            "stage_event_id",
+            "precompute_run_id",
+            "stage_sequence",
+            "input_set_hash",
+            "stage_name",
+            "stage_status",
+            "event_hash",
+            "event_doc",
+        ),
+    ),
+    (
+        "scripts/149-research-lab-weight-precompute-store.sql",
+        "research_lab_weight_precompute_run_current_v3",
+        (
+            "precompute_run_id",
+            "netuid",
+            "epoch_id",
+            "request_hash",
+            "input_set_hash",
+            "source_input_root",
+            "calculation_snapshot_hash",
+        ),
+    ),
 )
 
 REQUIRED_SUPABASE_V2_RPCS = (
@@ -792,6 +848,26 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/145-research-lab-source-add-admission-control.sql",
         "research_lab_source_add_admission_control_contract_v1",
+    ),
+    (
+        "scripts/149-research-lab-weight-precompute-store.sql",
+        "begin_research_lab_weight_precompute_run_v3",
+    ),
+    (
+        "scripts/149-research-lab-weight-precompute-store.sql",
+        "record_research_lab_weight_precompute_input_set_v3",
+    ),
+    (
+        "scripts/149-research-lab-weight-precompute-store.sql",
+        "append_research_lab_weight_precompute_stage_event_v3",
+    ),
+    (
+        "scripts/149-research-lab-weight-precompute-store.sql",
+        "research_lab_weight_precompute_readback_v3",
+    ),
+    (
+        "scripts/149-research-lab-weight-precompute-store.sql",
+        "research_lab_weight_precompute_store_contract_v3",
     ),
 )
 

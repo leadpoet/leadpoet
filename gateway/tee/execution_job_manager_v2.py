@@ -48,6 +48,12 @@ from leadpoet_canonical.ancestry_checkpoint_v2 import (
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     MAX_REWARD_CHECKPOINTS,
 )
+from leadpoet_canonical.constants import (
+    WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS,
+)
+from leadpoet_canonical.weight_authority_v2 import (
+    GATEWAY_WEIGHT_INPUT_CATEGORIES,
+)
 
 
 JOB_SCHEMA_VERSION = "leadpoet.enclave_execution_job.v2"
@@ -61,7 +67,14 @@ PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION = (
 )
 PARENT_ANCESTRY_PROOFS_FIELD = "_v2_parent_ancestry_proofs"
 MAX_JOB_COUNT = 256
+MAX_RESERVED_PUBLICATION_JOB_COUNT = 1
+MAX_RESERVED_JOB_COUNT = (
+    WEIGHT_INPUT_RECONSTRUCTION_MAX_GENERATIONS
+    * len(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+    + MAX_RESERVED_PUBLICATION_JOB_COUNT
+)
 MAX_QUEUED_JOBS = 64
+MAX_RESERVED_QUEUED_JOBS = 16
 MIN_TERMINAL_EVICTION_AGE_SECONDS = 300
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 # Allocation authority and its direct weight-publication consumers carry the
@@ -1157,6 +1170,9 @@ class ExecutionJobManagerV2:
         executor: Callable[[str, Mapping[str, Any], ExecutionContextV2], Any],
         worker_count: int,
         configured_worker_count: Optional[int] = None,
+        reserved_operation_purposes: Iterable[tuple[str, str]] = (),
+        reserved_worker_count: int = 0,
+        reserved_lane_name: Optional[str] = None,
         host_operation_channel_factory: Optional[
             Callable[[str, str], Any]
         ] = None,
@@ -1184,6 +1200,27 @@ class ExecutionJobManagerV2:
             str(operation): frozenset(str(item) for item in purposes)
             for operation, purposes in operations.items()
         }
+        self._reserved_operation_purposes = frozenset(
+            (str(operation), str(purpose))
+            for operation, purpose in reserved_operation_purposes
+        )
+        self._reserved_lane_name = (
+            _identifier(reserved_lane_name, "reserved lane name")
+            if reserved_lane_name is not None
+            else None
+        )
+        if self._reserved_operation_purposes:
+            if self._reserved_lane_name is None:
+                raise ValueError("reserved execution lane name is required")
+            if not 1 <= int(reserved_worker_count) <= 500:
+                raise ValueError("reserved execution worker count is invalid")
+            if any(
+                purpose not in self._operations.get(operation, ())
+                for operation, purpose in self._reserved_operation_purposes
+            ):
+                raise ValueError("reserved execution purpose is unauthorized")
+        elif int(reserved_worker_count) != 0 or self._reserved_lane_name is not None:
+            raise ValueError("reserved execution lane is not configured")
         self._executor = executor
         self._host_operation_channel_factory = host_operation_channel_factory
         self._failed_parent_graph_policy = failed_parent_graph_policy
@@ -1215,8 +1252,14 @@ class ExecutionJobManagerV2:
         self._jobs = {}  # type: Dict[str, Dict[str, Any]]
         self._lock = threading.Lock()
         self._queue = queue.Queue(maxsize=MAX_QUEUED_JOBS)
+        self._reserved_queue = (
+            queue.Queue(maxsize=MAX_RESERVED_QUEUED_JOBS)
+            if self._reserved_operation_purposes
+            else None
+        )
         self._active = set()
         self._workers = []
+        self._reserved_workers = []
         self._terminal_eviction_count = 0
         self._configured_worker_count = (
             int(worker_count)
@@ -1233,6 +1276,17 @@ class ExecutionJobManagerV2:
             )
             worker.start()
             self._workers.append(worker)
+        if self._reserved_queue is not None:
+            for index in range(int(reserved_worker_count)):
+                worker = threading.Thread(
+                    target=self._worker_loop,
+                    args=(self._reserved_queue,),
+                    name="enclave-v2-reserved-%s-%s"
+                    % (self._reserved_lane_name, index + 1),
+                    daemon=True,
+                )
+                worker.start()
+                self._reserved_workers.append(worker)
 
     def health(self) -> Dict[str, Any]:
         with self._lock:
@@ -1240,7 +1294,12 @@ class ExecutionJobManagerV2:
             counts = {}
             for job in self._jobs.values():
                 counts[job["state"]] = counts.get(job["state"], 0) + 1
-        return {
+            reserved_job_count = sum(
+                1
+                for job in self._jobs.values()
+                if job.get("execution_lane") == self._reserved_lane_name
+            )
+        result = {
             "schema_version": JOB_SCHEMA_VERSION,
             "authority": "v2_only",
             "role": self.role,
@@ -1257,6 +1316,32 @@ class ExecutionJobManagerV2:
             "ancestry_checkpoints": self._ancestry_lineage_id is not None,
             "ancestry_lineage_id": self._ancestry_lineage_id,
         }
+        if self._reserved_lane_name is not None:
+            result["reserved_lanes"] = {
+                str(self._reserved_lane_name): {
+                    "dedicated_worker": bool(self._reserved_workers)
+                    and all(
+                        worker.is_alive() for worker in self._reserved_workers
+                    ),
+                    "reserved_capacity": (
+                        self._reserved_queue is not None
+                        and self._reserved_queue.maxsize > 0
+                    ),
+                    "worker_count": len(self._reserved_workers),
+                    "queue_depth": self._reserved_queue.qsize()
+                    if self._reserved_queue is not None
+                    else 0,
+                    "job_capacity": MAX_RESERVED_JOB_COUNT,
+                    "job_count": reserved_job_count,
+                    "operation_purposes": [
+                        {"operation": operation, "purpose": purpose}
+                        for operation, purpose in sorted(
+                            self._reserved_operation_purposes
+                        )
+                    ],
+                }
+            }
+        return result
 
     def submit(self, manifest: Mapping[str, Any]) -> Dict[str, Any]:
         normalized = _manifest(
@@ -1266,6 +1351,7 @@ class ExecutionJobManagerV2:
         )
         manifest_hash = sha256_bytes(_canonical_bytes(normalized))
         now = self._clock()
+        execution_lane = self._execution_lane(normalized)
         with self._lock:
             self._purge_locked()
             existing = self._jobs.get(normalized["job_id"])
@@ -1275,10 +1361,31 @@ class ExecutionJobManagerV2:
                         "job_id already exists with another manifest"
                     )
                 return self._summary(existing)
-            if len(self._jobs) >= MAX_JOB_COUNT:
-                self._evict_oldest_terminal_locked()
-            if len(self._jobs) >= MAX_JOB_COUNT:
-                raise ExecutionJobV2Error("V2 job capacity is full")
+            lane_capacity = (
+                MAX_RESERVED_JOB_COUNT
+                if execution_lane == self._reserved_lane_name
+                else MAX_JOB_COUNT
+            )
+            lane_job_count = sum(
+                1
+                for job in self._jobs.values()
+                if job.get("execution_lane", "default") == execution_lane
+            )
+            if lane_job_count >= lane_capacity:
+                self._evict_oldest_terminal_locked(
+                    execution_lane=execution_lane,
+                )
+                lane_job_count = sum(
+                    1
+                    for job in self._jobs.values()
+                    if job.get("execution_lane", "default") == execution_lane
+                )
+            if lane_job_count >= lane_capacity:
+                if execution_lane == "default":
+                    raise ExecutionJobV2Error("V2 job capacity is full")
+                raise ExecutionJobV2Error(
+                    "%s job capacity is full" % execution_lane
+                )
             job = {
                 "manifest": normalized,
                 "manifest_hash": manifest_hash,
@@ -1298,6 +1405,7 @@ class ExecutionJobManagerV2:
                 "host_operation_channel": None,
                 "error_code": None,
                 "cancel_requested": False,
+                "execution_lane": execution_lane,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -1358,10 +1466,17 @@ class ExecutionJobManagerV2:
                 raise ExecutionJobV2Error("payload must be canonical UTF-8 JSON") from exc
             if not isinstance(decoded, Mapping) or _canonical_bytes(decoded) != payload:
                 raise ExecutionJobV2Error("payload must be a canonical JSON object")
+            work_queue = self._queue_for_job(job)
             try:
-                self._queue.put_nowait(job_id)
+                work_queue.put_nowait(job_id)
             except queue.Full as exc:
-                raise ExecutionJobV2Error("V2 execution queue is full") from exc
+                if job["execution_lane"] == "default":
+                    raise ExecutionJobV2Error(
+                        "V2 execution queue is full"
+                    ) from exc
+                raise ExecutionJobV2Error(
+                    "%s execution queue is full" % job["execution_lane"]
+                ) from exc
             job["state"] = "queued"
             job["updated_at"] = self._clock()
             return self._summary(job)
@@ -1515,9 +1630,26 @@ class ExecutionJobManagerV2:
                 )
             return json.loads(_canonical_bytes(proof).decode("utf-8"))
 
-    def _worker_loop(self) -> None:
+    def _execution_lane(self, manifest: Mapping[str, Any]) -> str:
+        if (
+            (str(manifest["operation"]), str(manifest["purpose"]))
+            in self._reserved_operation_purposes
+        ):
+            return str(self._reserved_lane_name)
+        return "default"
+
+    def _queue_for_job(self, job: Mapping[str, Any]) -> Any:
+        if job.get("execution_lane") == self._reserved_lane_name:
+            if self._reserved_queue is None:
+                raise ExecutionJobV2Error("reserved execution queue is unavailable")
+            return self._reserved_queue
+        return self._queue
+
+    def _worker_loop(self, work_queue: Any = None) -> None:
+        if work_queue is None:
+            work_queue = self._queue
         while True:
-            job_id = self._queue.get()
+            job_id = work_queue.get()
             try:
                 self._execute(job_id)
             except Exception as exc:
@@ -1534,7 +1666,7 @@ class ExecutionJobManagerV2:
                     flush=True,
                 )
             finally:
-                self._queue.task_done()
+                work_queue.task_done()
 
     def _build_ancestry_compact_proof(
         self,
@@ -2282,7 +2414,11 @@ class ExecutionJobManagerV2:
         for job_id in expired:
             del self._jobs[job_id]
 
-    def _evict_oldest_terminal_locked(self) -> Optional[str]:
+    def _evict_oldest_terminal_locked(
+        self,
+        *,
+        execution_lane: str = "default",
+    ) -> Optional[str]:
         cutoff = self._clock() - MIN_TERMINAL_EVICTION_AGE_SECONDS
         candidates = [
             (
@@ -2293,6 +2429,7 @@ class ExecutionJobManagerV2:
             for job_id, job in self._jobs.items()
             if (
                 job["state"] in TERMINAL_STATES
+                and job.get("execution_lane", "default") == execution_lane
                 and job_id not in self._active
                 and float(job["updated_at"]) <= cutoff
             )

@@ -432,6 +432,10 @@ async def test_flow_orders_inputs_compute_parent_binding_and_durable_publication
         assert prepared["weight_authorization_id"] == "sha256:" + "9" * 64
         assert prepared["published_bundle"]["schema_version"].endswith(".v2")
 
+    def inputs_verified(inputs):
+        order.append("inputs")
+        assert inputs["gateway_authority_event_hash"] == "sha256:" + "c" * 64
+
     client = Client()
     result = await prepare_authoritative_weight_publication_v2(
         calculation_snapshot={"epoch_id": 100},
@@ -447,6 +451,7 @@ async def test_flow_orders_inputs_compute_parent_binding_and_durable_publication
         fetch_inputs=_inputs,
         post_json=post,
         before_publish=before_publish,
+        on_inputs_verified=inputs_verified,
     )
     assert client.compute_requests[0]["gateway_authority_event_hash"] == (
         "sha256:" + "c" * 64
@@ -457,7 +462,117 @@ async def test_flow_orders_inputs_compute_parent_binding_and_durable_publication
     assert observed["timeout"] == 600.0
     assert result["uids"] == [0, 1]
     assert result["weight_submission_event_hash"] == EVENT
-    assert order == ["journal", "post"]
+    assert order == ["inputs", "journal", "post"]
+
+
+@pytest.mark.asyncio
+async def test_flow_replays_verified_gateway_inputs_without_network_fetch(
+    monkeypatch,
+):
+    monkeypatch.setattr(flow_module, "build_authoritative_weight_bundle_v2", _bundle)
+    monkeypatch.setattr(
+        flow_module,
+        "validate_published_weight_bundle_v2",
+        _verified_bundle,
+    )
+    prepared_inputs = await _inputs(validator_hotkey=HOTKEY)
+
+    async def fetch_must_not_run(**_kwargs):
+        raise AssertionError("verified gateway inputs must not be fetched again")
+
+    async def post(_url, _payload, _timeout):
+        return _ack()
+
+    result = await prepare_authoritative_weight_publication_v2(
+        calculation_snapshot={"epoch_id": 100},
+        host_uids=[0, 1],
+        host_weights=[0.8, 0.2],
+        validator_hotkey=HOTKEY,
+        allocation_hash="sha256:" + "d" * 64,
+        leaderboard_window_start="2026-07-03T20:00:00Z",
+        leaderboard_window_end="2026-07-10T20:00:00Z",
+        gateway_url="https://gateway.example",
+        expected_chain="wss://entrypoint-finney.opentensor.ai:443",
+        client=Client(),
+        fetch_inputs=fetch_must_not_run,
+        post_json=post,
+        prepared_gateway_inputs=prepared_inputs,
+        on_inputs_verified=lambda _inputs: (_ for _ in ()).throw(
+            AssertionError("replayed inputs must not be recorded as newly fetched")
+        ),
+    )
+    assert result["uids"] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_flow_refetches_after_enclave_rejects_shape_valid_gateway_inputs(
+    monkeypatch,
+):
+    monkeypatch.setattr(flow_module, "build_authoritative_weight_bundle_v2", _bundle)
+    monkeypatch.setattr(
+        flow_module,
+        "validate_published_weight_bundle_v2",
+        _verified_bundle,
+    )
+    invalid_inputs = await _inputs(validator_hotkey=HOTKEY)
+    invalid_inputs["gateway_authority_event_hash"] = "sha256:" + "d" * 64
+    valid_inputs = await _inputs(validator_hotkey=HOTKEY)
+    responses = [invalid_inputs, valid_inputs]
+    fetched = []
+    journaled = []
+
+    async def fetch(**_kwargs):
+        response = responses[len(fetched)]
+        fetched.append(response)
+        return response
+
+    class RejectFirstInputs(Client):
+        def compute_authoritative_weights_v2(self, request):
+            if request["gateway_authority_event_hash"] == (
+                invalid_inputs["gateway_authority_event_hash"]
+            ):
+                raise RuntimeError("validator enclave rejected gateway ancestry")
+            return super().compute_authoritative_weights_v2(request)
+
+    async def post(_url, _payload, _timeout):
+        return _ack()
+
+    def record_gateway_inputs(inputs):
+        journaled.append(dict(inputs))
+
+    client = RejectFirstInputs()
+    kwargs = {
+        "calculation_snapshot": {"epoch_id": 100},
+        "host_uids": [0, 1],
+        "host_weights": [0.8, 0.2],
+        "validator_hotkey": HOTKEY,
+        "allocation_hash": "sha256:" + "d" * 64,
+        "leaderboard_window_start": "2026-07-03T20:00:00Z",
+        "leaderboard_window_end": "2026-07-10T20:00:00Z",
+        "gateway_url": "https://gateway.example",
+        "expected_chain": "wss://entrypoint-finney.opentensor.ai:443",
+        "client": client,
+        "fetch_inputs": fetch,
+        "post_json": post,
+        "on_inputs_verified": record_gateway_inputs,
+    }
+
+    with pytest.raises(
+        AuthoritativeWeightFlowV2Error,
+        match="preparation failed closed",
+    ) as rejected:
+        await prepare_authoritative_weight_publication_v2(**kwargs)
+
+    assert isinstance(rejected.value.__cause__, RuntimeError)
+    assert str(rejected.value.__cause__) == (
+        "validator enclave rejected gateway ancestry"
+    )
+    assert journaled == []
+    result = await prepare_authoritative_weight_publication_v2(**kwargs)
+
+    assert result["uids"] == [0, 1]
+    assert fetched == [invalid_inputs, valid_inputs]
+    assert journaled == [valid_inputs]
 
 
 @pytest.mark.asyncio

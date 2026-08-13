@@ -493,6 +493,7 @@ def _migration_schema_contract(
         "146-research-lab-private-benchmark-schema-v11.sql",
         "147-research-lab-source-catalog-auth-metadata.sql",
         "148-research-lab-atomic-credit-resume.sql",
+        "149-research-lab-weight-precompute-store.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (

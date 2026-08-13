@@ -17,8 +17,8 @@ from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
 from urllib.parse import urlencode
 from uuid import UUID
 
-from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
+from leadpoet_canonical.constants import PROVIDER_BROKER_SCHEMA_VERSION
 
 
 SUPABASE_WEIGHT_SOURCE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
@@ -656,6 +656,39 @@ QUERY_POLICIES = {
         limit=1,
     ),
 }
+
+# Exact upper-bound invocation count for one complete gateway weight-input
+# generation. Allocation is read four times (allocation, champions,
+# reimbursements, and source-add rewards). Sourcing verifies at most the 30
+# rows allowed by its measured policy. Each invocation may consume every page
+# allowed by that policy and every measured transport retry for that page.
+_WEIGHT_INPUT_QUERY_POLICY_INVOCATIONS = {
+    "attested_receipt_by_hash": 4 + QUERY_POLICIES[
+        "sourcing_epoch_inputs"
+    ].limit,
+    "research_lab_allocation_current": 4,
+    "banned_hotkeys": 2,
+    "fulfillment_active_rewards": 1,
+    "fulfillment_leaderboard_winners": 1,
+    "sourcing_epoch_inputs": 1,
+}
+
+
+def weight_input_provider_attempt_upper_bound_v2() -> int:
+    """Return the measured provider-attempt bound for one input generation."""
+
+    page_requests = sum(
+        QUERY_POLICIES[policy_id].max_pages * invocation_count
+        for policy_id, invocation_count in (
+            _WEIGHT_INPUT_QUERY_POLICY_INVOCATIONS.items()
+        )
+    )
+    return page_requests * (len(SUPABASE_RETRY_BACKOFF_SECONDS) + 1)
+
+
+WEIGHT_INPUT_PROVIDER_ATTEMPTS_PER_GENERATION_MAX = (
+    weight_input_provider_attempt_upper_bound_v2()
+)
 
 
 def _non_negative_int(value: Any, field: str) -> int:

@@ -16,9 +16,13 @@ from Leadpoet.utils.subnet_epoch import (
     SubnetEpochSnapshot,
     read_subnet_epoch_snapshot,
 )
+from leadpoet_canonical.constants import ALLOCATION_PREPARATION_BLOCK
 
 
 MAXIMUM_RESTART_EPOCH_BLOCK = 300
+# A release may be prepared through block 300, but a healthy runtime must not
+# be stopped after deterministic allocation preparation begins.
+MAXIMUM_DESTRUCTIVE_RESTART_EPOCH_BLOCK = ALLOCATION_PREPARATION_BLOCK - 1
 RESTART_START_SCHEMA_VERSION = "leadpoet.restart_epoch_start.v1"
 RESTART_EPOCH_READ_ATTEMPTS = 3
 RESTART_EPOCH_RETRY_DELAY_SECONDS = 1.0
@@ -51,6 +55,41 @@ def verify_restart_epoch_window(
         raise RestartEpochGateError(
             "production restart may start only at official subnet epoch block "
             f"{MAXIMUM_RESTART_EPOCH_BLOCK} or earlier; observed "
+            f"{snapshot.epoch_block}"
+        )
+    return result
+
+
+def verify_destructive_restart_epoch_window(
+    subtensor: Any,
+    *,
+    netuid: int = 71,
+) -> dict[str, Any]:
+    """Reject a process or container teardown after allocation preparation starts."""
+
+    snapshot = read_subnet_epoch_snapshot(subtensor, netuid=netuid)
+    result = {
+        "schema_version": "leadpoet.restart_epoch_gate.v1",
+        "network_genesis_hash": snapshot.network_genesis_hash,
+        "netuid": snapshot.netuid,
+        "current_block": snapshot.current_block,
+        "subnet_epoch_index": snapshot.subnet_epoch_index,
+        "epoch_block": snapshot.epoch_block,
+        "maximum_restart_epoch_block": MAXIMUM_RESTART_EPOCH_BLOCK,
+        "maximum_destructive_restart_epoch_block": (
+            MAXIMUM_DESTRUCTIVE_RESTART_EPOCH_BLOCK
+        ),
+        "destructive_phase": True,
+        "restart_allowed": (
+            snapshot.epoch_block <= MAXIMUM_DESTRUCTIVE_RESTART_EPOCH_BLOCK
+        ),
+        "snapshot": snapshot.to_dict(),
+    }
+    if not result["restart_allowed"]:
+        raise RestartEpochGateError(
+            "production destructive restart may start only at official subnet "
+            "epoch block "
+            f"{MAXIMUM_DESTRUCTIVE_RESTART_EPOCH_BLOCK} or earlier; observed "
             f"{snapshot.epoch_block}"
         )
     return result
@@ -161,8 +200,9 @@ def verify_captured_restart_epoch_start(
     *,
     path: Path,
     netuid: int = 71,
+    reapply_current_deadline: bool = False,
 ) -> dict[str, Any]:
-    """Verify one earlier valid start without reapplying the position deadline."""
+    """Verify one earlier valid start and optionally guard destructive teardown."""
 
     captured = load_restart_epoch_start(path, netuid=netuid)
     exact = _read_captured_snapshot(subtensor, captured=captured)
@@ -192,13 +232,27 @@ def verify_captured_restart_epoch_start(
         raise RestartEpochGateError(
             "captured restart start is not in the current official chain history"
         )
+    if (
+        reapply_current_deadline
+        and current.epoch_block > MAXIMUM_DESTRUCTIVE_RESTART_EPOCH_BLOCK
+    ):
+        raise RestartEpochGateError(
+            "production destructive restart may start only at official subnet "
+            "epoch block "
+            f"{MAXIMUM_DESTRUCTIVE_RESTART_EPOCH_BLOCK} or earlier; observed "
+            f"{current.epoch_block}"
+        )
     return {
         "schema_version": RESTART_START_SCHEMA_VERSION,
         "maximum_restart_epoch_block": MAXIMUM_RESTART_EPOCH_BLOCK,
         "restart_allowed": True,
         "captured_epoch_block": captured.epoch_block,
         "current_epoch_block": current.epoch_block,
-        "deadline_reapplied": False,
+        "maximum_destructive_restart_epoch_block": (
+            MAXIMUM_DESTRUCTIVE_RESTART_EPOCH_BLOCK
+        ),
+        "destructive_phase": reapply_current_deadline,
+        "deadline_reapplied": reapply_current_deadline,
         "captured_snapshot": captured.to_dict(),
         "current_snapshot": current.to_dict(),
     }
@@ -216,6 +270,14 @@ def _parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--capture-output", type=Path)
     mode.add_argument("--captured-report", type=Path)
+    parser.add_argument(
+        "--destructive-phase",
+        action="store_true",
+        help=(
+            "require a fresh official epoch position at or before the "
+            "allocation-preparation boundary before process or container teardown"
+        ),
+    )
     return parser
 
 
@@ -230,6 +292,10 @@ def _network_for_attempt(network: str, attempt: int) -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
+    if args.capture_output is not None and args.destructive_phase:
+        raise RestartEpochGateError(
+            "destructive-phase may verify a restart start but may not capture one"
+        )
 
     import bittensor as bt
 
@@ -257,6 +323,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     subtensor,
                     path=args.captured_report,
                     netuid=args.netuid,
+                    reapply_current_deadline=args.destructive_phase,
                 )
             elif args.capture_output is not None:
                 result = capture_restart_epoch_start(
@@ -265,10 +332,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 write_restart_epoch_start(args.capture_output, result)
             else:
-                result = verify_restart_epoch_window(
-                    subtensor,
-                    netuid=args.netuid,
-                )
+                if args.destructive_phase:
+                    result = verify_destructive_restart_epoch_window(
+                        subtensor,
+                        netuid=args.netuid,
+                    )
+                else:
+                    result = verify_restart_epoch_window(
+                        subtensor,
+                        netuid=args.netuid,
+                    )
             break
         except SubnetEpochError as exc:
             if attempt >= RESTART_EPOCH_READ_ATTEMPTS:

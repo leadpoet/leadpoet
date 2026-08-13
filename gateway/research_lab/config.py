@@ -201,7 +201,7 @@ import research_lab_adapter
 import sourcing_model
 
 metadata = research_lab_adapter.adapter_metadata()
-assert metadata.get("adapter_version") == "sourcing-model-research-lab-adapter:v3"
+assert metadata.get("adapter_version") == "sourcing-model-research-lab-adapter:v7"
 assert metadata.get("component_registry_version") == "sourcing-model-components:v2"
 assert metadata.get("routing", {}).get("compiler_version") == "routing-compiler-v2"
 assert metadata.get("routing", {}).get("private_bindings_exposed") is False

@@ -428,15 +428,21 @@ def test_offline_replay_uses_only_nonsecret_key_sentinels(monkeypatch, tmp_path)
 
 def test_record_and_offline_replay_use_identical_model_context(monkeypatch, tmp_path):
     payloads = []
+    receipt_validations = []
 
     def run_named(_command, **kwargs):
         payloads.append(json.loads(kwargs["input_text"]))
         return SimpleNamespace(returncode=0, stdout="[]", stderr="receipt")
 
     monkeypatch.setattr(recorder, "_run_named_docker", run_named)
+
+    def validate_receipt(*_args, **kwargs):
+        receipt_validations.append(dict(kwargs))
+        return {}
+
     monkeypatch.setattr(
         "research_lab.eval.private_runtime.validate_sourcing_runtime_receipt",
-        lambda *args, **kwargs: {},
+        validate_receipt,
     )
     common = {
         "image_digest": "example.invalid/model@sha256:" + "1" * 64,
@@ -457,6 +463,10 @@ def test_record_and_offline_replay_use_identical_model_context(monkeypatch, tmp_
     assert payloads[0]["context"] == payloads[1]["context"]
     assert payloads[0]["context"][recorder.SNAPSHOT_EXECUTION_CONTEXT_MARKER] is True
     assert "dev_snapshot_replay_validation" not in payloads[1]["context"]
+    assert [item["expected_icp"] for item in receipt_validations] == [
+        payloads[0]["icp"],
+        payloads[1]["icp"],
+    ]
 
 
 def test_offline_replay_rejects_caught_strict_snapshot_miss(monkeypatch, tmp_path):

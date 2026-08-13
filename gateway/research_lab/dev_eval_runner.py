@@ -698,6 +698,7 @@ class DockerReplayDevEvaluator:
         private_runtime.validate_sourcing_runtime_receipt(
             str(completed.stderr or ""),
             expected_runtime_options=payload["context"]["runtime_options"],
+            expected_icp=payload["icp"],
         )
         decoded = json.loads(completed.stdout)
         if not isinstance(decoded, list):

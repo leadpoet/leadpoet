@@ -14,6 +14,7 @@ Covers bugs #8/#14/#15/#31/#35 from the pre-launch audit:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import subprocess
 import sys
@@ -55,6 +56,251 @@ PROVIDER_PERMANENT_MSG = (
     "docker private model provider-backed sourcing failed before returning companies: "
     "HTTPError: unauthorized; status=401; url=https://api.example.test/search"
 )
+
+
+_TRUSTED_PRIMARY_INTENT = {
+    "signal": "Funding raised: round type series a",
+    "category": "FUNDING",
+    "max_age_days": 90,
+}
+
+
+def _profile_icp() -> dict:
+    return {
+        "industry": "Software",
+        "signal_profile": {
+            "schema_version": "icp-signal-profile:v1",
+            "bindings": [
+                {
+                    "role": "monitor_only",
+                    "definition": {
+                        "schema_version": "signal-definition:v1",
+                        "archetype_id": "technology",
+                        "signal_kind_id": "current_use",
+                        "signal_kind_version": 1,
+                        "parameters": {"technology": "Snowflake"},
+                        "max_age_days": 365,
+                    },
+                },
+                {
+                    "role": "primary",
+                    "definition": {
+                        "schema_version": "signal-definition:v1",
+                        "archetype_id": "capital_ownership",
+                        "signal_kind_id": "funding_raised",
+                        "signal_kind_version": 1,
+                        "parameters": {"round_type": "series_a"},
+                        "max_age_days": 90,
+                    },
+                },
+            ],
+        },
+        "required_intent": dict(_TRUSTED_PRIMARY_INTENT),
+        "intent_signal": _TRUSTED_PRIMARY_INTENT["signal"],
+        "intent_signals": [_TRUSTED_PRIMARY_INTENT["signal"]],
+        "intent_category": _TRUSTED_PRIMARY_INTENT["category"],
+        "intent_max_age_days": _TRUSTED_PRIMARY_INTENT["max_age_days"],
+    }
+
+
+def _definition_sha256(definition: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            definition,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _profile_receipt(*, profile_hash: str = "a" * 64) -> dict:
+    icp = _profile_icp()
+    bindings = icp["signal_profile"]["bindings"]
+    return {
+        "schema_version": "research-lab-signal-profile-receipt:v1",
+        "audience": "private_evaluator_only",
+        "input_profile_sha256": "b" * 64,
+        "profile_sha256": profile_hash,
+        "signal_catalog_sha256": "b6b4138f4cc97976db1cd5f26bec2495767f21d9544779864eb4df208477ae28",
+        "primary": {
+            "input_index": 1,
+            "role": "primary",
+            "archetype_id": "capital_ownership",
+            "signal_kind_id": "funding_raised",
+            "signal_kind_version": 1,
+            "definition_sha256": _definition_sha256(
+                bindings[1]["definition"]
+            ),
+            "legacy_intent": dict(_TRUSTED_PRIMARY_INTENT),
+        },
+        "monitor_only": [
+            {
+                "input_index": 0,
+                "role": "monitor_only",
+                "archetype_id": "technology",
+                "signal_kind_id": "current_use",
+                "signal_kind_version": 1,
+                "definition_sha256": _definition_sha256(
+                    bindings[0]["definition"]
+                ),
+                "legacy_intent": {
+                    "signal": "Current technology use: Snowflake",
+                    "category": "TECHSTACK",
+                    "max_age_days": 365,
+                },
+            }
+        ],
+    }
+
+
+def test_profile_scoring_uses_only_trusted_primary_projection() -> None:
+    raw_icp = {
+        **_profile_icp(),
+        "prompt": "Monitor Snowflake and source funding",
+    }
+    receipt = _profile_receipt()
+    projected = evaluator._scoring_icp_from_profile_receipts(
+        raw_icp,
+        base_receipt=receipt,
+        candidate_receipt=receipt,
+        base_succeeded=True,
+        candidate_succeeded=True,
+    )
+    assert "signal_profile" not in projected
+    assert "bonus_intents" not in projected
+    assert "prompt" not in projected
+    assert "Snowflake" not in repr(projected)
+    assert projected["intent_signals"] == [
+        "Funding raised: round type series a"
+    ]
+    assert projected["intent_signal_evidence_types"] == ["FUNDING"]
+    assert projected["intent_signal_max_age_days"] == [90]
+    assert projected["_signal_profile_identity"] == {
+        "signal_catalog_sha256": "b6b4138f4cc97976db1cd5f26bec2495767f21d9544779864eb4df208477ae28",
+        "primary_definition_sha256": _definition_sha256(
+            raw_icp["signal_profile"]["bindings"][1]["definition"]
+        ),
+    }
+
+
+def test_profile_scoring_fails_closed_on_base_candidate_receipt_mismatch() -> None:
+    with pytest.raises(PrivateModelRuntimeError, match="receipts differ"):
+        evaluator._scoring_icp_from_profile_receipts(
+            _profile_icp(),
+            base_receipt=_profile_receipt(),
+            candidate_receipt=_profile_receipt(profile_hash="f" * 64),
+            base_succeeded=True,
+            candidate_succeeded=True,
+        )
+
+
+def test_profile_scoring_uses_successful_side_when_other_side_failed() -> None:
+    projected = evaluator._scoring_icp_from_profile_receipts(
+        _profile_icp(),
+        base_receipt=_profile_receipt(),
+        candidate_receipt=None,
+        base_succeeded=True,
+        candidate_succeeded=False,
+    )
+    assert projected["intent_category"] == "FUNDING"
+
+
+def test_profile_scoring_both_failed_keeps_zero_path_profile_free() -> None:
+    raw_icp = _profile_icp()
+    raw_icp["prompt"] = "Monitor Snowflake"
+    projected = evaluator._scoring_icp_from_profile_receipts(
+        raw_icp,
+        base_receipt=None,
+        candidate_receipt=None,
+        base_succeeded=False,
+        candidate_succeeded=False,
+    )
+    assert "signal_profile" not in projected
+    assert "prompt" not in projected
+    assert "Snowflake" not in repr(projected)
+    assert projected["required_intent"] == _TRUSTED_PRIMARY_INTENT
+    assert projected["intent_signals"] == [_TRUSTED_PRIMARY_INTENT["signal"]]
+
+
+def test_candidate_receipt_cannot_redefine_sealed_primary_scoring() -> None:
+    forged = _profile_receipt()
+    forged["primary"]["legacy_intent"] = {
+        "signal": "Current technology use: Snowflake",
+        "category": "TECHSTACK",
+        "max_age_days": 365,
+    }
+    with pytest.raises(PrivateModelRuntimeError, match="sealed primary input"):
+        evaluator._scoring_icp_from_profile_receipts(
+            _profile_icp(),
+            base_receipt=None,
+            candidate_receipt=forged,
+            base_succeeded=False,
+            candidate_succeeded=True,
+        )
+
+
+def test_base_absent_candidate_receipt_cannot_change_trusted_scoring() -> None:
+    projected = evaluator._scoring_icp_from_profile_receipts(
+        _profile_icp(),
+        base_receipt=None,
+        candidate_receipt=_profile_receipt(),
+        base_succeeded=False,
+        candidate_succeeded=True,
+    )
+    assert projected["required_intent"] == _TRUSTED_PRIMARY_INTENT
+    assert "Snowflake" not in repr(projected)
+
+
+@pytest.mark.asyncio
+async def test_profile_receipt_collectors_are_task_local() -> None:
+    async def collect(profile_hash: str) -> str:
+        collected, token = private_runtime.begin_sourcing_profile_receipt_collection()
+        try:
+            await asyncio.sleep(0)
+            private_runtime._publish_sourcing_profile_receipt(
+                _profile_receipt(profile_hash=profile_hash)
+            )
+            await asyncio.sleep(0)
+        finally:
+            private_runtime.end_sourcing_profile_receipt_collection(token)
+        assert len(collected) == 1
+        return collected[0]["profile_sha256"]
+
+    assert await asyncio.gather(collect("1" * 64), collect("2" * 64)) == [
+        "1" * 64,
+        "2" * 64,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_profile_receipt_failed_attempt_does_not_leak_to_next_call() -> None:
+    icp = _profile_icp()
+
+    async def failed_runner(_icp, _context):
+        private_runtime._publish_sourcing_profile_receipt(
+            _profile_receipt(profile_hash="1" * 64)
+        )
+        raise PrivateModelRuntimeError("attempt failed after receipt validation")
+
+    async def successful_runner(_icp, _context):
+        private_runtime._publish_sourcing_profile_receipt(
+            _profile_receipt(profile_hash="2" * 64)
+        )
+        return []
+
+    with pytest.raises(PrivateModelRuntimeError, match="attempt failed"):
+        await evaluator._call_model_runner_with_profile_receipt(
+            failed_runner, icp, {}
+        )
+
+    outputs, receipt = await evaluator._call_model_runner_with_profile_receipt(
+        successful_runner, icp, {}
+    )
+    assert outputs == []
+    assert receipt is not None
+    assert receipt["profile_sha256"] == "2" * 64
 SCRAPINGDOG_400_MSG = (
     "private model provider-backed sourcing failed before returning companies: "
     'HTTPError: HTTP Error 400: Bad Request; status=400; body={"success": false, '

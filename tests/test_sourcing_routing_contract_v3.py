@@ -18,8 +18,8 @@ from tests.private_model_artifact_fixtures import install_reviewed_consumer_snap
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_private_model_commands_require_routing_adapter_v3() -> None:
-    assert "sourcing-model-research-lab-adapter:v3" in DEFAULT_PRIVATE_TEST_CMD
+def test_private_model_commands_require_routing_adapter_v7() -> None:
+    assert "sourcing-model-research-lab-adapter:v7" in DEFAULT_PRIVATE_TEST_CMD
     assert "sourcing-model-components:v2" in DEFAULT_PRIVATE_TEST_CMD
     assert "routing-compiler-v2" in DEFAULT_PRIVATE_TEST_CMD
     assert "SubprocessPrivateModelRunner" in DEFAULT_PRIVATE_BUILD_CMD
@@ -35,6 +35,7 @@ def test_private_model_commands_require_routing_adapter_v3() -> None:
     assert "/tmp/research_lab_candidate_manifest_hash.txt" not in DEFAULT_PRIVATE_BUILD_CMD
     assert '"sourcing-model-components:v1"' not in DEFAULT_PRIVATE_BUILD_CMD
     assert '"sourcing-model-research-lab-adapter:v1"' not in DEFAULT_PRIVATE_BUILD_CMD
+    assert '"sourcing-model-research-lab-adapter:v3"' not in DEFAULT_PRIVATE_BUILD_CMD
 
 
 @pytest.mark.parametrize(

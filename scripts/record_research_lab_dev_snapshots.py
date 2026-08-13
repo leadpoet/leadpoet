@@ -247,6 +247,7 @@ def _record_icp_with_subprocess(
     private_runtime.validate_sourcing_runtime_receipt(
         completed.stderr,
         expected_runtime_options=payload["context"]["runtime_options"],
+        expected_icp=payload["icp"],
     )
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, list):
@@ -336,6 +337,7 @@ def _record_icp_with_docker(
     private_runtime.validate_sourcing_runtime_receipt(
         completed.stderr,
         expected_runtime_options=payload["context"]["runtime_options"],
+        expected_icp=payload["icp"],
     )
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, list):
@@ -554,6 +556,7 @@ def _replay_icp_with_docker(
     private_runtime.validate_sourcing_runtime_receipt(
         completed.stderr,
         expected_runtime_options=payload["context"]["runtime_options"],
+        expected_icp=payload["icp"],
     )
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, list):

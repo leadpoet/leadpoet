@@ -1239,6 +1239,7 @@ class AttestedPrivateModelRunnerV2:
                     expected_runtime_options=dict(
                         input_doc.get("context") or {}
                     )["runtime_options"],
+                    expected_icp=dict(input_doc.get("icp") or {}),
                 )
             except (KeyError, PrivateModelRuntimeError) as exc:
                 raise AttestedPrivateModelRunnerV2Error(

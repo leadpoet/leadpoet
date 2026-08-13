@@ -74,6 +74,7 @@ from leadpoet_canonical.attested_v2 import (
     sha256_bytes,
     sha256_json,
 )
+from research_lab.auto_research_prompt import coerce_component_registry
 from research_lab.eval import (
     PrivateModelArtifactManifest,
     build_local_private_artifact_manifest,
@@ -260,12 +261,28 @@ def _payload(tmp_path: Path):
         "source_state_hash": "sha256:" + "f" * 64,
     }
     active_model_graph = _active_model_graph(active_model_result)
-    component_registry = {"schema_version": "1.0", "components": []}
+    component_metadata = {
+        "adapter_version": "adapter:v1",
+        "component_registry_version": "components:v1",
+        "scoring_adapter_version": "scoring:v1",
+        "component_registry": {
+            "source_router": {
+                "purpose": "Select the source strategy",
+                "input_contract": "validated ICP",
+                "output_contract": "source query",
+                "ablation_leverage": 1.0,
+                "allowed_patch_types": ["PROMPT_EDIT"],
+                "max_instruction_chars": 800,
+                "cost_budget_cents": 10,
+            }
+        },
+    }
+    component_registry = coerce_component_registry(component_metadata).to_dict()
     component_result = {
         "schema_version": "leadpoet.model_sandbox_result.v2",
         "operation": "metadata",
-        "output": component_registry,
-        "output_hash": sha256_json(component_registry),
+        "output": component_metadata,
+        "output_hash": sha256_json(component_metadata),
     }
     component_graph = _component_registry_graph(component_result)
     runtime_catalog_body = {
@@ -919,6 +936,28 @@ def test_autoresearch_executor_verifies_input_evidence_with_its_source_role(
         "gateway_coordinator",
         "gateway_coordinator",
     ]
+
+
+def test_autoresearch_executor_rejects_registry_not_derived_from_measured_metadata(
+    tmp_path,
+):
+    payload = _payload(tmp_path)
+    payload["component_registry"]["entries"][0]["token_budget"] += 1
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: pytest.fail("provider must not be called"),
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(
+            AutoresearchExecutorV2Error,
+            match="component registry differs from measured model metadata",
+        ):
+            executor._validate_request(payload)
+    finally:
+        executor.close()
 
 
 def test_autoresearch_executor_rejects_unsupported_component_ancestry_role(

@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "90654bef0ae4f66d62dcdbe0a8d6442b0e7f5021",
+  "baseline_commit": "aad5d0b554d9105c602b98421fe3fa1e623b21a5",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -1007,7 +1007,7 @@
       "symbol": "_ArtifactVerificationTransportSession"
     },
     {
-      "ast_sha256": "sha256:a53ac3500694c7a5593d0789bbe37812618132ac2ded2d8641a3c05cb463a459",
+      "ast_sha256": "sha256:e5f309248a37dbdf77b04c6e2cbf702b45cab55e2af50d3d05f18b9433896460",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
     },
@@ -2752,7 +2752,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:c9a1138e15f1f278e7170600ecafe3dbbfd733431bce4051d8193b1aa8517e52",
-  "protected_source_commit": "90654bef0ae4f66d62dcdbe0a8d6442b0e7f5021",
+  "manifest_hash": "sha256:fb5930d29a4a74dde294d853914f6b3d576d870fadd160421b7eb13920af37b8",
+  "protected_source_commit": "aad5d0b554d9105c602b98421fe3fa1e623b21a5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

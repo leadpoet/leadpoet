@@ -99,6 +99,7 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_receipt_graph,
 )
+from research_lab.auto_research_prompt import coerce_component_registry
 from research_lab.code_editing import (
     CodeEditDraft,
     CodeEditSourceInspectionRequest,
@@ -2634,10 +2635,22 @@ class AutoresearchExecutorV2:
             raise AutoresearchExecutorV2Error(
                 "component registry receipt graph root differs"
             )
+        component_metadata = _mapping(
+            component_result.get("output"), "component registry metadata"
+        )
+        try:
+            measured_component_registry = coerce_component_registry(
+                component_metadata
+            ).to_dict()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AutoresearchExecutorV2Error(
+                "measured model metadata does not contain a valid component registry"
+            ) from exc
         if (
             component_result.get("operation") != "metadata"
-            or component_result.get("output") != component_registry
-            or component_result.get("output_hash") != sha256_json(component_registry)
+            or component_result.get("output_hash")
+            != sha256_json(component_metadata)
+            or measured_component_registry != component_registry
         ):
             raise AutoresearchExecutorV2Error(
                 "component registry differs from measured model metadata"

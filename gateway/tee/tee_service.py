@@ -1558,7 +1558,7 @@ def get_v2_provider_broker():
             retry_policy_hashes=retry_hashes,
             transport=HTTPXProviderTransport(
                 allow_authenticated_complete_body_eof=True,
-                parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+                upstream_parent_tunnel_framing=TUNNEL_FRAMING_MODE,
                 reuse_direct_connections=False,
             ),
             job_credential_slot_ref_hashes=configuration.get(

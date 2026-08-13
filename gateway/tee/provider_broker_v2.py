@@ -603,6 +603,7 @@ class HTTPXProviderTransport:
         response_body_ceiling_bytes: int = MAX_RESPONSE_BODY_BYTES,
         allow_authenticated_complete_body_eof: bool = False,
         parent_tunnel_framing: str = "",
+        upstream_parent_tunnel_framing: Optional[str] = None,
         reuse_direct_connections: bool = False,
     ) -> None:
         if (
@@ -623,6 +624,13 @@ class HTTPXProviderTransport:
             raise ProviderBrokerV2Error(
                 "provider transport tunnel framing is invalid"
             )
+        if (
+            upstream_parent_tunnel_framing is not None
+            and upstream_parent_tunnel_framing not in {"", TUNNEL_FRAMING_MODE}
+        ):
+            raise ProviderBrokerV2Error(
+                "provider transport upstream tunnel framing is invalid"
+            )
         if not isinstance(reuse_direct_connections, bool):
             raise ProviderBrokerV2Error(
                 "provider transport connection reuse policy is invalid"
@@ -634,6 +642,11 @@ class HTTPXProviderTransport:
             allow_authenticated_complete_body_eof
         )
         self.parent_tunnel_framing = parent_tunnel_framing
+        self.upstream_parent_tunnel_framing = (
+            parent_tunnel_framing
+            if upstream_parent_tunnel_framing is None
+            else upstream_parent_tunnel_framing
+        )
         self.reuse_direct_connections = reuse_direct_connections
         self._direct_client = None
         self._direct_client_lock = threading.Lock()
@@ -657,13 +670,16 @@ class HTTPXProviderTransport:
 
         verify_path = self.ca_bundle or certifi.where()
         normalized_proxy_headers = dict(proxy_headers or {})
-        # Framing protects the enclave-to-parent hop independently of whether
-        # the parent connects directly to the provider or to an assigned HTTPS
-        # proxy. Proxy TLS and credentials still terminate inside the enclave.
-        if self.parent_tunnel_framing:
-            normalized_proxy_headers[TUNNEL_FRAMING_HEADER] = (
-                self.parent_tunnel_framing
-            )
+        # Direct provider and assigned-proxy tunnels have independent terminal
+        # behavior. Keep their framing policies separate while TLS and proxy
+        # credentials continue to terminate inside the enclave.
+        tunnel_framing = (
+            self.upstream_parent_tunnel_framing
+            if normalized_proxy_headers
+            else self.parent_tunnel_framing
+        )
+        if tunnel_framing:
+            normalized_proxy_headers[TUNNEL_FRAMING_HEADER] = tunnel_framing
         return httpx.Client(
             proxy=httpx.Proxy(
                 self.proxy_url,

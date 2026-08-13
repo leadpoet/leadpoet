@@ -1050,6 +1050,48 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
     assert clients[0].closed is True
 
 
+def test_httpx_transport_can_frame_upstream_without_framing_direct(monkeypatch):
+    proxies = []
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(
+            Client=lambda **options: options,
+            Limits=lambda **options: options,
+            Proxy=lambda url, **options: proxies.append(
+                {"url": url, **options}
+            )
+            or proxies[-1],
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "certifi",
+        SimpleNamespace(where=lambda: "/tmp/test-ca.pem"),
+    )
+
+    transport = HTTPXProviderTransport(
+        upstream_parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+    )
+
+    transport._new_client()
+    transport._new_client(
+        proxy_headers={"X-Leadpoet-Upstream-Proxy-B64": "opaque"}
+    )
+
+    assert proxies == [
+        {"url": "http://127.0.0.1:18080", "headers": None},
+        {
+            "url": "http://127.0.0.1:18080",
+            "headers": {
+                "X-Leadpoet-Upstream-Proxy-B64": "opaque",
+                TUNNEL_FRAMING_HEADER: TUNNEL_FRAMING_MODE,
+            },
+        },
+    ]
+
+
 def test_httpx_transport_does_not_share_direct_failure_fate(monkeypatch):
     clients = []
     results = []

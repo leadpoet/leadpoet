@@ -1724,6 +1724,22 @@ def test_measured_upstream_proxy_framing_scenario(monkeypatch):
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
     }
+
+
+def test_coordinator_direct_transport_rehearsal_contract(monkeypatch):
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).parent / "restart_rehearsal")
+    )
+    from production_workflow_runner import (
+        _exercise_artifact_egress_sustained_readback,
+    )
+
+    evidence = _exercise_artifact_egress_sustained_readback()
+
+    assert evidence["ordinary_provider_transport_unchanged"] is True
+    assert evidence["ordinary_direct_requests_isolated"] is True
+
+
 def test_enclave_proxy_accepts_upstream_proxy_only_as_loopback_control_metadata():
     proxy_url = "https://worker-7:password@proxy.example.com:443"
     encoded = base64.b64encode(proxy_url.encode("utf-8"))

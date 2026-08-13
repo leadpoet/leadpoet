@@ -1562,10 +1562,19 @@ async def build_allocation_v2(
     epoch_id: int,
     netuid: int,
     policy: Mapping[str, Any],
+    allocation_sequence: int = 0,
     execute: Any = execute_coordinator_v2,
     persist_links: Any = None,
     load_allocation_parent_graphs: Any = None,
 ) -> dict[str, Any]:
+    if (
+        isinstance(allocation_sequence, bool)
+        or not isinstance(allocation_sequence, int)
+        or allocation_sequence < 0
+    ):
+        raise ResearchLabV2AuthorityError(
+            "allocation sequence must be a non-negative integer"
+        )
     using_default_parent_loader = load_allocation_parent_graphs is None
     if load_allocation_parent_graphs is None:
         load_allocation_parent_graphs = _load_allocation_parent_graphs_v2
@@ -1692,7 +1701,7 @@ async def build_allocation_v2(
             operation=OP_RESEARCH_LAB_ALLOCATION,
             purpose="research_lab.allocation.v2",
             epoch_id=int(epoch_id),
-            sequence=0,
+            sequence=int(allocation_sequence),
             payload={"epoch": int(epoch_id), "netuid": int(netuid)},
             parent_graphs=graphs,
         )

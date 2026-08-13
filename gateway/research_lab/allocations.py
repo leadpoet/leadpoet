@@ -19,7 +19,11 @@ from gateway.research_lab.v2_authority import build_allocation_v2
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_hotkey_uids
 from gateway.research_lab.config import ResearchLabGatewayConfig
-from gateway.research_lab.store import create_research_lab_emission_allocation_snapshot, select_all
+from gateway.research_lab.store import (
+    _is_transient_store_error,
+    create_research_lab_emission_allocation_snapshot,
+    select_all,
+)
 from leadpoet_verifier.economics import (
     CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
     allocate_research_lab_epoch,
@@ -43,6 +47,30 @@ _ALLOCATION_V2_INFLIGHT: dict[
     tuple[int, int, int, str],
     asyncio.Task[dict[str, Any]],
 ] = {}
+_ALLOCATION_V2_RETRY_GENERATIONS: dict[
+    tuple[int, int, int, str],
+    tuple[float, int],
+] = {}
+_ALLOCATION_V2_RETRY_GENERATION_TTL_SECONDS = 3600.0
+_ALLOCATION_V2_RETRY_MAX_GENERATIONS = 8
+
+
+def _allocation_v2_build_is_retryable(exc: BaseException) -> bool:
+    """Retry transport/source failures without replaying policy failures."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ == "AttestedScoringV2Error":
+            if "execution_supabasesourcev2error" in str(current).lower():
+                return True
+        if type(current).__name__ in {"SupabaseSourceV2Error", "TEEClientError"}:
+            return True
+        if _is_transient_store_error(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 async def _build_allocation_v2_singleflight(
@@ -62,11 +90,19 @@ async def _build_allocation_v2_singleflight(
     )
     task = _ALLOCATION_V2_INFLIGHT.get(key)
     if task is None:
+        retry_state = _ALLOCATION_V2_RETRY_GENERATIONS.get(key)
+        generation = 0
+        if retry_state is not None:
+            retry_expires_at, generation = retry_state
+            if retry_expires_at <= loop.time():
+                _ALLOCATION_V2_RETRY_GENERATIONS.pop(key, None)
+                generation = 0
         task = loop.create_task(
             build_allocation_v2(
                 epoch_id=int(epoch_id),
                 netuid=int(netuid),
                 policy=dict(policy),
+                allocation_sequence=int(generation),
             )
         )
         _ALLOCATION_V2_INFLIGHT[key] = task
@@ -74,6 +110,22 @@ async def _build_allocation_v2_singleflight(
         def clear(completed: asyncio.Task[dict[str, Any]]) -> None:
             if _ALLOCATION_V2_INFLIGHT.get(key) is completed:
                 _ALLOCATION_V2_INFLIGHT.pop(key, None)
+            if completed.cancelled():
+                return
+            try:
+                completed.result()
+            except BaseException as exc:
+                if _allocation_v2_build_is_retryable(exc):
+                    _ALLOCATION_V2_RETRY_GENERATIONS[key] = (
+                        loop.time()
+                        + _ALLOCATION_V2_RETRY_GENERATION_TTL_SECONDS,
+                        min(
+                            generation + 1,
+                            _ALLOCATION_V2_RETRY_MAX_GENERATIONS - 1,
+                        ),
+                    )
+                return
+            _ALLOCATION_V2_RETRY_GENERATIONS.pop(key, None)
 
         task.add_done_callback(clear)
     return await asyncio.shield(task)

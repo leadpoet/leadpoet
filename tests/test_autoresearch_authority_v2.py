@@ -123,7 +123,7 @@ def _coordinator_graph(
     return graph, receipt
 
 
-def _autoresearch_guard_authority(result):
+def _autoresearch_guard_authority(result, *, artifact_wrapped=False):
     key = Ed25519PrivateKey.generate()
     public_key = key.public_key().public_bytes_raw().hex()
     boot = create_boot_identity(
@@ -179,10 +179,75 @@ def _autoresearch_guard_authority(result):
         transport_attempts=(),
         host_operations=(),
     )
-    return {
+    authority_document = {
         "result": dict(result),
         "receipt": receipt,
         "receipt_graph": graph,
+    }
+    if not artifact_wrapped:
+        return authority_document
+
+    artifact_key = Ed25519PrivateKey.generate()
+    artifact_public_key = artifact_key.public_key().public_bytes_raw().hex()
+    artifact_boot = create_boot_identity(
+        body=build_boot_identity_body(
+            role="gateway_coordinator",
+            physical_role="gateway_coordinator",
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_nonce="9" * 32,
+            signing_pubkey=artifact_public_key,
+            transport_pubkey="a" * 64,
+            transport_certificate_hash="sha256:" + "b" * 64,
+            attestation_user_data_hash="sha256:" + "c" * 64,
+            issued_at="2026-07-10T20:00:01Z",
+        ),
+        attestation_document_b64=base64.b64encode(b"attestation").decode(
+            "ascii"
+        ),
+    )
+    artifact_receipt = create_signed_execution_receipt(
+        body=build_execution_receipt_body(
+            role="gateway_coordinator",
+            purpose="leadpoet.artifact_persistence.v2",
+            job_id="openrouter-guard-artifact-persistence",
+            epoch_id=10,
+            sequence=0,
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_identity_hash=artifact_boot["boot_identity_hash"],
+            input_root="sha256:" + "d" * 64,
+            output_root="sha256:" + "e" * 64,
+            transport_root_hash=EMPTY_TRANSPORT_ROOT,
+            host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+            artifact_root=EMPTY_ARTIFACT_ROOT,
+            parent_receipt_hashes=(receipt["receipt_hash"],),
+            status="succeeded",
+            failure_code=None,
+            issued_at="2026-07-10T20:00:01Z",
+        ),
+        enclave_pubkey=artifact_public_key,
+        sign_digest=artifact_key.sign,
+    )
+    lineage_graph = build_receipt_graph(
+        root_receipt_hash=artifact_receipt["receipt_hash"],
+        boot_identities=(boot, artifact_boot),
+        receipts=(receipt, artifact_receipt),
+        transport_attempts=(),
+        host_operations=(),
+    )
+    return {
+        "result": dict(result),
+        "receipt": artifact_receipt,
+        "receipt_graph": lineage_graph,
+        "execution_receipt": receipt,
+        "execution_receipt_graph": graph,
     }
 
 
@@ -597,8 +662,14 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
         "credit_limit_remaining": 1,
         "privacy_proof_doc": {"status": "verified"},
     }
-    guard_authority = _autoresearch_guard_authority(guard_result)
+    guard_authority = _autoresearch_guard_authority(
+        guard_result,
+        artifact_wrapped=True,
+    )
     guard_hash = guard_authority["receipt"]["receipt_hash"]
+    guard_execution_hash = guard_authority["execution_receipt"][
+        "receipt_hash"
+    ]
     component_hash = "sha256:" + "9" * 64
     observed = {}
 
@@ -774,10 +845,16 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     ] == outcome_execution_receipt["receipt_hash"]
     assert observed["payload"]["openrouter_guard_evidence"] == {
         "result": guard_result,
-        "receipt_graph": guard_authority["receipt_graph"],
-        "root_receipt_hash": guard_hash,
+        "receipt_graph": guard_authority["execution_receipt_graph"],
+        "root_receipt_hash": guard_execution_hash,
         "queue_event_hash": guard_queue_event_hash,
     }
+    assert guard_authority["receipt_graph"] in observed["parent_graphs"]
+    assert guard_authority["execution_receipt_graph"] in observed[
+        "parent_graphs"
+    ]
+    assert guard_hash in observed["input_artifact_hashes"]
+    assert guard_execution_hash in observed["input_artifact_hashes"]
     assert active_receipt["receipt_hash"] in observed["input_artifact_hashes"]
     assert active_execution_receipt["receipt_hash"] in observed[
         "input_artifact_hashes"

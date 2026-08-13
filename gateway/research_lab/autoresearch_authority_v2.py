@@ -1068,15 +1068,26 @@ async def run_authoritative_autoresearch_v2(
 ) -> AuthoritativeAutoresearchV2Result:
     guard_graph = openrouter_guard.authority.get("receipt_graph")
     guard_receipt = openrouter_guard.authority.get("receipt")
+    guard_execution_graph = openrouter_guard.authority.get(
+        "execution_receipt_graph"
+    ) or openrouter_guard.authority.get("receipt_graph")
+    guard_execution_receipt = openrouter_guard.authority.get(
+        "execution_receipt"
+    ) or openrouter_guard.authority.get("receipt")
     if (
         not isinstance(guard_graph, Mapping)
         or not isinstance(guard_receipt, Mapping)
+        or not isinstance(guard_execution_graph, Mapping)
+        or not isinstance(guard_execution_receipt, Mapping)
         or guard_graph.get("root_receipt_hash") != guard_receipt.get("receipt_hash")
+        or guard_execution_graph.get("root_receipt_hash")
+        != guard_execution_receipt.get("receipt_hash")
     ):
         raise AutoresearchAuthorityV2Error(
             "OpenRouter guard receipt lineage is unavailable"
         )
-    privacy_receipt_hash = str(guard_receipt["receipt_hash"])
+    guard_lineage_receipt_hash = str(guard_receipt["receipt_hash"])
+    privacy_receipt_hash = str(guard_execution_receipt["receipt_hash"])
     guard_result = openrouter_guard.authority.get("result")
     if not isinstance(guard_result, Mapping):
         raise AutoresearchAuthorityV2Error(
@@ -1090,7 +1101,7 @@ async def run_authoritative_autoresearch_v2(
     )
     guard_root_receipts = [
         receipt
-        for receipt in guard_graph.get("receipts", ())
+        for receipt in guard_execution_graph.get("receipts", ())
         if isinstance(receipt, Mapping)
         and receipt.get("receipt_hash") == privacy_receipt_hash
     ]
@@ -1330,7 +1341,7 @@ async def run_authoritative_autoresearch_v2(
         },
         "openrouter_guard_evidence": {
             "result": dict(guard_result),
-            "receipt_graph": dict(guard_graph),
+            "receipt_graph": dict(guard_execution_graph),
             "root_receipt_hash": privacy_receipt_hash,
             "queue_event_hash": str(openrouter_guard.queue_event_hash),
         },
@@ -1363,6 +1374,7 @@ async def run_authoritative_autoresearch_v2(
     provider_refs.update(dynamic_provider_refs)
     parent_graph_by_root: dict[str, dict[str, Any]] = {}
     for graph in (
+        guard_execution_graph,
         guard_graph,
         component_graph,
         active_model_execution_graph,
@@ -1390,6 +1402,7 @@ async def run_authoritative_autoresearch_v2(
             artifact.manifest_hash,
             str(source_bundle["archive_sha256"]),
             privacy_receipt_hash,
+            guard_lineage_receipt_hash,
             component_receipt_hash,
             active_model_lineage_receipt_hash,
             active_model_execution_receipt_hash,

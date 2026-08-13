@@ -267,6 +267,23 @@ forward, rollback, roll-forward, full fault/concurrency matrix, and 100
 accelerated epochs. It is supplemental evidence, never the default pre-push
 gate. The old `--profile release` CLI spelling is intentionally invalid.
 
+## Physical V2 staging
+
+The local rehearsal is not evidence for physical Nitro, AF_VSOCK, host-kernel,
+real provider TLS, or chain-finalization behavior. Once the dedicated
+`physical-v2-staging` GitHub environment is configured, every attested runtime
+candidate must pass `Physical V2 Staging Acceptance` before a production
+restart. Never substitute either production host for staging.
+
+The staging gate must invoke `scripts/restart_attested_release_local.sh` on
+distinct Nitro-capable staging hosts with staging-only secrets and persistence,
+then require one finalized canonical testnet bundle and matching
+`submission_success` evidence from at least two independent audit validators.
+It derives scoring, ICP, settlement, and weight behavior from the exact
+candidate; do not duplicate those rules in the staging controller. Missing,
+failed, cancelled, or superseded physical evidence means the release is not
+production-ready. See `docs/physical_v2_staging.md`.
+
 ## Rehearsal contract
 
 - Exercise repository-owned production shell and Python paths. Strict adapters

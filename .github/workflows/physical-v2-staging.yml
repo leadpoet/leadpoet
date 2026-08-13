@@ -1,0 +1,94 @@
+name: Physical V2 Staging Acceptance
+
+on:
+  workflow_run:
+    workflows:
+      - Attested V2 Release
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact attested main commit to validate
+        required: true
+        type: string
+
+concurrency:
+  group: physical-v2-staging
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: [self-hosted, linux, x64, leadpoet-v2-physical-staging]
+    environment: physical-v2-staging
+    timeout-minutes: 240
+    env:
+      CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.event.workflow_run.head_sha }}
+      CONFIG_JSON: ${{ vars.LEADPOET_V2_STAGING_CONFIG_JSON }}
+      SSH_KEY: ${{ secrets.LEADPOET_V2_STAGING_SSH_KEY }}
+    steps:
+      - name: Check out exact attested candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 0
+
+      - name: Materialize isolated staging controller inputs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          test -n "$CONFIG_JSON"
+          test -n "$SSH_KEY"
+          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/physical-v2-staging.pem"
+          printf '%s\n' "$CONFIG_JSON" > "$RUNNER_TEMP/physical-v2-staging.json"
+          python3 - \
+            "$RUNNER_TEMP/physical-v2-staging.json" \
+            "$RUNNER_TEMP/physical-v2-staging.pem" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          config_path = Path(sys.argv[1])
+          key_path = str(Path(sys.argv[2]))
+          doc = json.loads(config_path.read_text(encoding="utf-8"))
+          doc["gateway"]["ssh_key"] = key_path
+          doc["primary_validator"]["ssh_key"] = key_path
+          for auditor in doc["audit_validators"]:
+              auditor["ssh_key"] = key_path
+          config_path.write_text(
+              json.dumps(doc, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Run exact physical V2 acceptance
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/run_physical_v2_staging.py \
+            --config "$RUNNER_TEMP/physical-v2-staging.json" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --ledger "$RUNNER_TEMP/physical-v2-staging-ledger.json"
+
+      - name: Upload redacted acceptance ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: physical-v2-staging-${{ env.CANDIDATE_SHA }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/physical-v2-staging-ledger.json
+
+      - name: Remove controller credentials
+        if: always()
+        run: |
+          rm -f -- \
+            "$RUNNER_TEMP/physical-v2-staging.pem" \
+            "$RUNNER_TEMP/physical-v2-staging.json"

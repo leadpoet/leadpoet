@@ -8170,6 +8170,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
 
     ordinary_transport = HTTPXProviderTransport(
         allow_authenticated_complete_body_eof=True,
+        parent_tunnel_framing=TUNNEL_FRAMING_MODE,
         upstream_parent_tunnel_framing=TUNNEL_FRAMING_MODE,
         reuse_direct_connections=False,
     )
@@ -8192,7 +8193,8 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         second_direct = ordinary_transport(**ordinary_request)
         ordinary_transport_unchanged = (
             ordinary_transport.allow_authenticated_complete_body_eof
-            and not ordinary_transport.parent_tunnel_framing
+            and ordinary_transport.parent_tunnel_framing
+            == TUNNEL_FRAMING_MODE
             and ordinary_transport.upstream_parent_tunnel_framing
             == TUNNEL_FRAMING_MODE
             and not ordinary_transport.reuse_direct_connections

@@ -418,6 +418,26 @@ class ProviderSemanticsAuthorityV2:
     def _execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
         normalized, original_body, parsed, fingerprint = self._request(request)
         day = self._utc_day()
+        dynamic_route = normalized.get("dynamic_route")
+        provider = _LEGACY_PROVIDER_IDS.get(normalized["provider_id"])
+        if provider is None and isinstance(dynamic_route, Mapping):
+            provider = str(dynamic_route["provider_id"])
+        if provider is None:
+            # Infrastructure routes such as Supabase retain authenticated
+            # transport, but must not recursively read or populate the
+            # Supabase-backed paid-provider evidence cache.
+            return self._live(
+                normalized,
+                original_body=original_body,
+                parsed=parsed,
+                fingerprint=fingerprint,
+                ledger=None,
+                provider=None,
+                lookup_attempts=[],
+                lookup_artifacts=[],
+                day=day,
+                cache_recording_enabled=False,
+            )
         bypass_cache = normalized["purpose"] == _PROVIDER_PREFLIGHT_PURPOSE
         cache_key = (
             (day, fingerprint, normalized["job_id"])
@@ -496,25 +516,6 @@ class ProviderSemanticsAuthorityV2:
                     normalized["job_id"] if bypass_cache else "unscoped"
                 ),
             )
-            dynamic_route = normalized.get("dynamic_route")
-            provider = _LEGACY_PROVIDER_IDS.get(normalized["provider_id"])
-            if provider is None and isinstance(dynamic_route, Mapping):
-                provider = str(dynamic_route["provider_id"])
-            if provider is None:
-                # Non-Research-Lab public routes retain authenticated transport
-                # but do not invent cost/cache semantics they never had.
-                return self._live(
-                    normalized,
-                    original_body=original_body,
-                    parsed=parsed,
-                    fingerprint=fingerprint,
-                    ledger=None,
-                    provider=None,
-                    lookup_attempts=lookup_attempts,
-                    lookup_artifacts=lookup_artifacts,
-                    day=day,
-                    cache_recording_enabled=not bypass_cache,
-                )
             if isinstance(dynamic_route, Mapping):
                 quota = int(dynamic_route["per_day_quota"])
                 with self._lock:

@@ -685,6 +685,41 @@ def test_live_record_then_cache_hit_preserves_existing_fingerprint_and_costs():
     assert digest["providers"]["exa"]["measured_spend_microusd"] == 5000
 
 
+def test_infrastructure_routes_bypass_paid_provider_cache_and_outcomes():
+    outcome_store = _OutcomeStore()
+    authority, broker, cache, _artifacts = _authority(
+        outcome_store=outcome_store,
+    )
+    request = {
+        **_request(
+            provider="supabase",
+            url="https://fixture.supabase.co/rest/v1/allocation_inputs",
+            body=b"",
+            headers={"Accept": "application/json"},
+            purpose="research_lab.allocation.v2",
+        ),
+        "method": "GET",
+    }
+
+    first = authority.execute(request)
+    second = authority.execute(
+        {**request, "logical_operation_id": "infrastructure-read-retry"}
+    )
+
+    assert first["terminal_status"] == "authenticated_response"
+    assert second["terminal_status"] == "authenticated_response"
+    assert first["evidence"] == second["evidence"] == "live_unrecorded"
+    assert first["additional_transport_attempts"] == []
+    assert second["additional_transport_attempts"] == []
+    assert len(broker.calls) == 2
+    assert cache.load_count == 0
+    assert cache.persist_count == 0
+    assert outcome_store.persist_count == 0
+    assert "supabase" not in authority.provider_outcome_snapshot()[
+        "provider_outcome_digest"
+    ]["providers"]
+
+
 def test_cross_worker_cache_hit_uses_current_job_transport_profile():
     from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 

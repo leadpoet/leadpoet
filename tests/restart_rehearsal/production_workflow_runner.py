@@ -6549,6 +6549,42 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         clock=lambda: NOW,
         sleeper=lambda _seconds: None,
     )
+    infrastructure_call_start = len(boundary.calls)
+    infrastructure_cache_rows = len(boundary.cache_rows)
+    infrastructure_result = authority.execute(
+        {
+            "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
+            "logical_operation_id": "rehearsal:supabase-infrastructure-read",
+            "job_id": "rehearsal:allocation-input",
+            "purpose": "research_lab.allocation.v2",
+            "provider_id": "supabase",
+            "attempt_number": 0,
+            "method": "GET",
+            "url": (
+                "https://fixture.supabase.co/rest/v1/"
+                "research_lab_emission_allocation_current?limit=1"
+            ),
+            "headers": {"accept": "application/json"},
+            "body_b64": "",
+            "timeout_ms": 30_000,
+            "retry_policy_hash": retry_hashes["supabase"],
+        }
+    )
+    infrastructure_calls = boundary.calls[infrastructure_call_start:]
+    if (
+        infrastructure_result.get("terminal_status")
+        != "authenticated_response"
+        or infrastructure_result.get("evidence") != "live_unrecorded"
+        or infrastructure_result.get("additional_transport_attempts") != []
+        or len(infrastructure_calls) != 1
+        or infrastructure_calls[0]["provider_id"] != "supabase"
+        or "research_lab_provider_evidence_cache_v2"
+        in str(infrastructure_calls[0]["url"])
+        or len(boundary.cache_rows) != infrastructure_cache_rows
+    ):
+        raise RuntimeError(
+            "infrastructure Supabase read entered paid-provider cache semantics"
+        )
     context = ExecutionContextV2(
         job_id="rehearsal:rebenchmark-provider-poll",
         purpose="research_lab.private_model_run.v2",
@@ -7564,6 +7600,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     ):
         raise RuntimeError("measured rebenchmark wave exhausted artifact capacity")
     return {
+        "infrastructure_provider_cache_bypassed": True,
         "nonterminal_polls_live": True,
         "request_bound_cache_attempts": True,
         "execution_receipt_transport_unique": True,
@@ -9153,6 +9190,11 @@ def main() -> int:
         ),
         "rebenchmark_provider_transport_evidence_unique": (
             behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("infrastructure_provider_cache_bypassed")
+            is True
+            and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("nonterminal_polls_live")

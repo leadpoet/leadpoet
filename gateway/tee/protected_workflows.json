@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "aa6b8a167144b4cb9a345a3b0bb8b94e4f3f273e",
+  "baseline_commit": "eea80e85c91546b34c9b6b2dcd47ece73d6967d5",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -47,7 +47,7 @@
       "symbol": "submit_weights_v2"
     },
     {
-      "ast_sha256": "sha256:58373f480da774187dcd4dbfdf60033cd48acd77d4deead6d5ce6ba1e179ab47",
+      "ast_sha256": "sha256:3e76ff2fb413d0a9779cf9bf56777908084eca03de44587fd09baa46ac7f6147",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_build_allocation_v2_singleflight"
     },
@@ -957,7 +957,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:e914851040458eaa9ee3a432290884255fe3d5e020e6a6b7bca06e6735d377f0",
+      "ast_sha256": "sha256:b5948622117a6563daade23db3c0a0672c00e26ea3a42c19eae2dd2b335a4a1f",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -2752,7 +2752,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:f68ea9dfd49ad8fb6233d0f24ee476cd96905dbff3105f30c4231382ffd43e3a",
-  "protected_source_commit": "aa6b8a167144b4cb9a345a3b0bb8b94e4f3f273e",
+  "manifest_hash": "sha256:d663d270f23f4d949f2a9efa2f7a9b52380c4ab386ff36b91d194b3bbfbc76f0",
+  "protected_source_commit": "eea80e85c91546b34c9b6b2dcd47ece73d6967d5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

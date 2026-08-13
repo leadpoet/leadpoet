@@ -359,8 +359,35 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
 
     broken = dict(ready)
     broken["adapter_version"] = "sourcing-model-research-lab-adapter:v2"
-    with pytest.raises(PrivateModelRuntimeError, match="adapter v3"):
+    with pytest.raises(PrivateModelRuntimeError, match="supported adapter"):
         private_runtime.validate_sourcing_adapter_metadata(broken)
+
+    v7 = json.loads(json.dumps(ready))
+    v7["adapter_version"] = "sourcing-model-research-lab-adapter:v7"
+    v7["signal_catalog"] = {
+        "schema_version": "signal-catalog:v1",
+        "policy_version": "signal-catalog-policy:v2",
+        "catalog_sha256": "b6b4138f4cc97976db1cd5f26bec2495767f21d9544779864eb4df208477ae28",
+        "archetype_count": 7,
+        "signal_kind_count": 26,
+    }
+    v7["signal_profile"] = {
+        "schema_version": "icp-signal-profile:v1",
+        "projection_schema_version": "icp-signal-profile-projection:v1",
+        "research_lab_projection_schema_version": "research-lab-icp-projection:v1",
+        "receipt_schema_version": "research-lab-signal-profile-receipt:v1",
+        "receipt_audience": "private_evaluator_only",
+        "max_bindings": 10,
+    }
+    assert private_runtime.validate_sourcing_adapter_metadata(v7) == v7
+    broken_v7 = json.loads(json.dumps(v7))
+    broken_v7["signal_profile"]["receipt_audience"] = "public"
+    with pytest.raises(PrivateModelRuntimeError, match="profile metadata"):
+        private_runtime.validate_sourcing_adapter_metadata(broken_v7)
+    broken_catalog = json.loads(json.dumps(v7))
+    broken_catalog["signal_catalog"]["catalog_sha256"] = "f" * 64
+    with pytest.raises(PrivateModelRuntimeError, match="catalog identity"):
+        private_runtime.validate_sourcing_adapter_metadata(broken_catalog)
 
     broken = dict(ready)
     broken.pop("routing")
@@ -442,6 +469,256 @@ def test_sourcing_receipt_requires_compiled_route_replay_anchors() -> None:
             [broken],
             expected_runtime_options={"runtime_cap_seconds": 897.0},
         )
+
+
+def _signal_profile_fixture() -> dict:
+    return {
+        "schema_version": "icp-signal-profile:v1",
+        "bindings": [
+            {
+                "role": "monitor_only",
+                "definition": {
+                    "schema_version": "signal-definition:v1",
+                    "archetype_id": "technology",
+                    "signal_kind_id": "current_use",
+                    "signal_kind_version": 1,
+                    "parameters": {"technology": "Snowflake"},
+                    "max_age_days": 365,
+                },
+            },
+            {
+                "role": "primary",
+                "definition": {
+                    "schema_version": "signal-definition:v1",
+                    "archetype_id": "capital_ownership",
+                    "signal_kind_id": "funding_raised",
+                    "signal_kind_version": 1,
+                    "parameters": {"round_type": "series_a"},
+                    "max_age_days": 90,
+                },
+            },
+        ],
+    }
+
+
+def _profile_binding(profile: dict, index: int, legacy_intent: dict) -> dict:
+    binding = profile["bindings"][index]
+    definition = binding["definition"]
+    return {
+        "input_index": index,
+        "role": binding["role"],
+        "archetype_id": definition["archetype_id"],
+        "signal_kind_id": definition["signal_kind_id"],
+        "signal_kind_version": definition["signal_kind_version"],
+        "definition_sha256": hashlib.sha256(
+            json.dumps(
+                definition,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest(),
+        "legacy_intent": legacy_intent,
+    }
+
+
+def _profile_icp(profile: dict) -> dict:
+    return {
+        "industry": "Software",
+        "signal_profile": profile,
+        "required_intent": {
+            "signal": "Funding raised: round type series a",
+            "category": "FUNDING",
+            "max_age_days": 90,
+        },
+    }
+
+
+def _valid_profile_sourcing_receipt(profile: dict) -> dict:
+    receipt = {
+        "kind": "sourcing_branch_receipt",
+        "runtime_cap_seconds": 897.0,
+        "capability_contract": {
+            "host_registered": [
+                "deadline",
+                "emit",
+                "probe_origin",
+                "resolve_host",
+            ],
+        },
+        "industry_taxonomy": {
+            "taxonomy_content_hash": "sha256:" + "a" * 64,
+        },
+        "firmographic_discovery": {"plan": {"target": 5}},
+        "branches": [
+            {
+                "source": "news",
+                "compiled_source": "news",
+                "source_override": False,
+                "route_tool_ids": ["intent.news"],
+                "route_sources": ["news"],
+                "route_plan_sha256": "b" * 64,
+                "route_policy_sha256": "c" * 64,
+                "route_catalog_sha256": "d" * 64,
+                "route_context_sha256": "e" * 64,
+            }
+        ],
+    }
+    raw_hash = hashlib.sha256(
+        json.dumps(
+            profile,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    receipt["signal_profile_receipt"] = {
+        "schema_version": "research-lab-signal-profile-receipt:v1",
+        "audience": "private_evaluator_only",
+        "input_profile_sha256": raw_hash,
+        "profile_sha256": "7" * 64,
+        "signal_catalog_sha256": "b6b4138f4cc97976db1cd5f26bec2495767f21d9544779864eb4df208477ae28",
+        "primary": _profile_binding(
+            profile,
+            1,
+            {
+                "signal": "Funding raised: round type series a",
+                "category": "FUNDING",
+                "max_age_days": 90,
+            },
+        ),
+        "monitor_only": [
+            _profile_binding(
+                profile,
+                0,
+                {
+                    "signal": "Current technology use: technology Snowflake",
+                    "category": "TECHSTACK",
+                    "max_age_days": 365,
+                },
+            )
+        ],
+    }
+    return receipt
+
+
+def test_signal_profile_receipt_binds_input_and_publishes_after_validation() -> None:
+    profile = _signal_profile_fixture()
+    receipt = _valid_profile_sourcing_receipt(profile)
+    collected, token = private_runtime.begin_sourcing_profile_receipt_collection()
+    try:
+        assert private_runtime.validate_sourcing_runtime_receipt_entries(
+            [receipt],
+            expected_runtime_options={"runtime_cap_seconds": 897.0},
+            expected_icp=_profile_icp(profile),
+        ) == receipt
+    finally:
+        private_runtime.end_sourcing_profile_receipt_collection(token)
+    assert collected == [receipt["signal_profile_receipt"]]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (lambda value: value.update(input_profile_sha256="0" * 64), "input profile"),
+        (lambda value: value.update(audience="public"), "contract"),
+        (lambda value: value.update(signal_catalog_sha256="8" * 64), "catalog identity"),
+        (lambda value: value["primary"].update(input_index=0), "input order"),
+        (lambda value: value["primary"].update(role="monitor_only"), "role differs"),
+        (
+            lambda value: value["primary"].update(definition_sha256="0" * 64),
+            "definition hash differs",
+        ),
+        (lambda value: value.update(monitor_only=[]), "monitor receipts"),
+        (
+            lambda value: value["primary"]["legacy_intent"].pop("category"),
+            "legacy intent",
+        ),
+    ),
+)
+def test_signal_profile_receipt_rejects_tampering_without_publishing(
+    mutation, message: str
+) -> None:
+    profile = _signal_profile_fixture()
+    receipt = _valid_profile_sourcing_receipt(profile)
+    mutation(receipt["signal_profile_receipt"])
+    collected, token = private_runtime.begin_sourcing_profile_receipt_collection()
+    try:
+        with pytest.raises(PrivateModelRuntimeError, match=message):
+            private_runtime.validate_sourcing_runtime_receipt_entries(
+                [receipt],
+                expected_runtime_options={"runtime_cap_seconds": 897.0},
+                expected_icp=_profile_icp(profile),
+            )
+    finally:
+        private_runtime.end_sourcing_profile_receipt_collection(token)
+    assert collected == []
+
+
+def test_signal_profile_receipt_requires_exactly_one_primary_binding() -> None:
+    profile = _signal_profile_fixture()
+    profile["bindings"][1]["role"] = "monitor_only"
+    receipt = _valid_profile_sourcing_receipt(profile)
+    receipt["signal_profile_receipt"]["primary"] = None
+    receipt["signal_profile_receipt"]["monitor_only"] = [
+        _profile_binding(
+            profile,
+            index,
+            {
+                "signal": f"monitor {index}",
+                "category": "TECHSTACK",
+                "max_age_days": 30,
+            },
+        )
+        for index in range(2)
+    ]
+    with pytest.raises(PrivateModelRuntimeError, match="exactly one primary"):
+        private_runtime.validate_sourcing_runtime_receipt_entries(
+            [receipt],
+            expected_runtime_options={"runtime_cap_seconds": 897.0},
+            expected_icp=_profile_icp(profile),
+        )
+
+
+def test_signal_profile_requires_sealed_primary_tuple_before_execution() -> None:
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="requires a sealed required_intent primary tuple",
+    ):
+        private_runtime.canonicalize_private_model_icp(
+            {
+                "industry": "Software",
+                "signal_profile": _signal_profile_fixture(),
+            }
+        )
+
+
+def test_signal_profile_dual_write_is_canonicalized_from_sealed_primary() -> None:
+    normalized = private_runtime.canonicalize_private_model_icp(
+        _profile_icp(_signal_profile_fixture())
+    )
+    assert normalized["intent_signal"] == (
+        "Funding raised: round type series a"
+    )
+    assert normalized["intent_signals"] == [
+        "Funding raised: round type series a"
+    ]
+    assert normalized["intent_signal_evidence_types"] == ["FUNDING"]
+    assert normalized["intent_signal_max_age_days"] == [90]
+    assert normalized["intent_category"] == "FUNDING"
+    assert normalized["intent_max_age_days"] == 90
+
+
+def test_signal_profile_rejects_conflicting_populated_legacy_field() -> None:
+    icp = _profile_icp(_signal_profile_fixture())
+    icp["intent_signals"] = ["Current technology use: Snowflake"]
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="conflicts with sealed legacy field intent_signals",
+    ):
+        private_runtime.canonicalize_private_model_icp(icp)
 
 
 SUCCESS_AND_FAILURE_PROBE = r"""

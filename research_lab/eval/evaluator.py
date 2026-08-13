@@ -30,15 +30,19 @@ from .patches import (
     validate_candidate_patch_manifest,
 )
 from .private_runtime import (
+    EXPECTED_SIGNAL_CATALOG_METADATA,
     PrivateModelRuntimeError,
     begin_incontainer_trace_collection,
+    begin_sourcing_profile_receipt_collection,
     canonicalize_private_model_icp,
     employee_count_buckets_for_icp,
     end_incontainer_trace_collection,
+    end_sourcing_profile_receipt_collection,
     ensure_private_model_outputs,
     incontainer_trace_capture_enabled,
     publish_attested_receipt_hash,
     publish_incontainer_trace_entries,
+    trusted_signal_profile_primary_input,
 )
 from .provider_costs import summarize_provider_cost_trace_entries
 from .promotion_metric import PAIRED_LCB_PROMOTION_METRIC_VERSION
@@ -973,7 +977,12 @@ async def _score_single_icp(
     icp = item.get("icp")
     if not isinstance(icp, Mapping):
         raise RealEvaluatorRequired("benchmark item is missing private ICP payload")
+    trusted_signal_profile_primary_input(icp)
     failure_reasons: list[str] = []
+    base_profile_receipt: dict[str, Any] | None = None
+    candidate_profile_receipt: dict[str, Any] | None = None
+    base_succeeded = False
+    candidate_succeeded = False
     # In-container trace capture: install a per-task collector so runner calls
     # (including sync runners hopping through asyncio.to_thread, which copies
     # this context) can publish decoded trace entries. Tasks in a concurrent
@@ -988,11 +997,19 @@ async def _score_single_icp(
             base_outputs = []
         else:
             try:
+                raw_base_outputs, base_profile_receipt = (
+                    await _call_model_runner_with_profile_receipt(
+                        base_runner,
+                        icp,
+                        run_context,
+                    )
+                )
                 base_outputs = ensure_private_model_outputs(
-                    await _call_model_runner(base_runner, icp, run_context),
+                    raw_base_outputs,
                     context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
                     require_non_empty=False,
                 )
+                base_succeeded = True
             except PrivateModelRuntimeError as exc:
                 if not _is_provider_backed_sourcing_error(exc):
                     raise
@@ -1007,6 +1024,7 @@ async def _score_single_icp(
             candidate_context["patch"] = runtime_patch.to_dict()
         markers = {"timed_out": False, "latch_reason": "", "skipped": False}
         provider_excluded = False
+        candidate_failure_reason = ""
         if candidate_runtime_skip_reason:
             candidate_outputs = []
             failure_reasons.append(candidate_runtime_skip_reason)
@@ -1029,7 +1047,12 @@ async def _score_single_icp(
             # at the pool size across every scoring process. The skip path above
             # holds no slot. Pooling is disabled (no-op) when unconfigured.
             async with _scoring_pool_slot():
-                candidate_outputs, candidate_failure_reason, provider_excluded = await _run_candidate_with_retries(
+                (
+                    candidate_outputs,
+                    candidate_failure_reason,
+                    provider_excluded,
+                    candidate_profile_receipt,
+                ) = await _run_candidate_with_retries(
                     candidate_runner=candidate_runner,
                     icp=icp,
                     candidate_context=candidate_context,
@@ -1049,6 +1072,19 @@ async def _score_single_icp(
                         markers["latch_reason"] = _candidate_runtime_skip_reason(candidate_failure_reason)
                 else:
                     markers["latch_reason"] = _candidate_runtime_skip_reason(candidate_failure_reason)
+            else:
+                candidate_succeeded = True
+        if base_runner is None:
+            base_profile_receipt = None
+        if candidate_runtime_skip_reason:
+            candidate_profile_receipt = None
+        scoring_icp = _scoring_icp_from_profile_receipts(
+            icp,
+            base_receipt=base_profile_receipt,
+            candidate_receipt=candidate_profile_receipt,
+            base_succeeded=base_succeeded,
+            candidate_succeeded=candidate_succeeded,
+        )
         if not markers["skipped"]:
             await _emit_scoring_telemetry(
                 scoring_telemetry_hook,
@@ -1069,10 +1105,10 @@ async def _score_single_icp(
         if hasattr(scorer, "score_with_breakdowns"):
             if base_runner is not None:
                 base_breakdowns = await _maybe_await(
-                    scorer.score_with_breakdowns(base_outputs, icp, True)
+                    scorer.score_with_breakdowns(base_outputs, scoring_icp, True)
                 )
             candidate_breakdowns = await _maybe_await(
-                scorer.score_with_breakdowns(candidate_outputs, icp, False)
+                scorer.score_with_breakdowns(candidate_outputs, scoring_icp, False)
             )
             base_scores = [
                 float(item.get("final_score", 0.0) or 0.0) for item in base_breakdowns
@@ -1082,14 +1118,14 @@ async def _score_single_icp(
                 for item in candidate_breakdowns
             ]
         else:
-            base_scores = await _maybe_await(scorer(base_outputs, icp, True)) if base_runner is not None else []
-            candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
+            base_scores = await _maybe_await(scorer(base_outputs, scoring_icp, True)) if base_runner is not None else []
+            candidate_scores = await _maybe_await(scorer(candidate_outputs, scoring_icp, False))
     finally:
         if trace_token is not None:
             end_incontainer_trace_collection(trace_token)
     icp_has_intents = bool(
-        (icp.get("intent_signals") if isinstance(icp, Mapping) else None)
-        or (icp.get("intent_signal") if isinstance(icp, Mapping) else None)
+        (scoring_icp.get("intent_signals") if isinstance(scoring_icp, Mapping) else None)
+        or (scoring_icp.get("intent_signal") if isinstance(scoring_icp, Mapping) else None)
     )
     base_fp_gate, base_fp_primary = count_penalizable_false_positives(
         base_breakdowns, icp_has_intent_signals=icp_has_intents
@@ -1139,7 +1175,7 @@ async def _score_single_icp(
     }
     # P12 dense per-claim reward: deterministic L0 verdicts per submitted
     # signal (check ids + statuses only) ride the row into the score bundle.
-    l0_findings = _l0_per_claim_findings(candidate_outputs, icp)
+    l0_findings = _l0_per_claim_findings(candidate_outputs, scoring_icp)
     if l0_findings:
         row["l0_findings"] = l0_findings
     # P12: the gateway's trace-capturing scorer exposes its per-ICP judgment
@@ -1221,12 +1257,13 @@ async def _run_candidate_with_retries(
     item_ordinal: int = 0,
     scoring_telemetry_hook: ScoringTelemetryHook | None = None,
     attempt_cost_sink: AttemptCostSink | None = None,
-) -> tuple[list[Mapping[str, Any]], str, bool]:
+) -> tuple[list[Mapping[str, Any]], str, bool, dict[str, Any] | None]:
     """Run the candidate for one ICP with baseline-matched retry rounds.
 
-    Returns ``(outputs, failure_reason, provider_excluded)``. The third value is
-    retained for legacy row shape compatibility, but newly scored rows always
-    return ``False`` so retry-exhausted provider failures contribute a zero ICP.
+    Returns ``(outputs, failure_reason, provider_excluded, profile_receipt)``.
+    The third value is retained for legacy row shape compatibility, but newly
+    scored rows always return ``False`` so retry-exhausted provider failures
+    contribute a zero ICP.
     """
     attempts = 0
     max_attempts = 1 + _candidate_provider_retry_rounds()
@@ -1250,11 +1287,17 @@ async def _run_candidate_with_retries(
         failure_reason = ""
         will_retry = False
         outputs: Sequence[Mapping[str, Any]] = ()
+        profile_receipt: dict[str, Any] | None = None
         if attempt_cost_sink is not None and incontainer_trace_capture_enabled():
             attempt_entries, attempt_trace_token = begin_incontainer_trace_collection()
         try:
+            raw_outputs, profile_receipt = await _call_model_runner_with_profile_receipt(
+                candidate_runner,
+                icp,
+                candidate_context,
+            )
             outputs = ensure_private_model_outputs(
-                await _call_model_runner(candidate_runner, icp, candidate_context),
+                raw_outputs,
                 context_label=f"candidate model for ICP {item_label}",
                 require_non_empty=False,
             )
@@ -1311,7 +1354,7 @@ async def _run_candidate_with_retries(
             # The caller turns retry-exhausted runtime failures into the
             # canonical scoreable-zero row and checkpoints that result. Leave
             # this final attempt non-terminal until that callback runs.
-            return [], failure_reason, False
+            return [], failure_reason, False, None
         await _emit_scoring_telemetry(
             scoring_telemetry_hook,
             "sourcing_completed",
@@ -1324,7 +1367,7 @@ async def _run_candidate_with_retries(
                 "sourced_company_count": len(outputs),
             },
         )
-        return list(outputs), "", False
+        return list(outputs), "", False, profile_receipt
 
 
 def _candidate_failure_should_retry(
@@ -3182,6 +3225,117 @@ async def _call_model_runner(
     return result
 
 
+async def _call_model_runner_with_profile_receipt(
+    runner: ModelRunner,
+    icp: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> tuple[Sequence[Mapping[str, Any]], dict[str, Any] | None]:
+    """Run once and return only a validated task-local profile receipt."""
+
+    receipts, token = begin_sourcing_profile_receipt_collection()
+    try:
+        outputs = await _call_model_runner(runner, icp, context)
+    finally:
+        end_sourcing_profile_receipt_collection(token)
+    profile = icp.get("signal_profile")
+    bindings = profile.get("bindings") if isinstance(profile, Mapping) else None
+    requires_receipt = isinstance(bindings, list) and bool(bindings)
+    if requires_receipt and len(receipts) != 1:
+        raise PrivateModelRuntimeError(
+            "private model did not publish one validated signal profile receipt"
+        )
+    if not requires_receipt and receipts:
+        raise PrivateModelRuntimeError(
+            "private model published an unexpected signal profile receipt"
+        )
+    return outputs, (dict(receipts[0]) if receipts else None)
+
+
+def _scoring_icp_from_profile_receipts(
+    icp: Mapping[str, Any],
+    *,
+    base_receipt: Mapping[str, Any] | None,
+    candidate_receipt: Mapping[str, Any] | None,
+    base_succeeded: bool,
+    candidate_succeeded: bool,
+) -> dict[str, Any]:
+    """Bind scoring only to the model-owned primary profile projection."""
+
+    trusted_primary = trusted_signal_profile_primary_input(icp)
+    if trusted_primary is None:
+        return dict(icp)
+    if base_succeeded and base_receipt is None:
+        raise PrivateModelRuntimeError(
+            "reference model signal profile receipt is missing"
+        )
+    if candidate_succeeded and candidate_receipt is None:
+        raise PrivateModelRuntimeError(
+            "candidate model signal profile receipt is missing"
+        )
+    if (
+        base_receipt is not None
+        and candidate_receipt is not None
+        and dict(base_receipt) != dict(candidate_receipt)
+    ):
+        raise PrivateModelRuntimeError(
+            "reference and candidate signal profile receipts differ"
+        )
+    for label, receipt in (
+        ("reference", base_receipt),
+        ("candidate", candidate_receipt),
+    ):
+        if receipt is None:
+            continue
+        primary = receipt.get("primary") if isinstance(receipt, Mapping) else None
+        if (
+            not isinstance(primary, Mapping)
+            or primary.get("input_index") != trusted_primary["input_index"]
+            or primary.get("legacy_intent") != trusted_primary["legacy_intent"]
+            or primary.get("definition_sha256")
+            != trusted_primary["definition_sha256"]
+        ):
+            raise PrivateModelRuntimeError(
+                f"{label} signal profile receipt differs from sealed primary input"
+            )
+    legacy_intent = trusted_primary["legacy_intent"]
+    signal = legacy_intent["signal"]
+    category = legacy_intent["category"]
+    max_age_days = legacy_intent["max_age_days"]
+    scoring_icp = dict(icp)
+    scoring_icp.pop("signal_profile", None)
+    scoring_icp.update(
+        {
+            "_signal_profile_identity": {
+                "signal_catalog_sha256": EXPECTED_SIGNAL_CATALOG_METADATA[
+                    "catalog_sha256"
+                ],
+                "primary_definition_sha256": trusted_primary[
+                    "definition_sha256"
+                ],
+            },
+            "intent_signal": signal,
+            "intent_signal_text": signal,
+            "intent_signals": [signal],
+            "intent_signal_evidence_types": [category],
+            "intent_signal_max_age_days": [max_age_days],
+            "intent_category": category,
+            "intent_max_age_days": max_age_days,
+            "required_intent": dict(legacy_intent),
+        }
+    )
+    # Monitor-only projections remain in the private receipt and original
+    # profile identity. They never become scorer inputs or bonus intents.
+    for field in (
+        "prompt",
+        "bonus_intents",
+        "required_intents",
+        "intent_branch_contract",
+        "intent_branch_categories",
+    ):
+        scoring_icp.pop(field, None)
+    return scoring_icp
+
+
 def _is_provider_backed_sourcing_error(exc: PrivateModelRuntimeError) -> bool:
     return "provider-backed sourcing failed before returning companies" in str(exc).lower()
 
@@ -3226,6 +3380,10 @@ def prepare_autoresearch_scoring_payload(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Normalize private ICP/output into strict CompanyOutput/ICPPrompt shapes."""
     normalized_icp = canonicalize_private_model_icp(icp)
+    # The structured profile remains available to the cache key, but only the
+    # trusted primary projection above may reach the qualification scorer.
+    normalized_icp.pop("signal_profile", None)
+    normalized_icp.pop("_signal_profile_identity", None)
     normalized_icp.pop("employee_count_buckets", None)
     normalized_icp.pop("employee_counts", None)
     if isinstance(normalized_icp.get("employee_count"), Sequence) and not isinstance(

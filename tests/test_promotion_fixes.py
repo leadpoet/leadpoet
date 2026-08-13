@@ -650,6 +650,22 @@ def _assert_db_doc_safe(doc: Mapping[str, Any]) -> None:
     assert not promotion._DB_DOC_FORBIDDEN_RE.search(encoded)
 
 
+def test_db_safe_doc_removes_private_signal_profile_receipts() -> None:
+    safe = promotion._db_safe_doc(
+        {
+            "status": "completed",
+            "signal_profile_receipt": {
+                "profile_sha256": "a" * 64,
+                "input_profile_sha256": "b" * 64,
+                "primary": {"definition_sha256": "c" * 64},
+                "monitor_only": [{"definition_sha256": "d" * 64}],
+            },
+        }
+    )
+    assert safe == {"status": "completed"}
+    _assert_db_doc_safe(safe)
+
+
 # ---------------------------------------------------------------------------
 # Bug #2 — lineage fail-closed
 # ---------------------------------------------------------------------------

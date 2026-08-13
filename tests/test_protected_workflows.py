@@ -63,6 +63,18 @@ def test_scoring_receipt_failure_policy_is_protected():
     assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
         "gateway/research_lab/attested_scoring_v2.py"
     ]
+    assert {
+        "_canonical_input_profile_sha256",
+        "_canonical_input_definition_sha256",
+        "_validated_legacy_intent",
+        "trusted_signal_profile_primary_input",
+        "_validated_profile_binding",
+        "_validate_signal_profile_receipt",
+    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
+    assert {
+        "_call_model_runner_with_profile_receipt",
+        "_scoring_icp_from_profile_receipts",
+    } <= set(PROTECTED_SYMBOLS["research_lab/eval/evaluator.py"])
 
 
 def test_inter_enclave_replay_and_identity_boundaries_are_protected():

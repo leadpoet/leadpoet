@@ -4810,6 +4810,7 @@ def _image_ref_hash(image_ref: Any) -> str:
 _DB_DOC_FORBIDDEN_RE = re.compile(
     r"(sk-or-|openrouter_api_key|raw_openrouter_key|raw_secret|service_role|"
     r"private_repo|judge_prompt|hidden_icp|icp_plaintext|intent_signals|"
+    r"signal_profile|profile_sha256|definition_sha256|"
     r"\.dkr\.ecr\.|image_digest|private_model_manifest_doc|"
     r"candidate_patch_manifest|proxy[_-]?url|://[^/]+:[^/@]+@)",
     re.IGNORECASE,

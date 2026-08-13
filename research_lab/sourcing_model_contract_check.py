@@ -1,6 +1,6 @@
 """Sourcing-model consumer-contract conformance checks.
 
-The reviewed model-owned v7/v8/v11/v12/v13 contracts are snapshotted byte-for-byte under
+The reviewed model-owned v7/v8/v11/v12/v13/v27 contracts are snapshotted byte-for-byte under
 ``research_lab/``. The exact function signatures
 the Lab and production harness call
 (``research_lab_adapter.run_icp``/``adapter_metadata``,
@@ -51,7 +51,22 @@ CONTRACT_V13_PATH = Path(__file__).with_name("sourcing_model_contract_v13.json")
 PARITY_FIXTURE_V13_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v13.json"
 )
+CONTRACT_V27_PATH = Path(__file__).with_name("sourcing_model_contract_v27.json")
+PARITY_FIXTURE_V27_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v27.json"
+)
 REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v27",
+        "contract_path": CONTRACT_V27_PATH,
+        "contract_sha256": (
+            "sha256:7f13ae1f2ba28bac5da3f1e3d8e382f842ed9610dc7ac238686cae90e7dd5952"
+        ),
+        "parity_path": PARITY_FIXTURE_V27_PATH,
+        "parity_sha256": (
+            "sha256:ef9018ecf8f5f82b596eb8e301f5686357257190b3b452bcd606df3b0f878a1c"
+        ),
+    },
     {
         "contract_id": "leadpoet-sourcing-wrapper-contract-v13",
         "contract_path": CONTRACT_V13_PATH,

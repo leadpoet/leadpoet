@@ -1947,6 +1947,7 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 expected_runtime_options=dict(stdin_payload["context"])[
                     "runtime_options"
                 ],
+                expected_icp=dict(stdin_payload["icp"]),
             )
         except PrivateModelRuntimeError as exc:
             raise ModelSandboxV2Error(
@@ -2066,6 +2067,7 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 expected_runtime_options=dict(stdin_payload["context"])[
                     "runtime_options"
                 ],
+                expected_icp=dict(stdin_payload["icp"]),
             )
         except PrivateModelRuntimeError as exc:
             raise ModelSandboxV2Error(

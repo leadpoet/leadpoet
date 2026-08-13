@@ -440,6 +440,7 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
         "leadpoet-sourcing-wrapper-contract-v11",
         "leadpoet-sourcing-wrapper-contract-v12",
         "leadpoet-sourcing-wrapper-contract-v13",
+        "leadpoet-sourcing-wrapper-contract-v27",
     }
 
 

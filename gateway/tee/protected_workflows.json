@@ -467,7 +467,7 @@
       "symbol": "DEFAULT_PRIVATE_BUILD_CMD"
     },
     {
-      "ast_sha256": "sha256:d2141481ab39d6bf465c20ab61d4c7d6a13195bcd1ffe54294ab84bfa5b8d150",
+      "ast_sha256": "sha256:7bcb561c53425d1b70a15dc67fc14a8aed3a82e5e06c832da818be86b44233a4",
       "path": "gateway/research_lab/config.py",
       "symbol": "DEFAULT_PRIVATE_TEST_CMD"
     },
@@ -477,7 +477,7 @@
       "symbol": "AttestedReplayDevEvaluatorV2"
     },
     {
-      "ast_sha256": "sha256:e7ed3cace0fdf095c577d5fc0fbca8b1e3ee3304b6b2ffd19228ff99e16dc9eb",
+      "ast_sha256": "sha256:5846a027bac81e2aaa46eb54af2f4a8e04c4c212071b08da6549dca7a219d41e",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "DockerReplayDevEvaluator"
     },
@@ -1327,7 +1327,7 @@
       "symbol": "MODEL_SANDBOX_VISIBLE_ROOT"
     },
     {
-      "ast_sha256": "sha256:acace10cccd28c5412175edcc122056f3780c3f94ca7c93bc09e22adf269bd56",
+      "ast_sha256": "sha256:d866eb2676c9f974ffeaeb5bb41822a99aa36964ad24ff6120cf99d6e115f09f",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
@@ -2507,12 +2507,17 @@
       "symbol": "_benchmark_icp_score"
     },
     {
-      "ast_sha256": "sha256:1f51f9089f3a33d3f181831487ab55cfe23a665599f7a9f213bcd499f33a5d41",
+      "ast_sha256": "sha256:26b35d5e10b2120d3750edc464874f81790aee1481602d021104cca68abea49c",
+      "path": "research_lab/eval/evaluator.py",
+      "symbol": "_call_model_runner_with_profile_receipt"
+    },
+    {
+      "ast_sha256": "sha256:cb2a047e72f628bdfe12b68828e522bfa6e5ffef2d84e982492439ebf0314039",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "_run_candidate_with_retries"
     },
     {
-      "ast_sha256": "sha256:b67cc4186045493a843152d695770f039c1d44e0e5698b2a9adfcd04d0d84953",
+      "ast_sha256": "sha256:425469e26c12d64e8302e19d4669578cfe77d1063cde8022fd63e87d567ad3e5",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "_score_single_icp"
     },
@@ -2520,6 +2525,11 @@
       "ast_sha256": "sha256:8a09740541c48fc1f75d6fc80d15a431daad34eb258affa7cfe66db8c5cacd94",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "_score_with_private_holdout_gate"
+    },
+    {
+      "ast_sha256": "sha256:3f9457f46ad03205caa85e43157dd25733b50466cd62b5e28ace0dca7f96101e",
+      "path": "research_lab/eval/evaluator.py",
+      "symbol": "_scoring_icp_from_profile_receipts"
     },
     {
       "ast_sha256": "sha256:4ed8d17ad336da16aa2d157cc87fb476d73bda70bd0350bc162d8024ff92f7fb",
@@ -2547,7 +2557,7 @@
       "symbol": "evaluate_private_model_pair"
     },
     {
-      "ast_sha256": "sha256:a3d10e734ceefea3b5d2d1d49c49dd0a3ce9fcc316bb37f31420bc9394db3511",
+      "ast_sha256": "sha256:b2ca19f7116028a91c23afa74b7c9f248c19dd3650f99e35f8fcee865e7e4772",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "prepare_autoresearch_scoring_payload"
     },
@@ -2567,9 +2577,34 @@
       "symbol": "_REVIEWED_CONSUMER_MANIFEST_PAIRS"
     },
     {
+      "ast_sha256": "sha256:c23863cfb32f122acae627a0208cb38eb34da1189d32f9df6c8e7484a9105821",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_canonical_input_definition_sha256"
+    },
+    {
+      "ast_sha256": "sha256:bd1eeaf64d4f8bd45e83eb62f9d10660ccfebf657a15db70ed86075445578b9e",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_canonical_input_profile_sha256"
+    },
+    {
       "ast_sha256": "sha256:b3865748f3d116eed4679d5f715f8029db9e0732d65a5372e003f8204d6b5e36",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_private_manifest_hash_payload"
+    },
+    {
+      "ast_sha256": "sha256:5356e8bebaf80b200a728252fa56d6b7c594f26aa5a098958f90c938f26bcd7c",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_validate_signal_profile_receipt"
+    },
+    {
+      "ast_sha256": "sha256:b04e4fd7c52c669b5c9dace55e5d9439075c24c912a388075fbfb0faec934fe0",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_validated_legacy_intent"
+    },
+    {
+      "ast_sha256": "sha256:a59136058f5abb6e66ba3bcfb89528d290495844c0a704edd0861c7065d48470",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_validated_profile_binding"
     },
     {
       "ast_sha256": "sha256:df1eb782f4c7cb25ffcca337dd898d2c0c3c43c87aa88590b040388889bdb707",
@@ -2592,7 +2627,12 @@
       "symbol": "build_local_private_artifact_manifest"
     },
     {
-      "ast_sha256": "sha256:90ca8db8a9572102075299d56c335801e786d06e0e8caa8c0e80b704a935b952",
+      "ast_sha256": "sha256:f81737422e962c167ed1485b13f4448fc83fa824ce76d323b5f961d03ecda4e3",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "trusted_signal_profile_primary_input"
+    },
+    {
+      "ast_sha256": "sha256:940392d5aa500ca5dd9b6caa481d4d774dda8d0eed2706400934c128e0aea443",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "validate_sourcing_adapter_metadata"
     },
@@ -2707,7 +2747,7 @@
       "symbol": "validate_source_add_reward_record"
     },
     {
-      "ast_sha256": "sha256:14cf32a9c7bf8e04ea6913363254f92ac28117f6e41b17823441c167f84da6d1",
+      "ast_sha256": "sha256:c7b9ba6a03d54eae05f64b453e2f6ae9bc4ae26421758670de716633e4b5ee7f",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "REVIEWED_CONSUMER_SNAPSHOT_SPECS"
     },
@@ -2737,7 +2777,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:7ddd3c8298f4c4e361eecdafd1bf9d5295ae3ee78556f45293e5f21de3bfa0ae",
+  "manifest_hash": "sha256:37623dfd3d4e3febe699ef9f2555a9b3fb516562ce46526b332dd3f1ed4f319f",
   "protected_source_commit": "1f4ad1a3954297142ff4aad2f4d14b82a0579e09",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

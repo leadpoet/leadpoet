@@ -87,7 +87,33 @@ SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS = 1500.0
 SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
 # Match the adapter's result/receipt finalization window before sandbox kill.
 SOURCING_MODEL_MAX_FINALIZATION_RESERVE_SECONDS = 60.0
-EXPECTED_SOURCING_ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v3"
+EXPECTED_SOURCING_ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v7"
+SUPPORTED_SOURCING_ADAPTER_VERSIONS = frozenset(
+    {
+        "sourcing-model-research-lab-adapter:v3",
+        EXPECTED_SOURCING_ADAPTER_VERSION,
+    }
+)
+EXPECTED_SIGNAL_PROFILE_SCHEMA_VERSION = "icp-signal-profile:v1"
+EXPECTED_SIGNAL_PROFILE_PROJECTION_SCHEMA_VERSION = (
+    "icp-signal-profile-projection:v1"
+)
+EXPECTED_RESEARCH_LAB_ICP_PROJECTION_SCHEMA_VERSION = (
+    "research-lab-icp-projection:v1"
+)
+EXPECTED_SIGNAL_PROFILE_RECEIPT_SCHEMA_VERSION = (
+    "research-lab-signal-profile-receipt:v1"
+)
+EXPECTED_SIGNAL_PROFILE_RECEIPT_AUDIENCE = "private_evaluator_only"
+EXPECTED_SIGNAL_CATALOG_METADATA = {
+    "schema_version": "signal-catalog:v1",
+    "policy_version": "signal-catalog-policy:v2",
+    "catalog_sha256": (
+        "b6b4138f4cc97976db1cd5f26bec2495767f21d9544779864eb4df208477ae28"
+    ),
+    "archetype_count": 7,
+    "signal_kind_count": 26,
+}
 EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
 EXPECTED_ROUTING_COMPILER_VERSION = "routing-compiler-v2"
 REQUIRED_RUNTIME_CANDIDATE_TOOLS = {
@@ -234,6 +260,24 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(icp, Mapping):
         raise PrivateModelRuntimeError("private model ICP payload must be an object")
     normalized = dict(icp)
+    signal_profile = normalized.get("signal_profile")
+    if signal_profile is not None and not isinstance(signal_profile, Mapping):
+        raise PrivateModelRuntimeError("private model signal_profile must be an object")
+    profile_bindings = (
+        signal_profile.get("bindings")
+        if isinstance(signal_profile, Mapping)
+        else None
+    )
+    if profile_bindings is not None and not isinstance(profile_bindings, list):
+        raise PrivateModelRuntimeError(
+            "private model signal_profile bindings must be an array"
+    )
+    has_profile_bindings = bool(profile_bindings)
+    trusted_profile_primary = (
+        trusted_signal_profile_primary_input(normalized)
+        if has_profile_bindings
+        else None
+    )
 
     industry = _first_text(normalized.get("industry"), normalized.get("market"))
     sub_industry = _first_text(normalized.get("sub_industry"), normalized.get("subindustry"))
@@ -260,7 +304,11 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
             default="51-200",
         )
     )
-    intent_signal = _intent_signal_text(normalized)
+    intent_signal = (
+        trusted_profile_primary["legacy_intent"]["signal"]
+        if trusted_profile_primary is not None
+        else _intent_signal_text(normalized)
+    )
     required_attribute = _required_attribute(
         normalized.get("required_attribute"),
         industry=industry,
@@ -290,8 +338,23 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
     normalized["intent_signal"] = intent_signal
     normalized["intent_signal_text"] = _first_text(normalized.get("intent_signal_text"), intent_signal)
     normalized["intent_signals"] = _intent_signals_list(normalized.get("intent_signals"), intent_signal)
-    normalized["intent_category"] = _intent_category(normalized.get("intent_category"), intent_signal)
-    normalized["intent_max_age_days"] = _positive_int(normalized.get("intent_max_age_days"), default=365)
+    normalized["intent_category"] = (
+        trusted_profile_primary["legacy_intent"]["category"]
+        if trusted_profile_primary is not None
+        else _intent_category(normalized.get("intent_category"), intent_signal)
+    )
+    normalized["intent_max_age_days"] = (
+        trusted_profile_primary["legacy_intent"]["max_age_days"]
+        if trusted_profile_primary is not None
+        else _positive_int(normalized.get("intent_max_age_days"), default=365)
+    )
+    if trusted_profile_primary is not None:
+        normalized["intent_signal_evidence_types"] = [
+            trusted_profile_primary["legacy_intent"]["category"]
+        ]
+        normalized["intent_signal_max_age_days"] = [
+            trusted_profile_primary["legacy_intent"]["max_age_days"]
+        ]
     normalized["bonus_intents"] = _bonus_intents_list(normalized.get("bonus_intents"))
     normalized["company_stage"] = _first_text(normalized.get("company_stage"), default="Any")
     normalized["prompt"] = _first_text(normalized.get("prompt"), _prompt_from_icp(normalized))
@@ -309,7 +372,9 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
             }
         )[:18]
 
-    if not normalized["industry"] or not normalized["intent_signal"]:
+    if not normalized["industry"] or (
+        not normalized["intent_signal"] and not has_profile_bindings
+    ):
         raise PrivateModelRuntimeError("private model ICP is missing industry or intent signal after canonicalization")
     return normalized
 
@@ -435,6 +500,7 @@ class SubprocessPrivateModelRunner:
         validate_sourcing_runtime_receipt(
             completed.stderr,
             expected_runtime_options=payload["context"]["runtime_options"],
+            expected_icp=payload["icp"],
         )
 
         try:
@@ -658,6 +724,7 @@ class DockerPrivateModelRunner:
             validate_sourcing_runtime_receipt(
                 completed.stderr,
                 expected_runtime_options=expected_runtime_options,
+                expected_icp=stdin_payload.get("icp"),
             )
         try:
             decoded = _loads_adapter_stdout(completed.stdout)
@@ -1071,9 +1138,10 @@ def validate_sourcing_adapter_metadata(
     """Fail closed unless an artifact declares the Lab runtime contract."""
 
     document = dict(metadata)
-    if document.get("adapter_version") != EXPECTED_SOURCING_ADAPTER_VERSION:
+    adapter_version = str(document.get("adapter_version") or "")
+    if adapter_version not in SUPPORTED_SOURCING_ADAPTER_VERSIONS:
         raise PrivateModelRuntimeError(
-            "private model does not declare the supported adapter v3 contract"
+            "private model does not declare a supported adapter contract"
         )
     if (
         document.get("component_registry_version")
@@ -1241,6 +1309,49 @@ def validate_sourcing_adapter_metadata(
         raise PrivateModelRuntimeError(
             "source-router strategies differ from model-owned routing metadata"
         )
+    if adapter_version == EXPECTED_SOURCING_ADAPTER_VERSION:
+        signal_catalog = document.get("signal_catalog")
+        if not isinstance(signal_catalog, Mapping):
+            raise PrivateModelRuntimeError(
+                "private model v7 does not declare a signal catalog"
+            )
+        if any(
+            signal_catalog.get(field) != value
+            for field, value in EXPECTED_SIGNAL_CATALOG_METADATA.items()
+        ):
+            raise PrivateModelRuntimeError(
+                "private model v7 signal catalog identity is unsupported"
+            )
+        signal_profile = document.get("signal_profile")
+        expected_profile_metadata = {
+            "schema_version": EXPECTED_SIGNAL_PROFILE_SCHEMA_VERSION,
+            "projection_schema_version": (
+                EXPECTED_SIGNAL_PROFILE_PROJECTION_SCHEMA_VERSION
+            ),
+            "research_lab_projection_schema_version": (
+                EXPECTED_RESEARCH_LAB_ICP_PROJECTION_SCHEMA_VERSION
+            ),
+            "receipt_schema_version": (
+                EXPECTED_SIGNAL_PROFILE_RECEIPT_SCHEMA_VERSION
+            ),
+            "receipt_audience": EXPECTED_SIGNAL_PROFILE_RECEIPT_AUDIENCE,
+        }
+        if not isinstance(signal_profile, Mapping) or any(
+            signal_profile.get(field) != value
+            for field, value in expected_profile_metadata.items()
+        ):
+            raise PrivateModelRuntimeError(
+                "private model v7 signal profile metadata is unsupported"
+            )
+        max_bindings = signal_profile.get("max_bindings")
+        if (
+            isinstance(max_bindings, bool)
+            or not isinstance(max_bindings, int)
+            or max_bindings <= 0
+        ):
+            raise PrivateModelRuntimeError(
+                "private model v7 signal profile max_bindings is invalid"
+            )
     return document
 
 
@@ -1248,12 +1359,14 @@ def validate_sourcing_runtime_receipt(
     stderr: str,
     *,
     expected_runtime_options: Mapping[str, Any],
+    expected_icp: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Require one complete receipt from every successful sourcing call."""
 
     return validate_sourcing_runtime_receipt_entries(
         parse_sourcing_runtime_lines(stderr),
         expected_runtime_options=expected_runtime_options,
+        expected_icp=expected_icp,
     )
 
 
@@ -1261,6 +1374,7 @@ def validate_sourcing_runtime_receipt_entries(
     entries: Sequence[Mapping[str, Any]],
     *,
     expected_runtime_options: Mapping[str, Any],
+    expected_icp: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate receipts already decoded by the measured sandbox."""
 
@@ -1379,7 +1493,361 @@ def validate_sourcing_runtime_receipt_entries(
         raise PrivateModelRuntimeError(
             "private model intent branches used inconsistent routing contracts"
         )
+    profile_receipt = _validate_signal_profile_receipt(
+        receipt.get("signal_profile_receipt"),
+        expected_icp=expected_icp,
+    )
+    if profile_receipt is not None:
+        _publish_sourcing_profile_receipt(profile_receipt)
     return receipt
+
+
+def _canonical_input_profile_sha256(profile: Mapping[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            profile,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise PrivateModelRuntimeError(
+            "private model signal_profile is not canonical JSON"
+        ) from exc
+    return sha256_bytes(encoded).removeprefix("sha256:")
+
+
+def _canonical_input_definition_sha256(definition: Mapping[str, Any]) -> str:
+    """Hash the exact sealed definition without applying model semantics."""
+
+    try:
+        encoded = json.dumps(
+            definition,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise PrivateModelRuntimeError(
+            "private model signal_profile definition is not canonical JSON"
+        ) from exc
+    return sha256_bytes(encoded).removeprefix("sha256:")
+
+
+def _validated_legacy_intent(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "signal",
+        "category",
+        "max_age_days",
+    }:
+        raise PrivateModelRuntimeError(
+            "private model signal profile legacy intent is malformed"
+        )
+    signal = str(value.get("signal") or "").strip()
+    category = str(value.get("category") or "").strip()
+    max_age_days = value.get("max_age_days")
+    if (
+        not signal
+        or not category
+        or isinstance(max_age_days, bool)
+        or not isinstance(max_age_days, int)
+        or max_age_days <= 0
+    ):
+        raise PrivateModelRuntimeError(
+            "private model signal profile legacy intent is invalid"
+        )
+    validated = {
+        "signal": signal,
+        "category": category,
+        "max_age_days": max_age_days,
+    }
+    if dict(value) != validated:
+        raise PrivateModelRuntimeError(
+            "private model signal profile legacy intent is not canonical"
+        )
+    return validated
+
+
+def trusted_signal_profile_primary_input(
+    icp: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the sealed primary tuple and exact input-definition identity.
+
+    Lab does not project a structured definition. A non-empty profile must be
+    dual-written with the model-owned ``required_intent`` projection already
+    sealed into the benchmark input. Populated legacy aliases must agree with
+    that tuple so no runner receipt can redefine scoring.
+    """
+
+    if not isinstance(icp, Mapping):
+        raise PrivateModelRuntimeError("private model ICP payload must be an object")
+    profile = icp.get("signal_profile")
+    if profile is None:
+        return None
+    if not isinstance(profile, Mapping):
+        raise PrivateModelRuntimeError("private model signal_profile must be an object")
+    bindings = profile.get("bindings")
+    if not isinstance(bindings, list):
+        raise PrivateModelRuntimeError(
+            "private model signal_profile bindings must be an array"
+        )
+    if not bindings:
+        return None
+    if profile.get("schema_version") != EXPECTED_SIGNAL_PROFILE_SCHEMA_VERSION:
+        raise PrivateModelRuntimeError(
+            "private model signal_profile schema is unsupported"
+        )
+    primary_indexes: list[int] = []
+    definition_hashes: list[str] = []
+    for index, binding in enumerate(bindings):
+        if not isinstance(binding, Mapping):
+            raise PrivateModelRuntimeError(
+                f"private model signal_profile binding {index} must be an object"
+            )
+        role = binding.get("role")
+        if role not in {"primary", "monitor_only"}:
+            raise PrivateModelRuntimeError(
+                f"private model signal_profile binding {index} role is unsupported"
+            )
+        definition = binding.get("definition")
+        if not isinstance(definition, Mapping):
+            raise PrivateModelRuntimeError(
+                "private model signal_profile definition must be an object"
+            )
+        definition_hashes.append(_canonical_input_definition_sha256(definition))
+        if role == "primary":
+            primary_indexes.append(index)
+    if len(primary_indexes) != 1:
+        raise PrivateModelRuntimeError(
+            "private model signal_profile must contain exactly one primary binding"
+        )
+    required_intent = icp.get("required_intent")
+    if not isinstance(required_intent, Mapping):
+        raise PrivateModelRuntimeError(
+            "non-empty signal_profile requires a sealed required_intent primary tuple"
+        )
+    trusted_intent = _validated_legacy_intent(required_intent)
+    expected_legacy = {
+        "intent": trusted_intent["signal"],
+        "buying_intent": trusted_intent["signal"],
+        "intent_signal": trusted_intent["signal"],
+        "intent_signal_text": trusted_intent["signal"],
+        "intent_signals": [trusted_intent["signal"]],
+        "intent_signal_evidence_types": [trusted_intent["category"]],
+        "intent_signal_max_age_days": [trusted_intent["max_age_days"]],
+        "intent_category": trusted_intent["category"],
+        "intent_max_age_days": trusted_intent["max_age_days"],
+    }
+    for field, expected in expected_legacy.items():
+        if field not in icp or icp[field] in (None, "", [], ()):  # type: ignore[comparison-overlap]
+            continue
+        if icp[field] != expected:
+            raise PrivateModelRuntimeError(
+                f"signal_profile conflicts with sealed legacy field {field}"
+            )
+    for field in (
+        "required_intents",
+        "bonus_intents",
+        "intent_branch_contract",
+        "intent_branch_categories",
+    ):
+        if field in icp and icp[field] not in (None, "", [], (), {}):
+            raise PrivateModelRuntimeError(
+                f"signal_profile cannot be combined with {field}"
+            )
+    if icp.get("intent_match_mode") not in (None, "", "any"):
+        raise PrivateModelRuntimeError(
+            "signal_profile supports only one primary sourcing intent"
+        )
+    primary_index = primary_indexes[0]
+    return {
+        "input_index": primary_index,
+        "legacy_intent": trusted_intent,
+        "definition_sha256": definition_hashes[primary_index],
+    }
+
+
+def _validated_profile_binding(
+    value: Any,
+    *,
+    expected_binding: Mapping[str, Any],
+    input_index: int,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model signal profile binding receipt is malformed"
+        )
+    expected_keys = {
+        "input_index",
+        "role",
+        "archetype_id",
+        "signal_kind_id",
+        "signal_kind_version",
+        "definition_sha256",
+        "legacy_intent",
+    }
+    if set(value) != expected_keys or value.get("input_index") != input_index:
+        raise PrivateModelRuntimeError(
+            "private model signal profile binding receipt differs from input order"
+        )
+    definition = expected_binding.get("definition")
+    if not isinstance(definition, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model signal_profile definition must be an object"
+        )
+    for field in (
+        "role",
+        "archetype_id",
+        "signal_kind_id",
+        "signal_kind_version",
+    ):
+        expected_value = (
+            expected_binding.get(field)
+            if field == "role"
+            else definition.get(field)
+        )
+        if value.get(field) != expected_value:
+            raise PrivateModelRuntimeError(
+                f"private model signal profile binding {field} differs from input"
+            )
+    if not re.fullmatch(r"[0-9a-f]{64}", str(value.get("definition_sha256") or "")):
+        raise PrivateModelRuntimeError(
+            "private model signal profile definition hash is invalid"
+        )
+    expected_definition_sha256 = _canonical_input_definition_sha256(definition)
+    if value.get("definition_sha256") != expected_definition_sha256:
+        raise PrivateModelRuntimeError(
+            "private model signal profile definition hash differs from exact input definition"
+        )
+    return {
+        **dict(value),
+        "legacy_intent": _validated_legacy_intent(value.get("legacy_intent")),
+    }
+
+
+def _validate_signal_profile_receipt(
+    value: Any,
+    *,
+    expected_icp: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    profile = (
+        expected_icp.get("signal_profile")
+        if isinstance(expected_icp, Mapping)
+        else None
+    )
+    bindings = profile.get("bindings") if isinstance(profile, Mapping) else None
+    profile_requires_receipt = isinstance(bindings, list) and bool(bindings)
+    if not profile_requires_receipt:
+        if value is not None:
+            raise PrivateModelRuntimeError(
+                "private model emitted an unexpected signal profile receipt"
+            )
+        return None
+    if not isinstance(profile, Mapping):
+        raise PrivateModelRuntimeError("private model signal_profile must be an object")
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version",
+        "audience",
+        "input_profile_sha256",
+        "profile_sha256",
+        "signal_catalog_sha256",
+        "primary",
+        "monitor_only",
+    }:
+        raise PrivateModelRuntimeError(
+            "private model signal profile receipt is missing or malformed"
+        )
+    if (
+        value.get("schema_version")
+        != EXPECTED_SIGNAL_PROFILE_RECEIPT_SCHEMA_VERSION
+        or value.get("audience") != EXPECTED_SIGNAL_PROFILE_RECEIPT_AUDIENCE
+    ):
+        raise PrivateModelRuntimeError(
+            "private model signal profile receipt contract is unsupported"
+        )
+    if value.get("input_profile_sha256") != _canonical_input_profile_sha256(profile):
+        raise PrivateModelRuntimeError(
+            "private model signal profile receipt does not bind the input profile"
+        )
+    for field in ("profile_sha256", "signal_catalog_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field) or "")):
+            raise PrivateModelRuntimeError(
+                f"private model signal profile receipt {field} is invalid"
+            )
+    # ``profile_sha256`` hashes the model-normalized profile. Catalog-owned
+    # parameter normalization can change otherwise valid input definitions,
+    # so Lab cannot recompute that value generically without reimplementing
+    # model semantics. The exact raw profile and every exact input definition
+    # are independently hash-bound below; keep the normalized hash shape-only.
+    if (
+        value.get("signal_catalog_sha256")
+        != EXPECTED_SIGNAL_CATALOG_METADATA["catalog_sha256"]
+    ):
+        raise PrivateModelRuntimeError(
+            "private model signal profile receipt catalog identity is unsupported"
+        )
+    if not isinstance(bindings, list):
+        raise PrivateModelRuntimeError(
+            "private model signal_profile bindings must be an array"
+        )
+    trusted_primary = trusted_signal_profile_primary_input(expected_icp or {})
+    if trusted_primary is None:
+        raise PrivateModelRuntimeError(
+            "private model signal profile receipt has no sealed primary input"
+        )
+    primary_indexes = [
+        index
+        for index, binding in enumerate(bindings)
+        if isinstance(binding, Mapping) and binding.get("role") == "primary"
+    ]
+    monitor_indexes = [
+        index
+        for index, binding in enumerate(bindings)
+        if isinstance(binding, Mapping) and binding.get("role") == "monitor_only"
+    ]
+    if len(primary_indexes) != 1 or len(primary_indexes) + len(monitor_indexes) != len(bindings):
+        raise PrivateModelRuntimeError(
+            "private model signal_profile must contain exactly one primary binding"
+        )
+    primary = value.get("primary")
+    if primary_indexes:
+        primary = _validated_profile_binding(
+            primary,
+            expected_binding=bindings[primary_indexes[0]],
+            input_index=primary_indexes[0],
+        )
+    elif primary is not None:
+        raise PrivateModelRuntimeError(
+            "private model signal profile receipt has an unexpected primary"
+        )
+    if (
+        primary.get("legacy_intent") != trusted_primary["legacy_intent"]
+        or primary.get("definition_sha256")
+        != trusted_primary["definition_sha256"]
+    ):
+        raise PrivateModelRuntimeError(
+            "private model signal profile primary receipt differs from sealed input"
+        )
+    monitors = value.get("monitor_only")
+    if not isinstance(monitors, list) or len(monitors) != len(monitor_indexes):
+        raise PrivateModelRuntimeError(
+            "private model signal profile monitor receipts differ from input"
+        )
+    validated_monitors = [
+        _validated_profile_binding(
+            monitor,
+            expected_binding=bindings[input_index],
+            input_index=input_index,
+        )
+        for monitor, input_index in zip(monitors, monitor_indexes)
+    ]
+    return {
+        **dict(value),
+        "primary": primary,
+        "monitor_only": validated_monitors,
+    }
 
 
 # Provider failures that end the whole sourcing run: credit/auth/quota
@@ -1494,6 +1962,17 @@ _ATTESTED_RECEIPT_HASH_COLLECTOR: contextvars.ContextVar[set[str] | None] = cont
     default=None,
 )
 
+# One evaluator task can run the reference and candidate artifacts in sequence,
+# while many ICP tasks run concurrently. Keep validated private profile receipts
+# task-local so the evaluator can use the model-owned primary projection without
+# storing it on a shared runner object or copying projection semantics into Lab.
+_SOURCING_PROFILE_RECEIPT_COLLECTOR: contextvars.ContextVar[
+    list[dict[str, Any]] | None
+] = contextvars.ContextVar(
+    "research_lab_sourcing_profile_receipt_collector",
+    default=None,
+)
+
 
 def begin_incontainer_trace_collection() -> tuple[list[dict[str, Any]], contextvars.Token]:
     """Install an in-container trace collector for the current context."""
@@ -1533,6 +2012,26 @@ def publish_attested_receipt_hash(receipt_hash: str) -> None:
     if collector is None:
         return
     collector.add(str(receipt_hash or "").strip().lower())
+
+
+def begin_sourcing_profile_receipt_collection() -> tuple[
+    list[dict[str, Any]], contextvars.Token
+]:
+    """Collect validated private signal-profile receipts for one model call."""
+
+    receipts: list[dict[str, Any]] = []
+    token = _SOURCING_PROFILE_RECEIPT_COLLECTOR.set(receipts)
+    return receipts, token
+
+
+def end_sourcing_profile_receipt_collection(token: contextvars.Token) -> None:
+    _SOURCING_PROFILE_RECEIPT_COLLECTOR.reset(token)
+
+
+def _publish_sourcing_profile_receipt(receipt: Mapping[str, Any]) -> None:
+    collector = _SOURCING_PROFILE_RECEIPT_COLLECTOR.get()
+    if collector is not None:
+        collector.append(dict(receipt))
 
 
 def parse_incontainer_trace_lines(stderr: str) -> list[dict[str, Any]]:

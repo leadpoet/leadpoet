@@ -892,6 +892,32 @@ def _retry_runner_with_provider_cost_scope(
     )
 
 
+def _baseline_runner_for_attempt(
+    runner: AttestedPrivateModelRunnerV2,
+    *,
+    item_index: int,
+    retry_round: int,
+    worker_count: int,
+) -> AttestedPrivateModelRunnerV2:
+    """Bind each baseline attempt to a deterministic worker proxy profile."""
+
+    normalized_item_index = int(item_index)
+    normalized_retry_round = int(retry_round)
+    normalized_worker_count = int(worker_count)
+    if normalized_item_index <= 0:
+        raise ValueError("private baseline item index is invalid")
+    if normalized_retry_round < 0:
+        raise ValueError("private baseline retry round is invalid")
+    if not 1 <= normalized_worker_count <= 500:
+        raise ValueError("private baseline worker count is invalid")
+    if normalized_worker_count == 1:
+        return runner
+    worker_index = (
+        normalized_item_index - 1 + normalized_retry_round
+    ) % normalized_worker_count
+    return runner.with_worker_index(worker_index)
+
+
 def _attested_receipts_from(*sources: Any) -> list[dict[str, Any]]:
     receipts: dict[str, dict[str, Any]] = {}
     for source in sources:
@@ -14319,8 +14345,21 @@ class ResearchLabGatewayScoringWorker:
 
             async def run_one(item_index: int, item: Mapping[str, Any]) -> dict[str, Any]:
                 async with semaphore:
+                    attempt_runner = _baseline_runner_for_attempt(
+                        runner,
+                        item_index=item_index,
+                        retry_round=0,
+                        worker_count=int(
+                            getattr(
+                                self.config,
+                                "scoring_worker_total_workers",
+                                1,
+                            )
+                            or 1
+                        ),
+                    )
                     entry = await self._run_baseline_icp(
-                        runner=runner,
+                        runner=attempt_runner,
                         scorer=scorer,
                         item=item,
                         item_index=item_index,
@@ -14463,8 +14502,21 @@ class ResearchLabGatewayScoringWorker:
                                 backoff_seconds,
                             )
                             await asyncio.sleep(backoff_seconds)
+                        attempt_runner = _baseline_runner_for_attempt(
+                            round_retry_runner,
+                            item_index=item_index,
+                            retry_round=round_no,
+                            worker_count=int(
+                                getattr(
+                                    self.config,
+                                    "scoring_worker_total_workers",
+                                    1,
+                                )
+                                or 1
+                            ),
+                        )
                         entry = await self._run_baseline_icp(
-                            runner=round_retry_runner,
+                            runner=attempt_runner,
                             scorer=scorer,
                             item=window.benchmark_items[item_index - 1],
                             item_index=item_index,

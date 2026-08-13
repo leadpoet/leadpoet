@@ -332,6 +332,16 @@ class _LegacyPrivateModelRunnerAdapter:
             parent_graphs=self.parent_graphs,
         )
 
+    def with_worker_index(self, worker_index: int) -> "_LegacyPrivateModelRunnerAdapter":
+        return _LegacyPrivateModelRunnerAdapter(
+            artifact=self.artifact,
+            spec=self.spec,
+            model_kind=self.model_kind,
+            worker_index=int(worker_index),
+            epoch_id=self.epoch_id,
+            parent_graphs=self.parent_graphs,
+        )
+
     def attested_receipts(self) -> list[dict[str, Any]]:
         return []
 
@@ -728,6 +738,19 @@ class AttestedPrivateModelRunnerV2:
             spec=spec,
             model_kind=self.model_kind,
             worker_index=self.worker_index,
+            epoch_id=self.epoch_id,
+            parent_graphs=self.parent_graphs,
+            execute=self._execute,
+            catalog_snapshot_loader=self._catalog_snapshot_loader,
+            _shared_state=self._shared_state,
+        )
+
+    def with_worker_index(self, worker_index: int) -> "AttestedPrivateModelRunnerV2":
+        return AttestedPrivateModelRunnerV2(
+            artifact=self.artifact,
+            spec=self.spec,
+            model_kind=self.model_kind,
+            worker_index=int(worker_index),
             epoch_id=self.epoch_id,
             parent_graphs=self.parent_graphs,
             execute=self._execute,

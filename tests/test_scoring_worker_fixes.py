@@ -2072,6 +2072,88 @@ def test_private_baseline_retry_runner_gets_fresh_cost_scope(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_private_baseline_distributes_proxy_profiles_and_rotates_retry(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=3,
+        private_baseline_retry_concurrency=3,
+        private_baseline_provider_retry_rounds=1,
+        scoring_worker_total_workers=3,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[
+            {"icp_ref": f"icp-{index}", "icp_hash": f"hash-{index}"}
+            for index in range(1, 4)
+        ]
+    )
+    image_digest = (
+        "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:"
+        + "d" * 64
+    )
+    scope = "sha256:" + "5" * 64
+    first_runner = _retry_test_runner(image_digest=image_digest, scope=scope)
+    retry_runner = _retry_test_runner(image_digest=image_digest, scope=scope)
+    seen: list[tuple[int, int, int]] = []
+
+    async def fake_run_baseline_icp(
+        self,
+        *,
+        runner,
+        item,
+        item_index,
+        retry_round,
+        **_kwargs,
+    ):  # noqa: ANN001
+        seen.append((item_index, retry_round, runner.worker_index))
+        retryable = retry_round == 0
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": 0.0 if retryable else float(item_index),
+            "company_count": 0 if retryable else 1,
+            "sourced_count": 0 if retryable else 1,
+            "diagnostics": {"sourcing_failed": True} if retryable else {},
+            "_item_index": item_index,
+            "_retryable": retryable,
+            "_nonempty": not retryable,
+            "_runtime_error": "unexpected_eof" if retryable else "",
+            "_retry_backoff_seconds": 0.0,
+        }
+
+    async def maintenance_state():
+        return {"paused": False}
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        fake_run_baseline_icp,
+    )
+
+    rows, stats = await worker._run_baseline_batch_inner(
+        runner=first_runner,
+        retry_runner=retry_runner,
+        scorer=object(),
+        window=window,
+        run_start=0.0,
+    )
+
+    assert sorted(entry for entry in seen if entry[1] == 0) == [
+        (1, 0, 0),
+        (2, 0, 1),
+        (3, 0, 2),
+    ]
+    assert sorted(entry for entry in seen if entry[1] == 1) == [
+        (1, 1, 1),
+        (2, 1, 2),
+        (3, 1, 0),
+    ]
+    assert [row["score"] for row in rows] == [1.0, 2.0, 3.0]
+    assert stats == {"retried": 3, "recovered": 3, "unresolved": 0}
+
+
+@pytest.mark.asyncio
 async def test_private_baseline_retry_round_uses_fresh_cost_scope(monkeypatch):
     worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
     worker.worker_ref = "baseline-worker"

@@ -240,6 +240,25 @@ async def test_catalog_snapshot_load_is_singleflight_across_shared_runner_clones
     assert calls == [24001]
 
 
+def test_worker_index_clone_preserves_shared_attested_state(tmp_path):
+    artifact = _artifact(tmp_path)
+    runner = AttestedPrivateModelRunnerV2(
+        artifact=artifact,
+        spec=DockerPrivateModelSpec(image_digest=artifact["image_digest"]),
+        model_kind="private",
+        worker_index=2,
+        epoch_id=24001,
+    )
+
+    clone = runner.with_worker_index(7)
+
+    assert runner.worker_index == 2
+    assert clone.worker_index == 7
+    assert clone.spec is runner.spec
+    assert clone.parent_graphs == runner.parent_graphs
+    assert clone._shared_state is runner._shared_state
+
+
 @pytest.mark.asyncio
 async def test_catalog_snapshot_failed_load_is_not_cached(tmp_path):
     artifact = _artifact(tmp_path)

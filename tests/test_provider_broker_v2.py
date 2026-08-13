@@ -1449,6 +1449,7 @@ def test_provider_registry_hash_binds_measured_https_routes():
     ]
     assert document["routes"]["wayback"]["path_prefixes"] == [
         "/wayback/available",
+        "/cdx/search/cdx",
         "/wayback/cdx",
     ]
     assert document["routes"]["bittensor_chain"]["hosts"] == [
@@ -1921,6 +1922,18 @@ def test_source_add_archive_fallback_is_an_exact_measured_route():
 
     assert transport.calls[0]["url"] == request["url"]
     assert result["transport_attempt"]["provider_id"] == "wayback"
+    cdx_request = {
+        **request,
+        "logical_operation_id": "operation-cdx",
+        "url": (
+            "https://web.archive.org/cdx/search/cdx?"
+            "url=api.example.com%2F%2A&output=json&"
+            "filter=statuscode%3A200&limit=1&fl=timestamp"
+        ),
+    }
+    cdx_result = broker.execute(cdx_request)
+    assert transport.calls[1]["url"] == cdx_request["url"]
+    assert cdx_result["transport_attempt"]["provider_id"] == "wayback"
     with pytest.raises(ProviderBrokerV2Error, match="path differs"):
         broker.execute(
             {

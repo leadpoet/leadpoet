@@ -999,7 +999,6 @@ async def execute_autoresearch_v2(
         validate_receipt_graph(
             final_graph,
             required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
-            allowed_failed_receipt_hashes=allowed_failed,
             boot_attestation_verifier=verifier,
             require_boot_attestation_verification=True,
         )

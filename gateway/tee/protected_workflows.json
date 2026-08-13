@@ -142,7 +142,7 @@
       "symbol": "_trusted_parent_authorities_v2"
     },
     {
-      "ast_sha256": "sha256:487385875807da1971d0a296f76035a3a57123e0c9fbae100ac0848242f4639e",
+      "ast_sha256": "sha256:a58215a584361d83ed0d35281bb12b2ce5e22b62ef2659eacbd3ae5f1dc66188",
       "path": "gateway/research_lab/attested_autoresearch_v2.py",
       "symbol": "execute_autoresearch_v2"
     },
@@ -1142,7 +1142,7 @@
       "symbol": "CoordinatorSourceAddFunctionalProbeV2"
     },
     {
-      "ast_sha256": "sha256:38ddf8b9a577c627fc318c7f0925fdf86221c1dd331ac19f9e05b3fad163e722",
+      "ast_sha256": "sha256:b2b2ade4d9b8e25f37f14d38ac44d186de577dfdbde719b503b0f1b0c02c8b36",
       "path": "gateway/tee/coordinator_source_add_v2.py",
       "symbol": "CoordinatorSourceAddProvenanceV2"
     },
@@ -2737,7 +2737,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:7737f3073075b06580909a70594fd844b6b4a81ff4ed1d5ac219cf3e0b9135a5",
+  "manifest_hash": "sha256:a89b1ebd21c0dcee13395cc05f5d2c84f55cfdba62415b7563f9f17fd1e8e545",
   "protected_source_commit": "e513c89591f63a5cd5d7dc4e5aa3f3576354cf3c",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -443,11 +443,24 @@ def _summarize_ai(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _summarize_archive(result: Mapping[str, Any]) -> dict[str, Any]:
-    parsed = result.get("json") if isinstance(result.get("json"), Mapping) else {}
+    raw_parsed = result.get("json")
+    parsed = raw_parsed if isinstance(raw_parsed, Mapping) else {}
     snapshots = parsed.get("archived_snapshots") if isinstance(parsed, Mapping) else {}
     closest = snapshots.get("closest") if isinstance(snapshots, Mapping) else {}
     available = bool(isinstance(closest, Mapping) and closest.get("available") is True)
     timestamp = str(closest.get("timestamp") or "") if isinstance(closest, Mapping) else ""
+    if not available and isinstance(raw_parsed, list) and len(raw_parsed) >= 2:
+        headers = raw_parsed[0]
+        row = raw_parsed[1]
+        if isinstance(headers, list) and isinstance(row, list):
+            try:
+                timestamp_index = headers.index("timestamp")
+                cdx_timestamp = str(row[timestamp_index])
+            except (ValueError, IndexError):
+                cdx_timestamp = ""
+            if re.fullmatch(r"\d{14}", cdx_timestamp):
+                available = True
+                timestamp = cdx_timestamp
     if not available and isinstance(parsed, Mapping):
         arquivo_timestamp = str(parsed.get("timestamp") or "")
         if re.fullmatch(r"\d{14}", arquivo_timestamp):

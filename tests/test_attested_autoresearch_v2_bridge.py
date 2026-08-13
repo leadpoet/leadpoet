@@ -7,6 +7,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import gateway.research_lab.attested_autoresearch_v2 as autoresearch_bridge
 from gateway.research_lab.attested_autoresearch_v2 import (
     AttestedAutoresearchV2Error,
     _resolve_parent_ancestry_transport_v2,
@@ -204,7 +205,14 @@ def _nested_scoring_checkpointed_authority(*, failed=False):
 
 
 class _Client:
-    def __init__(self, release, *, external_graph=None, worker_count=10):
+    def __init__(
+        self,
+        release,
+        *,
+        external_graph=None,
+        worker_count=10,
+        executor_override=None,
+    ):
         role = "gateway_autoresearch"
         summary = release["roles"][role]
         self.key = Ed25519PrivateKey.generate()
@@ -252,7 +260,7 @@ class _Client:
             boot_identity_supplier=lambda: self.boot,
             sign_digest=self.key.sign,
             operations=AUTORESEARCH_OPERATIONS_V2,
-            executor=executor,
+            executor=executor_override or executor,
             worker_count=worker_count,
             host_operation_channel_factory=lambda job_id, purpose: HostOperationChannelV2(
                 job_id=job_id,
@@ -343,6 +351,19 @@ class _SubmitProbeClient(_Client):
     async def autoresearch_v2_submit_job(self, manifest):
         self.submitted_manifest = dict(manifest)
         raise RuntimeError("submitted")
+
+
+class _FailedArtifactClient(_Client):
+    def __init__(self, release):
+        def executor(_operation, _payload, context):
+            context.record_artifact(_hash("a"))
+            raise RuntimeError("provider unavailable")
+
+        super().__init__(
+            release,
+            worker_count=1,
+            executor_override=executor,
+        )
 
 
 async def _persist_checkpoint(proof, **kwargs):
@@ -834,3 +855,70 @@ async def test_autoresearch_bridge_fails_closed_when_host_handler_is_missing():
     assert authority["result"]["status"] == "failed"
     assert authority["receipt"]["status"] == "failed"
     assert persisted[0][1] == (authority["receipt"]["receipt_hash"],)
+
+
+@pytest.mark.asyncio
+async def test_failed_artifact_job_does_not_apply_parent_failure_to_persistence_graph(
+    monkeypatch,
+):
+    release = _release()
+    client = _FailedArtifactClient(release)
+    validations = []
+    original_validate_proof = autoresearch_bridge.validate_compact_ancestry_proof_v2
+
+    def validate_graph(graph, **kwargs):
+        validations.append((dict(graph), dict(kwargs)))
+        return ()
+
+    def validate_proof(proof, **kwargs):
+        if proof.get("test_final_proof") is True:
+            return dict(proof)
+        return original_validate_proof(proof, **kwargs)
+
+    async def persist_transport_artifacts(**kwargs):
+        failed_receipt_hash = str(kwargs["source_receipt"]["receipt_hash"])
+        assert kwargs["source_receipt"]["status"] == "failed"
+        assert failed_receipt_hash in {
+            str(item["receipt_hash"])
+            for item in kwargs["source_graph"]["receipts"]
+            if item["status"] == "failed"
+        }
+        final_receipt_hash = _hash("f")
+        return {
+            "receipt": {"receipt_hash": final_receipt_hash},
+            "receipt_graph": {"root_receipt_hash": final_receipt_hash},
+            "ancestry_compact_proof": {"test_final_proof": True},
+        }
+
+    monkeypatch.setattr(autoresearch_bridge, "validate_receipt_graph", validate_graph)
+    monkeypatch.setattr(
+        autoresearch_bridge,
+        "validate_compact_ancestry_proof_v2",
+        validate_proof,
+    )
+
+    with pytest.raises(AttestedAutoresearchV2Error, match="failed closed"):
+        await execute_autoresearch_v2(
+            operation="run_code_edit_loop",
+            purpose="research_lab.candidate_decision.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"value": 7},
+            host_operation_handlers={},
+            release_manifest=release,
+            client=client,
+            persist_transport_artifacts=persist_transport_artifacts,
+            persist_ancestry_checkpoint=_persist_checkpoint,
+            ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+    source_graph, source_kwargs = validations[-2]
+    final_graph, final_kwargs = validations[-1]
+    failed_source_hash = str(source_graph["root_receipt_hash"])
+    assert source_kwargs["allowed_failed_receipt_hashes"] == (
+        failed_source_hash,
+    )
+    assert final_graph["root_receipt_hash"] == _hash("f")
+    assert not tuple(final_kwargs.get("allowed_failed_receipt_hashes") or ())

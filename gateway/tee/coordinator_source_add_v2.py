@@ -41,6 +41,7 @@ SOURCE_ADD_FUNCTIONAL_PROBE_EVALUATOR_VERSION = (
 )
 SCRAPINGDOG_ORIGIN = "https://api.scrapingdog.com"
 WAYBACK_ORIGIN = "https://archive.org"
+WAYBACK_CDX_ORIGIN = "https://web.archive.org"
 ARQUIVO_ORIGIN = "https://arquivo.pt"
 _MAX_PROVIDER_BODY = 240_000
 _MAX_PROBE_BODY = 1024 * 1024
@@ -191,6 +192,20 @@ class CoordinatorSourceAddProvenanceV2:
             if _provider_result_succeeded(primary):
                 return primary
 
+            cdx = self._fetch_provider(
+                provider_id="wayback",
+                origin=WAYBACK_CDX_ORIGIN,
+                provider_path="/cdx/search/cdx",
+                params=_wayback_cdx_archive_params(params),
+                timeout_seconds=timeout_seconds,
+                retry_policy_hash=self._wayback_retry_policy_hash,
+                logical_suffix="archive-history-wayback-cdx",
+                context=context,
+            )
+            cdx["archive_provider"] = "wayback_cdx"
+            if _provider_result_succeeded(cdx):
+                return cdx
+
             fallback_params = _arquivo_archive_params(params)
             fallback = self._fetch_provider(
                 provider_id="wayback",
@@ -303,7 +318,7 @@ class CoordinatorSourceAddProvenanceV2:
             "status": int(result.get("http_status") or 0),
             "content_type": content_type[:120],
             "body_text": text,
-            "json": parsed if isinstance(parsed, Mapping) else None,
+            "json": parsed if isinstance(parsed, (Mapping, list)) else None,
         }
 
 
@@ -311,6 +326,22 @@ def _provider_result_succeeded(result: Mapping[str, Any]) -> bool:
     return str(result.get("provider_status") or "") == "ok" and 200 <= int(
         result.get("status") or 0
     ) < 300
+
+
+def _wayback_cdx_archive_params(params: Mapping[str, str]) -> Dict[str, str]:
+    target = urlsplit(str(params.get("url") or ""))
+    hostname = str(target.hostname or "").strip().lower()
+    if target.scheme not in {"http", "https"} or not hostname:
+        raise CoordinatorSourceAddV2Error(
+            "SOURCE_ADD archive target is invalid"
+        )
+    return {
+        "url": hostname + "/*",
+        "output": "json",
+        "filter": "statuscode:200",
+        "limit": "1",
+        "fl": "timestamp",
+    }
 
 
 def _arquivo_archive_params(params: Mapping[str, str]) -> Dict[str, str]:

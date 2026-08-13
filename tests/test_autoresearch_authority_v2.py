@@ -670,7 +670,34 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     guard_execution_hash = guard_authority["execution_receipt"][
         "receipt_hash"
     ]
-    component_hash = "sha256:" + "9" * 64
+    component_registry = {"schema_version": "1.0", "components": []}
+    component_result = {
+        "schema_version": "leadpoet.model_sandbox_result.v2",
+        "operation": "metadata",
+        "output": component_registry,
+        "output_hash": sha256_json(component_registry),
+    }
+    component_lineage_hash = "sha256:" + "9" * 64
+    component_execution_hash = "sha256:" + "0" * 64
+    component_lineage_graph = {
+        "root_receipt_hash": component_lineage_hash
+    }
+    component_execution_graph = {
+        "root_receipt_hash": component_execution_hash
+    }
+    component_authority = {
+        "result": component_result,
+        "receipt": {"receipt_hash": component_lineage_hash},
+        "receipt_graph": component_lineage_graph,
+        "execution_receipt": {
+            "receipt_hash": component_execution_hash,
+            "role": "gateway_scoring",
+            "purpose": "research_lab.private_model_run.v2",
+            "status": "succeeded",
+            "output_root": sha256_json(component_result),
+        },
+        "execution_receipt_graph": component_execution_graph,
+    }
     observed = {}
 
     monkeypatch.setattr(
@@ -762,7 +789,7 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
             run_id="run-1",
             ticket={"ticket_id": "ticket-1"},
             artifact=artifact,
-            component_registry={"schema_version": "1.0", "components": []},
+            component_registry=component_registry,
             benchmark_public_summary={},
             model_id="openai/test",
             model_doc={},
@@ -799,14 +826,7 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
                 run_state_hash=guard_run_state_hash,
                 authority=guard_authority,
             ),
-            component_registry_authority={
-                "result": {
-                    "operation": "metadata",
-                    "output": {"schema_version": "1.0", "components": []},
-                },
-                "receipt": {"receipt_hash": component_hash},
-                "receipt_graph": {"root_receipt_hash": component_hash},
-            },
+            component_registry_authority=component_authority,
             active_model_authority=active_authority,
             expected_event_state_hash="sha256:" + "c" * 64,
             record_loop_event=lambda _event: {},
@@ -829,6 +849,8 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     ]
     assert outcome_graph in observed["parent_graphs"]
     assert outcome_execution_graph in observed["parent_graphs"]
+    assert component_lineage_graph in observed["parent_graphs"]
+    assert component_execution_graph in observed["parent_graphs"]
     assert active_graph in observed["parent_graphs"]
     assert active_execution_graph in observed["parent_graphs"]
     assert catalog_execution_graph in observed["parent_graphs"]
@@ -836,6 +858,11 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
         "result": active_result,
         "receipt_graph": active_execution_graph,
         "root_receipt_hash": active_execution_receipt["receipt_hash"],
+    }
+    assert observed["payload"]["component_registry_evidence"] == {
+        "result": component_result,
+        "receipt_graph": component_execution_graph,
+        "root_receipt_hash": component_execution_hash,
     }
     assert observed["payload"]["provider_catalog_evidence"][
         "root_receipt_hash"
@@ -855,6 +882,8 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     ]
     assert guard_hash in observed["input_artifact_hashes"]
     assert guard_execution_hash in observed["input_artifact_hashes"]
+    assert component_lineage_hash in observed["input_artifact_hashes"]
+    assert component_execution_hash in observed["input_artifact_hashes"]
     assert active_receipt["receipt_hash"] in observed["input_artifact_hashes"]
     assert active_execution_receipt["receipt_hash"] in observed[
         "input_artifact_hashes"

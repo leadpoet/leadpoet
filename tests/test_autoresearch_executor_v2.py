@@ -834,6 +834,57 @@ def test_autoresearch_executor_runs_existing_engine_and_commits_events(tmp_path)
     )
 
 
+def test_autoresearch_executor_verifies_input_evidence_with_its_source_role(
+    tmp_path,
+):
+    _FakeEngine.instances.clear()
+    _artifact_seal.records.clear()
+    payload = _payload(tmp_path)
+    context = ExecutionContextV2(
+        job_id="autoresearch-v2:source-role-verification",
+        purpose="research_lab.candidate_decision.v2",
+        epoch_id=1,
+        parent_receipt_hashes=_parent_receipt_hashes(payload),
+        provider_credential_ref_hashes={
+            "openrouter": "sha256:" + "5" * 64,
+            "openrouter_management": "sha256:" + "6" * 64,
+        },
+        host_operation_channel=_HostChannel(),
+        allowed_purposes=frozenset(ROLE_PURPOSES["gateway_autoresearch"]),
+    )
+    verified_roles = []
+
+    def verify_scoring(identity):
+        assert identity["physical_role"] == "gateway_scoring"
+        verified_roles.append("gateway_scoring")
+
+    def verify_coordinator(identity):
+        assert identity["physical_role"] == "gateway_coordinator"
+        verified_roles.append("gateway_coordinator")
+
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: pytest.fail("provider must not be called"),
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        scoring_graph_verifier=verify_scoring,
+        coordinator_boot_verifier=verify_coordinator,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        result = asyncio.run(executor(OP_RUN_CODE_EDIT_LOOP, payload, context))
+    finally:
+        executor.close()
+
+    assert result.output["status"] == "failed"
+    assert verified_roles == [
+        "gateway_scoring",
+        "gateway_coordinator",
+        "gateway_coordinator",
+        "gateway_coordinator",
+    ]
+
+
 def test_autoresearch_executor_accepts_conservative_interrupted_evaluation_recovery(
     tmp_path,
 ):

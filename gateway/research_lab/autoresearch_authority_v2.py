@@ -1126,19 +1126,40 @@ async def run_authoritative_autoresearch_v2(
         )
     commitments = dict(openrouter_guard.credential_commitments)
     component_graph = component_registry_authority.get("receipt_graph")
-    component_receipt = component_registry_authority.get("receipt")
+    component_lineage_receipt = component_registry_authority.get("receipt")
+    component_execution_graph = component_registry_authority.get(
+        "execution_receipt_graph"
+    ) or component_registry_authority.get("receipt_graph")
+    component_execution_receipt = component_registry_authority.get(
+        "execution_receipt"
+    ) or component_registry_authority.get("receipt")
     component_result = component_registry_authority.get("result")
     if (
         not isinstance(component_graph, Mapping)
-        or not isinstance(component_receipt, Mapping)
+        or not isinstance(component_lineage_receipt, Mapping)
+        or not isinstance(component_execution_graph, Mapping)
+        or not isinstance(component_execution_receipt, Mapping)
         or not isinstance(component_result, Mapping)
         or component_graph.get("root_receipt_hash")
-        != component_receipt.get("receipt_hash")
+        != component_lineage_receipt.get("receipt_hash")
+        or component_execution_graph.get("root_receipt_hash")
+        != component_execution_receipt.get("receipt_hash")
+        or component_execution_receipt.get("role") != "gateway_scoring"
+        or component_execution_receipt.get("purpose")
+        != "research_lab.private_model_run.v2"
+        or component_execution_receipt.get("status") != "succeeded"
+        or component_execution_receipt.get("output_root")
+        != sha256_json(dict(component_result))
     ):
         raise AutoresearchAuthorityV2Error(
             "component registry measured lineage is unavailable"
         )
-    component_receipt_hash = str(component_receipt["receipt_hash"])
+    component_lineage_receipt_hash = str(
+        component_lineage_receipt["receipt_hash"]
+    )
+    component_execution_receipt_hash = str(
+        component_execution_receipt["receipt_hash"]
+    )
     active_model_graph = active_model_authority.get("receipt_graph")
     active_model_lineage_receipt = active_model_authority.get("receipt")
     active_model_execution_graph = active_model_authority.get(
@@ -1291,8 +1312,8 @@ async def run_authoritative_autoresearch_v2(
         "component_registry": dict(component_registry),
         "component_registry_evidence": {
             "result": dict(component_result),
-            "receipt_graph": dict(component_graph),
-            "root_receipt_hash": component_receipt_hash,
+            "receipt_graph": dict(component_execution_graph),
+            "root_receipt_hash": component_execution_receipt_hash,
         },
         "active_model_evidence": {
             "result": dict(active_model_result),
@@ -1376,6 +1397,7 @@ async def run_authoritative_autoresearch_v2(
     for graph in (
         guard_execution_graph,
         guard_graph,
+        component_execution_graph,
         component_graph,
         active_model_execution_graph,
         active_model_graph,
@@ -1403,7 +1425,8 @@ async def run_authoritative_autoresearch_v2(
             str(source_bundle["archive_sha256"]),
             privacy_receipt_hash,
             guard_lineage_receipt_hash,
-            component_receipt_hash,
+            component_lineage_receipt_hash,
+            component_execution_receipt_hash,
             active_model_lineage_receipt_hash,
             active_model_execution_receipt_hash,
             catalog_lineage_receipt_hash,

@@ -2658,11 +2658,11 @@ class AutoresearchExecutorV2:
             active_model_graph,
             required_purposes=("research_lab.active_private_model.v2",),
             require_boot_attestation_verification=(
-                self._scoring_graph_verifier is not None
+                self._coordinator_boot_verifier is not None
             ),
             boot_attestation_verifier=(
-                (lambda identity: self._scoring_graph_verifier(identity))
-                if self._scoring_graph_verifier is not None
+                (lambda identity: self._coordinator_boot_verifier(identity))
+                if self._coordinator_boot_verifier is not None
                 else None
             ),
         )

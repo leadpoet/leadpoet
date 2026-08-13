@@ -70,16 +70,25 @@ _ROUTING_FEATURE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
 _SOURCE_ADD_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
 _SOURCE_ADD_MUTABLE_RUNTIME_FUNCTIONS = frozenset(
     {
-        "candidate_enrichment_for_tool",
-        "candidate_lane_for_tool",
-        "candidate_route_eligibility",
-        "contact_binding_role_for_tool",
-        "enhanced_scrapingdog_tool_definitions",
-        "intent_tier_for_tool",
-        "runtime_catalog",
         "runtime_policy",
-        "runtime_routing_metadata",
         "runtime_tool_definitions",
+    }
+)
+_SOURCE_ADD_PROTECTED_ROUTER_NAMES = frozenset(
+    {
+        "PolicyStep",
+        "RouteContext",
+        "RoutingPolicy",
+        "ToolDefinition",
+        "compile_candidate_acquisition_route",
+        "compile_candidate_enrichment_route",
+        "compile_contact_acquisition_route",
+        "compile_intent_evidence_route",
+        "compile_route",
+        "STAGE_CANDIDATE_ACQUISITION",
+        "STAGE_CANDIDATE_ENRICHMENT",
+        "STAGE_CONTACT_ACQUISITION",
+        "STAGE_INTENT_EVIDENCE",
     }
 )
 _SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION = (
@@ -1831,6 +1840,7 @@ def validate_source_add_registration_diff(
             if is_canonical_registry_assignment(node):
                 continue
             guarded_names = sensitive_names | dynamic_namespace_names
+            mutation_only_names: frozenset[str] = frozenset()
             if (
                 isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.name in _SOURCE_ADD_MUTABLE_RUNTIME_FUNCTIONS
@@ -1843,6 +1853,7 @@ def validate_source_add_registration_diff(
                     "SOURCE_ADD_ROUTING_REGISTRATIONS",
                     "SourceAddRoutingRegistration",
                 } | dynamic_namespace_names
+                mutation_only_names = _SOURCE_ADD_PROTECTED_ROUTER_NAMES
             sensitive = False
             for descendant in ast.walk(node):
                 if (
@@ -1879,6 +1890,43 @@ def validate_source_add_registration_diff(
                 ):
                     sensitive = True
                     break
+                if mutation_only_names and (
+                    (
+                        isinstance(descendant, ast.Name)
+                        and descendant.id in mutation_only_names
+                        and isinstance(descendant.ctx, (ast.Store, ast.Del))
+                    )
+                    or (
+                        isinstance(descendant, ast.Attribute)
+                        and descendant.attr in mutation_only_names
+                        and isinstance(descendant.ctx, (ast.Store, ast.Del))
+                    )
+                    or (
+                        isinstance(descendant, (ast.Global, ast.Nonlocal))
+                        and bool(set(descendant.names) & mutation_only_names)
+                    )
+                    or (
+                        isinstance(descendant, ast.alias)
+                        and (
+                            descendant.name in mutation_only_names
+                            or (
+                                descendant.asname
+                                or descendant.name.split(".", 1)[0]
+                            )
+                            in mutation_only_names
+                        )
+                    )
+                    or (
+                        isinstance(
+                            descendant,
+                            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+                        )
+                        and descendant is not node
+                        and descendant.name in mutation_only_names
+                    )
+                ):
+                    sensitive = True
+                    break
             if sensitive:
                 signature.append(ast.dump(node, include_attributes=False))
         return tuple(signature)
@@ -1888,6 +1936,34 @@ def validate_source_add_registration_diff(
         for node in tree.body:
             if is_canonical_registry_assignment(node):
                 signature.append(canonical_registry_assignment_signature(node))
+                continue
+            assigned_name = ""
+            assigned_value: ast.AST | None = None
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+            ):
+                assigned_name = node.targets[0].id
+                assigned_value = node.value
+            elif isinstance(node, ast.AnnAssign) and isinstance(
+                node.target,
+                ast.Name,
+            ):
+                assigned_name = node.target.id
+                assigned_value = node.value
+            if (
+                isinstance(assigned_value, ast.Constant)
+                and isinstance(assigned_value.value, str)
+                and (
+                    assigned_name.startswith("TOOL_")
+                    or assigned_name
+                    in {"RUNTIME_CATALOG_VERSION", "RUNTIME_POLICY_VERSION"}
+                )
+            ):
+                # The pipeline structure gate owns these exact declarative
+                # identities and permits paired same-stage additions/version
+                # bumps. Keep SOURCE_ADD focused on its registry contract.
                 continue
             if (
                 isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))

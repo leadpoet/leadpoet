@@ -67,9 +67,9 @@ def _git(cmd, *, cwd=None):
 
 def _private_source_push_fixture():
     unified_diff = (
-        "diff --git a/sourcing_model.py b/sourcing_model.py\n"
-        "--- a/sourcing_model.py\n"
-        "+++ b/sourcing_model.py\n"
+        "diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py\n"
+        "--- a/sourcing_model/discovery.py\n"
+        "+++ b/sourcing_model/discovery.py\n"
         "@@ -1 +1 @@\n"
         "-VALUE = 1\n"
         "+VALUE = 2\n"
@@ -82,7 +82,7 @@ def _private_source_push_fixture():
         "parent_artifact_hash": "sha256:" + "1" * 64,
         "parent_manifest_hash": "sha256:" + "2" * 64,
         "source_diff_hash": sha256_json({"unified_diff": unified_diff}),
-        "target_files": ["sourcing_model.py"],
+        "target_files": ["sourcing_model/discovery.py"],
         "unified_diff": unified_diff,
         "draft_hash": "sha256:" + "3" * 64,
     }
@@ -118,7 +118,7 @@ def _private_source_push_fixture():
         "source_diff_hash": artifact["source_diff_hash"],
         "source_diff_artifact_uri": "s3://fixture/candidates/run-private-source-push/0/source_diff.json",
         "source_diff_artifact_hash": artifact["artifact_hash"],
-        "changed_files": ["sourcing_model.py"],
+        "changed_files": ["sourcing_model/discovery.py"],
     }
     build_doc = {
         **build_payload,
@@ -217,12 +217,14 @@ def test_private_source_push_verifies_artifact_before_git_and_pushes_exact_diff(
     tmp_path, monkeypatch
 ):
     source = tmp_path / "source"
-    source.mkdir()
+    (source / "sourcing_model").mkdir(parents=True)
     _git(["init", "-q", "-b", "main"], cwd=source)
     _git(["config", "user.name", "Fixture"], cwd=source)
     _git(["config", "user.email", "fixture@example.test"], cwd=source)
-    (source / "sourcing_model.py").write_text("VALUE = 1\n", encoding="utf-8")
-    _git(["add", "sourcing_model.py"], cwd=source)
+    (source / "sourcing_model" / "discovery.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+    _git(["add", "sourcing_model/discovery.py"], cwd=source)
     _git(["commit", "-q", "-m", "root"], cwd=source)
     active_sha = _git(["rev-parse", "HEAD"], cwd=source)
     remote = tmp_path / "remote.git"
@@ -260,9 +262,9 @@ def test_private_source_push_verifies_artifact_before_git_and_pushes_exact_diff(
     )
 
     assert result["status"] == "pushed"
-    assert result["target_files"] == ["sourcing_model.py"]
+    assert result["target_files"] == ["sourcing_model/discovery.py"]
     assert _git(
-        ["--git-dir", str(remote), "show", "main:sourcing_model.py"]
+        ["--git-dir", str(remote), "show", "main:sourcing_model/discovery.py"]
     ) == "VALUE = 2"
 
 
@@ -270,13 +272,20 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
     tmp_path, monkeypatch
 ):
     source = tmp_path / "source"
-    (source / "gateway").mkdir(parents=True)
+    (source / "sourcing_model" / "routing").mkdir(parents=True)
     _git(["init", "-q", "-b", "main"], cwd=source)
     _git(["config", "user.name", "Fixture"], cwd=source)
     _git(["config", "user.email", "fixture@example.test"], cwd=source)
-    (source / "sourcing_model.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (source / "gateway" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
-    _git(["add", "sourcing_model.py", "gateway/module.py"], cwd=source)
+    (source / "sourcing_model" / "discovery.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+    (source / "sourcing_model" / "routing" / "defaults.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+    _git(
+        ["add", "sourcing_model/discovery.py", "sourcing_model/routing/defaults.py"],
+        cwd=source,
+    )
     _git(["commit", "-q", "-m", "root"], cwd=source)
     active_sha = _git(["rev-parse", "HEAD"], cwd=source)
     remote = tmp_path / "remote.git"
@@ -286,17 +295,18 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
         _private_source_push_fixture()
     )
     first_patch = (
-        "diff --git a/sourcing_model.py b/sourcing_model.py\n"
-        "--- a/sourcing_model.py\n"
-        "+++ b/sourcing_model.py\n"
+        "diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py\n"
+        "--- a/sourcing_model/discovery.py\n"
+        "+++ b/sourcing_model/discovery.py\n"
         "@@ -1 +1 @@\n"
         "-VALUE = 1\n"
         "+VALUE = 2\n"
     )
     incremental_patch = (
-        "diff --git a/gateway/module.py b/gateway/module.py\n"
-        "--- a/gateway/module.py\n"
-        "+++ b/gateway/module.py\n"
+        "diff --git a/sourcing_model/routing/defaults.py "
+        "b/sourcing_model/routing/defaults.py\n"
+        "--- a/sourcing_model/routing/defaults.py\n"
+        "+++ b/sourcing_model/routing/defaults.py\n"
         "@@ -1 +1 @@\n"
         "-VALUE = 1\n"
         "+VALUE = 2\n"
@@ -312,7 +322,7 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
         },
         "candidate_index": 2,
         "source_diff_hash": source_diff_hash,
-        "target_files": ["gateway/module.py"],
+        "target_files": ["sourcing_model/routing/defaults.py"],
         "unified_diff": cumulative_patch,
     }
     artifact = {
@@ -323,7 +333,7 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
         "schema_version": "research_lab.git_tree_composition.v1",
         "incremental_source_diff_hash": incremental_hash,
         "cumulative_source_diff_hash": source_diff_hash,
-        "cumulative_changed_files": ["gateway/module.py"],
+        "cumulative_changed_files": ["sourcing_model/routing/defaults.py"],
         "child_source_tree_hash": candidate_manifest["model_artifact_hash"],
     }
     build_payload = {
@@ -334,7 +344,10 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
         "source_diff_hash": source_diff_hash,
         "source_diff_artifact_uri": "s3://fixture/legacy-depth-two/source_diff.json",
         "source_diff_artifact_hash": artifact["artifact_hash"],
-        "changed_files": ["gateway/module.py", "sourcing_model.py"],
+        "changed_files": [
+            "sourcing_model/discovery.py",
+            "sourcing_model/routing/defaults.py",
+        ],
         "git_tree": {
             "schema_version": "research_lab.git_tree_lineage.v1",
             "depth": 2,
@@ -360,7 +373,7 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
         "candidate_build_doc_hash": build_doc["build_doc_hash"],
         "redacted_summary": "legacy depth-two fixture",
         "validation_result": "passed",
-        "patch_doc": {"target_files": ["gateway/module.py"]},
+        "patch_doc": {"target_files": ["sourcing_model/routing/defaults.py"]},
     }
     patch_manifest = {
         **patch_payload,
@@ -395,12 +408,20 @@ def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
     )
 
     assert result["status"] == "pushed"
-    assert result["target_files"] == ["gateway/module.py", "sourcing_model.py"]
+    assert result["target_files"] == [
+        "sourcing_model/discovery.py",
+        "sourcing_model/routing/defaults.py",
+    ]
     assert _git(
-        ["--git-dir", str(remote), "show", "main:sourcing_model.py"]
+        ["--git-dir", str(remote), "show", "main:sourcing_model/discovery.py"]
     ) == "VALUE = 2"
     assert _git(
-        ["--git-dir", str(remote), "show", "main:gateway/module.py"]
+        [
+            "--git-dir",
+            str(remote),
+            "show",
+            "main:sourcing_model/routing/defaults.py",
+        ]
     ) == "VALUE = 2"
 
 
@@ -485,12 +506,14 @@ def test_private_source_push_rechecks_applied_tree_before_commit(
     tmp_path, monkeypatch
 ):
     source = tmp_path / "source"
-    source.mkdir()
+    (source / "sourcing_model").mkdir(parents=True)
     _git(["init", "-q", "-b", "main"], cwd=source)
     _git(["config", "user.name", "Fixture"], cwd=source)
     _git(["config", "user.email", "fixture@example.test"], cwd=source)
-    (source / "sourcing_model.py").write_text("VALUE = 1\n", encoding="utf-8")
-    _git(["add", "sourcing_model.py"], cwd=source)
+    (source / "sourcing_model" / "discovery.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+    _git(["add", "sourcing_model/discovery.py"], cwd=source)
     _git(["commit", "-q", "-m", "root"], cwd=source)
     active_sha = _git(["rev-parse", "HEAD"], cwd=source)
     remote = tmp_path / "remote.git"
@@ -538,7 +561,7 @@ def test_private_source_push_rechecks_applied_tree_before_commit(
             expected_run_id=artifact["run_id"],
         )
     assert _git(
-        ["--git-dir", str(remote), "show", "main:sourcing_model.py"]
+        ["--git-dir", str(remote), "show", "main:sourcing_model/discovery.py"]
     ) == "VALUE = 1"
     assert contract_checks == 2
 
@@ -579,8 +602,9 @@ def test_private_source_push_rejects_hash_consistent_mode_change_before_git(
         _private_source_push_fixture()
     )
     structural_diff = artifact["unified_diff"].replace(
-        "--- a/sourcing_model.py\n",
-        "old mode 100644\nnew mode 100755\n--- a/sourcing_model.py\n",
+        "--- a/sourcing_model/discovery.py\n",
+        "old mode 100644\nnew mode 100755\n"
+        "--- a/sourcing_model/discovery.py\n",
     )
     source_diff_hash = sha256_json({"unified_diff": structural_diff})
     artifact_payload = {

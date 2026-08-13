@@ -512,15 +512,9 @@ def test_sourcing_pipeline_spine_is_immutable(path):
 
 @pytest.mark.parametrize(
     "path",
-    (
-        "sourcing_model/routing/defaults.py",
-        "sourcing_model/routing/policy.py",
-        "sourcing_model/routing/runtime.py",
-        "sourcing_model/discovery.py",
-        "sourcing_model/scrapingdog_intent.py",
-    ),
+    sorted(code_editing.SOURCING_PIPELINE_EDITABLE_PATHS),
 )
-def test_stage_local_routing_prompt_and_tool_paths_remain_editable(path):
+def test_declarative_sourcing_paths_reach_the_ast_gate(path):
     draft = _draft(
         target_files=(path,),
         unified_diff=(
@@ -533,6 +527,34 @@ def test_stage_local_routing_prompt_and_tool_paths_remain_editable(path):
         ),
     )
     assert code_editing.validate_code_edit_draft(draft) == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "gateway/qualification/models.py",
+        "qualification/scoring/company_match.py",
+        "sourcing_model/scrapingdog_intent.py",
+        "validator_models/fulfillment_company_verification.py",
+    ),
+)
+def test_non_declarative_model_paths_are_default_deny(path):
+    draft = _draft(
+        target_files=(path,),
+        unified_diff=(
+            f"diff --git a/{path} b/{path}\n"
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2\n"
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"code_edit_sourcing_edit_surface_path:{path}",
+    ):
+        code_editing.validate_code_edit_draft(draft)
 
 
 def test_new_and_unread_source_paths_remain_blocked():
@@ -1508,3 +1530,36 @@ def test_candidate_signature_gate_precedes_build_evidence_and_return() -> None:
     assert call_lines["_verify_built_candidate_artifact"] < call_lines[
         "_write_private_code_edit_diff_artifact"
     ]
+
+
+def test_post_private_test_source_integrity_gate_fails_closed(
+    tmp_path,
+    monkeypatch,
+):
+    expected_structure = {"document_hash": "sha256:" + "1" * 64}
+    monkeypatch.setattr(
+        code_build,
+        "_changed_files",
+        lambda _root: ["sourcing_model/discovery.py"],
+    )
+    monkeypatch.setattr(
+        code_build,
+        "_sourcing_pipeline_structure_gate",
+        lambda _root, *, expected: expected,
+    )
+    monkeypatch.setattr(
+        code_build,
+        "compute_private_source_tree_hash",
+        lambda _root: "sha256:" + "3" * 64,
+    )
+
+    with pytest.raises(
+        code_build.CodeEditBuildError,
+        match="private tests changed the candidate source tree",
+    ):
+        code_build._post_private_test_source_integrity_gate(
+            tmp_path,
+            expected_changed_files=["sourcing_model/discovery.py"],
+            expected_source_tree_hash="sha256:" + "2" * 64,
+            expected_pipeline_structure=expected_structure,
+        )

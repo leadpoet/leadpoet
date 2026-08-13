@@ -977,6 +977,9 @@ class CodeEditCandidateBuilder:
                     repo_dir,
                     expected=parent_pipeline_structure,
                 )
+                candidate_source_tree_hash_before_tests = (
+                    compute_private_source_tree_hash(repo_dir)
+                )
                 _py_compile_changed_files(repo_dir, changed_files)
                 _sourcing_contract_gate(repo_dir)
                 _run_shell(
@@ -991,6 +994,18 @@ class CodeEditCandidateBuilder:
                         include_aws=False,
                     ),
                     timeout_seconds=self.config.code_edit_build_timeout_seconds,
+                )
+                candidate_pipeline_structure = (
+                    _post_private_test_source_integrity_gate(
+                        repo_dir,
+                        expected_changed_files=changed_files,
+                        expected_source_tree_hash=(
+                            candidate_source_tree_hash_before_tests
+                        ),
+                        expected_pipeline_structure=(
+                            candidate_pipeline_structure
+                        ),
+                    )
                 )
             except CodeEditBuildError as exc:
                 raise CodeEditPrivateTestError(
@@ -2155,6 +2170,28 @@ def _docker_platform() -> str:
 def _changed_files(repo_dir: Path) -> list[str]:
     output = _run(["git", "diff", "--name-only"], cwd=repo_dir, timeout_seconds=60)
     return sorted(line.strip() for line in output.splitlines() if line.strip())
+
+
+def _post_private_test_source_integrity_gate(
+    repo_dir: Path,
+    *,
+    expected_changed_files: Sequence[str],
+    expected_source_tree_hash: str,
+    expected_pipeline_structure: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reject source changes made as a side effect of private tests."""
+
+    observed_changed_files = _changed_files(repo_dir)
+    observed_pipeline_structure = _sourcing_pipeline_structure_gate(
+        repo_dir,
+        expected=expected_pipeline_structure,
+    )
+    observed_source_tree_hash = compute_private_source_tree_hash(repo_dir)
+    if observed_changed_files != list(expected_changed_files):
+        raise CodeEditBuildError("private tests changed the candidate file set")
+    if observed_source_tree_hash != expected_source_tree_hash:
+        raise CodeEditBuildError("private tests changed the candidate source tree")
+    return observed_pipeline_structure
 
 
 def _git_ignored_paths(repo_dir: Path) -> list[str]:

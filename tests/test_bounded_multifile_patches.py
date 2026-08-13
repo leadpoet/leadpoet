@@ -44,8 +44,16 @@ def _draft(paths: list[str]) -> CodeEditDraft:
     )
 
 
-TWO_FILES = ["gateway/alpha.py", "gateway/beta.py"]
-FOUR_FILES = ["gateway/a.py", "gateway/b.py", "gateway/c.py", "gateway/d.py"]
+TWO_FILES = [
+    "sourcing_model/discovery.py",
+    "sourcing_model/routing/defaults.py",
+]
+FOUR_FILES = [
+    "sourcing_model/discovery.py",
+    "sourcing_model/routing/defaults.py",
+    "sourcing_model/routing/runtime.py",
+    "sourcing_model/scrapingdog_signal_contract.py",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +79,8 @@ def test_cap_zero_means_unlimited():
 @pytest.mark.parametrize(
     "declared_paths,diff_paths",
     [
-        (["gateway/a.py"], ["gateway/a.py", "gateway/b.py"]),
-        (["gateway/a.py", "gateway/b.py"], ["gateway/a.py"]),
+        ([FOUR_FILES[0]], FOUR_FILES[:2]),
+        (FOUR_FILES[:2], [FOUR_FILES[0]]),
     ],
 )
 def test_declared_target_files_must_exactly_match_unified_diff(

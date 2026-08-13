@@ -127,6 +127,11 @@ def _conforming_tree(
             return []
     """)
     _write(root, "sourcing_model/discovery.py", """
+        _INTENT_PHRASE_FAMILIES = {"HIRING": ("active hiring",)}
+
+        def build_query(icp, source):
+            return f"find companies with {source} evidence"
+
         def agent_results(icp, effort, timeout_s, avoid_companies):
             pass
 
@@ -203,13 +208,26 @@ def _conforming_tree(
             RouteContext,
             STAGE_CANDIDATE_ACQUISITION,
             STAGE_INTENT_EVIDENCE,
+            ToolDefinition,
         )
+        from .policy import PolicyStep, RoutingPolicy
 
         DEFAULT_CATALOG_VERSION = "sourcing-model-tools:v2"
         DEFAULT_POLICY_VERSION = "sourcing-model-routing:v2"
+        TOOL_DEFAULT_CANDIDATE = "candidate.fixture_default"
+        TOOL_DEFAULT_INTENT = "intent.fixture_default"
 
         def builtin_definitions():
-            return ()
+            return (
+                ToolDefinition(
+                    tool_id=TOOL_DEFAULT_CANDIDATE,
+                    stages=(STAGE_CANDIDATE_ACQUISITION,),
+                ),
+                ToolDefinition(
+                    tool_id=TOOL_DEFAULT_INTENT,
+                    stages=(STAGE_INTENT_EVIDENCE,),
+                ),
+            )
 
         def compile_candidate_route(
             *, structured_query, allow_paid_escalation,
@@ -242,7 +260,18 @@ def _conforming_tree(
             return None
 
         def default_policy():
-            return None
+            return RoutingPolicy(steps=(
+                PolicyStep(
+                    TOOL_DEFAULT_CANDIDATE,
+                    STAGE_CANDIDATE_ACQUISITION,
+                    priority=10,
+                ),
+                PolicyStep(
+                    TOOL_DEFAULT_INTENT,
+                    STAGE_INTENT_EVIDENCE,
+                    priority=20,
+                ),
+            ))
 
         def intent_source_for_category(
             category, *, catalog=None, policy=None, cohort="control"
@@ -265,24 +294,60 @@ def _conforming_tree(
     """)
     _write(root, "sourcing_model/routing/policy.py", "POLICY = True\n")
     _write(root, "sourcing_model/routing/runtime.py", """
+        from sourcing_model.scrapingdog_signal_contract import (
+            TOOL_CATALOG as ENHANCED_SCRAPINGDOG_CATALOG,
+        )
         from .compiler import compile_route
         from .contracts import (
             RouteContext,
             STAGE_CANDIDATE_ACQUISITION,
             STAGE_INTENT_EVIDENCE,
+            ToolDefinition,
         )
+        from .policy import PolicyStep, RoutingPolicy
 
         RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v__RUNTIME_VERSION__"
         RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v__RUNTIME_VERSION__"
+        TOOL_RUNTIME_CANDIDATE = "candidate.fixture_runtime"
+        TOOL_RUNTIME_INTENT = "intent.fixture_runtime"
+        SOURCE_ADD_ROUTING_REGISTRATIONS = ()
 
         def runtime_tool_definitions():
-            return ()
+            return (
+                ToolDefinition(
+                    tool_id=TOOL_RUNTIME_CANDIDATE,
+                    stages=(STAGE_CANDIDATE_ACQUISITION,),
+                ),
+                ToolDefinition(
+                    tool_id=TOOL_RUNTIME_INTENT,
+                    stages=(STAGE_INTENT_EVIDENCE,),
+                ),
+            )
 
         def enhanced_scrapingdog_tool_definitions():
             return ()
 
         def runtime_policy():
-            return None
+            return RoutingPolicy(steps=(
+                PolicyStep(
+                    TOOL_RUNTIME_CANDIDATE,
+                    STAGE_CANDIDATE_ACQUISITION,
+                    priority=10,
+                ),
+                PolicyStep(
+                    TOOL_RUNTIME_INTENT,
+                    STAGE_INTENT_EVIDENCE,
+                    priority=20,
+                ),
+                *tuple(
+                    PolicyStep(
+                        definition.tool_id,
+                        STAGE_INTENT_EVIDENCE,
+                        priority=50,
+                    )
+                    for definition in ENHANCED_SCRAPINGDOG_CATALOG
+                ),
+            ))
 
         def runtime_catalog(
             availability=None, *, state_overrides=None, additional_tools=(),
@@ -338,6 +403,10 @@ def _conforming_tree(
             pass
     """)
     _write(root, "sourcing_model/scrapingdog_intent.py", """
+        TOOL_INTENT_SCRAPINGDOG_GOOGLE_NEWS = "intent.scrapingdog_google_news"
+        TOOL_INTENT_SCRAPINGDOG_GOOGLE_SEARCH = "intent.scrapingdog_google_search"
+        TOOL_INTENT_SCRAPINGDOG_YOUTUBE = "intent.scrapingdog_youtube_search"
+
         def compile_scrapingdog_intent_request(
             tool_id, *, company_name, company_domain, signal, category,
             max_age_days, country="us", language="en"
@@ -356,6 +425,17 @@ def _conforming_tree(
         SCHEMA_VERSION = __SCHEMA_VERSION__
         REQUEST_SCHEMA_VERSION = __REQUEST_SCHEMA_VERSION__
         EVIDENCE_SCHEMA_VERSION = "v1"
+
+        class ToolContract:
+            pass
+
+        def _tool(
+            tool_id, stage, capability, routing_role, signals,
+            source_classes, evidence_types, cost_credits=5
+        ):
+            return ToolContract()
+
+        TOOL_CATALOG = ()
 
         def canonical_json(value):
             return "{}"
@@ -871,9 +951,41 @@ def test_router_compiler_rebinding_fails_closed(tmp_path: Path) -> None:
         "router compiler binding drift sourcing_model/routing/runtime.py"
         in violations
     )
-    assert verify_sourcing_pipeline_structure(tmp_path) == [
-        "router compiler binding drift sourcing_model/routing/runtime.py"
-    ]
+    assert "router compiler binding drift sourcing_model/routing/runtime.py" in (
+        verify_sourcing_pipeline_structure(tmp_path)
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "anchor"),
+    (
+        ("sourcing_model/routing/defaults.py", "def default_catalog("),
+        ("sourcing_model/routing/runtime.py", "def runtime_catalog("),
+    ),
+)
+def test_stage_local_function_cannot_replace_router_compiler(
+    tmp_path: Path,
+    relative_path: str,
+    anchor: str,
+) -> None:
+    _conforming_tree(tmp_path)
+    path = tmp_path / relative_path
+    source = path.read_text(encoding="utf-8")
+    path.write_text(
+        source.replace(
+            anchor,
+            "def replace_router_compiler():\n"
+            "    global compile_route\n"
+            "    compile_route = unreviewed_compile_route\n\n"
+            + anchor,
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    violations = verify_sourcing_pipeline_structure(tmp_path)
+
+    assert f"protected router global mutation {relative_path}" in violations
 
 
 def test_router_handoff_wrapper_body_is_immutable(tmp_path: Path) -> None:
@@ -897,11 +1009,15 @@ def test_router_handoff_wrapper_body_is_immutable(tmp_path: Path) -> None:
         sourcing_pipeline_structure_document(candidate),
     )
 
-    assert errors == [
+    assert (
         "immutable pipeline router changed: "
         "sourcing_model/routing/runtime.py:"
         "compile_candidate_acquisition_route"
-    ]
+    ) in errors
+    assert (
+        "non-declarative sourcing edit changed: "
+        "sourcing_model/routing/runtime.py"
+    ) in errors
 
 
 def test_runtime_policy_body_remains_editable(tmp_path: Path) -> None:
@@ -910,28 +1026,497 @@ def test_runtime_policy_body_remains_editable(tmp_path: Path) -> None:
     _conforming_tree(parent)
     _conforming_tree(candidate)
     runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
-    runtime.write_text(
-        runtime.read_text(encoding="utf-8").replace(
-            "def runtime_policy():\n    return None",
-            "def runtime_policy():\n    return {'priority': 20}",
-            1,
-        ),
-        encoding="utf-8",
-    )
+    runtime_source = runtime.read_text(encoding="utf-8")
+    changed_runtime = runtime_source.replace("priority=10", "priority=11", 1)
+    assert changed_runtime != runtime_source
+    runtime.write_text(changed_runtime, encoding="utf-8")
     defaults = candidate / "sourcing_model" / "routing" / "defaults.py"
-    defaults.write_text(
-        defaults.read_text(encoding="utf-8").replace(
-            "def default_policy():\n    return None",
-            "def default_policy():\n    return {'priority': 20}",
+    defaults_source = defaults.read_text(encoding="utf-8")
+    changed_defaults = defaults_source.replace("priority=10", "priority=11", 1)
+    assert changed_defaults != defaults_source
+    defaults.write_text(changed_defaults, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_discovery_prompt_text_remains_editable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    discovery = candidate / "sourcing_model" / "discovery.py"
+    source = discovery.read_text(encoding="utf-8")
+    changed = source.replace(
+        "find companies with {source} evidence",
+        "find verified companies with {source} evidence",
+        1,
+    )
+    assert changed != source
+    discovery.write_text(changed, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_policy_executable_metadata_is_rejected(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "return RoutingPolicy(steps=(",
+        "return RoutingPolicy("
+        "policy_version=compile_intent_evidence_route(), steps=(",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    del parent
+    errors = verify_sourcing_pipeline_structure(candidate)
+
+    assert any("RoutingPolicy policy_version must be inert data" in error
+               for error in errors)
+
+
+def test_prompt_function_code_is_not_editable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    discovery = candidate / "sourcing_model" / "discovery.py"
+    source = discovery.read_text(encoding="utf-8")
+    changed = source.replace(
+        'return f"find companies with {source} evidence"',
+        'setattr(object, "pipeline", source)\n'
+        '    return f"find companies with {source} evidence"',
+        1,
+    )
+    assert changed != source
+    discovery.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert (
+        "non-declarative sourcing edit changed: sourcing_model/discovery.py"
+        in errors
+    )
+
+
+def test_stage_cannot_make_every_reviewed_policy_ineligible(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "priority=10,\n        )",
+        "priority=10,\n"
+        "            required_features=(FEATURE_NEVER_PRESENT,),\n"
+        "        )",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert any(
+        error.startswith("routing stage lost every reviewed viable path:")
+        for error in errors
+    )
+
+
+def test_policy_eligibility_can_change_when_stage_keeps_one_anchor(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+
+    def add_candidate_anchor(root: Path) -> None:
+        runtime = root / "sourcing_model" / "routing" / "runtime.py"
+        source = runtime.read_text(encoding="utf-8")
+        changed = source.replace(
+            'TOOL_RUNTIME_CANDIDATE = "candidate.fixture_runtime"',
+            'TOOL_RUNTIME_CANDIDATE = "candidate.fixture_runtime"\n'
+            'TOOL_RUNTIME_CANDIDATE_ANCHOR = "candidate.fixture_anchor"',
             1,
-        ),
-        encoding="utf-8",
+        ).replace(
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+            "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+            "        ),",
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+            "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+            "        ),\n"
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CANDIDATE_ANCHOR,\n"
+            "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+            "        ),",
+            1,
+        ).replace(
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CANDIDATE,\n"
+            "            STAGE_CANDIDATE_ACQUISITION,\n"
+            "            priority=10,\n"
+            "        ),",
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CANDIDATE,\n"
+            "            STAGE_CANDIDATE_ACQUISITION,\n"
+            "            priority=10,\n"
+            "        ),\n"
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CANDIDATE_ANCHOR,\n"
+            "            STAGE_CANDIDATE_ACQUISITION,\n"
+            "            priority=11,\n"
+            "        ),",
+            1,
+        )
+        assert changed != source
+        runtime.write_text(changed, encoding="utf-8")
+
+    add_candidate_anchor(parent)
+    add_candidate_anchor(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "priority=10,\n        )",
+        "priority=10,\n"
+        "            required_features=(FEATURE_STRUCTURED_ELIGIBLE,),\n"
+        "        )",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_imported_tool_identity_is_immutable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    intent = candidate / "sourcing_model" / "scrapingdog_intent.py"
+    source = intent.read_text(encoding="utf-8")
+    changed = source.replace(
+        '"intent.scrapingdog_google_news"',
+        '"intent.replaced_google_news"',
+        1,
+    )
+    assert changed != source
+    intent.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert any(
+        error.startswith("immutable pipeline router changed:")
+        or error.startswith("non-declarative sourcing edit changed:")
+        for error in errors
+    )
+
+
+def test_typed_same_stage_catalog_tool_remains_additive(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    contract = candidate / "sourcing_model" / "scrapingdog_signal_contract.py"
+    source = contract.read_text(encoding="utf-8")
+    changed = source.replace(
+        "TOOL_CATALOG = ()",
+        "TOOL_CATALOG = (\n"
+        "    _tool(\n"
+        '        "intent.fixture_catalog", "intent_evidence",\n'
+        '        "company_search", "discovery", ("hiring",),\n'
+        '        ("news",), ("external",), 5,\n'
+        "    ),\n"
+        ")",
+        1,
+    )
+    assert changed != source
+    contract.write_text(changed, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_typed_catalog_rejects_keyword_unpacking(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    contract = candidate / "sourcing_model" / "scrapingdog_signal_contract.py"
+    source = contract.read_text(encoding="utf-8")
+    changed = source.replace(
+        "TOOL_CATALOG = ()",
+        "TOOL_CATALOG = (\n"
+        "    _tool(\n"
+        '        "intent.fixture_catalog", "intent_evidence",\n'
+        '        "company_search", "discovery", ("hiring",),\n'
+        '        ("news",), ("external",), 5,\n'
+        '        **(globals().__setitem__("PWNED", True) or {}),\n'
+        "    ),\n"
+        ")",
+        1,
+    )
+    assert changed != source
+    contract.write_text(changed, encoding="utf-8")
+
+    errors = verify_sourcing_pipeline_structure(candidate)
+
+    assert any(
+        "routing constructor shape drift" in error
+        and "keyword unpacking is not allowed" in error
+        for error in errors
+    )
+
+
+def test_source_add_registry_must_be_a_literal_tuple(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = mutate_pipeline()",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert (
+        "SOURCE_ADD routing registry shape drift "
+        "sourcing_model/routing/runtime.py"
+        in verify_sourcing_pipeline_structure(candidate)
+    )
+
+
+def test_contact_stage_accepts_paired_declarative_tool_addition(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+
+    def add_contact_pair(
+        root: Path,
+        *,
+        constant_name: str,
+        tool_id: str,
+        priority: int,
+    ) -> None:
+        runtime = root / "sourcing_model" / "routing" / "runtime.py"
+        source = runtime.read_text(encoding="utf-8")
+        changed = source.replace(
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n"
+            f'{constant_name} = "{tool_id}"',
+            1,
+        ).replace(
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_INTENT,\n"
+            "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+            "        ),",
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_INTENT,\n"
+            "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+            "        ),\n"
+            "        ToolDefinition(\n"
+            f"            tool_id={constant_name},\n"
+            '            stages=("contact_acquisition",),\n'
+            "        ),",
+            1,
+        ).replace(
+            "        *tuple(",
+            "        PolicyStep(\n"
+            f"            {constant_name},\n"
+            '            "contact_acquisition",\n'
+            f"            priority={priority},\n"
+            "        ),\n"
+            "        *tuple(",
+            1,
+        )
+        assert changed != source
+        runtime.write_text(changed, encoding="utf-8")
+
+    for root in (parent, candidate):
+        add_contact_pair(
+            root,
+            constant_name="TOOL_RUNTIME_CONTACT_ANCHOR",
+            tool_id="contact.fixture_anchor",
+            priority=10,
+        )
+    add_contact_pair(
+        candidate,
+        constant_name="TOOL_RUNTIME_CONTACT_NEW",
+        tool_id="contact.fixture_new",
+        priority=20,
     )
 
     assert sourcing_pipeline_preservation_errors(
         sourcing_pipeline_structure_document(parent),
         sourcing_pipeline_structure_document(candidate),
     ) == []
+
+
+def test_existing_tool_cannot_move_between_stages(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+        "            stages=(STAGE_CANDIDATE_ACQUISITION,)",
+        "tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+        "            stages=(STAGE_INTENT_EVIDENCE,)",
+        1,
+    ).replace(
+        "TOOL_RUNTIME_CANDIDATE,\n"
+        "            STAGE_CANDIDATE_ACQUISITION,\n"
+        "            priority=10",
+        "TOOL_RUNTIME_CANDIDATE,\n"
+        "            STAGE_INTENT_EVIDENCE,\n"
+        "            priority=10",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert "existing routing tool membership changed" in errors
+    assert any(error.startswith("routing tool stage changed:") for error in errors)
+
+
+def test_paired_same_stage_direct_tool_addition_is_allowed(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"',
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"\n'
+        'TOOL_RUNTIME_NEW = "intent.fixture_new"',
+        1,
+    ).replace(
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        "        ),\n"
+        "    )",
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        "        ),\n"
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_NEW,\n"
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        "        ),\n"
+        "    )",
+        1,
+    ).replace(
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_INTENT,\n"
+        "            STAGE_INTENT_EVIDENCE,\n"
+        "            priority=20,\n"
+        "        ),\n"
+        "        *tuple(",
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_INTENT,\n"
+        "            STAGE_INTENT_EVIDENCE,\n"
+        "            priority=20,\n"
+        "        ),\n"
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_NEW,\n"
+        "            STAGE_INTENT_EVIDENCE,\n"
+        "            priority=30,\n"
+        "        ),\n"
+        "        *tuple(",
+        1,
+    )
+    assert changed != source
+    assert "TOOL_RUNTIME_NEW" in changed
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_unpaired_direct_tool_addition_is_rejected(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"',
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"\n'
+        'TOOL_RUNTIME_ORPHAN = "intent.fixture_orphan"',
+        1,
+    ).replace(
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        "        ),\n"
+        "    )",
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        "        ),\n"
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_ORPHAN,\n"
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        "        ),\n"
+        "    )",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert any(
+        error.startswith("new routing tool has no same-stage policy:")
+        for error in errors
+    )
 
 
 def test_non_utf8_coding_header_is_violation_not_crash(tmp_path: Path) -> None:

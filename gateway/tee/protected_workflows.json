@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "356c7cdbbc6bf734dcde3cf850d5f468c881d129",
+  "baseline_commit": "aaf2df46ef1408e6874964db8b58d7ee4105d943",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -1437,7 +1437,7 @@
       "symbol": "provider_registry_document"
     },
     {
-      "ast_sha256": "sha256:3e8b5f27fce3c4977483443e4b20009e281d26348ac8f97f70e0c339a9075d6c",
+      "ast_sha256": "sha256:63f18706e3d4b79cb394e0c285eed6c000fe7da1c589475e9e57fafb4b9ef126",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
     },
@@ -2737,7 +2737,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:51fd74b2648c906cf082bdfa51f1c6608ef7931bb86ee389b4020de5a3b925af",
-  "protected_source_commit": "356c7cdbbc6bf734dcde3cf850d5f468c881d129",
+  "manifest_hash": "sha256:f4df208d9b466dc2f9f8f4305e2d7adca83da6d1bdaf69814d61be073572aad7",
+  "protected_source_commit": "aaf2df46ef1408e6874964db8b58d7ee4105d943",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

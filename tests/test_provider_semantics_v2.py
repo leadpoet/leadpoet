@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -39,6 +40,14 @@ from gateway.tee.inter_enclave_tls import (
 )
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
 from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
+from gateway.tee.coordinator_executor_v2 import (
+    OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
+    CoordinatorExecutorV2,
+)
+from gateway.tee.execution_job_manager_v2 import (
+    ExecutionContextV2,
+    ExecutionJobV2Error,
+)
 from gateway.tee.provider_semantics_v2 import (
     ProviderSemanticsAuthorityV2,
     ProviderSemanticsV2Error,
@@ -199,6 +208,100 @@ class _OutcomeStore:
             "transport_attempts": [],
             "evidence_artifact_hashes": [self.checkpoint_hash],
         }
+
+
+def test_provider_outcome_snapshot_does_not_rebind_restore_transport() -> None:
+    restore_artifact_hash = _hash("e")
+
+    class RestoreEvidenceOutcomeStore(_OutcomeStore):
+        restore_attempt = None
+
+        def load_latest(
+            self,
+            *,
+            utc_day,
+            job_id,
+            purpose,
+            operation_suffix="restore",
+        ):
+            restored = super().load_latest(
+                utc_day=utc_day,
+                job_id=job_id,
+                purpose=purpose,
+                operation_suffix=operation_suffix,
+            )
+            if not restored["found"]:
+                return restored
+            restore_request = _request(
+                job_id=job_id,
+                purpose=purpose,
+                logical_operation_id="provider-outcome-checkpoint-restore",
+            )
+            self.restore_attempt = _Broker._result(
+                restore_request,
+                status=200,
+                body=b'{"restored":true}',
+                terminal_status="authenticated_response",
+            )["transport_attempt"]
+            restored["transport_attempts"] = [self.restore_attempt]
+            restored["evidence_artifact_hashes"] = [restore_artifact_hash]
+            return restored
+
+    outcome_store = RestoreEvidenceOutcomeStore()
+    first, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store
+    )
+    first.execute(_request(job_id="provider-outcome-live"))
+
+    restarted, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store
+    )
+    evidence = restarted.provider_outcome_snapshot_evidence()
+
+    assert evidence["transport_attempts"] == []
+    assert evidence["evidence_artifact_hashes"] == sorted(
+        [outcome_store.checkpoint_hash, restore_artifact_hash]
+    )
+
+    snapshot_context = ExecutionContextV2(
+        job_id="provider-outcome-snapshot-current",
+        purpose="research_lab.provider_outcome_snapshot.v2",
+        epoch_id=24_000,
+    )
+    result = asyncio.run(
+        CoordinatorExecutorV2(
+            provider_outcome_supplier=(
+                restarted.provider_outcome_snapshot_evidence
+            )
+        )(
+            OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
+            {
+                "schema_version": (
+                    "leadpoet.provider_outcome_snapshot_request.v2"
+                )
+            },
+            snapshot_context,
+        )
+    )
+    for attempt in result.transport_attempts:
+        snapshot_context.record_transport(attempt)
+    for artifact_hash in result.artifact_hashes:
+        snapshot_context.record_artifact(artifact_hash)
+
+    assert snapshot_context.freeze_transport_attempts() == ()
+    assert set(snapshot_context.freeze_artifact_hashes()).issuperset(
+        {outcome_store.checkpoint_hash, restore_artifact_hash}
+    )
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="transport attempt differs from execution scope",
+    ):
+        snapshot_context = ExecutionContextV2(
+            job_id="provider-outcome-snapshot-current",
+            purpose="research_lab.provider_outcome_snapshot.v2",
+            epoch_id=24_000,
+        )
+        snapshot_context.record_transport(outcome_store.restore_attempt)
 
 
 class _BatchOutcomeStore(_OutcomeStore):

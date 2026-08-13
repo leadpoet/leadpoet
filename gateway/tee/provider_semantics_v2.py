@@ -208,7 +208,6 @@ class ProviderSemanticsAuthorityV2:
         self._outcome_flushing = False
         self._outcome_checkpoint_hash = ""
         self._outcome_checkpoint_day = ""
-        self._outcome_restore_attempts: list[Dict[str, Any]] = []
         self._outcome_restore_artifacts: set[str] = set()
         if outcome_ledger is not None:
             self._outcome_ledger = outcome_ledger
@@ -219,9 +218,6 @@ class ProviderSemanticsAuthorityV2:
                 job_id="provider-outcome-restore-%s" % utc_day,
                 purpose="research_lab.provider_outcome_state.v2",
             )
-            self._outcome_restore_attempts = [
-                dict(item) for item in restored.get("transport_attempts") or ()
-            ]
             self._outcome_restore_artifacts = set(
                 str(item) for item in restored.get("evidence_artifact_hashes") or ()
             )
@@ -675,9 +671,10 @@ class ProviderSemanticsAuthorityV2:
             artifacts.add(self._outcome_checkpoint_hash)
         return {
             "snapshot": self.provider_outcome_snapshot(),
-            "transport_attempts": [
-                dict(item) for item in self._outcome_restore_attempts
-            ],
+            # The checkpoint restore happened under its own restore job. Its
+            # authenticated artifacts remain provenance for this snapshot,
+            # but its transport attempts cannot be rebound to a new job.
+            "transport_attempts": [],
             "evidence_artifact_hashes": sorted(artifacts),
         }
 

@@ -254,9 +254,9 @@ EVENT_DOC_BANNED_RE = re.compile(
 
 def _candidate_source_diff_fixture():
     unified_diff = (
-        "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
-        "--- a/sourcing_model/runtime.py\n"
-        "+++ b/sourcing_model/runtime.py\n"
+        "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+        "--- a/sourcing_model/routing/runtime.py\n"
+        "+++ b/sourcing_model/routing/runtime.py\n"
         "@@ -1 +1 @@\n"
         "-VALUE = 1\n"
         "+VALUE = 2\n"
@@ -269,7 +269,7 @@ def _candidate_source_diff_fixture():
         "parent_artifact_hash": "sha256:" + "1" * 64,
         "parent_manifest_hash": "sha256:" + "2" * 64,
         "source_diff_hash": sha256_json({"unified_diff": unified_diff}),
-        "target_files": ["sourcing_model/runtime.py"],
+        "target_files": ["sourcing_model/routing/runtime.py"],
         "unified_diff": unified_diff,
         "draft_hash": "sha256:" + "3" * 64,
     }
@@ -302,7 +302,7 @@ def _candidate_source_diff_fixture():
         "source_diff_hash": artifact["source_diff_hash"],
         "source_diff_artifact_hash": artifact["artifact_hash"],
         "source_diff_artifact_uri": "s3://fixture/candidates/run-source-diff-rebase/0/source_diff.json",
-        "changed_files": ["sourcing_model/runtime.py"],
+        "changed_files": ["sourcing_model/routing/runtime.py"],
     }
     build_doc = {
         **build_payload,
@@ -324,7 +324,8 @@ def _candidate_source_diff_fixture():
         "redacted_summary": "fixture",
         "validation_result": "passed",
         "patch_doc": {
-            "target_files": ["sourcing_model/runtime.py"],
+            "lane": "source_routing",
+            "target_files": ["sourcing_model/routing/runtime.py"],
         },
     }
     patch_manifest = {
@@ -361,9 +362,9 @@ def test_stale_parent_rebase_loads_only_fully_committed_source_diff(monkeypatch)
 def test_stale_parent_rebase_rejects_hash_consistent_mode_change(monkeypatch):
     candidate, artifact = _candidate_source_diff_fixture()
     structural_diff = artifact["unified_diff"].replace(
-        "--- a/sourcing_model/runtime.py\n",
+        "--- a/sourcing_model/routing/runtime.py\n",
         "old mode 100644\nnew mode 100755\n"
-        "--- a/sourcing_model/runtime.py\n",
+        "--- a/sourcing_model/routing/runtime.py\n",
     )
     source_diff_hash = sha256_json({"unified_diff": structural_diff})
     artifact_payload = {
@@ -436,9 +437,9 @@ def test_stale_parent_rebase_rejects_hash_consistent_mode_change(monkeypatch):
 def test_stale_parent_rebase_normalizes_historical_depth_two_targets(monkeypatch):
     candidate, artifact = _candidate_source_diff_fixture()
     child_diff = (
-        "diff --git a/sourcing_model/ranking.py b/sourcing_model/ranking.py\n"
-        "--- a/sourcing_model/ranking.py\n"
-        "+++ b/sourcing_model/ranking.py\n"
+        "diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py\n"
+        "--- a/sourcing_model/discovery.py\n"
+        "+++ b/sourcing_model/discovery.py\n"
         "@@ -1 +1 @@\n"
         "-RANK = 1\n"
         "+RANK = 2\n"
@@ -455,7 +456,7 @@ def test_stale_parent_rebase_normalizes_historical_depth_two_targets(monkeypatch
         },
         "source_diff_hash": cumulative_hash,
         # Historical depth>1 rows retained only the direct-parent target.
-        "target_files": ["sourcing_model/ranking.py"],
+        "target_files": ["sourcing_model/discovery.py"],
         "unified_diff": cumulative_diff,
     }
     artifact = {
@@ -471,7 +472,7 @@ def test_stale_parent_rebase_normalizes_historical_depth_two_targets(monkeypatch
         "schema_version": "research_lab.git_tree_composition.v1",
         "incremental_source_diff_hash": incremental_hash,
         "cumulative_source_diff_hash": cumulative_hash,
-        "cumulative_changed_files": ["sourcing_model/ranking.py"],
+        "cumulative_changed_files": ["sourcing_model/discovery.py"],
         "child_source_tree_hash": child_artifact_hash,
     }
     lineage = {
@@ -498,8 +499,8 @@ def test_stale_parent_rebase_normalizes_historical_depth_two_targets(monkeypatch
             "source_diff_hash": cumulative_hash,
             "source_diff_artifact_hash": artifact["artifact_hash"],
             "changed_files": [
-                "sourcing_model/ranking.py",
-                "sourcing_model/runtime.py",
+                "sourcing_model/discovery.py",
+                "sourcing_model/routing/runtime.py",
             ],
             "git_tree": lineage,
         }
@@ -522,7 +523,10 @@ def test_stale_parent_rebase_normalizes_historical_depth_two_targets(monkeypatch
         "patch_payload_hash": cumulative_hash,
         "candidate_source_diff_hash": cumulative_hash,
         "candidate_build_doc_hash": build_doc["build_doc_hash"],
-        "patch_doc": {"target_files": ["sourcing_model/ranking.py"]},
+        "patch_doc": {
+            "lane": "source_routing",
+            "target_files": ["sourcing_model/discovery.py"],
+        },
     }
     patch_manifest = {
         **patch_payload,
@@ -542,8 +546,8 @@ def test_stale_parent_rebase_normalizes_historical_depth_two_targets(monkeypatch
     draft = worker._draft_from_stale_candidate(candidate)
 
     assert draft.target_files == (
-        "sourcing_model/ranking.py",
-        "sourcing_model/runtime.py",
+        "sourcing_model/discovery.py",
+        "sourcing_model/routing/runtime.py",
     )
     assert draft.unified_diff == cumulative_diff
     assert validate_code_edit_draft(draft) == []

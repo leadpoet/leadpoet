@@ -1414,6 +1414,101 @@ def test_source_add_registration_diff_rejects_unreviewed_runtime_change():
     ) == ["source_add_registration_patched_source_invalid"]
 
 
+def test_source_add_registration_diff_allows_stage_local_routing_change():
+    existing = _EMPTY_ROUTER_RUNTIME + (
+        "def runtime_policy():\n"
+        "    return {'priority': 10}\n"
+    )
+    changed = existing.replace("'priority': 10", "'priority': 20")
+
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed),
+        None,
+        existing_runtime_source=existing,
+    ) == []
+
+
+def test_source_add_registration_diff_allows_same_stage_tool_addition():
+    existing = _EMPTY_ROUTER_RUNTIME + (
+        "def runtime_tool_definitions():\n"
+        "    return (ToolDefinition(tool_id=TOOL_A, "
+        "stages=(STAGE_INTENT_EVIDENCE,)),)\n"
+    )
+    changed = existing.replace(
+        "stages=(STAGE_INTENT_EVIDENCE,)),)",
+        "stages=(STAGE_INTENT_EVIDENCE,)), "
+        "ToolDefinition(tool_id=TOOL_B, "
+        "stages=(STAGE_INTENT_EVIDENCE,)))",
+        1,
+    )
+
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed),
+        None,
+        existing_runtime_source=existing,
+    ) == []
+
+
+def test_source_add_validator_defers_literal_tool_ids_to_pipeline_guard():
+    existing = _EMPTY_ROUTER_RUNTIME + (
+        'TOOL_A = "intent.fixture_a"\n'
+        "def runtime_tool_definitions():\n"
+        "    return (ToolDefinition(tool_id=TOOL_A, "
+        "stages=(STAGE_INTENT_EVIDENCE,)),)\n"
+    )
+    changed = existing.replace(
+        'TOOL_A = "intent.fixture_a"\n',
+        'TOOL_A = "intent.fixture_a"\nTOOL_B = "intent.fixture_b"\n',
+        1,
+    ).replace(
+        "stages=(STAGE_INTENT_EVIDENCE,)),)",
+        "stages=(STAGE_INTENT_EVIDENCE,)), "
+        "ToolDefinition(tool_id=TOOL_B, "
+        "stages=(STAGE_INTENT_EVIDENCE,)))",
+        1,
+    )
+
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed),
+        None,
+        existing_runtime_source=existing,
+    ) == []
+
+
+def test_source_add_registration_diff_rejects_router_rebinding_from_mutable_function():
+    existing = _EMPTY_ROUTER_RUNTIME + (
+        "def runtime_catalog():\n"
+        "    return None\n"
+    )
+    changed = existing.replace(
+        "def runtime_catalog():\n",
+        "def runtime_catalog():\n"
+        "    global compile_route\n"
+        "    compile_route = unreviewed_compile_route\n",
+        1,
+    )
+
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed),
+        None,
+        existing_runtime_source=existing,
+    ) == ["source_add_registration_patched_source_invalid"]
+
+
+def test_source_add_registration_diff_keeps_router_handoff_wrapper_immutable():
+    existing = _EMPTY_ROUTER_RUNTIME + (
+        "def compile_candidate_acquisition_route():\n"
+        "    return compile_route(expected_context)\n"
+    )
+    changed = existing.replace("expected_context", "changed_context")
+
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed),
+        None,
+        existing_runtime_source=existing,
+    ) == ["source_add_registration_patched_source_invalid"]
+
+
 def test_source_add_registration_rejects_annotation_side_effect():
     existing = _EMPTY_V8_ROUTER_RUNTIME.replace(
         "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",

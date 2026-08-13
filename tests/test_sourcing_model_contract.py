@@ -28,9 +28,13 @@ from research_lab.sourcing_model_contract_check import (
     PARITY_FIXTURE_V13_PATH,
     PARITY_FIXTURE_V26_PATH,
     PARITY_FIXTURE_V7_PATH,
+    _normalize_source_add_registration_static,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
     reviewed_consumer_snapshots,
+    sourcing_pipeline_preservation_errors,
+    sourcing_pipeline_structure_document,
+    verify_sourcing_pipeline_structure,
     verify_source_tree_contract,
 )
 
@@ -124,6 +128,11 @@ def _conforming_tree(
             return []
     """)
     _write(root, "sourcing_model/discovery.py", """
+        _INTENT_PHRASE_FAMILIES = {"HIRING": ("active hiring",)}
+
+        def build_query(icp, source):
+            return f"find companies with {source} evidence"
+
         def agent_results(icp, effort, timeout_s, avoid_companies):
             pass
 
@@ -195,11 +204,35 @@ def _conforming_tree(
             return None
     """)
     _write(root, "sourcing_model/routing/defaults.py", """
+        from .compiler import compile_route
+        from .contracts import (
+            RouteContext,
+            STAGE_CANDIDATE_ACQUISITION,
+            STAGE_INTENT_EVIDENCE,
+            ToolDefinition,
+        )
+        from .policy import PolicyStep, RoutingPolicy
+
         DEFAULT_CATALOG_VERSION = "sourcing-model-tools:v2"
         DEFAULT_POLICY_VERSION = "sourcing-model-routing:v2"
+        TOOL_DEFAULT_CANDIDATE = "candidate.fixture_default"
+        TOOL_DEFAULT_INTENT = "intent.fixture_default"
 
         def builtin_definitions():
-            return ()
+            return (
+                ToolDefinition(
+                    tool_id=TOOL_DEFAULT_CANDIDATE,
+                    revision="v1",
+                    stages=(STAGE_CANDIDATE_ACQUISITION,),
+                    capabilities=("fixture.candidate",),
+                ),
+                ToolDefinition(
+                    tool_id=TOOL_DEFAULT_INTENT,
+                    revision="v1",
+                    stages=(STAGE_INTENT_EVIDENCE,),
+                    capabilities=("fixture.intent",),
+                ),
+            )
 
         def compile_candidate_route(
             *, structured_query, allow_paid_escalation,
@@ -207,7 +240,11 @@ def _conforming_tree(
             remaining_results, credit_cap, cohort="control",
             catalog=None, policy=None
         ):
-            return None
+            return compile_route(
+                None,
+                None,
+                RouteContext(stage=STAGE_CANDIDATE_ACQUISITION),
+            )
 
         def compile_intent_route(
             category, *, existing_evidence=False, available_tools=None,
@@ -215,7 +252,11 @@ def _conforming_tree(
             remaining_results=1, credit_cap=8, cohort="control",
             catalog=None, policy=None
         ):
-            return None
+            return compile_route(
+                None,
+                None,
+                RouteContext(stage=STAGE_INTENT_EVIDENCE),
+            )
 
         def default_catalog(
             availability=None, *, state_overrides=None, additional_tools=(),
@@ -224,7 +265,18 @@ def _conforming_tree(
             return None
 
         def default_policy():
-            return None
+            return RoutingPolicy(policy_version=DEFAULT_POLICY_VERSION, steps=(
+                PolicyStep(
+                    TOOL_DEFAULT_CANDIDATE,
+                    STAGE_CANDIDATE_ACQUISITION,
+                    priority=10,
+                ),
+                PolicyStep(
+                    TOOL_DEFAULT_INTENT,
+                    STAGE_INTENT_EVIDENCE,
+                    priority=20,
+                ),
+            ))
 
         def intent_source_for_category(
             category, *, catalog=None, policy=None, cohort="control"
@@ -247,17 +299,64 @@ def _conforming_tree(
     """)
     _write(root, "sourcing_model/routing/policy.py", "POLICY = True\n")
     _write(root, "sourcing_model/routing/runtime.py", """
+        from sourcing_model.scrapingdog_signal_contract import (
+            TOOL_CATALOG as ENHANCED_SCRAPINGDOG_CATALOG,
+        )
+        from .compiler import compile_route
+        from .contracts import (
+            RouteContext,
+            STAGE_CANDIDATE_ACQUISITION,
+            STAGE_INTENT_EVIDENCE,
+            ToolDefinition,
+        )
+        from .policy import PolicyStep, RoutingPolicy
+
         RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v__RUNTIME_VERSION__"
         RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v__RUNTIME_VERSION__"
+        TOOL_RUNTIME_CANDIDATE = "candidate.fixture_runtime"
+        TOOL_RUNTIME_INTENT = "intent.fixture_runtime"
+        SOURCE_ADD_ROUTING_REGISTRATIONS = ()
 
         def runtime_tool_definitions():
-            return ()
+            return (
+                ToolDefinition(
+                    tool_id=TOOL_RUNTIME_CANDIDATE,
+                    revision="v1",
+                    stages=(STAGE_CANDIDATE_ACQUISITION,),
+                    capabilities=("fixture.candidate",),
+                ),
+                ToolDefinition(
+                    tool_id=TOOL_RUNTIME_INTENT,
+                    revision="v1",
+                    stages=(STAGE_INTENT_EVIDENCE,),
+                    capabilities=("fixture.intent",),
+                ),
+            )
 
         def enhanced_scrapingdog_tool_definitions():
             return ()
 
         def runtime_policy():
-            return None
+            return RoutingPolicy(policy_version=RUNTIME_POLICY_VERSION, steps=(
+                PolicyStep(
+                    TOOL_RUNTIME_CANDIDATE,
+                    STAGE_CANDIDATE_ACQUISITION,
+                    priority=10,
+                ),
+                PolicyStep(
+                    TOOL_RUNTIME_INTENT,
+                    STAGE_INTENT_EVIDENCE,
+                    priority=20,
+                ),
+                *tuple(
+                    PolicyStep(
+                        definition.tool_id,
+                        STAGE_INTENT_EVIDENCE,
+                        priority=50,
+                    )
+                    for definition in ENHANCED_SCRAPINGDOG_CATALOG
+                ),
+            ))
 
         def runtime_catalog(
             availability=None, *, state_overrides=None, additional_tools=(),
@@ -276,14 +375,22 @@ def _conforming_tree(
             remaining_calls, remaining_results, credit_cap, cohort="control",
             catalog=None, policy=None
         ):
-            return None
+            return compile_route(
+                None,
+                None,
+                RouteContext(stage=STAGE_CANDIDATE_ACQUISITION),
+            )
 
         def compile_intent_evidence_route(
             category, *, existing_evidence, available_tools,
             remaining_seconds, remaining_calls, credit_cap, cohort="control",
             catalog=None, policy=None
         ):
-            return None
+            return compile_route(
+                None,
+                None,
+                RouteContext(stage=STAGE_INTENT_EVIDENCE),
+            )
 
         def candidate_lane_for_tool(tool_id):
             return None
@@ -305,6 +412,10 @@ def _conforming_tree(
             pass
     """)
     _write(root, "sourcing_model/scrapingdog_intent.py", """
+        TOOL_INTENT_SCRAPINGDOG_GOOGLE_NEWS = "intent.scrapingdog_google_news"
+        TOOL_INTENT_SCRAPINGDOG_GOOGLE_SEARCH = "intent.scrapingdog_google_search"
+        TOOL_INTENT_SCRAPINGDOG_YOUTUBE = "intent.scrapingdog_youtube_search"
+
         def compile_scrapingdog_intent_request(
             tool_id, *, company_name, company_domain, signal, category,
             max_age_days, country="us", language="en"
@@ -323,6 +434,17 @@ def _conforming_tree(
         SCHEMA_VERSION = __SCHEMA_VERSION__
         REQUEST_SCHEMA_VERSION = __REQUEST_SCHEMA_VERSION__
         EVIDENCE_SCHEMA_VERSION = "v1"
+
+        class ToolContract:
+            pass
+
+        def _tool(
+            tool_id, stage, capability, routing_role, signals,
+            source_classes, evidence_types, cost_credits=5
+        ):
+            return ToolContract()
+
+        TOOL_CATALOG = ()
 
         def canonical_json(value):
             return "{}"
@@ -380,6 +502,107 @@ def _conforming_tree(
         ):
             pass
     """)
+
+
+def _v26_pipeline_tree(root: Path) -> None:
+    """Build the smallest v26-shaped source tree needed by the topology gate."""
+
+    _conforming_tree(
+        root,
+        contract_snapshot=CONTRACT_V26_PATH,
+        parity_snapshot=PARITY_FIXTURE_V26_PATH,
+        runtime_version=11,
+    )
+    _write(
+        root,
+        "sourcing_model/routing/guidance.py",
+        '''
+        GUIDANCE_PROMPT_VERSION = "llm-routing-prompt-v1"
+        GUIDANCE_SYSTEM_PROMPT = "Rank the safe same-stage tool shortlist."
+        GUIDANCE_PROMPT_SHA256 = sha256_payload({
+            "prompt_version": GUIDANCE_PROMPT_VERSION,
+            "system": GUIDANCE_SYSTEM_PROMPT,
+        })
+
+        def bind_llm_guidance_response(response):
+            return response
+
+        def build_routing_guidance_request(*args, **kwargs):
+            return {}
+
+        def compile_guided_route(*args, **kwargs):
+            return None
+
+        def guidance_metadata():
+            return {}
+        ''',
+    )
+    runtime = root / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "    STAGE_CANDIDATE_ACQUISITION,\n"
+        "    STAGE_INTENT_EVIDENCE,",
+        "    STAGE_CANDIDATE_ACQUISITION,\n"
+        "    STAGE_CANDIDATE_ENRICHMENT,\n"
+        "    STAGE_CONTACT_ACQUISITION,\n"
+        "    STAGE_INTENT_EVIDENCE,",
+        1,
+    ).replace(
+        "def compile_intent_evidence_route(",
+        "def compile_candidate_enrichment_route(\n"
+        "    verified_company_identity, *, available_tools,\n"
+        "    remaining_seconds, remaining_calls, remaining_results,\n"
+        "    credit_cap, catalog=None, policy=None\n"
+        "):\n"
+        "    context = RouteContext(stage=STAGE_CANDIDATE_ENRICHMENT)\n"
+        "    return compile_route(None, None, context)\n\n"
+        "def compile_contact_acquisition_route(\n"
+        "    verified_company_identity, contact_persona, *,\n"
+        "    fulfillment_mode, available_tools, remaining_seconds,\n"
+        "    remaining_calls, remaining_results, credit_cap,\n"
+        "    catalog=None, policy=None\n"
+        "):\n"
+        "    context = RouteContext(stage=STAGE_CONTACT_ACQUISITION)\n"
+        "    return compile_route(None, None, context)\n\n"
+        "def compile_intent_evidence_route(",
+        1,
+    ).replace(
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"',
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"\n'
+        'TOOL_RUNTIME_CONTACT_BASE = "contact.fixture_v26_base"',
+        1,
+    ).replace(
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        '            capabilities=("fixture.intent",),\n'
+        "        ),",
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        '            capabilities=("fixture.intent",),\n'
+        "        ),\n"
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_CONTACT_BASE,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_CONTACT_ACQUISITION,),\n"
+        '            capabilities=("fixture.contact",),\n'
+        "        ),",
+        1,
+    ).replace(
+        "        *tuple(",
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_CONTACT_BASE,\n"
+        "            STAGE_CONTACT_ACQUISITION,\n"
+        "            priority=25,\n"
+        "        ),\n"
+        "        *tuple(",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
 
 
 def test_contract_loads_and_declares_frozen_surface() -> None:
@@ -478,6 +701,148 @@ def test_exact_v26_contract_pair_and_keyword_only_surface_are_reviewed(
     assert not any(
         "intent_freshness.py:build_source_date_proof" in item
         for item in violations
+    )
+
+
+def test_v26_pipeline_accepts_local_context_and_contact_pair_only(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _v26_pipeline_tree(parent)
+    _v26_pipeline_tree(candidate)
+
+    assert verify_sourcing_pipeline_structure(parent) == []
+    parent_document = sourcing_pipeline_structure_document(parent)
+
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"',
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"\n'
+        'TOOL_RUNTIME_CONTACT = "contact.fixture_v26"',
+        1,
+    ).replace(
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_INTENT,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+            '            capabilities=("fixture.intent",),\n'
+            "        ),",
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_INTENT,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+            '            capabilities=("fixture.intent",),\n'
+            "        ),\n"
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CONTACT,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_CONTACT_ACQUISITION,),\n"
+            '            capabilities=("fixture.contact",),\n'
+            "        ),",
+        1,
+    ).replace(
+        "        *tuple(",
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_CONTACT,\n"
+        "            STAGE_CONTACT_ACQUISITION,\n"
+        "            priority=30,\n"
+        "        ),\n"
+        "        *tuple(",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    candidate_document = sourcing_pipeline_structure_document(candidate)
+    assert sourcing_pipeline_preservation_errors(
+        parent_document,
+        candidate_document,
+    ) == []
+
+    runtime.write_text(
+        changed.replace(
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CONTACT,\n"
+            "            STAGE_CONTACT_ACQUISITION,\n"
+            "            priority=30,\n"
+            "        ),\n",
+            "",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    unpaired = sourcing_pipeline_structure_document(candidate)
+    assert any(
+        error.endswith(
+            "sourcing_model/routing/runtime.py:contact.fixture_v26"
+        )
+        for error in sourcing_pipeline_preservation_errors(
+            parent_document,
+            unpaired,
+        )
+    )
+
+
+def test_v26_routing_guidance_prompt_literal_is_editable_but_code_is_not(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _v26_pipeline_tree(parent)
+    _v26_pipeline_tree(candidate)
+    guidance = candidate / "sourcing_model" / "routing" / "guidance.py"
+    source = guidance.read_text(encoding="utf-8")
+    changed = source.replace(
+        "Rank the safe same-stage tool shortlist.",
+        "Rank the safe same-stage tools by expected evidence quality.",
+        1,
+    )
+    assert changed != source
+    guidance.write_text(changed, encoding="utf-8")
+
+    parent_document = sourcing_pipeline_structure_document(parent)
+    assert sourcing_pipeline_preservation_errors(
+        parent_document,
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+    guidance.write_text(
+        changed.replace(
+            "def guidance_metadata():\n    return {}",
+            "def guidance_metadata():\n    mutate_pipeline()\n    return {}",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        "non-declarative sourcing edit changed: "
+        "sourcing_model/routing/guidance.py"
+        in sourcing_pipeline_preservation_errors(
+            parent_document,
+            sourcing_pipeline_structure_document(candidate),
+        )
+    )
+
+
+def test_v26_routing_guidance_prompt_requires_plain_string(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    _v26_pipeline_tree(candidate)
+    guidance = candidate / "sourcing_model" / "routing" / "guidance.py"
+    source = guidance.read_text(encoding="utf-8")
+    changed = source.replace(
+        'GUIDANCE_SYSTEM_PROMPT = "Rank the safe same-stage tool shortlist."',
+        'GUIDANCE_SYSTEM_PROMPT = {"not": "a prompt"}',
+        1,
+    )
+    assert changed != source
+    guidance.write_text(changed, encoding="utf-8")
+
+    assert (
+            "prompt binding is not reviewed data "
+        "sourcing_model/routing/guidance.py:GUIDANCE_SYSTEM_PROMPT"
+        in verify_sourcing_pipeline_structure(candidate)
     )
 
 
@@ -776,6 +1141,1247 @@ def test_annotated_constant_assignment_conforms(tmp_path: Path) -> None:
     assert verify_source_tree_contract(tmp_path) == []
 
 
+def test_router_stage_binding_drift_fails_closed(tmp_path: Path) -> None:
+    _conforming_tree(tmp_path)
+    runtime = tmp_path / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert any(
+        item.startswith(
+            "router stage binding drift "
+            "sourcing_model/routing/runtime.py:"
+            "compile_candidate_acquisition_route"
+        )
+        for item in violations
+    )
+
+
+def test_router_local_context_binding_conforms_and_wrong_stage_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "local-context"
+    _conforming_tree(root)
+    runtime = root / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    inline = """return compile_route(
+        None,
+        None,
+        RouteContext(stage=STAGE_CANDIDATE_ACQUISITION),
+    )"""
+    local = """context = RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)
+    return compile_route(
+        None,
+        None,
+        context,
+    )"""
+    changed = source.replace(inline, local, 1)
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert verify_source_tree_contract(root) == []
+    assert verify_sourcing_pipeline_structure(root) == []
+
+    runtime.write_text(
+        changed.replace(
+            "context = RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "context = RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith(
+            "router stage binding drift "
+            "sourcing_model/routing/runtime.py:"
+            "compile_candidate_acquisition_route"
+        )
+        for item in verify_source_tree_contract(root)
+    )
+
+
+def test_default_router_stage_binding_drift_fails_closed(tmp_path: Path) -> None:
+    _conforming_tree(tmp_path)
+    defaults = tmp_path / "sourcing_model" / "routing" / "defaults.py"
+    defaults.write_text(
+        defaults.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert any(
+        item.startswith(
+            "router stage binding drift "
+            "sourcing_model/routing/defaults.py:compile_candidate_route"
+        )
+        for item in violations
+    )
+
+
+def test_router_compiler_rebinding_fails_closed(tmp_path: Path) -> None:
+    _conforming_tree(tmp_path)
+    runtime = tmp_path / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8")
+        + "\ncompile_route = unreviewed_compile_route\n",
+        encoding="utf-8",
+    )
+
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert (
+        "router compiler binding drift sourcing_model/routing/runtime.py"
+        in violations
+    )
+    assert "router compiler binding drift sourcing_model/routing/runtime.py" in (
+        verify_sourcing_pipeline_structure(tmp_path)
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "anchor"),
+    (
+        ("sourcing_model/routing/defaults.py", "def default_catalog("),
+        ("sourcing_model/routing/runtime.py", "def runtime_catalog("),
+    ),
+)
+def test_stage_local_function_cannot_replace_router_compiler(
+    tmp_path: Path,
+    relative_path: str,
+    anchor: str,
+) -> None:
+    _conforming_tree(tmp_path)
+    path = tmp_path / relative_path
+    source = path.read_text(encoding="utf-8")
+    path.write_text(
+        source.replace(
+            anchor,
+            "def replace_router_compiler():\n"
+            "    global compile_route\n"
+            "    compile_route = unreviewed_compile_route\n\n"
+            + anchor,
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    violations = verify_sourcing_pipeline_structure(tmp_path)
+
+    assert f"protected router global mutation {relative_path}" in violations
+
+
+def test_router_handoff_wrapper_body_is_immutable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _v26_pipeline_tree(parent)
+    _v26_pipeline_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext("
+            "stage=STAGE_CANDIDATE_ACQUISITION, changed=True)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert (
+        "immutable pipeline router changed: "
+        "sourcing_model/routing/runtime.py:"
+        "compile_candidate_acquisition_route"
+    ) in errors
+    assert (
+        "non-declarative sourcing edit changed: "
+        "sourcing_model/routing/runtime.py"
+    ) in errors
+
+
+def test_runtime_policy_body_remains_editable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    runtime_source = runtime.read_text(encoding="utf-8")
+    changed_runtime = runtime_source.replace("priority=10", "priority=11", 1)
+    assert changed_runtime != runtime_source
+    runtime.write_text(changed_runtime, encoding="utf-8")
+    defaults = candidate / "sourcing_model" / "routing" / "defaults.py"
+    defaults_source = defaults.read_text(encoding="utf-8")
+    changed_defaults = defaults_source.replace("priority=10", "priority=11", 1)
+    assert changed_defaults != defaults_source
+    defaults.write_text(changed_defaults, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_discovery_prompt_text_remains_editable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    discovery = candidate / "sourcing_model" / "discovery.py"
+    source = discovery.read_text(encoding="utf-8")
+    changed = source.replace(
+        "find companies with {source} evidence",
+        "find verified companies with {source} evidence",
+        1,
+    )
+    assert changed != source
+    discovery.write_text(changed, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_discovery_control_string_is_not_a_prompt_edit(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+
+    for root in (parent, candidate):
+        discovery = root / "sourcing_model" / "discovery.py"
+        source = discovery.read_text(encoding="utf-8")
+        changed = source.replace(
+            "def build_query(icp, source):\n"
+            '    return f"find companies with {source} evidence"',
+            "def build_query(icp, source):\n"
+            '    if source == "never":\n'
+            '        return "inactive branch"\n'
+            '    return f"find companies with {source} evidence"',
+            1,
+        )
+        assert changed != source
+        discovery.write_text(changed, encoding="utf-8")
+
+    discovery = candidate / "sourcing_model" / "discovery.py"
+    source = discovery.read_text(encoding="utf-8")
+    changed = source.replace('source == "never"', 'source == "news"', 1)
+    assert changed != source
+    discovery.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert (
+        "non-declarative sourcing edit changed: sourcing_model/discovery.py"
+        in errors
+    )
+
+
+@pytest.mark.parametrize(
+    ("parent_expression", "candidate_expression"),
+    (
+        ('"SAFE" or print("SIDE_EFFECT")', '"" or print("SIDE_EFFECT")'),
+        ('"company %s" % source', '"company %d" % source'),
+    ),
+)
+def test_prompt_text_cannot_change_expression_control_semantics(
+    tmp_path: Path,
+    parent_expression: str,
+    candidate_expression: str,
+) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+
+    for root in (parent, candidate):
+        discovery = root / "sourcing_model" / "discovery.py"
+        source = discovery.read_text(encoding="utf-8")
+        changed = source.replace(
+            'f"find companies with {source} evidence"',
+            parent_expression,
+            1,
+        )
+        assert changed != source
+        discovery.write_text(changed, encoding="utf-8")
+
+    discovery = candidate / "sourcing_model" / "discovery.py"
+    source = discovery.read_text(encoding="utf-8")
+    changed = source.replace(parent_expression, candidate_expression, 1)
+    assert changed != source
+    discovery.write_text(changed, encoding="utf-8")
+
+    assert (
+        "non-declarative sourcing edit changed: sourcing_model/discovery.py"
+        in sourcing_pipeline_preservation_errors(
+            sourcing_pipeline_structure_document(parent),
+            sourcing_pipeline_structure_document(candidate),
+        )
+    )
+
+
+def test_discovery_lookup_key_is_not_a_prompt_edit(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+
+    for root in (parent, candidate):
+        discovery = root / "sourcing_model" / "discovery.py"
+        source = discovery.read_text(encoding="utf-8")
+        changed = source.replace(
+            'return f"find companies with {source} evidence"',
+            'return f"find {icp.get(\'industry\')} companies with {source} evidence"',
+            1,
+        )
+        assert changed != source
+        discovery.write_text(changed, encoding="utf-8")
+
+    discovery = candidate / "sourcing_model" / "discovery.py"
+    source = discovery.read_text(encoding="utf-8")
+    changed = source.replace("icp.get('industry')", "icp.get('admin_override')", 1)
+    assert changed != source
+    discovery.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert (
+        "non-declarative sourcing edit changed: sourcing_model/discovery.py"
+        in errors
+    )
+
+
+def test_policy_executable_metadata_is_rejected(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "return RoutingPolicy(policy_version=RUNTIME_POLICY_VERSION, steps=(",
+        "return RoutingPolicy("
+        "policy_version=compile_intent_evidence_route(), steps=(",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    del parent
+    errors = verify_sourcing_pipeline_structure(candidate)
+
+    assert any("RoutingPolicy policy_version must be inert data" in error
+               for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "before", "after", "expected_error"),
+    (
+        (
+            "sourcing_model/routing/runtime.py",
+            'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"',
+            'TOOL_RUNTIME_INTENT: side_effect() = "intent.fixture_runtime"',
+            "routing tool constant is not a plain string assignment",
+        ),
+        (
+            "sourcing_model/routing/runtime.py",
+            'RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v7"',
+            'RUNTIME_POLICY_VERSION: side_effect() = "sourcing-model-runtime-routing:v7"',
+            "routing version is not a plain literal",
+        ),
+        (
+            "sourcing_model/routing/runtime.py",
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+            "SOURCE_ADD_ROUTING_REGISTRATIONS: side_effect() = ()",
+            "SOURCE_ADD registry is not a plain assignment",
+        ),
+        (
+            "sourcing_model/scrapingdog_signal_contract.py",
+            "TOOL_CATALOG = ()",
+            "TOOL_CATALOG: side_effect() = ()",
+            "tool catalog is not a plain assignment",
+        ),
+        (
+            "sourcing_model/discovery.py",
+            '_INTENT_PHRASE_FAMILIES = {"HIRING": ("active hiring",)}',
+            '_INTENT_PHRASE_FAMILIES: side_effect() = {"HIRING": ("active hiring",)}',
+            "prompt binding is not a plain assignment",
+        ),
+    ),
+)
+def test_declarative_bindings_reject_executable_annotations(
+    tmp_path: Path,
+    relative_path: str,
+    before: str,
+    after: str,
+    expected_error: str,
+) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    path = candidate / relative_path
+    source = path.read_text(encoding="utf-8")
+    changed = source.replace(before, after, 1)
+    assert changed != source
+    path.write_text(changed, encoding="utf-8")
+
+    assert any(
+        expected_error in error
+        for error in verify_sourcing_pipeline_structure(candidate)
+    )
+
+
+def test_prompt_function_code_is_not_editable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    discovery = candidate / "sourcing_model" / "discovery.py"
+    source = discovery.read_text(encoding="utf-8")
+    changed = source.replace(
+        'return f"find companies with {source} evidence"',
+        'setattr(object, "pipeline", source)\n'
+        '    return f"find companies with {source} evidence"',
+        1,
+    )
+    assert changed != source
+    discovery.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert (
+        "non-declarative sourcing edit changed: sourcing_model/discovery.py"
+        in errors
+    )
+
+
+def test_stage_cannot_make_every_reviewed_policy_ineligible(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "priority=10,\n        )",
+        "priority=10,\n"
+        '            required_features=("fixture.never",),\n'
+        "        )",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert any(
+        error.startswith("routing stage lost every reviewed viable route pair:")
+        for error in errors
+    )
+
+
+def test_policy_eligibility_can_change_when_stage_keeps_one_anchor(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+
+    def add_candidate_anchor(root: Path) -> None:
+        runtime = root / "sourcing_model" / "routing" / "runtime.py"
+        source = runtime.read_text(encoding="utf-8")
+        changed = source.replace(
+            'TOOL_RUNTIME_CANDIDATE = "candidate.fixture_runtime"',
+            'TOOL_RUNTIME_CANDIDATE = "candidate.fixture_runtime"\n'
+            'TOOL_RUNTIME_CANDIDATE_ANCHOR = "candidate.fixture_anchor"',
+            1,
+        ).replace(
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+            '            capabilities=("fixture.candidate",),\n'
+            "        ),",
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+            '            capabilities=("fixture.candidate",),\n'
+            "        ),\n"
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CANDIDATE_ANCHOR,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+            '            capabilities=("fixture.candidate",),\n'
+            "        ),",
+            1,
+        ).replace(
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CANDIDATE,\n"
+            "            STAGE_CANDIDATE_ACQUISITION,\n"
+            "            priority=10,\n"
+            "        ),",
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CANDIDATE,\n"
+            "            STAGE_CANDIDATE_ACQUISITION,\n"
+            "            priority=10,\n"
+            "        ),\n"
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CANDIDATE_ANCHOR,\n"
+            "            STAGE_CANDIDATE_ACQUISITION,\n"
+            "            priority=11,\n"
+            "        ),",
+            1,
+        )
+        assert changed != source
+        runtime.write_text(changed, encoding="utf-8")
+
+    add_candidate_anchor(parent)
+    add_candidate_anchor(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "priority=10,\n        )",
+        "priority=10,\n"
+        '            required_features=("fixture.structured",),\n'
+        "        )",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_stage_liveness_requires_one_complete_definition_policy_pair(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+
+    def add_anchor(root: Path) -> None:
+        runtime = root / "sourcing_model" / "routing" / "runtime.py"
+        source = runtime.read_text(encoding="utf-8")
+        changed = source.replace(
+            'TOOL_RUNTIME_CANDIDATE = "candidate.fixture_runtime"',
+            'TOOL_RUNTIME_CANDIDATE = "candidate.fixture_runtime"\n'
+            'TOOL_RUNTIME_CANDIDATE_ANCHOR = "candidate.fixture_anchor"',
+            1,
+        ).replace(
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+            '            capabilities=("fixture.candidate",),\n'
+            "        ),",
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+            '            capabilities=("fixture.candidate",),\n'
+            "        ),\n"
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_CANDIDATE_ANCHOR,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+            '            capabilities=("fixture.candidate",),\n'
+            "        ),",
+            1,
+        ).replace(
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CANDIDATE,\n"
+            "            STAGE_CANDIDATE_ACQUISITION,\n"
+            "            priority=10,\n"
+            "        ),",
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CANDIDATE,\n"
+            "            STAGE_CANDIDATE_ACQUISITION,\n"
+            "            priority=10,\n"
+            "        ),\n"
+            "        PolicyStep(\n"
+            "            TOOL_RUNTIME_CANDIDATE_ANCHOR,\n"
+            "            STAGE_CANDIDATE_ACQUISITION,\n"
+            "            priority=11,\n"
+            "        ),",
+            1,
+        )
+        assert changed != source
+        runtime.write_text(changed, encoding="utf-8")
+
+    add_anchor(parent)
+    add_anchor(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_CANDIDATE_ACQUISITION,),",
+        "tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+        '            avoid_when=("stage.candidate_acquisition",),',
+        1,
+    ).replace(
+        "TOOL_RUNTIME_CANDIDATE_ANCHOR,\n"
+        "            STAGE_CANDIDATE_ACQUISITION,\n"
+        "            priority=11,",
+        "TOOL_RUNTIME_CANDIDATE_ANCHOR,\n"
+        "            STAGE_CANDIDATE_ACQUISITION,\n"
+        "            priority=11,\n"
+            '            required_features=("fixture.never",),',
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert any(
+        error.startswith(
+            "routing stage lost every reviewed viable route pair:"
+        )
+        for error in errors
+    )
+
+
+def test_duplicate_direct_tool_membership_is_rejected(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    definition = (
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+        '            capabilities=("fixture.candidate",),\n'
+        "        ),"
+    )
+    changed = source.replace(definition, f"{definition}\n{definition}", 1)
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert (
+        "duplicate routing membership "
+        "sourcing_model/routing/runtime.py:definition:"
+        "candidate.fixture_runtime"
+        in verify_sourcing_pipeline_structure(candidate)
+    )
+
+
+def test_existing_tool_cannot_gain_cross_catalog_ownership(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+        '            capabilities=("fixture.candidate",),\n'
+        "        ),",
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+        '            capabilities=("fixture.candidate",),\n'
+        "        ),\n"
+        "        ToolDefinition(\n"
+        '            tool_id="candidate.fixture_default",\n'
+        '            revision="v1",\n'
+        "            stages=(STAGE_CANDIDATE_ACQUISITION,),\n"
+        '            capabilities=("fixture.candidate",),\n'
+        "        ),",
+        1,
+    ).replace(
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_CANDIDATE,\n"
+        "            STAGE_CANDIDATE_ACQUISITION,\n"
+        "            priority=10,\n"
+        "        ),",
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_CANDIDATE,\n"
+        "            STAGE_CANDIDATE_ACQUISITION,\n"
+        "            priority=10,\n"
+        "        ),\n"
+        "        PolicyStep(\n"
+        '            "candidate.fixture_default",\n'
+        "            STAGE_CANDIDATE_ACQUISITION,\n"
+        "            priority=11,\n"
+        "        ),",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert any(
+        error.endswith("definition:candidate.fixture_default")
+        for error in verify_sourcing_pipeline_structure(candidate)
+    )
+
+
+def test_imported_tool_identity_is_immutable(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    intent = candidate / "sourcing_model" / "scrapingdog_intent.py"
+    source = intent.read_text(encoding="utf-8")
+    changed = source.replace(
+        '"intent.scrapingdog_google_news"',
+        '"intent.replaced_google_news"',
+        1,
+    )
+    assert changed != source
+    intent.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert any(
+        error.startswith("immutable pipeline router changed:")
+        or error.startswith("non-declarative sourcing edit changed:")
+        for error in errors
+    )
+
+
+def test_typed_same_stage_catalog_tool_remains_additive(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    contract = candidate / "sourcing_model" / "scrapingdog_signal_contract.py"
+    source = contract.read_text(encoding="utf-8")
+    changed = source.replace(
+        "TOOL_CATALOG = ()",
+        "TOOL_CATALOG = (\n"
+        "    _tool(\n"
+        '        "intent.fixture_catalog", "intent_evidence",\n'
+        '        "company_search", "discovery", ("hiring",),\n'
+        '        ("news",), ("external",), 5,\n'
+        "    ),\n"
+        ")",
+        1,
+    )
+    assert changed != source
+    contract.write_text(changed, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_eager_catalog_cannot_reference_a_later_tool_binding(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    contract = candidate / "sourcing_model" / "scrapingdog_signal_contract.py"
+    source = contract.read_text(encoding="utf-8")
+    changed = source.replace(
+        "TOOL_CATALOG = ()",
+        "TOOL_CATALOG = (\n"
+        "    _tool(\n"
+        "        TOOL_LATE, 'intent_evidence', 'company_search',\n"
+        "        'discovery', ('hiring',), ('news',), ('external',),\n"
+        "    ),\n"
+        ")\n"
+        "TOOL_LATE = 'intent.fixture_late'",
+        1,
+    )
+    assert changed != source
+    contract.write_text(changed, encoding="utf-8")
+
+    errors = verify_sourcing_pipeline_structure(candidate)
+
+    assert any("field tool_id is" in error for error in errors)
+
+
+def test_eager_prompt_binding_cannot_reference_a_later_binding(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    discovery = candidate / "sourcing_model" / "discovery.py"
+    source = discovery.read_text(encoding="utf-8")
+    changed = source.replace(
+        '_INTENT_PHRASE_FAMILIES = {"HIRING": ("active hiring",)}',
+        "_INTENT_PHRASE_FAMILIES = _LATE_PROMPT_DATA\n"
+        "_LATE_PROMPT_DATA = {'HIRING': ('active hiring',)}",
+        1,
+    )
+    assert changed != source
+    discovery.write_text(changed, encoding="utf-8")
+
+    assert any(
+        "prompt binding is not reviewed data" in error
+        for error in verify_sourcing_pipeline_structure(candidate)
+    )
+
+
+def test_unbound_reviewed_category_name_is_not_grandfathered(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    defaults = candidate / "sourcing_model" / "routing" / "defaults.py"
+    source = defaults.read_text(encoding="utf-8")
+    changed = source.replace(
+        '            capabilities=("fixture.intent",),\n'
+        "        ),\n",
+        '            capabilities=("fixture.intent",),\n'
+        "            intent_categories=GOOGLE_NEWS_RUNTIME_CATEGORIES,\n"
+        "        ),\n",
+        1,
+    )
+    assert changed != source
+    defaults.write_text(changed, encoding="utf-8")
+
+    assert any(
+        "field intent_categories is not resolved inert data" in error
+        for error in verify_sourcing_pipeline_structure(candidate)
+    )
+
+
+def test_direct_source_add_tool_definition_is_not_registry_derived(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        '            capabilities=("fixture.intent",),\n'
+        "        ),\n",
+        '            capabilities=("fixture.intent",),\n'
+        '            origin="source_add",\n'
+        f'            manifest_sha256={"a" * 64!r},\n'
+        "        ),\n",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert any(
+        "direct SOURCE_ADD tool is not registry-derived" in error
+        for error in verify_sourcing_pipeline_structure(candidate)
+    )
+
+
+def test_static_source_add_mirror_accepts_v7_legacy_defaults() -> None:
+    from gateway.research_lab.provider_capabilities import (
+        _normalize_source_add_v7_registration,
+    )
+
+    manifest = "a" * 64
+    normalized = _normalize_source_add_registration_static(
+        {
+            "provider_id": "legacy_provider",
+            "stage": "candidate_acquisition",
+            "revision": f"source-add-{manifest[:12]}",
+            "manifest_sha256": manifest,
+            "priority": 80,
+            "capabilities": ("candidate.provider_discovery",),
+            "idempotency": "idempotent",
+            "cost_class": "metered",
+            "unit_cost": 0.01,
+            "max_calls": 1,
+            "max_results": 100,
+            "timeout_seconds": 60.0,
+            "evidence_types": ("provider_database",),
+        },
+        contract_version=7,
+    )
+
+    assert normalized["best_for"] == ("icp.structured_eligible",)
+    assert normalized["intent_categories"] == ()
+    assert normalized == _normalize_source_add_v7_registration(normalized)
+
+
+def test_v7_source_add_rejects_a_hybrid_field_set(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(
+        candidate,
+        contract_snapshot=CONTRACT_V7_PATH,
+        parity_snapshot=PARITY_FIXTURE_V7_PATH,
+        runtime_version=6,
+    )
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    manifest = "a" * 64
+    changed = source.replace(
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+        "    SourceAddRoutingRegistration(\n"
+        "        provider_id='legacy_provider',\n"
+        "        stage=STAGE_CANDIDATE_ACQUISITION,\n"
+        f"        revision='source-add-{manifest[:12]}',\n"
+        f"        manifest_sha256='{manifest}',\n"
+        "        priority=80,\n"
+        "        capabilities=('candidate.provider_discovery',),\n"
+        "        idempotency='idempotent',\n"
+        "        cost_class='metered',\n"
+        "        unit_cost=0.01,\n"
+        "        max_calls=1,\n"
+        "        max_results=100,\n"
+        "        timeout_seconds=60.0,\n"
+        "        evidence_types=('provider_database',),\n"
+        "        avoid_when=(),\n"
+        "    ),\n"
+        ")",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert any(
+        "SOURCE_ADD v7 registration fields differ from the contract" in error
+        for error in verify_sourcing_pipeline_structure(candidate)
+    )
+
+
+def test_static_source_add_mirror_accepts_v8_requirement_text() -> None:
+    from gateway.research_lab.provider_capabilities import (
+        _normalize_source_add_v8_registration,
+    )
+
+    raw = {
+            "provider_id": "evidence_provider",
+            "stage": "intent_evidence",
+            "priority": 35,
+            "capabilities": ("intent.provider_evidence",),
+            "evidence_types": ("external",),
+            "intent_categories": ("HIRING",),
+            "category_contracts": (
+                {
+                    "category": "HIRING",
+                    "capabilities": ("intent.provider_evidence",),
+                    "evidence_types": ("external",),
+                    "requirements": ("must cite an official source",),
+                },
+            ),
+            "binding_requirements": ("must cite an official source",),
+    }
+    normalized = _normalize_source_add_registration_static(
+        raw,
+        contract_version=8,
+    )
+
+    assert normalized["binding_requirements"] == (
+        "must cite an official source",
+    )
+    assert normalized == _normalize_source_add_v8_registration(raw)
+
+
+def test_typed_catalog_rejects_keyword_unpacking(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    contract = candidate / "sourcing_model" / "scrapingdog_signal_contract.py"
+    source = contract.read_text(encoding="utf-8")
+    changed = source.replace(
+        "TOOL_CATALOG = ()",
+        "TOOL_CATALOG = (\n"
+        "    _tool(\n"
+        '        "intent.fixture_catalog", "intent_evidence",\n'
+        '        "company_search", "discovery", ("hiring",),\n'
+        '        ("news",), ("external",), 5,\n'
+        '        **(globals().__setitem__("PWNED", True) or {}),\n'
+        "    ),\n"
+        ")",
+        1,
+    )
+    assert changed != source
+    contract.write_text(changed, encoding="utf-8")
+
+    errors = verify_sourcing_pipeline_structure(candidate)
+
+    assert any(
+        "routing constructor shape drift" in error
+        and "keyword unpacking is not allowed" in error
+        for error in errors
+    )
+
+
+def test_source_add_registry_must_be_a_literal_tuple(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = mutate_pipeline()",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert (
+        "SOURCE_ADD routing registry shape drift "
+        "sourcing_model/routing/runtime.py"
+        in verify_sourcing_pipeline_structure(candidate)
+    )
+
+
+def test_contact_stage_accepts_paired_declarative_tool_addition(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _v26_pipeline_tree(parent)
+    _v26_pipeline_tree(candidate)
+
+    def add_contact_pair(
+        root: Path,
+        *,
+        constant_name: str,
+        tool_id: str,
+        priority: int,
+    ) -> None:
+        runtime = root / "sourcing_model" / "routing" / "runtime.py"
+        source = runtime.read_text(encoding="utf-8")
+        changed = source.replace(
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n"
+            f'{constant_name} = "{tool_id}"',
+            1,
+        ).replace(
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_INTENT,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+            '            capabilities=("fixture.intent",),\n'
+            "        ),",
+            "        ToolDefinition(\n"
+            "            tool_id=TOOL_RUNTIME_INTENT,\n"
+            '            revision="v1",\n'
+            "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+            '            capabilities=("fixture.intent",),\n'
+            "        ),\n"
+            "        ToolDefinition(\n"
+            f"            tool_id={constant_name},\n"
+            '            revision="v1",\n'
+            '            stages=("contact_acquisition",),\n'
+            '            capabilities=("fixture.contact",),\n'
+            "        ),",
+            1,
+        ).replace(
+            "        *tuple(",
+            "        PolicyStep(\n"
+            f"            {constant_name},\n"
+            '            "contact_acquisition",\n'
+            f"            priority={priority},\n"
+            "        ),\n"
+            "        *tuple(",
+            1,
+        )
+        assert changed != source
+        runtime.write_text(changed, encoding="utf-8")
+
+    for root in (parent, candidate):
+        add_contact_pair(
+            root,
+            constant_name="TOOL_RUNTIME_CONTACT_ANCHOR",
+            tool_id="contact.fixture_anchor",
+            priority=10,
+        )
+    add_contact_pair(
+        candidate,
+        constant_name="TOOL_RUNTIME_CONTACT_NEW",
+        tool_id="contact.fixture_new",
+        priority=20,
+    )
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_existing_tool_cannot_move_between_stages(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        "tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+        "            stages=(STAGE_CANDIDATE_ACQUISITION,)",
+        "tool_id=TOOL_RUNTIME_CANDIDATE,\n"
+        "            stages=(STAGE_INTENT_EVIDENCE,)",
+        1,
+    ).replace(
+        "TOOL_RUNTIME_CANDIDATE,\n"
+        "            STAGE_CANDIDATE_ACQUISITION,\n"
+        "            priority=10",
+        "TOOL_RUNTIME_CANDIDATE,\n"
+        "            STAGE_INTENT_EVIDENCE,\n"
+        "            priority=10",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    errors = verify_sourcing_pipeline_structure(candidate)
+
+    assert any(
+        error.startswith("tool policy stage differs from definition")
+        or error.startswith("global tool stage ownership is not singular")
+        for error in errors
+    )
+
+
+def test_paired_same_stage_direct_tool_addition_is_allowed(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"',
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"\n'
+        'TOOL_RUNTIME_NEW = "intent.fixture_new"',
+        1,
+    ).replace(
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        '            capabilities=("fixture.intent",),\n'
+        "        ),\n"
+        "    )",
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        '            capabilities=("fixture.intent",),\n'
+        "        ),\n"
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_NEW,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        '            capabilities=("fixture.intent",),\n'
+        "        ),\n"
+        "    )",
+        1,
+    ).replace(
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_INTENT,\n"
+        "            STAGE_INTENT_EVIDENCE,\n"
+        "            priority=20,\n"
+        "        ),\n"
+        "        *tuple(",
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_INTENT,\n"
+        "            STAGE_INTENT_EVIDENCE,\n"
+        "            priority=20,\n"
+        "        ),\n"
+        "        PolicyStep(\n"
+        "            TOOL_RUNTIME_NEW,\n"
+        "            STAGE_INTENT_EVIDENCE,\n"
+        "            priority=30,\n"
+        "        ),\n"
+        "        *tuple(",
+        1,
+    )
+    assert changed != source
+    assert "TOOL_RUNTIME_NEW" in changed
+    runtime.write_text(changed, encoding="utf-8")
+
+    assert sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    ) == []
+
+
+def test_unpaired_direct_tool_addition_is_rejected(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    candidate = tmp_path / "candidate"
+    _conforming_tree(parent)
+    _conforming_tree(candidate)
+    runtime = candidate / "sourcing_model" / "routing" / "runtime.py"
+    source = runtime.read_text(encoding="utf-8")
+    changed = source.replace(
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"',
+        'TOOL_RUNTIME_INTENT = "intent.fixture_runtime"\n'
+        'TOOL_RUNTIME_ORPHAN = "intent.fixture_orphan"',
+        1,
+    ).replace(
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        '            capabilities=("fixture.intent",),\n'
+        "        ),\n"
+        "    )",
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_INTENT,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        '            capabilities=("fixture.intent",),\n'
+        "        ),\n"
+        "        ToolDefinition(\n"
+        "            tool_id=TOOL_RUNTIME_ORPHAN,\n"
+        '            revision="v1",\n'
+        "            stages=(STAGE_INTENT_EVIDENCE,),\n"
+        '            capabilities=("fixture.intent",),\n'
+        "        ),\n"
+        "    )",
+        1,
+    )
+    assert changed != source
+    runtime.write_text(changed, encoding="utf-8")
+
+    errors = sourcing_pipeline_preservation_errors(
+        sourcing_pipeline_structure_document(parent),
+        sourcing_pipeline_structure_document(candidate),
+    )
+
+    assert any(
+        error.startswith("new routing tool has no same-stage policy:")
+        for error in errors
+    )
+
+
 def test_non_utf8_coding_header_is_violation_not_crash(tmp_path: Path) -> None:
     """A legal PEP 263 latin-1 module must parse like the interpreter parses
     it; a truly undecodable file must surface as a violation — never as an
@@ -1035,6 +2641,137 @@ def test_build_gate_disabled_and_enforce_fails_closed(tmp_path: Path, monkeypatc
     monkeypatch.setattr(check_mod, "verify_source_tree_contract", _boom)
     with pytest.raises(cb.CodeEditPrivateTestError, match="failed internally"):
         cb._sourcing_contract_gate(tmp_path)
+
+
+def test_pipeline_structure_gate_is_not_disabled_by_contract_rollout_flag(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import gateway.research_lab.code_build as cb
+
+    monkeypatch.setenv("RESEARCH_LAB_SOURCING_CONTRACT_CHECK", "disabled")
+    _conforming_tree(tmp_path)
+    runtime = tmp_path / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        cb.CodeEditPrivateTestError,
+        match="sourcing pipeline structure violation",
+    ):
+        cb._sourcing_pipeline_structure_gate(tmp_path)
+
+
+def test_pipeline_structure_gate_rejects_same_stage_wrapper_body_change(
+    tmp_path: Path,
+) -> None:
+    import gateway.research_lab.code_build as cb
+
+    _conforming_tree(tmp_path)
+    parent_structure = cb._sourcing_pipeline_structure_gate(tmp_path)
+    runtime = tmp_path / "sourcing_model" / "routing" / "runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+            "RouteContext("
+            "stage=STAGE_CANDIDATE_ACQUISITION, changed=True)",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        cb.CodeEditPrivateTestError,
+        match="immutable pipeline router changed",
+    ):
+        cb._sourcing_pipeline_structure_gate(
+            tmp_path,
+            expected=parent_structure,
+        )
+
+
+def test_local_candidate_builder_rejects_allowed_path_topology_mutation(
+    tmp_path: Path,
+) -> None:
+    import difflib
+    from types import SimpleNamespace
+
+    import gateway.research_lab.code_build as cb
+    from research_lab.code_editing import CodeEditDraft
+    from research_lab.eval.private_runtime import compute_private_source_tree_hash
+
+    parent = tmp_path / "parent"
+    _conforming_tree(parent)
+    for required_directory in ("gateway", "qualification", "validator_models"):
+        path = parent / required_directory / "runtime.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+    relative_path = "sourcing_model/routing/runtime.py"
+    runtime = parent / relative_path
+    before = runtime.read_text(encoding="utf-8")
+    after = before.replace(
+        "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+        "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+        1,
+    )
+    assert after != before
+    unified_diff = "diff --git a/{0} b/{0}\n".format(relative_path) + "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{relative_path}",
+            tofile=f"b/{relative_path}",
+        )
+    )
+    draft = CodeEditDraft(
+        failure_mode="wrong stage",
+        mechanism="change wrapper stage",
+        expected_improvement="none",
+        risk="pipeline mutation",
+        lane="source_routing",
+        target_files=(relative_path,),
+        unified_diff=unified_diff,
+        redacted_summary="attempt topology mutation",
+        test_plan="pipeline structure gate",
+        rollback_plan="revert",
+    )
+    context = cb.ParentImageSourceContext(
+        source_root=parent,
+        source_mode="test",
+        parent_image_digest_hash="sha256:" + "1" * 64,
+        source_tree_hash=compute_private_source_tree_hash(parent),
+        top_level_paths=("research_lab_adapter.py", "sourcing_model"),
+        editable_files=(relative_path,),
+        file_previews=(),
+    )
+    builder = object.__new__(cb.CodeEditCandidateBuilder)
+    builder.config = SimpleNamespace(
+        code_edit_allowed_path_prefixes=lambda: ("sourcing_model/",),
+        code_edit_allowed_exact_paths=lambda: ("research_lab_adapter.py",),
+        code_edit_allowed_suffixes=lambda: (".py", ".json"),
+        code_edit_build_timeout_seconds=120,
+    )
+
+    with pytest.raises(
+        cb.CodeEditPatchApplyError,
+        match="router stage binding drift",
+    ):
+        builder.check_patch_applies(
+            draft=draft,
+            parent_artifact=SimpleNamespace(
+                image_digest=(
+                    "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:"
+                    + "2" * 64
+                )
+            ),
+            source_context=context,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -52,6 +53,7 @@ from leadpoet_verifier.economics import build_champion_reward_obligation
 from research_lab.eval import (
     DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
     PrivateModelArtifactManifest,
+    compute_private_source_tree_hash,
     load_private_artifact_manifest,
     sign_digest_with_kms,
     validate_private_model_artifact_manifest,
@@ -63,6 +65,7 @@ from research_lab.eval.promotion_metric import (
     promotion_gate_decision,
     promotion_improvement_metric,
 )
+from research_lab.code_editing import sourcing_pipeline_guard_errors
 
 
 logger = logging.getLogger(__name__)
@@ -2087,7 +2090,10 @@ class ResearchLabPromotionController:
             improvement_points=improvement_points,
             threshold=threshold,
         )
-        if private_repo_result.get("status") == "failed":
+        if private_repo_result.get("status") in {
+            "failed",
+            "stale_active_model_source_push_blocked",
+        }:
             return private_repo_result
         activation_artifact = new_artifact
         activation_manifest_uri = new_artifact.manifest_uri
@@ -2594,6 +2600,31 @@ class ResearchLabPromotionController:
             return {"status": "skipped_auto_commit_disabled"}
         if not self.config.private_repo_url:
             return {"status": "skipped_private_source_repo_not_configured"}
+
+        active_artifact_hash = str(active_parent or "")
+        candidate_parent_hash = str(candidate_parent or "")
+        candidate_artifact_hash = str(new_artifact.model_artifact_hash or "")
+        if (
+            not active_artifact_hash
+            or not candidate_parent_hash
+            or not candidate_artifact_hash
+            or active_artifact_hash
+            not in {candidate_parent_hash, candidate_artifact_hash}
+        ):
+            logger.warning(
+                "research_lab_private_source_push_stale_active_model_blocked "
+                "candidate=%s active=%s candidate_parent=%s candidate_artifact=%s",
+                _short_ref(candidate.get("candidate_id")),
+                _short_ref(active_artifact_hash),
+                _short_ref(candidate_parent_hash),
+                _short_ref(candidate_artifact_hash),
+            )
+            return {
+                "status": "stale_active_model_source_push_blocked",
+                "active_model_artifact_hash": active_artifact_hash,
+                "candidate_parent_artifact_hash": candidate_parent_hash,
+                "candidate_model_artifact_hash": candidate_artifact_hash,
+            }
 
         candidate_id = str(candidate["candidate_id"])
         score_bundle_id = str(score_bundle_row["score_bundle_id"])
@@ -3173,13 +3204,27 @@ class ResearchLabPromotionController:
                 return {"status": "skipped_candidate_manifest_invalid", "errors": errors[:5]}
         except Exception as exc:
             return {"status": "skipped_candidate_manifest_invalid", "error": type(exc).__name__}
+        if (
+            str(active.artifact.model_artifact_hash or "")
+            != str(new_artifact.model_artifact_hash or "")
+        ):
+            return {
+                "status": "stale_active_model_source_push_blocked",
+                "active_model_artifact_hash": str(
+                    active.artifact.model_artifact_hash or ""
+                ),
+                "candidate_parent_artifact_hash": str(candidate_parent or ""),
+                "candidate_model_artifact_hash": str(
+                    new_artifact.model_artifact_hash or ""
+                ),
+            }
         return await self._maybe_push_private_repo_candidate(
             candidate=candidate,
             score_bundle_row=score_bundle_row,
             score_bundle=score_bundle,
             active=active,
             new_artifact=new_artifact,
-            active_parent=candidate_parent,
+            active_parent=active.artifact.model_artifact_hash,
             candidate_parent=candidate_parent,
             rolling_window_hash=rolling_window_hash,
             improvement_points=improvement_points,
@@ -4605,8 +4650,44 @@ def _push_candidate_source_diff_to_repo(
     target_files = list(source_diff_doc["target_files"])
     if _safe_target_files(target_files) != target_files:
         raise RuntimeError("candidate source diff artifact has unsafe target files")
+    pipeline_errors = sourcing_pipeline_guard_errors(target_files)
+    if pipeline_errors:
+        raise RuntimeError("; ".join(pipeline_errors))
     source_diff_hash = str(source_diff_doc["source_diff_hash"])
     candidate_manifest_sha = str(candidate_model_manifest_doc.get("git_commit_sha") or "")
+    pipeline_structure_commitment = candidate_build_doc.get(
+        "pipeline_structure"
+    )
+    if pipeline_structure_commitment is not None and not isinstance(
+        pipeline_structure_commitment, Mapping
+    ):
+        raise RuntimeError("candidate pipeline structure commitment is invalid")
+    candidate_source_tree_commitment = str(
+        candidate_build_doc.get("candidate_source_tree_hash")
+        or candidate_model_manifest_doc.get("model_artifact_hash")
+        or ""
+    )
+    manifest_source_tree_hash = str(
+        candidate_model_manifest_doc.get("model_artifact_hash") or ""
+    )
+    if (
+        not re.fullmatch(r"sha256:[0-9a-f]{64}", candidate_source_tree_commitment)
+        or candidate_source_tree_commitment != manifest_source_tree_hash
+    ):
+        raise RuntimeError("candidate source tree commitment is invalid")
+    parent_source_tree_commitment = str(expected_parent_artifact_hash or "")
+    if not re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        parent_source_tree_commitment,
+    ):
+        raise RuntimeError("candidate parent source tree commitment is invalid")
+    active_sha = str(active_git_commit_sha or "").strip()
+    if pipeline_structure_commitment is None and not re.fullmatch(
+        r"[0-9a-f]{40}", active_sha
+    ):
+        raise RuntimeError(
+            "legacy candidate build requires a full exact active Git commit lineage"
+        )
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="research-lab-private-source-push-"))
     try:
@@ -4618,8 +4699,18 @@ def _push_candidate_source_diff_to_repo(
             redact=True,
         )
         head = _run_command(["git", "rev-parse", "HEAD"], cwd=worktree, timeout_seconds=10).strip()
-        active_sha = str(active_git_commit_sha or "").strip()
-        if active_sha and head[: len(active_sha)] != active_sha:
+        current_pipeline_structure = _verify_promoted_source_tree_contract(
+            worktree
+        )
+        current_source_tree_hash = compute_private_source_tree_hash(worktree)
+        head_mismatch = bool(
+            active_sha and head[: len(active_sha)] != active_sha
+        )
+        exact_candidate_tree_replay = bool(
+            head_mismatch
+            and current_source_tree_hash == candidate_source_tree_commitment
+        )
+        if head_mismatch and not exact_candidate_tree_replay:
             # Bug #29 wedge: the active manifest's sha comes from a throwaway
             # `git init`, so after the first push the branch head never matches
             # again and every subsequent auto-commit hard-fails here. The
@@ -4628,6 +4719,12 @@ def _push_candidate_source_diff_to_repo(
             # flag re-resolves against the current head and must only be
             # enabled once the baseline health gate is live.
             if _env_flag(AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV):
+                if pipeline_structure_commitment is None:
+                    raise RuntimeError(
+                        "repo_head_mismatch: legacy candidate build has no pipeline "
+                        "structure commitment; refusing to apply its diff against "
+                        "the current branch head"
+                    )
                 logger.warning(
                     "research_lab_auto_commit_head_mismatch_recovered: head=%s active_manifest_sha=%s "
                     "(%s enabled; applying candidate diff against current branch head)",
@@ -4637,6 +4734,14 @@ def _push_candidate_source_diff_to_repo(
                 )
             else:
                 raise RepoHeadMismatchError(head=head, expected_sha=active_sha)
+        elif exact_candidate_tree_replay:
+            logger.info(
+                "research_lab_private_source_exact_candidate_replay "
+                "head=%s active_manifest_sha=%s candidate_source_tree=%s",
+                head[:12],
+                active_sha[:12],
+                candidate_source_tree_commitment[:19],
+            )
 
         patch_path = tmp_dir / "candidate.patch"
         patch_text = unified_diff
@@ -4654,13 +4759,52 @@ def _push_candidate_source_diff_to_repo(
                     cwd=worktree,
                     timeout_seconds=30,
                 )
-        if check.returncode != 0:
+        if exact_candidate_tree_replay or check.returncode != 0:
             reverse = _run_command_result(
                 ["git", "apply", "--reverse", "--check", str(patch_path)],
                 cwd=worktree,
                 timeout_seconds=30,
             )
             if reverse.returncode == 0:
+                if current_source_tree_hash != candidate_source_tree_commitment:
+                    raise RuntimeError(
+                        "already-applied source tree differs from scored candidate"
+                    )
+                _run_command(
+                    ["git", "apply", "--reverse", str(patch_path)],
+                    cwd=worktree,
+                    timeout_seconds=30,
+                )
+                reversed_pipeline_structure = (
+                    _verify_promoted_source_tree_contract(worktree)
+                )
+                reversed_source_tree_hash = compute_private_source_tree_hash(worktree)
+                if reversed_source_tree_hash != parent_source_tree_commitment:
+                    raise RuntimeError(
+                        "already-applied source parent differs from candidate lineage"
+                    )
+                try:
+                    from research_lab.sourcing_model_contract_check import (
+                        sourcing_pipeline_preservation_errors,
+                    )
+
+                    preservation_errors = sourcing_pipeline_preservation_errors(
+                        reversed_pipeline_structure,
+                        current_pipeline_structure,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- promotion fails closed
+                    raise RuntimeError(
+                        "promoted sourcing pipeline comparison failed internally"
+                    ) from exc
+                if preservation_errors:
+                    raise RuntimeError("; ".join(preservation_errors[:8]))
+                commitment_errors = _pipeline_structure_commitment_errors(
+                    pipeline_structure_commitment,
+                    parent=reversed_pipeline_structure,
+                    candidate=current_pipeline_structure,
+                )
+                if commitment_errors:
+                    raise RuntimeError("; ".join(commitment_errors))
                 return {
                     "status": "already_applied",
                     "git_commit_sha": head,
@@ -4671,6 +4815,10 @@ def _push_candidate_source_diff_to_repo(
                 }
             raise RuntimeError("candidate source diff does not apply to private source branch")
 
+        if current_source_tree_hash != parent_source_tree_commitment:
+            raise RuntimeError(
+                "private source branch differs from candidate parent source tree"
+            )
         _run_command(["git", "apply", str(patch_path)], cwd=worktree, timeout_seconds=30)
         changed_files = {
             line.strip()
@@ -4685,6 +4833,22 @@ def _push_candidate_source_diff_to_repo(
             raise RuntimeError(
                 "candidate source diff changed files differ from committed targets"
             )
+        candidate_pipeline_structure = _verify_promoted_source_tree_contract(
+            worktree,
+            expected=current_pipeline_structure,
+        )
+        candidate_source_tree_hash = compute_private_source_tree_hash(worktree)
+        if candidate_source_tree_hash != candidate_source_tree_commitment:
+            raise RuntimeError(
+                "applied source tree differs from scored candidate source tree"
+            )
+        commitment_errors = _pipeline_structure_commitment_errors(
+            pipeline_structure_commitment,
+            parent=current_pipeline_structure,
+            candidate=candidate_pipeline_structure,
+        )
+        if commitment_errors:
+            raise RuntimeError("; ".join(commitment_errors))
         status = _run_command(["git", "status", "--porcelain"], cwd=worktree, timeout_seconds=10)
         if not status.strip():
             return {
@@ -4719,6 +4883,21 @@ def _push_candidate_source_diff_to_repo(
             raise RuntimeError(
                 "candidate source diff staging differs from committed targets"
             )
+        staged_pipeline_structure, staged_source_tree_hash = (
+            _verify_promoted_git_tree_contract(
+                worktree,
+                treeish=_run_command(
+                    ["git", "write-tree"],
+                    cwd=worktree,
+                    timeout_seconds=10,
+                ).strip(),
+                expected=current_pipeline_structure,
+            )
+        )
+        if staged_source_tree_hash != candidate_source_tree_hash:
+            raise RuntimeError("candidate source tree changed while staging")
+        if staged_pipeline_structure != candidate_pipeline_structure:
+            raise RuntimeError("candidate pipeline structure changed while staging")
         short_candidate = _short_ref(candidate_id).replace(":", "-")
         commit_message = (
             f"Promote Research Lab candidate {short_candidate}\n\n"
@@ -4728,7 +4907,27 @@ def _push_candidate_source_diff_to_repo(
         )
         _run_command(["git", "commit", "-m", commit_message], cwd=worktree, timeout_seconds=30)
         new_head = _run_command(["git", "rev-parse", "HEAD"], cwd=worktree, timeout_seconds=10).strip()
-        _run_command(["git", "push", "origin", f"HEAD:{branch_name}"], cwd=worktree, timeout_seconds=120, redact=True)
+        final_pipeline_structure, final_source_tree_hash = (
+            _verify_promoted_git_tree_contract(
+                worktree,
+                treeish=_run_command(
+                    ["git", "rev-parse", "HEAD^{tree}"],
+                    cwd=worktree,
+                    timeout_seconds=10,
+                ).strip(),
+                expected=current_pipeline_structure,
+            )
+        )
+        if final_source_tree_hash != staged_source_tree_hash:
+            raise RuntimeError("candidate source tree changed while committing")
+        if final_pipeline_structure != staged_pipeline_structure:
+            raise RuntimeError("candidate pipeline structure changed while committing")
+        _run_command(
+            ["git", "push", "origin", f"{new_head}:refs/heads/{branch_name}"],
+            cwd=worktree,
+            timeout_seconds=120,
+            redact=True,
+        )
         return {
             "status": "pushed",
             "git_commit_sha": new_head,
@@ -4739,6 +4938,135 @@ def _push_candidate_source_diff_to_repo(
         }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _verify_promoted_source_tree_contract(
+    source_root: Path,
+    *,
+    expected: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Recheck the applied private source tree before any commit or push."""
+
+    try:
+        from research_lab.sourcing_model_contract_check import (
+            sourcing_pipeline_preservation_errors,
+            sourcing_pipeline_structure_document,
+            verify_source_tree_contract,
+        )
+
+        violations = verify_source_tree_contract(source_root)
+        structure = sourcing_pipeline_structure_document(source_root)
+        if expected is not None:
+            violations.extend(
+                sourcing_pipeline_preservation_errors(expected, structure)
+            )
+    except ValueError as exc:
+        raise RuntimeError(
+            "promoted sourcing contract violation: " + str(exc)[:800]
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 -- promotion must fail closed
+        raise RuntimeError(
+            "promoted sourcing contract verification failed internally"
+        ) from exc
+    if violations:
+        raise RuntimeError(
+            "promoted sourcing contract violation: " + "; ".join(violations[:8])
+        )
+    return structure
+
+
+def _verify_promoted_git_tree_contract(
+    repository_root: Path,
+    *,
+    treeish: str,
+    expected: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Verify an immutable Git tree, not a mutable promotion worktree.
+
+    ``git add`` filters can change the index after the worktree check and
+    commit hooks can change the final commit after the index check.  Archive
+    the exact Git tree for each boundary, then check its source contract and
+    pipeline document before the exact verified commit is pushed.
+    """
+
+    if not re.fullmatch(r"[0-9a-f]{40,64}", str(treeish or "")):
+        raise RuntimeError("promoted Git tree identity is invalid")
+    with tempfile.TemporaryDirectory(prefix="research-lab-private-source-tree-") as tmp:
+        snapshot_root = Path(tmp) / "source"
+        archive_path = Path(tmp) / "source.tar"
+        _run_command(
+            [
+                "git",
+                "archive",
+                "--format=tar",
+                f"--output={archive_path}",
+                str(treeish),
+            ],
+            cwd=repository_root,
+            timeout_seconds=30,
+        )
+        _extract_promoted_git_tree_archive(archive_path, snapshot_root)
+        return (
+            _verify_promoted_source_tree_contract(snapshot_root, expected=expected),
+            compute_private_source_tree_hash(snapshot_root),
+        )
+
+
+def _extract_promoted_git_tree_archive(archive_path: Path, destination: Path) -> None:
+    """Extract only ordinary, relative paths from a locally generated archive."""
+
+    destination.mkdir(parents=True, exist_ok=True)
+    resolved_destination = destination.resolve()
+    try:
+        with tarfile.open(archive_path, mode="r") as archive:
+            members = archive.getmembers()
+            for member in members:
+                member_path = Path(member.name)
+                if (
+                    not (member.isfile() or member.isdir())
+                    or member_path.is_absolute()
+                    or ".." in member_path.parts
+                ):
+                    raise RuntimeError("promoted Git tree archive contains an unsafe path")
+                try:
+                    (destination / member_path).resolve().relative_to(
+                        resolved_destination
+                    )
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "promoted Git tree archive escapes its verification root"
+                    ) from exc
+            archive.extractall(destination, members=members)
+    except (OSError, tarfile.TarError) as exc:
+        raise RuntimeError("promoted Git tree archive could not be verified") from exc
+
+
+def _pipeline_structure_commitment_errors(
+    commitment: Any,
+    *,
+    parent: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> list[str]:
+    """Bind promotion measurements to new build documents when available."""
+
+    if commitment is None:
+        return []
+    if not isinstance(commitment, Mapping) or set(commitment) != {
+        "schema_version",
+        "contract_id",
+        "parent_hash",
+        "candidate_hash",
+    }:
+        return ["candidate pipeline structure commitment is invalid"]
+    expected = {
+        "schema_version": parent.get("schema_version"),
+        "contract_id": parent.get("contract_id"),
+        "parent_hash": parent.get("document_hash"),
+        "candidate_hash": candidate.get("document_hash"),
+    }
+    if dict(commitment) != expected:
+        return ["candidate pipeline structure commitment differs"]
+    return []
 
 
 def _normalize_unified_diff_hunk_headers(unified_diff: str) -> str:

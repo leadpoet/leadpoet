@@ -21,14 +21,16 @@ import threading
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from gateway.research_lab.code_build import (
+    CodeEditBuildError,
     CodeEditBuildResult,
     CodeEditPatchApplyError,
     CodeEditCandidateBuilder,
     ParentImageSourceContext,
     _copy_source_tree,
-    _editable_runtime_files,
     _initialize_temporary_git_repo,
     _run_git_apply,
+    _sourcing_loop_visible_files,
+    _sourcing_pipeline_structure_gate,
     _source_file_previews,
     _top_level_paths,
     _prepare_parent_image_workspace,
@@ -1260,42 +1262,42 @@ class _HostCandidateBuilder:
 
         artifact = candidate.build.candidate_model_manifest
         artifact_hash = artifact.model_artifact_hash
+        draft_hash = sha256_json(
+            {"unified_diff": candidate.draft.unified_diff}
+        )
+        if (
+            candidate.tree_depth <= 0
+            or candidate.tree_root_artifact_hash
+            != self._root_artifact_hash
+            or candidate.tree_cumulative_source_diff_hash != draft_hash
+            or candidate.build.source_diff_hash != draft_hash
+            or not re.fullmatch(r"[0-9a-f]{64}", candidate.tree_git_commit)
+            or str(
+                candidate.build.code_edit_manifest.get("parent_artifact_hash")
+                or ""
+            )
+            != self._root_artifact_hash
+        ):
+            raise AutoresearchExecutorV2Error(
+                "rehydrated Git-tree candidate commitment differs"
+            )
+        if git_diff_structural_metadata(candidate.draft.unified_diff):
+            raise AutoresearchExecutorV2Error(
+                "rehydrated Git-tree candidate is not a content-only Git patch"
+            )
+        source_errors = self._local.validate_draft_against_source_context(
+            candidate.draft,
+            self._source_context,
+        )
+        if source_errors:
+            raise AutoresearchExecutorV2Error(
+                "rehydrated Git-tree candidate source binding differs: "
+                + "; ".join(source_errors)
+            )
         with self._source_context_lock:
             existing = self._source_contexts.get(artifact_hash)
             if existing is not None:
                 return existing
-
-            draft_hash = sha256_json(
-                {"unified_diff": candidate.draft.unified_diff}
-            )
-            if (
-                candidate.tree_depth <= 0
-                or candidate.tree_root_artifact_hash
-                != self._root_artifact_hash
-                or candidate.tree_cumulative_source_diff_hash != draft_hash
-                or candidate.build.source_diff_hash != draft_hash
-                or not re.fullmatch(r"[0-9a-f]{64}", candidate.tree_git_commit)
-                or str(
-                    candidate.build.code_edit_manifest.get("parent_artifact_hash")
-                    or ""
-                )
-                != self._root_artifact_hash
-            ):
-                raise AutoresearchExecutorV2Error(
-                    "rehydrated Git-tree candidate commitment differs"
-                )
-            if git_diff_structural_metadata(candidate.draft.unified_diff):
-                raise AutoresearchExecutorV2Error(
-                    "rehydrated Git-tree candidate is not a content-only Git patch"
-                )
-            source_errors = self._local.validate_draft_against_source_context(
-                candidate.draft,
-                self._source_context,
-            )
-            if source_errors:
-                raise AutoresearchExecutorV2Error(
-                    "rehydrated Git-tree candidate source binding differs"
-                )
 
             destination = (
                 self._derived_source_root / artifact_hash.split(":", 1)[-1]
@@ -1371,11 +1373,24 @@ class _HostCandidateBuilder:
             )
             diff_path = Path(tmp) / "candidate.diff"
             diff_path.write_text(draft.unified_diff, encoding="utf-8")
+            try:
+                parent_pipeline_structure = _sourcing_pipeline_structure_gate(
+                    measured_repo
+                )
+            except CodeEditBuildError as exc:
+                raise AutoresearchExecutorV2Error(str(exc)) from exc
             _run(
                 ["git", "apply", "--recount", str(diff_path)],
                 cwd=measured_repo,
                 timeout_seconds=120,
             )
+            try:
+                _sourcing_pipeline_structure_gate(
+                    measured_repo,
+                    expected=parent_pipeline_structure,
+                )
+            except CodeEditBuildError as exc:
+                raise AutoresearchExecutorV2Error(str(exc)) from exc
             expected_candidate_artifact_hash = compute_private_source_tree_hash(
                 measured_repo
             )
@@ -1458,7 +1473,7 @@ def _source_context(
     source_mode: str = "attested_source_bundle",
 ) -> ParentImageSourceContext:
     source_tree_hash = compute_private_source_tree_hash(source_root)
-    editable_files = _editable_runtime_files(
+    editable_files = _sourcing_loop_visible_files(
         source_root,
         allowed_prefixes=config.code_edit_allowed_path_prefixes(),
         allowed_exact_paths=config.code_edit_allowed_exact_paths(),

@@ -1682,17 +1682,17 @@ async def test_depth_two_build_uses_cumulative_targets_and_incremental_child_pat
     tmp_path,
 ):
     source_context = _source_context(tmp_path)
-    gateway_path = (
-        source_context.source_root / "gateway" / "research_lab" / "runtime.py"
+    routing_path = (
+        source_context.source_root / "sourcing_model" / "routing" / "defaults.py"
     )
-    gateway_path.parent.mkdir(parents=True)
-    gateway_path.write_text("VALUE = 1\n", encoding="utf-8")
+    routing_path.parent.mkdir(parents=True)
+    routing_path.write_text("VALUE = 1\n", encoding="utf-8")
     editable_files = tuple(
-        sorted((*source_context.editable_files, "gateway/research_lab/runtime.py"))
+        sorted((*source_context.editable_files, "sourcing_model/routing/defaults.py"))
     )
     source_context = replace(
         source_context,
-        top_level_paths=("gateway/", "sourcing_model/"),
+        top_level_paths=("sourcing_model/",),
         editable_files=editable_files,
         planner_source_index=build_source_symbol_index(
             source_root=source_context.source_root,
@@ -1708,7 +1708,7 @@ async def test_depth_two_build_uses_cumulative_targets_and_incremental_child_pat
         required_mechanism="increase one bounded runtime value",
         must_inspect=[
             "sourcing_model/discovery.py",
-            "gateway/research_lab/runtime.py",
+            "sourcing_model/routing/defaults.py",
         ],
         ranked_paths=[
             {
@@ -1717,7 +1717,7 @@ async def test_depth_two_build_uses_cumulative_targets_and_incremental_child_pat
                 "mechanism": "increase one bounded runtime value",
                 "must_inspect": [
                     "sourcing_model/discovery.py",
-                    "gateway/research_lab/runtime.py",
+                    "sourcing_model/routing/defaults.py",
                 ],
             }
         ],
@@ -1744,7 +1744,7 @@ async def test_depth_two_build_uses_cumulative_targets_and_incremental_child_pat
                             },
                             {
                                 "operation": "read_file",
-                                "path": "gateway/research_lab/runtime.py",
+                                "path": "sourcing_model/routing/defaults.py",
                             },
                         ]
                     }
@@ -1758,12 +1758,12 @@ async def test_depth_two_build_uses_cumulative_targets_and_incremental_child_pat
             ]
             depth_two = branch["parent_node_id"] != "root"
             if depth_two:
-                target_files = ("gateway/research_lab/runtime.py",)
+                target_files = ("sourcing_model/routing/defaults.py",)
                 unified_diff = (
-                    "diff --git a/gateway/research_lab/runtime.py "
-                    "b/gateway/research_lab/runtime.py\n"
-                    "--- a/gateway/research_lab/runtime.py\n"
-                    "+++ b/gateway/research_lab/runtime.py\n"
+                    "diff --git a/sourcing_model/routing/defaults.py "
+                    "b/sourcing_model/routing/defaults.py\n"
+                    "--- a/sourcing_model/routing/defaults.py\n"
+                    "+++ b/sourcing_model/routing/defaults.py\n"
                     "@@ -1 +1 @@\n"
                     "-VALUE = 1\n"
                     "+VALUE = 2\n"
@@ -1841,7 +1841,7 @@ async def test_depth_two_build_uses_cumulative_targets_and_incremental_child_pat
     )
     assert set(builder.submission_drafts[1].target_files) == {
         "sourcing_model/discovery.py",
-        "gateway/research_lab/runtime.py",
+        "sourcing_model/routing/defaults.py",
     }
     depth_two_commit = next(
         commit
@@ -1849,7 +1849,7 @@ async def test_depth_two_build_uses_cumulative_targets_and_incremental_child_pat
         if commit.depth == 2
     )
     assert depth_two_commit.changed_files == (
-        "gateway/research_lab/runtime.py",
+        "sourcing_model/routing/defaults.py",
     )
 
 

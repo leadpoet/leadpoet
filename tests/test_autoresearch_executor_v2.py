@@ -210,6 +210,16 @@ def _source_and_artifact(tmp_path: Path):
         (root / directory / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "research_lab_adapter.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     (root / "requirements.txt").write_text("", encoding="utf-8")
+    for relative_path in (
+        "sourcing_model/discovery.py",
+        "sourcing_model/routing/defaults.py",
+        "sourcing_model/routing/guidance.py",
+        "sourcing_model/routing/runtime.py",
+        "sourcing_model/scrapingdog_signal_contract.py",
+    ):
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
     install_reviewed_consumer_snapshot(root)
     manifest = build_local_private_artifact_manifest(
         source_path=root,
@@ -413,13 +423,13 @@ def _stale_parent_payload(tmp_path: Path):
         mechanism="update measured source",
         expected_improvement="preserve behavior",
         risk="low",
-        lane="stale_parent_rebase",
-        target_files=("gateway/research_lab/runtime.py",),
+        lane="source_routing",
+        target_files=("sourcing_model/routing/runtime.py",),
         unified_diff=(
-            "diff --git a/gateway/research_lab/runtime.py "
-            "b/gateway/research_lab/runtime.py\n"
-            "--- a/gateway/research_lab/runtime.py\n"
-            "+++ b/gateway/research_lab/runtime.py\n"
+            "diff --git a/sourcing_model/routing/runtime.py "
+            "b/sourcing_model/routing/runtime.py\n"
+            "--- a/sourcing_model/routing/runtime.py\n"
+            "+++ b/sourcing_model/routing/runtime.py\n"
             "@@ -1 +1 @@\n"
             "-VALUE = 1\n"
             "+VALUE = 2\n"
@@ -1101,11 +1111,11 @@ def test_host_git_tree_commit_accepts_valid_zero_slot_index():
         expected_improvement="recover valid companies",
         risk="bounded change",
         lane="query_construction",
-        target_files=("sourcing_model/runtime.py",),
+        target_files=("sourcing_model/routing/runtime.py",),
         unified_diff=(
-            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
-            "--- a/sourcing_model/runtime.py\n"
-            "+++ b/sourcing_model/runtime.py\n"
+            "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+            "--- a/sourcing_model/routing/runtime.py\n"
+            "+++ b/sourcing_model/routing/runtime.py\n"
             "@@ -1 +1 @@\n"
             "-VALUE = 1\n"
             "+VALUE = 2\n"
@@ -1147,11 +1157,11 @@ def test_host_git_tree_commit_rejects_noncanonical_slot_index(
         expected_improvement="recover valid companies",
         risk="bounded change",
         lane="query_construction",
-        target_files=("sourcing_model/runtime.py",),
+        target_files=("sourcing_model/routing/runtime.py",),
         unified_diff=(
-            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
-            "--- a/sourcing_model/runtime.py\n"
-            "+++ b/sourcing_model/runtime.py\n"
+            "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+            "--- a/sourcing_model/routing/runtime.py\n"
+            "+++ b/sourcing_model/routing/runtime.py\n"
             "@@ -1 +1 @@\n"
             "-VALUE = 1\n"
             "+VALUE = 2\n"
@@ -1190,7 +1200,7 @@ def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
     source_root = tmp_path / "private-source"
     child_root = tmp_path / "child-source"
     shutil.copytree(source_root, child_root)
-    child_file = child_root / "sourcing_model" / "runtime.py"
+    child_file = child_root / "sourcing_model" / "routing" / "runtime.py"
     child_file.write_text("VALUE = 2\n", encoding="utf-8")
     child_artifact = PrivateModelArtifactManifest.from_mapping(
         build_local_private_artifact_manifest(
@@ -1212,11 +1222,11 @@ def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
         expected_improvement="recover more valid companies",
         risk="bounded runtime increase",
         lane="query_construction",
-        target_files=("sourcing_model/runtime.py",),
+        target_files=("sourcing_model/routing/runtime.py",),
         unified_diff=(
-            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
-            "--- a/sourcing_model/runtime.py\n"
-            "+++ b/sourcing_model/runtime.py\n"
+            "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+            "--- a/sourcing_model/routing/runtime.py\n"
+            "+++ b/sourcing_model/routing/runtime.py\n"
             "@@ -1 +1 @@\n"
             "-VALUE = 1\n"
             "+VALUE = 2\n"
@@ -1276,9 +1286,21 @@ def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
     )
 
     assert restored.source_tree_hash == child_artifact.model_artifact_hash
-    assert (restored.source_root / "sourcing_model" / "runtime.py").read_text(
+    assert (
+        restored.source_root / "sourcing_model" / "routing" / "runtime.py"
+    ).read_text(
         encoding="utf-8"
     ) == "VALUE = 2\n"
+    with pytest.raises(
+        AutoresearchExecutorV2Error,
+        match="code_edit_lane_outside_sourcing_scope:output_ranking",
+    ):
+        builder.restore_rehydrated_candidate_source_context(
+            candidate=replace(
+                candidate,
+                draft=replace(draft, lane="output_ranking"),
+            )
+        )
     assert builder.prepare_parent_source_context(
         parent_artifact=child_artifact,
         workspace_dir=tmp_path / "unused",
@@ -1306,9 +1328,9 @@ def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
         )
 
     structural_diff = draft.unified_diff.replace(
-        "--- a/sourcing_model/runtime.py\n",
+        "--- a/sourcing_model/routing/runtime.py\n",
         "old mode 100644\nnew mode 100755\n"
-        "--- a/sourcing_model/runtime.py\n",
+        "--- a/sourcing_model/routing/runtime.py\n",
     )
     structural_hash = sha256_json({"unified_diff": structural_diff})
     structural_candidate = replace(
@@ -1335,6 +1357,31 @@ def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
         structural_builder.restore_rehydrated_candidate_source_context(
             candidate=structural_candidate
         )
+
+
+def test_v2_loop_source_context_exposes_only_exact_declarative_surface(tmp_path):
+    _, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+
+    context = _source_context(
+        source_root=tmp_path / "private-source",
+        artifact=root_artifact,
+        config=_config(),
+    )
+
+    expected = (
+        "sourcing_model/discovery.py",
+        "sourcing_model/routing/defaults.py",
+        "sourcing_model/routing/guidance.py",
+        "sourcing_model/routing/runtime.py",
+        "sourcing_model/scrapingdog_signal_contract.py",
+    )
+    assert context.editable_files == expected
+    assert {item["path"] for item in context.file_previews} <= set(expected)
+    assert context.prompt_context()["editable_files"] == list(expected)
+    assert context.inspection_index()["editable_files"] == list(expected)
+    assert "sourcing_model/runtime.py" not in context.editable_files
+    assert "qualification/scoring/runtime.py" not in context.editable_files
 
 
 def test_signed_source_normalization_matches_tree_and_build_hashes(tmp_path):
@@ -1385,11 +1432,11 @@ def test_signed_source_normalization_matches_tree_and_build_hashes(tmp_path):
         expected_improvement="recover more valid companies",
         risk="bounded runtime increase",
         lane="query_construction",
-        target_files=("sourcing_model/runtime.py",),
+        target_files=("sourcing_model/routing/runtime.py",),
         unified_diff=(
-            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
-            "--- a/sourcing_model/runtime.py\n"
-            "+++ b/sourcing_model/runtime.py\n"
+            "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+            "--- a/sourcing_model/routing/runtime.py\n"
+            "+++ b/sourcing_model/routing/runtime.py\n"
             "@@ -1 +1 @@\n"
             "-VALUE = 1\n"
             "+VALUE = 2\n"
@@ -1432,8 +1479,8 @@ def test_signed_source_normalization_matches_tree_and_build_hashes(tmp_path):
     (
         "old mode 100644\nnew mode 100755\n",
         (
-            "rename from sourcing_model/runtime.py\n"
-            "rename to sourcing_model/runtime.py\n"
+            "rename from sourcing_model/routing/runtime.py\n"
+            "rename to sourcing_model/routing/runtime.py\n"
         ),
         "GIT binary patch\n",
     ),
@@ -1453,10 +1500,10 @@ def test_measured_host_rejects_structural_git_patch_metadata(
         workspace_dir=tmp_path / "host-context",
     )
     patch = (
-        "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+        "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
         f"{structural_metadata}"
-        "--- a/sourcing_model/runtime.py\n"
-        "+++ b/sourcing_model/runtime.py\n"
+        "--- a/sourcing_model/routing/runtime.py\n"
+        "+++ b/sourcing_model/routing/runtime.py\n"
         "@@ -1 +1 @@\n"
         "-VALUE = 1\n"
         "+VALUE = 2\n"
@@ -1512,11 +1559,11 @@ def test_host_git_tree_rejects_semantically_substituted_cumulative_patch(
         expected_improvement="recover more valid companies",
         risk="bounded runtime increase",
         lane="query_construction",
-        target_files=("sourcing_model/runtime.py",),
+        target_files=("sourcing_model/routing/runtime.py",),
         unified_diff=(
-            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
-            "--- a/sourcing_model/runtime.py\n"
-            "+++ b/sourcing_model/runtime.py\n"
+            "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+            "--- a/sourcing_model/routing/runtime.py\n"
+            "+++ b/sourcing_model/routing/runtime.py\n"
             "@@ -1 +1 @@\n"
             "-VALUE = 1\n"
             "+VALUE = 2\n"
@@ -1546,9 +1593,9 @@ def test_host_git_tree_rejects_semantically_substituted_cumulative_patch(
         expected_child_source_tree_hash=genuine.source_tree_hash,
     )
     substituted_cumulative = (
-        "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
-        "--- a/sourcing_model/runtime.py\n"
-        "+++ b/sourcing_model/runtime.py\n"
+        "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+        "--- a/sourcing_model/routing/runtime.py\n"
+        "+++ b/sourcing_model/routing/runtime.py\n"
         "@@ -1 +1 @@\n"
         "-VALUE = 1\n"
         "+VALUE = 999\n"
@@ -1616,11 +1663,11 @@ def test_measured_host_rejects_incremental_patch_with_undeclared_extra_path(
         expected_improvement="recover more valid companies",
         risk="bounded runtime increase",
         lane="query_construction",
-        target_files=("sourcing_model/runtime.py",),
+        target_files=("sourcing_model/routing/runtime.py",),
         unified_diff=(
-            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
-            "--- a/sourcing_model/runtime.py\n"
-            "+++ b/sourcing_model/runtime.py\n"
+            "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+            "--- a/sourcing_model/routing/runtime.py\n"
+            "+++ b/sourcing_model/routing/runtime.py\n"
             "@@ -1 +1 @@\n"
             "-VALUE = 1\n"
             "+VALUE = 2\n"
@@ -1641,7 +1688,7 @@ def test_measured_host_rejects_incremental_patch_with_undeclared_extra_path(
 
     with pytest.raises(
         AutoresearchExecutorV2Error,
-        match="Git-tree incremental changed-file set differs",
+        match="Git-tree canonical incremental patch escapes the measured editable source",
     ):
         measured_builder.verify_git_tree_child_semantics(
             draft=draft,
@@ -1693,11 +1740,11 @@ def test_host_git_tree_accepts_depth_two_incremental_and_cumulative_paths(
         expected_improvement="recover more valid companies",
         risk="bounded runtime increase",
         lane="query_construction",
-        target_files=("sourcing_model/runtime.py",),
+        target_files=("sourcing_model/routing/runtime.py",),
         unified_diff=(
-            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
-            "--- a/sourcing_model/runtime.py\n"
-            "+++ b/sourcing_model/runtime.py\n"
+            "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+            "--- a/sourcing_model/routing/runtime.py\n"
+            "+++ b/sourcing_model/routing/runtime.py\n"
             "@@ -1 +1 @@\n"
             "-VALUE = 1\n"
             "+VALUE = 2\n"
@@ -1740,16 +1787,16 @@ def test_host_git_tree_accepts_depth_two_incremental_and_cumulative_paths(
 
     second_draft = CodeEditDraft(
         failure_mode="bounded routing",
-        mechanism="increase an independent gateway runtime value",
+        mechanism="increase independent discovery prompt data",
         expected_improvement="improve source routing",
         risk="bounded runtime increase",
         lane="source_routing",
-        target_files=("gateway/research_lab/runtime.py",),
+        target_files=("sourcing_model/discovery.py",),
         unified_diff=(
-            "diff --git a/gateway/research_lab/runtime.py "
-            "b/gateway/research_lab/runtime.py\n"
-            "--- a/gateway/research_lab/runtime.py\n"
-            "+++ b/gateway/research_lab/runtime.py\n"
+            "diff --git a/sourcing_model/discovery.py "
+            "b/sourcing_model/discovery.py\n"
+            "--- a/sourcing_model/discovery.py\n"
+            "+++ b/sourcing_model/discovery.py\n"
             "@@ -1 +1 @@\n"
             "-VALUE = 1\n"
             "+VALUE = 3\n"
@@ -1771,9 +1818,9 @@ def test_host_git_tree_accepts_depth_two_incremental_and_cumulative_paths(
         expected_parent_source_tree_hash=first.source_tree_hash,
     )
 
-    assert second.changed_files == ("gateway/research_lab/runtime.py",)
-    assert "sourcing_model/runtime.py" in second.cumulative_patch
-    assert "gateway/research_lab/runtime.py" in second.cumulative_patch
+    assert second.changed_files == ("sourcing_model/discovery.py",)
+    assert "sourcing_model/routing/runtime.py" in second.cumulative_patch
+    assert "sourcing_model/discovery.py" in second.cumulative_patch
     measured_builder.verify_git_tree_child_semantics(
         draft=second_draft,
         canonical_incremental_patch=second.incremental_patch,
@@ -2269,3 +2316,86 @@ def test_stale_parent_repair_runs_existing_prompt_and_parser_in_measured_scope(
     assert len(calls) == 1
     assert calls[0]["api_key"].startswith("sk-or-v1-")
     assert calls[0]["messages"]
+
+
+def test_v2_builder_rejects_allowed_path_wrapper_mutation_with_real_structure_gate(
+    tmp_path,
+):
+    """The host builder must not rely on path allowlisting alone."""
+
+    from difflib import unified_diff
+
+    from tests.test_sourcing_model_contract import _v26_pipeline_tree
+
+    source_root = tmp_path / "private-source"
+    _v26_pipeline_tree(source_root)
+    for required_directory in ("gateway", "qualification", "validator_models"):
+        path = source_root / required_directory / "runtime.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+    parent_artifact = PrivateModelArtifactManifest.from_mapping(
+        build_local_private_artifact_manifest(
+            source_path=source_root,
+            git_commit_sha="a" * 40,
+            image_digest=(
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/private@sha256:"
+                + "b" * 64
+            ),
+            manifest_uri="s3://private/manifests/current.json",
+            signature_ref="kms:signature",
+            component_registry_version="1",
+            scoring_adapter_version="1",
+        )
+    )
+    config = _config()
+    source_context = _source_context(
+        source_root=source_root,
+        artifact=parent_artifact,
+        config=config,
+    )
+    runtime_path = source_root / "sourcing_model" / "routing" / "runtime.py"
+    original = runtime_path.read_text(encoding="utf-8")
+    changed = original.replace(
+        "RouteContext(stage=STAGE_CANDIDATE_ACQUISITION)",
+        "RouteContext(stage=STAGE_INTENT_EVIDENCE)",
+        1,
+    )
+    assert changed != original
+    relative_path = "sourcing_model/routing/runtime.py"
+    patch = "diff --git a/{0} b/{0}\n".format(relative_path) + "".join(
+        unified_diff(
+            original.splitlines(keepends=True),
+            changed.splitlines(keepends=True),
+            fromfile=f"a/{relative_path}",
+            tofile=f"b/{relative_path}",
+        )
+    )
+    draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="change candidate router context",
+        expected_improvement="recover more valid companies",
+        risk="wrong stage routing",
+        lane="query_construction",
+        target_files=(relative_path,),
+        unified_diff=patch,
+        redacted_summary="mutate an allowed routing file",
+        test_plan="run focused tests",
+        rollback_plan="revert the patch",
+    )
+    builder = _HostCandidateBuilder(
+        config=config,
+        source_context=source_context,
+        source_bundle_hash="sha256:" + "c" * 64,
+        execution_context=object(),
+    )
+
+    with pytest.raises(
+        CodeEditPatchApplyError,
+        match="sourcing pipeline structure violation",
+    ):
+        builder.build(
+            draft=draft,
+            parent_artifact=parent_artifact,
+            run_id="v2-structure-guard",
+            candidate_index=0,
+        )

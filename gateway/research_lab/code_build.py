@@ -26,6 +26,8 @@ from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
     CodeEditDraft,
     CodeEditSourceInspectionRequest,
+    LOOP_DIRECTION_ALLOWED_LANES,
+    SOURCING_PIPELINE_EDITABLE_PATHS,
     code_edit_candidate_manifest,
     extract_unified_diff_paths,
     git_diff_structural_metadata,
@@ -314,6 +316,16 @@ def validate_private_code_edit_diff_artifact(
                 "candidate model manifest is invalid: "
                 + "; ".join(manifest_errors)
             )
+        candidate_source_tree_hash = str(
+            candidate_build_doc.get("candidate_source_tree_hash") or ""
+        )
+        if candidate_source_tree_hash and (
+            not _SHA256_REF_RE.fullmatch(candidate_source_tree_hash)
+            or candidate_manifest.model_artifact_hash != candidate_source_tree_hash
+        ):
+            raise CodeEditBuildError(
+                "candidate model source hash differs from committed build"
+            )
         if (
             str(candidate_build_doc.get("candidate_model_artifact_hash") or "")
             != candidate_manifest.model_artifact_hash
@@ -351,6 +363,11 @@ def validate_private_code_edit_diff_artifact(
         patch_doc = patch_manifest.get("patch_doc")
         if not isinstance(patch_doc, Mapping):
             raise CodeEditBuildError("candidate patch manifest document is invalid")
+        patch_lane = str(patch_doc.get("lane") or "").strip().lower()
+        if patch_lane not in LOOP_DIRECTION_ALLOWED_LANES:
+            raise CodeEditBuildError(
+                f"candidate patch lane is outside sourcing scope:{patch_lane[:120]}"
+            )
         patch_target_files = patch_doc.get("target_files")
         if (
             not isinstance(patch_target_files, list)
@@ -741,7 +758,7 @@ class CodeEditCandidateBuilder:
         source_tree_hash: str,
         top_level_paths: Sequence[str],
     ) -> ParentImageSourceContext:
-        editable_files = _editable_runtime_files(
+        editable_files = _sourcing_loop_visible_files(
             source_root,
             allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
             allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
@@ -792,6 +809,11 @@ class CodeEditCandidateBuilder:
         read = set(read_paths or ())
         paths = set(draft.target_files) | extract_unified_diff_paths(draft.unified_diff)
         errors: list[str] = []
+        normalized_lane = str(draft.lane or "").strip().lower()
+        if normalized_lane not in LOOP_DIRECTION_ALLOWED_LANES:
+            errors.append(
+                f"code_edit_lane_outside_sourcing_scope:{normalized_lane[:120]}"
+            )
         for path in sorted(paths):
             if path not in allowed:
                 errors.append(f"code_edit_path_not_in_extracted_source:{path}")
@@ -833,11 +855,24 @@ class CodeEditCandidateBuilder:
             diff_path = tmp_dir / "candidate.diff"
             diff_path.write_text(draft.unified_diff, encoding="utf-8")
             try:
+                parent_pipeline_structure = _sourcing_pipeline_structure_gate(
+                    repo_dir
+                )
                 _run_git_apply(
                     diff_path,
                     cwd=repo_dir,
                     timeout_seconds=120,
                     check=True,
+                )
+                _run_git_apply(
+                    diff_path,
+                    cwd=repo_dir,
+                    timeout_seconds=120,
+                    check=False,
+                )
+                _sourcing_pipeline_structure_gate(
+                    repo_dir,
+                    expected=parent_pipeline_structure,
                 )
             except CodeEditBuildError as exc:
                 raise CodeEditPatchApplyError(
@@ -934,6 +969,9 @@ class CodeEditCandidateBuilder:
             draft_path.write_text(json.dumps(draft.to_dict(), sort_keys=True), encoding="utf-8")
             parent_manifest_path.write_text(json.dumps(parent_artifact.to_dict(), sort_keys=True), encoding="utf-8")
             try:
+                parent_pipeline_structure = _sourcing_pipeline_structure_gate(
+                    repo_dir
+                )
                 _run_git_apply(
                     diff_path,
                     cwd=repo_dir,
@@ -957,6 +995,13 @@ class CodeEditCandidateBuilder:
             if not changed_files:
                 raise CodeEditEmptyOrNoopPatchError("code edit produced no repository changes")
             try:
+                candidate_pipeline_structure = _sourcing_pipeline_structure_gate(
+                    repo_dir,
+                    expected=parent_pipeline_structure,
+                )
+                candidate_source_tree_hash_before_tests = (
+                    compute_private_source_tree_hash(repo_dir)
+                )
                 _py_compile_changed_files(repo_dir, changed_files)
                 _sourcing_contract_gate(repo_dir)
                 _run_shell(
@@ -971,6 +1016,18 @@ class CodeEditCandidateBuilder:
                         include_aws=False,
                     ),
                     timeout_seconds=self.config.code_edit_build_timeout_seconds,
+                )
+                candidate_pipeline_structure = (
+                    _post_private_test_source_integrity_gate(
+                        repo_dir,
+                        expected_changed_files=changed_files,
+                        expected_source_tree_hash=(
+                            candidate_source_tree_hash_before_tests
+                        ),
+                        expected_pipeline_structure=(
+                            candidate_pipeline_structure
+                        ),
+                    )
                 )
             except CodeEditBuildError as exc:
                 raise CodeEditPrivateTestError(
@@ -993,6 +1050,10 @@ class CodeEditCandidateBuilder:
                 timeout_seconds=120,
             )
             git_commit_sha = _run(["git", "rev-parse", "HEAD"], cwd=repo_dir, timeout_seconds=60).strip()
+            # The manifest is evidence about the candidate source.  Keep its
+            # generated output outside that source tree so the output cannot
+            # change the source hash it claims to describe.
+            manifest_path = tmp_dir / "candidate_manifest.json"
             recorded_commit_sha, recorded_commit_sha_source = _resolve_recorded_commit_sha(
                 workspace_sha=git_commit_sha,
                 parent_artifact=parent_artifact,
@@ -1026,17 +1087,21 @@ class CodeEditCandidateBuilder:
                         include_aws=True,
                     ),
                     "RESEARCH_LAB_PRIVATE_COMMIT_SHA": recorded_commit_sha,
-                    "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT": self.config.private_artifact_manifest_output,
+                    "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT": str(manifest_path),
                 },
                 timeout_seconds=self.config.code_edit_build_timeout_seconds,
             )
-            manifest_path = Path(self.config.private_artifact_manifest_output)
-            if not manifest_path.is_absolute():
-                manifest_path = repo_dir / manifest_path
             if not manifest_path.exists():
                 raise CodeEditArtifactMissingError("private build did not produce artifact manifest output")
             candidate_manifest = PrivateModelArtifactManifest.from_mapping(
                 json.loads(manifest_path.read_text(encoding="utf-8"))
+            )
+            candidate_pipeline_structure = _post_private_build_source_integrity_gate(
+                repo_dir,
+                expected_source_tree_hash=candidate_source_tree_hash_before_tests,
+                expected_pipeline_structure=candidate_pipeline_structure,
+                expected_git_commit_sha=git_commit_sha,
+                candidate_manifest=candidate_manifest,
             )
             _verify_built_candidate_artifact(candidate_manifest)
             if candidate_manifest.model_artifact_hash == parent_artifact.model_artifact_hash:
@@ -1056,6 +1121,7 @@ class CodeEditCandidateBuilder:
                 "candidate_model_artifact_hash": candidate_manifest.model_artifact_hash,
                 "candidate_model_manifest_hash": candidate_manifest.manifest_hash,
                 "candidate_git_commit_sha": candidate_manifest.git_commit_sha,
+                "candidate_source_tree_hash": candidate_source_tree_hash_before_tests,
                 "build_workspace_git_commit_sha": git_commit_sha,
                 "recorded_git_commit_sha": recorded_commit_sha,
                 "recorded_git_commit_sha_source": recorded_commit_sha_source,
@@ -1066,6 +1132,16 @@ class CodeEditCandidateBuilder:
                 "test_command_hash": canonical_hash({"cmd": self.config.private_test_cmd}),
                 "build_command_hash": canonical_hash({"cmd": self.config.private_build_cmd}),
                 "build_validation": "passed",
+                "pipeline_structure": {
+                    "schema_version": candidate_pipeline_structure[
+                        "schema_version"
+                    ],
+                    "contract_id": candidate_pipeline_structure["contract_id"],
+                    "parent_hash": parent_pipeline_structure["document_hash"],
+                    "candidate_hash": candidate_pipeline_structure[
+                        "document_hash"
+                    ],
+                },
             }
             build_doc.update(
                 _write_private_code_edit_diff_artifact(
@@ -1614,6 +1690,38 @@ def _editable_runtime_files(
     return sorted(allowed)[:_SOURCE_CONTEXT_MAX_FILES]
 
 
+def _sourcing_loop_visible_files(
+    source_dir: Path,
+    *,
+    allowed_prefixes: Sequence[str],
+    allowed_exact_paths: Sequence[str],
+    allowed_suffixes: Sequence[str],
+) -> list[str]:
+    """Return only reviewed declarative files that a sourcing loop may inspect."""
+
+    allowed_exact = set(allowed_exact_paths)
+    visible: list[str] = []
+    for relative_path in sorted(SOURCING_PIPELINE_EDITABLE_PATHS):
+        if relative_path not in allowed_exact and not any(
+            relative_path.startswith(prefix) for prefix in allowed_prefixes
+        ):
+            continue
+        if not relative_path.endswith(tuple(allowed_suffixes)):
+            continue
+        if _source_path_disallowed(relative_path):
+            continue
+        candidate = source_dir
+        path_is_plain = True
+        for part in Path(relative_path).parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                path_is_plain = False
+                break
+        if path_is_plain and candidate.is_file():
+            visible.append(relative_path)
+    return visible
+
+
 # Sentinel end-line marking full-file coverage: an unranged repeat read of a
 # fully-read file is contained in (1, FULL_FILE_RANGE_END) and skips.
 FULL_FILE_RANGE_END = 10**9
@@ -2127,6 +2235,64 @@ def _changed_files(repo_dir: Path) -> list[str]:
     return sorted(line.strip() for line in output.splitlines() if line.strip())
 
 
+def _post_private_test_source_integrity_gate(
+    repo_dir: Path,
+    *,
+    expected_changed_files: Sequence[str],
+    expected_source_tree_hash: str,
+    expected_pipeline_structure: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reject source changes made as a side effect of private tests."""
+
+    observed_changed_files = _changed_files(repo_dir)
+    observed_pipeline_structure = _sourcing_pipeline_structure_gate(
+        repo_dir,
+        expected=expected_pipeline_structure,
+    )
+    observed_source_tree_hash = compute_private_source_tree_hash(repo_dir)
+    if observed_changed_files != list(expected_changed_files):
+        raise CodeEditBuildError("private tests changed the candidate file set")
+    if observed_source_tree_hash != expected_source_tree_hash:
+        raise CodeEditBuildError("private tests changed the candidate source tree")
+    return observed_pipeline_structure
+
+
+def _post_private_build_source_integrity_gate(
+    repo_dir: Path,
+    *,
+    expected_source_tree_hash: str,
+    expected_pipeline_structure: Mapping[str, Any],
+    expected_git_commit_sha: str,
+    candidate_manifest: PrivateModelArtifactManifest,
+) -> dict[str, Any]:
+    """Bind the signed build artifact to the source verified before tests.
+
+    The private build command is an external boundary.  Re-measure after it
+    completes because it can run hooks or arbitrary build tooling in the
+    candidate checkout.  Its generated manifest is written outside that
+    checkout, so this hash is the exact source passed to the artifact builder.
+    """
+
+    observed_source_tree_hash = compute_private_source_tree_hash(repo_dir)
+    if observed_source_tree_hash != expected_source_tree_hash:
+        raise CodeEditImageBuildError("private build changed the candidate source tree")
+    if candidate_manifest.model_artifact_hash != expected_source_tree_hash:
+        raise CodeEditImageBuildError(
+            "candidate artifact source hash differs from verified candidate source tree"
+        )
+    observed_git_commit_sha = _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        timeout_seconds=60,
+    ).strip()
+    if observed_git_commit_sha != expected_git_commit_sha:
+        raise CodeEditImageBuildError("private build changed the candidate Git commit")
+    return _sourcing_pipeline_structure_gate(
+        repo_dir,
+        expected=expected_pipeline_structure,
+    )
+
+
 def _git_ignored_paths(repo_dir: Path) -> list[str]:
     """Extracted files that git ignore rules keep out of commits (bug #29b).
 
@@ -2399,6 +2565,41 @@ def _sourcing_contract_gate(repo_dir: Path) -> None:
     raise CodeEditPrivateTestError(
         "sourcing wrapper contract violation: " + "; ".join(violations[:8])
     )
+
+
+def _sourcing_pipeline_structure_gate(
+    repo_dir: Path,
+    *,
+    expected: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Enforce router stage ownership and immutable handoff wrappers."""
+
+    try:
+        from research_lab.sourcing_model_contract_check import (
+            sourcing_pipeline_preservation_errors,
+            sourcing_pipeline_structure_document,
+        )
+
+        document = sourcing_pipeline_structure_document(repo_dir)
+        violations = (
+            sourcing_pipeline_preservation_errors(expected, document)
+            if expected is not None
+            else []
+        )
+    except ValueError as exc:
+        raise CodeEditPrivateTestError(
+            "sourcing pipeline structure violation: " + str(exc)[:800]
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 -- structure checks fail closed
+        raise CodeEditPrivateTestError(
+            "sourcing pipeline structure verification failed internally"
+        ) from exc
+    if violations:
+        raise CodeEditPrivateTestError(
+            "sourcing pipeline structure violation: "
+            + "; ".join(violations[:8])
+        )
+    return document
 
 
 def _run_git_apply(

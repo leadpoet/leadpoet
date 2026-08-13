@@ -112,15 +112,45 @@ DEFAULT_ALLOWED_EXACT_PATHS = (
     "research_lab_adapter.py",
 )
 DEFAULT_ALLOWED_SUFFIXES = (".py", ".json", ".yaml", ".yml", ".toml", ".txt", ".md")
+
+# PR1 uses a positive, data-only edit surface. Arbitrary Python tool bodies run
+# in the coordinator process and cannot be proven unable to mutate that
+# coordinator. They stay immutable until tools have a typed process boundary.
+# The paths below permit only independently checked prompt strings,
+# declarative routing data, paired same-stage tool records, approved SOURCE_ADD
+# registrations, and typed tool catalog entries. Every other private-model
+# path is default-deny.
+SOURCING_PIPELINE_EDITABLE_PATHS = frozenset(
+    {
+        "sourcing_model/discovery.py",
+        "sourcing_model/routing/defaults.py",
+        "sourcing_model/routing/guidance.py",
+        "sourcing_model/routing/runtime.py",
+        "sourcing_model/scrapingdog_signal_contract.py",
+    }
+)
+IMMUTABLE_SOURCING_PIPELINE_PATHS = frozenset(
+    {
+        "research_lab_adapter.py",
+        "sourcing_model/__init__.py",
+        "sourcing_model/consumer_contract.json",
+        "sourcing_model/consumer_parity.py",
+        "sourcing_model/consumer_parity_fixtures.json",
+        "sourcing_model/contact_verification.py",
+        "sourcing_model/contact_verification_contract_v1.json",
+        "sourcing_model/core.py",
+        "sourcing_model/orchestrator.py",
+        "sourcing_model/routing/__init__.py",
+        "sourcing_model/routing/compiler.py",
+        "sourcing_model/routing/contracts.py",
+        "sourcing_model/routing/policy.py",
+    }
+)
 LOOP_DIRECTION_ALLOWED_LANES = (
-    "icp_normalization",
     "query_construction",
     "source_routing",
     "provider_fallback",
     "intent_evidence_quality",
-    "company_fit_filtering",
-    "openrouter_model_selection",
-    "output_ranking",
 )
 LOOP_DIRECTION_VALIDATION_MODES = (
     "runtime_checks",
@@ -449,8 +479,9 @@ def build_loop_direction_planner_messages(
         "- Provider fallback paths must classify, retry, timeout, log, or route provider/runtime failures; pure query wording changes are not provider fallback.\n"
         "- Do not select paths that weaken ICP fit, remove constraints as the primary mechanism, or merely clean up code.\n"
         "- If the ticket names a concrete file/path/function that is not present in runtime_source_index, do not invent it or silently translate it. Return no_new_safe_path=true and list only the exact missing path/identifier in unresolved_references so the gateway can perform one bounded clarification pass.\n"
-        "- A provider endpoint or text model absent from source inventory is viable only when approved_provider_capabilities explicitly permits its provider family/policy and runtime_source_index shows an existing editable provider module.\n"
-        "- Capability expansion may edit that existing provider module only; never introduce a new host, credential/env reference, dependency, or network client.\n"
+        "- A provider endpoint absent from source inventory is viable only through an exact approved_provider_capabilities SOURCE_ADD registration request and its separate reviewed host binding.\n"
+        "- Never edit a provider implementation body, host, credential/env reference, dependency, or network client in this loop.\n"
+        "- The sourcing pipeline topology is immutable. Target only sourcing_model/discovery.py, sourcing_model/routing/defaults.py, sourcing_model/routing/guidance.py, sourcing_model/routing/runtime.py, or sourcing_model/scrapingdog_signal_contract.py. In guidance.py only the reviewed GUIDANCE_SYSTEM_PROMPT string literal is editable. In the other paths change only reviewed prompt output text/data, inert routing metadata, a paired same-stage tool record, an approved SOURCE_ADD registration, or a typed catalog entry. Existing tool ids must stay in their current stage, and each stage must keep one reviewed viable route. Arbitrary Python function bodies are not editable.\n"
         "- candidate_edit_constraints is binding. Never require a new file. If it reports no editable test files, use validation_mode=runtime_checks and do not require adding tests.\n"
         "- success_criteria must describe observable behavior and existing validation, not repository work such as creating a test file.\n"
         "- Return exactly Context JSON required_root_branch_count independently safe, source-feasible ranked paths whenever that many genuinely distinct mechanisms exist. Return fewer only when another safe independent mechanism does not exist; never duplicate or paraphrase one path to fill the count.\n"
@@ -626,7 +657,7 @@ def build_code_edit_source_inspection_messages(
         "- Stop with finish once you have enough exact file content to draft a narrow patch.\n"
         "- If is_final_inspection_round is true, no file has been read, and prior search results contain an editable match, request read_file for the best exact match now; do not spend the final round on another search.\n"
         "- On the final round, finish without a read only when no safe editable source path exists.\n"
-        "- Prefer source related to query construction, ICP normalization, provider fallback, intent evidence, ranking, and adapter output.\n\n"
+        "- Prefer the reviewed prompt, routing-data, provider-fallback, and typed tool-catalog surfaces.\n\n"
         "Approved SOURCE_ADD incorporation:\n"
         "- If approved_provider_capabilities.routerverse_source_incorporation.requests is non-empty, read the exact registration_symbol in sourcing_model/routing/runtime.py before finishing.\n"
         "- Determine whether the inspected signed source uses the v7 legacy registration or the v8 canonical binding-manifest registration. Never treat provisioning_provenance_sha256 as a v8 manifest_sha256.\n"
@@ -688,23 +719,8 @@ def build_code_edit_auto_research_messages(
         "loop_direction_plan": _redacted_mapping(loop_direction_plan or {}),
         "max_candidates": max(1, int(max_candidates)),
         "source_mode": "parent_image_extract",
-        "allowed_runtime_roots": [
-            "gateway/",
-            "qualification/",
-            "sourcing_model/",
-            "validator_models/",
-            "research_lab_adapter.py",
-        ],
-        "allowed_lanes": [
-            "icp_normalization",
-            "query_construction",
-            "source_routing",
-            "provider_fallback",
-            "intent_evidence_quality",
-            "company_fit_filtering",
-            "openrouter_model_selection",
-            "output_ranking",
-        ],
+        "allowed_runtime_paths": sorted(SOURCING_PIPELINE_EDITABLE_PATHS),
+        "allowed_lanes": list(LOOP_DIRECTION_ALLOWED_LANES),
         "candidate_edit_constraints": _redacted_mapping(candidate_edit_constraints or {}),
     }
     if provider_outcome_digest:
@@ -745,15 +761,14 @@ def build_code_edit_auto_research_messages(
     )
     user = (
         "Return strict JSON only, no markdown.\n\n"
-        "Choose one improvement lane per candidate: ICP normalization, query construction, "
-        "source routing, provider fallback, intent evidence quality, company fit filtering, "
-        "OpenRouter model selection, or output ranking.\n\n"
+        "Choose one improvement lane per candidate: query construction, source routing, "
+        "provider fallback, or intent evidence quality.\n\n"
         "Allowed edit scope:\n"
-        "- gateway/\n"
-        "- qualification/\n"
-        "- sourcing_model/\n"
-        "- validator_models/\n"
-        "- research_lab_adapter.py\n\n"
+        "- sourcing_model/discovery.py (prompt/query strings and reviewed prompt data only)\n"
+        "- sourcing_model/routing/defaults.py (declarative routing metadata and paired same-stage tool records only)\n"
+        "- sourcing_model/routing/guidance.py (the reviewed routing system-prompt literal only)\n"
+        "- sourcing_model/routing/runtime.py (declarative routing metadata, paired same-stage tool records, and approved SOURCE_ADD registrations only)\n"
+        "- sourcing_model/scrapingdog_signal_contract.py (typed inert TOOL_CATALOG entries only)\n\n"
         "Active extracted source rules:\n"
         "- The current ECR image has already been pulled and /app has already been extracted before this prompt.\n"
         "- Use only exact files listed in Context JSON runtime_source_context.editable_files.\n"
@@ -770,6 +785,15 @@ def build_code_edit_auto_research_messages(
         "- copying private provider aliases, endpoint names, hosts, or model IDs into redacted_summary or other public-facing prose; describe the mechanism generically\n"
         "- subprocess/shell execution additions\n"
         "- hidden ICP access, raw judge prompts, raw model responses, secrets, or key handling changes\n\n"
+        "Immutable pipeline boundary:\n"
+        "- Do not edit the adapter, core, orchestrator, routing compiler/contracts/exports, consumer parity, or contact-verification boundary files.\n"
+        "- Do not add, remove, merge, bypass, reorder, or newly connect sourcing stages. Keep each router bound to its current stage and preserve the existing callers and handoffs, including stages that are evaluated independently.\n"
+        "- The compile_*_route handoff wrapper bodies in routing/defaults.py and routing/runtime.py are immutable. Put selection, ranking, and fallback improvements in the existing runtime/default policy surfaces.\n"
+        "- Keep every existing tool id in its current stage. A new tool must declare exactly one existing stage and a same-stage policy step; it cannot create a stage or bridge stages.\n"
+        "- Routing eligibility, category, priority, ranking, and fallback metadata may change, but each existing stage must keep at least one reviewed viable route.\n"
+        "- New tool records are declarative only. They do not add an implementation, credential, or consumer binding; execution requires a separately reviewed binding for the exact tool id.\n"
+        "- The current paid scorer measures company fit and intent evidence, not contact quality. Do not propose or promote a contact-only routing change without a separate contact-quality evaluation commitment.\n"
+        "- Allowed work is inside an existing stage: prompt strings, routing metadata, approved SOURCE_ADD registration, a paired ToolDefinition/PolicyStep, or an inert typed catalog entry. Do not edit arbitrary Python tool bodies; those require a separate-process tool boundary.\n\n"
         "Diff requirements:\n"
         "- Produce a small git unified diff that applies to the active runtime source extracted from the current ECR image.\n"
         "- The unified_diff string must begin with 'diff --git a/<path> b/<path>'.\n"
@@ -1165,9 +1189,16 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
 def loop_direction_plan_contract_errors(plan: LoopDirectionPlan) -> list[str]:
     """Validate the strict v1.1 path contract without rejecting v1.0 checkpoints."""
 
-    if str(plan.schema_version or "1.0") != "1.1" or plan.no_new_safe_path:
+    if plan.no_new_safe_path:
         return []
     errors: list[str] = []
+    if plan.required_lane not in LOOP_DIRECTION_ALLOWED_LANES:
+        errors.append(
+            "loop_direction_plan_lane_outside_sourcing_scope:"
+            f"{plan.required_lane[:120]}"
+        )
+    if str(plan.schema_version or "1.0") != "1.1":
+        return errors
     if not plan.ranked_paths:
         errors.append("loop_direction_plan_v1_1_requires_ranked_paths")
         return errors
@@ -1204,6 +1235,11 @@ def loop_direction_plan_contract_errors(plan: LoopDirectionPlan) -> list[str]:
             seen_ids.add(path_id)
         if not lane:
             errors.append(f"ranked_path_missing_lane:{path_id[:120]}")
+        elif lane not in LOOP_DIRECTION_ALLOWED_LANES:
+            errors.append(
+                "ranked_path_lane_outside_sourcing_scope:"
+                f"{path_id[:120]}:{lane[:120]}"
+            )
         if not mechanism:
             errors.append(f"ranked_path_missing_mechanism:{path_id[:120]}")
         for field_name, aliases in required_path_fields.items():
@@ -2389,6 +2425,9 @@ def validate_code_edit_draft(
 ) -> list[str]:
     errors: list[str] = []
     payload = draft.to_dict()
+    normalized_lane = str(draft.lane or "").strip().lower()
+    if normalized_lane not in LOOP_DIRECTION_ALLOWED_LANES:
+        errors.append(f"code_edit_lane_outside_sourcing_scope:{normalized_lane[:120]}")
     if _contains_forbidden_material_diff_aware(payload):
         errors.append("code_edit_contains_forbidden_material")
     stripped_diff = draft.unified_diff.lstrip()
@@ -2409,6 +2448,7 @@ def validate_code_edit_draft(
         errors.append(
             f"code_edit_too_many_target_files:{len(all_paths)}>{int(max_target_files)}"
         )
+    errors.extend(sourcing_pipeline_guard_errors(all_paths))
     for path in all_paths:
         errors.extend(_validate_repo_path(
             path,
@@ -2425,6 +2465,23 @@ def validate_code_edit_draft(
     if errors:
         raise ValueError("; ".join(errors))
     return []
+
+
+def sourcing_pipeline_guard_errors(paths: Sequence[str]) -> list[str]:
+    """Allow only the reviewed declarative sourcing edit surface.
+
+    The caller supplies paths derived from both the signed target-file list and
+    the unified diff. The source-tree structure gate then validates the allowed
+    nodes inside these files against the signed parent.
+    """
+
+    errors: list[str] = []
+    for path in sorted(set(str(item or "") for item in paths)):
+        if path in IMMUTABLE_SOURCING_PIPELINE_PATHS:
+            errors.append(f"code_edit_immutable_sourcing_pipeline_path:{path}")
+        elif path not in SOURCING_PIPELINE_EDITABLE_PATHS:
+            errors.append(f"code_edit_sourcing_edit_surface_path:{path}")
+    return errors
 
 
 def code_edit_candidate_manifest(

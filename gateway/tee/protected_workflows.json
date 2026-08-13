@@ -437,9 +437,44 @@
       "symbol": "validate_legacy_settlement_migrations_v2"
     },
     {
-      "ast_sha256": "sha256:877b59bcd544004706490988134e48e5f3062d9ea83d128e9e13698c00b34356",
+      "ast_sha256": "sha256:ce83de76986142d1a01bbc11d13effdc19be61d5c9325f1232e1dc7eddd4de84",
       "path": "gateway/research_lab/code_build.py",
       "symbol": "CodeEditCandidateBuilder._build_under_deadline"
+    },
+    {
+      "ast_sha256": "sha256:9ac0d08e3fc2942dd9aeef7435224870f69a618a4a15381cea5516405824b181",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "CodeEditCandidateBuilder._source_context_from_root"
+    },
+    {
+      "ast_sha256": "sha256:3118c8046e9a5f6e4f63a88e37d253a660e3bac84e2888fa5a445c37eb7ad956",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "CodeEditCandidateBuilder.validate_draft_against_source_context"
+    },
+    {
+      "ast_sha256": "sha256:e0faf4829cbcae32c6e8a955f0ab95ad22f09ae7a98ead0b6fdf81b7b928dddc",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_changed_files"
+    },
+    {
+      "ast_sha256": "sha256:6b3a2e7519b4e9e48577a4c85d1b46674fb7ad9697761e2fc78e8171624bdba4",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_post_private_build_source_integrity_gate"
+    },
+    {
+      "ast_sha256": "sha256:b320f29d94ca9700abfff7bc69bbd6d4e3b68fae108a5465973c4c21ff442911",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_post_private_test_source_integrity_gate"
+    },
+    {
+      "ast_sha256": "sha256:b88071e8cab586a9acfb06d2731ed822f6119c50933f050003844a7df72fdebd",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_sourcing_loop_visible_files"
+    },
+    {
+      "ast_sha256": "sha256:c268ea64dd8a14df02317ecfd04a9a62e9887815b459826a445f78edfe0a9944",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_sourcing_pipeline_structure_gate"
     },
     {
       "ast_sha256": "sha256:c25d69005a275bb7508a817868a4383fd4e5ee0cf018f6a8cbcea804ea020695",
@@ -447,7 +482,7 @@
       "symbol": "_verify_built_candidate_artifact"
     },
     {
-      "ast_sha256": "sha256:ec77b35b054118f466a0ae885b597d69911187eecb4ba585fc6de1f054e4e436",
+      "ast_sha256": "sha256:ceb37d389021a737d541b98ed175cf2786f736d4aab295e6fe574ccaf61b716c",
       "path": "gateway/research_lab/code_build.py",
       "symbol": "validate_private_code_edit_diff_artifact"
     },
@@ -627,7 +662,17 @@
       "symbol": "reconcile_champion_reward_statuses"
     },
     {
-      "ast_sha256": "sha256:874dd6b2ed9057bbf85a34f1d54da7b617efa125899bdb734b7535315fe254e0",
+      "ast_sha256": "sha256:47c4f13d93448d089e2c859895ee5eacc044e01650a0d7995597adafc3817d43",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "ResearchLabPromotionController._maybe_finalize_missing_private_source_push"
+    },
+    {
+      "ast_sha256": "sha256:69c49fcf987ed0b86ce46d40fa07fcff2b576024c5099e7a618dd64da939ec99",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "ResearchLabPromotionController._maybe_push_private_repo_candidate"
+    },
+    {
+      "ast_sha256": "sha256:6fec9b3c18eddbf99add5cf476ac328d9e6ffee197a2e917c9154c6c6eaa9821",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "ResearchLabPromotionController._promote_built_image_candidate"
     },
@@ -647,14 +692,34 @@
       "symbol": "_candidate_icp_score"
     },
     {
+      "ast_sha256": "sha256:b65bbaa7448eff7ab53fe7dd52d98f86f20039f59afa5083ebfca6533c2ca960",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "_extract_promoted_git_tree_archive"
+    },
+    {
       "ast_sha256": "sha256:71ae256cb2d29f1fd6157d318dc926f9c80157ff44bb92945efed49083e7341d",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "_load_valid_artifact"
     },
     {
-      "ast_sha256": "sha256:ecc42ea515da3f77196df08fd375369238a462d33a25951c4229d9be917fce97",
+      "ast_sha256": "sha256:a3e0c3975914f6e57dfd025cc4203750dc38f2c6164ca8505618c5e8abe29c88",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "_pipeline_structure_commitment_errors"
+    },
+    {
+      "ast_sha256": "sha256:2a838ec80369855a73bd1c2970fa442c0ac0e508edfa9f258f6c1be88e2d6a25",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "_push_candidate_source_diff_to_repo"
+    },
+    {
+      "ast_sha256": "sha256:0bd278a11ec1fcdf189bb883d0fb9d6e0c4943bc553465eeaf1a2a26fd1a911e",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "_verify_promoted_git_tree_contract"
+    },
+    {
+      "ast_sha256": "sha256:fe4fe89bc3955d193581722787a655409176d5c312d6b87ce452bda0db1d0974",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "_verify_promoted_source_tree_contract"
     },
     {
       "ast_sha256": "sha256:3ad1a2e70cf8e8210f0dbf0602df4ed297d5ee37001944f5b3f2fd39ecc24b06",
@@ -705,6 +770,16 @@
       "ast_sha256": "sha256:9d66766d0c68cd3b9b82fae4568aac8fe7ae0be0474654134846160ed5848649",
       "path": "gateway/research_lab/provider_capabilities.py",
       "symbol": "_SOURCE_ADD_MANIFEST_RE"
+    },
+    {
+      "ast_sha256": "sha256:b0e6783b8ef3d1040a5588f5a2d4e808446bf97da89aafa6d3f0faa843d1fd81",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "_SOURCE_ADD_MUTABLE_RUNTIME_FUNCTIONS"
+    },
+    {
+      "ast_sha256": "sha256:fc586cf519eaecc129297ab9479494dc9e507a9d9cb89d4b133683dfb9c8946b",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "_SOURCE_ADD_PROTECTED_ROUTER_NAMES"
     },
     {
       "ast_sha256": "sha256:0c0efce10850559d3a4d98027666f65482a60a0569db40fc050112063c1086f8",
@@ -852,7 +927,7 @@
       "symbol": "normalize_source_add_planner_contract"
     },
     {
-      "ast_sha256": "sha256:d066efcc5ffcccbecd7a2883536e010c83a985d8b34b15e112b5defc9a47adfb",
+      "ast_sha256": "sha256:35fb3ca4b624240273584616b353f629036e7ec438febec6c014b2e8f672dd37",
       "path": "gateway/research_lab/provider_capabilities.py",
       "symbol": "validate_source_add_registration_diff"
     },
@@ -1012,7 +1087,7 @@
       "symbol": "AutoresearchExecutorV2"
     },
     {
-      "ast_sha256": "sha256:bcfe8cf6c0c26e801c86e29eeacc52fb0ffb25a9c868e82bcdffee124de1128e",
+      "ast_sha256": "sha256:7569c8c2199749e05e36bb953cb080988dd569b9db8dfd6ce7018c6edac366be",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "_HostCandidateBuilder"
     },
@@ -1020,6 +1095,11 @@
       "ast_sha256": "sha256:899d7df54b786760f6c15aa431e1616cbdd21712011a9e936c82aee000cd12a9",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "_HostGitTreeRepository"
+    },
+    {
+      "ast_sha256": "sha256:b5dc9c2b441ac523eb254dff88bd1fdf4342c9783759546f63e5790e1644506f",
+      "path": "gateway/tee/autoresearch_executor_v2.py",
+      "symbol": "_source_context"
     },
     {
       "ast_sha256": "sha256:5b8ef524ed49eee74801a83bf0d7ee7ef1b757c856f8ece9556cd309eaade16a",
@@ -2372,12 +2452,32 @@
       "symbol": "compute_reimbursement_award"
     },
     {
+      "ast_sha256": "sha256:07d77ec7926cd36d7ee8fd0286ee562b803abf34ec5bcde32080fcf4a1b100fe",
+      "path": "research_lab/code_editing.py",
+      "symbol": "IMMUTABLE_SOURCING_PIPELINE_PATHS"
+    },
+    {
+      "ast_sha256": "sha256:7e01bda78162b4e46229223c75c6395a1b06396beda50eaf5e0afd9364c9aec0",
+      "path": "research_lab/code_editing.py",
+      "symbol": "LOOP_DIRECTION_ALLOWED_LANES"
+    },
+    {
+      "ast_sha256": "sha256:7ab3984e6a51fd01425ee0c288a3d9b8a3d1e578c2f0b523ab3d3362ee189218",
+      "path": "research_lab/code_editing.py",
+      "symbol": "LOOP_DIRECTION_VALIDATION_MODES"
+    },
+    {
+      "ast_sha256": "sha256:3fe3db8d19d21dfa82770a411c69ecf9954b67712fa417e4309dc292bcee09b0",
+      "path": "research_lab/code_editing.py",
+      "symbol": "SOURCING_PIPELINE_EDITABLE_PATHS"
+    },
+    {
       "ast_sha256": "sha256:b0460f368c49f12a2a4689d8bdc3ad2b3a1de85c63a349671cd4f41b47c6baf0",
       "path": "research_lab/code_editing.py",
       "symbol": "_GIT_STRUCTURAL_DIFF_PREFIXES"
     },
     {
-      "ast_sha256": "sha256:0ea67aea860bc4864bb81e7bdf0154ed37d15d9793cc325382b20c594667c010",
+      "ast_sha256": "sha256:1db9b4a9e2bd4b0813559ceca5601efe5cda6551dfb298a8fb84b2f463fb94e8",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_auto_research_messages"
     },
@@ -2392,12 +2492,12 @@
       "symbol": "build_code_edit_repair_messages"
     },
     {
-      "ast_sha256": "sha256:35a588194d0453d72425c30062331ae90e51063d4c0955218ecb3c3f60bde589",
+      "ast_sha256": "sha256:225e385426a433418d0f2caf1b0fede216f94aace47ffe40e22540116f66c21a",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_source_inspection_messages"
     },
     {
-      "ast_sha256": "sha256:dc78161e0f59f36fe649966325374a8c0ece2ab76c8dc53c7258c0b98b224ace",
+      "ast_sha256": "sha256:e6ac3d26737e6c04e98916ab091da18829c24b5c0ff426974949ae9094da1949",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_planner_messages"
     },
@@ -2420,6 +2520,11 @@
       "ast_sha256": "sha256:f179f8d9ecb8d688103ba0629eb124441b1914a44b8b870f0ef70f972595aa09",
       "path": "research_lab/code_editing.py",
       "symbol": "git_diff_structural_metadata"
+    },
+    {
+      "ast_sha256": "sha256:52e7f0285bd9a85d2b2b9ca0fff1b9e1b67ddb303865c039fed21d2b8cba73e7",
+      "path": "research_lab/code_editing.py",
+      "symbol": "loop_direction_plan_contract_errors"
     },
     {
       "ast_sha256": "sha256:b6c7866522d61cf146bf8619e45a5a5b4ef5c2a2c9c01fb491309760e3049bc6",
@@ -2447,7 +2552,12 @@
       "symbol": "parse_plan_alignment_judge_response"
     },
     {
-      "ast_sha256": "sha256:e6174d0072e186d9be77b8d4e8ca33019d8460a23af8bc245be0977d194c0e19",
+      "ast_sha256": "sha256:fe06ee64f3ef1831ee720cdecd5743cd099180a1d795604abc06acdabbbaedb3",
+      "path": "research_lab/code_editing.py",
+      "symbol": "sourcing_pipeline_guard_errors"
+    },
+    {
+      "ast_sha256": "sha256:066a8c0159340e4dae8819cae439dc11c9a4021e86204b680eacc3bbff9c5c7d",
       "path": "research_lab/code_editing.py",
       "symbol": "validate_code_edit_draft"
     },
@@ -2567,6 +2677,11 @@
       "symbol": "_REVIEWED_CONSUMER_MANIFEST_PAIRS"
     },
     {
+      "ast_sha256": "sha256:c6e8143713376c4d29587a6e6261215c42e73f464b852ca383393bcb711dd810",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_excluded_source_path"
+    },
+    {
       "ast_sha256": "sha256:b3865748f3d116eed4679d5f715f8029db9e0732d65a5372e003f8204d6b5e36",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_private_manifest_hash_payload"
@@ -2590,6 +2705,11 @@
       "ast_sha256": "sha256:678085f71d8ac2b46f7264c609d11e908478bcacca1e124792d578095b5ce1eb",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "build_local_private_artifact_manifest"
+    },
+    {
+      "ast_sha256": "sha256:b72ca069de01302117d6b1a5f059dd635c646278825d5bca3dc66427367acd9e",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "compute_private_source_tree_hash"
     },
     {
       "ast_sha256": "sha256:d061a3c38907d22ba209e179a41b5f78662fbc4f1cc2a04c2ab2d5d927e358f0",
@@ -2707,14 +2827,519 @@
       "symbol": "validate_source_add_reward_record"
     },
     {
+      "ast_sha256": "sha256:a2c81b72e36b1a03bb28bc7f59614bcc9adaa80d7a3163a78f3ee4537c4bae47",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "CONTRACT_PATH"
+    },
+    {
+      "ast_sha256": "sha256:0226e1e0f1ac28b864d1abb71b7e0f9350be8a834cd287ac667902279945bdc4",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "CONTRACT_V11_PATH"
+    },
+    {
+      "ast_sha256": "sha256:48144e873c97140feebf5be10ea3ff2b68d00d75cfc0c52f4de53758d29f1e5f",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "CONTRACT_V12_PATH"
+    },
+    {
+      "ast_sha256": "sha256:3540f669c5a95ec8719976f4dc8a49e21372e35f97993aad58414209a6966aa9",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "CONTRACT_V13_PATH"
+    },
+    {
+      "ast_sha256": "sha256:fb64ab539e1d3d705b06e99c2d237a4802fdc92d20b7442b6db2884fe0869350",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "CONTRACT_V26_PATH"
+    },
+    {
+      "ast_sha256": "sha256:db829891d6ed1eab2cf166100c6243f841a858ef82595af22257a23829acbd26",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "CONTRACT_V7_PATH"
+    },
+    {
+      "ast_sha256": "sha256:d872918425844b7ed0dc84ca6147fa56c1648d8dde427ffb4826ff7037300f54",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "PARITY_FIXTURE_PATH"
+    },
+    {
+      "ast_sha256": "sha256:4a633e1028ffe45386e3d11238a7bc1b923acd4f6b7746fe25cc2ed5c5144338",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "PARITY_FIXTURE_V11_PATH"
+    },
+    {
+      "ast_sha256": "sha256:608ce021d73daf35706600b4caba560b018263408bc194b63493078b405f8c1f",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "PARITY_FIXTURE_V12_PATH"
+    },
+    {
+      "ast_sha256": "sha256:e3e12711dfa6b54eb62b03b08be3bf472519bc9ca7002f7de0ddec934be3b171",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "PARITY_FIXTURE_V13_PATH"
+    },
+    {
+      "ast_sha256": "sha256:e898c260441c399a2a6b19e9952b8571c04418f0de77daebe8ec988f0c9038bd",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "PARITY_FIXTURE_V26_PATH"
+    },
+    {
+      "ast_sha256": "sha256:1e01b4ae3adc2b635f31ff5676c0fdb6649b3af6b87f151b69398f2c9319e98e",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "PARITY_FIXTURE_V7_PATH"
+    },
+    {
       "ast_sha256": "sha256:cf5d43b3447c91e00c631b5f05088c60f72464f8f3bc9107b543e4624248edee",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "REVIEWED_CONSUMER_SNAPSHOT_SPECS"
     },
     {
+      "ast_sha256": "sha256:091ade817c52d8f8f6b6d5fdc3ecbbbb1728841fc62984f437759fdf1dc18819",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_DEFAULT_ROUTER_STAGE_BINDINGS"
+    },
+    {
+      "ast_sha256": "sha256:01c5770a20a4ff674ea9afb4c30c71e79665755860a0035074abb738a3b52ec5",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_COLLECTION_FUNCTIONS"
+    },
+    {
+      "ast_sha256": "sha256:a7b7495d50808f71b24f690ae5e56b8dba5360081508c5ef82ed76467447c452",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_CONSTRUCTOR_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:6db3508d962c0977ac5902ae7a47708cb6e377826f266b9fcd2e7f5cd88f283b",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_CONSTRUCTOR_POSITIONAL_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:bb5ade883da40db28916585db9dd720021f8dda07a84d4f569c4cfb83f5ca110",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_EDIT_SURFACE_MODULES"
+    },
+    {
+      "ast_sha256": "sha256:0ef498230d4e6d30ca29f913f7fd76ef5ec5cbe7de33378f848c048dc07d33dd",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_EXACT_SYMBOLS"
+    },
+    {
+      "ast_sha256": "sha256:fab0e9541bf6980ad20218ab346595bd8b411394005bc4019991ac75e09ac11d",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_FEATURE_RE"
+    },
+    {
+      "ast_sha256": "sha256:b4aced159813b485cc649a7172cf048baef38a53b7f51ba780b68d43903ddcd3",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_IDENTIFIER_RE"
+    },
+    {
+      "ast_sha256": "sha256:4e0575bf189c6e75f2c36ee7bf1c984db92bd3d5ad6c0510729f69bd550079c0",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_IMPORTED_TOOL_IDS"
+    },
+    {
+      "ast_sha256": "sha256:b045da36ac1c44ebce854aa6c7b8f9f5c314e15c64c8b401446e2305670edf7e",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_KNOWN_IMPORTED_VALUES"
+    },
+    {
+      "ast_sha256": "sha256:0a347cf286e0e8493f1049dba13c8230ed1ed540a7a72e34b7653b4ccff57bf9",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_LITERAL_STRING_BINDINGS"
+    },
+    {
+      "ast_sha256": "sha256:a596e4c2bc6cbd06477f675469c6470176a0ae8c9bc62c0130b88c85c8f05585",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_LIVENESS_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:410741043206ae12e5710538825636867065fc7fc8edb38b416cbc8d9c880b0f",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_MEMBERSHIP_MODULES"
+    },
+    {
+      "ast_sha256": "sha256:033a3d3060e58193cd1b7fd8d0ca0c26ae82534cb164e98c22c4edb857713d99",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_OPTIONAL_EDIT_SURFACE_MODULES"
+    },
+    {
+      "ast_sha256": "sha256:24d48bff45b2d2990e61cbc2bcc9f7f00ce9e3236dd871c36485e1f8c900b422",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_POLICY_MUTABLE_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:9b566580f0c9b2a0e6b97f037fe3470e874b3b3231a7054a5506a9a40151aaf9",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_PROMPT_BINDINGS"
+    },
+    {
+      "ast_sha256": "sha256:d978c29e7fa013fb6d6640a2746fb3dde2eb27f841f1c6fcc9212e6bf8ed5d54",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_PROMPT_CALL_SINKS"
+    },
+    {
+      "ast_sha256": "sha256:9b58c69d3fdf21bbda5cdb392d7ac121ce7bd0bd901fa9d98d61ce6a69cf2908",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_PROMPT_FUNCTIONS"
+    },
+    {
+      "ast_sha256": "sha256:7619cc061b53d21d2e328360353a005663c9fb1d22993061b70ebd1b2606d8a1",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_PROMPT_LOCAL_BINDINGS"
+    },
+    {
+      "ast_sha256": "sha256:02ccc7313d15ecf9d9321f1fa7910a3023006148728c7d8e61fa508706bf7d2c",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_PROVIDER_ID_RE"
+    },
+    {
+      "ast_sha256": "sha256:b4a865c4231f5a10010c94aa5929c35e23eb80743e6b98b6a652795501ffa476",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_REFLECTION_NAMES"
+    },
+    {
+      "ast_sha256": "sha256:ea2a6aa24ad1fb110a0f71556bc56eaa6fd719b5fbd4eb9985b2c0e13811a381",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_REVIEWED_SHARED_TOOL_OWNERSHIP"
+    },
+    {
+      "ast_sha256": "sha256:d0fca81149811f924ea22bc0d18b656e81a7709a9529e381c45838a9998b7ce3",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_ROUTING_MODULES"
+    },
+    {
+      "ast_sha256": "sha256:e748d14b0fb67cd37244f6d41272ed9c5e16dfc5f8723f34a1e493777fed0266",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_SHA256_RE"
+    },
+    {
+      "ast_sha256": "sha256:28b095606b12d8c450bdeafdd92cfbd1a8dde04e8dce8c59739286d7a52bb77d",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_SIGNAL_TOOL_MUTABLE_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:cbcc48e2bb825385a5b7a3a3dffa5c4dda750913695c122c71e2fa35af254365",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_SOURCE_ADD_MUTABLE_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:e0e65e254fb8f0eebd160f192234e398c36e7e11575ab9bb5335283af465cca2",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_SOURCE_ADD_V7_ACCEPTED_FIELD_SETS"
+    },
+    {
+      "ast_sha256": "sha256:eae887c64da86dccb8d049fbcfaa2e2a6c33af5d269efd1762fc832a0871adba",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_SOURCE_ADD_V7_FULL_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:3882d384e3f419c4295db80b55af7b513a8cccc3d8df091682eb87813beb2adf",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_SOURCE_ADD_V7_GUIDANCE_WITHOUT_CATEGORIES_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:2d0aa92e4bd41a660014b89b9f164e6f7e2b818effa9af05d939b81f115ff0ab",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_SOURCE_ADD_V7_LEGACY_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:c5949dd6b81040bc925c7fa867678e31e04ee9e6075dd82586a25a9cc0506e11",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_SOURCE_ADD_V7_ORIGINAL_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:6dded93907b2a983f890089f34e0be95996e4c40cc7e6986baad4a160c2ff2e6",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_STAGE_VALUES"
+    },
+    {
+      "ast_sha256": "sha256:e20c6e45f6658d9caaf78e7ea3c6c04a96b0c3bb709afd6bc3c9219568c81331",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_STRUCTURE_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:02e2b800bd7dfff34cfc546f1a4cea9bf7833d305d6fd4958410ee7a9750c1bf",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_TOOL_CONTRACT_ID_RE"
+    },
+    {
+      "ast_sha256": "sha256:17ae4730391ec4fd725bf99305a7e9e77d82503cf76f6a7b4c9929b4be2e47a6",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_TOOL_CONTRACT_TOKEN_RE"
+    },
+    {
+      "ast_sha256": "sha256:7c3ef7c6ba9e86e9afbecc1c562a18140f0accbc3f1eea10b7265923f8ee2760",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_TOOL_MUTABLE_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:a9b7c5ffcd96b639b4fc40af1628acd4a5b33ef9f4e064b1f02a04857385ea20",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_UNRESOLVED"
+    },
+    {
+      "ast_sha256": "sha256:625e8f4e2a578367b8ce4bbee6f06d53cbba18f628c7e01bd783c4dbcaf82ef3",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PIPELINE_VERSION_RE"
+    },
+    {
+      "ast_sha256": "sha256:4188d5dec16b99436ef960839c1195c0cea5c760a969732cd04179e7591a6ae4",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_PromptStringNormalizer"
+    },
+    {
+      "ast_sha256": "sha256:f63a3a43cc6ef94d31c066d42648230e71cd7f5cee670d6c1a206c82ffe6390c",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_ROUTER_STAGE_BINDINGS"
+    },
+    {
+      "ast_sha256": "sha256:3e44c366880b63041408c4f6d69f3b38313f94931d26ef77c3fe5f2c0dc42be5",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_assigned_name_and_value"
+    },
+    {
+      "ast_sha256": "sha256:6dfd541098630412b4af085c3ae4725ddf1ed9f1b95bfb6c7203bf7639ed48b9",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_assigned_value"
+    },
+    {
+      "ast_sha256": "sha256:17aa13068c996c4fdadfb72546113c650f7e7f96a1a0f2e435b62dab7796c7fe",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_assignment_with_sentinel"
+    },
+    {
+      "ast_sha256": "sha256:f387ff109ae47228199353c02ff30ef90d1bb97831df6a2e197e832a5e4293f5",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_call_argument"
+    },
+    {
+      "ast_sha256": "sha256:f13317c89371adb0ebf7e730efb1ad7450bc511c38ecd26aa185d2af6359af0b",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_call_name"
+    },
+    {
+      "ast_sha256": "sha256:5756cdda7ab5ea7c7353c04a45a8b18f1b0b3a78e336cfeb8c96d7a09eb7ceb3",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_collection_function_shell"
+    },
+    {
+      "ast_sha256": "sha256:bcad8a5e26144e436181d385e3648d6713d113859fd5a5305af28b2fef27d1a1",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_collection_items"
+    },
+    {
+      "ast_sha256": "sha256:41e27fa61e4bb2a128cdec6dbd3fa6d08da1d0741263c3873d50fef7aed37490",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_compile_route_context"
+    },
+    {
+      "ast_sha256": "sha256:1c3d02f2355f81efade52e1ce469cfc910cfc7b48085b1295c929f48e7c67f86",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_declarative_constructor_call"
+    },
+    {
+      "ast_sha256": "sha256:a80e09fb3d676d8cc705ff362408b2454bd25f4126fe340226a9b9338f259519",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_function_rebinds"
+    },
+    {
+      "ast_sha256": "sha256:6593e803dbb417ccdca6728e62387ea6fb9a38a9febbc6c93694faf00854e756",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_function_signature"
+    },
+    {
+      "ast_sha256": "sha256:c56ae4729a844a119e6fa12da78e5ad11672f3a5026f7a365da7824795d4267c",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_has_single_unaliased_relative_import"
+    },
+    {
+      "ast_sha256": "sha256:c44e23d81e1c007172d852ac5ade49b36823b015ac63a5a1431e20557f0dda0e",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_int_constant"
+    },
+    {
+      "ast_sha256": "sha256:4566bb62cdf95641c658bef5618db80d02fba6da02c9c5efb2dcb6dad767b30a",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_is_pipeline_data_expression"
+    },
+    {
+      "ast_sha256": "sha256:7f62edb3b7066021c95e934960a08107d270ab62ce08b6f6c1047c1a3fe0b1f1",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_literal_module_constants"
+    },
+    {
+      "ast_sha256": "sha256:d3f63c3e8acb0145af21932eae9d2d5ed0592666653e8ed45da4dc0099b84d21",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_local_route_context_bindings"
+    },
+    {
+      "ast_sha256": "sha256:88fb7fcf3587d09da580fe53b4d1596b435bc023897d847cb6bca9d981393c70",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_membership_record"
+    },
+    {
+      "ast_sha256": "sha256:90d8293ff4ad71b011888f01faa06179dd8becda779f54ef9728abdf59ed916c",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_module_bound_imports"
+    },
+    {
+      "ast_sha256": "sha256:3ba1aee11915a12218697cf8c4674bd55c10dc608451da75d2ce2a3fac5d0eee",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_module_edit_surface_projection"
+    },
+    {
+      "ast_sha256": "sha256:cf6d47bdc345d10ecb47ebcf85bf2d680d7e6398a04fe3eb968bc91372bb3166",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_module_protected_binding_violations"
+    },
+    {
+      "ast_sha256": "sha256:4b4fe37c7006f777ae847c950be5aff2339ce08875e14efe5a78c5268a201724",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_module_scope_bindings"
+    },
+    {
+      "ast_sha256": "sha256:b77a70d964b4929d579187f0c78a5ecfa5936c2fc72fe42c2c5d04d8c04e3b52",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_module_symbols"
+    },
+    {
+      "ast_sha256": "sha256:699818463e37516ffc8ed99f44cd50f95ec8bd5160854a56f96cb3cae70dfd6b",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_node_hash"
+    },
+    {
+      "ast_sha256": "sha256:b8513e140ddeef2095094a87bf3e4ba0105e2980cfc2d484ddd996eef5aa4226",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_normalize_source_add_registration_static"
+    },
+    {
+      "ast_sha256": "sha256:279b57775061580152a8aace3aa08159f33fd162674ee6a24b26de87e63da2d2",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_normalized_collection_entry"
+    },
+    {
+      "ast_sha256": "sha256:3152571440739096a6c1ca693e0bad234d0650c1209e8d51a3f56551e2f1339b",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_normalized_expansion"
+    },
+    {
+      "ast_sha256": "sha256:c3fa14bf0e20e3215a01b609f49e8779b9dae1346e860ffc4349dcc4764354d7",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_normalized_prompt_output_expression"
+    },
+    {
+      "ast_sha256": "sha256:ba742985e99240f72802fe9458b8d19f15241dec0f929fe91c2e4d45056bd6c0",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_constructor_semantic_errors"
+    },
+    {
+      "ast_sha256": "sha256:715d55395247a16204fad72a31183a06de74203b421c9cd7ed65956b6d11d49c",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_edit_surface_modules"
+    },
+    {
+      "ast_sha256": "sha256:d337da0ea8d5d5e2c0b1296fe3a8884862fc6e3e091721cb8da1deca67ed0b17",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_literal_value"
+    },
+    {
+      "ast_sha256": "sha256:6968216723752ce695b8cb3fff66b4dfdbe9049e3d302a60a7abcfda37d1211a",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_membership_projection"
+    },
+    {
+      "ast_sha256": "sha256:bee282d98a0d986e5be59e88e75763918c365aef7e5cb7197208ea3b4034bc19",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_prompt_binding_errors"
+    },
+    {
+      "ast_sha256": "sha256:e40bc1aa3c40183ae274d397b8f16829e5a01864243f8234134943caa8facd24",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_routing_policy_errors"
+    },
+    {
+      "ast_sha256": "sha256:22fe5094b579cfc96c45d597708d76d378134e78979ae69b6898c7b47adbc08c",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_static_values"
+    },
+    {
+      "ast_sha256": "sha256:d08021f90cc7b58dcee985a09312be6129df75320b31764e4eac2fd5a4481164",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_static_values_before"
+    },
+    {
+      "ast_sha256": "sha256:2643d818760915738758d829065df94b2e02f8b0aebcadffad90e7f0100de6d2",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_static_values_for_module"
+    },
+    {
+      "ast_sha256": "sha256:98bff1f3c5dec18f66c5268261766e30b19daa864d78f9f5bd2a47a5c2ef7b78",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_static_values_for_module_before"
+    },
+    {
+      "ast_sha256": "sha256:1b2aa0661930d43b709822fa7c726dbfbc739a10d08df2503fbead55681f7237",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_string_sequence"
+    },
+    {
+      "ast_sha256": "sha256:784017ee6a4a0d22a63afe5d3e7202a0fc42dbbaddeec1a0c74bb1bd6366fa0d",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_pipeline_unresolved_name"
+    },
+    {
+      "ast_sha256": "sha256:ccf72b10f61175c278fc5d4c5423af7da942baa81b1f2137d4f841962a886314",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_prompt_call_sink"
+    },
+    {
+      "ast_sha256": "sha256:32270f47edc262f46eb08b1dbc86c2b7e0bc69155b59bd110db3616c4def0e7c",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_resolve_stages"
+    },
+    {
+      "ast_sha256": "sha256:baaf7b2e02c15163156a47eec6888cab71e1c403040def4327de98d72e10d003",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_resolve_string"
+    },
+    {
+      "ast_sha256": "sha256:61d94da251f868064f5600164e5b5441628dcdb1024dc6e6f842aced1ff5f2e9",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_router_stage_binding_violations"
+    },
+    {
+      "ast_sha256": "sha256:ba1d69cc73b6405789e2d8b185f6d1d78e3fab2648806be8c331d8d1726cf48d",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_same_literal"
+    },
+    {
+      "ast_sha256": "sha256:ec3a5d21af80d240b1e5cf0d3fb713c0a76a6939fc3cac5fc95b2016a30372ae",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_simple_assignment_target"
+    },
+    {
+      "ast_sha256": "sha256:14ee16149a0b6e867501fa6ca7352d9e3841ca0659e89caa6f1a79ecb5f6ff57",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_simple_string_constants"
+    },
+    {
       "ast_sha256": "sha256:c2cdf5a53b0bf0134a5c2c438e3167c62015adb494fd4883cc184e322c1f4fb0",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "_snapshot_sha256"
+    },
+    {
+      "ast_sha256": "sha256:cfb815721a5a6bfcef5011a3fa7f9eae943bf60c0d02d1eeee7c9aa2dc9646b0",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_source_add_registration_values"
+    },
+    {
+      "ast_sha256": "sha256:9c78a3153b7e50ec0e502bedb66e8b70e00ef11a132b0fa416fd1e7171bbf6a3",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_top_level_binding_nodes"
+    },
+    {
+      "ast_sha256": "sha256:c9b51a4669fffeaa4a3ccd68a3870623e74ef473706a3203de21144c0c2fb377",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_without_docstring"
     },
     {
       "ast_sha256": "sha256:6d61bfa385fb3d0a44388983a7852f153ebfd2e11c35caaf9ec8563f7a95f595",
@@ -2732,12 +3357,27 @@
       "symbol": "reviewed_consumer_snapshots"
     },
     {
-      "ast_sha256": "sha256:e45535d006aa839564ca448535fad6245a1eb521e37ca83e5a59212db5e1d45a",
+      "ast_sha256": "sha256:bf994a312725aad2c3ecd5f42a5944c014f2e79ff127c2c95581a2f24543bb60",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "sourcing_pipeline_preservation_errors"
+    },
+    {
+      "ast_sha256": "sha256:e60e8ac6b1216220ded0de671f71a7b3ebcda88f134a55a75ab7f46e43338a63",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "sourcing_pipeline_structure_document"
+    },
+    {
+      "ast_sha256": "sha256:f21dbf8e1039c242dfa5a7b781b97d19ccdc10c57efb86e46bb980eb1271c801",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "verify_source_tree_contract"
+    },
+    {
+      "ast_sha256": "sha256:8cef305529975c6b8c86f4fcc7ef3cb846ad010f1bd65e15a7b420ff48677e31",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "verify_sourcing_pipeline_structure"
     }
   ],
-  "manifest_hash": "sha256:f4df208d9b466dc2f9f8f4305e2d7adca83da6d1bdaf69814d61be073572aad7",
-  "protected_source_commit": "aaf2df46ef1408e6874964db8b58d7ee4105d943",
+  "manifest_hash": "sha256:05df565994432730ed107e9de5dcaf7c8fac62ffaa9dc0a8112fcfd91d6b858c",
+  "protected_source_commit": "fa2cfbf6a42ba5786d64d46c1e2fdf866143fe71",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

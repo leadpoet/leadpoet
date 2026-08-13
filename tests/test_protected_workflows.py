@@ -108,10 +108,57 @@ def test_git_tree_source_authority_boundaries_are_protected():
     assert "_push_candidate_source_diff_to_repo" in PROTECTED_SYMBOLS[
         "gateway/research_lab/promotion.py"
     ]
+    assert {
+        "IMMUTABLE_SOURCING_PIPELINE_PATHS",
+        "LOOP_DIRECTION_ALLOWED_LANES",
+        "loop_direction_plan_contract_errors",
+        "sourcing_pipeline_guard_errors",
+    } <= set(PROTECTED_SYMBOLS["research_lab/code_editing.py"])
+    assert {
+        "CONTRACT_V26_PATH",
+        "PARITY_FIXTURE_V26_PATH",
+        "_ROUTER_STAGE_BINDINGS",
+        "_DEFAULT_ROUTER_STAGE_BINDINGS",
+        "_PIPELINE_PROMPT_LOCAL_BINDINGS",
+        "_PIPELINE_PROMPT_CALL_SINKS",
+        "_PIPELINE_LITERAL_STRING_BINDINGS",
+        "_PIPELINE_OPTIONAL_EDIT_SURFACE_MODULES",
+        "_pipeline_edit_surface_modules",
+        "_PIPELINE_REVIEWED_SHARED_TOOL_OWNERSHIP",
+        "_normalized_prompt_output_expression",
+        "_local_route_context_bindings",
+        "_router_stage_binding_violations",
+        "verify_sourcing_pipeline_structure",
+    } <= set(
+        PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]
+    )
+    assert "_sourcing_pipeline_structure_gate" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/code_build.py"
+    ]
+    assert "_sourcing_loop_visible_files" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/code_build.py"
+    ]
+    assert "CodeEditCandidateBuilder._source_context_from_root" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/code_build.py"
+    ]
+    assert (
+        "CodeEditCandidateBuilder.validate_draft_against_source_context"
+        in PROTECTED_SYMBOLS["gateway/research_lab/code_build.py"]
+    )
+    assert "_post_private_build_source_integrity_gate" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/code_build.py"
+    ]
+    assert {
+        "ResearchLabPromotionController._maybe_push_private_repo_candidate",
+        "ResearchLabPromotionController._maybe_finalize_missing_private_source_push",
+        "_verify_promoted_git_tree_contract",
+        "_extract_promoted_git_tree_archive",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/promotion.py"])
     assert "_load_candidate_source_diff" in PROTECTED_SYMBOLS[
         "gateway/research_lab/scoring_worker.py"
     ]
     assert {
+        "_source_context",
         "_HostGitTreeRepository",
         "_HostCandidateBuilder",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/autoresearch_executor_v2.py"])

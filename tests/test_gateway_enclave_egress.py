@@ -1716,19 +1716,19 @@ def test_enclave_proxy_accepts_tunnel_framing_with_upstream_proxy():
     assert parsed["upstream_proxy_url"].startswith("https://worker:secret@")
 
 
-def test_measured_upstream_proxy_framing_scenario(monkeypatch):
+def test_measured_assigned_proxy_raw_transport_scenario(monkeypatch):
     monkeypatch.syspath_prepend(
         str(Path(__file__).parent / "restart_rehearsal")
     )
     from production_workflow_runner import (
-        _exercise_measured_upstream_proxy_framing,
+        _exercise_measured_assigned_proxy_raw_transport,
     )
 
-    evidence = _exercise_measured_upstream_proxy_framing()
+    evidence = _exercise_measured_assigned_proxy_raw_transport()
 
     assert evidence == {
         "exact_httpx_enclave_parent_proxy_provider_path": True,
-        "framed_parent_tunnel_verified": True,
+        "assigned_proxy_raw_parent_tunnel_verified": True,
         "nested_tls_verified": True,
         "proxy_auth_remained_in_enclave": True,
         "provider_first_close_verified": True,

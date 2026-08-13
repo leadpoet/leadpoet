@@ -8560,20 +8560,15 @@ def _exercise_measured_upstream_proxy_transport(
     }
 
 
-def _exercise_measured_upstream_proxy_framing() -> dict[str, Any]:
-    from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
-
+def _exercise_measured_assigned_proxy_raw_transport() -> dict[str, Any]:
     evidence = _exercise_measured_upstream_proxy_transport(
-        upstream_parent_tunnel_framing=TUNNEL_FRAMING_MODE,
+        upstream_parent_tunnel_framing="",
     )
     if evidence.pop("parent_tunnel_framing"):
         raise RuntimeError("direct coordinator transport was not raw")
-    if (
-        evidence.pop("upstream_parent_tunnel_framing")
-        != TUNNEL_FRAMING_MODE
-    ):
-        raise RuntimeError("measured upstream proxy framing was not exercised")
-    evidence["framed_parent_tunnel_verified"] = True
+    if evidence.pop("upstream_parent_tunnel_framing"):
+        raise RuntimeError("assigned proxy parent transport was not raw")
+    evidence["assigned_proxy_raw_parent_tunnel_verified"] = True
     return evidence
 
 
@@ -8602,8 +8597,8 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "rebenchmark-provider-transport-evidence": (
         _exercise_rebenchmark_provider_transport_evidence
     ),
-    "measured-upstream-proxy-framing": (
-        _exercise_measured_upstream_proxy_framing
+    "measured-assigned-proxy-raw-transport": (
+        _exercise_measured_assigned_proxy_raw_transport
     ),
     "measured-coordinator-raw-transport": (
         _exercise_measured_coordinator_raw_transport
@@ -9238,34 +9233,34 @@ def main() -> int:
             ).get("baseline_pause_checkpoint_resume_complete")
             is True
         ),
-        "measured_upstream_proxy_framing_verified": (
+        "measured_assigned_proxy_raw_transport_verified": (
             behavior_evidence.get(
-                "measured-upstream-proxy-framing",
+                "measured-assigned-proxy-raw-transport",
                 {},
             ).get("exact_httpx_enclave_parent_proxy_provider_path")
             is True
             and behavior_evidence.get(
-                "measured-upstream-proxy-framing",
+                "measured-assigned-proxy-raw-transport",
                 {},
-            ).get("framed_parent_tunnel_verified")
+            ).get("assigned_proxy_raw_parent_tunnel_verified")
             is True
             and behavior_evidence.get(
-                "measured-upstream-proxy-framing",
+                "measured-assigned-proxy-raw-transport",
                 {},
             ).get("nested_tls_verified")
             is True
             and behavior_evidence.get(
-                "measured-upstream-proxy-framing",
+                "measured-assigned-proxy-raw-transport",
                 {},
             ).get("proxy_auth_remained_in_enclave")
             is True
             and behavior_evidence.get(
-                "measured-upstream-proxy-framing",
+                "measured-assigned-proxy-raw-transport",
                 {},
             ).get("provider_first_close_verified")
             is True
             and behavior_evidence.get(
-                "measured-upstream-proxy-framing",
+                "measured-assigned-proxy-raw-transport",
                 {},
             ).get("bounded_cleanup_verified")
             is True

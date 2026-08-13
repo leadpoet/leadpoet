@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 import re
 import stat
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
     from gateway.tee.normalize_attested_runtime import normalized_file_mode
@@ -239,39 +239,21 @@ def _resolve_relative_module(current_module: str, level: int, module: Optional[s
     return ".".join(base)
 
 
-def _candidate_imports(path: Path, module_name: str) -> Set[str]:
+def _parse_module(path: Path) -> ast.Module:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (OSError, SyntaxError, UnicodeDecodeError) as exc:
         raise ScoringClosureError("cannot parse %s: %s" % (path, exc)) from exc
+
+
+def _module_analysis_from_tree(
+    tree: ast.AST,
+    module_name: str,
+) -> Tuple[Set[str], Set[str]]:
     candidates: Set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            candidates.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            base = (
-                _resolve_relative_module(module_name, node.level, node.module)
-                if node.level
-                else str(node.module or "")
-            )
-            if base:
-                candidates.add(base)
-                candidates.update(
-                    base + "." + alias.name
-                    for alias in node.names
-                    if alias.name != "*"
-                )
-    return candidates
-
-
-def _literal_environment_names(path: Path) -> Set[str]:
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
-        raise ScoringClosureError("cannot parse %s: %s" % (path, exc)) from exc
     names: Set[str] = set()
     string_constants: Dict[str, str] = {}
-    for node in tree.body:
+    for node in getattr(tree, "body", ()):
         target = None
         value = None
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
@@ -293,7 +275,22 @@ def _literal_environment_names(path: Path) -> Set[str]:
         return None
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and node.args and isinstance(node.func, ast.Attribute):
+        if isinstance(node, ast.Import):
+            candidates.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = (
+                _resolve_relative_module(module_name, node.level, node.module)
+                if node.level
+                else str(node.module or "")
+            )
+            if base:
+                candidates.add(base)
+                candidates.update(
+                    base + "." + alias.name
+                    for alias in node.names
+                    if alias.name != "*"
+                )
+        elif isinstance(node, ast.Call) and node.args and isinstance(node.func, ast.Attribute):
             first = resolved_name(node.args[0])
             if not first:
                 continue
@@ -333,7 +330,26 @@ def _literal_environment_names(path: Path) -> Set[str]:
             resolved = resolved_name(slice_value)
             if resolved:
                 names.add(resolved)
-    return names
+    return candidates, names
+
+
+def _candidate_imports_from_tree(
+    tree: ast.AST,
+    module_name: str,
+) -> Set[str]:
+    return _module_analysis_from_tree(tree, module_name)[0]
+
+
+def _candidate_imports(path: Path, module_name: str) -> Set[str]:
+    return _candidate_imports_from_tree(_parse_module(path), module_name)
+
+
+def _literal_environment_names_from_tree(tree: ast.Module) -> Set[str]:
+    return _module_analysis_from_tree(tree, "")[1]
+
+
+def _literal_environment_names(path: Path) -> Set[str]:
+    return _literal_environment_names_from_tree(_parse_module(path))
 
 
 def _parents(module_name: str) -> Iterable[str]:
@@ -342,7 +358,12 @@ def _parents(module_name: str) -> Iterable[str]:
         yield ".".join(parts[:index])
 
 
-def discover_modules(index: Dict[str, Path], roots: Sequence[str]) -> Tuple[str, ...]:
+def _discover_modules(
+    index: Dict[str, Path],
+    roots: Sequence[str],
+    *,
+    candidate_imports: Callable[[Path, str], Set[str]],
+) -> Tuple[str, ...]:
     roots = tuple(dict.fromkeys(roots))
     missing_roots = [module for module in roots if module not in index]
     if missing_roots:
@@ -361,7 +382,7 @@ def discover_modules(index: Dict[str, Path], roots: Sequence[str]) -> Tuple[str,
         for parent in _parents(module):
             if parent in index and parent not in discovered:
                 pending.append(parent)
-        for candidate in _candidate_imports(path, module):
+        for candidate in candidate_imports(path, module):
             if candidate in index and candidate not in discovered:
                 pending.append(candidate)
                 continue
@@ -373,6 +394,14 @@ def discover_modules(index: Dict[str, Path], roots: Sequence[str]) -> Tuple[str,
                     pending.append(parent)
                     break
     return tuple(sorted(discovered))
+
+
+def discover_modules(index: Dict[str, Path], roots: Sequence[str]) -> Tuple[str, ...]:
+    return _discover_modules(
+        index,
+        roots,
+        candidate_imports=_candidate_imports,
+    )
 
 
 def discover_scoring_modules(index: Dict[str, Path]) -> Tuple[str, ...]:
@@ -431,10 +460,20 @@ def _measured_data_files(
     return output
 
 
-def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
+def _build_manifest(
+    *,
+    gateway_root: Path,
+    source_root: Path,
+    candidate_imports: Callable[[Path, str], Set[str]],
+    literal_environment_names: Callable[[Path], Set[str]],
+) -> dict:
     index = build_module_index(gateway_root=gateway_root, source_root=source_root)
     role_modules = {
-        role: discover_modules(index, roots)
+        role: _discover_modules(
+            index,
+            roots,
+            candidate_imports=candidate_imports,
+        )
         for role, roots in sorted(ROLE_ENTRYPOINT_MODULES.items())
     }
     modules = tuple(sorted({module for values in role_modules.values() for module in values}))
@@ -447,7 +486,7 @@ def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
     files_by_module: Dict[str, dict] = {}
     for module in modules:
         path = index[module]
-        environment_variables.update(_literal_environment_names(path))
+        environment_variables.update(literal_environment_names(path))
         staged_path = _staged_relative_path(
             path,
             gateway_root=gateway_root,
@@ -471,7 +510,7 @@ def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
             {
                 name
                 for module in discovered
-                for name in _literal_environment_names(index[module])
+                for name in literal_environment_names(index[module])
             }
         )
         role_body = {
@@ -507,6 +546,48 @@ def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
         **body,
         "manifest_hash": "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
     }
+
+
+def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
+    tree_cache: Dict[Path, ast.Module] = {}
+    analysis_cache: Dict[str, Tuple[Set[str], Set[str]]] = {}
+    module_by_path: Dict[Path, str] = {}
+
+    def parsed_tree(path: Path) -> ast.Module:
+        if path not in tree_cache:
+            tree_cache[path] = _parse_module(path)
+        return tree_cache[path]
+
+    def module_analysis(path: Path, module_name: str) -> Tuple[Set[str], Set[str]]:
+        existing_module = module_by_path.setdefault(path, module_name)
+        if existing_module != module_name:
+            raise ScoringClosureError(
+                "source path resolves to multiple modules: %s" % path
+            )
+        if module_name not in analysis_cache:
+            analysis_cache[module_name] = _module_analysis_from_tree(
+                parsed_tree(path),
+                module_name,
+            )
+        return analysis_cache[module_name]
+
+    def candidate_imports(path: Path, module_name: str) -> Set[str]:
+        return module_analysis(path, module_name)[0]
+
+    def literal_environment_names(path: Path) -> Set[str]:
+        module_name = module_by_path.get(path)
+        if module_name is None:
+            raise ScoringClosureError(
+                "environment source was not discovered as a module: %s" % path
+            )
+        return module_analysis(path, module_name)[1]
+
+    return _build_manifest(
+        gateway_root=gateway_root,
+        source_root=source_root,
+        candidate_imports=candidate_imports,
+        literal_environment_names=literal_environment_names,
+    )
 
 
 def write_manifest(manifest: dict, output: Path) -> None:

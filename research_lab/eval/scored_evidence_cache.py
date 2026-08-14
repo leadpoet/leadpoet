@@ -21,8 +21,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from typing import Any, Mapping, Sequence
+
+from qualification.scoring.company_fit_decision import (
+    COMPANY_FIT_DECISION_CONTRACT_ID,
+    COMPANY_FIT_DECISION_VERSION,
+    company_fit_decision_contract_identity,
+)
 
 SCORING_CACHE_DIR_ENV = "RESEARCH_LAB_SCORING_CACHE_DIR"
 
@@ -37,11 +44,85 @@ _ICP_SCORING_FIELDS = (
     "location",
     "geography",
     "intent_signals",
+    "intent_signal_evidence_types",
+    "intent_max_age_days",
+    "product_service",
     "required_attributes",
     "keywords",
     "description",
     "icp_text",
 )
+
+
+def _normalize_spacefold(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _normalize_company_stage(value: Any) -> str:
+    text = _normalize_spacefold(value)
+    if text in {"", "any", "all", "unknown", "n/a", "na", "not specified"}:
+        return ""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+
+
+def _normalize_country(value: Any) -> str:
+    """Use the scorer's canonical country aliases when they are available."""
+
+    raw = str(value or "").strip()
+    try:
+        from qualification.scoring.pre_checks import _normalize_country as normalize
+
+        return str(normalize(raw) or "")
+    except Exception:
+        return _normalize_spacefold(raw)
+
+
+def _normalize_required_attribute(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        try:
+            value = value.model_dump(mode="json")
+        except Exception:
+            value = str(value)
+    if isinstance(value, Mapping):
+        return {
+            _normalize_spacefold(key): _normalize_required_attribute(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_normalize_required_attribute(item) for item in value]
+    if isinstance(value, str):
+        return _normalize_spacefold(value)
+    return value
+
+
+def _normalize_excluded_companies(value: Any) -> list[Any]:
+    """Canonicalize exclusions as an order-independent matching policy."""
+
+    if value is None:
+        return []
+    values = [value] if isinstance(value, (str, bytes, Mapping)) else value
+    try:
+        normalized = [_normalize_required_attribute(item) for item in values]
+    except TypeError:
+        normalized = [_normalize_required_attribute(value)]
+    # Exclusion order has no scoring semantics. Sort the canonical JSON form
+    # so equivalent source orderings share one cache result.
+    return sorted(
+        normalized,
+        key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"), default=str),
+    )
+
+
+def company_fit_cache_policy_identity() -> dict[str, str]:
+    """Version the cache by the complete current company-fit decision policy."""
+
+    policy = company_fit_decision_contract_identity()
+    encoded = json.dumps(policy, sort_keys=True, separators=(",", ":"))
+    return {
+        "contract_id": COMPANY_FIT_DECISION_CONTRACT_ID,
+        "contract_version": COMPANY_FIT_DECISION_VERSION,
+        "policy_version": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }
 
 
 def _utc_day() -> str:
@@ -63,13 +144,28 @@ def scoring_cache_key(
 ) -> str:
     """Stable key for one scoring call.
 
-    Includes every ICP field that affects scoring, the exact companies (with
-    their intent evidence, canonicalized and order-preserving because order
-    drives de-dup), and the reference/candidate flag.
+    Includes every ICP field that affects scoring, the normalized company-fit
+    policy fields, the current ``company-fit-decision:v1`` policy version, the
+    exact companies (with their intent evidence, canonicalized and
+    order-preserving because order drives de-dup), and the reference/candidate
+    flag.
     """
-    icp_part = {k: _canonical(icp.get(k)) for k in _ICP_SCORING_FIELDS if icp.get(k) is not None}
+    icp_part = {
+        k: _canonical(icp.get(k))
+        for k in _ICP_SCORING_FIELDS
+        if icp.get(k) is not None
+    }
+    icp_part["company_stage"] = _normalize_company_stage(icp.get("company_stage"))
+    icp_part["country"] = _normalize_country(icp.get("country"))
+    icp_part["required_attribute"] = _normalize_required_attribute(
+        icp.get("required_attribute")
+    )
+    icp_part["excluded_companies"] = _normalize_excluded_companies(
+        icp.get("excluded_companies")
+    )
     payload = {
         "icp": icp_part,
+        "company_fit_policy": company_fit_cache_policy_identity(),
         "companies": [_canonical(c) for c in companies],
         "ref": bool(is_reference_model),
     }

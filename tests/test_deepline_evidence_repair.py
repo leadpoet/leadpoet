@@ -159,15 +159,50 @@ def test_hook_disabled_is_no_op(monkeypatch):
 
 
 def test_verifier_outage_is_unavailable_not_fabricated(monkeypatch):
+    from qualification.scoring.company_fit_decision import company_fit_match
+
     async def prechecks(*args, **kwargs):
-        return True, ""
+        return company_fit_match()
 
     async def company_exists(*args, **kwargs):
+        assert kwargs["company_linkedin"] == "https://linkedin.com/company/testco"
         assert kwargs["require_https_transport"] is True
-        return True, "verified"
+        return company_fit_match("verified")
 
     async def reverify(*args, **kwargs):
-        return True, "verified"
+        assert kwargs["require_company_fit_dimensions"] is True
+        return company_fit_match(
+            "verified",
+            details={
+                "dimension_decisions": {
+                    "employee_size": "match",
+                    "industry": "match",
+                    "geography": "match",
+                    "stage": "match",
+                },
+                "required_attribute_decision": "match",
+                "identity_decision": "match",
+                "identity_receipt": {
+                    "decision": "match",
+                    "reason_code": "verifier_accepted",
+                    "submitted_name": "testco",
+                    "submitted_domain": "testco.com",
+                    "submitted_linkedin_slug": "testco",
+                    "observed_name": "testco",
+                    "observed_domain": "testco.com",
+                    "observed_linkedin_slug": "testco",
+                    "evidence_source": "company_web_reverification",
+                },
+                "dimension_evidence": {
+                    dimension: {
+                        "url": f"https://evidence.example/{dimension}",
+                        "quote": f"Verified {dimension}",
+                    }
+                    for dimension in ("employee_size", "industry", "geography")
+                },
+                "provider_observations": {},
+            },
+        )
 
     async def scorer(*args, **kwargs):
         return (
@@ -191,7 +226,7 @@ def test_verifier_outage_is_unavailable_not_fabricated(monkeypatch):
 
     monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(
-        lead_scorer, "_run_autoresearch_binary_fit_checks", lambda *_: (True, "")
+        lead_scorer, "_run_company_binary_fit_checks", lambda *_: (True, "")
     )
     monkeypatch.setattr(lead_scorer, "verify_company_exists", company_exists)
     monkeypatch.setattr(lead_scorer, "_llm_reverify_company", reverify)

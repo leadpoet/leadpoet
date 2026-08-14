@@ -175,6 +175,88 @@ def test_infra_failures_never_penalized():
     )
 
 
+def test_structured_company_fit_unavailable_is_retryable_not_fp():
+    breakdown = _bd("Company fit pre-check unavailable: provider outage")
+    breakdown["verifier_gate_receipts"] = [
+        {
+            "gate": "taxonomy_industry",
+            "contract_version": "company-fit-decision:v1",
+            "decision": "unavailable",
+            "reason": "provider outage",
+        }
+    ]
+    assert evaluator.scorer_breakdown_has_retryable_infrastructure_failure(
+        breakdown
+    )
+    assert evaluator.count_penalizable_false_positives(
+        [breakdown], icp_has_intent_signals=True
+    ) == (0, 0)
+
+
+def _company_fit_receipt(decision: str) -> dict:
+    dimensions = {
+        "identity": decision,
+        "employee_size": decision,
+        "industry": decision,
+        "geography": decision,
+        "stage": "match",
+    }
+    return {
+        "gate": "company_fit",
+        "contract_id": "company-fit-decision:v1",
+        "contract_version": "company-fit-decision:v1",
+        "decision": decision,
+        "company_fit_decision": decision,
+        "company_fit_dimensions": dimensions,
+        "company_fit_stage_required": False,
+        "required_attribute_decision": "match",
+        "dimension_evidence": {
+            name: {"decision": value} for name, value in dimensions.items()
+        },
+    }
+
+
+def test_structured_company_fit_mismatch_is_penalized_without_reason_text():
+    breakdown = _bd("opaque wrapper text")
+    breakdown["verifier_gate_receipts"] = [_company_fit_receipt("mismatch")]
+    assert evaluator.count_penalizable_false_positives(
+        [breakdown], icp_has_intent_signals=True
+    ) == (1, 0)
+
+
+def test_company_fit_cache_key_versions_every_hard_gate_field():
+    from research_lab.eval.scored_evidence_cache import scoring_cache_key
+
+    company = [{"company_name": "Acme", "employee_count": "51-200"}]
+    base = {
+        "industry": "Software",
+        "employee_count": "51-200",
+        "company_stage": "Series A",
+        "country": "United States",
+        "required_attribute": "B2B software product",
+        "excluded_companies": ["other.example"],
+    }
+    baseline = scoring_cache_key(base, company, False)
+    for field, value in (
+        ("company_stage", "Series B"),
+        ("country", "Canada"),
+        ("required_attribute", "SOC 2 certified"),
+        ("excluded_companies", ["acme.example"]),
+        ("product_service", "Revenue intelligence"),
+        ("intent_max_age_days", 30),
+        ("intent_signal_evidence_types", ["HIRING"]),
+    ):
+        assert scoring_cache_key({**base, field: value}, company, False) != baseline
+
+
+def test_cache_requires_complete_current_company_fit_receipt():
+    old = _bd()
+    assert not evaluator.scorer_breakdown_has_complete_current_company_fit_receipt(old)
+    current = _bd()
+    current["verifier_gate_receipts"] = [_company_fit_receipt("match")]
+    assert evaluator.scorer_breakdown_has_complete_current_company_fit_receipt(current)
+
+
 def test_content_rejection_is_not_misclassified_as_retryable():
     breakdown = _bd("Company verification failed: company identity differs")
     assert not evaluator.scorer_breakdown_has_retryable_infrastructure_failure(

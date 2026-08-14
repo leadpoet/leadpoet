@@ -55,6 +55,13 @@ except ImportError:
 
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import LeadOutput, ICPPrompt, CompanyOutput
+from qualification.scoring.company_fit_decision import (
+    COMPANY_FIT_DECISION_CONTRACT_ID,
+    CompanyFitDecisionResult,
+    company_fit_match,
+    company_fit_mismatch,
+    company_fit_unavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -191,14 +198,14 @@ SUSPICIOUS_CHAR_PATTERN = re.compile(r'[<>{}|\\\^~`\[\]]')
 def _taxonomy_industry_gate_mode() -> str:
     """Resolve the taxonomy industry gate mode (disabled | shadow | enforce)."""
     value = str(
-        os.environ.get("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE") or "shadow"
+        os.environ.get("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE") or "enforce"
     ).strip().lower()
     if value not in {"disabled", "shadow", "enforce"}:
         logger.warning(
-            "taxonomy_industry_gate_invalid_mode value=%r falling back to shadow",
+            "taxonomy_industry_gate_invalid_mode value=%r falling back to enforce",
             value,
         )
-        return "shadow"
+        return "enforce"
     return value
 
 
@@ -278,32 +285,11 @@ async def _semantic_industry_rescue(
 
 async def _taxonomy_industry_gate(
     company: Any, icp: Any
-) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
-    """Canonical taxonomy/concept industry fit, ported from the site verifier.
-
-    Deterministic core is pure compute (no network, no LLM).  Decision table
-    (taxonomy mode x semantic mode), fixed after the PR-28 audit:
-
-      * taxonomy ``shadow``  — outcome is ALWAYS pass; deterministic and (if
-        consulted) semantic verdicts are logged + receipted only.
-      * taxonomy ``enforce``:
-          - canonical taxonomy conflict            -> zero (judge not consulted)
-          - ambiguous + semantic ``disabled``      -> zero
-          - ambiguous + semantic ``shadow``        -> zero (verdict receipted
-            only — semantic shadow NEVER changes the outcome)
-          - ambiguous + semantic ``enforce`` match -> pass (rescued)
-          - ambiguous + semantic ``enforce`` no-match -> zero
-          - ambiguous + semantic ``enforce`` UNAVAILABLE -> pass (fail-open:
-            judge unavailability is never a verdict)
-
-    Returns ``(passed, failure_reason, receipt)``; the receipt is a durable
-    audit document (gate modes, deterministic detail, semantic receipt, and
-    the final scoring effect).  Any internal failure logs a WARNING and fails
-    open — this gate must never take down scoring availability.
-    """
+) -> Tuple[CompanyFitDecisionResult, Optional[Dict[str, Any]]]:
+    """Return canonical industry fit without converting absence into a match."""
     mode = _taxonomy_industry_gate_mode()
     if mode == "disabled":
-        return True, None, None
+        return company_fit_match(), None
     try:
         from leadpoet_verifier.industry_fit import industry_fit
 
@@ -313,25 +299,33 @@ async def _taxonomy_industry_gate(
             getattr(company, "sub_industry", None),
             candidate_description=getattr(company, "description", None),
         )
-    except Exception as exc:  # noqa: BLE001 — availability over strictness
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
             "taxonomy_industry_gate_error mode=%s error=%s", mode, str(exc)[:200]
         )
-        return True, None, None
+        result = company_fit_unavailable(
+            f"taxonomy industry matcher unavailable: {type(exc).__name__}"
+        )
+        return result, result.receipt("taxonomy_industry")
     deterministic_receipt = {
         "passed": passed,
         "match_strategy": detail.get("match_strategy"),
         "candidate": detail.get("candidate"),
         "requested": detail.get("requested"),
+        "requested_concepts": detail.get("requested_concepts"),
+        "candidate_concepts": detail.get("candidate_concepts"),
         "matched_concepts": detail.get("matched_concepts"),
         "leadpoet_taxonomy": detail.get("leadpoet_taxonomy"),
     }
 
-    def _receipt(final_effect: str, semantic_mode: str = "disabled",
+    def _receipt(decision: str, final_effect: str, semantic_mode: str = "disabled",
                  semantic_receipt: Optional[Dict[str, Any]] = None,
                  semantic_verdict: Optional[bool] = None) -> Dict[str, Any]:
         return {
             "gate": "taxonomy_industry",
+            "contract_id": COMPANY_FIT_DECISION_CONTRACT_ID,
+            "contract_version": COMPANY_FIT_DECISION_CONTRACT_ID,
+            "decision": decision,
             "taxonomy_mode": mode,
             "semantic_mode": semantic_mode,
             "deterministic": deterministic_receipt,
@@ -341,11 +335,47 @@ async def _taxonomy_industry_gate(
         }
 
     if passed:
-        # No receipt on a trivial deterministic pass: with the default shadow
-        # mode this would attach an audit doc to EVERY scored company and
+        # No receipt on a trivial deterministic pass: this would attach an
+        # audit doc to EVERY scored company and
         # bloat every persisted breakdown for zero audit value. Receipts mark
-        # the non-trivial outcomes (shadow mismatch, rescue, fail-open, zero).
-        return True, None, None
+        # the non-trivial outcomes (shadow mismatch, rescue, unavailable, zero).
+        return company_fit_match(), None
+    taxonomy = detail.get("leadpoet_taxonomy") or {}
+    requested_concepts = set(detail.get("requested_concepts") or [])
+    candidate_concepts = set(detail.get("candidate_concepts") or [])
+    matched_concepts = set(detail.get("matched_concepts") or [])
+    explicit_conflict = taxonomy.get("decision") == "rejected" or bool(
+        requested_concepts and candidate_concepts and not matched_concepts
+    )
+    if explicit_conflict:
+        mismatch = company_fit_mismatch(
+            "Industry outside canonical taxonomy fit: "
+            f"'{getattr(company, 'industry', '')}' does not match ICP industry "
+            f"'{getattr(icp, 'industry', '')}'"
+        )
+        if mode == "shadow":
+            logger.warning(
+                "taxonomy_industry_gate_shadow_mismatch company=%r "
+                "icp_industry=%r strategy=%s detail=%s",
+                getattr(company, "company_name", None),
+                getattr(icp, "industry", None),
+                detail.get("match_strategy"),
+                {
+                    key: detail.get(key)
+                    for key in (
+                        "candidate",
+                        "requested",
+                        "candidate_concepts",
+                        "requested_concepts",
+                    )
+                },
+            )
+            return company_fit_match(), _receipt(
+                "match", "shadow_pass", "disabled", None, None
+            )
+        return mismatch, _receipt(
+            "mismatch", "zeroed", "disabled", None, None
+        )
     semantic_verdict: Optional[bool] = None
     semantic_mode = _resolved_semantic_mode()
     semantic_receipt: Optional[Dict[str, Any]] = None
@@ -359,7 +389,7 @@ async def _taxonomy_industry_gate(
         )
         if semantic_mode == "enforce":
             # A configured judge that cannot even start is UNAVAILABLE, not a
-            # verdict — receipt it so the fail-open branch below applies.
+            # verdict — receipt it so the unavailable branch below applies.
             semantic_receipt = {
                 "status": "unavailable",
                 "error_class": type(exc).__name__,
@@ -374,8 +404,8 @@ async def _taxonomy_industry_gate(
             semantic_verdict,
             {k: detail.get(k) for k in ("candidate", "requested", "matched_concepts")},
         )
-        return True, None, _receipt(
-            "shadow_pass", semantic_mode, semantic_receipt, semantic_verdict
+        return company_fit_match(), _receipt(
+            "match", "shadow_pass", semantic_mode, semantic_receipt, semantic_verdict
         )
     # taxonomy enforce: only a semantic-ENFORCE judge may change the outcome.
     if semantic_mode == "enforce":
@@ -385,29 +415,42 @@ async def _taxonomy_industry_gate(
                 getattr(company, "company_name", None),
                 getattr(icp, "industry", None),
             )
-            return True, None, _receipt(
-                "rescued_semantic_enforce", semantic_mode, semantic_receipt, True
+            return company_fit_match(), _receipt(
+                "match", "rescued_semantic_enforce", semantic_mode, semantic_receipt, True
             )
         if semantic_verdict is None and semantic_receipt is not None:
-            # The judge was consulted but UNAVAILABLE (provider outage or
-            # internal error): unavailability is never a verdict, so the
-            # documented fail-open contract passes the company.
             logger.warning(
-                "taxonomy_industry_gate_semantic_unavailable_failopen company=%r",
+                "taxonomy_industry_gate_semantic_unavailable company=%r",
                 getattr(company, "company_name", None),
             )
-            return True, None, _receipt(
-                "failed_open_semantic_unavailable",
+            result = company_fit_unavailable(
+                "semantic industry verification unavailable"
+            )
+            return result, _receipt(
+                "unavailable",
+                "unavailable",
                 semantic_mode,
                 semantic_receipt,
                 None,
             )
-    receipt = _receipt("zeroed", semantic_mode, semantic_receipt, semantic_verdict)
-    return False, (
-        "Industry outside canonical taxonomy fit: "
-        f"'{getattr(company, 'industry', '')}' does not match ICP industry "
-        f"'{getattr(icp, 'industry', '')}'"
-    ), receipt
+    if semantic_verdict is False:
+        result = company_fit_mismatch(
+            "Industry outside canonical taxonomy fit: "
+            f"'{getattr(company, 'industry', '')}' does not match ICP industry "
+            f"'{getattr(icp, 'industry', '')}'"
+        )
+    else:
+        result = company_fit_unavailable(
+            "Industry fit could not be proven by deterministic or semantic evidence"
+        )
+    receipt = _receipt(
+        result.decision,
+        "zeroed" if result.decision == "mismatch" else "unavailable",
+        semantic_mode,
+        semantic_receipt,
+        semantic_verdict,
+    )
+    return result, receipt
 
 
 async def run_company_zero_checks(
@@ -417,7 +460,8 @@ async def run_company_zero_checks(
     run_time_seconds: float,
     seen_companies: Set[str],
     gate_receipts: Optional[List[Dict[str, Any]]] = None,
-) -> Tuple[bool, Optional[str]]:
+    defer_fit_dimensions: bool = False,
+) -> CompanyFitDecisionResult:
     """Deterministic pre-checks that run BEFORE any LLM scoring in
     the company-mode model competition.
 
@@ -437,54 +481,53 @@ async def run_company_zero_checks(
     There is intentionally no role / seniority / email / contact
     check — the model competition surfaces companies, not contacts.
 
-    Returns ``(passed, failure_reason)``.
+    Returns a ``company-fit-decision:v1`` result. Historical callers can still
+    unpack it as ``(passed, failure_reason)``.
     """
+    def _mismatch(reason: Optional[str]) -> CompanyFitDecisionResult:
+        decision = company_fit_mismatch(reason)
+        if gate_receipts is not None:
+            gate_receipts.append(decision.receipt("company_pre_checks"))
+        return decision
+
     # Check 1: HARD time limit (30s safety net) — unchanged from lead-mode.
     result = check_hard_time_limit(run_time_seconds)
     if not result.passed:
         logger.info(f"Company failed hard time limit: {result.reason}")
-        return False, result.reason
+        return _mismatch(result.reason)
 
-    # Check 2: Industry sanity check.  Do not hard-zero merely because
-    # LinkedIn and ICP labels use adjacent names; the ICP-fit scorer
-    # has the context needed to score this properly.
-    result = check_industry_match(company.industry, icp.industry)
-    if not result.passed:
-        logger.info(f"Company failed industry check: {result.reason}")
-        return False, result.reason
-
-    # Check 3: Sub-industry sanity check — relaxed.  CompanyOutput marks
-    # sub_industry as optional; if either side is empty we skip the check
-    # rather than failing (industry fit is the primary filter).
-    if (icp.sub_industry and icp.sub_industry.strip()
-            and company.sub_industry and company.sub_industry.strip()):
-        result = check_sub_industry_match(company.sub_industry, icp.sub_industry)
+    if not defer_fit_dimensions:
+        # Direct legacy callers still receive the standalone taxonomy/country
+        # gates. Official public and Research Lab scoring defer these fields to
+        # the one shared verifier, which persists a complete dimension receipt.
+        result = check_industry_match(company.industry, icp.industry)
         if not result.passed:
-            logger.info(f"Company failed sub-industry check: {result.reason}")
-            return False, result.reason
+            logger.info(f"Company failed industry check: {result.reason}")
+            return _mismatch(result.reason)
 
-    # Check 3b: Canonical taxonomy industry fit (ported from the site
-    # verifier).  The fuzzy checks above are presence-only sanity gates; this
-    # evaluates the authoritative Leadpoet taxonomy + bounded canonical
-    # concepts.  Mode via RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE:
-    #   disabled — skip entirely;
-    #   shadow (default) — compute + log mismatches only, outcome unchanged;
-    #   enforce — hard-zero on a canonical mismatch (operator opt-in only,
-    #   because it changes benchmark scores).
-    taxonomy_passed, taxonomy_reason, taxonomy_receipt = (
-        await _taxonomy_industry_gate(company, icp)
-    )
-    if gate_receipts is not None and taxonomy_receipt is not None:
-        gate_receipts.append(taxonomy_receipt)
-    if not taxonomy_passed:
-        logger.info(f"Company failed taxonomy industry gate: {taxonomy_reason}")
-        return False, taxonomy_reason
+        if (icp.sub_industry and icp.sub_industry.strip()
+                and company.sub_industry and company.sub_industry.strip()):
+            result = check_sub_industry_match(company.sub_industry, icp.sub_industry)
+            if not result.passed:
+                logger.info(f"Company failed sub-industry check: {result.reason}")
+                return _mismatch(result.reason)
 
-    # Check 4: Country match — unchanged.
-    result = check_country_match(company.country, icp.country)
-    if not result.passed:
-        logger.info(f"Company failed country check: {result.reason}")
-        return False, result.reason
+        taxonomy_result, taxonomy_receipt = (
+            await _taxonomy_industry_gate(company, icp)
+        )
+        if gate_receipts is not None and taxonomy_receipt is not None:
+            gate_receipts.append(taxonomy_receipt)
+        if not taxonomy_result.passed:
+            logger.info(
+                "Company did not pass taxonomy industry gate: %s",
+                taxonomy_result.reason,
+            )
+            return taxonomy_result
+
+        result = check_country_match(company.country, icp.country)
+        if not result.passed:
+            logger.info(f"Company failed country check: {result.reason}")
+            return _mismatch(result.reason)
 
     # Check 5: Company-shaped data quality — light check for placeholder
     # text in the company name and website fields.  We do NOT call
@@ -493,16 +536,16 @@ async def run_company_zero_checks(
     quality_valid, quality_reason = _check_company_data_quality(company)
     if not quality_valid:
         logger.info(f"Company failed data quality check: {quality_reason}")
-        return False, f"Data quality issue: {quality_reason}"
+        return _mismatch(f"Data quality issue: {quality_reason}")
 
     # Check 6: Duplicate company tracking — first surface wins.
     result = check_duplicate_company(company.company_name, seen_companies)
     if not result.passed:
         logger.info(f"Company failed duplicate check: {result.reason}")
-        return False, result.reason
+        return _mismatch(result.reason)
 
     logger.debug(f"Company passed all company-mode pre-checks: {company.company_name}")
-    return True, None
+    return company_fit_match()
 
 
 def _check_company_data_quality(

@@ -84,7 +84,7 @@ def test_execution_config_commits_production_defaults_when_env_omits_them():
         behavior["RESEARCH_LAB_DEV_SNAPSHOT_URI"]
         == DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
     )
-    assert behavior["RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE"] == "shadow"
+    assert behavior["RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE"] == "enforce"
     assert behavior["VERIFIER_SEMANTIC_GATES_MODE"] == "disabled"
     assert behavior["VERIFIER_SEMANTIC_GATE_MODELS"] == ""
     assert behavior["RESEARCH_LAB_INTENT_CORROBORATION_RESCUE"] == "false"

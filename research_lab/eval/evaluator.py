@@ -21,6 +21,12 @@ from leadpoet_verifier.research_evaluation import (
 )
 from research_lab.canonical import canonical_json, sha256_json
 from research_lab.employee_buckets import normalize_employee_count_bucket
+from qualification.scoring.company_fit_decision import (
+    COMPANY_FIT_DECISION_CONTRACT_ID,
+    COMPANY_FIT_DECISION_VERSION,
+    COMPANY_FIT_DECISIONS,
+    COMPANY_FIT_DIMENSIONS,
+)
 
 from .artifacts import PrivateModelArtifactManifest, validate_private_model_artifact_manifest
 from .benchmark import SealedBenchmarkSet, validate_sealed_benchmark_set
@@ -306,6 +312,23 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
 
     if not isinstance(breakdown, Mapping):
         return False
+    gate_receipts = breakdown.get("verifier_gate_receipts")
+    if isinstance(gate_receipts, Sequence) and not isinstance(
+        gate_receipts, (str, bytes)
+    ):
+        for receipt in gate_receipts:
+            if not isinstance(receipt, Mapping):
+                continue
+            if (
+                str(
+                    receipt.get("contract_id")
+                    or receipt.get("contract_version")
+                    or ""
+                )
+                == "company-fit-decision:v1"
+                and str(receipt.get("decision") or "") == "unavailable"
+            ):
+                return True
     details = breakdown.get("intent_signals_detail")
     if isinstance(details, Sequence) and not isinstance(details, (str, bytes)):
         for detail in details:
@@ -329,6 +352,9 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
             "company verification error:",
             "company verification failed: website unreachable:",
             "company verification failed: website fetch error:",
+            "company verification unavailable:",
+            "company fit pre-check unavailable:",
+            "company web re-verification unavailable:",
             "providerclientv2error",
             "runner external request must use https",
             "provider error",
@@ -336,6 +362,79 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
             "http 429",
             "no_openrouter_key",
         )
+    )
+
+
+def scorer_breakdown_has_complete_current_company_fit_receipt(
+    breakdown: Mapping[str, Any],
+) -> bool:
+    """Whether a cached row contains the full current company-fit contract.
+
+    Cache records from before the v1 company-fit receipt cannot establish which
+    hard gates produced the score. Reusing one would silently carry old policy
+    behavior into a new evaluation, so only a full current final receipt may
+    satisfy a cache hit.
+    """
+
+    if not isinstance(breakdown, Mapping):
+        return False
+    receipts = breakdown.get("verifier_gate_receipts")
+    if not isinstance(receipts, Sequence) or isinstance(receipts, (str, bytes)):
+        return False
+    for receipt in receipts:
+        if not isinstance(receipt, Mapping):
+            continue
+        if (
+            receipt.get("gate") != "company_fit"
+            or receipt.get("contract_id") != COMPANY_FIT_DECISION_CONTRACT_ID
+            or receipt.get("contract_version") != COMPANY_FIT_DECISION_VERSION
+        ):
+            continue
+        decision = str(receipt.get("decision") or "")
+        if decision not in COMPANY_FIT_DECISIONS:
+            continue
+        if receipt.get("company_fit_decision") != decision:
+            continue
+        dimensions = receipt.get("company_fit_dimensions")
+        evidence = receipt.get("dimension_evidence")
+        if (
+            not isinstance(dimensions, Mapping)
+            or not isinstance(evidence, Mapping)
+            or not isinstance(receipt.get("company_fit_stage_required"), bool)
+            or str(receipt.get("required_attribute_decision") or "")
+            not in COMPANY_FIT_DECISIONS
+            or set(dimensions) != set(COMPANY_FIT_DIMENSIONS)
+        ):
+            continue
+        if any(
+            str(dimensions.get(dimension) or "") not in COMPANY_FIT_DECISIONS
+            or not isinstance(evidence.get(dimension), Mapping)
+            or evidence[dimension].get("decision") != dimensions[dimension]
+            for dimension in COMPANY_FIT_DIMENSIONS
+        ):
+            continue
+        return True
+    return False
+
+
+def scorer_breakdown_has_structured_company_fit_mismatch(
+    breakdown: Mapping[str, Any],
+) -> bool:
+    """True for a model-controllable company-fit conflict, independent of text."""
+
+    if not isinstance(breakdown, Mapping):
+        return False
+    receipts = breakdown.get("verifier_gate_receipts")
+    if not isinstance(receipts, Sequence) or isinstance(receipts, (str, bytes)):
+        return False
+    return any(
+        isinstance(receipt, Mapping)
+        and (
+            receipt.get("contract_id") == COMPANY_FIT_DECISION_CONTRACT_ID
+            or receipt.get("contract_version") == COMPANY_FIT_DECISION_VERSION
+        )
+        and str(receipt.get("decision") or "") == "mismatch"
+        for receipt in receipts
     )
 
 
@@ -368,6 +467,12 @@ def count_penalizable_false_positives(
         if not isinstance(row, Mapping):
             continue
         if scorer_breakdown_has_retryable_infrastructure_failure(row):
+            continue
+        # The v1 receipt is authoritative. A mismatch is a structural
+        # company-fit false positive even when a wrapper changes or removes
+        # the human-readable failure text.
+        if scorer_breakdown_has_structured_company_fit_mismatch(row):
+            gate_fps += 1
             continue
         reason = row.get("failure_reason")
         if reason:
@@ -3086,9 +3191,14 @@ class QualificationStyleCompanyScorer:
             if scoring_cache is not None:
                 cache_key = scoring_cache_key(icp, companies, is_reference_model)
                 cached = scoring_cache.get(cache_key)
-                if cached is not None and not any(
-                    scorer_breakdown_has_retryable_infrastructure_failure(item)
-                    for item in cached
+                if (
+                    cached
+                    and all(
+                        isinstance(item, Mapping)
+                        and scorer_breakdown_has_complete_current_company_fit_receipt(item)
+                        and not scorer_breakdown_has_retryable_infrastructure_failure(item)
+                        for item in cached
+                    )
                 ):
                     return [dict(item) for item in cached]
         except Exception:
@@ -3137,6 +3247,11 @@ class QualificationStyleCompanyScorer:
         if (
             scoring_cache is not None
             and cache_key
+            and breakdowns
+            and all(
+                scorer_breakdown_has_complete_current_company_fit_receipt(item)
+                for item in breakdowns
+            )
             and not any(
                 scorer_breakdown_has_retryable_infrastructure_failure(item)
                 for item in breakdowns

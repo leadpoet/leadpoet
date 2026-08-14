@@ -32,6 +32,15 @@ def test_private_model_commands_require_reviewed_routing_adapters() -> None:
     assert "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID" in DEFAULT_PRIVATE_BUILD_CMD
     assert "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID" not in DEFAULT_PRIVATE_BUILD_CMD
     assert "research-lab-candidate-manifest.XXXXXX" in DEFAULT_PRIVATE_BUILD_CMD
+    assert 'DOCKER_CONFIG="${BUILD_WORK_DIR}/docker-config"' in DEFAULT_PRIVATE_BUILD_CMD
+    assert "export DOCKER_CONFIG" in DEFAULT_PRIVATE_BUILD_CMD
+    assert "chmod 700 \"${DOCKER_CONFIG}\"" in DEFAULT_PRIVATE_BUILD_CMD
+    assert "chmod 600 \"${DOCKER_CONFIG}/config.json\"" in DEFAULT_PRIVATE_BUILD_CMD
+    assert "credentialHelpers" not in DEFAULT_PRIVATE_BUILD_CMD
+    assert "credsStore" not in DEFAULT_PRIVATE_BUILD_CMD
+    assert DEFAULT_PRIVATE_BUILD_CMD.index("export DOCKER_CONFIG") < (
+        DEFAULT_PRIVATE_BUILD_CMD.index("aws ecr get-login-password")
+    )
     assert "scripts/build_research_lab_manifest.py" not in DEFAULT_PRIVATE_BUILD_CMD
     assert "/tmp/research_lab_candidate_manifest_hash.txt" not in DEFAULT_PRIVATE_BUILD_CMD
     assert '"sourcing-model-components:v1"' not in DEFAULT_PRIVATE_BUILD_CMD

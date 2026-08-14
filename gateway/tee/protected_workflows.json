@@ -462,7 +462,7 @@
       "symbol": "_bind_loop_direction_plan"
     },
     {
-      "ast_sha256": "sha256:6dea1c370a92bda5c68fa90b0ab620bb78ef4eebfcbc87b9d3a20fb11bb01462",
+      "ast_sha256": "sha256:8ecc50b718de1ba425efa297aaa636ab0eee0dbd9cf8a9f939c0eed4d9174652",
       "path": "gateway/research_lab/config.py",
       "symbol": "DEFAULT_PRIVATE_BUILD_CMD"
     },
@@ -2772,7 +2772,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:00ba0a501851526a4dcd252e411653db00bb883aa64443ecd905f05ee65b1b93",
-  "protected_source_commit": "3be27b892c3ef5bfa6af3814135744a4e906a028",
+  "manifest_hash": "sha256:f7ecdfc726186a242979cb31d57cb9eed11b53c5afc38f09ebac6134b2cfda0d",
+  "protected_source_commit": "2a36a08b4857e0b932de43d5c56f62e6a0aa13f8",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -210,16 +210,28 @@ def _run_zero_checks(company: CompanyOutput, icp: ICPPrompt):
     )
 
 
-def test_shadow_mode_is_output_neutral(monkeypatch, caplog) -> None:
+def test_shadow_mode_is_output_neutral(monkeypatch) -> None:
     # A canonical industry mismatch in explicitly selected SHADOW mode passes
-    # exactly as before the port — only a tagged warning is emitted.
+    # exactly as before the port and records a durable shadow-only receipt.
     monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
     company, icp = _company("Food & Beverages"), _icp("Software")
-    with caplog.at_level("WARNING"):
-        passed, reason = _run_zero_checks(company, icp)
-    assert passed is True and reason is None  # outcome unchanged
+    receipts = []
+    result = asyncio.run(
+        pre_checks.run_company_zero_checks(
+            company,
+            icp,
+            run_cost_usd=0.0,
+            run_time_seconds=1.0,
+            seen_companies=set(),
+            gate_receipts=receipts,
+        )
+    )
+    assert result.passed is True and result.reason is None  # outcome unchanged
     assert any(
-        "taxonomy_industry_gate_shadow_mismatch" in rec.message for rec in caplog.records
+        receipt.get("gate") == "taxonomy_industry"
+        and receipt.get("taxonomy_mode") == "shadow"
+        and receipt.get("final_effect") == "shadow_pass"
+        for receipt in receipts
     )
 
 

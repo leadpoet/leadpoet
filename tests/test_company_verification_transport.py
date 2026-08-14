@@ -106,6 +106,20 @@ def test_homepage_name_is_a_match(monkeypatch):
     assert result.decision == COMPANY_FIT_MATCH
 
 
+def test_homepage_colon_title_is_a_match(monkeypatch):
+    import asyncio
+
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            b'<title>Example Company: product tagline</title>'
+            b'<a href="https://www.linkedin.com/company/example-company">LinkedIn</a>',
+        )
+    )
+    assert result.decision == COMPANY_FIT_MATCH
+
+
 def test_homepage_name_without_linkedin_binding_is_unavailable(monkeypatch):
     import asyncio
 
@@ -164,7 +178,7 @@ def test_https_mode_rejects_final_http_redirect(monkeypatch):
     assert "final URL is not HTTPS" in (result.reason or "")
 
 
-def test_homepage_conflicting_linkedin_binding_is_mismatch(monkeypatch):
+def test_homepage_nonnumeric_conflicting_linkedin_binding_is_mismatch(monkeypatch):
     import asyncio
 
     result = asyncio.run(
@@ -176,6 +190,23 @@ def test_homepage_conflicting_linkedin_binding_is_mismatch(monkeypatch):
     )
     assert result.decision == COMPANY_FIT_MISMATCH
     assert "identity conflict" in (result.reason or "")
+
+
+def test_homepage_numeric_linkedin_id_vs_vanity_slug_is_unavailable(monkeypatch):
+    import asyncio
+
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            b'<title>Example Company</title>'
+            b'<a href="https://www.linkedin.com/company/123456">LinkedIn</a>',
+        )
+    )
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["identity"]["reason_code"] == (
+        "identity_linkedin_alias_unresolved"
+    )
 
 
 def test_missing_submitted_linkedin_identity_is_mismatch(monkeypatch):

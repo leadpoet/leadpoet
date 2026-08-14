@@ -514,6 +514,97 @@ def test_shared_verifier_persists_complete_dimension_receipt(monkeypatch):
     }
 
 
+def test_homepage_unavailable_can_be_rescued_by_complete_web_receipt(monkeypatch):
+    import qualification.scoring.lead_scorer as scorer
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match()
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable("homepage lacks LinkedIn binding")
+
+    async def web(*_args, **_kwargs):
+        return company_fit_match(
+            "complete independent web receipt",
+            details={
+                "dimension_decisions": {
+                    "employee_size": "match",
+                    "industry": "match",
+                    "geography": "match",
+                    "stage": "match",
+                },
+                "required_attribute_decision": "match",
+                "identity_decision": "match",
+                "identity_receipt": {
+                    "decision": "match",
+                    "submitted_name": "acme",
+                    "submitted_domain": "acme.com",
+                    "submitted_linkedin_slug": "acme",
+                    "observed_name": "acme",
+                    "observed_domain": "acme.com",
+                    "observed_linkedin_slug": "acme",
+                    "evidence_source": "company_web_reverification",
+                },
+                "dimension_evidence": {
+                    dimension: {
+                        "url": f"https://evidence.example/{dimension}",
+                        "quote": f"Verified {dimension}",
+                    }
+                    for dimension in ("employee_size", "industry", "geography")
+                },
+            },
+        )
+
+    monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(scorer, "_llm_reverify_company", web)
+    result = asyncio.run(
+        _verify_company_fit(
+            _company(linkedin="https://linkedin.com/company/acme"),
+            _icp(),
+            0.0,
+            1.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+    assert result.decision == COMPANY_FIT_MATCH
+    identity = result.details["dimension_evidence"]["identity"]
+    assert identity["homepage_identity_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert identity["web_identity_decision"] == COMPANY_FIT_MATCH
+
+
+def test_homepage_unavailable_remains_unavailable_without_complete_web_receipt(monkeypatch):
+    import qualification.scoring.lead_scorer as scorer
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match()
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable("homepage lacks LinkedIn binding")
+
+    async def web(*_args, **_kwargs):
+        return company_fit_unavailable("web provider unavailable")
+
+    monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(scorer, "_llm_reverify_company", web)
+    result = asyncio.run(
+        _verify_company_fit(
+            _company(linkedin="https://linkedin.com/company/acme"),
+            _icp(),
+            0.0,
+            1.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    identity = result.details["dimension_evidence"]["identity"]
+    assert identity["homepage_identity_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert identity["web_identity_decision"] == COMPANY_FIT_UNAVAILABLE
+
+
 def test_public_and_research_lab_use_the_same_shared_verifier(monkeypatch):
     import qualification.scoring.lead_scorer as scorer
 

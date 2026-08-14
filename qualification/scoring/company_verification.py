@@ -355,7 +355,13 @@ def _homepage_company_names(page_text: str) -> list[str]:
         candidates.append(parser.title)
         candidates.extend(
             part.strip()
-            for part in re.split(r"\s+(?:\||-|\N{EN DASH}|\N{EM DASH}|:)\s+", parser.title)
+            # Product homepages commonly use ``Brand: tagline`` without a
+            # space before the colon. Keep the conservative whitespace rule
+            # for dash-like separators so hyphenated brand names are intact.
+            for part in re.split(
+                r"\s+(?:\||-|\N{EN DASH}|\N{EM DASH})\s+|\s*:\s*",
+                parser.title,
+            )
             if part.strip()
         )
     generic = {"home", "homepage", "welcome", "official site", "website"}
@@ -573,6 +579,16 @@ async def verify_company_exists(
         return _identity_result(
             conflict,
             f"company identity conflict: {conflict['reason_code']}",
+            actual_final_url=observed_url,
+        )
+    unavailable = next(
+        (receipt for receipt in identity_receipts if receipt["decision"] == "unavailable"),
+        None,
+    )
+    if unavailable is not None:
+        return _identity_result(
+            unavailable,
+            "homepage identity evidence unavailable: complete identity not proven",
             actual_final_url=observed_url,
         )
     return _identity_result(

@@ -1039,7 +1039,12 @@ async def _verify_company_fit(
         "reason": identity.reason,
         **dict(identity.details),
     }
-    if identity.decision != COMPANY_FIT_MATCH:
+    # A homepage mismatch is a proven conflict and remains terminal. An
+    # unavailable homepage result is incomplete evidence, not a negative
+    # company verdict: continue to the later web verifier, which must still
+    # return a complete independently bound identity and every active
+    # dimension before this company can pass.
+    if identity.decision == COMPANY_FIT_MISMATCH:
         aggregate = aggregate_company_fit_decisions(
             dimensions, stage_required=stage_required
         )
@@ -1100,6 +1105,8 @@ async def _verify_company_fit(
         "decision": web_identity_decision,
         "web_identity_decision": web_identity_decision,
         "web_identity_receipt": web_identity_mapping,
+        "homepage_identity_decision": identity.decision,
+        "homepage_identity_reason": identity.reason,
     }
     web_dimension_evidence = web_details.get("dimension_evidence") or {}
     if not isinstance(web_dimension_evidence, Mapping):

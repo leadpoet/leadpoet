@@ -213,6 +213,13 @@ def evaluate_company_identity(
     if not observed["linkedin_slug"]:
         return receipt
     if observed["linkedin_slug"] != submitted["linkedin_slug"]:
+        # LinkedIn may expose an opaque numeric company ID on a first-party
+        # homepage while the submitted record has the company's vanity slug.
+        # Those two identifiers do not prove a conflict by themselves; a later
+        # independently grounded web receipt can still bind the entity.
+        if observed["linkedin_slug"].isdigit() != submitted["linkedin_slug"].isdigit():
+            receipt.update(reason_code="identity_linkedin_alias_unresolved")
+            return receipt
         receipt.update(decision="mismatch", reason_code="identity_mismatch")
         return receipt
     receipt.update(decision="match", reason_code="verifier_accepted")

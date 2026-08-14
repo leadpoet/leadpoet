@@ -22,7 +22,9 @@ from gateway.research_lab.attested_execution_upload_v2 import (
 )
 from gateway.tee.autoresearch_executor_v2 import (
     AUTORESEARCH_OPERATIONS_V2,
+    HOST_BUILD_CANDIDATE,
     OP_REPAIR_STALE_PARENT,
+    code_edit_host_failure_code,
 )
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
@@ -589,13 +591,18 @@ async def _dispatch_host_operation(
             failure_code="host_operation_cancelled",
         )
         raise
-    except Exception:
+    except Exception as exc:
+        failure_code = (
+            code_edit_host_failure_code(exc)
+            if operation == HOST_BUILD_CANDIDATE
+            else "host_operation_failed"
+        )
         await client.autoresearch_v2_complete_host_operation(
             job_id=job_id,
             request_hash=str(request["request_hash"]),
             terminal_status="failed",
             response=None,
-            failure_code="host_operation_failed",
+            failure_code=failure_code,
         )
 
 

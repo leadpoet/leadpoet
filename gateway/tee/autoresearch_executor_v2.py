@@ -21,9 +21,15 @@ import threading
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from gateway.research_lab.code_build import (
+    CodeEditArtifactMissingError,
+    CodeEditBuildError,
     CodeEditBuildResult,
-    CodeEditPatchApplyError,
     CodeEditCandidateBuilder,
+    CodeEditEmptyOrNoopPatchError,
+    CodeEditImageBuildError,
+    CodeEditInfraFailureError,
+    CodeEditPatchApplyError,
+    CodeEditPrivateTestError,
     ParentImageSourceContext,
     _copy_source_tree,
     _editable_runtime_files,
@@ -78,6 +84,7 @@ from gateway.tee.execution_job_manager_v2 import (
     ExecutionContextV2,
     ExecutionResultV2,
 )
+from gateway.tee.host_operation_channel_v2 import HostOperationV2Error
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
 from gateway.tee.provider_evidence_v2 import (
     REQUEST_SCHEMA_VERSION as PROVIDER_EVIDENCE_REQUEST_SCHEMA_VERSION,
@@ -166,6 +173,41 @@ HOST_CHECK_PAUSE = "autoresearch_check_pause"
 HOST_DEV_EVALUATE = "autoresearch_dev_evaluate"
 HOST_RECORD_PRIVACY = "autoresearch_record_privacy_proof"
 HOST_GIT_TREE = "autoresearch_git_tree"
+
+_HOST_BUILD_FAILURE_TYPES = {
+    "candidate_patch_apply_failed": CodeEditPatchApplyError,
+    "candidate_patch_empty_or_noop": CodeEditEmptyOrNoopPatchError,
+    "candidate_patch_test_failed": CodeEditPrivateTestError,
+    "candidate_image_build_failed": CodeEditImageBuildError,
+    "candidate_artifact_missing": CodeEditArtifactMissingError,
+    "candidate_build_infra_failed": CodeEditInfraFailureError,
+    "candidate_build_failed": CodeEditBuildError,
+}
+HOST_BUILD_FAILURE_CODES = frozenset(_HOST_BUILD_FAILURE_TYPES)
+
+
+def code_edit_host_failure_code(error: BaseException) -> str:
+    """Return one non-sensitive, allowlisted candidate-build failure stage."""
+
+    if not isinstance(error, CodeEditBuildError):
+        return "host_operation_failed"
+    failure_code = str(getattr(error, "failure_stage", "") or "")
+    if failure_code not in HOST_BUILD_FAILURE_CODES:
+        return "host_operation_failed"
+    return failure_code
+
+
+def _raise_code_edit_host_operation_failure(error: HostOperationV2Error) -> None:
+    """Restore measured candidate policy from a signed host failure terminal."""
+
+    failure_code = str(error.terminal.get("failure_code") or "")
+    error_type = _HOST_BUILD_FAILURE_TYPES.get(failure_code)
+    if error_type is None:
+        raise error
+    raise error_type(
+        "host candidate build failed at %s" % failure_code,
+        failure_stage=failure_code,
+    ) from error
 
 AUTORESEARCH_HOST_OPERATIONS_V2 = frozenset(
     {
@@ -1414,21 +1456,27 @@ class _HostCandidateBuilder:
                 "build_result": _build_result_document(result),
             }
 
-        response = self._context.execute_host_operation(
-            operation=HOST_BUILD_CANDIDATE,
-            payload={
-                "run_id": str(run_id),
-                "candidate_index": int(candidate_index),
-                "parent_artifact": parent_artifact.to_dict(),
-                "draft": draft.to_dict(),
-                "source_bundle_hash": self._source_bundle_hash,
-                "source_diff_hash": source_diff_hash,
-                "expected_candidate_artifact_hash": expected_candidate_artifact_hash,
-            },
-            expected_state_hash=expected_state_hash,
-            timeout_seconds=max(120, int(self.config.code_edit_build_timeout_seconds) + 120),
-            response_validator=validate,
-        )
+        try:
+            response = self._context.execute_host_operation(
+                operation=HOST_BUILD_CANDIDATE,
+                payload={
+                    "run_id": str(run_id),
+                    "candidate_index": int(candidate_index),
+                    "parent_artifact": parent_artifact.to_dict(),
+                    "draft": draft.to_dict(),
+                    "source_bundle_hash": self._source_bundle_hash,
+                    "source_diff_hash": source_diff_hash,
+                    "expected_candidate_artifact_hash": expected_candidate_artifact_hash,
+                },
+                expected_state_hash=expected_state_hash,
+                timeout_seconds=max(
+                    120,
+                    int(self.config.code_edit_build_timeout_seconds) + 120,
+                ),
+                response_validator=validate,
+            )
+        except HostOperationV2Error as exc:
+            _raise_code_edit_host_operation_failure(exc)
         build_result = _validate_build_result(
             response["build_result"],
             draft=draft,

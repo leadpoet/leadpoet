@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import socket
 import ssl
 import sys
@@ -110,8 +111,7 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         def __init__(self):
             self.status_code = 200
             self.headers = {
-                "content-encoding": "gzip",
-                "content-length": "31",
+                "content-length": "11",
                 "content-type": "application/json",
                 "transfer-encoding": "chunked",
             }
@@ -466,8 +466,8 @@ def test_httpx_transport_accepts_authenticated_complete_body_before_eof(method):
     assert result["body"] == body
 
 
-@pytest.mark.parametrize("method", ("POST", "PATCH"))
-def test_complete_body_classifier_rejects_ambiguous_mutating_response(method):
+@pytest.mark.parametrize("method", ("PATCH", "DELETE"))
+def test_complete_body_classifier_rejects_unmeasured_mutating_response(method):
     body = b'{"ok":true}'
     response = SimpleNamespace(
         status_code=200,
@@ -672,7 +672,8 @@ def test_httpx_transport_requires_declared_length_for_eof_recovery():
         )
 
 
-def test_httpx_transport_accepts_complete_chunked_json_before_eof():
+@pytest.mark.parametrize("method", ("GET", "POST"))
+def test_httpx_transport_accepts_complete_chunked_json_before_eof(method):
     class TLS:
         def getpeercert(self, binary_form=False, /):
             assert binary_form is True
@@ -707,7 +708,7 @@ def test_httpx_transport_accepts_complete_chunked_json_before_eof():
         },
         stream=CompleteJSONThenEOF(),
         extensions={"network_stream": NetworkStream()},
-        request=httpx.Request("GET", "https://example.com/rest/v1/providers"),
+        request=httpx.Request(method, "https://example.com/rest/v1/providers"),
     )
 
     class ResponseContext:
@@ -723,7 +724,7 @@ def test_httpx_transport_accepts_complete_chunked_json_before_eof():
 
     result = HTTPXProviderTransport._execute_with_client(
         Client(),
-        method="GET",
+        method=method,
         url="https://example.com/rest/v1/providers",
         headers={},
         body=b"",
@@ -736,7 +737,8 @@ def test_httpx_transport_accepts_complete_chunked_json_before_eof():
     assert result["body"] == body
 
 
-def test_httpx_transport_accepts_complete_http2_json_before_terminal_eof():
+@pytest.mark.parametrize("method", ("GET", "POST"))
+def test_httpx_transport_accepts_complete_http2_json_before_terminal_eof(method):
     class TLS:
         def getpeercert(self, binary_form=False, /):
             assert binary_form is True
@@ -771,7 +773,7 @@ def test_httpx_transport_accepts_complete_http2_json_before_terminal_eof():
             "http_version": b"HTTP/2",
             "network_stream": NetworkStream(),
         },
-        request=httpx.Request("GET", "https://example.com/rest/v1/receipts"),
+        request=httpx.Request(method, "https://example.com/rest/v1/receipts"),
     )
 
     class ResponseContext:
@@ -787,7 +789,7 @@ def test_httpx_transport_accepts_complete_http2_json_before_terminal_eof():
 
     result = HTTPXProviderTransport._execute_with_client(
         Client(),
-        method="GET",
+        method=method,
         url="https://example.com/rest/v1/receipts",
         headers={},
         body=b"",
@@ -798,6 +800,119 @@ def test_httpx_transport_accepts_complete_http2_json_before_terminal_eof():
 
     assert result["http_status"] == 200
     assert result["body"] == body
+
+
+def _execute_gzip_response(
+    *,
+    compressed_body,
+    method="GET",
+    status=200,
+    content_type="application/json",
+    terminal_error=True,
+    max_response_bytes=1024,
+):
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class NetworkStream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    class GzipStream(httpx.SyncByteStream):
+        def __iter__(self):
+            midpoint = max(1, len(compressed_body) // 2)
+            yield compressed_body[:midpoint]
+            yield compressed_body[midpoint:]
+            if terminal_error:
+                raise httpx.RemoteProtocolError(
+                    "peer closed after gzip DATA without relaying END_STREAM"
+                )
+
+        def close(self):
+            return None
+
+    response = httpx.Response(
+        status,
+        headers={
+            "content-encoding": "gzip",
+            "content-type": content_type,
+        },
+        stream=GzipStream(),
+        extensions={
+            "http_version": b"HTTP/2",
+            "network_stream": NetworkStream(),
+        },
+        request=httpx.Request(method, "https://example.com/rest/v1/receipts"),
+    )
+
+    class ResponseContext:
+        def __enter__(self):
+            return response
+
+        def __exit__(self, *_args):
+            response.close()
+
+    class Client:
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+    return HTTPXProviderTransport._execute_with_client(
+        Client(),
+        method=method,
+        url="https://example.com/rest/v1/receipts",
+        headers={},
+        body=b"",
+        timeout_seconds=1.0,
+        max_response_bytes=max_response_bytes,
+        allow_authenticated_complete_body_eof=True,
+    )
+
+
+@pytest.mark.parametrize("terminal_error", (False, True))
+def test_httpx_transport_requires_complete_gzip_member_before_recovery(
+    terminal_error,
+):
+    body = b'[{"receipt_hash":"sha256:' + (b"a" * 64) + b'"}]'
+
+    result = _execute_gzip_response(
+        compressed_body=gzip.compress(body),
+        terminal_error=terminal_error,
+    )
+
+    assert result["http_status"] == 200
+    assert result["body"] == body
+    assert result["headers"] == {"content-type": "application/json"}
+    assert result["tls_protocol"] == "TLSv1.3"
+
+
+def test_httpx_transport_rejects_gzip_body_without_authenticated_footer():
+    compressed = gzip.compress(b'[{"ok":true}]')
+
+    with pytest.raises(httpx.RemoteProtocolError, match="without relaying"):
+        _execute_gzip_response(compressed_body=compressed[:-8])
+
+
+def test_httpx_transport_rejects_gzip_body_with_corrupt_checksum():
+    compressed = bytearray(gzip.compress(b'[{"ok":true}]'))
+    compressed[-8] ^= 0x01
+
+    with pytest.raises(Exception, match="incorrect data check"):
+        _execute_gzip_response(compressed_body=bytes(compressed))
+
+
+def test_httpx_transport_enforces_decoded_gzip_response_ceiling():
+    with pytest.raises(ProviderBrokerV2Error, match="response exceeds size limit"):
+        _execute_gzip_response(
+            compressed_body=gzip.compress(b"x" * 1025),
+            terminal_error=False,
+            max_response_bytes=1024,
+        )
 
 
 @pytest.mark.parametrize(
@@ -850,12 +965,6 @@ def test_complete_body_classifier_rejects_ambiguous_unframed_response(
             "GET",
             200,
             {"content-type": "text/plain", "transfer-encoding": "chunked"},
-            b"[]",
-        ),
-        (
-            "POST",
-            200,
-            {"content-type": "application/json", "transfer-encoding": "chunked"},
             b"[]",
         ),
         (

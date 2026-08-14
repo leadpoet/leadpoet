@@ -6226,6 +6226,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     from gateway.tee.topology import COORDINATOR_ROLE, ROLE_SPECS, topology_document
     from gateway.tee.provider_broker_v2 import (
         BUILTIN_PROVIDER_ROUTES,
+        HTTPXProviderTransport,
         MAX_RESPONSE_BODY_BYTES,
         MEASURED_TRANSPORT_REQUEST_HEADERS,
         PROVIDER_BROKER_SCHEMA_VERSION,
@@ -6302,7 +6303,87 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             "an unrelated provider route overrides measured response framing"
         )
 
+    import gzip
     import httpx
+
+    class _TransportTLS:
+        def getpeercert(self, binary_form=False, /):
+            if binary_form is not True:
+                raise RuntimeError("rehearsal TLS evidence was not requested in DER")
+            return b"candidate-derived-peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class _TransportNetworkStream:
+        def get_extra_info(self, name):
+            if name != "ssl_object":
+                raise RuntimeError("unexpected transport evidence lookup")
+            return _TransportTLS()
+
+    def _read_candidate_gzip_response(compressed_body: bytes) -> bytes:
+        class _CompleteGzipThenEOF(httpx.SyncByteStream):
+            def __iter__(self):
+                midpoint = max(1, len(compressed_body) // 2)
+                yield compressed_body[:midpoint]
+                yield compressed_body[midpoint:]
+                raise httpx.RemoteProtocolError(
+                    "relay lost HTTP/2 END_STREAM after gzip member"
+                )
+
+            def close(self):
+                return None
+
+        response = httpx.Response(
+            200,
+            headers={
+                "content-encoding": "gzip",
+                "content-type": "application/json; charset=utf-8",
+            },
+            stream=_CompleteGzipThenEOF(),
+            extensions={
+                "http_version": b"HTTP/2",
+                "network_stream": _TransportNetworkStream(),
+            },
+            request=httpx.Request(
+                "GET", "https://example.com/rest/v1/settlement"
+            ),
+        )
+
+        class _ResponseContext:
+            def __enter__(self):
+                return response
+
+            def __exit__(self, *_args):
+                response.close()
+
+        class _Client:
+            def stream(self, *_args, **_kwargs):
+                return _ResponseContext()
+
+        return HTTPXProviderTransport._execute_with_client(
+            _Client(),
+            method="GET",
+            url="https://example.com/rest/v1/settlement",
+            headers={},
+            body=b"",
+            timeout_seconds=1.0,
+            max_response_bytes=1024,
+            allow_authenticated_complete_body_eof=True,
+        )["body"]
+
+    production_gzip_body = b'[{"settlement_hash":"sha256:' + (b"b" * 64) + b'"}]'
+    production_gzip_member = gzip.compress(production_gzip_body)
+    if _read_candidate_gzip_response(production_gzip_member) != production_gzip_body:
+        raise RuntimeError(
+            "complete checksum-verified Supabase gzip response was not recovered"
+        )
+    try:
+        _read_candidate_gzip_response(production_gzip_member[:-8])
+    except httpx.RemoteProtocolError:
+        pass
+    else:
+        raise RuntimeError("Supabase gzip response without its footer was accepted")
 
     production_http2_body = b'[{"receipt_hash":"sha256:' + (b"a" * 64) + b'"}]'
     production_http2_response = SimpleNamespace(
@@ -6337,7 +6418,6 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         headers=httpx.Headers(
             {
                 "content-type": "application/json",
-                "content-length": str(len(production_exa_body)),
             }
         ),
         http_version="HTTP/2",
@@ -6351,7 +6431,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             "relay lost HTTP/2 END_STREAM after the exact Exa body"
         ),
     ):
-        raise RuntimeError("exact-length authenticated Exa POST was not recovered")
+        raise RuntimeError("complete authenticated Exa HTTP/2 POST was not recovered")
     if _authenticated_body_is_complete_after_stream_error(
         method="POST",
         response=production_exa_response,
@@ -7780,8 +7860,9 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_rpc_frame_budget_bound": True,
         "openrouter_body_framing_recomputed": True,
         "complete_http2_json_eof_recovered": True,
+        "complete_gzip_http2_eof_recovered": True,
         "measured_provider_identity_response_encoding_bound": True,
-        "exact_length_provider_post_eof_recovered": True,
+        "complete_http2_provider_post_eof_recovered": True,
     }
 
 
@@ -9430,12 +9511,17 @@ def main() -> int:
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",
                 {},
+            ).get("complete_gzip_http2_eof_recovered")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
             ).get("measured_provider_identity_response_encoding_bound")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",
                 {},
-            ).get("exact_length_provider_post_eof_recovered")
+            ).get("complete_http2_provider_post_eof_recovered")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

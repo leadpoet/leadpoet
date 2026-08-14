@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+import zlib
 
 from httpx import SyncByteStream
 
@@ -578,7 +579,7 @@ def _authenticated_body_is_complete_after_stream_error(
                 len(declared_lengths) == 1
                 and byte_count == next(iter(declared_lengths))
             )
-        if normalized_method != "GET":
+        if normalized_method not in {"GET", "POST"}:
             return False
         # HTTP/2 carries message completion in DATA-frame END_STREAM rather
         # than HTTP/1 Content-Length or Transfer-Encoding headers. The parent
@@ -587,7 +588,8 @@ def _authenticated_body_is_complete_after_stream_error(
         # application boundary: truncating an array or object before its final
         # delimiter cannot still parse, and trailing non-whitespace is
         # rejected by json.loads. Restrict this recovery to authenticated 2xx
-        # HTTP/2 JSON reads; unframed HTTP/1 responses remain ambiguous.
+        # HTTP/2 JSON GET/POST exchanges; unframed HTTP/1 responses and other
+        # mutating methods remain ambiguous.
         try:
             http_version = str(response.http_version or "").strip().upper()
         except Exception:
@@ -600,12 +602,16 @@ def _authenticated_body_is_complete_after_stream_error(
             body=body,
         )
 
-    # PostgREST legitimately streams bounded JSON with chunked framing. A
-    # relay may preserve the complete authenticated JSON body but lose the
-    # terminal zero-length chunk. Recover only when the body itself provides
-    # an objective completeness boundary; every other chunked response remains
-    # fail-closed.
-    if normalized_method != "GET" or transfer_encoding != "chunked" or tokens:
+    # PostgREST and measured providers legitimately stream bounded JSON with
+    # chunked framing. A relay may preserve the complete authenticated JSON
+    # body but lose the terminal zero-length chunk. Recover only when the body
+    # itself provides an objective completeness boundary; every other chunked
+    # response remains fail-closed.
+    if (
+        normalized_method not in {"GET", "POST"}
+        or transfer_encoding != "chunked"
+        or tokens
+    ):
         return False
     return _authenticated_json_body_is_complete(
         response=response,
@@ -633,6 +639,63 @@ def _authenticated_json_body_is_complete(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
     return isinstance(document, (dict, list))
+
+
+def _append_bounded_gzip_bytes(
+    *,
+    decoder: Any,
+    compressed: bytes,
+    chunks: list[bytes],
+    byte_count: int,
+    max_response_bytes: int,
+) -> int:
+    """Decode one gzip chunk without allocating beyond the response ceiling."""
+    pending = bytes(compressed)
+    while pending:
+        remaining = max_response_bytes - byte_count
+        decoded = decoder.decompress(pending, remaining + 1)
+        if len(decoded) > remaining:
+            raise ProviderBrokerV2Error("provider response exceeds size limit")
+        if decoded:
+            chunks.append(decoded)
+            byte_count += len(decoded)
+        next_pending = decoder.unconsumed_tail
+        if decoder.unused_data:
+            raise ProviderBrokerV2Error(
+                "provider gzip response contains trailing data"
+            )
+        if next_pending == pending:
+            raise ProviderBrokerV2Error(
+                "provider gzip response decoder made no progress"
+            )
+        pending = next_pending
+    return byte_count
+
+
+def _authenticated_gzip_body_is_complete_after_stream_error(
+    *,
+    method: str,
+    response: Any,
+    byte_count: int,
+    body: bytes,
+    decoder: Any,
+) -> bool:
+    """Recover only after a complete, checksum-verified gzip JSON member."""
+    if str(method or "").upper() != "GET":
+        return False
+    try:
+        http_version = str(response.http_version or "").strip().upper()
+    except Exception:
+        http_version = ""
+    if http_version != "HTTP/2":
+        return False
+    if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+        return False
+    return _authenticated_json_body_is_complete(
+        response=response,
+        byte_count=byte_count,
+        body=body,
+    )
 
 
 class HTTPXProviderTransport:
@@ -825,30 +888,77 @@ class HTTPXProviderTransport:
             tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
             chunks = []
             byte_count = 0
-            try:
-                for chunk in response.iter_bytes():
-                    byte_count += len(chunk)
-                    if byte_count > max_response_bytes:
+            content_encoding = str(
+                response.headers.get("content-encoding") or ""
+            ).strip().lower()
+            if content_encoding == "gzip":
+                decoder = zlib.decompressobj(zlib.MAX_WBITS | 16)
+                try:
+                    for chunk in response.iter_raw():
+                        byte_count = _append_bounded_gzip_bytes(
+                            decoder=decoder,
+                            compressed=chunk,
+                            chunks=chunks,
+                            byte_count=byte_count,
+                            max_response_bytes=max_response_bytes,
+                        )
+                except Exception:
+                    response_body = b"".join(chunks)
+                    if not (
+                        allow_authenticated_complete_body_eof
+                        and _authenticated_gzip_body_is_complete_after_stream_error(
+                            method=method,
+                            response=response,
+                            byte_count=byte_count,
+                            body=response_body,
+                            decoder=decoder,
+                        )
+                    ):
+                        raise
+                else:
+                    remaining = max_response_bytes - byte_count
+                    decoded_tail = decoder.flush(remaining + 1)
+                    if len(decoded_tail) > remaining:
                         raise ProviderBrokerV2Error(
                             "provider response exceeds size limit"
                         )
-                    chunks.append(chunk)
-            except Exception as exc:
-                response_body = b"".join(chunks)
-                if not (
-                    allow_authenticated_complete_body_eof
-                    and byte_count <= max_response_bytes
-                    and _authenticated_body_is_complete_after_stream_error(
-                        method=method,
-                        response=response,
-                        byte_count=byte_count,
-                        body=response_body,
-                        error=exc,
-                    )
-                ):
-                    raise
+                    if decoded_tail:
+                        chunks.append(decoded_tail)
+                        byte_count += len(decoded_tail)
+                    if (
+                        not decoder.eof
+                        or decoder.unused_data
+                        or decoder.unconsumed_tail
+                    ):
+                        raise ProviderBrokerV2Error(
+                            "provider gzip response is incomplete"
+                        )
+                    response_body = b"".join(chunks)
             else:
-                response_body = b"".join(chunks)
+                try:
+                    for chunk in response.iter_bytes():
+                        byte_count += len(chunk)
+                        if byte_count > max_response_bytes:
+                            raise ProviderBrokerV2Error(
+                                "provider response exceeds size limit"
+                            )
+                        chunks.append(chunk)
+                except Exception as exc:
+                    response_body = b"".join(chunks)
+                    if not (
+                        allow_authenticated_complete_body_eof
+                        and byte_count <= max_response_bytes
+                        and _authenticated_body_is_complete_after_stream_error(
+                            method=method,
+                            response=response,
+                            byte_count=byte_count,
+                            body=response_body,
+                            error=exc,
+                        )
+                    ):
+                        raise
+                else:
+                    response_body = b"".join(chunks)
             return {
                 "http_status": int(response.status_code),
                 "headers": _decoded_response_headers(response.headers),

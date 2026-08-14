@@ -1011,7 +1011,10 @@ async def test_infrastructure_judgments_are_not_reused_or_cached(monkeypatch):
     )
     assert [item["final_score"] for item in result] == [55.0]
     assert len(calls) == 1
-    assert len(cache.puts) == 1
+    # A fresh row without the complete current company-fit receipt is also
+    # ineligible for the durable cache. Old and custom scorers cannot smuggle
+    # pre-contract judgments into later runs.
+    assert cache.puts == []
 
 
 async def test_fresh_infrastructure_judgment_is_not_cached(monkeypatch):

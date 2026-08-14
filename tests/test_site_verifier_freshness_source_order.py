@@ -10,6 +10,7 @@ from gateway.qualification.models import (
     IntentSignalSource,
 )
 from qualification.scoring.lead_scorer import score_company_autoresearch_intent_v2
+from qualification.scoring.company_fit_decision import company_fit_match
 
 
 class FreshnessSourceOrderTests(unittest.IsolatedAsyncioTestCase):
@@ -55,9 +56,27 @@ class FreshnessSourceOrderTests(unittest.IsolatedAsyncioTestCase):
             None,
             0,
         ))
+        fit_verifier = AsyncMock(return_value=company_fit_match(
+            "company fit verified",
+            details={
+                "company_fit_decision": "match",
+                "company_fit_dimensions": {
+                    "identity": "match",
+                    "employee_size": "match",
+                    "industry": "match",
+                    "geography": "match",
+                    "stage": "match",
+                },
+                "company_fit_stage_required": False,
+                "dimension_evidence": {},
+            },
+        ))
         with patch(
             "qualification.scoring.lead_scorer._score_single_intent_signal",
             source_verifier,
+        ), patch(
+            "qualification.scoring.lead_scorer._verify_company_fit",
+            fit_verifier,
         ):
             result = await score_company_autoresearch_intent_v2(
                 company,
@@ -67,6 +86,7 @@ class FreshnessSourceOrderTests(unittest.IsolatedAsyncioTestCase):
                 seen_companies=set(),
             )
         source_verifier.assert_awaited_once()
+        fit_verifier.assert_awaited_once()
         self.assertEqual(result.final_score, 0)
         detail = result.intent_signals_detail[0]
         self.assertEqual(detail["date_status"], "out_of_window")

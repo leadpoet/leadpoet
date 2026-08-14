@@ -20,28 +20,35 @@ Design constraints:
   baking those into base-miner scoring would force every miner who
   builds on the model to take on licensing risk.  See
   ``gateway/qualification/models.py::CompanyOutput`` for the rationale.
-* Soft on legitimate edge cases (anti-bot pages, JS-rendered sites,
-  302 redirects, IDN domains).  We err on the side of accepting a
-  weakly-verified company rather than rejecting a real one, because
-  intent verification (which IS strict) still has to pass on every
-  signal.  Net result: a fake company can pass company verification
-  but is extraordinarily unlikely to also produce verifiable intent
-  signals at the same domain.
+* Three-state outcome.  A verified homepage-name binding is ``match``;
+  a parked or contradicted identity is ``mismatch``; transport failure or
+  insufficient evidence is ``unavailable``.  A domain that resembles the
+  company name is never sufficient proof by itself.
 
 Public API:
-    verify_company_exists(company_name, company_website,
-                          timeout_secs=5) -> (passed, reason)
+    verify_company_exists(company_name, company_website, timeout_secs=5,
+                          company_linkedin=...) -> (passed, reason)
 """
 
 from __future__ import annotations
 
 import asyncio
+from html.parser import HTMLParser
+import json
 import logging
 import re
-from typing import Tuple
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
+
+from leadpoet_verifier.identity.normalization import NormalizationError, normalize_url
+from qualification.scoring.company_fit_decision import (
+    CompanyFitDecisionResult,
+    company_fit_match,
+    company_fit_mismatch,
+    company_fit_unavailable,
+    evaluate_company_identity,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -86,8 +93,6 @@ _PARKED_DOMAIN_PATTERNS = [
     r"\bdefault web site page\b",
 ]
 _PARKED_DOMAIN_RE = re.compile("|".join(_PARKED_DOMAIN_PATTERNS), re.IGNORECASE)
-
-
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
@@ -120,18 +125,11 @@ def _upgrade_plain_http_company_url(company_website: str) -> str:
     return urlunsplit(("https", host, parsed.path, parsed.query, parsed.fragment))
 
 def _registrable_domain(url: str) -> str:
-    """Extract the registrable hostname from a URL (lowercased, no www).
+    """Extract the PSL-aware registrable domain from an HTTP(S) URL.
 
     ``https://www.ExampleCo.com/about`` -> ``exampleco.com``.
     """
-    try:
-        parsed = urlparse(url.strip())
-        host = (parsed.hostname or "").lower()
-        if host.startswith("www."):
-            host = host[4:]
-        return host
-    except Exception:
-        return ""
+    return normalize_url(url.strip()).domain.registrable_domain
 
 
 def _normalize_for_match(s: str) -> str:
@@ -150,15 +148,18 @@ def _name_appears(haystack: str, company_name: str) -> bool:
     if not company_name or not haystack:
         return False
 
-    # Strip common legal suffixes from the claimed name before normalizing,
-    # so 'ExampleCo Inc.' still matches a homepage that only says 'ExampleCo'.
-    cleaned = re.sub(
-        r"\b(inc|incorporated|llc|ltd|limited|corp|corporation|co|company|gmbh|sa|bv|plc)\.?\b",
-        "",
-        company_name,
-        flags=re.IGNORECASE,
-    )
-    needle = _normalize_for_match(cleaned)
+    # Strip only terminal legal suffixes from the claimed name. Tokens such
+    # as "Group" and "AG" can be meaningful leading name terms.
+    legal_suffixes = {
+        "inc", "incorporated", "llc", "ltd", "limited", "corp",
+        "corporation", "co", "company", "gmbh", "sa", "bv", "plc",
+        "holdings", "group", "ag", "nv", "oy", "ab", "as", "pty",
+        "pte", "kk", "srl", "spa",
+    }
+    words = re.findall(r"[a-z0-9]+", str(company_name or "").casefold())
+    while words and words[-1] in legal_suffixes:
+        words.pop()
+    needle = "".join(words)
     if len(needle) < 3:
         # Avoid spurious matches on extremely short normalized names.
         # In practice, requiring 3+ characters costs us nothing; companies
@@ -170,26 +171,222 @@ def _name_appears(haystack: str, company_name: str) -> bool:
 
 
 def _domain_matches_name(company_website: str, company_name: str) -> bool:
-    """Is the second-level domain a plausible derivation of the company name?
-
-    Fallback path when the homepage HTML cannot be retrieved (anti-bot,
-    JS-only render, transient network error).  If the URL host already
-    encodes the company name, we treat that as weak-but-positive evidence
-    of company existence and pass with a soft reason.
-    """
-    domain = _registrable_domain(company_website)
+    """Legacy diagnostic heuristic; never sufficient for a fit decision."""
+    try:
+        domain = _registrable_domain(company_website)
+    except Exception:
+        return False
     if not domain:
         return False
     # Take only the part before the public suffix (e.g. 'exampleco' from
     # 'exampleco.com' or 'exampleco' from 'exampleco.co.uk').  This is a
-    # heuristic — not a full PSL parse — but is sufficient since false
-    # positives just turn into "weak verification, pass anyway".
+    # diagnostic heuristic only. The verifier never uses it as proof.
     parts = domain.split(".")
     if len(parts) >= 2:
         base = parts[-2]
     else:
         base = domain
     return _name_appears(base, company_name)
+
+
+def _canonical_linkedin_company_url(value: str) -> str:
+    """Return a direct, canonical LinkedIn company URL or an empty string."""
+
+    raw = str(value or "").strip()
+    if raw.startswith("//"):
+        raw = f"https:{raw}"
+    try:
+        parsed = urlsplit(raw)
+    except (TypeError, ValueError):
+        return ""
+    host = str(parsed.hostname or "").casefold().removeprefix("www.")
+    parts = [part for part in parsed.path.split("/") if part]
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or not (host == "linkedin.com" or host.endswith(".linkedin.com"))
+        or len(parts) < 2
+        or parts[0].casefold() != "company"
+    ):
+        return ""
+    slug = parts[1].casefold()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._%+-]{0,99}", slug):
+        return ""
+    return f"https://www.linkedin.com/company/{slug}"
+
+
+def _organization_same_as_urls(value) -> list[str]:
+    """Extract LinkedIn URLs only from JSON-LD Organization ``sameAs`` data."""
+
+    try:
+        document = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+    urls: list[str] = []
+
+    def visit(node) -> None:
+        if isinstance(node, dict):
+            raw_type = node.get("@type", "")
+            types = raw_type if isinstance(raw_type, list) else [raw_type]
+            is_organization = any(
+                str(item or "").casefold() == "organization" for item in types
+            )
+            if is_organization:
+                raw_same_as = node.get("sameAs", [])
+                candidates = (
+                    raw_same_as
+                    if isinstance(raw_same_as, list)
+                    else [raw_same_as]
+                )
+                for candidate in candidates:
+                    canonical = _canonical_linkedin_company_url(candidate)
+                    if canonical:
+                        urls.append(canonical)
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(document)
+    return list(dict.fromkeys(urls))[:10]
+
+
+def _is_https_url(value: str) -> bool:
+    """Whether a final response URL is an absolute HTTPS URL without creds."""
+
+    try:
+        parsed = urlsplit(str(value or "").strip())
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        parsed.scheme.casefold() == "https"
+        and parsed.hostname
+        and parsed.username is None
+        and parsed.password is None
+    )
+
+
+def _homepage_company_linkedin_urls(page_text: str) -> list[str]:
+    """Return bounded LinkedIn identities from parsed hrefs or Organization JSON-LD."""
+
+    parser = _HomepageIdentityParser()
+    try:
+        parser.feed(str(page_text or "")[:_MAX_BYTES])
+        parser.close()
+    except Exception:
+        return []
+    return list(dict.fromkeys(parser.linkedin_urls))[:10]
+
+
+class _HomepageIdentityParser(HTMLParser):
+    """Extract bounded first-party name metadata without trusting input text."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._in_title = False
+        self._title_parts: list[str] = []
+        self.metadata_names: list[str] = []
+        self.linkedin_urls: list[str] = []
+        self._json_ld_parts: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attributes = {
+            str(key or "").casefold(): str(value or "").strip()
+            for key, value in attrs
+        }
+        if tag.casefold() == "title":
+            self._in_title = True
+            return
+        if tag.casefold() in {"a", "link"}:
+            linkedin = _canonical_linkedin_company_url(attributes.get("href", ""))
+            if linkedin:
+                self.linkedin_urls.append(linkedin)
+        if tag.casefold() == "script":
+            script_type = attributes.get("type", "").split(";", 1)[0].casefold()
+            if script_type == "application/ld+json":
+                self._json_ld_parts = []
+            return
+        if tag.casefold() != "meta":
+            return
+        key = (
+            attributes.get("property")
+            or attributes.get("name")
+            or attributes.get("itemprop")
+            or ""
+        ).casefold()
+        if key in {"og:site_name", "application-name"}:
+            content = attributes.get("content", "")
+            if content:
+                self.metadata_names.append(content[:200])
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() == "title":
+            self._in_title = False
+        elif tag.casefold() == "script" and self._json_ld_parts is not None:
+            self.linkedin_urls.extend(
+                _organization_same_as_urls("".join(self._json_ld_parts))
+            )
+            self._json_ld_parts = None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and data.strip():
+            self._title_parts.append(data.strip())
+        if self._json_ld_parts is not None:
+            self._json_ld_parts.append(data)
+
+    @property
+    def title(self) -> str:
+        return " ".join(self._title_parts).strip()[:300]
+
+
+def _homepage_company_names(page_text: str) -> list[str]:
+    """Return names actually observed in title or first-party metadata."""
+
+    parser = _HomepageIdentityParser()
+    try:
+        parser.feed(str(page_text or "")[:_MAX_BYTES])
+    except Exception:
+        return []
+    candidates = list(parser.metadata_names)
+    if parser.title:
+        candidates.append(parser.title)
+        candidates.extend(
+            part.strip()
+            # Product homepages commonly use ``Brand: tagline`` without a
+            # space before the colon. Keep the conservative whitespace rule
+            # for dash-like separators so hyphenated brand names are intact.
+            for part in re.split(
+                r"\s+(?:\||-|\N{EN DASH}|\N{EM DASH})\s+|\s*:\s*",
+                parser.title,
+            )
+            if part.strip()
+        )
+    generic = {"home", "homepage", "welcome", "official site", "website"}
+    return list(dict.fromkeys(
+        candidate
+        for candidate in candidates
+        if candidate.casefold() not in generic and 2 < len(candidate) <= 200
+    ))[:10]
+
+
+def _identity_result(
+    receipt: dict[str, str],
+    reason: str,
+    *,
+    actual_final_url: str = "",
+) -> CompanyFitDecisionResult:
+    details = {
+        "identity": dict(receipt),
+        "actual_final_url": str(actual_final_url or ""),
+    }
+    if receipt["decision"] == "match":
+        return company_fit_match(reason, details=details)
+    if receipt["decision"] == "mismatch":
+        return company_fit_mismatch(reason, details=details)
+    return company_fit_unavailable(reason, details=details)
 
 
 # ----------------------------------------------------------------------------
@@ -201,25 +398,33 @@ async def verify_company_exists(
     company_website: str,
     timeout_secs: float = _HTTP_TIMEOUT_SECS,
     *,
+    company_linkedin: str = "",
     require_https_transport: bool = False,
-) -> Tuple[bool, str]:
+) -> CompanyFitDecisionResult:
     """Verify that ``company_website`` is a real page for ``company_name``.
 
-    Returns ``(passed, reason)``.  Examples of reasons:
+    Returns a ``company-fit-decision:v1`` result.  Historical callers may
+    still unpack it as ``(passed, reason)``.
 
       * ``"verified: name 'ExampleCo' found in homepage"`` (best case)
-      * ``"verified (soft): homepage unreachable but domain 'exampleco.com' matches name"``
-      * ``"company name 'ExampleCo' not found in homepage and not in domain"``
+      * ``"homepage identity evidence unavailable: ..."``
       * ``"website is a parked / for-sale page"``
-      * ``"website unreachable: ..."`` (when the domain itself is invalid)
-
-    Soft-pass behavior: if the homepage GET fails for any transient
-    reason BUT the registrable domain encodes the company name, we pass
-    with reason annotated as ``(soft)``.  This is deliberate — see the
-    module docstring.
+      * ``"website unreachable: ..."``
     """
-    if not company_website or not company_website.strip():
-        return False, "company_website is empty"
+    submitted_identity = evaluate_company_identity(
+        submitted_name=company_name,
+        submitted_website=company_website,
+        submitted_linkedin=company_linkedin,
+        observed_name="",
+        observed_website="",
+        observed_linkedin="",
+        evidence_source="company_homepage",
+    )
+    if submitted_identity["decision"] == "mismatch":
+        return _identity_result(
+            submitted_identity,
+            "submitted company identity is missing or invalid",
+        )
 
     request_url = (
         _upgrade_plain_http_company_url(company_website)
@@ -227,9 +432,21 @@ async def verify_company_exists(
         else company_website.strip()
     )
 
-    domain = _registrable_domain(request_url)
-    if not domain:
-        return False, f"company_website has no valid hostname: {company_website!r}"
+    try:
+        domain = _registrable_domain(request_url)
+    except NormalizationError:
+        submitted_identity.update(
+            decision="mismatch", reason_code="identity_unresolved"
+        )
+        return _identity_result(
+            submitted_identity,
+            f"company_website has no valid registrable domain: {company_website!r}",
+        )
+    except Exception as exc:  # Pinned identity primitive is unavailable.
+        return _identity_result(
+            submitted_identity,
+            f"company identity normalization unavailable: {type(exc).__name__}",
+        )
 
     timeout = aiohttp.ClientTimeout(total=timeout_secs, connect=min(3.0, timeout_secs))
 
@@ -242,6 +459,9 @@ async def verify_company_exists(
                 ) as session:
                     async with session.get(request_url, allow_redirects=True) as resp:
                         status = resp.status
+                        observed_url = str(
+                            getattr(resp, "url", request_url) or request_url
+                        )
                         # Read at most _MAX_BYTES so a giant single-page-app
                         # download can't stall the scorer.
                         raw = await resp.content.read(_MAX_BYTES)
@@ -255,47 +475,124 @@ async def verify_company_exists(
                     raise
                 await asyncio.sleep(_TRANSIENT_FETCH_RETRY_DELAY_SECS)
     except aiohttp.ClientError as e:
-        # Network-level failure.  Try the domain-name fallback.
-        if _domain_matches_name(request_url, company_name):
-            return True, (
-                f"verified (soft): homepage unreachable ({type(e).__name__}) "
-                f"but domain {domain!r} matches name {company_name!r}"
-            )
-        return False, f"website unreachable: {type(e).__name__}: {str(e)[:120]}"
+        return _identity_result(
+            submitted_identity,
+            f"website unreachable: {type(e).__name__}: {str(e)[:120]}",
+        )
     except Exception as e:  # noqa: BLE001 - log everything else and fall through
-        if _domain_matches_name(request_url, company_name):
-            return True, (
-                f"verified (soft): homepage fetch raised ({type(e).__name__}) "
-                f"but domain {domain!r} matches name {company_name!r}"
-            )
-        return False, f"website fetch error: {type(e).__name__}: {str(e)[:120]}"
+        return _identity_result(
+            submitted_identity,
+            f"website fetch error: {type(e).__name__}: {str(e)[:120]}",
+        )
 
     # ----- Status checks ----------------------------------------------------
     # 200 = ideal.  3xx are already followed by aiohttp.  4xx/5xx mean
     # the page itself is not a usable company page.
     if status >= 400:
-        if _domain_matches_name(request_url, company_name):
-            return True, (
-                f"verified (soft): homepage returned HTTP {status} but "
-                f"domain {domain!r} matches name {company_name!r}"
-            )
-        return False, f"website returned HTTP {status}"
+        return _identity_result(
+            submitted_identity, f"website returned HTTP {status}",
+            actual_final_url=observed_url,
+        )
+
+    if require_https_transport and not _is_https_url(observed_url):
+        return _identity_result(
+            submitted_identity,
+            "homepage identity evidence unavailable: final URL is not HTTPS",
+            actual_final_url=observed_url,
+        )
 
     # ----- Parked-domain detection ------------------------------------------
     if _PARKED_DOMAIN_RE.search(text):
-        return False, "website is a parked / for-sale page"
-
-    # ----- Name-presence check ---------------------------------------------
-    if _name_appears(text, company_name):
-        return True, f"verified: name {company_name!r} found in homepage"
-
-    if _domain_matches_name(request_url, company_name):
-        return True, (
-            f"verified (soft): name not found in homepage text but "
-            f"domain {domain!r} matches name {company_name!r}"
+        submitted_identity.update(decision="mismatch", reason_code="identity_mismatch")
+        return _identity_result(
+            submitted_identity,
+            "website is a parked / for-sale page",
+            actual_final_url=observed_url,
         )
 
-    return False, (
-        f"company name {company_name!r} not found in homepage "
-        f"and not in domain {domain!r}"
+    try:
+        observed_domain = _registrable_domain(observed_url)
+    except Exception as exc:
+        return _identity_result(
+            submitted_identity,
+            "homepage identity evidence unavailable: observed domain "
+            f"normalization failed ({type(exc).__name__})",
+            actual_final_url=observed_url,
+        )
+    if observed_domain != domain:
+        redirect_receipt = dict(submitted_identity)
+        redirect_receipt.update(
+            decision="mismatch",
+            reason_code="identity_mismatch",
+            observed_domain=observed_domain,
+        )
+        return _identity_result(
+            redirect_receipt,
+            f"company identity conflict: redirect changed registrable domain "
+            f"from {domain!r} to {observed_domain!r}",
+            actual_final_url=observed_url,
+        )
+
+    observed_names = _homepage_company_names(text)
+    if not observed_names:
+        return _identity_result(
+            submitted_identity,
+            "homepage identity evidence unavailable: company name metadata not found",
+            actual_final_url=observed_url,
+        )
+    observed_linkedins = _homepage_company_linkedin_urls(text)
+    if not observed_linkedins:
+        return _identity_result(
+            submitted_identity,
+            "homepage identity evidence unavailable: LinkedIn company binding not found",
+            actual_final_url=observed_url,
+        )
+    identity_receipts = [
+        evaluate_company_identity(
+            submitted_name=company_name,
+            submitted_website=company_website,
+            submitted_linkedin=company_linkedin,
+            observed_name=observed_name,
+            observed_website=observed_url,
+            observed_linkedin=observed_linkedin,
+            evidence_source="company_homepage",
+        )
+        for observed_name in observed_names
+        for observed_linkedin in observed_linkedins
+    ]
+    matched = next(
+        (receipt for receipt in identity_receipts if receipt["decision"] == "match"),
+        None,
+    )
+    if matched is not None:
+        return _identity_result(
+            matched,
+            "verified: independently observed homepage name, final domain, "
+            "and exact LinkedIn company identity",
+            actual_final_url=observed_url,
+        )
+    conflict = next(
+        (receipt for receipt in identity_receipts if receipt["decision"] == "mismatch"),
+        None,
+    )
+    if conflict is not None:
+        return _identity_result(
+            conflict,
+            f"company identity conflict: {conflict['reason_code']}",
+            actual_final_url=observed_url,
+        )
+    unavailable = next(
+        (receipt for receipt in identity_receipts if receipt["decision"] == "unavailable"),
+        None,
+    )
+    if unavailable is not None:
+        return _identity_result(
+            unavailable,
+            "homepage identity evidence unavailable: complete identity not proven",
+            actual_final_url=observed_url,
+        )
+    return _identity_result(
+        submitted_identity,
+        "homepage identity evidence unavailable: complete identity not proven",
+        actual_final_url=observed_url,
     )

@@ -1,9 +1,8 @@
 """Tests for the site-verifier improvements ported into the lab verifier.
 
-Covers the four ported surfaces and — most importantly — proves the port is
-OUTPUT-NEUTRAL under default flags (shadow/disabled), so benchmark scores,
-champion selection, and validator weights are unchanged until an operator
-explicitly enables enforcement.
+Covers the four ported surfaces and the precision-first company-fit contract.
+The official default enforces deterministic industry fit. Explicit shadow and
+disabled modes remain available for controlled observation.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ import pytest
 import leadpoet_verifier.industry_taxonomy as taxonomy
 from leadpoet_verifier.industry_fit import b2b_saas_evidence, industry_fit
 import qualification.scoring.pre_checks as pre_checks
+from qualification.scoring.company_fit_decision import COMPANY_FIT_UNAVAILABLE
 from gateway.qualification.models import (
     CompanyOutput,
     ICPPrompt,
@@ -210,16 +210,28 @@ def _run_zero_checks(company: CompanyOutput, icp: ICPPrompt):
     )
 
 
-def test_shadow_mode_is_output_neutral(monkeypatch, caplog) -> None:
-    # A canonical industry mismatch in SHADOW mode (the default) must pass
-    # exactly as before the port — only a tagged warning is emitted.
+def test_shadow_mode_is_output_neutral(monkeypatch) -> None:
+    # A canonical industry mismatch in explicitly selected SHADOW mode passes
+    # exactly as before the port and records a durable shadow-only receipt.
     monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
     company, icp = _company("Food & Beverages"), _icp("Software")
-    with caplog.at_level("WARNING"):
-        passed, reason = _run_zero_checks(company, icp)
-    assert passed is True and reason is None  # outcome unchanged
+    receipts = []
+    result = asyncio.run(
+        pre_checks.run_company_zero_checks(
+            company,
+            icp,
+            run_cost_usd=0.0,
+            run_time_seconds=1.0,
+            seen_companies=set(),
+            gate_receipts=receipts,
+        )
+    )
+    assert result.passed is True and result.reason is None  # outcome unchanged
     assert any(
-        "taxonomy_industry_gate_shadow_mismatch" in rec.message for rec in caplog.records
+        receipt.get("gate") == "taxonomy_industry"
+        and receipt.get("taxonomy_mode") == "shadow"
+        and receipt.get("final_effect") == "shadow_pass"
+        for receipt in receipts
     )
 
 
@@ -229,6 +241,13 @@ def test_disabled_mode_skips_and_is_output_neutral(monkeypatch, caplog) -> None:
         passed, reason = _run_zero_checks(_company("Food & Beverages"), _icp("Software"))
     assert passed is True and reason is None
     assert not any("taxonomy_industry_gate" in rec.message for rec in caplog.records)
+
+
+def test_default_mode_shadows_canonical_mismatch(monkeypatch) -> None:
+    monkeypatch.delenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", raising=False)
+    result = _run_zero_checks(_company("Food & Beverages"), _icp("Software"))
+    assert result.passed is True
+    assert result.decision == "match"
 
 
 def test_enforce_mode_zeroes_canonical_mismatch(monkeypatch) -> None:
@@ -244,9 +263,8 @@ def test_enforce_mode_passes_true_match(monkeypatch) -> None:
     assert passed is True and reason is None
 
 
-def test_gate_fails_open_on_internal_error(monkeypatch) -> None:
-    # Availability over strictness: a broken matcher must never take down
-    # scoring, even in enforce mode (it logs a tagged warning instead).
+def test_gate_marks_internal_error_unavailable(monkeypatch) -> None:
+    # A broken matcher is retryable infrastructure, not an implicit match.
     monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
 
     def _boom(*args, **kwargs):
@@ -255,8 +273,9 @@ def test_gate_fails_open_on_internal_error(monkeypatch) -> None:
     import leadpoet_verifier.industry_fit as fit_mod
 
     monkeypatch.setattr(fit_mod, "industry_fit", _boom)
-    passed, reason = _run_zero_checks(_company("Food & Beverages"), _icp("Software"))
-    assert passed is True and reason is None
+    result = _run_zero_checks(_company("Food & Beverages"), _icp("Software"))
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert "matcher unavailable" in (result.reason or "")
 
 
 def test_invalid_mode_falls_back_to_shadow(monkeypatch) -> None:
@@ -544,10 +563,10 @@ def test_semantic_disabled_never_constructs_evaluator(monkeypatch) -> None:
     monkeypatch.setattr(sg.SemanticGateEvaluator, "from_env", classmethod(_boom))
     # Ambiguous mismatch: unknown provider label, no concepts -> enforce zeroes
     # WITHOUT ever touching the semantic evaluator.
-    passed, reason = _run_zero_checks(
+    result = _run_zero_checks(
         _company("Bespoke Provider Label Xyz"), _icp("Software")
     )
-    assert passed is False and "canonical taxonomy" in (reason or "")
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
 
 
 def test_semantic_enforce_rescues_ambiguous_label(monkeypatch) -> None:
@@ -667,14 +686,13 @@ def test_matrix_semantic_enforce_decides_ambiguous_only(monkeypatch) -> None:
     assert calls == []
 
 
-def test_matrix_semantic_enforce_unavailability_fails_open(monkeypatch) -> None:
-    # THE SECOND PR-28 AUDIT BUG: provider unavailability used to hard-zero.
-    # Unavailability is never a verdict — ambiguous labels FAIL OPEN.
+def test_matrix_semantic_enforce_unavailability_is_retryable(monkeypatch) -> None:
+    # Provider unavailability is not a verdict and must not become a match.
     monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
     for behavior in ("error", "construct_error"):
         _install_matrix(monkeypatch, "enforce", behavior)
-        passed, reason = _run_zero_checks(_company(AMBIGUOUS[0]), _icp(AMBIGUOUS[1]))
-        assert passed is True and reason is None, f"must fail open on {behavior}"
+        result = _run_zero_checks(_company(AMBIGUOUS[0]), _icp(AMBIGUOUS[1]))
+        assert result.decision == COMPANY_FIT_UNAVAILABLE, behavior
         # ...but canonical conflicts still zero (unavailability changes nothing).
         passed, _ = _run_zero_checks(_company(CONFLICT[0]), _icp(CONFLICT[1]))
         assert passed is False
@@ -760,20 +778,20 @@ async def test_gate_receipts_persist_into_breakdown_end_to_end(monkeypatch) -> N
         seen_companies=set(),
     )
     assert breakdown.final_score == 0
-    assert "canonical taxonomy" in (breakdown.failure_reason or "")
+    assert "submitted company fit conflicts" in (breakdown.failure_reason or "")
     receipts = breakdown.verifier_gate_receipts
-    assert receipts and receipts[0]["gate"] == "taxonomy_industry"
-    assert receipts[0]["final_effect"] == "zeroed"
-    assert receipts[0]["taxonomy_mode"] == "enforce"
+    assert receipts and receipts[0]["gate"] == "company_fit"
+    assert receipts[0]["decision"] == "mismatch"
+    assert receipts[0]["company_fit_dimensions"]["industry"] == "mismatch"
     # Round-trips through the model layer (what the evaluator serializes).
     dumped = breakdown.model_dump()
-    assert dumped["verifier_gate_receipts"][0]["final_effect"] == "zeroed"
+    assert dumped["verifier_gate_receipts"][0]["decision"] == "mismatch"
 
 
 @pytest.mark.asyncio
 async def test_clean_pass_carries_no_receipt(monkeypatch) -> None:
     # Payload discipline: a trivial deterministic pass must NOT attach an
-    # audit receipt — otherwise the default shadow mode would bloat every
+    # audit receipt — otherwise a shadow-mode run would bloat every
     # persisted breakdown in every benchmark.
     from qualification.scoring.lead_scorer import _run_autoresearch_binary_fit_checks
 

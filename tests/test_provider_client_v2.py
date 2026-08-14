@@ -516,7 +516,11 @@ async def test_company_verification_retries_signed_transient_homepage_failure():
             return {
                 "http_status": 200,
                 "headers": {"content-type": "text/html"},
-                "body": b"<html><title>Example Company</title></html>",
+                "body": (
+                    b"<html><title>Example Company</title>"
+                    b'<a href="https://www.linkedin.com/company/example-company">'
+                    b"LinkedIn</a></html>"
+                ),
                 "tls_peer_chain_hash": "sha256:" + "b" * 64,
                 "tls_protocol": "TLSv1.3",
             }
@@ -534,14 +538,17 @@ async def test_company_verification_retries_signed_transient_homepage_failure():
             },
             terminal_sink=terminal_attempts.append,
         ):
-            verified, reason = await verify_company_exists(
+            result = await verify_company_exists(
                 "Example Company",
                 "https://example.com/",
+                company_linkedin=(
+                    "https://www.linkedin.com/company/example-company"
+                ),
                 require_https_transport=True,
             )
 
-        assert verified is True
-        assert reason.startswith("verified:")
+        assert result.passed is True
+        assert (result.reason or "").startswith("verified:")
         assert [row["attempt_number"] for row in terminal_attempts] == [0, 1]
         assert [row["terminal_status"] for row in terminal_attempts] == [
             "transport_failure",
@@ -560,24 +567,26 @@ async def test_company_verification_exhaustion_remains_fail_closed():
     transport = Transport(error=RuntimeError("unexpected eof"))
     router, observed = _router(transport)
     try:
-        with pytest.raises(
-            ProviderClientV2Error,
-            match="provider transport did not authenticate",
+        with router.scope(
+            job_id="company-score-job",
+            purpose="research_lab.company_score.v2",
+            logical_operation_id="company-score-operation",
+            retry_policy_hashes={
+                provider: HASH for provider in BUILTIN_PROVIDER_ROUTES
+            },
+            allow_transport_failures=True,
         ):
-            with router.scope(
-                job_id="company-score-job",
-                purpose="research_lab.company_score.v2",
-                logical_operation_id="company-score-operation",
-                retry_policy_hashes={
-                    provider: HASH for provider in BUILTIN_PROVIDER_ROUTES
-                },
-            ):
-                await verify_company_exists(
-                    "Example Company",
-                    "https://example.com/",
-                    require_https_transport=True,
-                )
+            result = await verify_company_exists(
+                "Example Company",
+                "https://example.com/",
+                company_linkedin=(
+                    "https://www.linkedin.com/company/example-company"
+                ),
+                require_https_transport=True,
+            )
 
+        assert result.decision == "unavailable"
+        assert result.passed is False
         assert len(observed) == 2
         assert [
             row["transport_attempt"]["attempt_number"] for row in observed

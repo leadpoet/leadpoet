@@ -1082,6 +1082,7 @@ wait_for_gateway_build_memory() {
   for attempt in $(seq 1 300); do
     if python3 "$guard" \
         --cleanup-disposable-tests \
+        --cleanup-stale-vsock-probes \
         --minimum-available-mib 16384 >"$report"; then
       cat "$report"
       rm -f "$report"
@@ -2449,6 +2450,11 @@ if [ "$(git -C "$LEADPOET_REPO_ROOT" rev-parse HEAD)" != "$GATEWAY_DEPLOY_SHA" ]
   echo "ERROR: canonical gateway checkout does not match activated deployment" >&2
   exit 1
 fi
+echo "Cleaning stale read-only gateway vsock probes"
+"$GATEWAY_PYTHON_BIN" \
+  "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py" \
+  --cleanup-stale-vsock-probes \
+  --minimum-available-mib 1024
 echo "Verifying prepared and activated gateway trees against exact Git blobs"
 GATEWAY_DEPLOY_STAGE="git_tree_verification"
 export GATEWAY_DEPLOY_STAGE

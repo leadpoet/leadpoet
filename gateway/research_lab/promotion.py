@@ -1504,6 +1504,7 @@ async def _promotion_reason_recorded(
     score_bundle_id: str,
     reason: str,
     adapter_id: str,
+    required_doc_fields: Mapping[str, Any] | None = None,
 ) -> bool:
     rows = await select_many(
         "research_lab_candidate_promotion_events",
@@ -1518,9 +1519,140 @@ async def _promotion_reason_recorded(
     )
     for row in rows:
         doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
-        if str(doc.get("reason") or "") == reason and str(doc.get("adapter_id") or "") == adapter_id:
+        if (
+            str(doc.get("reason") or "") == reason
+            and str(doc.get("adapter_id") or "") == adapter_id
+            and (
+                required_doc_fields is None
+                or all(doc.get(key) == value for key, value in required_doc_fields.items())
+            )
+        ):
             return True
     return False
+
+
+async def _ensure_source_add_leg2_reward_activation(
+    *,
+    adapter_id: str,
+    reward_rows: Sequence[Mapping[str, Any]] | None = None,
+    dry_run: bool = False,
+) -> Mapping[str, Any]:
+    rows = list(reward_rows) if reward_rows is not None else await select_many(
+        "research_lab_source_add_reward_current",
+        columns=(
+            "reward_ref,adapter_id,leg,current_reward_status,"
+            "trigger_evidence_doc"
+        ),
+        filters=(("adapter_id", adapter_id),),
+        limit=20,
+    )
+    existing = next(
+        (
+            row
+            for row in rows
+            if int(row.get("leg") or 0) == 2
+            and str(row.get("adapter_id") or "") == adapter_id
+        ),
+        None,
+    )
+    if existing is None:
+        raise RuntimeError("SOURCE_ADD Leg 2 idempotency row is missing")
+    if str(existing.get("current_reward_status") or ""):
+        return existing
+
+    reward_ref = str(existing.get("reward_ref") or "")
+    evidence = existing.get("trigger_evidence_doc")
+    if (
+        re.fullmatch(r"source_add_reward:[0-9a-f]{16}", reward_ref) is None
+        or not isinstance(evidence, Mapping)
+        or evidence.get("llm_judge_passed") is not True
+        or evidence.get("llm_verdict") != "helped"
+        or evidence.get("source_used") is not True
+    ):
+        raise RuntimeError("SOURCE_ADD Leg 2 orphan authority differs")
+    if dry_run:
+        return existing
+    try:
+        await insert_row(
+            "research_lab_source_add_reward_events",
+            {
+                "reward_ref": reward_ref,
+                "seq": 0,
+                "reward_status": "active",
+                "reason": "leg2_llm_judge_helped",
+            },
+        )
+    except Exception as exc:
+        if not (
+            "duplicate" in str(exc).lower()
+            or "unique" in str(exc).lower()
+            or "23505" in str(exc)
+        ):
+            raise
+    return existing
+
+
+async def reconcile_source_add_leg2_reward_activations(
+    *,
+    limit: int = 50,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Repair measured Leg 2 obligations missing their initial active event."""
+
+    bounded_limit = max(1, min(int(limit), 500))
+    rows = await select_many(
+        "research_lab_source_add_reward_current",
+        columns=(
+            "reward_ref,adapter_id,leg,current_reward_status,"
+            "trigger_evidence_doc,created_at"
+        ),
+        filters=(("leg", 2), ("current_reward_status", "is", None)),
+        order_by=(("created_at", False),),
+        limit=bounded_limit,
+    )
+    repaired: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for row in rows:
+        adapter_id = str(row.get("adapter_id") or "")
+        reward_ref = str(row.get("reward_ref") or "")
+        try:
+            await _ensure_source_add_leg2_reward_activation(
+                adapter_id=adapter_id,
+                reward_rows=(row,),
+                dry_run=dry_run,
+            )
+        except Exception as exc:  # noqa: BLE001 - continue the bounded sweep
+            logger.warning(
+                "research_lab_source_add_leg2_activation_reconcile_failed "
+                "reward_ref=%s error=%s",
+                reward_ref,
+                _safe_text(str(exc))[:240],
+            )
+            failed.append(
+                {
+                    "reward_ref": reward_ref,
+                    "adapter_id": adapter_id,
+                    "error": _safe_text(str(exc))[:240],
+                }
+            )
+            continue
+        repaired.append(
+            {
+                "reward_ref": reward_ref,
+                "adapter_id": adapter_id,
+                "status": "would_activate" if dry_run else "activated",
+            }
+        )
+    return {
+        "ok": not failed,
+        "action": "reconcile-source-add-leg2-reward-activations",
+        "dry_run": bool(dry_run),
+        "found_orphaned": len(rows),
+        "repaired_count": 0 if dry_run else len(repaired),
+        "planned_count": len(repaired) if dry_run else 0,
+        "repaired": repaired,
+        "failed": failed,
+    }
 
 
 class ResearchLabPromotionController:
@@ -2891,6 +3023,42 @@ class ResearchLabPromotionController:
                 score_bundle=score_bundle,
                 provisioned_sources=provisioned_rows,
             )
+            judge_receipt = judge_outcome.get("execution_receipt")
+            judge_graph = judge_outcome.get("execution_receipt_graph")
+            judge_result = judge_outcome.get("result")
+            if (
+                not isinstance(judge_receipt, Mapping)
+                or not isinstance(judge_graph, Mapping)
+                or not isinstance(judge_result, Mapping)
+            ):
+                raise RuntimeError("SOURCE_ADD Leg 2 judge authority is incomplete")
+            judge_receipt_hash = str(
+                judge_receipt.get("receipt_hash") or ""
+            ).lower()
+            judge_output_root = str(
+                judge_receipt.get("output_root") or ""
+            ).lower()
+            graph_receipts = {
+                str(item.get("receipt_hash") or ""): item
+                for item in judge_graph.get("receipts") or ()
+                if isinstance(item, Mapping)
+            }
+            if (
+                re.fullmatch(r"sha256:[0-9a-f]{64}", judge_receipt_hash) is None
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", judge_output_root) is None
+                or judge_receipt.get("role") != "gateway_scoring"
+                or judge_receipt.get("purpose")
+                != "research_lab.source_add_judge.v2"
+                or judge_receipt.get("status") != "succeeded"
+                or judge_graph.get("root_receipt_hash") != judge_receipt_hash
+                or graph_receipts.get(judge_receipt_hash) != dict(judge_receipt)
+                or judge_output_root != sha256_json(dict(judge_result))
+            ):
+                raise RuntimeError("SOURCE_ADD Leg 2 judge authority differs")
+            judge_event_binding = {
+                "judge_receipt_hash": judge_receipt_hash,
+                "judge_output_root": judge_output_root,
+            }
             rows_by_adapter = {str(row.get("adapter_id") or ""): row for row in provisioned_rows}
             rows_by_registry = {str(row.get("registry_provider_id") or ""): row for row in provisioned_rows}
             matched_row = rows_by_adapter.get(verdict.adapter_id) or rows_by_registry.get(verdict.registry_provider_id)
@@ -2903,6 +3071,7 @@ class ResearchLabPromotionController:
                     score_bundle_id=score_bundle_id,
                     reason=reason,
                     adapter_id=adapter_for_event,
+                    required_doc_fields=judge_event_binding,
                 ):
                     await create_candidate_promotion_event(
                         candidate_id=candidate_id,
@@ -2923,6 +3092,7 @@ class ResearchLabPromotionController:
                                 "registry_provider_id": verdict.registry_provider_id,
                                 "evidence_summary": verdict.evidence_summary,
                                 "reason_codes": list(verdict.reason_codes),
+                                **judge_event_binding,
                             }
                         ),
                     )
@@ -2935,7 +3105,10 @@ class ResearchLabPromotionController:
             adapter_id = str(matched_row.get("adapter_id") or "")
             reward_rows = await select_many(
                 "research_lab_source_add_reward_current",
-                columns="reward_ref,adapter_id,leg,current_reward_status",
+                columns=(
+                    "reward_ref,adapter_id,leg,current_reward_status,"
+                    "trigger_evidence_doc"
+                ),
                 filters=(("adapter_id", adapter_id),),
                 limit=20,
             )
@@ -2966,6 +3139,10 @@ class ResearchLabPromotionController:
             )
             blockers: list[str] = []
             if leg2 is None:
+                await _ensure_source_add_leg2_reward_activation(
+                    adapter_id=adapter_id,
+                    reward_rows=reward_rows,
+                )
                 blockers = ["leg2_already_created"]
                 reward_doc = None
             else:
@@ -2975,7 +3152,6 @@ class ResearchLabPromotionController:
                         authorize_reward_decision_v2,
                     )
 
-                    judge_graph = judge_outcome.get("receipt_graph")
                     judge_result = judge_outcome.get("result")
                     if not isinstance(judge_graph, Mapping) or not isinstance(
                         judge_result, Mapping
@@ -3038,6 +3214,9 @@ class ResearchLabPromotionController:
                     )
                 except Exception as exc:
                     if "duplicate" in str(exc).lower() or "unique" in str(exc).lower() or "23505" in str(exc):
+                        await _ensure_source_add_leg2_reward_activation(
+                            adapter_id=adapter_id,
+                        )
                         blockers = ["leg2_already_created"]
                         reward_doc = None
                     else:
@@ -3048,6 +3227,7 @@ class ResearchLabPromotionController:
                 score_bundle_id=score_bundle_id,
                 reason=reason,
                 adapter_id=adapter_id,
+                required_doc_fields=judge_event_binding,
             ):
                 await create_candidate_promotion_event(
                     candidate_id=candidate_id,
@@ -3070,6 +3250,7 @@ class ResearchLabPromotionController:
                             "source_used": verdict.source_used,
                             "evidence_summary": verdict.evidence_summary,
                             "reason_codes": list(verdict.reason_codes),
+                            **judge_event_binding,
                         }
                     ),
                 )

@@ -23,9 +23,15 @@ from gateway.research_lab.git_tree_models import (
     derive_tree_id,
 )
 from gateway.research_lab.code_build import (
+    CodeEditArtifactMissingError,
+    CodeEditBuildError,
     CodeEditBuildResult,
     CodeEditCandidateBuilder,
+    CodeEditEmptyOrNoopPatchError,
+    CodeEditImageBuildError,
+    CodeEditInfraFailureError,
     CodeEditPatchApplyError,
+    CodeEditPrivateTestError,
     _copy_source_tree,
     _initialize_temporary_git_repo,
     _prepare_parent_image_workspace,
@@ -53,9 +59,11 @@ from gateway.tee.autoresearch_executor_v2 import (
     _HostCandidateBuilder,
     _HostGitTreeRepository,
     _candidate_document,
+    _raise_code_edit_host_operation_failure,
     _source_context,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+from gateway.tee.host_operation_channel_v2 import HostOperationV2Error
 from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
 from gateway.tee.source_bundle_v2 import (
     build_source_bundle_v2,
@@ -817,6 +825,101 @@ def _artifact_seal(*, plaintext, job_id, purpose, artifact_kind):
 
 
 _artifact_seal.records = []
+
+
+@pytest.mark.parametrize(
+    ("failure_code", "expected_type"),
+    (
+        ("candidate_patch_apply_failed", CodeEditPatchApplyError),
+        ("candidate_patch_empty_or_noop", CodeEditEmptyOrNoopPatchError),
+        ("candidate_patch_test_failed", CodeEditPrivateTestError),
+        ("candidate_image_build_failed", CodeEditImageBuildError),
+        ("candidate_artifact_missing", CodeEditArtifactMissingError),
+        ("candidate_build_infra_failed", CodeEditInfraFailureError),
+        ("candidate_build_failed", CodeEditBuildError),
+    ),
+)
+def test_measured_executor_restores_allowlisted_host_build_failure_type(
+    failure_code,
+    expected_type,
+):
+    error = HostOperationV2Error(
+        "generic host failure",
+        terminal={"failure_code": failure_code},
+    )
+    with pytest.raises(expected_type) as caught:
+        _raise_code_edit_host_operation_failure(error)
+    assert caught.value.failure_stage == failure_code
+    assert "generic host failure" not in str(caught.value)
+
+
+def test_measured_executor_preserves_unknown_host_build_failure():
+    error = HostOperationV2Error(
+        "host operation failed: unknown_stage",
+        terminal={"failure_code": "unknown_stage"},
+    )
+    with pytest.raises(HostOperationV2Error) as caught:
+        _raise_code_edit_host_operation_failure(error)
+    assert caught.value is error
+
+
+def test_host_candidate_builder_requeues_signed_infrastructure_failure(tmp_path):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    config = _config()
+    source_context = CodeEditCandidateBuilder(
+        config
+    ).prepare_attested_source_context(
+        parent_artifact=root_artifact,
+        source_bundle=source_bundle,
+        workspace_dir=tmp_path / "host-context",
+    )
+    draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase the source runtime value",
+        expected_improvement="recover more valid companies",
+        risk="bounded runtime increase",
+        lane="query_construction",
+        target_files=("sourcing_model/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+            "--- a/sourcing_model/runtime.py\n"
+            "+++ b/sourcing_model/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="increase a bounded sourcing runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+
+    class FailedBuildContext:
+        @staticmethod
+        def execute_host_operation(**kwargs):
+            assert kwargs["operation"] == "autoresearch_build_candidate"
+            raise HostOperationV2Error(
+                "host operation failed",
+                terminal={"failure_code": "candidate_build_infra_failed"},
+            )
+
+    builder = _HostCandidateBuilder(
+        config=config,
+        source_context=source_context,
+        source_bundle_hash=source_bundle["archive_sha256"],
+        execution_context=FailedBuildContext(),
+    )
+
+    with pytest.raises(CodeEditInfraFailureError) as caught:
+        builder.build(
+            draft=draft,
+            parent_artifact=root_artifact,
+            run_id="run-host-build-failure-v2",
+            candidate_index=1,
+            source_context=source_context,
+        )
+    assert caught.value.retryable is True
+    assert caught.value.failure_stage == "candidate_build_infra_failed"
 
 
 def test_autoresearch_executor_runs_existing_engine_and_commits_events(tmp_path):

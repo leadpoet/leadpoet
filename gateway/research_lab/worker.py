@@ -106,6 +106,7 @@ from gateway.research_lab.promotion import (
     load_active_private_model,
     reconcile_active_private_model_lineage,
     reconcile_pending_champion_rewards,
+    reconcile_source_add_leg2_reward_activations,
 )
 from gateway.research_lab.public_activity import (
     safe_project_public_loop_activity,
@@ -2528,6 +2529,17 @@ class ResearchLabHostedWorker:
         except Exception as exc:
             logger.warning(
                 "research_lab_periodic_reward_reconcile_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:200],
+            )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
+        try:
+            await reconcile_source_add_leg2_reward_activations(dry_run=False)
+        except Exception as exc:
+            logger.warning(
+                "research_lab_periodic_source_add_leg2_activation_reconcile_failed "
+                "worker_ref=%s error=%s",
                 self.worker_ref,
                 str(exc)[:200],
             )

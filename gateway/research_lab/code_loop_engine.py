@@ -3753,8 +3753,10 @@ class CodeEditLoopEngine:
                 editable_files=source_context.editable_files,
                 references=requested_references,
             )
-            references = exact_binding.missing_references
-            if not references:
+            if exact_binding.invalid_references or exact_binding.ambiguous_references:
+                reference_repair_status = "unsafe_references"
+                return None
+            if not requested_references:
                 reference_repair_status = "no_safe_references"
                 return None
             if elapsed() >= settings.max_seconds:
@@ -3796,7 +3798,7 @@ class CodeEditLoopEngine:
                 resolve_source_references,
                 index_doc=source_context.planner_index(),
                 source_root=source_context.source_root,
-                references=references,
+                references=requested_references,
             )
             prior_plan_hash = str(plan_doc.get("plan_hash") or sha256_json(dict(plan_doc)))
             await self.event_sink(
@@ -3834,6 +3836,7 @@ class CodeEditLoopEngine:
                     reference_resolution=resolution,
                     candidate_edit_constraints=candidate_edit_constraints,
                     feasibility_errors=feasibility_errors,
+                    branch_factor=tree_policy.branch_factor,
                 ),
                 min(settings.draft_timeout_seconds, remaining_call_seconds),
                 self.builder.config.loop_planner_max_tokens,
@@ -5181,7 +5184,7 @@ class CodeEditLoopEngine:
                                 "iteration": iteration,
                                 "trigger": str(trigger or "")[:120],
                                 "reason": safe_event_error_text(reason),
-                                "mode": "smaller_same_lane_inspected_files",
+                                "mode": "schema_repair_smaller_same_lane_inspected_files",
                                 "generation_attempt": candidate_generation_attempt_count,
                                 "generation_attempt_limit": tree_policy.generation_attempts,
                                 "max_candidates": 1,
@@ -5227,6 +5230,8 @@ class CodeEditLoopEngine:
                         fallback_reason=reason,
                         max_candidates=1,
                         max_target_files=_fallback_max_target_files(self.builder.config),
+                        provider_outcome_digest=self.provider_outcome_digest,
+                        provider_capability_summary=provider_capability_summary,
                         candidate_edit_constraints=candidate_edit_constraints,
                     ),
                         min(settings.draft_timeout_seconds, remaining_fallback_seconds),

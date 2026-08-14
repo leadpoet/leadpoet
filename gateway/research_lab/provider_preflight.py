@@ -343,7 +343,9 @@ async def _cached_attested_preflight(
     with _attested_preflight_cache_lock:
         cached = _attested_preflight_cache.get(cache_key)
         if cached is not None and now < float(cached["expires_at"]):
-            return copy.deepcopy(cached["result"])
+            cached_result = copy.deepcopy(cached["result"])
+            cached_result["_measurement_cached"] = True
+            return cached_result
         expired = [
             key
             for key, entry in _attested_preflight_cache.items()
@@ -364,13 +366,16 @@ async def _cached_attested_preflight(
     if not isinstance(result, Mapping):
         raise RuntimeError("attested provider preflight result is invalid")
     normalized = copy.deepcopy(dict(result))
+    normalized.pop("_measurement_cached", None)
     ttl_seconds = max(60.0, float(settings["ttl_seconds"]))
     with _attested_preflight_cache_lock:
         _attested_preflight_cache[cache_key] = {
             "expires_at": time.monotonic() + ttl_seconds,
             "result": normalized,
         }
-    return copy.deepcopy(normalized)
+    measured_result = copy.deepcopy(normalized)
+    measured_result["_measurement_cached"] = False
+    return measured_result
 
 
 def _maintenance_state_values(state: Any) -> tuple[bool, str]:
@@ -390,6 +395,7 @@ async def apply_preflight_control_result(
     set_paused: Callable[..., Any],
     prefetched_state: Any = None,
     may_change_pause_state: bool = True,
+    refresh_existing_preflight_pause: bool = False,
 ) -> None:
     """Apply one measured or aggregated preflight result to maintenance state."""
 
@@ -440,16 +446,55 @@ async def apply_preflight_control_result(
         # Re-read only on a pause-worthy result so concurrent workers observe
         # an existing pause instead of appending the same event afterward.
         state = await is_paused()
-        already_paused, _ = _maintenance_state_values(state)
+        already_paused, existing_reason = _maintenance_state_values(state)
         if not already_paused:
             await set_paused(
                 paused=True,
                 reason=pause_reason,
                 actor_ref=actor_ref,
-                event_doc={"scope": scope, "verdicts": verdicts},
+                event_doc={
+                    "scope": scope,
+                    "verdicts": verdicts,
+                    "systemic_transport_failure": bool(
+                        result.get("systemic_transport_failure")
+                    ),
+                },
             )
             logger.warning(
                 "research_lab_provider_preflight_auto_paused scope=%s providers=%s",
+                scope,
+                marker,
+            )
+        elif (
+            refresh_existing_preflight_pause
+            and existing_reason.startswith(PREFLIGHT_REASON_PREFIX)
+        ):
+            raw_event_seq = (
+                state.get("event_seq") if isinstance(state, Mapping) else None
+            )
+            expected_prior_seq = (
+                int(raw_event_seq)
+                if isinstance(raw_event_seq, int)
+                and not isinstance(raw_event_seq, bool)
+                else None
+            )
+            await set_paused(
+                paused=True,
+                reason=pause_reason,
+                actor_ref=actor_ref,
+                event_doc={
+                    "scope": scope,
+                    "verdicts": verdicts,
+                    "recovery_probe_failed": True,
+                    "systemic_transport_failure": bool(
+                        result.get("systemic_transport_failure")
+                    ),
+                },
+                expected_prior_seq=expected_prior_seq,
+            )
+            logger.warning(
+                "research_lab_provider_preflight_recovery_deferred "
+                "scope=%s providers=%s",
                 scope,
                 marker,
             )
@@ -520,6 +565,7 @@ async def preflight_gate(
         "healthy": bool(result.get("healthy")),
         "pause_worthy": bool(result.get("pause_worthy")),
         "verdicts": list(verdicts),
+        "measurement_cached": bool(result.get("_measurement_cached")),
     }
     await apply_preflight_control_result(
         scope=scope,
@@ -538,6 +584,7 @@ async def preflight_gate(
             else "provider_preflight_unhealthy"
         ),
         "verdicts": normalized_result["verdicts"],
+        "measurement_cached": normalized_result["measurement_cached"],
         "healthy": normalized_result["healthy"],
         "pause_worthy": normalized_result["pause_worthy"],
         "disabled": False,

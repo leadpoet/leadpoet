@@ -88,6 +88,7 @@ from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
     apply_preflight_control_result,
     preflight_gate,
+    provider_preflight_settings,
 )
 from gateway.research_lab.provider_profiles_v2 import (
     BENCHMARK_MODEL_PROFILE,
@@ -697,10 +698,10 @@ def _baseline_publication_retry_token_hash() -> str:
     return sha256_json({"retry_token": token}) if token else ""
 
 
-def _latest_terminal_baseline_publication_failure(
+def _latest_terminal_baseline_failure(
     rows: list[Mapping[str, Any]],
 ) -> Mapping[str, Any] | None:
-    """Return a terminal publication failure only when it is the latest event."""
+    """Return a terminal baseline failure only when it is the latest event."""
 
     if not rows:
         return None
@@ -708,11 +709,22 @@ def _latest_terminal_baseline_publication_failure(
     doc = latest.get("event_doc") if isinstance(latest.get("event_doc"), Mapping) else {}
     if str(latest.get("dispatch_status") or "") != "failed":
         return None
-    if str(doc.get("failure_phase") or "") != "publication":
+    if str(doc.get("failure_phase") or "") not in {
+        "publication",
+        "health_gate",
+    }:
         return None
     if not bool(doc.get("terminal_no_automatic_retry")):
         return None
     return latest
+
+
+def _latest_terminal_baseline_publication_failure(
+    rows: list[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    """Compatibility alias for callers and tests using the original name."""
+
+    return _latest_terminal_baseline_failure(rows)
 
 
 def _baseline_publication_retry_authorization(failure_row: Mapping[str, Any]) -> str:
@@ -740,7 +752,7 @@ def _baseline_publication_retry_decision(
 
     if scope_key in in_process_failures:
         return True, ""
-    failure = _latest_terminal_baseline_publication_failure(rows)
+    failure = _latest_terminal_baseline_failure(rows)
     if failure is None:
         return False, ""
     authorization = _baseline_publication_retry_authorization(failure)
@@ -1456,6 +1468,18 @@ class BaselineHealthGateFailure(RuntimeError):
     def __init__(self, message: str, *, baseline_health: Mapping[str, Any]) -> None:
         super().__init__(message)
         self.baseline_health = dict(baseline_health)
+
+
+def _baseline_computation_failure_policy(exc: BaseException) -> dict[str, Any]:
+    """Classify whether retrying an unchanged completed checkpoint can help."""
+
+    terminal = isinstance(exc, BaselineHealthGateFailure)
+    return {
+        "failure_phase": "health_gate" if terminal else "computation",
+        "terminal_no_automatic_retry": terminal,
+        "telemetry_retryable": not terminal,
+        "status": "baseline_health_gate_failed_terminal" if terminal else "failed",
+    }
 
 
 class BaselineCheckpointRecycle(RuntimeError):
@@ -4482,6 +4506,65 @@ def _status_is_stale(raw_status_at: object, stale_after_seconds: int) -> bool:
     return age_seconds is not None and age_seconds > max(60, int(stale_after_seconds))
 
 
+def _provider_preflight_recovery_cooldown_seconds(
+    maintenance_state: Mapping[str, Any],
+) -> float:
+    """Return the durable delay before one owner may probe a paused fleet."""
+
+    if not (
+        bool(maintenance_state.get("paused"))
+        and str(maintenance_state.get("reason") or "").startswith(
+            PREFLIGHT_REASON_PREFIX
+        )
+    ):
+        return 0.0
+    age_seconds = _status_age_seconds(maintenance_state.get("status_at"))
+    if age_seconds is None:
+        return 0.0
+    ttl_seconds = max(
+        60.0,
+        float(provider_preflight_settings().get("ttl_seconds") or 600.0),
+    )
+    return max(0.0, ttl_seconds - max(0.0, age_seconds))
+
+
+def _systemic_provider_transport_failure(
+    batch: Sequence[tuple[int, Mapping[str, Any]]],
+) -> bool:
+    """Recognize one shared transport failure across independent profiles."""
+
+    if len(batch) < 2:
+        return False
+    expected_providers: frozenset[str] | None = None
+    for _worker_index, result in batch:
+        if bool(result.get("proceed")):
+            return False
+        verdicts = [
+            verdict
+            for verdict in (result.get("verdicts") or [])
+            if isinstance(verdict, Mapping)
+        ]
+        if (
+            len(verdicts) < 2
+            or any(bool(verdict.get("healthy")) for verdict in verdicts)
+            or any(
+                str(verdict.get("status") or "") != "transport_failure"
+                for verdict in verdicts
+            )
+        ):
+            return False
+        providers = frozenset(
+            str(verdict.get("provider") or "") for verdict in verdicts
+        )
+        if "" in providers or len(providers) < 2:
+            return False
+        if expected_providers is None:
+            expected_providers = providers
+        elif providers != expected_providers:
+            return False
+    return expected_providers is not None
+
+
 def _claim_predates_worker_boot(
     row: Mapping[str, Any],
     *,
@@ -5157,6 +5240,16 @@ class ResearchLabGatewayScoringWorker:
                 }
 
             if self._holds_maintenance_lease:
+                recovery_cooldown = _provider_preflight_recovery_cooldown_seconds(
+                    maintenance_state
+                )
+                if recovery_cooldown > 0:
+                    return {
+                        "proceed": False,
+                        "reason": "provider_preflight_recovery_cooldown",
+                        "verdicts": [],
+                        "retry_after_seconds": round(recovery_cooldown, 3),
+                    }
                 preflight = await self._run_owned_provider_preflight(
                     maintenance_state=maintenance_state,
                     heartbeat=heartbeat,
@@ -5200,6 +5293,7 @@ class ResearchLabGatewayScoringWorker:
             int(self.config.scoring_worker_total_workers or 1),
         )
         results: list[tuple[int, Mapping[str, Any]]] = []
+        systemic_transport_failure = False
         # Bound measured job pressure. In particular, a full recipient pool
         # should fail one small batch and globally pause, not launch the rest
         # of the configured fleet's doomed jobs in parallel.
@@ -5249,13 +5343,16 @@ class ResearchLabGatewayScoringWorker:
                 )
             )
             results.extend(batch)
+            systemic_transport_failure = _systemic_provider_transport_failure(
+                batch
+            )
             if any(
                 any(
                     verdict.get("status") == "preflight_execution_failure"
                     for verdict in (result.get("verdicts") or [])
                 )
                 for _, result in batch
-            ):
+            ) or systemic_transport_failure:
                 break
 
         aggregate_verdicts: list[dict[str, Any]] = []
@@ -5282,7 +5379,12 @@ class ResearchLabGatewayScoringWorker:
                 and all(bool(result.get("disabled")) for _, result in results)
             ),
             "verdicts": aggregate_verdicts,
+            "systemic_transport_failure": systemic_transport_failure,
         }
+        fresh_measurement = any(
+            not bool(result.get("measurement_cached"))
+            for _, result in results
+        )
         heartbeat.ensure_held()
         await apply_preflight_control_result(
             scope="scoring",
@@ -5292,6 +5394,9 @@ class ResearchLabGatewayScoringWorker:
             set_paused=set_scoring_maintenance_paused,
             prefetched_state=maintenance_state,
             may_change_pause_state=True,
+            refresh_existing_preflight_pause=(
+                bool(systemic_transport_failure) and fresh_measurement
+            ),
         )
         return {
             "proceed": healthy,
@@ -13238,6 +13343,11 @@ class ResearchLabGatewayScoringWorker:
             }
         except Exception as exc:
             await _stop_baseline_telemetry_heartbeat()
+            failure_policy = _baseline_computation_failure_policy(exc)
+            if failure_policy["terminal_no_automatic_retry"]:
+                self._baseline_publication_failures_in_process.add(
+                    publication_scope_key
+                )
             await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
                 dispatch_status="failed",
@@ -13259,8 +13369,10 @@ class ResearchLabGatewayScoringWorker:
                     "benchmark_attempt": benchmark_attempt,
                     "selected_icp_count": len(window.item_refs),
                     "private_model_manifest_hash": artifact.manifest_hash,
-                    "failure_phase": "computation",
-                    "terminal_no_automatic_retry": False,
+                    "failure_phase": failure_policy["failure_phase"],
+                    "terminal_no_automatic_retry": failure_policy[
+                        "terminal_no_automatic_retry"
+                    ],
                     "scoring_worker_source_hash": _scoring_worker_source_hash(),
                     "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
                     "error_diagnostics": _event_error_diagnostics(exc),
@@ -13280,7 +13392,7 @@ class ResearchLabGatewayScoringWorker:
                 await emit_run_event(
                     baseline_telemetry_session.run,
                     "failed",
-                    retryable=True,
+                    retryable=bool(failure_policy["telemetry_retryable"]),
                     failure_category="baseline_computation_failed",
                     error=exc,
                     telemetry_degraded=baseline_telemetry_session.degraded,
@@ -13299,7 +13411,7 @@ class ResearchLabGatewayScoringWorker:
                 )
             )
             return {
-                "status": "failed",
+                "status": failure_policy["status"],
                 "benchmark_date": today,
                 "rolling_window_hash": window.window_hash,
                 "error": str(exc)[:300],

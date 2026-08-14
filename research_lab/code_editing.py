@@ -457,7 +457,7 @@ def build_loop_direction_planner_messages(
         "- Every schema_version 1.1 ranked path must carry its own target_behavior, must_inspect, allowed_lanes, disallowed_lanes, must_not_try, success_criteria, novelty_requirements, anti_overfit_checks, validation_mode, and validation_paths.\n"
         "- The ranked path named by selected_path_id is authoritative. Copy its lane, mechanism, target_behavior, must_inspect, lane constraints, safety constraints, success criteria, novelty requirements, anti-overfit checks, validation_mode, and validation_paths exactly into the duplicate top-level fields.\n"
         "- Prefer canonical source references as file.py::qualified.symbol. file.py:symbol, an exact bare file, and a uniquely resolvable bare symbol are accepted only when they bind to the extracted source index.\n"
-        "- validation_mode must be runtime_checks or existing_test_files. existing_test_files requires exact paths from candidate_edit_constraints.editable_test_paths.\n"
+        "- validation_mode must be runtime_checks or existing_test_files. runtime_checks requires validation_paths=[]. existing_test_files requires exact paths from candidate_edit_constraints.editable_test_paths.\n"
         "- Do not request, reveal, or store secrets, hidden ICP plaintext, judge prompts, provider keys, private repo URLs, or raw private data.\n"
         "- If no safe new path exists, return no_new_safe_path=true with a clear reason.\n\n"
         "Required output shape (the selected path and duplicate top-level fields match exactly):\n"
@@ -476,9 +476,11 @@ def build_loop_direction_reference_repair_messages(
     reference_resolution: Mapping[str, Any],
     candidate_edit_constraints: Mapping[str, Any] | None = None,
     feasibility_errors: Sequence[str] = (),
+    branch_factor: int = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.branch_factor,
 ) -> list[dict[str, str]]:
     """Ask the planner once to repair a plan bound to missing source names."""
 
+    required_branch_count = max(1, min(8, int(branch_factor)))
     context: dict[str, Any] = {
         "ticket": _redacted_mapping(ticket),
         "original_plan": _redacted_mapping(original_plan),
@@ -486,18 +488,24 @@ def build_loop_direction_reference_repair_messages(
         "allowed_lanes": list(LOOP_DIRECTION_ALLOWED_LANES),
         "candidate_edit_constraints": _redacted_mapping(candidate_edit_constraints or {}),
         "feasibility_errors": [str(item)[:300] for item in feasibility_errors[:12]],
+        "required_root_branch_count": required_branch_count,
     }
     system = (
         "You are Leadpoet Research Lab's loop-direction planner repairing one plan "
         "whose file or function references did not bind to the exact extracted model source. "
-        "You do not write code. Preserve the miner's objective and return one complete replacement plan."
+        "You do not write code. Preserve the miner's objective and return one complete "
+        "replacement plan containing the required independent root paths."
     )
     user = (
         "Return strict JSON only, no markdown.\n\n"
         "Use only paths and symbols present in reference_resolution matches or the original plan's valid paths. "
         "Do not invent an API, path, function, credential, dependency, host, or network client. "
+        "For repaired must_inspect fields, encode a symbol match as path::symbol and a path-only match as path; "
+        "do not add a file merely because it appears useful for implementation or validation. "
         "A similar symbol is evidence to inspect, not permission to change the miner's requested mechanism. "
-        "candidate_edit_constraints and feasibility_errors are binding. Never require a new file, and when no editable test file exists use validation_mode=runtime_checks. "
+        "candidate_edit_constraints and feasibility_errors are binding. Never require a new file. "
+        "When no editable test file exists use validation_mode=runtime_checks with validation_paths=[]. "
+        "For every plan, runtime_checks requires validation_paths=[]; existing_test_files may use only exact paths from candidate_edit_constraints.editable_test_paths. "
         "If the objective still cannot be implemented safely, return no_new_safe_path=true with exact "
         "identifier/path values in unresolved_references. Otherwise return no_new_safe_path=false and a "
         "complete schema_version 1.1 plan with required_lane, required_mechanism, selected_path_id, ranked_paths, target_behavior, "
@@ -506,6 +514,10 @@ def build_loop_direction_reference_repair_messages(
         "Every ranked path must include the same complete path-local fields. The selected ranked path is authoritative: "
         "copy all duplicate top-level lane, mechanism, behavior, source-reference, safety, novelty, and validation fields "
         "exactly from that path. Prefer canonical source references as file.py::qualified.symbol. "
+        "Return exactly Context JSON required_root_branch_count independently safe, source-feasible ranked paths. "
+        "Each path must use a genuinely distinct mechanism; never duplicate or paraphrase one path to fill the count. "
+        "If that complete independent path set cannot be produced safely from the resolved source, fail closed with "
+        "no_new_safe_path=true instead of returning a partial path set. "
         "unresolved_references must then be empty.\n\n"
         "Never expose secrets, private ICP text, raw provider bodies, hidden prompts, or private repository URLs.\n\n"
         "Context JSON:\n"
@@ -835,6 +847,8 @@ def build_code_edit_fallback_messages(
     fallback_reason: str,
     max_candidates: int = 1,
     max_target_files: int = 1,
+    provider_outcome_digest: Mapping[str, Any] | None = None,
+    provider_capability_summary: Mapping[str, Any] | None = None,
     candidate_edit_constraints: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build one bounded fallback pass after the first candidate draft fails.
@@ -852,7 +866,7 @@ def build_code_edit_fallback_messages(
         **dict(budget_context or {}),
         "candidate_generation_fallback": {
             "schema_version": "1.0",
-            "mode": "smaller_same_lane_inspected_files",
+            "mode": "schema_repair_smaller_same_lane_inspected_files",
             "fallback_reason": str(fallback_reason or "")[:500],
             "max_candidates": 1,
             "max_target_files": bounded_target_files,
@@ -869,6 +883,8 @@ def build_code_edit_fallback_messages(
         budget_context=fallback_context,
         loop_direction_plan=loop_direction_plan,
         max_candidates=min(1, max(1, int(max_candidates))),
+        provider_outcome_digest=provider_outcome_digest,
+        provider_capability_summary=provider_capability_summary,
         candidate_edit_constraints=candidate_edit_constraints,
     )
     user = messages[-1]["content"]
@@ -895,6 +911,13 @@ def build_code_edit_fallback_messages(
                 if bounded_target_files <= 1
                 else "- If no bounded inspected-source patch is safe, return the structured no_viable_patch shape with failure_class, reason, and missing_references.\n"
             )
+            + "\nFinal response contract (mandatory):\n"
+            "- Repair the prior response shape. Return exactly one JSON object and nothing else.\n"
+            "- Choose exactly one envelope: {\"candidates\":[<one complete candidate>]} OR "
+            "{\"no_viable_patch\":true,\"failure_class\":\"binding_plan_unimplementable|insufficient_source_context|unsafe_or_out_of_scope|provider_probe_refuted_hypothesis|no_safe_patch\",\"reason\":\"...\",\"missing_references\":[]}.\n"
+            "- A candidate must include lane, plan_path_id, plan_alignment, expected_metric_effect, hypothesis, and code_edit; code_edit must include target_files, unified_diff, redacted_summary, test_plan, and rollback_plan.\n"
+            "- Do not return analysis, commentary, a plan, source-inspection requests, tool calls, markdown, or a candidate outside the candidates array.\n"
+            "- Escape every newline inside unified_diff as \\n so the outer response remains valid JSON.\n"
         ),
     }
     return messages

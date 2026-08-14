@@ -14,6 +14,7 @@ from leadpoet_canonical.attested_v2 import sha256_json
 SUBMISSION_ID = "source_add_submission:1234567890abcdef"
 HASH = "sha256:" + "a" * 64
 FUNCTIONAL_RECEIPT_HASH = "sha256:" + "b" * 64
+JUDGE_RECEIPT_HASH = "sha256:" + "c" * 64
 
 
 class FakeReader:
@@ -65,31 +66,56 @@ def _config():
     )
 
 
-def _context(*, with_functional_parent=False, with_functional_proof=False):
+def _context(
+    *,
+    with_functional_parent=False,
+    with_functional_proof=False,
+    with_judge_parent=False,
+):
     functional = _functional_result()
-    receipt = {
+    functional_receipt = {
         "receipt_hash": FUNCTIONAL_RECEIPT_HASH,
         "purpose": "research_lab.source_add_functional_probe.v2",
         "output_root": sha256_json(functional),
+    }
+    judge_receipt = {
+        "receipt_hash": JUDGE_RECEIPT_HASH,
+        "role": "gateway_scoring",
+        "purpose": "research_lab.source_add_judge.v2",
+        "status": "succeeded",
+        "output_root": sha256_json(_judge_result()),
     }
     return ExecutionContextV2(
         job_id="reward:test",
         purpose="research_lab.reward_decision.v2",
         epoch_id=100,
         parent_receipt_hashes=(
-            (FUNCTIONAL_RECEIPT_HASH,)
-            if with_functional_parent or with_functional_proof
-            else ()
+            (JUDGE_RECEIPT_HASH,)
+            if with_judge_parent
+            else (
+                (FUNCTIONAL_RECEIPT_HASH,)
+                if with_functional_parent or with_functional_proof
+                else ()
+            )
         ),
         external_receipt_graphs=(
             [
                 {
-                    "root_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
-                    "receipts": [receipt],
+                    "root_receipt_hash": JUDGE_RECEIPT_HASH,
+                    "receipts": [judge_receipt],
                 }
             ]
-            if with_functional_parent
-            else []
+            if with_judge_parent
+            else (
+                [
+                    {
+                        "root_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
+                        "receipts": [functional_receipt],
+                    }
+                ]
+                if with_functional_parent
+                else []
+            )
         ),
         external_ancestry_proofs=(
             [
@@ -101,7 +127,7 @@ def _context(*, with_functional_parent=False, with_functional_proof=False):
                         }
                     },
                     "disclosed_boot_identities": [],
-                    "disclosed_receipts": [receipt],
+                    "disclosed_receipts": [functional_receipt],
                 }
             ]
             if with_functional_proof
@@ -184,6 +210,38 @@ def _trigger():
         "judge_model": "openai/gpt-test",
         "judge_doc_hash": HASH,
         "provider_usage": {},
+    }
+
+
+def _leg2_reader():
+    return FakeReader(
+        {
+            "source_add_rewards_by_adapter": [],
+            "source_add_provisioning_by_adapter": [
+                {
+                    "adapter_id": "adapter:test",
+                    "miner_hotkey": "real-owner",
+                    "registry_provider_id": "provider:test",
+                    "provision_status": "provisioned_autoresearch_eligible",
+                }
+            ],
+        }
+    )
+
+
+def _leg2_payload(*, judge_result=None):
+    return {
+        "decision_kind": "source_add_leg2",
+        "decision_payload": {
+            "adapter_id": "adapter:test",
+            "miner_ref": "real-owner",
+            "start_epoch": 101,
+            "trigger_evidence": _trigger(),
+            "judge_result": judge_result or _judge_result(),
+            "existing_rewards": [],
+            "alpha_percent": 5.0,
+            "reward_epochs": 20,
+        },
     }
 
 
@@ -461,6 +519,79 @@ def test_leg1_daily_cap_is_not_rechecked_outside_atomic_slot_transaction():
     assert all(call[0] != "source_add_leg1_events_since" for call in reader.calls)
 
 
+def test_leg2_requires_exact_signed_judge_parent():
+    resolver = CoordinatorRewardSourceV2(
+        reader=_leg2_reader(),
+        chain_source=FakeChain(),
+        config_supplier=_config,
+    )
+
+    resolved = resolver.resolve(
+        payload=_leg2_payload(),
+        context=_context(with_judge_parent=True),
+    )
+
+    assert resolved["decision_kind"] == "source_add_leg2"
+    assert resolved["decision_payload"]["judge_result"] == _judge_result()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "zero_parents",
+        "multiple_parents",
+        "wrong_role",
+        "wrong_purpose",
+        "wrong_status",
+        "wrong_root",
+        "host_mutated_result",
+    ],
+)
+def test_leg2_rejects_unbound_or_mismatched_judge_parent(mutation):
+    resolver = CoordinatorRewardSourceV2(
+        reader=_leg2_reader(),
+        chain_source=FakeChain(),
+        config_supplier=_config,
+    )
+    context = _context(with_judge_parent=True)
+    payload = _leg2_payload()
+    if mutation == "zero_parents":
+        context = _context()
+    elif mutation == "multiple_parents":
+        second_hash = "sha256:" + "d" * 64
+        context.parent_receipt_hashes = (JUDGE_RECEIPT_HASH, second_hash)
+        context.external_receipt_graphs.append(
+            {
+                "root_receipt_hash": second_hash,
+                "receipts": [
+                    {
+                        "receipt_hash": second_hash,
+                        "role": "gateway_scoring",
+                        "purpose": "research_lab.source_add_judge.v2",
+                        "status": "succeeded",
+                        "output_root": sha256_json(_judge_result()),
+                    }
+                ],
+            }
+        )
+    elif mutation == "wrong_root":
+        context.external_receipt_graphs[0]["root_receipt_hash"] = HASH
+    elif mutation == "host_mutated_result":
+        mutated = _judge_result()
+        mutated["verdict"] = {**mutated["verdict"], "confidence": 0.8}
+        payload = _leg2_payload(judge_result=mutated)
+    else:
+        field, value = {
+            "wrong_role": ("role", "gateway_coordinator"),
+            "wrong_purpose": ("purpose", "research_lab.promotion_decision.v2"),
+            "wrong_status": ("status", "failed"),
+        }[mutation]
+        context.external_receipt_graphs[0]["receipts"][0][field] = value
+
+    with pytest.raises(CoordinatorRewardSourceV2Error):
+        resolver.resolve(payload=payload, context=context)
+
+
 def test_leg2_requires_authenticated_adapter_owner():
     reader = FakeReader(
         {
@@ -495,7 +626,7 @@ def test_leg2_requires_authenticated_adapter_owner():
     }
 
     with pytest.raises(CoordinatorRewardSourceV2Error, match="owner"):
-        resolver.resolve(payload=payload, context=_context())
+        resolver.resolve(payload=payload, context=_context(with_judge_parent=True))
 
 
 def test_leg1_rejects_host_substituted_miner():
@@ -572,7 +703,7 @@ def test_leg2_rejects_trigger_that_differs_from_signed_judge():
         },
     }
     with pytest.raises(CoordinatorRewardSourceV2Error, match="signed judge"):
-        resolver.resolve(payload=payload, context=_context())
+        resolver.resolve(payload=payload, context=_context(with_judge_parent=True))
 
 
 def test_reimbursement_reconstructs_formula_inputs_from_measured_rows():

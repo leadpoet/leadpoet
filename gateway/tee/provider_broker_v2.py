@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+import zlib
 
 from httpx import SyncByteStream
 
@@ -160,6 +161,10 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_slot="exa",
         credential_location="header",
         credential_name="x-api-key",
+        # Exa's assigned-proxy path can deliver the complete authenticated
+        # response body while losing only the terminal HTTP marker. A single
+        # gzip member supplies an independently checksum-verified boundary.
+        request_headers=(("Accept-Encoding", "gzip"),),
     ),
     "scrapingdog": ProviderRouteV2(
         provider_id="scrapingdog",
@@ -185,15 +190,10 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
-        # PostgREST's compressed HTTP/2 response keeps the terminal DATA frame
-        # on the known-good measured wire path used before the August transport
-        # hardening. A compressed stream is never eligible for EOF recovery:
-        # httpx must observe normal authenticated message completion.
+        # Preserve the compressed PostgREST wire profile used by the last
+        # release that produced a finalized canonical weight bundle. The gzip
+        # footer proves body completeness if the raw relay loses END_STREAM.
         request_headers=(("Accept-Encoding", "gzip"),),
-        # The coordinator's direct provider path is a raw TLS tunnel. Preserve
-        # ALPN negotiation here; the former HTTP/1.1 pin belonged to the
-        # removed framed-tunnel implementation and causes current Supabase
-        # responses to terminate before headers are received.
     ),
     "truelist": ProviderRouteV2(
         provider_id="truelist",
@@ -465,6 +465,38 @@ def _extract_tls_metadata(response: Any) -> Tuple[str, str]:
     return sha256_bytes(bytes(certificate)), str(protocol)
 
 
+def _force_close_response_network_stream(response: Any) -> None:
+    """Best-effort teardown after a response-stream cleanup failure."""
+
+    extensions = getattr(response, "extensions", None)
+    network_stream = (
+        extensions.get("network_stream")
+        if isinstance(extensions, Mapping)
+        else None
+    )
+    if network_stream is None:
+        return
+    try:
+        network_stream.close()
+        return
+    except Exception:
+        pass
+    try:
+        raw_socket = network_stream.get_extra_info("socket")
+    except Exception:
+        raw_socket = None
+    if raw_socket is None:
+        return
+    try:
+        raw_socket.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        raw_socket.close()
+    except Exception:
+        pass
+
+
 def _make_response_cleanup_nonfatal(response: Any) -> None:
     """Keep stream cleanup from replacing a completed read or its real error."""
     stream = getattr(response, "stream", None)
@@ -482,7 +514,10 @@ def _make_response_cleanup_nonfatal(response: Any) -> None:
             try:
                 stream.close()
             except Exception:
-                pass
+                # A cleanup EOF is not response evidence, but swallowing it
+                # without closing the underlying relay socket leaks one
+                # request-scoped assigned-proxy tunnel per failed cleanup.
+                _force_close_response_network_stream(response)
 
     response.stream = CleanupSafeStream()
 
@@ -543,7 +578,7 @@ def _authenticated_body_is_complete_after_stream_error(
                 len(declared_lengths) == 1
                 and byte_count == next(iter(declared_lengths))
             )
-        if normalized_method != "GET":
+        if normalized_method not in {"GET", "POST"}:
             return False
         # HTTP/2 carries message completion in DATA-frame END_STREAM rather
         # than HTTP/1 Content-Length or Transfer-Encoding headers. The parent
@@ -552,7 +587,8 @@ def _authenticated_body_is_complete_after_stream_error(
         # application boundary: truncating an array or object before its final
         # delimiter cannot still parse, and trailing non-whitespace is
         # rejected by json.loads. Restrict this recovery to authenticated 2xx
-        # HTTP/2 JSON reads; unframed HTTP/1 responses remain ambiguous.
+        # HTTP/2 JSON GET/POST exchanges; unframed HTTP/1 responses and other
+        # mutating methods remain ambiguous.
         try:
             http_version = str(response.http_version or "").strip().upper()
         except Exception:
@@ -565,12 +601,16 @@ def _authenticated_body_is_complete_after_stream_error(
             body=body,
         )
 
-    # PostgREST legitimately streams bounded JSON with chunked framing. A
-    # relay may preserve the complete authenticated JSON body but lose the
-    # terminal zero-length chunk. Recover only when the body itself provides
-    # an objective completeness boundary; every other chunked response remains
-    # fail-closed.
-    if normalized_method != "GET" or transfer_encoding != "chunked" or tokens:
+    # PostgREST and measured providers legitimately stream bounded JSON with
+    # chunked framing. A relay may preserve the complete authenticated JSON
+    # body but lose the terminal zero-length chunk. Recover only when the body
+    # itself provides an objective completeness boundary; every other chunked
+    # response remains fail-closed.
+    if (
+        normalized_method not in {"GET", "POST"}
+        or transfer_encoding != "chunked"
+        or tokens
+    ):
         return False
     return _authenticated_json_body_is_complete(
         response=response,
@@ -598,6 +638,63 @@ def _authenticated_json_body_is_complete(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
     return isinstance(document, (dict, list))
+
+
+def _append_bounded_gzip_bytes(
+    *,
+    decoder: Any,
+    compressed: bytes,
+    chunks: list[bytes],
+    byte_count: int,
+    max_response_bytes: int,
+) -> int:
+    """Decode one gzip chunk without allocating beyond the response ceiling."""
+    pending = bytes(compressed)
+    while pending:
+        remaining = max_response_bytes - byte_count
+        decoded = decoder.decompress(pending, remaining + 1)
+        if len(decoded) > remaining:
+            raise ProviderBrokerV2Error("provider response exceeds size limit")
+        if decoded:
+            chunks.append(decoded)
+            byte_count += len(decoded)
+        next_pending = decoder.unconsumed_tail
+        if decoder.unused_data:
+            raise ProviderBrokerV2Error(
+                "provider gzip response contains trailing data"
+            )
+        if next_pending == pending:
+            raise ProviderBrokerV2Error(
+                "provider gzip response decoder made no progress"
+            )
+        pending = next_pending
+    return byte_count
+
+
+def _authenticated_gzip_body_is_complete_after_stream_error(
+    *,
+    method: str,
+    response: Any,
+    byte_count: int,
+    body: bytes,
+    decoder: Any,
+) -> bool:
+    """Recover only after a complete, checksum-verified gzip JSON member."""
+    if str(method or "").upper() not in {"GET", "POST"}:
+        return False
+    try:
+        http_version = str(response.http_version or "").strip().upper()
+    except Exception:
+        http_version = ""
+    if http_version not in {"HTTP/1.1", "HTTP/2"}:
+        return False
+    if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+        return False
+    return _authenticated_json_body_is_complete(
+        response=response,
+        byte_count=byte_count,
+        body=body,
+    )
 
 
 class HTTPXProviderTransport:
@@ -678,12 +775,13 @@ class HTTPXProviderTransport:
 
         verify_path = self.ca_bundle or certifi.where()
         normalized_proxy_headers = dict(proxy_headers or {})
+        assigned_proxy = bool(normalized_proxy_headers)
         # Direct provider and assigned-proxy tunnels have independent terminal
         # behavior. Keep their framing policies separate while TLS and proxy
         # credentials continue to terminate inside the enclave.
         tunnel_framing = (
             self.upstream_parent_tunnel_framing
-            if normalized_proxy_headers
+            if assigned_proxy
             else self.parent_tunnel_framing
         )
         if tunnel_framing:
@@ -699,7 +797,10 @@ class HTTPXProviderTransport:
             http2=allow_http2,
             limits=httpx.Limits(
                 max_connections=64,
-                max_keepalive_connections=32,
+                # Assigned-proxy clients are credential-bound and request-scoped.
+                # Retaining their one connection cannot provide reuse, but it can
+                # leave a relay tunnel alive when cleanup loses its final EOF.
+                max_keepalive_connections=(0 if assigned_proxy else 32),
                 keepalive_expiry=DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
             ),
             cookies=CookieJar(policy=RejectAllCookies()),
@@ -786,30 +887,77 @@ class HTTPXProviderTransport:
             tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
             chunks = []
             byte_count = 0
-            try:
-                for chunk in response.iter_bytes():
-                    byte_count += len(chunk)
-                    if byte_count > max_response_bytes:
+            content_encoding = str(
+                response.headers.get("content-encoding") or ""
+            ).strip().lower()
+            if content_encoding == "gzip":
+                decoder = zlib.decompressobj(zlib.MAX_WBITS | 16)
+                try:
+                    for chunk in response.iter_raw():
+                        byte_count = _append_bounded_gzip_bytes(
+                            decoder=decoder,
+                            compressed=chunk,
+                            chunks=chunks,
+                            byte_count=byte_count,
+                            max_response_bytes=max_response_bytes,
+                        )
+                except Exception:
+                    response_body = b"".join(chunks)
+                    if not (
+                        allow_authenticated_complete_body_eof
+                        and _authenticated_gzip_body_is_complete_after_stream_error(
+                            method=method,
+                            response=response,
+                            byte_count=byte_count,
+                            body=response_body,
+                            decoder=decoder,
+                        )
+                    ):
+                        raise
+                else:
+                    remaining = max_response_bytes - byte_count
+                    decoded_tail = decoder.flush(remaining + 1)
+                    if len(decoded_tail) > remaining:
                         raise ProviderBrokerV2Error(
                             "provider response exceeds size limit"
                         )
-                    chunks.append(chunk)
-            except Exception as exc:
-                response_body = b"".join(chunks)
-                if not (
-                    allow_authenticated_complete_body_eof
-                    and byte_count <= max_response_bytes
-                    and _authenticated_body_is_complete_after_stream_error(
-                        method=method,
-                        response=response,
-                        byte_count=byte_count,
-                        body=response_body,
-                        error=exc,
-                    )
-                ):
-                    raise
+                    if decoded_tail:
+                        chunks.append(decoded_tail)
+                        byte_count += len(decoded_tail)
+                    if (
+                        not decoder.eof
+                        or decoder.unused_data
+                        or decoder.unconsumed_tail
+                    ):
+                        raise ProviderBrokerV2Error(
+                            "provider gzip response is incomplete"
+                        )
+                    response_body = b"".join(chunks)
             else:
-                response_body = b"".join(chunks)
+                try:
+                    for chunk in response.iter_bytes():
+                        byte_count += len(chunk)
+                        if byte_count > max_response_bytes:
+                            raise ProviderBrokerV2Error(
+                                "provider response exceeds size limit"
+                            )
+                        chunks.append(chunk)
+                except Exception as exc:
+                    response_body = b"".join(chunks)
+                    if not (
+                        allow_authenticated_complete_body_eof
+                        and byte_count <= max_response_bytes
+                        and _authenticated_body_is_complete_after_stream_error(
+                            method=method,
+                            response=response,
+                            byte_count=byte_count,
+                            body=response_body,
+                            error=exc,
+                        )
+                    ):
+                        raise
+                else:
+                    response_body = b"".join(chunks)
             return {
                 "http_status": int(response.status_code),
                 "headers": _decoded_response_headers(response.headers),
@@ -1574,9 +1722,9 @@ class ProviderBrokerV2:
                     if name.lower() != str(static_name).lower()
                 }
                 outbound_headers[str(static_name)] = str(static_value)
-        # Bind the default response framing at the measured transport boundary
-        # so no caller or dynamic route can opt into compressed bodies whose
-        # decoded bytes cannot prove wire length after an EOF.
+        # Bind the default response framing at the measured transport boundary.
+        # Built-in routes may select the stricter checksum-delimited gzip
+        # profile below; callers and dynamic routes cannot select an encoding.
         for static_name, static_value in MEASURED_TRANSPORT_REQUEST_HEADERS:
             outbound_headers = {
                 name: value
@@ -1586,8 +1734,8 @@ class ProviderBrokerV2:
             outbound_headers[static_name] = static_value
         # A built-in route may select a stricter, statically measured wire
         # profile after the global default. Dynamic routes cannot override it.
-        # Compressed responses still require ordinary authenticated stream
-        # completion; the EOF recovery predicate rejects content encodings.
+        # A compressed response is recoverable only after its complete gzip
+        # member and bounded JSON document have both verified.
         for static_name, static_value in route.request_headers:
             outbound_headers = {
                 name: value

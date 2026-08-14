@@ -1417,6 +1417,27 @@ def test_bootstrap_emits_patch_assertion_marker():
     assert doc["streaming_posture"] == "request_only_for_streams"
 
 
+def test_recorded_urllib_response_adapts_mapping_headers():
+    completed = _run_bootstrap_probe(
+        r'''
+body = b"caf\xc3\xa9"
+response = _ResearchLabCachedResponse(
+    "https://example.test/data",
+    200,
+    body,
+    headers={"Content-Type": "text/plain; charset=utf-8", "X-Test": "yes"},
+)
+assert response.info().get_content_charset() == "utf-8"
+assert response.headers.get("content-type") == "text/plain; charset=utf-8"
+assert response.headers.get("X-Test") == "yes"
+assert response.headers.get("Content-Length") == str(len(body))
+assert _ResearchLabCachedHeaders(0).get_content_charset() == "utf-8"
+print("MAPPING_HEADERS_PROBE_DONE")
+'''
+    )
+    assert "MAPPING_HEADERS_PROBE_DONE" in completed.stdout
+
+
 def test_corpus_env_defaults_larger_caps_only_with_prefix(monkeypatch):
     from research_lab.eval import private_runtime as pr
 

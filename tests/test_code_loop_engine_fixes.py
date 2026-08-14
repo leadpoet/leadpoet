@@ -1331,7 +1331,7 @@ async def test_sanitized_production_plans_bind_and_reach_patch_drafting(
     assert any(event.event_type == "code_edit_drafted" for event in events)
 
 
-async def test_source_add_request_reaches_exact_registration_validation_and_build(
+async def test_source_add_malformed_draft_is_schema_repaired_and_built(
     tmp_path,
 ):
     source_context = _source_add_context(tmp_path)
@@ -1424,8 +1424,24 @@ async def test_source_add_request_reaches_exact_registration_validation_and_buil
             )
         if stage == "code_edit_draft":
             return OpenRouterCallResult(
-                content=json.dumps({"candidates": [draft.to_dict()]}),
+                content=json.dumps(
+                    {
+                        "analysis": "the approved source can be registered",
+                        "suggested_change": "update the routing registration",
+                    }
+                ),
                 provider_usage={"provider": "fixture", "response_id": "draft"},
+                cost_microusd=1,
+            )
+        if stage == "code_edit_fallback":
+            final_contract = messages[-1]["content"].rsplit(
+                "Final response contract (mandatory):", 1
+            )[1]
+            assert '"candidates":[<one complete candidate>]' in final_contract
+            assert '"no_viable_patch":true' in final_contract
+            return OpenRouterCallResult(
+                content=json.dumps({"candidates": [draft.to_dict()]}),
+                provider_usage={"provider": "fixture", "response_id": "fallback"},
                 cost_microusd=1,
             )
         raise AssertionError(f"unexpected stage: {stage}")
@@ -1487,12 +1503,23 @@ async def test_source_add_request_reaches_exact_registration_validation_and_buil
     assert prompt_contexts["code_edit_draft"][
         "approved_provider_capabilities"
     ]["routerverse_source_incorporation"]["requests"] == [request]
+    assert prompt_contexts["code_edit_fallback"][
+        "approved_provider_capabilities"
+    ]["routerverse_source_incorporation"]["requests"] == [request]
     assert result.status == "completed", [
         (event.event_type, event.event_doc)
         for event in events
         if "validation" in event.event_type or "draft" in event.event_type
     ]
     assert builder.builds == [(plan_path_id, 0)]
+    assert result.selected_candidates[0].tree_generation_attempt_count == 2
+    assert any(
+        event.event_type == "candidate_patch_parse_failed" for event in events
+    )
+    assert any(
+        event.event_type == "candidate_generation_fallback_drafted"
+        for event in events
+    )
     assert not any(
         event.event_type == "code_edit_validation_failed"
         for event in events
@@ -2125,8 +2152,22 @@ async def test_v1_1_infeasible_test_plan_gets_one_bounded_repair(tmp_path):
             context = json.loads(messages[1]["content"].split("Context JSON:\n", 1)[1])
             assert context["candidate_edit_constraints"]["editable_test_path_count"] == 0
             assert context["feasibility_errors"]
+            assert context["required_root_branch_count"] == 2
+            assert "exactly Context JSON required_root_branch_count" in messages[1]["content"]
+            assert "runtime_checks requires validation_paths=[]" in messages[1]["content"]
+            assert "encode a symbol match as path::symbol" in messages[1]["content"]
+            repaired = _loop_direction_plan_v1_1_payload()
+            repaired["ranked_paths"].append(
+                {
+                    **repaired["ranked_paths"][0],
+                    "path_id": "query_recall_fallback_path",
+                    "mechanism": "add one bounded fallback query after an empty primary query",
+                    "target_behavior": ["recover completed-empty sparse searches"],
+                    "novelty_requirements": ["use a distinct fallback-query mechanism"],
+                }
+            )
             return OpenRouterCallResult(
-                content=json.dumps(_loop_direction_plan_v1_1_payload()),
+                content=json.dumps(repaired),
                 provider_usage={"provider": "openrouter", "response_id": "repair"},
                 cost_microusd=1000,
             )
@@ -2183,7 +2224,22 @@ async def test_v1_1_infeasible_test_plan_gets_one_bounded_repair(tmp_path):
         component_registry={},
         benchmark_public_summary={"item_count": 1},
         model_id="test/model",
-        budget_context={"requested_compute_budget_usd": 5.0},
+        budget_context={
+            "requested_compute_budget_usd": 5.0,
+            "tree_policy": _tree_runtime_policy(
+                TreePolicy(
+                    mode="active",
+                    branch_factor=2,
+                    beam_width=2,
+                    max_depth=1,
+                    max_nodes=2,
+                    shortlist_size=2,
+                    diversity_floor=2,
+                    deadline_seconds=300,
+                    finalization_reserve_seconds=30,
+                )
+            ),
+        },
         requested_loop_count=1,
     )
 
@@ -2191,6 +2247,12 @@ async def test_v1_1_infeasible_test_plan_gets_one_bounded_repair(tmp_path):
     assert calls.count("loop_planner_reference_repair") == 1
     assert calls.index("loop_planner_reference_repair") < calls.index("source_inspection")
     assert builder.builds == [("query_recall_path", 0)]
+    assert not [
+        event
+        for event in events
+        if event.event_doc.get("failure_class")
+        == "tree_branch_objectives_incomplete"
+    ]
     repair_checkpoints = [
         event.event_doc["checkpoint"]
         for event in events
@@ -2289,7 +2351,20 @@ async def test_ambiguous_symbol_fails_without_paid_reference_repair(tmp_path):
     )
 
 
-async def test_planner_reference_repair_resolves_symbol_and_builds_once(tmp_path):
+@pytest.mark.parametrize(
+    "unresolved_references",
+    [
+        pytest.param(["discover_companies"], id="all-exact"),
+        pytest.param(
+            ["discover_companies", "discover_companiez"],
+            id="mixed-exact-missing",
+        ),
+    ],
+)
+async def test_planner_reference_repair_resolves_symbol_and_builds_once(
+    tmp_path,
+    unresolved_references,
+):
     events = []
     calls = []
     builder = _PlannerBuildsCandidateBuilder(_source_context(tmp_path))
@@ -2302,8 +2377,8 @@ async def test_planner_reference_repair_resolves_symbol_and_builds_once(tmp_path
                 content=json.dumps(
                     _loop_direction_plan_payload(
                         no_new_safe_path=True,
-                        reason="discover_companiez is not present in editable source",
-                        unresolved_references=["discover_companiez"],
+                        reason=f"{unresolved_references[-1]} is not present in editable source",
+                        unresolved_references=unresolved_references,
                     )
                 ),
                 provider_usage={"provider": "openrouter", "response_id": "planner", "cost_microusd": 1000},
@@ -2312,9 +2387,15 @@ async def test_planner_reference_repair_resolves_symbol_and_builds_once(tmp_path
         if stage == "loop_planner_reference_repair":
             prompt = json.loads(messages[1]["content"].split("Context JSON:\n", 1)[1])
             resolution = prompt["reference_resolution"]
-            assert resolution["reference_count"] == 1
-            assert resolution["resolved_reference_count"] == 1
-            assert resolution["results"][0]["matches"][0]["symbol"] == "discover_companies"
+            assert resolution["reference_count"] == len(unresolved_references)
+            assert resolution["resolved_reference_count"] == len(unresolved_references)
+            assert {item["reference"] for item in resolution["results"]} == set(
+                unresolved_references
+            )
+            assert all(
+                item["matches"][0]["symbol"] == "discover_companies"
+                for item in resolution["results"]
+            )
             return OpenRouterCallResult(
                 content=json.dumps(
                     _loop_direction_plan_payload(

@@ -1636,8 +1636,10 @@ def test_httpx_direct_transport_connection_scope_and_recovery(
     assert all(result["tls_protocol"].startswith("TLSv1.") for result in results)
 
 
-def test_httpx_raw_relays_preserve_complete_gzip_http2_json_before_origin_close(
+@pytest.mark.parametrize("content_encoding", ["identity", "gzip"])
+def test_httpx_raw_relays_preserve_complete_http2_json_before_origin_close(
     tmp_path: Path,
+    content_encoding: str,
 ):
     from h2.config import H2Configuration
     from h2.connection import H2Connection
@@ -1657,7 +1659,7 @@ def test_httpx_raw_relays_preserve_complete_gzip_http2_json_before_origin_close(
     origin_errors = []
     request_seen = threading.Event()
     body = b'[{"bundle_hash":"sha256:' + (b"a" * 64) + b'"}]'
-    wire_body = gzip.compress(body)
+    wire_body = gzip.compress(body) if content_encoding == "gzip" else body
 
     def serve_origin():
         try:
@@ -1677,19 +1679,17 @@ def test_httpx_raw_relays_preserve_complete_gzip_http2_json_before_origin_close(
                     if not isinstance(event, RequestReceived):
                         continue
                     request_seen.set()
-                    h2_connection.send_headers(
-                        event.stream_id,
-                        [
-                            (":status", "200"),
-                            ("content-type", "application/json; charset=utf-8"),
-                            ("content-encoding", "gzip"),
-                            ("content-length", str(len(wire_body))),
-                        ],
-                    )
+                    response_headers = [
+                        (":status", "200"),
+                        ("content-type", "application/json; charset=utf-8"),
+                    ]
+                    if content_encoding == "gzip":
+                        response_headers.append(("content-encoding", "gzip"))
+                    h2_connection.send_headers(event.stream_id, response_headers)
                     h2_connection.send_data(
                         event.stream_id,
                         wire_body,
-                        end_stream=True,
+                        end_stream=False,
                     )
                     protected.sendall(h2_connection.data_to_send())
             # Match the production failure boundary: a complete HTTP/2 stream
@@ -1755,7 +1755,7 @@ def test_httpx_raw_relays_preserve_complete_gzip_http2_json_before_origin_close(
         )(
             method="GET",
             url="https://example.com/rest/v1/finalized",
-            headers={"Accept-Encoding": "gzip"},
+            headers={"Accept-Encoding": content_encoding},
             body=b"",
             timeout_ms=3000,
         )
@@ -1871,6 +1871,8 @@ def test_measured_assigned_proxy_raw_transport_scenario(monkeypatch):
         "proxy_auth_remained_in_enclave": True,
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
+        "production_http_connect_proxy_verified": True,
+        "repeated_request_count": 8,
     }
 
 
@@ -1890,6 +1892,8 @@ def test_measured_coordinator_raw_transport_scenario(monkeypatch):
         "proxy_auth_remained_in_enclave": True,
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
+        "production_http_connect_proxy_verified": True,
+        "repeated_request_count": 8,
         "raw_parent_tunnel_verified": True,
     }
 

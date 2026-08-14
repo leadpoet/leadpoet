@@ -263,6 +263,14 @@ async def test_nonzero_hosted_lease_holder_runs_snapshot_refresh(monkeypatch) ->
     monkeypatch.setattr(hosted, "reconcile_active_private_model_lineage", noop)
     monkeypatch.setattr(hosted, "maybe_refresh_dev_snapshot", snapshot)
     monkeypatch.setattr(hosted, "reconcile_pending_champion_rewards", noop)
+    async def reconcile_source_add(**_kwargs: Any) -> None:
+        observed["source_add_leg2_activation"] = True
+
+    monkeypatch.setattr(
+        hosted,
+        "reconcile_source_add_leg2_reward_activations",
+        reconcile_source_add,
+    )
     async def reconcile_statuses(**kwargs: Any) -> None:
         observed["netuid"] = kwargs["netuid"]
 
@@ -278,6 +286,7 @@ async def test_nonzero_hosted_lease_holder_runs_snapshot_refresh(monkeypatch) ->
         "worker_index": 0,
         "tree_policy": worker.tree_policy,
         "netuid": 71,
+        "source_add_leg2_activation": True,
     }
     observed.clear()
     worker._holds_maintenance_lease = False
@@ -503,6 +512,105 @@ async def test_owner_stops_after_failed_batch_and_fails_closed(
     )
     assert failure["worker_index"] == 1
     assert "job recipient capacity is full" in failure["detail"]
+
+
+@pytest.mark.asyncio
+async def test_owner_stops_after_one_systemic_transport_failure_batch(
+    monkeypatch,
+) -> None:
+    worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_index=0,
+        scoring_worker_total_workers=25,
+    )
+    worker.worker_ref = "scoring-worker-1"
+    checked: list[int] = []
+    applied: list[dict[str, Any]] = []
+
+    async def preflight(**kwargs: Any) -> dict[str, Any]:
+        checked.append(int(kwargs["worker_index"]))
+        return {
+            "proceed": False,
+            "healthy": False,
+            "pause_worthy": False,
+            "disabled": False,
+            "measurement_cached": False,
+            "verdicts": [
+                {
+                    "provider": provider,
+                    "healthy": False,
+                    "status": "transport_failure",
+                    "detail": "unexpected_eof",
+                }
+                for provider in ("exa", "scrapingdog")
+            ],
+        }
+
+    async def apply(**kwargs: Any) -> None:
+        applied.append(kwargs)
+
+    monkeypatch.setattr(scoring, "preflight_gate", preflight)
+    monkeypatch.setattr(scoring, "apply_preflight_control_result", apply)
+
+    class Heartbeat:
+        def ensure_held(self) -> None:
+            return None
+
+    result = await worker._run_owned_provider_preflight(
+        maintenance_state={"paused": True, "reason": "provider_preflight:x"},
+        heartbeat=Heartbeat(),
+    )
+
+    assert sorted(checked) == [0, 1, 2, 3]
+    assert result["proceed"] is False
+    assert result["pause_worthy"] is True
+    assert result["systemic_transport_failure"] is True
+    assert len(result["verdicts"]) == 8
+    assert applied[0]["refresh_existing_preflight_pause"] is True
+
+
+@pytest.mark.asyncio
+async def test_paused_fleet_honors_durable_recovery_cooldown(monkeypatch) -> None:
+    worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_index=0,
+        scoring_worker_total_workers=25,
+    )
+    worker.worker_ref = "scoring-worker-1"
+    worker._lease_holder_ref = "scoring-worker-1:lease"
+    worker._holds_maintenance_lease = False
+
+    async def acquire(**_kwargs: Any) -> bool:
+        return True
+
+    async def noop() -> None:
+        return None
+
+    async def forbidden_preflight(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("durable cooldown must suppress a fresh fleet probe")
+
+    monkeypatch.setattr(scoring, "try_acquire_maintenance_lease", acquire)
+    monkeypatch.setattr(worker, "_recover_stale_candidate_claims", noop)
+    monkeypatch.setattr(worker, "_alert_stuck_candidates", noop)
+    monkeypatch.setattr(worker, "_run_owned_provider_preflight", forbidden_preflight)
+    monkeypatch.setattr(scoring, "_status_age_seconds", lambda _value: 90.0)
+    monkeypatch.setattr(
+        scoring,
+        "provider_preflight_settings",
+        lambda: {"ttl_seconds": 600.0},
+    )
+
+    result = await worker._run_lease_held_recovery_and_preflight(
+        {
+            "paused": True,
+            "reason": "provider_preflight:exa=transport_failure",
+            "status_at": "ignored-by-test-clock",
+        }
+    )
+
+    assert result["proceed"] is False
+    assert result["reason"] == "provider_preflight_recovery_cooldown"
+    assert result["retry_after_seconds"] == 510.0
 
 
 @pytest.mark.asyncio

@@ -452,7 +452,7 @@
       "symbol": "validate_private_code_edit_diff_artifact"
     },
     {
-      "ast_sha256": "sha256:989c3eca9bf510572802015dc435698d9c78c6d1f8aa96489afa0745a68ab480",
+      "ast_sha256": "sha256:825aa50655e54901fc008c587da63ab7d89c984e6013222ad590707e5f4f7115",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -462,7 +462,7 @@
       "symbol": "_bind_loop_direction_plan"
     },
     {
-      "ast_sha256": "sha256:6dea1c370a92bda5c68fa90b0ab620bb78ef4eebfcbc87b9d3a20fb11bb01462",
+      "ast_sha256": "sha256:8ecc50b718de1ba425efa297aaa636ab0eee0dbd9cf8a9f939c0eed4d9174652",
       "path": "gateway/research_lab/config.py",
       "symbol": "DEFAULT_PRIVATE_BUILD_CMD"
     },
@@ -627,6 +627,11 @@
       "symbol": "reconcile_champion_reward_statuses"
     },
     {
+      "ast_sha256": "sha256:e25a5393c1d00d53924db53cd37462371afbfb844830195af458a9c71c3ab201",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "ResearchLabPromotionController._maybe_create_source_add_implementation_rewards"
+    },
+    {
       "ast_sha256": "sha256:874dd6b2ed9057bbf85a34f1d54da7b617efa125899bdb734b7535315fe254e0",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "ResearchLabPromotionController._promote_built_image_candidate"
@@ -647,9 +652,19 @@
       "symbol": "_candidate_icp_score"
     },
     {
+      "ast_sha256": "sha256:e6ba9470cf81f3dc00fbc7dc536eeca360edea8f724d603fcd211c2088d9fec4",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "_ensure_source_add_leg2_reward_activation"
+    },
+    {
       "ast_sha256": "sha256:71ae256cb2d29f1fd6157d318dc926f9c80157ff44bb92945efed49083e7341d",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "_load_valid_artifact"
+    },
+    {
+      "ast_sha256": "sha256:0fcbf16258bf33f8e92b5cb31d7de301f3e1abdf91a72952c9b6f62e06eeff88",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "_promotion_reason_recorded"
     },
     {
       "ast_sha256": "sha256:ecc42ea515da3f77196df08fd375369238a462d33a25951c4229d9be917fce97",
@@ -665,6 +680,11 @@
       "ast_sha256": "sha256:0a4de723e21de2d8de36e594266335d187722d8383cef1a8fff7bac9b3515110",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "confirmation_min_delta"
+    },
+    {
+      "ast_sha256": "sha256:81d4d3758be8952d0f63a48b85a0685dd5b788321682192e7f0ffddc07f6cab0",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "reconcile_source_add_leg2_reward_activations"
     },
     {
       "ast_sha256": "sha256:619e3304a984d349b7bc58c1224a07f3da6c6f07456035124ce67674d6011e4b",
@@ -957,7 +977,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:b5948622117a6563daade23db3c0a0672c00e26ea3a42c19eae2dd2b335a4a1f",
+      "ast_sha256": "sha256:97f98a5fda04f9c58a5baa6d05b82851ff2b8a0f4b60bc25f4ab04650b1fbc09",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -967,12 +987,12 @@
       "symbol": "classify_historical_champion_allocation_v2"
     },
     {
-      "ast_sha256": "sha256:613ecfc2f8f1c817a27e2d92f908673887c4e6030cc46cf75bfe667812959773",
+      "ast_sha256": "sha256:11104a43ccfb98c92021b4c6bec099d925f3e2503e8f8474b27e005ee21439b5",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "ensure_chain_realized_settlements_v1"
     },
     {
-      "ast_sha256": "sha256:5db1e63414d54a6ef407e9412c7659dcebe462f45d2be7098efc6cdccb987270",
+      "ast_sha256": "sha256:bb8c55c306e696ac97d2c8dfbfe657aebf0cd0c0afbd564e5ee1a9bdd52512dd",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "settle_chain_realized_epoch_v1"
     },
@@ -1012,7 +1032,7 @@
       "symbol": "AutoresearchExecutorV2"
     },
     {
-      "ast_sha256": "sha256:bcfe8cf6c0c26e801c86e29eeacc52fb0ffb25a9c868e82bcdffee124de1128e",
+      "ast_sha256": "sha256:539a3fae40f51f6e0d38695f0d08579684ff84d7449ed24e20e4fe506d014732",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "_HostCandidateBuilder"
     },
@@ -1132,7 +1152,7 @@
       "symbol": "CoordinatorLegacySettlementSourceV2"
     },
     {
-      "ast_sha256": "sha256:e20756343cdf6887240f91967761aa81c517d97865c2d6634b92a812e44cdc3a",
+      "ast_sha256": "sha256:01ee1910dda0550468e613f49d1933a63226b4c7455415e761352e71dd531ec2",
       "path": "gateway/tee/coordinator_reward_source_v2.py",
       "symbol": "CoordinatorRewardSourceV2"
     },
@@ -1412,7 +1432,7 @@
       "symbol": "write_identity_to_tmpfs"
     },
     {
-      "ast_sha256": "sha256:9331423a3ef25779547b44f17ea564a777ae6bf0d0958edd8211b1016794292a",
+      "ast_sha256": "sha256:ffb31b1b99ec7a6f6e3486daf724d7ae25ae01b2bab360f923b0519e810ec4dc",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -2382,7 +2402,7 @@
       "symbol": "build_code_edit_auto_research_messages"
     },
     {
-      "ast_sha256": "sha256:e533a7b7b8a4c98bb3e25a80f44f69eb814d28212586341d7dcc49924a29871d",
+      "ast_sha256": "sha256:9553371c41b4f9f9ce9fb561842e228501b577f38002cc73efd24198e6ad7f87",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_fallback_messages"
     },
@@ -2397,12 +2417,12 @@
       "symbol": "build_code_edit_source_inspection_messages"
     },
     {
-      "ast_sha256": "sha256:dc78161e0f59f36fe649966325374a8c0ece2ab76c8dc53c7258c0b98b224ace",
+      "ast_sha256": "sha256:5b8703fa52bf5d26c8774706d89f2bd1d870799526747b0dcee2698d1cf0e9d7",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_planner_messages"
     },
     {
-      "ast_sha256": "sha256:f4c2b9962ea0b6e968404397a06af5e680f0b7c4261d6aeedfde13bd34c23da7",
+      "ast_sha256": "sha256:0115b4b749c44980136295a2b59da51b96457311e01ffcccdbd42290f50df546",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_reference_repair_messages"
     },
@@ -2752,7 +2772,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:39d2067f9bc73a8d0152ba34bbe31f3e4f037ee573922eb91e1b61b12ec9b2d6",
-  "protected_source_commit": "088b415aa8d5827ea06a5808512b20a758d82b50",
+  "manifest_hash": "sha256:a9f77bf206f8c00908e7344d7bec8bf55ce9a5edf4aec68ab00ca54ceb520a44",
+  "protected_source_commit": "d1d62d291e8a7932783917a9a3ee8f1d0eec9e5d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

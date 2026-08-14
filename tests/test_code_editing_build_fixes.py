@@ -1260,6 +1260,7 @@ def test_planner_prompt_exposes_safe_validation_capabilities_without_command_tex
     assert context["candidate_edit_constraints"] == constraints
     assert "RESEARCH_LAB_PRIVATE_TEST_CMD" not in content
     assert "do not require adding tests" in content
+    assert "runtime_checks requires validation_paths=[]" in content
 
 
 def test_planner_prompt_example_is_internally_consistent_and_source_bound():

@@ -46,6 +46,7 @@ from gateway.research_lab.promotion import (
     reconcile_active_private_model_lineage,
     reconcile_failed_private_source_pushes,
     reconcile_pending_champion_rewards,
+    reconcile_source_add_leg2_reward_activations,
     sync_active_model_to_repo_head,
 )
 from research_lab.canonical import sha256_json
@@ -2323,17 +2324,50 @@ def _source_add_attribution_bundle() -> dict[str, Any]:
     }
 
 
-def _install_source_add_v2_judge(monkeypatch, judge):
+def _install_source_add_v2_judge(
+    monkeypatch,
+    judge,
+    *,
+    receipt_overrides: Mapping[str, Any] | None = None,
+    graph_overrides: Mapping[str, Any] | None = None,
+    include_execution_authority: bool = True,
+):
     async def _measured_judge(**kwargs: Any):
         verdict = await judge(**kwargs)
-        return verdict, {
-            "receipt": {
-                "receipt_hash": "sha256:" + "a" * 64,
-                "output_root": "sha256:" + "b" * 64,
-            },
-            "receipt_graph": {"root_receipt_hash": "sha256:" + "a" * 64},
-            "result": {"verdict": verdict.verdict},
+        result = {"verdict": verdict.verdict}
+        output_root = sha256_json(result)
+        receipt = {
+            "receipt_hash": "sha256:" + "a" * 64,
+            "output_root": output_root,
+            "role": "gateway_scoring",
+            "purpose": "research_lab.source_add_judge.v2",
+            "status": "succeeded",
+            **dict(receipt_overrides or {}),
         }
+        execution_receipt_graph = {
+            "root_receipt_hash": "sha256:" + "a" * 64,
+            "receipts": [dict(receipt)],
+            **dict(graph_overrides or {}),
+        }
+        outcome = {
+            "receipt": {
+                "receipt_hash": "sha256:" + "c" * 64,
+                "output_root": output_root,
+            },
+            "receipt_graph": {
+                "root_receipt_hash": "sha256:" + "c" * 64,
+                "receipts": [],
+            },
+            "result": result,
+        }
+        if include_execution_authority:
+            outcome.update(
+                {
+                    "execution_receipt": receipt,
+                    "execution_receipt_graph": execution_receipt_graph,
+                }
+            )
+        return verdict, outcome
 
     async def _persist_link(**_kwargs: Any):
         return {"business_artifact_link_count": 1}
@@ -2343,6 +2377,9 @@ def _install_source_add_v2_judge(monkeypatch, judge):
         assert kwargs["artifact_kind"] == "source_add_reward_decision"
         assert kwargs["expected_result"]["reward"]["leg"] == 2
         assert kwargs["parent_graphs"][0]["root_receipt_hash"] == "sha256:" + "a" * 64
+        assert kwargs["parent_graphs"][0]["receipts"][0]["purpose"] == (
+            "research_lab.source_add_judge.v2"
+        )
         return {"status": "matched"}
 
     monkeypatch.setattr(
@@ -2425,7 +2462,16 @@ async def test_source_add_leg2_created_when_llm_judge_says_helped(store, monkeyp
     assert obligation["trigger_evidence_doc"]["llm_judge_passed"] is True
     assert obligation["trigger_evidence_doc"]["llm_verdict"] == "helped"
     events = [event for event in store.promotion_event_writes if event["event_type"] == "promotion_checked"]
-    assert any((event["event_doc"] or {}).get("reason") == "source_add_leg2_reward_created" for event in events)
+    source_event = next(
+        event
+        for event in events
+        if (event["event_doc"] or {}).get("reason")
+        == "source_add_leg2_reward_created"
+    )
+    assert source_event["event_doc"]["judge_receipt_hash"] == "sha256:" + "a" * 64
+    assert source_event["event_doc"]["judge_output_root"] == sha256_json(
+        {"verdict": "helped"}
+    )
 
 
 async def test_stateful_source_add_leg2_fails_closed_when_epoch_authority_is_unavailable(
@@ -2527,6 +2573,138 @@ async def test_source_add_leg2_blocks_when_llm_judge_says_not_helped(store, monk
     assert result["source_add_reward_status"] == "blocked"
     assert result["results"][0]["blockers"] == ["llm_judge_not_helped"]
     assert store.generic_insert_writes == []
+    source_event = next(
+        event
+        for event in store.promotion_event_writes
+        if (event["event_doc"] or {}).get("reason")
+        == "source_add_leg2_reward_blocked"
+    )
+    assert source_event["event_doc"]["judge_receipt_hash"] == "sha256:" + "a" * 64
+    assert source_event["event_doc"]["judge_output_root"] == sha256_json(
+        {"verdict": "not_helped"}
+    )
+
+
+async def test_source_add_leg2_replaces_unbound_legacy_event(store, monkeypatch):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_candidate_promotion_events"] = [
+        {
+            "promotion_event_id": "legacy-event",
+            "event_doc": {
+                "reason": "source_add_leg2_reward_blocked",
+                "adapter_id": "",
+            },
+            "created_at": "2026-08-13T00:00:00Z",
+        }
+    ]
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="not_helped",
+            confidence=0.82,
+            source_used=False,
+            model_id="openai/gpt-5.6-sol",
+        )
+
+    _install_source_add_v2_judge(monkeypatch, _judge)
+    controller = ResearchLabPromotionController(
+        _source_add_reward_config(), worker_ref="test-worker"
+    )
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={
+            "champion_reward_status": "created",
+            "champion_reward_id": "cr-1",
+        },
+    )
+
+    assert result["source_add_reward_status"] == "blocked"
+    assert len(store.promotion_event_writes) == 1
+    event_doc = store.promotion_event_writes[0]["event_doc"]
+    assert event_doc["judge_receipt_hash"] == "sha256:" + "a" * 64
+    assert event_doc["judge_output_root"] == sha256_json({"verdict": "not_helped"})
+
+
+@pytest.mark.parametrize(
+    ("receipt_overrides", "graph_overrides", "include_execution_authority"),
+    [
+        ({"receipt_hash": "invalid"}, None, True),
+        (None, {"root_receipt_hash": "sha256:" + "c" * 64}, True),
+        ({"output_root": "sha256:" + "b" * 64}, None, True),
+        (None, None, False),
+    ],
+)
+async def test_source_add_leg2_rejects_malformed_judge_authority(
+    store,
+    monkeypatch,
+    receipt_overrides,
+    graph_overrides,
+    include_execution_authority,
+):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_source_add_reward_current"] = []
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.91,
+            source_used=True,
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            model_id="openai/gpt-5.6-sol",
+        )
+
+    _install_source_add_v2_judge(
+        monkeypatch,
+        _judge,
+        receipt_overrides=receipt_overrides,
+        graph_overrides=graph_overrides,
+        include_execution_authority=include_execution_authority,
+    )
+    controller = ResearchLabPromotionController(
+        _source_add_reward_config(), worker_ref="test-worker"
+    )
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle=_source_add_attribution_bundle(),
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={
+            "champion_reward_status": "created",
+            "champion_reward_id": "cr-1",
+        },
+    )
+
+    assert result["source_add_reward_status"] == "failed"
+    assert result["error_class"] == "RuntimeError"
+    assert not any(
+        table == "research_lab_source_add_reward_obligations"
+        for table, _row in store.generic_insert_writes
+    )
 
 
 @pytest.mark.parametrize("verdict", ["not_helped", "uncertain"])
@@ -2658,6 +2836,210 @@ async def test_source_add_leg2_duplicate_is_idempotently_blocked(store, monkeypa
     assert result["source_add_reward_status"] == "blocked"
     assert result["results"][0]["blockers"] == ["leg2_already_created"]
     assert store.generic_insert_writes == []
+
+
+async def test_source_add_leg2_retry_activates_orphaned_obligation(store, monkeypatch):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    reward_ref = "source_add_reward:" + "3" * 16
+    store.select_many_results["research_lab_source_add_reward_current"] = [
+        {
+            "reward_ref": reward_ref,
+            "adapter_id": "adapter:test-api-source",
+            "leg": 2,
+            "current_reward_status": None,
+            "trigger_evidence_doc": {
+                "llm_judge_passed": True,
+                "llm_verdict": "helped",
+                "source_used": True,
+            },
+        }
+    ]
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.9,
+            source_used=True,
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            model_id="test/judge",
+        )
+
+    async def _live_epoch(configured: Any = None) -> tuple[int, int | None, str]:
+        return 250, None, "test"
+
+    monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
+    _install_source_add_v2_judge(monkeypatch, _judge)
+    controller = ResearchLabPromotionController(
+        _source_add_reward_config(), worker_ref="test-worker"
+    )
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={
+            "champion_reward_status": "already_created",
+            "champion_reward_id": "cr-1",
+        },
+    )
+
+    assert result["source_add_reward_status"] == "blocked"
+    assert result["results"][0]["blockers"] == ["leg2_already_created"]
+    event_rows = [
+        row
+        for table, row in store.generic_insert_writes
+        if table == "research_lab_source_add_reward_events"
+    ]
+    assert event_rows == [
+        {
+            "reward_ref": reward_ref,
+            "seq": 0,
+            "reward_status": "active",
+            "reason": "leg2_llm_judge_helped",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_source_add_leg2_orphan_is_repaired_by_periodic_reconciler(store):
+    reward_ref = "source_add_reward:" + "3" * 16
+    store.select_many_results["research_lab_source_add_reward_current"] = [
+        {
+            "reward_ref": reward_ref,
+            "adapter_id": "adapter:test-api-source",
+            "leg": 2,
+            "current_reward_status": None,
+            "trigger_evidence_doc": {
+                "llm_judge_passed": True,
+                "llm_verdict": "helped",
+                "source_used": True,
+            },
+            "created_at": "2026-08-14T00:00:00+00:00",
+        }
+    ]
+
+    preview = await reconcile_source_add_leg2_reward_activations(dry_run=True)
+    assert preview["ok"] is True
+    assert preview["planned_count"] == 1
+    assert store.generic_insert_writes == []
+
+    result = await reconcile_source_add_leg2_reward_activations(dry_run=False)
+    assert result["ok"] is True
+    assert result["repaired_count"] == 1
+    assert store.generic_insert_writes == [
+        (
+            "research_lab_source_add_reward_events",
+            {
+                "reward_ref": reward_ref,
+                "seq": 0,
+                "reward_status": "active",
+                "reason": "leg2_llm_judge_helped",
+            },
+        )
+    ]
+
+
+async def test_source_add_leg2_duplicate_obligation_repairs_activation_in_same_attempt(
+    store, monkeypatch
+):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_source_add_reward_current"] = []
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+    reward_ref = "source_add_reward:" + "3" * 16
+    original_insert = store.insert_row
+
+    async def _racing_insert(table: str, row: dict[str, Any]) -> dict[str, Any]:
+        if table == "research_lab_source_add_reward_obligations":
+            store.generic_insert_writes.append((table, row))
+            store.select_many_results[
+                "research_lab_source_add_reward_current"
+            ] = [
+                {
+                    "reward_ref": reward_ref,
+                    "adapter_id": "adapter:test-api-source",
+                    "leg": 2,
+                    "current_reward_status": None,
+                    "trigger_evidence_doc": {
+                        "llm_judge_passed": True,
+                        "llm_verdict": "helped",
+                        "source_used": True,
+                    },
+                }
+            ]
+            raise RuntimeError("duplicate key value violates unique constraint")
+        return await original_insert(table, row)
+
+    monkeypatch.setattr(promotion, "insert_row", _racing_insert)
+    monkeypatch.setattr(store_module, "insert_row", _racing_insert)
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.9,
+            source_used=True,
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            model_id="test/judge",
+        )
+
+    async def _live_epoch(configured: Any = None) -> tuple[int, int | None, str]:
+        return 250, None, "test"
+
+    monkeypatch.setattr(
+        promotion, "resolve_research_lab_evaluation_epoch", _live_epoch
+    )
+    _install_source_add_v2_judge(monkeypatch, _judge)
+    controller = ResearchLabPromotionController(
+        _source_add_reward_config(), worker_ref="test-worker"
+    )
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={
+            "champion_reward_status": "already_created",
+            "champion_reward_id": "cr-1",
+        },
+    )
+
+    assert result["source_add_reward_status"] == "blocked"
+    assert result["results"][0]["blockers"] == ["leg2_already_created"]
+    event_rows = [
+        row
+        for table, row in store.generic_insert_writes
+        if table == "research_lab_source_add_reward_events"
+    ]
+    assert event_rows == [
+        {
+            "reward_ref": reward_ref,
+            "seq": 0,
+            "reward_status": "active",
+            "reason": "leg2_llm_judge_helped",
+        }
+    ]
 
 
 async def test_source_add_leg2_persistence_failure_is_non_blocking(store, monkeypatch):

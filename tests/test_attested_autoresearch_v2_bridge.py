@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -10,11 +11,19 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import gateway.research_lab.attested_autoresearch_v2 as autoresearch_bridge
 from gateway.research_lab.attested_autoresearch_v2 import (
     AttestedAutoresearchV2Error,
+    _dispatch_host_operation,
     _resolve_parent_ancestry_transport_v2,
     derive_autoresearch_job_id_v2,
     execute_autoresearch_v2,
 )
-from gateway.tee.autoresearch_executor_v2 import AUTORESEARCH_OPERATIONS_V2
+from gateway.research_lab.code_build import (
+    CodeEditBuildError,
+    CodeEditInfraFailureError,
+)
+from gateway.tee.autoresearch_executor_v2 import (
+    AUTORESEARCH_OPERATIONS_V2,
+    HOST_BUILD_CANDIDATE,
+)
 from gateway.tee.execution_job_manager_v2 import (
     ExecutionJobManagerV2,
     PARENT_ANCESTRY_PROOFS_FIELD,
@@ -31,9 +40,11 @@ from leadpoet_canonical.attested_v2 import (
     build_boot_identity_body,
     build_checkpointed_receipt_graph,
     build_execution_receipt_body,
+    build_host_operation_request_body,
     build_receipt_graph,
     create_boot_identity,
     create_signed_execution_receipt,
+    create_signed_host_operation_request,
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
@@ -855,6 +866,81 @@ async def test_autoresearch_bridge_fails_closed_when_host_handler_is_missing():
     assert authority["result"]["status"] == "failed"
     assert authority["receipt"]["status"] == "failed"
     assert persisted[0][1] == (authority["receipt"]["receipt_hash"],)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_failure_code"),
+    (
+        (
+            CodeEditInfraFailureError("private host detail"),
+            "candidate_build_infra_failed",
+        ),
+        (
+            CodeEditBuildError(
+                "private host detail",
+                failure_stage="unapproved_private_stage",
+            ),
+            "host_operation_failed",
+        ),
+        (RuntimeError("private host detail"), "host_operation_failed"),
+    ),
+)
+async def test_autoresearch_bridge_exports_only_allowlisted_build_failure_codes(
+    error,
+    expected_failure_code,
+):
+    release = _release()
+    source = _Client(release)
+    now = datetime.now(timezone.utc)
+    payload = {"candidate_index": 1}
+    request = create_signed_host_operation_request(
+        body=build_host_operation_request_body(
+            job_id="autoresearch-v2:build-failure",
+            purpose="research_lab.candidate_decision.v2",
+            operation=HOST_BUILD_CANDIDATE,
+            sequence=0,
+            payload_hash=sha256_json(payload),
+            expected_state_hash=_hash("e"),
+            boot_identity_hash=source.boot["boot_identity_hash"],
+            request_nonce="b" * 32,
+            issued_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            expires_at=(now + timedelta(minutes=1)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+        ),
+        enclave_pubkey=source.boot["signing_pubkey"],
+        sign_digest=source.key.sign,
+    )
+
+    class CompletionClient:
+        completed = None
+
+        async def autoresearch_v2_complete_host_operation(self, **kwargs):
+            self.completed = dict(kwargs)
+
+    client = CompletionClient()
+
+    def fail(_payload, _request):
+        raise error
+
+    await _dispatch_host_operation(
+        command={"request": request, "payload": payload},
+        job_id="autoresearch-v2:build-failure",
+        purpose="research_lab.candidate_decision.v2",
+        boot_identity=source.boot,
+        handlers={HOST_BUILD_CANDIDATE: fail},
+        client=client,
+    )
+
+    assert client.completed == {
+        "job_id": "autoresearch-v2:build-failure",
+        "request_hash": request["request_hash"],
+        "terminal_status": "failed",
+        "response": None,
+        "failure_code": expected_failure_code,
+    }
+    assert "private host detail" not in json.dumps(client.completed)
 
 
 @pytest.mark.asyncio

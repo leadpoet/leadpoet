@@ -46,6 +46,7 @@ from gateway.research_lab.promotion import (
     reconcile_active_private_model_lineage,
     reconcile_failed_private_source_pushes,
     reconcile_pending_champion_rewards,
+    reconcile_source_add_leg2_reward_activations,
     sync_active_model_to_repo_head,
 )
 from research_lab.canonical import sha256_json
@@ -2908,6 +2909,45 @@ async def test_source_add_leg2_retry_activates_orphaned_obligation(store, monkey
             "reward_status": "active",
             "reason": "leg2_llm_judge_helped",
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_source_add_leg2_orphan_is_repaired_by_periodic_reconciler(store):
+    reward_ref = "source_add_reward:" + "3" * 16
+    store.select_many_results["research_lab_source_add_reward_current"] = [
+        {
+            "reward_ref": reward_ref,
+            "adapter_id": "adapter:test-api-source",
+            "leg": 2,
+            "current_reward_status": None,
+            "trigger_evidence_doc": {
+                "llm_judge_passed": True,
+                "llm_verdict": "helped",
+                "source_used": True,
+            },
+            "created_at": "2026-08-14T00:00:00+00:00",
+        }
+    ]
+
+    preview = await reconcile_source_add_leg2_reward_activations(dry_run=True)
+    assert preview["ok"] is True
+    assert preview["planned_count"] == 1
+    assert store.generic_insert_writes == []
+
+    result = await reconcile_source_add_leg2_reward_activations(dry_run=False)
+    assert result["ok"] is True
+    assert result["repaired_count"] == 1
+    assert store.generic_insert_writes == [
+        (
+            "research_lab_source_add_reward_events",
+            {
+                "reward_ref": reward_ref,
+                "seq": 0,
+                "reward_status": "active",
+                "reason": "leg2_llm_judge_helped",
+            },
+        )
     ]
 
 

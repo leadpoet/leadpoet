@@ -56,6 +56,7 @@ def test_private_artifact_signature_boundary_is_protected():
     assert {
         "_promotion_reason_recorded",
         "_ensure_source_add_leg2_reward_activation",
+        "reconcile_source_add_leg2_reward_activations",
         "ResearchLabPromotionController._promote_built_image_candidate",
         "ResearchLabPromotionController._maybe_create_source_add_implementation_rewards",
         "_load_valid_artifact",

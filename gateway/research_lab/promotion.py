@@ -1535,6 +1535,7 @@ async def _ensure_source_add_leg2_reward_activation(
     *,
     adapter_id: str,
     reward_rows: Sequence[Mapping[str, Any]] | None = None,
+    dry_run: bool = False,
 ) -> Mapping[str, Any]:
     rows = list(reward_rows) if reward_rows is not None else await select_many(
         "research_lab_source_add_reward_current",
@@ -1569,6 +1570,8 @@ async def _ensure_source_add_leg2_reward_activation(
         or evidence.get("source_used") is not True
     ):
         raise RuntimeError("SOURCE_ADD Leg 2 orphan authority differs")
+    if dry_run:
+        return existing
     try:
         await insert_row(
             "research_lab_source_add_reward_events",
@@ -1587,6 +1590,69 @@ async def _ensure_source_add_leg2_reward_activation(
         ):
             raise
     return existing
+
+
+async def reconcile_source_add_leg2_reward_activations(
+    *,
+    limit: int = 50,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Repair measured Leg 2 obligations missing their initial active event."""
+
+    bounded_limit = max(1, min(int(limit), 500))
+    rows = await select_many(
+        "research_lab_source_add_reward_current",
+        columns=(
+            "reward_ref,adapter_id,leg,current_reward_status,"
+            "trigger_evidence_doc,created_at"
+        ),
+        filters=(("leg", 2), ("current_reward_status", "is", None)),
+        order_by=(("created_at", False),),
+        limit=bounded_limit,
+    )
+    repaired: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for row in rows:
+        adapter_id = str(row.get("adapter_id") or "")
+        reward_ref = str(row.get("reward_ref") or "")
+        try:
+            await _ensure_source_add_leg2_reward_activation(
+                adapter_id=adapter_id,
+                reward_rows=(row,),
+                dry_run=dry_run,
+            )
+        except Exception as exc:  # noqa: BLE001 - continue the bounded sweep
+            logger.warning(
+                "research_lab_source_add_leg2_activation_reconcile_failed "
+                "reward_ref=%s error=%s",
+                reward_ref,
+                _safe_text(str(exc))[:240],
+            )
+            failed.append(
+                {
+                    "reward_ref": reward_ref,
+                    "adapter_id": adapter_id,
+                    "error": _safe_text(str(exc))[:240],
+                }
+            )
+            continue
+        repaired.append(
+            {
+                "reward_ref": reward_ref,
+                "adapter_id": adapter_id,
+                "status": "would_activate" if dry_run else "activated",
+            }
+        )
+    return {
+        "ok": not failed,
+        "action": "reconcile-source-add-leg2-reward-activations",
+        "dry_run": bool(dry_run),
+        "found_orphaned": len(rows),
+        "repaired_count": 0 if dry_run else len(repaired),
+        "planned_count": len(repaired) if dry_run else 0,
+        "repaired": repaired,
+        "failed": failed,
+    }
 
 
 class ResearchLabPromotionController:

@@ -263,6 +263,14 @@ async def test_nonzero_hosted_lease_holder_runs_snapshot_refresh(monkeypatch) ->
     monkeypatch.setattr(hosted, "reconcile_active_private_model_lineage", noop)
     monkeypatch.setattr(hosted, "maybe_refresh_dev_snapshot", snapshot)
     monkeypatch.setattr(hosted, "reconcile_pending_champion_rewards", noop)
+    async def reconcile_source_add(**_kwargs: Any) -> None:
+        observed["source_add_leg2_activation"] = True
+
+    monkeypatch.setattr(
+        hosted,
+        "reconcile_source_add_leg2_reward_activations",
+        reconcile_source_add,
+    )
     async def reconcile_statuses(**kwargs: Any) -> None:
         observed["netuid"] = kwargs["netuid"]
 
@@ -278,6 +286,7 @@ async def test_nonzero_hosted_lease_holder_runs_snapshot_refresh(monkeypatch) ->
         "worker_index": 0,
         "tree_policy": worker.tree_policy,
         "netuid": 71,
+        "source_add_leg2_activation": True,
     }
     observed.clear()
     worker._holds_maintenance_lease = False

@@ -1331,7 +1331,7 @@ async def test_sanitized_production_plans_bind_and_reach_patch_drafting(
     assert any(event.event_type == "code_edit_drafted" for event in events)
 
 
-async def test_source_add_request_reaches_exact_registration_validation_and_build(
+async def test_source_add_malformed_draft_is_schema_repaired_and_built(
     tmp_path,
 ):
     source_context = _source_add_context(tmp_path)
@@ -1424,8 +1424,24 @@ async def test_source_add_request_reaches_exact_registration_validation_and_buil
             )
         if stage == "code_edit_draft":
             return OpenRouterCallResult(
-                content=json.dumps({"candidates": [draft.to_dict()]}),
+                content=json.dumps(
+                    {
+                        "analysis": "the approved source can be registered",
+                        "suggested_change": "update the routing registration",
+                    }
+                ),
                 provider_usage={"provider": "fixture", "response_id": "draft"},
+                cost_microusd=1,
+            )
+        if stage == "code_edit_fallback":
+            final_contract = messages[-1]["content"].rsplit(
+                "Final response contract (mandatory):", 1
+            )[1]
+            assert '"candidates":[<one complete candidate>]' in final_contract
+            assert '"no_viable_patch":true' in final_contract
+            return OpenRouterCallResult(
+                content=json.dumps({"candidates": [draft.to_dict()]}),
+                provider_usage={"provider": "fixture", "response_id": "fallback"},
                 cost_microusd=1,
             )
         raise AssertionError(f"unexpected stage: {stage}")
@@ -1487,12 +1503,23 @@ async def test_source_add_request_reaches_exact_registration_validation_and_buil
     assert prompt_contexts["code_edit_draft"][
         "approved_provider_capabilities"
     ]["routerverse_source_incorporation"]["requests"] == [request]
+    assert prompt_contexts["code_edit_fallback"][
+        "approved_provider_capabilities"
+    ]["routerverse_source_incorporation"]["requests"] == [request]
     assert result.status == "completed", [
         (event.event_type, event.event_doc)
         for event in events
         if "validation" in event.event_type or "draft" in event.event_type
     ]
     assert builder.builds == [(plan_path_id, 0)]
+    assert result.selected_candidates[0].tree_generation_attempt_count == 2
+    assert any(
+        event.event_type == "candidate_patch_parse_failed" for event in events
+    )
+    assert any(
+        event.event_type == "candidate_generation_fallback_drafted"
+        for event in events
+    )
     assert not any(
         event.event_type == "code_edit_validation_failed"
         for event in events

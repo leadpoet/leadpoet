@@ -847,6 +847,8 @@ def build_code_edit_fallback_messages(
     fallback_reason: str,
     max_candidates: int = 1,
     max_target_files: int = 1,
+    provider_outcome_digest: Mapping[str, Any] | None = None,
+    provider_capability_summary: Mapping[str, Any] | None = None,
     candidate_edit_constraints: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build one bounded fallback pass after the first candidate draft fails.
@@ -864,7 +866,7 @@ def build_code_edit_fallback_messages(
         **dict(budget_context or {}),
         "candidate_generation_fallback": {
             "schema_version": "1.0",
-            "mode": "smaller_same_lane_inspected_files",
+            "mode": "schema_repair_smaller_same_lane_inspected_files",
             "fallback_reason": str(fallback_reason or "")[:500],
             "max_candidates": 1,
             "max_target_files": bounded_target_files,
@@ -881,6 +883,8 @@ def build_code_edit_fallback_messages(
         budget_context=fallback_context,
         loop_direction_plan=loop_direction_plan,
         max_candidates=min(1, max(1, int(max_candidates))),
+        provider_outcome_digest=provider_outcome_digest,
+        provider_capability_summary=provider_capability_summary,
         candidate_edit_constraints=candidate_edit_constraints,
     )
     user = messages[-1]["content"]
@@ -907,6 +911,13 @@ def build_code_edit_fallback_messages(
                 if bounded_target_files <= 1
                 else "- If no bounded inspected-source patch is safe, return the structured no_viable_patch shape with failure_class, reason, and missing_references.\n"
             )
+            + "\nFinal response contract (mandatory):\n"
+            "- Repair the prior response shape. Return exactly one JSON object and nothing else.\n"
+            "- Choose exactly one envelope: {\"candidates\":[<one complete candidate>]} OR "
+            "{\"no_viable_patch\":true,\"failure_class\":\"binding_plan_unimplementable|insufficient_source_context|unsafe_or_out_of_scope|provider_probe_refuted_hypothesis|no_safe_patch\",\"reason\":\"...\",\"missing_references\":[]}.\n"
+            "- A candidate must include lane, plan_path_id, plan_alignment, expected_metric_effect, hypothesis, and code_edit; code_edit must include target_files, unified_diff, redacted_summary, test_plan, and rollback_plan.\n"
+            "- Do not return analysis, commentary, a plan, source-inspection requests, tool calls, markdown, or a candidate outside the candidates array.\n"
+            "- Escape every newline inside unified_diff as \\n so the outer response remains valid JSON.\n"
         ),
     }
     return messages

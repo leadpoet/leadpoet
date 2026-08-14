@@ -140,6 +140,19 @@ def test_fallback_context_carries_cap():
     assert '"max_target_files":3' in joined
 
 
+def test_fallback_prompt_ends_with_exclusive_schema_repair_contract():
+    content = _fallback_messages(3)
+    final_contract = content.rsplit("Final response contract (mandatory):", 1)[1]
+
+    assert '"candidates":[<one complete candidate>]' in final_contract
+    assert '"no_viable_patch":true' in final_contract
+    assert "candidate outside the candidates array" in final_contract
+    assert "source-inspection requests" in final_contract
+    assert final_contract.rstrip().endswith(
+        "so the outer response remains valid JSON."
+    )
+
+
 # ---------------------------------------------------------------------------
 # engine accessor
 # ---------------------------------------------------------------------------

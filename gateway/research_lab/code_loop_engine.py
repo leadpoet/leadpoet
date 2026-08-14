@@ -3796,7 +3796,7 @@ class CodeEditLoopEngine:
                 resolve_source_references,
                 index_doc=source_context.planner_index(),
                 source_root=source_context.source_root,
-                references=references,
+                references=requested_references,
             )
             prior_plan_hash = str(plan_doc.get("plan_hash") or sha256_json(dict(plan_doc)))
             await self.event_sink(

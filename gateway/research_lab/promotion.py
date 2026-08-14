@@ -2975,7 +2975,10 @@ class ResearchLabPromotionController:
             adapter_id = str(matched_row.get("adapter_id") or "")
             reward_rows = await select_many(
                 "research_lab_source_add_reward_current",
-                columns="reward_ref,adapter_id,leg,current_reward_status",
+                columns=(
+                    "reward_ref,adapter_id,leg,current_reward_status,"
+                    "trigger_evidence_doc"
+                ),
                 filters=(("adapter_id", adapter_id),),
                 limit=20,
             )
@@ -3006,6 +3009,50 @@ class ResearchLabPromotionController:
             )
             blockers: list[str] = []
             if leg2 is None:
+                existing_leg2 = next(
+                    (
+                        row
+                        for row in reward_rows
+                        if int(row.get("leg") or 0) == 2
+                        and str(row.get("adapter_id") or "") == adapter_id
+                    ),
+                    None,
+                )
+                if existing_leg2 is None:
+                    raise RuntimeError("SOURCE_ADD Leg 2 idempotency row is missing")
+                if not str(existing_leg2.get("current_reward_status") or ""):
+                    existing_reward_ref = str(
+                        existing_leg2.get("reward_ref") or ""
+                    )
+                    existing_evidence = existing_leg2.get("trigger_evidence_doc")
+                    if (
+                        re.fullmatch(
+                            r"source_add_reward:[0-9a-f]{16}", existing_reward_ref
+                        )
+                        is None
+                        or not isinstance(existing_evidence, Mapping)
+                        or existing_evidence.get("llm_judge_passed") is not True
+                    ):
+                        raise RuntimeError(
+                            "SOURCE_ADD Leg 2 orphan authority differs"
+                        )
+                    try:
+                        await insert_row(
+                            "research_lab_source_add_reward_events",
+                            {
+                                "reward_ref": existing_reward_ref,
+                                "seq": 0,
+                                "reward_status": "active",
+                                "reason": "leg2_llm_judge_helped",
+                            },
+                        )
+                    except Exception as exc:
+                        if not (
+                            "duplicate" in str(exc).lower()
+                            or "unique" in str(exc).lower()
+                            or "23505" in str(exc)
+                        ):
+                            raise
                 blockers = ["leg2_already_created"]
                 reward_doc = None
             else:

@@ -2812,6 +2812,76 @@ async def test_source_add_leg2_duplicate_is_idempotently_blocked(store, monkeypa
     assert store.generic_insert_writes == []
 
 
+async def test_source_add_leg2_retry_activates_orphaned_obligation(store, monkeypatch):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    reward_ref = "source_add_reward:" + "3" * 16
+    store.select_many_results["research_lab_source_add_reward_current"] = [
+        {
+            "reward_ref": reward_ref,
+            "adapter_id": "adapter:test-api-source",
+            "leg": 2,
+            "current_reward_status": None,
+            "trigger_evidence_doc": {"llm_judge_passed": True},
+        }
+    ]
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.9,
+            source_used=True,
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            model_id="test/judge",
+        )
+
+    async def _live_epoch(configured: Any = None) -> tuple[int, int | None, str]:
+        return 250, None, "test"
+
+    monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
+    _install_source_add_v2_judge(monkeypatch, _judge)
+    controller = ResearchLabPromotionController(
+        _source_add_reward_config(), worker_ref="test-worker"
+    )
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={
+            "champion_reward_status": "already_created",
+            "champion_reward_id": "cr-1",
+        },
+    )
+
+    assert result["source_add_reward_status"] == "blocked"
+    assert result["results"][0]["blockers"] == ["leg2_already_created"]
+    event_rows = [
+        row
+        for table, row in store.generic_insert_writes
+        if table == "research_lab_source_add_reward_events"
+    ]
+    assert event_rows == [
+        {
+            "reward_ref": reward_ref,
+            "seq": 0,
+            "reward_status": "active",
+            "reason": "leg2_llm_judge_helped",
+        }
+    ]
+
+
 async def test_source_add_leg2_persistence_failure_is_non_blocking(store, monkeypatch):
     store.select_many_results["research_lab_source_add_provisioning_current"] = [
         {

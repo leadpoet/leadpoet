@@ -2125,8 +2125,22 @@ async def test_v1_1_infeasible_test_plan_gets_one_bounded_repair(tmp_path):
             context = json.loads(messages[1]["content"].split("Context JSON:\n", 1)[1])
             assert context["candidate_edit_constraints"]["editable_test_path_count"] == 0
             assert context["feasibility_errors"]
+            assert context["required_root_branch_count"] == 2
+            assert "exactly Context JSON required_root_branch_count" in messages[1]["content"]
+            assert "runtime_checks requires validation_paths=[]" in messages[1]["content"]
+            assert "encode a symbol match as path::symbol" in messages[1]["content"]
+            repaired = _loop_direction_plan_v1_1_payload()
+            repaired["ranked_paths"].append(
+                {
+                    **repaired["ranked_paths"][0],
+                    "path_id": "query_recall_fallback_path",
+                    "mechanism": "add one bounded fallback query after an empty primary query",
+                    "target_behavior": ["recover completed-empty sparse searches"],
+                    "novelty_requirements": ["use a distinct fallback-query mechanism"],
+                }
+            )
             return OpenRouterCallResult(
-                content=json.dumps(_loop_direction_plan_v1_1_payload()),
+                content=json.dumps(repaired),
                 provider_usage={"provider": "openrouter", "response_id": "repair"},
                 cost_microusd=1000,
             )
@@ -2183,7 +2197,22 @@ async def test_v1_1_infeasible_test_plan_gets_one_bounded_repair(tmp_path):
         component_registry={},
         benchmark_public_summary={"item_count": 1},
         model_id="test/model",
-        budget_context={"requested_compute_budget_usd": 5.0},
+        budget_context={
+            "requested_compute_budget_usd": 5.0,
+            "tree_policy": _tree_runtime_policy(
+                TreePolicy(
+                    mode="active",
+                    branch_factor=2,
+                    beam_width=2,
+                    max_depth=1,
+                    max_nodes=2,
+                    shortlist_size=2,
+                    diversity_floor=2,
+                    deadline_seconds=300,
+                    finalization_reserve_seconds=30,
+                )
+            ),
+        },
         requested_loop_count=1,
     )
 
@@ -2191,6 +2220,12 @@ async def test_v1_1_infeasible_test_plan_gets_one_bounded_repair(tmp_path):
     assert calls.count("loop_planner_reference_repair") == 1
     assert calls.index("loop_planner_reference_repair") < calls.index("source_inspection")
     assert builder.builds == [("query_recall_path", 0)]
+    assert not [
+        event
+        for event in events
+        if event.event_doc.get("failure_class")
+        == "tree_branch_objectives_incomplete"
+    ]
     repair_checkpoints = [
         event.event_doc["checkpoint"]
         for event in events

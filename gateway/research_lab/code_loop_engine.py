@@ -3836,6 +3836,7 @@ class CodeEditLoopEngine:
                     reference_resolution=resolution,
                     candidate_edit_constraints=candidate_edit_constraints,
                     feasibility_errors=feasibility_errors,
+                    branch_factor=tree_policy.branch_factor,
                 ),
                 min(settings.draft_timeout_seconds, remaining_call_seconds),
                 self.builder.config.loop_planner_max_tokens,

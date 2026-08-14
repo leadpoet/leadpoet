@@ -2891,6 +2891,36 @@ class ResearchLabPromotionController:
                 score_bundle=score_bundle,
                 provisioned_sources=provisioned_rows,
             )
+            judge_receipt = judge_outcome.get("execution_receipt") or judge_outcome.get(
+                "receipt"
+            )
+            judge_graph = judge_outcome.get(
+                "execution_receipt_graph"
+            ) or judge_outcome.get("receipt_graph")
+            judge_result = judge_outcome.get("result")
+            if (
+                not isinstance(judge_receipt, Mapping)
+                or not isinstance(judge_graph, Mapping)
+                or not isinstance(judge_result, Mapping)
+            ):
+                raise RuntimeError("SOURCE_ADD Leg 2 judge authority is incomplete")
+            judge_receipt_hash = str(
+                judge_receipt.get("receipt_hash") or ""
+            ).lower()
+            judge_output_root = str(
+                judge_receipt.get("output_root") or ""
+            ).lower()
+            if (
+                re.fullmatch(r"sha256:[0-9a-f]{64}", judge_receipt_hash) is None
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", judge_output_root) is None
+                or judge_graph.get("root_receipt_hash") != judge_receipt_hash
+                or judge_output_root != sha256_json(dict(judge_result))
+            ):
+                raise RuntimeError("SOURCE_ADD Leg 2 judge authority differs")
+            judge_event_binding = {
+                "judge_receipt_hash": judge_receipt_hash,
+                "judge_output_root": judge_output_root,
+            }
             rows_by_adapter = {str(row.get("adapter_id") or ""): row for row in provisioned_rows}
             rows_by_registry = {str(row.get("registry_provider_id") or ""): row for row in provisioned_rows}
             matched_row = rows_by_adapter.get(verdict.adapter_id) or rows_by_registry.get(verdict.registry_provider_id)
@@ -2923,6 +2953,7 @@ class ResearchLabPromotionController:
                                 "registry_provider_id": verdict.registry_provider_id,
                                 "evidence_summary": verdict.evidence_summary,
                                 "reason_codes": list(verdict.reason_codes),
+                                **judge_event_binding,
                             }
                         ),
                     )
@@ -3070,6 +3101,7 @@ class ResearchLabPromotionController:
                             "source_used": verdict.source_used,
                             "evidence_summary": verdict.evidence_summary,
                             "reason_codes": list(verdict.reason_codes),
+                            **judge_event_binding,
                         }
                     ),
                 )

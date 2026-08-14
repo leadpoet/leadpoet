@@ -2326,13 +2326,15 @@ def _source_add_attribution_bundle() -> dict[str, Any]:
 def _install_source_add_v2_judge(monkeypatch, judge):
     async def _measured_judge(**kwargs: Any):
         verdict = await judge(**kwargs)
+        result = {"verdict": verdict.verdict}
+        output_root = sha256_json(result)
         return verdict, {
             "receipt": {
                 "receipt_hash": "sha256:" + "a" * 64,
-                "output_root": "sha256:" + "b" * 64,
+                "output_root": output_root,
             },
             "receipt_graph": {"root_receipt_hash": "sha256:" + "a" * 64},
-            "result": {"verdict": verdict.verdict},
+            "result": result,
         }
 
     async def _persist_link(**_kwargs: Any):
@@ -2425,7 +2427,16 @@ async def test_source_add_leg2_created_when_llm_judge_says_helped(store, monkeyp
     assert obligation["trigger_evidence_doc"]["llm_judge_passed"] is True
     assert obligation["trigger_evidence_doc"]["llm_verdict"] == "helped"
     events = [event for event in store.promotion_event_writes if event["event_type"] == "promotion_checked"]
-    assert any((event["event_doc"] or {}).get("reason") == "source_add_leg2_reward_created" for event in events)
+    source_event = next(
+        event
+        for event in events
+        if (event["event_doc"] or {}).get("reason")
+        == "source_add_leg2_reward_created"
+    )
+    assert source_event["event_doc"]["judge_receipt_hash"] == "sha256:" + "a" * 64
+    assert source_event["event_doc"]["judge_output_root"] == sha256_json(
+        {"verdict": "helped"}
+    )
 
 
 async def test_stateful_source_add_leg2_fails_closed_when_epoch_authority_is_unavailable(
@@ -2527,6 +2538,16 @@ async def test_source_add_leg2_blocks_when_llm_judge_says_not_helped(store, monk
     assert result["source_add_reward_status"] == "blocked"
     assert result["results"][0]["blockers"] == ["llm_judge_not_helped"]
     assert store.generic_insert_writes == []
+    source_event = next(
+        event
+        for event in store.promotion_event_writes
+        if (event["event_doc"] or {}).get("reason")
+        == "source_add_leg2_reward_blocked"
+    )
+    assert source_event["event_doc"]["judge_receipt_hash"] == "sha256:" + "a" * 64
+    assert source_event["event_doc"]["judge_output_root"] == sha256_json(
+        {"verdict": "not_helped"}
+    )
 
 
 @pytest.mark.parametrize("verdict", ["not_helped", "uncertain"])

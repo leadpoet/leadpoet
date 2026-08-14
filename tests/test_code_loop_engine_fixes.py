@@ -2289,7 +2289,20 @@ async def test_ambiguous_symbol_fails_without_paid_reference_repair(tmp_path):
     )
 
 
-async def test_planner_reference_repair_resolves_symbol_and_builds_once(tmp_path):
+@pytest.mark.parametrize(
+    "unresolved_references",
+    [
+        pytest.param(["discover_companies"], id="all-exact"),
+        pytest.param(
+            ["discover_companies", "discover_companiez"],
+            id="mixed-exact-missing",
+        ),
+    ],
+)
+async def test_planner_reference_repair_resolves_symbol_and_builds_once(
+    tmp_path,
+    unresolved_references,
+):
     events = []
     calls = []
     builder = _PlannerBuildsCandidateBuilder(_source_context(tmp_path))
@@ -2302,8 +2315,8 @@ async def test_planner_reference_repair_resolves_symbol_and_builds_once(tmp_path
                 content=json.dumps(
                     _loop_direction_plan_payload(
                         no_new_safe_path=True,
-                        reason="discover_companiez is not present in editable source",
-                        unresolved_references=["discover_companies", "discover_companiez"],
+                        reason=f"{unresolved_references[-1]} is not present in editable source",
+                        unresolved_references=unresolved_references,
                     )
                 ),
                 provider_usage={"provider": "openrouter", "response_id": "planner", "cost_microusd": 1000},
@@ -2312,12 +2325,11 @@ async def test_planner_reference_repair_resolves_symbol_and_builds_once(tmp_path
         if stage == "loop_planner_reference_repair":
             prompt = json.loads(messages[1]["content"].split("Context JSON:\n", 1)[1])
             resolution = prompt["reference_resolution"]
-            assert resolution["reference_count"] == 2
-            assert resolution["resolved_reference_count"] == 2
-            assert {item["reference"] for item in resolution["results"]} == {
-                "discover_companies",
-                "discover_companiez",
-            }
+            assert resolution["reference_count"] == len(unresolved_references)
+            assert resolution["resolved_reference_count"] == len(unresolved_references)
+            assert {item["reference"] for item in resolution["results"]} == set(
+                unresolved_references
+            )
             assert all(
                 item["matches"][0]["symbol"] == "discover_companies"
                 for item in resolution["results"]

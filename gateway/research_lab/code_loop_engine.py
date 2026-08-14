@@ -3753,8 +3753,10 @@ class CodeEditLoopEngine:
                 editable_files=source_context.editable_files,
                 references=requested_references,
             )
-            references = exact_binding.missing_references
-            if not references:
+            if exact_binding.invalid_references or exact_binding.ambiguous_references:
+                reference_repair_status = "unsafe_references"
+                return None
+            if not requested_references:
                 reference_repair_status = "no_safe_references"
                 return None
             if elapsed() >= settings.max_seconds:

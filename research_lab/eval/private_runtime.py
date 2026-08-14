@@ -2191,17 +2191,27 @@ def _research_lab_evidence_fingerprint(method, url, body):
     return digest.hexdigest()
 
 class _ResearchLabCachedHeaders(object):
-    def __init__(self, body_len):
-        self._values = {"Content-Length": str(body_len)}
+    def __init__(self, body_len, values=None):
+        import email.message as _email_message
+        self._message = _email_message.Message()
+        if values is not None:
+            try:
+                items = values.items()
+            except AttributeError:
+                items = ()
+            for name, value in items:
+                self._message[str(name)] = str(value)
+        if self._message.get("Content-Length") is None:
+            self._message["Content-Length"] = str(body_len)
 
     def get(self, name, default=None):
-        return self._values.get(str(name), default)
+        return self._message.get(str(name), default)
 
     def get_content_charset(self, failobj=None):
-        return "utf-8"
+        return self._message.get_content_charset(failobj="utf-8")
 
     def items(self):
-        return list(self._values.items())
+        return list(self._message.items())
 
 class _ResearchLabCachedResponse(object):
     def __init__(self, url, status, body, headers=None):
@@ -2210,7 +2220,11 @@ class _ResearchLabCachedResponse(object):
         self.url = url
         self.status = status
         self.code = status
-        self.headers = headers if headers is not None else _ResearchLabCachedHeaders(len(body))
+        self.headers = (
+            headers
+            if headers is not None and hasattr(headers, "get_content_charset")
+            else _ResearchLabCachedHeaders(len(body), headers)
+        )
         self.reason = ""
 
     def read(self, *args):

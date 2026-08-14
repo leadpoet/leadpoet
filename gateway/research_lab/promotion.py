@@ -1531,6 +1531,64 @@ async def _promotion_reason_recorded(
     return False
 
 
+async def _ensure_source_add_leg2_reward_activation(
+    *,
+    adapter_id: str,
+    reward_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> Mapping[str, Any]:
+    rows = list(reward_rows) if reward_rows is not None else await select_many(
+        "research_lab_source_add_reward_current",
+        columns=(
+            "reward_ref,adapter_id,leg,current_reward_status,"
+            "trigger_evidence_doc"
+        ),
+        filters=(("adapter_id", adapter_id),),
+        limit=20,
+    )
+    existing = next(
+        (
+            row
+            for row in rows
+            if int(row.get("leg") or 0) == 2
+            and str(row.get("adapter_id") or "") == adapter_id
+        ),
+        None,
+    )
+    if existing is None:
+        raise RuntimeError("SOURCE_ADD Leg 2 idempotency row is missing")
+    if str(existing.get("current_reward_status") or ""):
+        return existing
+
+    reward_ref = str(existing.get("reward_ref") or "")
+    evidence = existing.get("trigger_evidence_doc")
+    if (
+        re.fullmatch(r"source_add_reward:[0-9a-f]{16}", reward_ref) is None
+        or not isinstance(evidence, Mapping)
+        or evidence.get("llm_judge_passed") is not True
+        or evidence.get("llm_verdict") != "helped"
+        or evidence.get("source_used") is not True
+    ):
+        raise RuntimeError("SOURCE_ADD Leg 2 orphan authority differs")
+    try:
+        await insert_row(
+            "research_lab_source_add_reward_events",
+            {
+                "reward_ref": reward_ref,
+                "seq": 0,
+                "reward_status": "active",
+                "reason": "leg2_llm_judge_helped",
+            },
+        )
+    except Exception as exc:
+        if not (
+            "duplicate" in str(exc).lower()
+            or "unique" in str(exc).lower()
+            or "23505" in str(exc)
+        ):
+            raise
+    return existing
+
+
 class ResearchLabPromotionController:
     """Process scored candidates into active private model versions."""
 
@@ -2899,12 +2957,8 @@ class ResearchLabPromotionController:
                 score_bundle=score_bundle,
                 provisioned_sources=provisioned_rows,
             )
-            judge_receipt = judge_outcome.get("execution_receipt") or judge_outcome.get(
-                "receipt"
-            )
-            judge_graph = judge_outcome.get(
-                "execution_receipt_graph"
-            ) or judge_outcome.get("receipt_graph")
+            judge_receipt = judge_outcome.get("execution_receipt")
+            judge_graph = judge_outcome.get("execution_receipt_graph")
             judge_result = judge_outcome.get("result")
             if (
                 not isinstance(judge_receipt, Mapping)
@@ -2918,10 +2972,20 @@ class ResearchLabPromotionController:
             judge_output_root = str(
                 judge_receipt.get("output_root") or ""
             ).lower()
+            graph_receipts = {
+                str(item.get("receipt_hash") or ""): item
+                for item in judge_graph.get("receipts") or ()
+                if isinstance(item, Mapping)
+            }
             if (
                 re.fullmatch(r"sha256:[0-9a-f]{64}", judge_receipt_hash) is None
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", judge_output_root) is None
+                or judge_receipt.get("role") != "gateway_scoring"
+                or judge_receipt.get("purpose")
+                != "research_lab.source_add_judge.v2"
+                or judge_receipt.get("status") != "succeeded"
                 or judge_graph.get("root_receipt_hash") != judge_receipt_hash
+                or graph_receipts.get(judge_receipt_hash) != dict(judge_receipt)
                 or judge_output_root != sha256_json(dict(judge_result))
             ):
                 raise RuntimeError("SOURCE_ADD Leg 2 judge authority differs")
@@ -3009,50 +3073,10 @@ class ResearchLabPromotionController:
             )
             blockers: list[str] = []
             if leg2 is None:
-                existing_leg2 = next(
-                    (
-                        row
-                        for row in reward_rows
-                        if int(row.get("leg") or 0) == 2
-                        and str(row.get("adapter_id") or "") == adapter_id
-                    ),
-                    None,
+                await _ensure_source_add_leg2_reward_activation(
+                    adapter_id=adapter_id,
+                    reward_rows=reward_rows,
                 )
-                if existing_leg2 is None:
-                    raise RuntimeError("SOURCE_ADD Leg 2 idempotency row is missing")
-                if not str(existing_leg2.get("current_reward_status") or ""):
-                    existing_reward_ref = str(
-                        existing_leg2.get("reward_ref") or ""
-                    )
-                    existing_evidence = existing_leg2.get("trigger_evidence_doc")
-                    if (
-                        re.fullmatch(
-                            r"source_add_reward:[0-9a-f]{16}", existing_reward_ref
-                        )
-                        is None
-                        or not isinstance(existing_evidence, Mapping)
-                        or existing_evidence.get("llm_judge_passed") is not True
-                    ):
-                        raise RuntimeError(
-                            "SOURCE_ADD Leg 2 orphan authority differs"
-                        )
-                    try:
-                        await insert_row(
-                            "research_lab_source_add_reward_events",
-                            {
-                                "reward_ref": existing_reward_ref,
-                                "seq": 0,
-                                "reward_status": "active",
-                                "reason": "leg2_llm_judge_helped",
-                            },
-                        )
-                    except Exception as exc:
-                        if not (
-                            "duplicate" in str(exc).lower()
-                            or "unique" in str(exc).lower()
-                            or "23505" in str(exc)
-                        ):
-                            raise
                 blockers = ["leg2_already_created"]
                 reward_doc = None
             else:
@@ -3062,7 +3086,6 @@ class ResearchLabPromotionController:
                         authorize_reward_decision_v2,
                     )
 
-                    judge_graph = judge_outcome.get("receipt_graph")
                     judge_result = judge_outcome.get("result")
                     if not isinstance(judge_graph, Mapping) or not isinstance(
                         judge_result, Mapping
@@ -3125,6 +3148,9 @@ class ResearchLabPromotionController:
                     )
                 except Exception as exc:
                     if "duplicate" in str(exc).lower() or "unique" in str(exc).lower() or "23505" in str(exc):
+                        await _ensure_source_add_leg2_reward_activation(
+                            adapter_id=adapter_id,
+                        )
                         blockers = ["leg2_already_created"]
                         reward_doc = None
                     else:

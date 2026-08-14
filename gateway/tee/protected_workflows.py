@@ -464,6 +464,7 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/research_lab/promotion.py": (
         "_promotion_reason_recorded",
+        "_ensure_source_add_leg2_reward_activation",
         "confirmation_min_delta",
         "confirmation_attempt_budget",
         "_baseline_aggregate_excluding_icps",

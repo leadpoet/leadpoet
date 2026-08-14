@@ -218,6 +218,42 @@ class CoordinatorRewardSourceV2:
                 )
         else:
             judge_result = decision.get("judge_result")
+            if not isinstance(judge_result, Mapping):
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 2 judge result is invalid"
+                )
+            try:
+                graphs = list(context.external_receipt_authority_graphs())
+            except ExecutionJobV2Error as exc:
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 2 judge parent is invalid"
+                ) from exc
+            if len(graphs) != 1:
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 2 requires one judge parent"
+                )
+            graph = graphs[0]
+            root_hash = str(graph.get("root_receipt_hash") or "")
+            root = next(
+                (
+                    item
+                    for item in graph.get("receipts") or ()
+                    if isinstance(item, Mapping)
+                    and item.get("receipt_hash") == root_hash
+                ),
+                None,
+            )
+            if (
+                not isinstance(root, Mapping)
+                or tuple(context.parent_receipt_hashes) != (root_hash,)
+                or root.get("role") != "gateway_scoring"
+                or root.get("purpose") != "research_lab.source_add_judge.v2"
+                or root.get("status") != "succeeded"
+                or root.get("output_root") != sha256_json(dict(judge_result))
+            ):
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 2 judge receipt differs"
+                )
             verdict = (
                 judge_result.get("verdict")
                 if isinstance(judge_result, Mapping)

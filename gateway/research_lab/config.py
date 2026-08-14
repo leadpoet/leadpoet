@@ -228,6 +228,12 @@ IMAGE_TAG="$(printf '%s' "${IMAGE_TAG_RAW}" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1
 IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 IMAGE_DIGEST=""
 BUILD_WORK_DIR="$(mktemp -d /tmp/research-lab-candidate-manifest.XXXXXX)"
+DOCKER_CONFIG="${BUILD_WORK_DIR}/docker-config"
+mkdir -p "${DOCKER_CONFIG}"
+chmod 700 "${DOCKER_CONFIG}"
+printf '%s\n' '{"auths":{}}' > "${DOCKER_CONFIG}/config.json"
+chmod 600 "${DOCKER_CONFIG}/config.json"
+export DOCKER_CONFIG
 cleanup_candidate_image() {
   if [ -n "${IMAGE_DIGEST:-}" ]; then
     docker image rm "${IMAGE_DIGEST}" >/dev/null 2>&1 || true

@@ -16,6 +16,7 @@ import re
 import secrets
 import shlex
 import shutil
+import sys
 import tempfile
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
@@ -31,6 +32,7 @@ from gateway.research_lab.worker_autostart import (
     deferred_worker_fleet_roles,
 )
 from gateway.tee.artifact_vault_v2 import artifact_master_key_reference_hash
+from gateway.tee.host_memory_guard_v2 import cleanup_stale_vsock_probes
 from gateway.tee.provider_broker_v2 import (
     ProviderBrokerV2Error,
     _validated_tls_proxy_url,
@@ -68,6 +70,7 @@ _BOOT_SOURCES = {
 }
 _SHARED_PARENT_SLOTS = frozenset(("supabase_service_role", "truelist"))
 _WORKER_PROXY_TRANSPORT_POLICY = "authenticated_http_or_https_connect.v2"
+_GATEWAY_RESTART_ENVELOPE_STAGE = "v2_credential_envelope_preparation"
 _SPECIAL_PROFILES = {
     "benchmark_exa.json": (
         "exa",
@@ -103,6 +106,29 @@ _SPECIAL_PROFILES = {
 
 class GatewayEnvelopePreparationV2Error(RuntimeError):
     """The operator input cannot produce a complete encrypted V2 profile."""
+
+
+def cleanup_stale_gateway_restart_probes_v2() -> list[dict[str, object]]:
+    """Clean only the historical EOF-spinning probe during gateway restart."""
+
+    if os.environ.get("GATEWAY_DEPLOY_STAGE") != _GATEWAY_RESTART_ENVELOPE_STAGE:
+        return []
+    cleaned = cleanup_stale_vsock_probes()
+    print(
+        "GATEWAY_RESTART_STALE_PROBE_CLEANUP "
+        + json.dumps(
+            {
+                "cleaned": cleaned,
+                "schema_version": "leadpoet.gateway_restart_probe_cleanup.v1",
+                "status": "ready",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    return cleaned
 
 
 def load_environment_file(path: Path) -> Dict[str, str]:
@@ -986,6 +1012,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--install", action="store_true")
     args = parser.parse_args(argv)
+    if args.install:
+        cleanup_stale_gateway_restart_probes_v2()
     function = install_gateway_envelopes_v2 if args.install else prepare_gateway_envelopes_v2
     keyword = "install_dir" if args.install else "output_dir"
     environment = load_environment_file(args.env_file)

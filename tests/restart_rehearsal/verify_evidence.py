@@ -1782,6 +1782,23 @@ def main() -> int:
             transition=transition,
             storage_preflight_supported=storage_preflight_supported,
         )
+        if transition == "forward":
+            launcher_log = Path(
+                "/evidence/"
+                f"{os.environ.get('REHEARSAL_RUN_ORDINAL', '1')}-gateway-"
+                f"{transition}-{candidate_sha}-launcher.log"
+            )
+            try:
+                launcher_output = launcher_log.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise SystemExit(
+                    "gateway launcher output is unavailable for stale-probe cleanup"
+                ) from exc
+            if "GATEWAY_RESTART_STALE_PROBE_CLEANUP " not in launcher_output:
+                raise SystemExit(
+                    "prepared candidate did not clean stale gateway probes before "
+                    "V2 preflight"
+                )
         verify_chain_settlement_durable_readback(rows)
         required_gateway_order = [
             "module:gateway.tee.release_channel_v2",

@@ -240,7 +240,21 @@ def test_gateway_restart_uses_bounded_memory_gates_without_async_termination() -
     assert 'GATEWAY_HOST_MEMORY_GUARD_PATH="${GATEWAY_HOST_MEMORY_GUARD_PATH:-' in restart
     assert 'local guard="$GATEWAY_HOST_MEMORY_GUARD_PATH"' in restart
     assert "--minimum-available-mib 16384" in restart
-    assert restart.count("--cleanup-stale-vsock-probes") == 2
+    assert restart.count("--cleanup-stale-vsock-probes") == 3
+    prepared_cleanup = restart.index(
+        'echo "Cleaning stale read-only gateway vsock probes before V2 preflight"'
+    )
+    restart_gate = restart.index(
+        'echo "Capturing the official subnet restart window before release acquisition"'
+    )
+    weight_preflight = restart.index(
+        'echo "Preflighting durable V2 validator weight authority before production shutdown"'
+    )
+    assert prepared_cleanup < restart_gate < weight_preflight
+    assert (
+        '"$GATEWAY_PREFLIGHT_TREE/gateway/tee/host_memory_guard_v2.py"'
+        in restart
+    )
     assert "--minimum-available-mib 4096" in workflow
     assert "--watch-parent" not in restart
     assert "--watch-parent" not in (

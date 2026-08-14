@@ -1118,6 +1118,15 @@ def test_install_cli_checks_schema_before_writing_envelopes(
     env_file.write_text(json.dumps(environment), encoding="utf-8")
     calls = []
 
+    monkeypatch.setenv(
+        "GATEWAY_DEPLOY_STAGE",
+        "v2_credential_envelope_preparation",
+    )
+
+    def cleanup_stale_probes():
+        calls.append("cleanup")
+        return []
+
     def verify_schema(observed_environment):
         assert observed_environment == environment
         calls.append("schema")
@@ -1137,6 +1146,11 @@ def test_install_cli_checks_schema_before_writing_envelopes(
         "verify_required_supabase_v2_schema",
         verify_schema,
     )
+    monkeypatch.setattr(
+        envelope_module,
+        "cleanup_stale_vsock_probes",
+        cleanup_stale_probes,
+    )
     monkeypatch.setattr(envelope_module, "install_gateway_envelopes_v2", install)
 
     assert envelope_module.main(
@@ -1153,8 +1167,10 @@ def test_install_cli_checks_schema_before_writing_envelopes(
         ]
     ) == 0
 
-    result = json.loads(capsys.readouterr().out)
-    assert calls == ["schema", "install"]
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert calls == ["cleanup", "schema", "install"]
+    assert "GATEWAY_RESTART_STALE_PROBE_CLEANUP" in captured.err
     assert result["supabase_v2_schema"]["status"] == "ready"
 
 

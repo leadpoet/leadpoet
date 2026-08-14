@@ -2009,6 +2009,12 @@ export GATEWAY_DEPLOY_STAGE
   --phase prepared_archive \
   --strict-extras
 
+echo "Cleaning stale read-only gateway vsock probes before V2 preflight"
+"$GATEWAY_PYTHON_BIN" \
+  "$GATEWAY_PREFLIGHT_TREE/gateway/tee/host_memory_guard_v2.py" \
+  --cleanup-stale-vsock-probes \
+  --minimum-available-mib 1024
+
 RESTART_GATE_ARGS=(
   --network "${BITTENSOR_NETWORK:-finney}"
   --netuid "${BITTENSOR_NETUID:-71}"

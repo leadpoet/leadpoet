@@ -957,7 +957,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:b5948622117a6563daade23db3c0a0672c00e26ea3a42c19eae2dd2b335a4a1f",
+      "ast_sha256": "sha256:97f98a5fda04f9c58a5baa6d05b82851ff2b8a0f4b60bc25f4ab04650b1fbc09",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -967,12 +967,12 @@
       "symbol": "classify_historical_champion_allocation_v2"
     },
     {
-      "ast_sha256": "sha256:613ecfc2f8f1c817a27e2d92f908673887c4e6030cc46cf75bfe667812959773",
+      "ast_sha256": "sha256:11104a43ccfb98c92021b4c6bec099d925f3e2503e8f8474b27e005ee21439b5",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "ensure_chain_realized_settlements_v1"
     },
     {
-      "ast_sha256": "sha256:5db1e63414d54a6ef407e9412c7659dcebe462f45d2be7098efc6cdccb987270",
+      "ast_sha256": "sha256:bb8c55c306e696ac97d2c8dfbfe657aebf0cd0c0afbd564e5ee1a9bdd52512dd",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "settle_chain_realized_epoch_v1"
     },
@@ -1412,7 +1412,7 @@
       "symbol": "write_identity_to_tmpfs"
     },
     {
-      "ast_sha256": "sha256:9331423a3ef25779547b44f17ea564a777ae6bf0d0958edd8211b1016794292a",
+      "ast_sha256": "sha256:26919df1564a596a2ea0cc8d398cd267ff5b13fe7d6a6870c017c1ddacf306d4",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -2752,7 +2752,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:a135475b5806d68cb07a31bac8fcd412a511f68837469888e3b5fb98bc40aad0",
-  "protected_source_commit": "fb6c0ca5621d9571b946b8b39876d61389a2f63a",
+  "manifest_hash": "sha256:911bd0b043fcb8daf20c8285e419ce2e889cc0de414b7db4eea02bdc13dd2564",
+  "protected_source_commit": "805bc8bf7061c177eb3cf705774bd9a4e5bcaf3d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

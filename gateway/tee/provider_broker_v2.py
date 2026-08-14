@@ -161,6 +161,10 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_slot="exa",
         credential_location="header",
         credential_name="x-api-key",
+        # Exa's assigned-proxy path can deliver the complete authenticated
+        # response body while losing only the terminal HTTP marker. A single
+        # gzip member supplies an independently checksum-verified boundary.
+        request_headers=(("Accept-Encoding", "gzip"),),
     ),
     "scrapingdog": ProviderRouteV2(
         provider_id="scrapingdog",
@@ -186,9 +190,10 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
-        # The global identity-encoding policy keeps the committed body equal to
-        # the authenticated wire body and permits objective JSON-completeness
-        # recovery when a raw HTTP/2 relay loses only END_STREAM.
+        # Preserve the compressed PostgREST wire profile used by the last
+        # release that produced a finalized canonical weight bundle. The gzip
+        # footer proves body completeness if the raw relay loses END_STREAM.
+        request_headers=(("Accept-Encoding", "gzip"),),
     ),
     "truelist": ProviderRouteV2(
         provider_id="truelist",
@@ -675,13 +680,13 @@ def _authenticated_gzip_body_is_complete_after_stream_error(
     decoder: Any,
 ) -> bool:
     """Recover only after a complete, checksum-verified gzip JSON member."""
-    if str(method or "").upper() != "GET":
+    if str(method or "").upper() not in {"GET", "POST"}:
         return False
     try:
         http_version = str(response.http_version or "").strip().upper()
     except Exception:
         http_version = ""
-    if http_version != "HTTP/2":
+    if http_version not in {"HTTP/1.1", "HTTP/2"}:
         return False
     if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
         return False
@@ -1717,9 +1722,9 @@ class ProviderBrokerV2:
                     if name.lower() != str(static_name).lower()
                 }
                 outbound_headers[str(static_name)] = str(static_value)
-        # Bind the default response framing at the measured transport boundary
-        # so no caller or dynamic route can opt into compressed bodies whose
-        # decoded bytes cannot prove wire length after an EOF.
+        # Bind the default response framing at the measured transport boundary.
+        # Built-in routes may select the stricter checksum-delimited gzip
+        # profile below; callers and dynamic routes cannot select an encoding.
         for static_name, static_value in MEASURED_TRANSPORT_REQUEST_HEADERS:
             outbound_headers = {
                 name: value
@@ -1729,8 +1734,8 @@ class ProviderBrokerV2:
             outbound_headers[static_name] = static_value
         # A built-in route may select a stricter, statically measured wire
         # profile after the global default. Dynamic routes cannot override it.
-        # Compressed responses still require ordinary authenticated stream
-        # completion; the EOF recovery predicate rejects content encodings.
+        # A compressed response is recoverable only after its complete gzip
+        # member and bounded JSON document have both verified.
         for static_name, static_value in route.request_headers:
             outbound_headers = {
                 name: value

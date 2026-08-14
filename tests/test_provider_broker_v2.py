@@ -810,6 +810,7 @@ def _execute_gzip_response(
     content_type="application/json",
     terminal_error=True,
     max_response_bytes=1024,
+    http_version="HTTP/2",
 ):
     class TLS:
         def getpeercert(self, binary_form=False, /):
@@ -845,7 +846,7 @@ def _execute_gzip_response(
         },
         stream=GzipStream(),
         extensions={
-            "http_version": b"HTTP/2",
+            "http_version": http_version.encode("ascii"),
             "network_stream": NetworkStream(),
         },
         request=httpx.Request(method, "https://example.com/rest/v1/receipts"),
@@ -875,14 +876,27 @@ def _execute_gzip_response(
 
 
 @pytest.mark.parametrize("terminal_error", (False, True))
+@pytest.mark.parametrize(
+    ("method", "http_version"),
+    (
+        ("GET", "HTTP/1.1"),
+        ("GET", "HTTP/2"),
+        ("POST", "HTTP/1.1"),
+        ("POST", "HTTP/2"),
+    ),
+)
 def test_httpx_transport_requires_complete_gzip_member_before_recovery(
     terminal_error,
+    method,
+    http_version,
 ):
     body = b'[{"receipt_hash":"sha256:' + (b"a" * 64) + b'"}]'
 
     result = _execute_gzip_response(
         compressed_body=gzip.compress(body),
         terminal_error=terminal_error,
+        method=method,
+        http_version=http_version,
     )
 
     assert result["http_status"] == 200
@@ -904,6 +918,27 @@ def test_httpx_transport_rejects_gzip_body_with_corrupt_checksum():
 
     with pytest.raises(Exception, match="incorrect data check"):
         _execute_gzip_response(compressed_body=bytes(compressed))
+
+
+def test_httpx_transport_rejects_complete_gzip_for_mutating_method():
+    with pytest.raises(httpx.RemoteProtocolError, match="without relaying"):
+        _execute_gzip_response(
+            compressed_body=gzip.compress(b'{"ok":true}'),
+            method="PATCH",
+            http_version="HTTP/1.1",
+        )
+
+
+def test_httpx_transport_rejects_gzip_member_with_trailing_data():
+    with pytest.raises(ProviderBrokerV2Error, match="trailing data"):
+        _execute_gzip_response(
+            compressed_body=gzip.compress(b'{"ok":true}') + b"trailing",
+        )
+
+
+def test_httpx_transport_rejects_complete_gzip_with_invalid_json_after_eof():
+    with pytest.raises(httpx.RemoteProtocolError, match="without relaying"):
+        _execute_gzip_response(compressed_body=gzip.compress(b'{"ok":'))
 
 
 def test_httpx_transport_enforces_decoded_gzip_response_ceiling():
@@ -1654,6 +1689,9 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_header_aliases": [],
         "allowed_methods": ["GET"],
     }
+    assert document["routes"]["exa"]["request_headers"] == [
+        {"name": "Accept-Encoding", "value": "gzip"}
+    ]
     assert document["routes"]["supabase"] == {
         "hosts": ["qplwoislplkcegvdmbim.supabase.co"],
         "path_prefixes": ["/rest/v1/"],
@@ -1662,6 +1700,9 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_name": "Authorization",
         "credential_prefix": "Bearer ",
         "credential_header_aliases": [{"name": "apikey", "prefix": ""}],
+        "request_headers": [
+            {"name": "Accept-Encoding", "value": "gzip"}
+        ],
     }
     assert MEASURED_TRANSPORT_REQUEST_HEADERS == (("Accept-Encoding", "identity"),)
     assert provider_registry_hash().startswith("sha256:")
@@ -1776,7 +1817,7 @@ def test_authenticated_provider_error_is_recorded_only_with_tls_evidence():
         ("scrapingdog", "https://api.scrapingdog.com/scrape?url=test"),
     ),
 )
-def test_measured_transport_overrides_compressed_provider_responses(
+def test_measured_transport_binds_provider_response_encoding(
     provider_id,
     url,
 ):
@@ -1795,7 +1836,8 @@ def test_measured_transport_overrides_compressed_provider_responses(
     )
 
     outbound_headers = transport.calls[0]["headers"]
-    assert outbound_headers["Accept-Encoding"] == "identity"
+    expected_encoding = "gzip" if provider_id == "exa" else "identity"
+    assert outbound_headers["Accept-Encoding"] == expected_encoding
     assert "accept-encoding" not in outbound_headers
 
 
@@ -2153,7 +2195,7 @@ def test_supabase_service_role_is_injected_only_for_measured_project():
         "Bearer supabase-service-role-secret"
     )
     assert outbound["headers"]["apikey"] == "supabase-service-role-secret"
-    assert outbound["headers"]["Accept-Encoding"] == "identity"
+    assert outbound["headers"]["Accept-Encoding"] == "gzip"
     assert outbound.get("allow_http2", True) is True
     assert "supabase-service-role-secret" not in str(result)
 
@@ -2171,7 +2213,7 @@ def test_supabase_service_role_is_injected_only_for_measured_project():
         )
     )
     encoded_headers = transport.calls[1]["headers"]
-    assert encoded_headers["Accept-Encoding"] == "identity"
+    assert encoded_headers["Accept-Encoding"] == "gzip"
     assert "accept-encoding" not in encoded_headers
 
     with pytest.raises(ProviderBrokerV2Error, match="destination"):

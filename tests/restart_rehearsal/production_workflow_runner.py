@@ -6289,16 +6289,17 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         raise RuntimeError(
             "measured provider transport is not bound to identity encoding"
         )
-    if BUILTIN_PROVIDER_ROUTES["supabase"].request_headers:
+    compressed_routes = {
+        provider_id: dict(route.request_headers)
+        for provider_id, route in BUILTIN_PROVIDER_ROUTES.items()
+        if route.request_headers
+    }
+    if compressed_routes != {
+        "exa": {"Accept-Encoding": "gzip"},
+        "supabase": {"Accept-Encoding": "gzip"},
+    }:
         raise RuntimeError(
-            "measured Supabase route overrides identity response encoding"
-        )
-    if any(
-        route.provider_id != "supabase" and route.request_headers
-        for route in BUILTIN_PROVIDER_ROUTES.values()
-    ):
-        raise RuntimeError(
-            "an unrelated provider route overrides measured response framing"
+            "measured Exa/Supabase routes do not bind gzip response framing"
         )
 
     import gzip
@@ -6319,14 +6320,19 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 raise RuntimeError("unexpected transport evidence lookup")
             return _TransportTLS()
 
-    def _read_candidate_gzip_response(compressed_body: bytes) -> bytes:
+    def _read_candidate_gzip_response(
+        compressed_body: bytes,
+        *,
+        method: str,
+        http_version: str,
+    ) -> bytes:
         class _CompleteGzipThenEOF(httpx.SyncByteStream):
             def __iter__(self):
                 midpoint = max(1, len(compressed_body) // 2)
                 yield compressed_body[:midpoint]
                 yield compressed_body[midpoint:]
                 raise httpx.RemoteProtocolError(
-                    "relay lost HTTP/2 END_STREAM after gzip member"
+                    "relay lost the terminal HTTP marker after gzip member"
                 )
 
             def close(self):
@@ -6340,11 +6346,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             },
             stream=_CompleteGzipThenEOF(),
             extensions={
-                "http_version": b"HTTP/2",
+                "http_version": http_version.encode("ascii"),
                 "network_stream": _TransportNetworkStream(),
             },
             request=httpx.Request(
-                "GET", "https://example.com/rest/v1/settlement"
+                method, "https://example.com/rest/v1/settlement"
             ),
         )
 
@@ -6361,7 +6367,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
 
         return HTTPXProviderTransport._execute_with_client(
             _Client(),
-            method="GET",
+            method=method,
             url="https://example.com/rest/v1/settlement",
             headers={},
             body=b"",
@@ -6372,12 +6378,21 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
 
     production_gzip_body = b'[{"settlement_hash":"sha256:' + (b"b" * 64) + b'"}]'
     production_gzip_member = gzip.compress(production_gzip_body)
-    if _read_candidate_gzip_response(production_gzip_member) != production_gzip_body:
-        raise RuntimeError(
-            "complete checksum-verified Supabase gzip response was not recovered"
-        )
+    for method, http_version in (("GET", "HTTP/2"), ("POST", "HTTP/1.1")):
+        if _read_candidate_gzip_response(
+            production_gzip_member,
+            method=method,
+            http_version=http_version,
+        ) != production_gzip_body:
+            raise RuntimeError(
+                "complete checksum-verified provider gzip response was not recovered"
+            )
     try:
-        _read_candidate_gzip_response(production_gzip_member[:-8])
+        _read_candidate_gzip_response(
+            production_gzip_member[:-8],
+            method="POST",
+            http_version="HTTP/1.1",
+        )
     except httpx.RemoteProtocolError:
         pass
     else:
@@ -7858,8 +7873,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_rpc_frame_budget_bound": True,
         "openrouter_body_framing_recomputed": True,
         "complete_http2_json_eof_recovered": True,
-        "complete_gzip_http2_eof_recovered": True,
-        "measured_provider_identity_response_encoding_bound": True,
+        "complete_gzip_get_post_eof_recovered": True,
+        "measured_provider_response_encoding_bound": True,
         "complete_http2_provider_post_eof_recovered": True,
     }
 
@@ -9509,12 +9524,12 @@ def main() -> int:
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",
                 {},
-            ).get("complete_gzip_http2_eof_recovered")
+            ).get("complete_gzip_get_post_eof_recovered")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",
                 {},
-            ).get("measured_provider_identity_response_encoding_bound")
+            ).get("measured_provider_response_encoding_bound")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

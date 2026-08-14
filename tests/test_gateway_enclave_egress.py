@@ -1871,6 +1871,8 @@ def test_measured_assigned_proxy_raw_transport_scenario(monkeypatch):
         "proxy_auth_remained_in_enclave": True,
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
+        "production_http_connect_proxy_verified": True,
+        "repeated_request_count": 8,
     }
 
 
@@ -1890,6 +1892,8 @@ def test_measured_coordinator_raw_transport_scenario(monkeypatch):
         "proxy_auth_remained_in_enclave": True,
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
+        "production_http_connect_proxy_verified": True,
+        "repeated_request_count": 8,
         "raw_parent_tunnel_verified": True,
     }
 

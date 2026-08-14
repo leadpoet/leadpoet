@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import copy
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -2308,6 +2309,7 @@ async def _exercise_chain_settlement_state_space_async() -> dict[str, Any]:
 
     from gateway.research_lab import champion_settlement_v2 as settlement
     from gateway.research_lab import store
+    from gateway.research_lab import v2_authority
 
     netuid = 71
     activation_epoch = 40_000
@@ -2499,10 +2501,103 @@ async def _exercise_chain_settlement_state_space_async() -> dict[str, Any]:
             rejected.append("backlog-exceeds-policy")
         else:
             raise RuntimeError("excessive settlement backlog was accepted")
+
+        observation_calls: list[dict[str, Any]] = []
+
+        class ObservationReached(RuntimeError):
+            pass
+
+        async def capture_observation(**kwargs: Any) -> dict[str, Any]:
+            observation_calls.append(kwargs)
+            raise ObservationReached
+
+        try:
+            await v2_authority.settle_chain_realized_epoch_v1(
+                epoch_id=target_epoch,
+                netuid=netuid,
+                settlement_attempt=4,
+                execute=capture_observation,
+            )
+        except ObservationReached:
+            pass
+        if (
+            len(observation_calls) != 1
+            or observation_calls[0].get("operation")
+            != v2_authority.OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1
+            or observation_calls[0].get("sequence") != 8
+        ):
+            raise RuntimeError(
+                "chain settlement retry replayed the prior observation identity"
+            )
+
+        async def load_durable_attempt_history(
+            table: str,
+            **kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            if (
+                table != "research_lab_attested_execution_receipts_v2"
+                or kwargs.get("order_by") != (("sequence", True),)
+                or kwargs.get("limit") != 1
+            ):
+                raise RuntimeError(
+                    "chain settlement durable retry history query differs"
+                )
+            return [{"sequence": 7}]
+
+        durable_retry_attempt = (
+            await v2_authority._resolve_chain_settlement_attempt_v1(
+                epoch_id=target_epoch,
+                requested_attempt=0,
+                load_attempt_history=load_durable_attempt_history,
+            )
+        )
+        if durable_retry_attempt != 4:
+            raise RuntimeError(
+                "chain settlement retry identity did not survive restart"
+            )
+
+        propagated_attempts: list[tuple[int, int]] = []
+
+        async def load_retry_frontier(
+            table: str,
+            **_kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            if table == settlement.CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1:
+                return [dict(activation)]
+            if table == settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1:
+                return []
+            raise AssertionError(f"unexpected retry-frontier table: {table}")
+
+        async def capture_settlement_attempt(
+            *,
+            epoch_id: int,
+            settlement_attempt: int,
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
+            propagated_attempts.append((epoch_id, settlement_attempt))
+            return {"epoch_id": epoch_id}
+
+        await v2_authority.ensure_chain_realized_settlements_v1(
+            epoch_id=activation_epoch + 2,
+            netuid=netuid,
+            settlement_attempt=4,
+            load_latest=load_retry_frontier,
+            settle=capture_settlement_attempt,
+        )
+        if propagated_attempts != [
+            (activation_epoch, 4),
+            (activation_epoch + 1, 4),
+        ]:
+            raise RuntimeError(
+                "allocation retry generation did not reach settlement backlog"
+            )
         return {
             "accepted_prefixes": accepted,
             "accepted_count": len(accepted),
             "rejected_state_classes": sorted(rejected),
+            "retry_observation_sequence": 8,
+            "retry_attempts_propagated": len(propagated_attempts),
+            "durable_retry_attempt": durable_retry_attempt,
         }
     finally:
         (
@@ -6143,9 +6238,12 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     )
     from gateway.research_lab.scoring_worker import (
         _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD,
+        BaselineHealthGateFailure,
         BaselineMaintenancePause,
         ResearchLabGatewayScoringWorker,
         _baseline_attempt_ledger_entry,
+        _baseline_computation_failure_policy,
+        _baseline_publication_retry_decision,
         _attested_receipts_with_persisted_roots,
         _baseline_summary_checkpointable,
         _load_baseline_scoring_progress,
@@ -7110,6 +7208,51 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     ):
         raise RuntimeError("provider recovery checkpoint eligibility differed")
 
+    health_gate_failure = BaselineHealthGateFailure(
+        "rehearsal exhausted its configured ICP attempts",
+        baseline_health={"gate_passed": False, "unresolved_icp_count": 29},
+    )
+    failure_policy = _baseline_computation_failure_policy(health_gate_failure)
+    terminal_event = {
+        "dispatch_status": "failed",
+        "event_doc": {
+            "failure_phase": failure_policy["failure_phase"],
+            "terminal_no_automatic_retry": failure_policy[
+                "terminal_no_automatic_retry"
+            ],
+            "scoring_worker_source_hash": (
+                scoring_worker_module._scoring_worker_source_hash()
+            ),
+            "publication_retry_token_hash": (
+                scoring_worker_module._baseline_publication_retry_token_hash()
+            ),
+        },
+    }
+    blocked, authorization = _baseline_publication_retry_decision(
+        [terminal_event],
+        scope_key="rehearsal:terminal-health-gate",
+        in_process_failures=set(),
+    )
+    changed_source_event = copy.deepcopy(terminal_event)
+    changed_source_event["event_doc"]["scoring_worker_source_hash"] = (
+        "sha256:" + "0" * 64
+    )
+    retry_blocked, retry_authorization = _baseline_publication_retry_decision(
+        [changed_source_event],
+        scope_key="rehearsal:terminal-health-gate",
+        in_process_failures=set(),
+    )
+    if (
+        failure_policy["failure_phase"] != "health_gate"
+        or failure_policy["terminal_no_automatic_retry"] is not True
+        or failure_policy["telemetry_retryable"] is not False
+        or not blocked
+        or authorization
+        or retry_blocked
+        or retry_authorization != "scoring_worker_source_changed"
+    ):
+        raise RuntimeError("exhausted rebenchmark health gate was reopened unchanged")
+
     if not _private_baseline_uses_batch_execution(
         SimpleNamespace(private_baseline_concurrency=1)
     ):
@@ -7627,6 +7770,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_recovery_checkpoint_bound": True,
         "baseline_checkpoint_cross_release_resume": True,
         "baseline_partial_retry_round_resume_exact": True,
+        "baseline_exhausted_health_gate_contained": True,
         "baseline_checkpoint_receipt_ancestry_restored": True,
         "baseline_exact_receipt_frontier_bound": True,
         "baseline_pause_checkpoint_resume_complete": True,
@@ -8317,7 +8461,7 @@ def _exercise_measured_upstream_proxy_transport(
     *,
     upstream_parent_tunnel_framing: str,
 ) -> dict[str, Any]:
-    """Exercise the exact worker HTTPS-proxy path through parent VSOCK."""
+    """Exercise repeated production-shaped HTTP CONNECT proxy requests."""
 
     from datetime import timedelta
     import socket
@@ -8339,6 +8483,8 @@ def _exercise_measured_upstream_proxy_transport(
     errors: list[str] = []
     parent_destinations: list[tuple[str, int]] = []
     parent_threads: list[threading.Thread] = []
+    request_count = 8
+    upstream_proxy_port = 18080
 
     with tempfile.TemporaryDirectory(prefix="leadpoet-upstream-proxy-") as root:
         root_path = Path(root)
@@ -8373,11 +8519,6 @@ def _exercise_measured_upstream_proxy_transport(
                 serialization.NoEncryption(),
             )
         )
-        proxy_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        proxy_tls.load_cert_chain(
-            certfile=str(certificate_path),
-            keyfile=str(private_key_path),
-        )
         provider_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         provider_tls.load_cert_chain(
             certfile=str(certificate_path),
@@ -8385,68 +8526,77 @@ def _exercise_measured_upstream_proxy_transport(
         )
         provider_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         provider_listener.bind(("127.0.0.1", 0))
-        provider_listener.listen(1)
+        provider_listener.listen(request_count)
         provider_address = provider_listener.getsockname()
         upstream_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         upstream_listener.bind(("127.0.0.1", 0))
-        upstream_listener.listen(1)
+        upstream_listener.listen(request_count)
         upstream_address = upstream_listener.getsockname()
 
         def serve_provider() -> None:
             try:
-                connection, _address = provider_listener.accept()
-                protected = provider_tls.wrap_socket(connection, server_side=True)
-                request = bytearray()
-                while b"\r\n\r\n" not in request:
-                    chunk = protected.recv(4096)
-                    if not chunk:
-                        raise RuntimeError("provider request ended early")
-                    request.extend(chunk)
-                observed["provider_request"] = bytes(request)
-                protected.sendall(
-                    b"HTTP/1.1 200 OK\r\n"
-                    b"Content-Type: application/json\r\n"
-                    b"Content-Length: 11\r\n"
-                    b"Connection: close\r\n\r\n"
-                    b'{"ok":true}'
-                )
-                protected.close()
+                requests = observed.setdefault("provider_requests", [])
+                for _ordinal in range(request_count):
+                    connection, _address = provider_listener.accept()
+                    protected = provider_tls.wrap_socket(
+                        connection, server_side=True
+                    )
+                    request = bytearray()
+                    while b"\r\n\r\n" not in request:
+                        chunk = protected.recv(4096)
+                        if not chunk:
+                            raise RuntimeError("provider request ended early")
+                        request.extend(chunk)
+                    requests.append(bytes(request))
+                    protected.sendall(
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Content-Type: application/json\r\n"
+                        b"Content-Length: 11\r\n"
+                        b"Connection: close\r\n\r\n"
+                        b'{"ok":true}'
+                    )
+                    protected.close()
             except Exception as exc:
                 errors.append(type(exc).__name__ + ":" + str(exc))
             finally:
                 provider_listener.close()
 
         def serve_upstream_proxy() -> None:
-            provider = None
-            protected = None
             try:
-                connection, _address = upstream_listener.accept()
-                protected = proxy_tls.wrap_socket(connection, server_side=True)
-                headers = bytearray()
-                while b"\r\n\r\n" not in headers:
-                    chunk = protected.recv(4096)
-                    if not chunk:
-                        raise RuntimeError("proxy CONNECT ended early")
-                    headers.extend(chunk)
-                observed["proxy_headers"] = bytes(headers)
-                protected.sendall(
-                    b"HTTP/1.1 200 Connection Established\r\n\r\n"
-                )
-                provider = socket.create_connection(provider_address, timeout=2)
-                _relay_bidirectional(
-                    protected,
-                    provider,
-                    idle_timeout_seconds=5,
-                )
+                proxy_requests = observed.setdefault("proxy_headers", [])
+                for _ordinal in range(request_count):
+                    connection = None
+                    provider = None
+                    try:
+                        connection, _address = upstream_listener.accept()
+                        headers = bytearray()
+                        while b"\r\n\r\n" not in headers:
+                            chunk = connection.recv(4096)
+                            if not chunk:
+                                raise RuntimeError("proxy CONNECT ended early")
+                            headers.extend(chunk)
+                        proxy_requests.append(bytes(headers))
+                        connection.sendall(
+                            b"HTTP/1.1 200 Connection Established\r\n\r\n"
+                        )
+                        provider = socket.create_connection(
+                            provider_address, timeout=2
+                        )
+                        _relay_bidirectional(
+                            connection,
+                            provider,
+                            idle_timeout_seconds=5,
+                        )
+                    finally:
+                        for candidate in (connection, provider):
+                            if candidate is not None:
+                                try:
+                                    candidate.close()
+                                except Exception:
+                                    pass
             except Exception as exc:
                 errors.append(type(exc).__name__ + ":" + str(exc))
             finally:
-                for candidate in (protected, provider):
-                    if candidate is not None:
-                        try:
-                            candidate.close()
-                        except Exception:
-                            pass
                 upstream_listener.close()
 
         provider_thread = threading.Thread(
@@ -8456,7 +8606,7 @@ def _exercise_measured_upstream_proxy_transport(
         )
         upstream_thread = threading.Thread(
             target=serve_upstream_proxy,
-            name="rehearsal-measured-https-proxy",
+            name="rehearsal-measured-http-connect-proxy",
             daemon=True,
         )
         provider_thread.start()
@@ -8539,16 +8689,21 @@ def _exercise_measured_upstream_proxy_transport(
         try:
             certifi.where = lambda: str(certificate_path)  # type: ignore[assignment]
             enclave_proxy.start()
-            result = transport(
-                method="GET",
-                url="https://example.com/search",
-                headers={"accept": "application/json"},
-                body=b"",
-                timeout_ms=5_000,
-                upstream_proxy_url=(
-                    "https://rehearsal-worker:rehearsal-secret@example.com:443"
-                ),
-            )
+            results = []
+            for ordinal in range(request_count):
+                results.append(
+                    transport(
+                        method="GET",
+                        url=f"https://example.com/search/{ordinal}",
+                        headers={"accept": "application/json"},
+                        body=b"",
+                        timeout_ms=5_000,
+                        upstream_proxy_url=(
+                            "http://rehearsal-worker:rehearsal-secret@"
+                            f"example.com:{upstream_proxy_port}"
+                        ),
+                    )
+                )
         finally:
             certifi.where = original_certifi_where  # type: ignore[assignment]
             transport.close()
@@ -8559,17 +8714,34 @@ def _exercise_measured_upstream_proxy_transport(
             for thread in parent_threads:
                 thread.join(timeout=5)
 
-    proxy_headers = bytes(observed.get("proxy_headers") or b"")
-    provider_request = bytes(observed.get("provider_request") or b"")
+    proxy_headers = [
+        bytes(value) for value in (observed.get("proxy_headers") or [])
+    ]
+    provider_requests = [
+        bytes(value) for value in (observed.get("provider_requests") or [])
+    ]
     if (
         errors
-        or result.get("http_status") != 200
-        or result.get("body") != b'{"ok":true}'
-        or not str(result.get("tls_protocol") or "").startswith("TLSv1.")
-        or parent_destinations != [("example.com", 443)]
-        or not proxy_headers.startswith(b"CONNECT example.com:443 HTTP/1.1")
-        or b"Proxy-Authorization: Basic " not in proxy_headers
-        or not provider_request.startswith(b"GET /search HTTP/")
+        or len(results) != request_count
+        or any(result.get("http_status") != 200 for result in results)
+        or any(result.get("body") != b'{"ok":true}' for result in results)
+        or any(
+            not str(result.get("tls_protocol") or "").startswith("TLSv1.")
+            for result in results
+        )
+        or parent_destinations
+        != [("example.com", upstream_proxy_port)] * request_count
+        or len(proxy_headers) != request_count
+        or any(
+            not headers.startswith(b"CONNECT example.com:443 HTTP/1.1")
+            for headers in proxy_headers
+        )
+        or any(b"Proxy-Authorization: Basic " not in headers for headers in proxy_headers)
+        or len(provider_requests) != request_count
+        or any(
+            not request.startswith(f"GET /search/{ordinal} HTTP/".encode("ascii"))
+            for ordinal, request in enumerate(provider_requests)
+        )
         or proxy_status.get("last_failure")
         or provider_thread.is_alive()
         or upstream_thread.is_alive()
@@ -8580,22 +8752,23 @@ def _exercise_measured_upstream_proxy_transport(
             + json.dumps(
                 {
                     "errors": errors,
-                    "http_status": result.get("http_status"),
+                    "http_statuses": [result.get("http_status") for result in results],
                     "parent_destinations": parent_destinations,
-                    "proxy_connect_seen": proxy_headers.startswith(
-                        b"CONNECT example.com:443 HTTP/1.1"
+                    "proxy_connect_count": sum(
+                        headers.startswith(b"CONNECT example.com:443 HTTP/1.1")
+                        for headers in proxy_headers
                     ),
-                    "proxy_auth_seen": b"Proxy-Authorization: Basic "
-                    in proxy_headers,
-                    "provider_request_seen": provider_request.startswith(
-                        b"GET /search HTTP/"
+                    "proxy_auth_count": sum(
+                        b"Proxy-Authorization: Basic " in headers
+                        for headers in proxy_headers
                     ),
+                    "provider_request_count": len(provider_requests),
                     "proxy_failure": proxy_status.get("last_failure"),
                 },
                 sort_keys=True,
             )
         )
-    if b"rehearsal-secret" in proxy_headers:
+    if any(b"rehearsal-secret" in headers for headers in proxy_headers):
         raise RuntimeError("upstream proxy credential escaped Basic auth encoding")
     return {
         "exact_httpx_enclave_parent_proxy_provider_path": True,
@@ -8607,6 +8780,8 @@ def _exercise_measured_upstream_proxy_transport(
         "proxy_auth_remained_in_enclave": True,
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
+        "production_http_connect_proxy_verified": True,
+        "repeated_request_count": request_count,
     }
 
 
@@ -9280,6 +9455,11 @@ def main() -> int:
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",
                 {},
+            ).get("baseline_exhausted_health_gate_contained")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
             ).get("baseline_checkpoint_receipt_ancestry_restored")
             is True
             and behavior_evidence.get(
@@ -9319,6 +9499,16 @@ def main() -> int:
                 {},
             ).get("bounded_cleanup_verified")
             is True
+            and behavior_evidence.get(
+                "measured-assigned-proxy-raw-transport",
+                {},
+            ).get("production_http_connect_proxy_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-assigned-proxy-raw-transport",
+                {},
+            ).get("repeated_request_count")
+            == 8
         ),
         "measured_coordinator_raw_transport_verified": (
             behavior_evidence.get(
@@ -9411,6 +9601,18 @@ def main() -> int:
         ),
         "chain_settlement_state_space_complete": (
             "chain-settlement-state-space" in behavior_evidence
+            and behavior_evidence["chain-settlement-state-space"].get(
+                "retry_observation_sequence"
+            )
+            == 8
+            and behavior_evidence["chain-settlement-state-space"].get(
+                "retry_attempts_propagated"
+            )
+            == 2
+            and behavior_evidence["chain-settlement-state-space"].get(
+                "durable_retry_attempt"
+            )
+            == 4
         ),
         "conditional_icp_policy_config_bound": (
             "conditional-icp-policy" in behavior_evidence

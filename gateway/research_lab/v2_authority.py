@@ -1612,6 +1612,7 @@ async def build_allocation_v2(
                 epoch_id=int(epoch_id),
                 netuid=int(netuid),
                 execute=execute,
+                settlement_attempt=int(allocation_sequence),
             )
         if settlement_frontier_context is None:
             if current_frontier_context is not None:
@@ -1812,11 +1813,51 @@ async def build_allocation_v2(
     }
 
 
+async def _resolve_chain_settlement_attempt_v1(
+    *,
+    epoch_id: int,
+    requested_attempt: int,
+    load_attempt_history: Any,
+) -> int:
+    rows = await load_attempt_history(
+        "research_lab_attested_execution_receipts_v2",
+        columns="purpose,sequence",
+        filters=(
+            ("role", "gateway_coordinator"),
+            ("epoch_id", int(epoch_id)),
+            (
+                "purpose",
+                "in",
+                (
+                    CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+                    CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1,
+                ),
+            ),
+        ),
+        order_by=(("sequence", True),),
+        limit=1,
+    )
+    if not rows:
+        return int(requested_attempt)
+    durable_sequence = rows[0].get("sequence")
+    if (
+        isinstance(durable_sequence, bool)
+        or not isinstance(durable_sequence, int)
+        or durable_sequence < 0
+    ):
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement attempt history is invalid"
+        )
+    return max(int(requested_attempt), (durable_sequence // 2) + 1)
+
+
 async def settle_chain_realized_epoch_v1(
     *,
     epoch_id: int,
     netuid: int,
+    settlement_attempt: int = 0,
     execute: Any = execute_coordinator_v2,
+    load_attempt_history: Any = None,
     persist_settlement: Any = None,
     select_candidates: Any = None,
     load_graph: Any = None,
@@ -1838,6 +1879,27 @@ async def settle_chain_realized_epoch_v1(
 
     normalized_epoch = int(epoch_id)
     normalized_netuid = int(netuid)
+    if (
+        isinstance(settlement_attempt, bool)
+        or not isinstance(settlement_attempt, int)
+        or settlement_attempt < 0
+    ):
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement attempt must be a non-negative integer"
+        )
+    resolved_settlement_attempt = int(settlement_attempt)
+    if load_attempt_history is not None or execute is execute_coordinator_v2:
+        if load_attempt_history is None:
+            from gateway.research_lab.store import select_many
+
+            load_attempt_history = select_many
+        resolved_settlement_attempt = await _resolve_chain_settlement_attempt_v1(
+            epoch_id=normalized_epoch,
+            requested_attempt=resolved_settlement_attempt,
+            load_attempt_history=load_attempt_history,
+        )
+    observation_sequence = resolved_settlement_attempt * 2
+    settlement_sequence = observation_sequence + 1
     if normalized_epoch < 0 or normalized_netuid <= 0:
         raise ResearchLabV2AuthorityError(
             "chain-realized settlement scope is invalid"
@@ -1846,7 +1908,7 @@ async def settle_chain_realized_epoch_v1(
         operation=OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
         purpose=CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
         epoch_id=normalized_epoch,
-        sequence=0,
+        sequence=observation_sequence,
         payload={
             "schema_version": (
                 "leadpoet.chain_realized_weight_observation_request.v1"
@@ -1950,7 +2012,7 @@ async def settle_chain_realized_epoch_v1(
         operation=OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
         purpose=CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1,
         epoch_id=normalized_epoch,
-        sequence=1,
+        sequence=settlement_sequence,
         payload={
             "schema_version": "leadpoet.chain_realized_settlement_request.v1",
             "netuid": normalized_netuid,
@@ -2105,6 +2167,7 @@ async def ensure_chain_realized_settlements_v1(
     *,
     epoch_id: int,
     netuid: int,
+    settlement_attempt: int = 0,
     execute: Any = execute_coordinator_v2,
     settle: Any = settle_chain_realized_epoch_v1,
     load_latest: Any = None,
@@ -2120,6 +2183,14 @@ async def ensure_chain_realized_settlements_v1(
 
     current_epoch = int(epoch_id)
     normalized_netuid = int(netuid)
+    if (
+        isinstance(settlement_attempt, bool)
+        or not isinstance(settlement_attempt, int)
+        or settlement_attempt < 0
+    ):
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement attempt must be a non-negative integer"
+        )
     target_epoch = current_epoch - 1
     if target_epoch < 0:
         return []
@@ -2195,6 +2266,7 @@ async def ensure_chain_realized_settlements_v1(
             await settle(
                 epoch_id=settlement_epoch,
                 netuid=normalized_netuid,
+                settlement_attempt=int(settlement_attempt),
                 execute=execute,
             )
         )

@@ -465,6 +465,38 @@ def _extract_tls_metadata(response: Any) -> Tuple[str, str]:
     return sha256_bytes(bytes(certificate)), str(protocol)
 
 
+def _force_close_response_network_stream(response: Any) -> None:
+    """Best-effort teardown after a response-stream cleanup failure."""
+
+    extensions = getattr(response, "extensions", None)
+    network_stream = (
+        extensions.get("network_stream")
+        if isinstance(extensions, Mapping)
+        else None
+    )
+    if network_stream is None:
+        return
+    try:
+        network_stream.close()
+        return
+    except Exception:
+        pass
+    try:
+        raw_socket = network_stream.get_extra_info("socket")
+    except Exception:
+        raw_socket = None
+    if raw_socket is None:
+        return
+    try:
+        raw_socket.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        raw_socket.close()
+    except Exception:
+        pass
+
+
 def _make_response_cleanup_nonfatal(response: Any) -> None:
     """Keep stream cleanup from replacing a completed read or its real error."""
     stream = getattr(response, "stream", None)
@@ -482,7 +514,10 @@ def _make_response_cleanup_nonfatal(response: Any) -> None:
             try:
                 stream.close()
             except Exception:
-                pass
+                # A cleanup EOF is not response evidence, but swallowing it
+                # without closing the underlying relay socket leaks one
+                # request-scoped assigned-proxy tunnel per failed cleanup.
+                _force_close_response_network_stream(response)
 
     response.stream = CleanupSafeStream()
 
@@ -678,12 +713,13 @@ class HTTPXProviderTransport:
 
         verify_path = self.ca_bundle or certifi.where()
         normalized_proxy_headers = dict(proxy_headers or {})
+        assigned_proxy = bool(normalized_proxy_headers)
         # Direct provider and assigned-proxy tunnels have independent terminal
         # behavior. Keep their framing policies separate while TLS and proxy
         # credentials continue to terminate inside the enclave.
         tunnel_framing = (
             self.upstream_parent_tunnel_framing
-            if normalized_proxy_headers
+            if assigned_proxy
             else self.parent_tunnel_framing
         )
         if tunnel_framing:
@@ -699,7 +735,10 @@ class HTTPXProviderTransport:
             http2=allow_http2,
             limits=httpx.Limits(
                 max_connections=64,
-                max_keepalive_connections=32,
+                # Assigned-proxy clients are credential-bound and request-scoped.
+                # Retaining their one connection cannot provide reuse, but it can
+                # leave a relay tunnel alive when cleanup loses its final EOF.
+                max_keepalive_connections=(0 if assigned_proxy else 32),
                 keepalive_expiry=DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
             ),
             cookies=CookieJar(policy=RejectAllCookies()),

@@ -462,6 +462,48 @@ def test_gate_unhealthy_but_not_pause_worthy_defers_without_pausing(monkeypatch)
     assert set_calls == []
 
 
+def test_failed_recovery_probe_refreshes_only_preflight_owned_pause(monkeypatch):
+    monkeypatch.setattr(pp, "preflight_auto_pause_enabled", lambda: True)
+    set_calls = []
+
+    async def is_paused():
+        return {
+            "paused": True,
+            "reason": f"{pp.PREFLIGHT_REASON_PREFIX}exa=transport_failure",
+            "event_seq": 41,
+        }
+
+    async def set_paused(**kwargs):
+        set_calls.append(kwargs)
+
+    asyncio.run(
+        pp.apply_preflight_control_result(
+            scope="scoring",
+            actor_ref="owner",
+            result={
+                "healthy": False,
+                "pause_worthy": True,
+                "systemic_transport_failure": True,
+                "verdicts": [
+                    {
+                        "provider": "exa",
+                        "healthy": False,
+                        "status": "transport_failure",
+                    }
+                ],
+            },
+            is_paused=is_paused,
+            set_paused=set_paused,
+            refresh_existing_preflight_pause=True,
+        )
+    )
+
+    assert len(set_calls) == 1
+    assert set_calls[0]["paused"] is True
+    assert set_calls[0]["expected_prior_seq"] == 41
+    assert set_calls[0]["event_doc"]["recovery_probe_failed"] is True
+
+
 def test_gate_healthy_auto_resumes_preflight_pause_only(monkeypatch):
     _stub_shared(monkeypatch, {"healthy": True, "pause_worthy": False, "verdicts": []})
     set_calls = []
@@ -584,6 +626,41 @@ def test_legacy_gate_is_rejected_before_host_preflight(monkeypatch):
 
 def _healthy_authority(**_kwargs):
     return {"healthy": True, "pause_worthy": False, "verdicts": []}
+
+
+def test_attested_preflight_reports_fresh_then_cached_measurement():
+    calls = []
+
+    def authority(**kwargs):
+        calls.append(kwargs)
+        return {"healthy": True, "pause_worthy": False, "verdicts": []}
+
+    settings = {
+        "enabled": True,
+        "ttl_seconds": 600.0,
+        "timeout_seconds": 12.0,
+        "failure_streak_threshold": 3,
+    }
+    first = asyncio.run(
+        pp._cached_attested_preflight(
+            scope_key="scoring:worker_profile:0",
+            worker_index=0,
+            settings=settings,
+            authority_check=authority,
+        )
+    )
+    second = asyncio.run(
+        pp._cached_attested_preflight(
+            scope_key="scoring:worker_profile:0",
+            worker_index=0,
+            settings=settings,
+            authority_check=authority,
+        )
+    )
+
+    assert first["_measurement_cached"] is False
+    assert second["_measurement_cached"] is True
+    assert len(calls) == 1
 
 
 def test_prefetched_non_preflight_state_dedups_the_control_read(monkeypatch):

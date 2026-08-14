@@ -28,26 +28,27 @@ def _activation(epoch: int = 100) -> dict[str, object]:
 
 @pytest.mark.asyncio
 async def test_settlement_backlog_fills_contiguously_through_prior_epoch():
-    calls: list[int] = []
+    calls: list[tuple[int, int]] = []
 
     async def load_latest(table, **_kwargs):
         if table.endswith("_activation_v1"):
             return [_activation()]
         return []
 
-    async def settle(*, epoch_id, **_kwargs):
-        calls.append(epoch_id)
+    async def settle(*, epoch_id, settlement_attempt, **_kwargs):
+        calls.append((epoch_id, settlement_attempt))
         return {"epoch_id": epoch_id}
 
     results = await v2_authority.ensure_chain_realized_settlements_v1(
         epoch_id=200,
         netuid=71,
+        settlement_attempt=4,
         load_latest=load_latest,
         settle=settle,
     )
 
-    assert calls == list(range(100, 200))
-    assert [item["epoch_id"] for item in results] == calls
+    assert calls == [(epoch_id, 4) for epoch_id in range(100, 200)]
+    assert [item["epoch_id"] for item in results] == list(range(100, 200))
 
 
 @pytest.mark.asyncio
@@ -260,6 +261,7 @@ async def test_settle_chain_realized_epoch_executes_both_measured_authorities(
     result = await v2_authority.settle_chain_realized_epoch_v1(
         epoch_id=101,
         netuid=71,
+        settlement_attempt=3,
         execute=execute,
         persist_settlement=persist_settlement,
         select_candidates=select_candidates,
@@ -270,12 +272,80 @@ async def test_settle_chain_realized_epoch_executes_both_measured_authorities(
         v2_authority.OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
         v2_authority.OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
     ]
+    assert [call["sequence"] for call in calls] == [6, 7]
     assert calls[1]["payload"]["bundle_hash"] == HASH_B
     assert calls[1]["parent_graphs"][0]["root_receipt_hash"] == HASH
     assert calls[1]["parent_graphs"][1]["root_receipt_hash"] == HASH_C
     assert persisted == [{"package": package, "receipt_hash": HASH_B}]
     assert result["status"] == "settled"
     assert result["durable_settlement"] == {"durable": True}
+
+
+@pytest.mark.asyncio
+async def test_settlement_attempt_advances_from_durable_failed_receipt_history():
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def load_attempt_history(table, **kwargs):
+        calls.append((table, kwargs))
+        return [{"sequence": 1}]
+
+    resolved = await v2_authority._resolve_chain_settlement_attempt_v1(
+        epoch_id=101,
+        requested_attempt=0,
+        load_attempt_history=load_attempt_history,
+    )
+
+    assert resolved == 1
+    assert calls == [
+        (
+            "research_lab_attested_execution_receipts_v2",
+            {
+                "columns": "purpose,sequence",
+                "filters": (
+                    ("role", "gateway_coordinator"),
+                    ("epoch_id", 101),
+                    (
+                        "purpose",
+                        "in",
+                        (
+                            v2_authority.CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+                            v2_authority.CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1,
+                        ),
+                    ),
+                ),
+                "order_by": (("sequence", True),),
+                "limit": 1,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_settlement_attempt_history_does_not_rewind_process_retry():
+    async def load_attempt_history(*_args, **_kwargs):
+        return [{"sequence": 1}]
+
+    assert await v2_authority._resolve_chain_settlement_attempt_v1(
+        epoch_id=101,
+        requested_attempt=4,
+        load_attempt_history=load_attempt_history,
+    ) == 4
+
+
+@pytest.mark.asyncio
+async def test_settlement_attempt_history_fails_closed_when_sequence_is_invalid():
+    async def load_attempt_history(*_args, **_kwargs):
+        return [{"sequence": "1"}]
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="attempt history is invalid",
+    ):
+        await v2_authority._resolve_chain_settlement_attempt_v1(
+            epoch_id=101,
+            requested_attempt=0,
+            load_attempt_history=load_attempt_history,
+        )
 
 
 @pytest.mark.asyncio

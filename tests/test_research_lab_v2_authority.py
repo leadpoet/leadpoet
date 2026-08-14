@@ -1210,6 +1210,7 @@ async def test_default_allocation_threads_readiness_authority_graphs(
         "receipts": [{"receipt_hash": authority_root}],
     }
     captured = {}
+    settlement_calls = []
 
     async def ready(**kwargs):
         kwargs["_authority_graph_records_out"][authority_root] = {
@@ -1222,7 +1223,8 @@ async def test_default_allocation_threads_readiness_authority_graphs(
             "historical_classification_coverage": 1.0,
         }
 
-    async def no_settlement_repair(**_kwargs):
+    async def no_settlement_repair(**kwargs):
+        settlement_calls.append(kwargs)
         return {}
 
     class ParentLoaderReached(RuntimeError):
@@ -1262,8 +1264,17 @@ async def test_default_allocation_threads_readiness_authority_graphs(
             epoch_id=100,
             netuid=71,
             policy={},
+            allocation_sequence=4,
         )
 
+    assert settlement_calls == [
+        {
+            "epoch_id": 100,
+            "netuid": 71,
+            "execute": v2_authority.execute_coordinator_v2,
+            "settlement_attempt": 4,
+        }
+    ]
     assert captured["preloaded_receipt_graph_records"] == {
         authority_root: {
             "epoch_id": 99,

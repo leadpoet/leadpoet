@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import socket
 import ssl
 import sys
 import threading
@@ -281,6 +282,72 @@ def test_httpx_transport_preserves_complete_response_when_stream_cleanup_fails()
     assert result["body"] == b'{"ok":true}'
     assert result["tls_peer_chain_hash"] == sha256_bytes(b"peer-certificate")
     assert result["tls_protocol"] == "TLSv1.3"
+
+
+def test_response_cleanup_failure_force_closes_underlying_socket():
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    for _ in range(32):
+        local_socket, peer_socket = socket.socketpair()
+
+        class NetworkStream:
+            def get_extra_info(self, name):
+                if name == "ssl_object":
+                    return TLS()
+                if name == "socket":
+                    return local_socket
+                return None
+
+            def close(self):
+                raise EOFError("relay close acknowledgement was lost")
+
+        class CloseFailsAfterCompleteBody(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b'{"ok":true}'
+
+            def close(self):
+                raise EOFError("TLS close_notify was not available")
+
+        response = httpx.Response(
+            200,
+            headers={"content-length": "11"},
+            stream=CloseFailsAfterCompleteBody(),
+            extensions={"network_stream": NetworkStream()},
+            request=httpx.Request("GET", "https://example.com/artifact"),
+        )
+
+        class ResponseContext:
+            def __enter__(self):
+                return response
+
+            def __exit__(self, *_args):
+                response.close()
+
+        class Client:
+            def stream(self, *_args, **_kwargs):
+                return ResponseContext()
+
+        try:
+            result = HTTPXProviderTransport._execute_with_client(
+                Client(),
+                method="GET",
+                url="https://example.com/artifact",
+                headers={},
+                body=b"",
+                timeout_seconds=1.0,
+                max_response_bytes=1024,
+            )
+            assert result["body"] == b'{"ok":true}'
+            assert local_socket.fileno() == -1
+        finally:
+            local_socket.close()
+            peer_socket.close()
 
 
 def test_httpx_transport_does_not_hide_incomplete_response_body():
@@ -1037,6 +1104,9 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
     assert len(clients) == 3
     assert clients[1].closed is True
     assert clients[2].closed is True
+    assert clients[0].options["limits"]["max_keepalive_connections"] == 32
+    assert clients[1].options["limits"]["max_keepalive_connections"] == 0
+    assert clients[2].options["limits"]["max_keepalive_connections"] == 0
     expected_proxy_header = base64.b64encode(upstream_proxy.encode("utf-8")).decode(
         "ascii"
     )

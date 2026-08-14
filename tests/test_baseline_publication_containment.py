@@ -173,6 +173,44 @@ def test_terminal_publication_failure_allows_changed_source_or_retry_token(monke
     assert sw._baseline_publication_retry_authorization(failed) == "operator_retry_token_changed"
 
 
+def test_terminal_health_gate_failure_blocks_unchanged_exhausted_checkpoint(monkeypatch):
+    source_hash = "sha256:" + "1" * 64
+    monkeypatch.setattr(sw, "_scoring_worker_source_hash", lambda: source_hash)
+    monkeypatch.setattr(sw, "_baseline_publication_retry_token_hash", lambda: "")
+    failed = {
+        "dispatch_status": "failed",
+        "event_doc": {
+            "failure_phase": "health_gate",
+            "terminal_no_automatic_retry": True,
+            "scoring_worker_source_hash": source_hash,
+            "publication_retry_token_hash": "",
+            "baseline_health": {
+                "gate_passed": False,
+                "unresolved_provider_errors": 29,
+                "max_unresolved_icps": 2,
+            },
+        },
+    }
+
+    assert sw._latest_terminal_baseline_failure([failed]) is failed
+    assert sw._baseline_publication_retry_decision(
+        [failed], scope_key="2026-08-13:window:model", in_process_failures=set()
+    ) == (True, "")
+
+    policy = sw._baseline_computation_failure_policy(
+        sw.BaselineHealthGateFailure(
+            "baseline health gate failed",
+            baseline_health=failed["event_doc"]["baseline_health"],
+        )
+    )
+    assert policy == {
+        "failure_phase": "health_gate",
+        "terminal_no_automatic_retry": True,
+        "telemetry_retryable": False,
+        "status": "baseline_health_gate_failed_terminal",
+    }
+
+
 def test_nonpublication_failure_and_newer_assignment_do_not_trip_terminal_guard(monkeypatch):
     monkeypatch.setattr(sw, "_scoring_worker_source_hash", lambda: "sha256:" + "1" * 64)
     monkeypatch.setattr(sw, "_baseline_publication_retry_token_hash", lambda: "")

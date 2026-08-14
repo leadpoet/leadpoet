@@ -2323,17 +2323,29 @@ def _source_add_attribution_bundle() -> dict[str, Any]:
     }
 
 
-def _install_source_add_v2_judge(monkeypatch, judge):
+def _install_source_add_v2_judge(
+    monkeypatch,
+    judge,
+    *,
+    receipt_overrides: Mapping[str, Any] | None = None,
+    graph_overrides: Mapping[str, Any] | None = None,
+):
     async def _measured_judge(**kwargs: Any):
         verdict = await judge(**kwargs)
         result = {"verdict": verdict.verdict}
         output_root = sha256_json(result)
+        receipt = {
+            "receipt_hash": "sha256:" + "a" * 64,
+            "output_root": output_root,
+            **dict(receipt_overrides or {}),
+        }
+        receipt_graph = {
+            "root_receipt_hash": "sha256:" + "a" * 64,
+            **dict(graph_overrides or {}),
+        }
         return verdict, {
-            "receipt": {
-                "receipt_hash": "sha256:" + "a" * 64,
-                "output_root": output_root,
-            },
-            "receipt_graph": {"root_receipt_hash": "sha256:" + "a" * 64},
+            "receipt": receipt,
+            "receipt_graph": receipt_graph,
             "result": result,
         }
 
@@ -2547,6 +2559,125 @@ async def test_source_add_leg2_blocks_when_llm_judge_says_not_helped(store, monk
     assert source_event["event_doc"]["judge_receipt_hash"] == "sha256:" + "a" * 64
     assert source_event["event_doc"]["judge_output_root"] == sha256_json(
         {"verdict": "not_helped"}
+    )
+
+
+async def test_source_add_leg2_replaces_unbound_legacy_event(store, monkeypatch):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_candidate_promotion_events"] = [
+        {
+            "promotion_event_id": "legacy-event",
+            "event_doc": {
+                "reason": "source_add_leg2_reward_blocked",
+                "adapter_id": "",
+            },
+            "created_at": "2026-08-13T00:00:00Z",
+        }
+    ]
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="not_helped",
+            confidence=0.82,
+            source_used=False,
+            model_id="openai/gpt-5.6-sol",
+        )
+
+    _install_source_add_v2_judge(monkeypatch, _judge)
+    controller = ResearchLabPromotionController(
+        _source_add_reward_config(), worker_ref="test-worker"
+    )
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={
+            "champion_reward_status": "created",
+            "champion_reward_id": "cr-1",
+        },
+    )
+
+    assert result["source_add_reward_status"] == "blocked"
+    assert len(store.promotion_event_writes) == 1
+    event_doc = store.promotion_event_writes[0]["event_doc"]
+    assert event_doc["judge_receipt_hash"] == "sha256:" + "a" * 64
+    assert event_doc["judge_output_root"] == sha256_json({"verdict": "not_helped"})
+
+
+@pytest.mark.parametrize(
+    ("receipt_overrides", "graph_overrides"),
+    [
+        ({"receipt_hash": "invalid"}, None),
+        (None, {"root_receipt_hash": "sha256:" + "c" * 64}),
+        ({"output_root": "sha256:" + "b" * 64}, None),
+    ],
+)
+async def test_source_add_leg2_rejects_malformed_judge_authority(
+    store,
+    monkeypatch,
+    receipt_overrides,
+    graph_overrides,
+):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_source_add_reward_current"] = []
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.91,
+            source_used=True,
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            model_id="openai/gpt-5.6-sol",
+        )
+
+    _install_source_add_v2_judge(
+        monkeypatch,
+        _judge,
+        receipt_overrides=receipt_overrides,
+        graph_overrides=graph_overrides,
+    )
+    controller = ResearchLabPromotionController(
+        _source_add_reward_config(), worker_ref="test-worker"
+    )
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle=_source_add_attribution_bundle(),
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={
+            "champion_reward_status": "created",
+            "champion_reward_id": "cr-1",
+        },
+    )
+
+    assert result["source_add_reward_status"] == "failed"
+    assert result["error_class"] == "RuntimeError"
+    assert not any(
+        table == "research_lab_source_add_reward_obligations"
+        for table, _row in store.generic_insert_writes
     )
 
 

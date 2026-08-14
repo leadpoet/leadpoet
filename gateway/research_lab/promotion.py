@@ -1504,6 +1504,7 @@ async def _promotion_reason_recorded(
     score_bundle_id: str,
     reason: str,
     adapter_id: str,
+    required_doc_fields: Mapping[str, Any] | None = None,
 ) -> bool:
     rows = await select_many(
         "research_lab_candidate_promotion_events",
@@ -1518,7 +1519,14 @@ async def _promotion_reason_recorded(
     )
     for row in rows:
         doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
-        if str(doc.get("reason") or "") == reason and str(doc.get("adapter_id") or "") == adapter_id:
+        if (
+            str(doc.get("reason") or "") == reason
+            and str(doc.get("adapter_id") or "") == adapter_id
+            and (
+                required_doc_fields is None
+                or all(doc.get(key) == value for key, value in required_doc_fields.items())
+            )
+        ):
             return True
     return False
 
@@ -2933,6 +2941,7 @@ class ResearchLabPromotionController:
                     score_bundle_id=score_bundle_id,
                     reason=reason,
                     adapter_id=adapter_for_event,
+                    required_doc_fields=judge_event_binding,
                 ):
                     await create_candidate_promotion_event(
                         candidate_id=candidate_id,
@@ -3079,6 +3088,7 @@ class ResearchLabPromotionController:
                 score_bundle_id=score_bundle_id,
                 reason=reason,
                 adapter_id=adapter_id,
+                required_doc_fields=judge_event_binding,
             ):
                 await create_candidate_promotion_event(
                     candidate_id=candidate_id,

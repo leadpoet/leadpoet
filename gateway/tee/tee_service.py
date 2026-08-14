@@ -1557,10 +1557,11 @@ def get_v2_provider_broker():
             retry_policy_hashes=retry_hashes,
             transport=HTTPXProviderTransport(
                 allow_authenticated_complete_body_eof=True,
-                # Weight reconstruction fans out independent Supabase reads.
-                # Keep those tunnels request-scoped so one failed relay
-                # generation cannot poison sibling categories or retries.
-                reuse_direct_connections=False,
+                # Direct coordinator reads share one HTTP/2 generation. Any
+                # request failure retires that generation before the measured
+                # caller retries, so retries cannot inherit a dead relay while
+                # successful reads avoid a close race after every response.
+                reuse_direct_connections=True,
             ),
             job_credential_slot_ref_hashes=configuration.get(
                 "job_lease_slot_ref_hashes"

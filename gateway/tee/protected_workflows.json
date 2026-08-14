@@ -652,7 +652,7 @@
       "symbol": "_candidate_icp_score"
     },
     {
-      "ast_sha256": "sha256:3933e6b44827d3ce60a974c4fb6dfb31f373c66862902070e949e925550f07ea",
+      "ast_sha256": "sha256:e6ba9470cf81f3dc00fbc7dc536eeca360edea8f724d603fcd211c2088d9fec4",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "_ensure_source_add_leg2_reward_activation"
     },
@@ -680,6 +680,11 @@
       "ast_sha256": "sha256:0a4de723e21de2d8de36e594266335d187722d8383cef1a8fff7bac9b3515110",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "confirmation_min_delta"
+    },
+    {
+      "ast_sha256": "sha256:81d4d3758be8952d0f63a48b85a0685dd5b788321682192e7f0ffddc07f6cab0",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "reconcile_source_add_leg2_reward_activations"
     },
     {
       "ast_sha256": "sha256:619e3304a984d349b7bc58c1224a07f3da6c6f07456035124ce67674d6011e4b",
@@ -2767,7 +2772,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:7805513632ad1819d7c7bef61d14a87beb19340b0d5c40c647a681b0f53c5611",
-  "protected_source_commit": "aa4f81cc151f74f38f3cc1bb8d43a335f5da5b6f",
+  "manifest_hash": "sha256:0131cd7480d18d416dbe7f18cc18f8966aa81ff9d394ecb64dae8ee9060af33b",
+  "protected_source_commit": "39d7a4fcaa03a2fbab6811ea1c542eff864d0634",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -33,6 +34,25 @@ def test_default_and_explicit_long_profiles_are_unambiguous() -> None:
     assert controller._runtime_profile("unaccelerated") == "release"
     with pytest.raises(ValueError, match="unsupported rehearsal profile"):
         controller._runtime_profile("release")
+
+
+def test_rehearsal_docker_config_is_private_helper_free_and_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    monkeypatch.setenv("DOCKER_CONFIG", "/ambient/docker-config")
+
+    with controller._isolated_docker_client_config() as root:
+        config = root / "config.json"
+        assert os.environ["DOCKER_CONFIG"] == str(root)
+        assert root.stat().st_mode & 0o777 == 0o700
+        assert config.stat().st_mode & 0o777 == 0o600
+        assert config.read_text(encoding="utf-8") == '{"auths":{}}\n'
+        assert "credsStore" not in config.read_text(encoding="utf-8")
+        assert "credentialHelpers" not in config.read_text(encoding="utf-8")
+
+    assert not root.exists()
+    assert os.environ["DOCKER_CONFIG"] == "/ambient/docker-config"
 
 
 def test_old_release_cli_spelling_is_rejected_before_rehearsal() -> None:

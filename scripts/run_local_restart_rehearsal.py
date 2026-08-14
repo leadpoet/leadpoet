@@ -186,6 +186,29 @@ def _exclusive_rehearsal_lock() -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+@contextmanager
+def _isolated_docker_client_config() -> Iterator[Path]:
+    """Keep the exact rehearsal independent of developer Docker helpers."""
+
+    previous = os.environ.get("DOCKER_CONFIG")
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-restart-docker-config-"
+    ) as raw:
+        root = Path(raw)
+        root.chmod(0o700)
+        config = root / "config.json"
+        config.write_text('{"auths":{}}\n', encoding="utf-8")
+        config.chmod(0o600)
+        os.environ["DOCKER_CONFIG"] = str(root)
+        try:
+            yield root
+        finally:
+            if previous is None:
+                os.environ.pop("DOCKER_CONFIG", None)
+            else:
+                os.environ["DOCKER_CONFIG"] = previous
+
+
 def _run(
     args: Sequence[str],
     *,
@@ -1231,7 +1254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.profile = _runtime_profile(args.profile)
 
-    with _exclusive_rehearsal_lock():
+    with _exclusive_rehearsal_lock(), _isolated_docker_client_config():
         target_seconds = PROFILE_LIMITS[args.profile]["target_seconds"]
         try:
             with _profile_time_limit(target_seconds):

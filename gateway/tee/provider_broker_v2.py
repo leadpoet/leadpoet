@@ -186,15 +186,9 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
-        # PostgREST's compressed HTTP/2 response keeps the terminal DATA frame
-        # on the known-good measured wire path used before the August transport
-        # hardening. A compressed stream is never eligible for EOF recovery:
-        # httpx must observe normal authenticated message completion.
-        request_headers=(("Accept-Encoding", "gzip"),),
-        # The coordinator's direct provider path is a raw TLS tunnel. Preserve
-        # ALPN negotiation here; the former HTTP/1.1 pin belonged to the
-        # removed framed-tunnel implementation and causes current Supabase
-        # responses to terminate before headers are received.
+        # The global identity-encoding policy keeps the committed body equal to
+        # the authenticated wire body and permits objective JSON-completeness
+        # recovery when a raw HTTP/2 relay loses only END_STREAM.
     ),
     "truelist": ProviderRouteV2(
         provider_id="truelist",

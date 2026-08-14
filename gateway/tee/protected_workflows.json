@@ -452,7 +452,7 @@
       "symbol": "validate_private_code_edit_diff_artifact"
     },
     {
-      "ast_sha256": "sha256:d55eca2f65fc003df86f3af50167a432aa97fa7231fd5405db7f49c5094f14c7",
+      "ast_sha256": "sha256:584fd7fe4efcccf117707761c36ac667b9e3d8ee290d089f95d59cbdd8cca625",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -2397,12 +2397,12 @@
       "symbol": "build_code_edit_source_inspection_messages"
     },
     {
-      "ast_sha256": "sha256:dc78161e0f59f36fe649966325374a8c0ece2ab76c8dc53c7258c0b98b224ace",
+      "ast_sha256": "sha256:5b8703fa52bf5d26c8774706d89f2bd1d870799526747b0dcee2698d1cf0e9d7",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_planner_messages"
     },
     {
-      "ast_sha256": "sha256:f4c2b9962ea0b6e968404397a06af5e680f0b7c4261d6aeedfde13bd34c23da7",
+      "ast_sha256": "sha256:0115b4b749c44980136295a2b59da51b96457311e01ffcccdbd42290f50df546",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_reference_repair_messages"
     },
@@ -2752,7 +2752,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:911bd0b043fcb8daf20c8285e419ce2e889cc0de414b7db4eea02bdc13dd2564",
-  "protected_source_commit": "805bc8bf7061c177eb3cf705774bd9a4e5bcaf3d",
+  "manifest_hash": "sha256:e467023caf6e797bf5eda80fdd7ffc5d75061982dfe4c364f876c9454421ea23",
+  "protected_source_commit": "914c3658b1f036b725248bacb8f6f3da4c90fbcc",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

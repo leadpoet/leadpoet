@@ -22,6 +22,12 @@ def test_validator_rpc_configures_authority_once_and_disables_legacy(monkeypatch
         def boot_identity(self):
             return dict(self._boot)
 
+        def chain_source_boundary(self):
+            return {
+                "chain_host": "entrypoint-finney.opentensor.ai",
+                "chain_archive_host": "archive.chain.opentensor.ai",
+            }
+
         def gateway_release_lineage(self):
             return {
                 "1" * 40: {

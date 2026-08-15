@@ -128,6 +128,7 @@ def test_operation_log_is_single_line_joinable_and_private_fields_are_dropped(
             icp_ref_hash="sha256:" + "ab" * 32,
             result_hash="sha256:" + "cd" * 32,
             authority_hash="sha256:" + "ef" * 32,
+            icp_score=73.25,
             provider_payload={"authorization": secret},
             raw_icp="private ICP text " + secret,
             authorization=secret,
@@ -151,6 +152,7 @@ def test_operation_log_is_single_line_joinable_and_private_fields_are_dropped(
     assert payload["icp_ref_hash"] == "sha256:" + "ab" * 32
     assert payload["result_hash"] == "sha256:" + "cd" * 32
     assert payload["authority_hash"] == "sha256:" + "ef" * 32
+    assert "icp_score" not in payload
     assert "provider_payload" not in payload
     assert "raw_icp" not in payload
     assert "authorization" not in payload

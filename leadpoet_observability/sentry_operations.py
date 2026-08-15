@@ -128,7 +128,6 @@ _SAFE_FIELDS = frozenset(
         "frontier_hash",
         "gateway_restart_invocation_id",
         "http_status",
-        "icp_score",
         "inclusion_block",
         "icp_ordinal",
         "icp_ref_hash",

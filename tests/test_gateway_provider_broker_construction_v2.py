@@ -4,7 +4,7 @@ from pathlib import Path
 from gateway.tee import provider_broker_v2, rpc_authority
 
 
-def test_coordinator_provider_broker_serializes_direct_raw_tls_transport(
+def test_coordinator_provider_broker_serializes_request_scoped_direct_transport(
     monkeypatch,
 ):
     monkeypatch.syspath_prepend(
@@ -57,7 +57,7 @@ def test_coordinator_provider_broker_serializes_direct_raw_tls_transport(
     assert isinstance(broker, Broker)
     assert captured["transport"] == {
         "allow_authenticated_complete_body_eof": True,
-        "reuse_direct_connections": True,
+        "reuse_direct_connections": False,
         "reuse_upstream_proxy_connections": True,
     }
     assert captured["broker"]["transport"].__class__ is Transport

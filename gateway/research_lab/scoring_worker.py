@@ -57,6 +57,7 @@ from gateway.research_lab.code_build import (
 from gateway.research_lab.config import (
     DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS,
     DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS,
+    DEFAULT_PRIVATE_BASELINE_PROVIDER_RETRY_ROUNDS,
     ResearchLabGatewayConfig,
 )
 from gateway.research_lab.icp_window import (
@@ -104,7 +105,10 @@ from gateway.research_lab.provider_profiles_v2 import (
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
 from gateway.tee.execution_job_manager_v2 import MAX_EXTERNAL_RECEIPT_GRAPHS
-from gateway.tee.scoring_executor import configuration_hash as scoring_configuration_hash
+from gateway.tee.scoring_executor import (
+    configuration_hash as scoring_configuration_hash,
+    runtime_environment_values as scoring_runtime_environment_values,
+)
 from gateway.research_lab.promotion import (
     CONFIRMATION_ATTEMPT_FAILED_REASON,
     CONFIRMATION_CLOSED_REASON,
@@ -258,6 +262,25 @@ def _record_private_baseline_stage(
         benchmark_date=benchmark_date,
         **fields,
     )
+
+
+async def _emit_private_baseline_retry_extension(
+    *,
+    run: Any,
+    extension: Mapping[str, Any],
+) -> None:
+    """Record a hash-bound retry extension using migration 83's event schema."""
+
+    await emit_run_event(
+        run,
+        "resumed",
+        event_ordinal=int(extension["current_retry_rounds"]),
+        event_doc={
+            **dict(extension),
+            "resume_reason": "retry_budget_extension",
+        },
+    )
+
 
 STALE_PARENT_REBASE_REPAIR_MAX_TOKENS = 32_768
 STALE_PARENT_REBASE_REPAIR_REASONING_BODY = {"enabled": True, "effort": "max"}
@@ -682,6 +705,52 @@ def _validate_baseline_checkpoint_model_identity(
     if not _SHA256_RE.fullmatch(normalized_manifest_hash):
         raise ValueError("baseline checkpoint model manifest hash is invalid")
     return repo_commit, normalized_manifest_hash
+
+
+def _compatible_baseline_retry_extension(
+    *,
+    checkpoint_configuration_hash: str,
+    current_configuration_hash: str,
+) -> tuple[int, int] | None:
+    """Recognize only an exact one-round retry-budget extension.
+
+    The full scoring configuration remains hash-bound.  Recomputing the prior
+    hash from the current runtime environment proves that the retry-round
+    value is the only changed field; accepting only ``current - 1`` prevents a
+    restart or an unrelated configuration change from reopening settled work.
+    """
+
+    checkpoint_hash = str(checkpoint_configuration_hash or "").strip().lower()
+    current_hash = str(current_configuration_hash or "").strip().lower()
+    if not _SHA256_RE.fullmatch(checkpoint_hash) or not _SHA256_RE.fullmatch(
+        current_hash
+    ):
+        return None
+    current_values = scoring_runtime_environment_values()
+    if scoring_configuration_hash(current_values) != current_hash:
+        return None
+    retry_env_name = "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"
+    raw_current_limit = current_values.get(retry_env_name)
+    # An extension must be an explicit operation.  An absent current value is
+    # the ordinary default, not evidence that an operator increased a budget.
+    if raw_current_limit is None:
+        return None
+    try:
+        current_limit = max(0, int(raw_current_limit))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if current_limit <= 0:
+        return None
+    prior_limit = current_limit - 1
+    candidate_values = dict(current_values)
+    candidate_values[retry_env_name] = str(prior_limit)
+    if scoring_configuration_hash(candidate_values) == checkpoint_hash:
+        return prior_limit, current_limit
+    if prior_limit == DEFAULT_PRIVATE_BASELINE_PROVIDER_RETRY_ROUNDS:
+        candidate_values[retry_env_name] = None
+        if scoring_configuration_hash(candidate_values) == checkpoint_hash:
+            return prior_limit, current_limit
+    return None
 
 
 @functools.lru_cache(maxsize=1)
@@ -2379,6 +2448,7 @@ def _load_baseline_scoring_progress(
     attempt_ledger_out: list[dict[str, Any]] | None = None,
     producer_runtime_commits_out: set[str] | None = None,
     provider_cost_base_scope_out: list[str] | None = None,
+    retry_budget_extension_out: list[dict[str, Any]] | None = None,
     scoring_contract_hash_value: str = "",
     benchmark_items: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
@@ -2467,14 +2537,33 @@ def _load_baseline_scoring_progress(
     checkpoint_scoring_config_hash = str(
         doc.get("scoring_configuration_hash") or ""
     ).strip().lower()
+    compatible_retry_extension: tuple[int, int] | None = None
     if checkpoint_scoring_config_hash != expected_scoring_config_hash:
+        if checkpoint_schema_version == _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION:
+            compatible_retry_extension = _compatible_baseline_retry_extension(
+                checkpoint_configuration_hash=checkpoint_scoring_config_hash,
+                current_configuration_hash=expected_scoring_config_hash,
+            )
+        if compatible_retry_extension is None:
+            logger.warning(
+                "research_lab_baseline_progress_rejected reason=scoring_configuration_changed "
+                "checkpoint=%s current=%s",
+                checkpoint_scoring_config_hash[:24] or "missing",
+                expected_scoring_config_hash[:24],
+            )
+            return []
+        if checkpoint_runtime_commit == expected_runtime_commit:
+            raise RuntimeError(
+                "baseline retry-budget extension requires a new gateway runtime"
+            )
         logger.warning(
-            "research_lab_baseline_progress_rejected reason=scoring_configuration_changed "
-            "checkpoint=%s current=%s",
-            checkpoint_scoring_config_hash[:24] or "missing",
-            expected_scoring_config_hash[:24],
+            "research_lab_baseline_progress_reused_after_retry_extension "
+            "prior_rounds=%s current_rounds=%s producer_runtime=%s current_runtime=%s",
+            compatible_retry_extension[0],
+            compatible_retry_extension[1],
+            checkpoint_runtime_commit[:16],
+            expected_runtime_commit[:16],
         )
-        return []
     raw_parent_receipt_hashes = doc.get("attested_parent_receipt_hashes")
     if not isinstance(raw_parent_receipt_hashes, list):
         logger.warning(
@@ -2560,6 +2649,7 @@ def _load_baseline_scoring_progress(
                 return []
 
     attempt_entries: list[dict[str, Any]] = []
+    exhausted_retryable_attempts: list[dict[str, Any]] = []
     producer_runtime_commits = {checkpoint_runtime_commit}
     provider_cost_base_scope = ""
     if checkpoint_schema_version == _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION:
@@ -2620,6 +2710,13 @@ def _load_baseline_scoring_progress(
                 _short_error(exc),
             )
             return []
+        if compatible_retry_extension is not None and any(
+            int(entry["retry_round"]) > compatible_retry_extension[0]
+            for entry in attempt_entries
+        ):
+            raise RuntimeError(
+                "baseline checkpoint attempt exceeds its prior retry budget"
+            )
         attempt_entries_by_ref: dict[str, list[dict[str, Any]]] = {}
         for entry in attempt_entries:
             ref = str(entry["icp_ref"])
@@ -2655,6 +2752,29 @@ def _load_baseline_scoring_progress(
                     compact_ref(ref),
                 )
                 return []
+        if (
+            compatible_retry_extension is not None
+            and expected_runtime_commit in producer_runtime_commits
+        ):
+            raise RuntimeError(
+                "baseline retry-budget extension runtime was already used"
+            )
+        exhausted_retryable_attempts = [
+            entries[-1]
+            for entries in attempt_entries_by_ref.values()
+            if compatible_retry_extension is not None
+            and int(entries[-1]["retry_round"])
+            == compatible_retry_extension[0]
+            and bool(entries[-1]["result_row"].get("_retryable"))
+            and not _baseline_summary_checkpointable(entries[-1]["result_row"])
+        ]
+        if (
+            compatible_retry_extension is not None
+            and not exhausted_retryable_attempts
+        ):
+            raise RuntimeError(
+                "baseline retry-budget extension has no exhausted retryable attempts"
+            )
         for ref, row in reusable_by_ref.items():
             entries = attempt_entries_by_ref.get(ref) or []
             if not entries:
@@ -2717,6 +2837,30 @@ def _load_baseline_scoring_progress(
         producer_runtime_commits_out.update(producer_runtime_commits)
     if provider_cost_base_scope_out is not None and provider_cost_base_scope:
         provider_cost_base_scope_out.append(provider_cost_base_scope)
+    if (
+        retry_budget_extension_out is not None
+        and compatible_retry_extension is not None
+    ):
+        retry_budget_extension_out.append(
+            {
+                "schema_version": "research_lab_retry_budget_extension.v1",
+                "prior_scoring_configuration_hash": (
+                    checkpoint_scoring_config_hash
+                ),
+                "current_scoring_configuration_hash": (
+                    expected_scoring_config_hash
+                ),
+                "prior_retry_rounds": compatible_retry_extension[0],
+                "current_retry_rounds": compatible_retry_extension[1],
+                "producer_gateway_runtime_commit_sha": (
+                    checkpoint_runtime_commit
+                ),
+                "current_gateway_runtime_commit_sha": expected_runtime_commit,
+                "exhausted_retryable_icp_count": len(
+                    exhausted_retryable_attempts
+                ),
+            }
+        )
     return reusable_rows
 
 
@@ -12698,6 +12842,10 @@ class ResearchLabGatewayScoringWorker:
                     "reference_manifest_hash": artifact.manifest_hash,
                     "evaluation_epoch": evaluation_epoch,
                     "scoring_worker_source_hash": _scoring_worker_source_hash(),
+                    "scoring_configuration_hash": scoring_configuration_hash(),
+                    "provider_retry_rounds": int(
+                        self.config.private_baseline_provider_retry_rounds
+                    ),
                 },
                 run_type="private_baseline_rebenchmark",
                 worker_ref=self.worker_ref,
@@ -12763,6 +12911,7 @@ class ResearchLabGatewayScoringWorker:
         baseline_progress_attempt_ledger: list[dict[str, Any]] = []
         baseline_progress_producer_runtime_commits: set[str] = set()
         baseline_progress_provider_cost_scope_values: list[str] = []
+        baseline_progress_retry_budget_extensions: list[dict[str, Any]] = []
         baseline_progress_provider_cost_base_scope = str(
             (runner.spec.extra_env or {}).get(PROVIDER_COST_EVALUATION_SCOPE_ENV)
             or ""
@@ -12805,11 +12954,55 @@ class ResearchLabGatewayScoringWorker:
                 provider_cost_base_scope_out=(
                     baseline_progress_provider_cost_scope_values
                 ),
+                retry_budget_extension_out=(
+                    baseline_progress_retry_budget_extensions
+                ),
                 scoring_contract_hash_value=(
                     baseline_progress_scoring_contract_hash
                 ),
                 benchmark_items=window.benchmark_items,
             )
+            if len(baseline_progress_retry_budget_extensions) > 1:
+                raise RuntimeError(
+                    "baseline checkpoint retry-budget extension is ambiguous"
+                )
+            if baseline_progress_retry_budget_extensions:
+                retry_extension = baseline_progress_retry_budget_extensions[0]
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="retry_budget_extension",
+                    status="passed",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    prior_scoring_configuration_hash=retry_extension[
+                        "prior_scoring_configuration_hash"
+                    ],
+                    current_scoring_configuration_hash=retry_extension[
+                        "current_scoring_configuration_hash"
+                    ],
+                    prior_retry_rounds=retry_extension["prior_retry_rounds"],
+                    current_retry_rounds=retry_extension["current_retry_rounds"],
+                    producer_gateway_runtime_commit_sha=retry_extension[
+                        "producer_gateway_runtime_commit_sha"
+                    ],
+                    current_gateway_runtime_commit_sha=retry_extension[
+                        "current_gateway_runtime_commit_sha"
+                    ],
+                    exhausted_retryable_icp_count=retry_extension[
+                        "exhausted_retryable_icp_count"
+                    ],
+                )
+                await _emit_private_baseline_retry_extension(
+                    run=(
+                        baseline_telemetry_session.run
+                        if baseline_telemetry_session is not None
+                        else None
+                    ),
+                    extension=retry_extension,
+                )
             if baseline_progress_provider_cost_scope_values:
                 if len(baseline_progress_provider_cost_scope_values) != 1:
                     raise RuntimeError(

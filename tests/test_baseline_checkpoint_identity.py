@@ -9,11 +9,14 @@ budget again.
 """
 
 import json
+import os
 import sys
 import types
 from unittest import mock
 
 import gateway.research_lab.scoring_worker as sw
+import pytest
+from gateway.tee import scoring_executor
 
 
 RUNTIME_SHA = "1" * 40
@@ -583,6 +586,247 @@ def test_unresolved_attempt_ledger_round_trips_across_release():
     } == {"attempt_failed"}
     assert b"HTTP 500" not in stored["body"]
     assert scope_values == ["sha256:" + "b" * 64]
+
+
+def test_exact_one_step_retry_extension_restores_exhausted_attempts_only_across_release():
+    stored = {}
+    s3 = mock.Mock()
+
+    def put_object(**kwargs):
+        stored["body"] = bytes(kwargs["Body"])
+
+    def get_object(**_kwargs):
+        body = mock.Mock()
+        body.read.return_value = stored["body"]
+        return {"Body": body}
+
+    s3.put_object.side_effect = put_object
+    s3.get_object.side_effect = get_object
+    stub = types.ModuleType("boto3")
+    stub.client = lambda *args, **kwargs: s3
+    attempt_rows = []
+    for retry_round in (0, 1):
+        row = {
+            "icp_ref": "icp-1",
+            "icp_hash": "hash-1",
+            "score": 0.0,
+            "company_count": 0,
+            "diagnostics": {
+                "sourcing_failed": True,
+                "runtime_error": {"category": "runtime_provider_error"},
+            },
+            "_item_index": 1,
+            "_retryable": True,
+            "_nonempty": False,
+            "_runtime_error": "unexpected_eof",
+            "_retry_backoff_seconds": 0.0,
+            sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+        }
+        attempt_rows.append(
+            sw._baseline_attempt_ledger_entry(
+                row,
+                retry_round=retry_round,
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+            )
+        )
+
+    clean_environment = {
+        name: None for name in scoring_executor.SCORING_RUNTIME_ENV_NAMES
+    }
+    prior_values = dict(clean_environment)
+    current_values = dict(clean_environment)
+    current_values["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"] = "2"
+    skipped_values = dict(clean_environment)
+    skipped_values["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"] = "3"
+    prior_hash = scoring_executor.configuration_hash(prior_values)
+    current_hash = scoring_executor.configuration_hash(current_values)
+    skipped_hash = scoring_executor.configuration_hash(skipped_values)
+
+    runtime_environment = {
+        name: value for name, value in current_values.items() if value is not None
+    }
+    with (
+        mock.patch.dict(sys.modules, {"boto3": stub}),
+        mock.patch.dict(os.environ, runtime_environment, clear=True),
+    ):
+        sw._store_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=RUNTIME_SHA,
+            scoring_configuration_hash_value=prior_hash,
+            rows=[],
+            attested_parent_receipt_hashes=[],
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+            attempt_ledger=attempt_rows,
+            provider_cost_base_scope_hash="sha256:" + "b" * 64,
+        )
+        checkpoint_body = stored["body"]
+        restored_attempts = []
+        retry_extensions = []
+        loaded = sw._load_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+            scoring_configuration_hash_value=current_hash,
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+            attempt_ledger_out=restored_attempts,
+            retry_budget_extension_out=retry_extensions,
+            benchmark_items=[{"icp_ref": "icp-1", "icp_hash": "hash-1"}],
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="requires a new gateway runtime",
+        ):
+            sw._load_baseline_scoring_progress(
+                "bucket",
+                "key",
+                benchmark_date="2026-07-15",
+                window_hash="sha256:w1",
+                private_model_artifact_hash="sha256:a1",
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+                scoring_configuration_hash_value=current_hash,
+                repo_git_sha=MODEL_REPO_SHA,
+                manifest_hash=MODEL_MANIFEST_HASH,
+                benchmark_items=[{"icp_ref": "icp-1", "icp_hash": "hash-1"}],
+            )
+
+        reused_runtime_doc = json.loads(checkpoint_body)
+        reused_runtime_doc["producer_gateway_runtime_commits"].append(
+            OTHER_RUNTIME_SHA
+        )
+        stored["body"] = json.dumps(reused_runtime_doc).encode()
+        with pytest.raises(
+            RuntimeError,
+            match="runtime was already used",
+        ):
+            sw._load_baseline_scoring_progress(
+                "bucket",
+                "key",
+                benchmark_date="2026-07-15",
+                window_hash="sha256:w1",
+                private_model_artifact_hash="sha256:a1",
+                gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+                scoring_configuration_hash_value=current_hash,
+                repo_git_sha=MODEL_REPO_SHA,
+                manifest_hash=MODEL_MANIFEST_HASH,
+                benchmark_items=[{"icp_ref": "icp-1", "icp_hash": "hash-1"}],
+            )
+
+        gap_doc = json.loads(checkpoint_body)
+        gap_payload = dict(gap_doc["attempt_ledger"])
+        gap_payload["entries"] = [gap_payload["entries"][1]]
+        gap_payload["settled_attempt_count"] = 1
+        gap_payload.pop("ledger_hash")
+        gap_doc["attempt_ledger"] = {
+            **gap_payload,
+            "ledger_hash": sw.canonical_hash(gap_payload),
+        }
+        stored["body"] = json.dumps(gap_doc).encode()
+        gap_extension = sw._load_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+            scoring_configuration_hash_value=current_hash,
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+            benchmark_items=[{"icp_ref": "icp-1", "icp_hash": "hash-1"}],
+        )
+
+    stored["body"] = checkpoint_body
+    skipped_environment = {
+        name: value for name, value in skipped_values.items() if value is not None
+    }
+    with (
+        mock.patch.dict(sys.modules, {"boto3": stub}),
+        mock.patch.dict(os.environ, skipped_environment, clear=True),
+    ):
+        skipped_extension = sw._load_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+            scoring_configuration_hash_value=skipped_hash,
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+            benchmark_items=[{"icp_ref": "icp-1", "icp_hash": "hash-1"}],
+        )
+
+    assert loaded == []
+    assert [entry["retry_round"] for entry in restored_attempts] == [0, 1]
+    assert retry_extensions == [
+        {
+            "schema_version": "research_lab_retry_budget_extension.v1",
+            "prior_scoring_configuration_hash": prior_hash,
+            "current_scoring_configuration_hash": current_hash,
+            "prior_retry_rounds": 1,
+            "current_retry_rounds": 2,
+            "producer_gateway_runtime_commit_sha": RUNTIME_SHA,
+            "current_gateway_runtime_commit_sha": OTHER_RUNTIME_SHA,
+            "exhausted_retryable_icp_count": 1,
+        }
+    ]
+    assert gap_extension == []
+    assert skipped_extension == []
+
+
+def test_retry_extension_accepts_exact_default_or_explicit_prior_encoding():
+    current_values = {
+        name: None for name in scoring_executor.SCORING_RUNTIME_ENV_NAMES
+    }
+    current_values["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"] = "2"
+    prior_default_values = dict(current_values)
+    prior_default_values["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"] = None
+    prior_explicit_values = dict(current_values)
+    prior_explicit_values["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"] = "1"
+    unrelated_values = dict(current_values)
+    unrelated_values["QUAL_LEADS_PER_ICP"] = "changed"
+
+    current_environment = {
+        name: value for name, value in current_values.items() if value is not None
+    }
+    with mock.patch.dict(os.environ, current_environment, clear=True):
+        assert sw._compatible_baseline_retry_extension(
+            checkpoint_configuration_hash=(
+                scoring_executor.configuration_hash(prior_default_values)
+            ),
+            current_configuration_hash=(
+                scoring_executor.configuration_hash(current_values)
+            ),
+        ) == (1, 2)
+        assert sw._compatible_baseline_retry_extension(
+            checkpoint_configuration_hash=(
+                scoring_executor.configuration_hash(prior_explicit_values)
+            ),
+            current_configuration_hash=(
+                scoring_executor.configuration_hash(current_values)
+            ),
+        ) == (1, 2)
+
+    unrelated_environment = {
+        name: value for name, value in unrelated_values.items() if value is not None
+    }
+    with mock.patch.dict(os.environ, unrelated_environment, clear=True):
+        assert sw._compatible_baseline_retry_extension(
+            checkpoint_configuration_hash=(
+                scoring_executor.configuration_hash(prior_default_values)
+            ),
+            current_configuration_hash=(
+                scoring_executor.configuration_hash(unrelated_values)
+            ),
+        ) is None
 
 
 def test_attempt_ledger_gap_is_rejected():

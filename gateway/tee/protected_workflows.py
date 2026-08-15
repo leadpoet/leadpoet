@@ -477,7 +477,13 @@ PROTECTED_SYMBOLS = {
         "_candidate_icp_score",
     ),
     "gateway/research_lab/scoring_worker.py": (
+        "_compatible_baseline_retry_extension",
+        "_emit_private_baseline_retry_extension",
+        "_load_baseline_scoring_progress",
         "_load_candidate_source_diff",
+    ),
+    "gateway/tee/update_gateway_rebenchmark_retry_secret.py": (
+        "update_gateway_rebenchmark_retry_secret",
     ),
     "leadpoet_canonical/weight_computation.py": (
         "weight_config_document",

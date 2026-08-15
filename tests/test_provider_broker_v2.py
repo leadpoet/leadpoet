@@ -1435,10 +1435,14 @@ def test_httpx_transport_can_frame_upstream_without_framing_direct(monkeypatch):
     assert retained_proxy_client["limits"]["max_keepalive_connections"] == 32
 
 
-def test_httpx_transport_does_not_share_direct_failure_fate(monkeypatch):
+def test_httpx_transport_serializes_request_scoped_direct_failure_isolation(
+    monkeypatch,
+):
     clients = []
     results = []
     errors = []
+    activity = {"current": 0, "maximum": 0}
+    activity_lock = threading.Lock()
 
     class TLS:
         def getpeercert(self, binary_form=False, /):
@@ -1466,11 +1470,22 @@ def test_httpx_transport_does_not_share_direct_failure_fate(monkeypatch):
             self.error = error
 
         def __enter__(self):
+            with activity_lock:
+                activity["current"] += 1
+                activity["maximum"] = max(
+                    activity["maximum"],
+                    activity["current"],
+                )
+            time.sleep(0.01)
             if self.error is not None:
+                with activity_lock:
+                    activity["current"] -= 1
                 raise self.error
             return Response()
 
         def __exit__(self, *_args):
+            with activity_lock:
+                activity["current"] -= 1
             return False
 
     class Client:
@@ -1532,6 +1547,7 @@ def test_httpx_transport_does_not_share_direct_failure_fate(monkeypatch):
     assert len(results) == 7
     assert len(clients) == 8
     assert all(client.closed for client in clients)
+    assert activity == {"current": 0, "maximum": 1}
 
 
 def test_httpx_request_scoped_direct_slot_wait_is_timeout_bounded():

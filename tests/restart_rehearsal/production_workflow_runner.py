@@ -6305,6 +6305,10 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         _store_baseline_scoring_progress,
     )
     from gateway.research_lab import scoring_worker as scoring_worker_module
+    from gateway.tee.scoring_executor import (
+        SCORING_RUNTIME_ENV_NAMES,
+        configuration_hash as scoring_configuration_hash,
+    )
     from gateway.tee.provider_evidence_cache_store_v2 import (
         CACHE_TRANSPORT_ATTEMPTS,
         ProviderEvidenceCacheStoreV2,
@@ -6315,6 +6319,10 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     )
     from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
     from gateway.tee.provider_semantics_v2 import ProviderSemanticsAuthorityV2
+    from gateway.tee.update_gateway_rebenchmark_retry_secret import (
+        GatewayRebenchmarkRetryUpdateError,
+        update_gateway_rebenchmark_retry_secret,
+    )
     from leadpoet_canonical.attested_v2 import (
         DIRECT_EGRESS_REF_HASH,
         build_transport_attempt,
@@ -7764,6 +7772,16 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 ]
             )
             prior_runtime = "8" * 40
+            current_runtime = "9" * 40
+            prior_values = {
+                name: None for name in SCORING_RUNTIME_ENV_NAMES
+            }
+            current_values = dict(prior_values)
+            current_values[
+                "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"
+            ] = "2"
+            prior_hash = scoring_configuration_hash(prior_values)
+            current_hash = scoring_configuration_hash(current_values)
             resume_attempts = [
                 _baseline_attempt_ledger_entry(
                     attempt_row(index, retry_round=0, retryable=True),
@@ -7788,7 +7806,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 window_hash="sha256:" + "3" * 64,
                 private_model_artifact_hash="sha256:" + "4" * 64,
                 gateway_runtime_commit_sha=prior_runtime,
-                scoring_configuration_hash_value=checkpoint_config_hash,
+                scoring_configuration_hash_value=prior_hash,
                 rows=[],
                 attested_parent_receipt_hashes=[],
                 repo_git_sha=checkpoint_repo_sha,
@@ -7796,25 +7814,140 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 attempt_ledger=resume_attempts,
                 provider_cost_base_scope_hash="sha256:" + "5" * 64,
             )
+            object_ref = (checkpoint_bucket, retry_checkpoint_key)
+            checkpoint_body = checkpoint_objects[object_ref]
+
+            @contextmanager
+            def scoring_environment(values: Mapping[str, str | None]):
+                previous = {
+                    name: (name in os.environ, os.environ.get(name))
+                    for name in SCORING_RUNTIME_ENV_NAMES
+                }
+                try:
+                    for name in SCORING_RUNTIME_ENV_NAMES:
+                        os.environ.pop(name, None)
+                    os.environ.update(
+                        {
+                            name: value
+                            for name, value in values.items()
+                            if value is not None
+                        }
+                    )
+                    yield
+                finally:
+                    for name, (present, value) in previous.items():
+                        if present and value is not None:
+                            os.environ[name] = value
+                        else:
+                            os.environ.pop(name, None)
+
+            def load_extension(
+                *,
+                runtime: str = current_runtime,
+                config_hash: str = current_hash,
+                attempts_out: list[dict[str, Any]] | None = None,
+                scope_out: list[str] | None = None,
+                extension_out: list[dict[str, Any]] | None = None,
+            ) -> list[dict[str, Any]]:
+                return _load_baseline_scoring_progress(
+                    checkpoint_bucket,
+                    retry_checkpoint_key,
+                    benchmark_date="2026-07-25",
+                    window_hash="sha256:" + "3" * 64,
+                    private_model_artifact_hash="sha256:" + "4" * 64,
+                    gateway_runtime_commit_sha=runtime,
+                    scoring_configuration_hash_value=config_hash,
+                    repo_git_sha=checkpoint_repo_sha,
+                    manifest_hash=checkpoint_manifest_hash,
+                    attempt_ledger_out=attempts_out,
+                    provider_cost_base_scope_out=scope_out,
+                    retry_budget_extension_out=extension_out,
+                    benchmark_items=retry_window.benchmark_items,
+                )
+
             restored_attempts: list[dict[str, Any]] = []
             restored_scope: list[str] = []
-            restored_terminal_rows = _load_baseline_scoring_progress(
-                checkpoint_bucket,
-                retry_checkpoint_key,
-                benchmark_date="2026-07-25",
-                window_hash="sha256:" + "3" * 64,
-                private_model_artifact_hash="sha256:" + "4" * 64,
-                gateway_runtime_commit_sha="9" * 40,
-                scoring_configuration_hash_value=checkpoint_config_hash,
-                repo_git_sha=checkpoint_repo_sha,
-                manifest_hash=checkpoint_manifest_hash,
-                attempt_ledger_out=restored_attempts,
-                provider_cost_base_scope_out=restored_scope,
-                benchmark_items=retry_window.benchmark_items,
-            )
-            if restored_terminal_rows or len(restored_attempts) != 5:
+            extensions: list[dict[str, Any]] = []
+            with scoring_environment(current_values):
+                restored_terminal_rows = load_extension(
+                    attempts_out=restored_attempts,
+                    scope_out=restored_scope,
+                    extension_out=extensions,
+                )
+                for runtime, error_text in (
+                    (prior_runtime, "requires a new gateway runtime"),
+                    (current_runtime, "runtime was already used"),
+                ):
+                    if runtime == current_runtime:
+                        used_doc = json.loads(checkpoint_body.decode("utf-8"))
+                        used_doc["producer_gateway_runtime_commits"].append(
+                            current_runtime
+                        )
+                        checkpoint_objects[object_ref] = json.dumps(
+                            used_doc, sort_keys=True
+                        ).encode("utf-8")
+                    try:
+                        load_extension(runtime=runtime)
+                    except RuntimeError as exc:
+                        if error_text not in str(exc):
+                            raise
+                    else:
+                        raise RuntimeError(
+                            "retry extension runtime guard did not fail closed"
+                        )
+                    checkpoint_objects[object_ref] = checkpoint_body
+
+                gap_doc = json.loads(checkpoint_body.decode("utf-8"))
+                gap_doc["attempt_ledger"] = (
+                    scoring_worker_module._baseline_attempt_ledger_doc(
+                        [
+                            entry
+                            for entry in gap_doc["attempt_ledger"]["entries"]
+                            if not (
+                                entry["icp_ref"] == "retry-icp-1"
+                                and entry["retry_round"] == 0
+                            )
+                        ]
+                    )
+                )
+                checkpoint_objects[object_ref] = json.dumps(
+                    gap_doc, sort_keys=True
+                ).encode("utf-8")
+                gap_attempts: list[dict[str, Any]] = []
+                gap_extensions: list[dict[str, Any]] = []
+                load_extension(
+                    attempts_out=gap_attempts,
+                    extension_out=gap_extensions,
+                )
+                if gap_attempts or gap_extensions:
+                    raise RuntimeError("retry extension accepted a round gap")
+                checkpoint_objects[object_ref] = checkpoint_body
+
+            mismatched_values = dict(current_values)
+            mismatched_values["QUAL_LEADS_PER_ICP"] = "changed"
+            with scoring_environment(mismatched_values):
+                mismatch_attempts: list[dict[str, Any]] = []
+                mismatch_extensions: list[dict[str, Any]] = []
+                load_extension(
+                    config_hash=scoring_configuration_hash(mismatched_values),
+                    attempts_out=mismatch_attempts,
+                    extension_out=mismatch_extensions,
+                )
+                if mismatch_attempts or mismatch_extensions:
+                    raise RuntimeError(
+                        "retry extension accepted another scoring config change"
+                    )
+
+            if (
+                restored_terminal_rows
+                or len(restored_attempts) != 5
+                or len(extensions) != 1
+                or extensions[0]["prior_retry_rounds"] != 1
+                or extensions[0]["current_retry_rounds"] != 2
+                or extensions[0]["exhausted_retryable_icp_count"] != 2
+            ):
                 raise RuntimeError(
-                    "partial retry checkpoint did not survive a gateway release"
+                    "retry extension did not restore the exhausted checkpoint"
                 )
             if restored_scope != ["sha256:" + "5" * 64]:
                 raise RuntimeError("partial retry provider-cost scope changed")
@@ -7850,7 +7983,10 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 scoring_worker_module._retry_runner_with_provider_cost_scope = (
                     original_retry_scope
                 )
-            if retry_calls != [(3, 1), (1, 2), (2, 2), (3, 2)]:
+            if (
+                retry_calls != [(3, 1), (1, 2), (2, 2), (3, 2)]
+                or any(round_number == 0 for _, round_number in retry_calls)
+            ):
                 raise RuntimeError("partial retry round replayed settled attempts")
             if len(rows) != 3 or stats != {
                 "retried": 6,
@@ -7860,6 +7996,178 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 raise RuntimeError("partial retry round did not resume exactly")
 
         asyncio.run(exercise_partial_retry_round_resume())
+
+        class StrictSecretsClient:
+            def __init__(self, secret: str) -> None:
+                self.versions = {"initial-version": secret}
+                self.current = "initial-version"
+                self.put_calls: list[dict[str, str]] = []
+
+            def get_secret_value(
+                self,
+                *,
+                SecretId: str,
+                VersionId: str | None = None,
+            ) -> dict[str, str]:
+                version = VersionId or self.current
+                return {
+                    "Name": SecretId,
+                    "VersionId": version,
+                    "SecretString": self.versions[version],
+                }
+
+            def put_secret_value(
+                self,
+                *,
+                SecretId: str,
+                SecretString: str,
+                ClientRequestToken: str,
+            ) -> dict[str, str]:
+                self.put_calls.append(
+                    {
+                        "SecretId": SecretId,
+                        "SecretString": SecretString,
+                        "ClientRequestToken": ClientRequestToken,
+                    }
+                )
+                self.versions[ClientRequestToken] = SecretString
+                self.current = ClientRequestToken
+                return {"VersionId": ClientRequestToken}
+
+            def describe_secret(self, *, SecretId: str) -> dict[str, Any]:
+                return {
+                    "Name": SecretId,
+                    "VersionIdsToStages": {
+                        version: (
+                            ["AWSCURRENT"]
+                            if version == self.current
+                            else ["AWSPREVIOUS"]
+                        )
+                        for version in self.versions
+                    },
+                }
+
+        prior_secret_values = {
+            name: None for name in SCORING_RUNTIME_ENV_NAMES
+        }
+        expected_prior_hash = scoring_configuration_hash(prior_secret_values)
+        original_secret = "UNRELATED_REHEARSAL_VALUE=preserved\n"
+        with tempfile.TemporaryDirectory(
+            prefix="leadpoet-retry-secret-update-"
+        ) as backup_root:
+            backup_path = Path(backup_root)
+            client = StrictSecretsClient(original_secret)
+            verified = update_gateway_rebenchmark_retry_secret(
+                secrets_client=client,
+                expected_prior_scoring_configuration_hash=expected_prior_hash,
+                backup_directory=backup_path,
+            )
+            if verified["status"] != "verified" or client.put_calls:
+                raise RuntimeError("retry updater verify-only mode wrote state")
+            updated = update_gateway_rebenchmark_retry_secret(
+                secrets_client=client,
+                expected_prior_scoring_configuration_hash=expected_prior_hash,
+                apply=True,
+                backup_directory=backup_path,
+            )
+            persisted_secret = client.versions[client.current]
+            if (
+                updated["status"] != "updated"
+                or len(client.put_calls) != 1
+                or original_secret not in persisted_secret
+                or "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2"
+                not in persisted_secret
+                or "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1"
+                not in persisted_secret
+                or Path(updated["backup_path"]).read_text(encoding="utf-8")
+                != original_secret
+            ):
+                raise RuntimeError("retry updater exact readback differed")
+
+        class ConcurrentSecretsClient(StrictSecretsClient):
+            def __init__(self, secret: str) -> None:
+                super().__init__(secret)
+                self.unversioned_reads = 0
+
+            def get_secret_value(
+                self,
+                *,
+                SecretId: str,
+                VersionId: str | None = None,
+            ) -> dict[str, str]:
+                if VersionId is None:
+                    self.unversioned_reads += 1
+                    if self.unversioned_reads == 2:
+                        self.versions["concurrent-version"] = (
+                            self.versions[self.current]
+                            + "CONCURRENT_REHEARSAL_VALUE=changed\n"
+                        )
+                        self.current = "concurrent-version"
+                return super().get_secret_value(
+                    SecretId=SecretId,
+                    VersionId=VersionId,
+                )
+
+        with tempfile.TemporaryDirectory(
+            prefix="leadpoet-retry-secret-cas-"
+        ) as backup_root:
+            concurrent_client = ConcurrentSecretsClient(original_secret)
+            try:
+                update_gateway_rebenchmark_retry_secret(
+                    secrets_client=concurrent_client,
+                    expected_prior_scoring_configuration_hash=(
+                        expected_prior_hash
+                    ),
+                    apply=True,
+                    backup_directory=Path(backup_root),
+                )
+            except GatewayRebenchmarkRetryUpdateError as exc:
+                if "changed concurrently" not in str(exc):
+                    raise
+            else:
+                raise RuntimeError("retry updater ignored its version CAS")
+            if concurrent_client.put_calls:
+                raise RuntimeError("retry updater wrote after a lost version CAS")
+
+        class CorruptReadbackSecretsClient(StrictSecretsClient):
+            def get_secret_value(
+                self,
+                *,
+                SecretId: str,
+                VersionId: str | None = None,
+            ) -> dict[str, str]:
+                response = super().get_secret_value(
+                    SecretId=SecretId,
+                    VersionId=VersionId,
+                )
+                if VersionId is not None and VersionId != "initial-version":
+                    response["SecretString"] += "CORRUPTED_REHEARSAL_VALUE=1\n"
+                return response
+
+        with tempfile.TemporaryDirectory(
+            prefix="leadpoet-retry-secret-rollback-"
+        ) as backup_root:
+            rollback_client = CorruptReadbackSecretsClient(original_secret)
+            try:
+                update_gateway_rebenchmark_retry_secret(
+                    secrets_client=rollback_client,
+                    expected_prior_scoring_configuration_hash=(
+                        expected_prior_hash
+                    ),
+                    apply=True,
+                    backup_directory=Path(backup_root),
+                )
+            except GatewayRebenchmarkRetryUpdateError as exc:
+                if "exact readback verification" not in str(exc):
+                    raise
+            else:
+                raise RuntimeError("retry updater accepted corrupt readback")
+            if (
+                len(rollback_client.put_calls) != 2
+                or rollback_client.versions[rollback_client.current]
+                != original_secret
+            ):
+                raise RuntimeError("retry updater did not restore prior state")
     finally:
         if prior_boto3 is None:
             sys.modules.pop("boto3", None)
@@ -7917,6 +8225,10 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "provider_recovery_checkpoint_bound": True,
         "baseline_checkpoint_cross_release_resume": True,
         "baseline_partial_retry_round_resume_exact": True,
+        "baseline_retry_budget_extension_continuation_exact": True,
+        "baseline_retry_budget_extension_guards_bound": True,
+        "retry_configuration_updater_verify_apply_bound": True,
+        "retry_configuration_updater_cas_readback_rollback_bound": True,
         "baseline_exhausted_health_gate_contained": True,
         "baseline_checkpoint_receipt_ancestry_restored": True,
         "baseline_exact_receipt_frontier_bound": True,
@@ -8512,7 +8824,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
 
     ordinary_transport = HTTPXProviderTransport(
         allow_authenticated_complete_body_eof=True,
-        reuse_direct_connections=True,
+        reuse_direct_connections=False,
     )
     ordinary_transport._new_client = (  # type: ignore[method-assign]
         lambda **_kwargs: OrdinaryClient()
@@ -8535,7 +8847,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
             ordinary_transport.allow_authenticated_complete_body_eof
             and ordinary_transport.parent_tunnel_framing == ""
             and ordinary_transport.upstream_parent_tunnel_framing == ""
-            and ordinary_transport.reuse_direct_connections
+            and not ordinary_transport.reuse_direct_connections
             and ordinary_transport._direct_request_slot is not None
         )
         ordinary_direct_generation_recovered = (
@@ -8543,8 +8855,8 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
             and second_direct.get("body") == b'{"ok":true}'
             and len(ordinary_clients) == 2
             and ordinary_clients[0].closed is True
-            and ordinary_clients[1].closed is False
-            and ordinary_transport._direct_client is ordinary_clients[1]
+            and ordinary_clients[1].closed is True
+            and ordinary_transport._direct_client is None
         )
     finally:
         ordinary_transport.close()
@@ -8597,7 +8909,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         "provider_first_idle_terminal_handshake_verified": True,
         "complete_chunked_json_eof_recovered": True,
         "truncated_frame_rejected": True,
-        "ordinary_provider_transport_unchanged": True,
+        "ordinary_provider_transport_request_scoped": True,
         "ordinary_direct_serialized_generation_recovery_verified": True,
         "stale_pooled_transport_evicted_before_relay_timeout": True,
         "failed_pooled_generation_evicted_before_retry": True,
@@ -9634,6 +9946,28 @@ def main() -> int:
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",
                 {},
+            ).get("baseline_retry_budget_extension_continuation_exact")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("baseline_retry_budget_extension_guards_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("retry_configuration_updater_verify_apply_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get(
+                "retry_configuration_updater_cas_readback_rollback_bound"
+            )
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
             ).get("baseline_exhausted_health_gate_contained")
             is True
             and behavior_evidence.get(
@@ -9770,7 +10104,7 @@ def main() -> int:
             and behavior_evidence.get(
                 "artifact-egress-sustained-readback",
                 {},
-            ).get("ordinary_provider_transport_unchanged")
+            ).get("ordinary_provider_transport_request_scoped")
             is True
             and behavior_evidence.get(
                 "artifact-egress-sustained-readback",

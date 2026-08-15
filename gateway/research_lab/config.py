@@ -180,6 +180,7 @@ DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG = ResearchLabGitTreeConfig()
 DEFAULT_LOOP_START_FEE_USD = 2.0
 DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS = 300
 DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT = 3
+DEFAULT_PRIVATE_BASELINE_PROVIDER_RETRY_ROUNDS = 1
 DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS = 15 * 60
 DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS = (23 * 3600) + (30 * 60)
 # Successful current-model five-company runs remain below this bounded cap.
@@ -629,7 +630,9 @@ class ResearchLabGatewayConfig:
     private_baseline_rebenchmark_enabled: bool = True
     private_baseline_concurrency: int = 1
     private_baseline_retry_concurrency: int = 2
-    private_baseline_provider_retry_rounds: int = 1
+    private_baseline_provider_retry_rounds: int = (
+        DEFAULT_PRIVATE_BASELINE_PROVIDER_RETRY_ROUNDS
+    )
     baseline_start_utc_offset_seconds: int = DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS
     candidate_scoring_quiet_start_utc_seconds: int = DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS
     provider_cost_cap_usd_per_icp: float = DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP
@@ -1078,7 +1081,10 @@ class ResearchLabGatewayConfig:
             ),
             private_baseline_provider_retry_rounds=max(
                 0,
-                _int("RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS", 1),
+                _int(
+                    "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS",
+                    DEFAULT_PRIVATE_BASELINE_PROVIDER_RETRY_ROUNDS,
+                ),
             ),
             baseline_start_utc_offset_seconds=_bounded_utc_offset_seconds(
                 "RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS",

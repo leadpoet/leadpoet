@@ -1558,10 +1558,10 @@ def get_v2_provider_broker():
             transport=HTTPXProviderTransport(
                 allow_authenticated_complete_body_eof=True,
                 # Provider-outcome persistence and weight reconstruction use
-                # one serialized direct generation. A failure retires it
-                # before the next request enters, preventing both stale-relay
-                # sharing and concurrent fresh-tunnel handshake bursts.
-                reuse_direct_connections=True,
+                # serialized request-scoped direct generations. This retains
+                # the concurrency bound without carrying an idle raw relay
+                # generation across independent jobs or epochs.
+                reuse_direct_connections=False,
                 reuse_upstream_proxy_connections=True,
             ),
             job_credential_slot_ref_hashes=configuration.get(

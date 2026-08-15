@@ -172,6 +172,46 @@ def test_fresh_incomplete_run_is_not_misclassified_as_restart():
 
 
 @pytest.mark.asyncio
+async def test_retry_budget_extension_uses_allowed_hash_bound_resumed_event(
+    monkeypatch,
+):
+    rows: list[tuple[str, dict]] = []
+
+    async def capture(table: str, row: dict, **_kwargs):
+        rows.append((table, dict(row)))
+        return dict(row)
+
+    monkeypatch.setattr(telemetry, "_best_effort_insert", capture)
+    extension = {
+        "schema_version": "research_lab_retry_budget_extension.v1",
+        "prior_scoring_configuration_hash": HASH_A,
+        "current_scoring_configuration_hash": HASH_B,
+        "prior_retry_rounds": 1,
+        "current_retry_rounds": 2,
+        "producer_gateway_runtime_commit_sha": "1" * 40,
+        "current_gateway_runtime_commit_sha": "2" * 40,
+        "exhausted_retryable_icp_count": 4,
+    }
+
+    await scoring_worker._emit_private_baseline_retry_extension(
+        run=_run_context(),
+        extension=extension,
+    )
+
+    assert len(rows) == 1
+    table, row = rows[0]
+    assert table == "research_lab_scoring_run_events"
+    assert row["event_type"] == "resumed"
+    assert row["event_ordinal"] == 2
+    assert row["event_doc"] == {
+        **extension,
+        "resume_reason": "retry_budget_extension",
+    }
+    payload = {key: value for key, value in row.items() if key != "anchored_hash"}
+    assert row["anchored_hash"] == telemetry.canonical_hash(payload)
+
+
+@pytest.mark.asyncio
 async def test_retry_attempts_get_unique_executions_and_terminal_events(monkeypatch):
     rows: list[tuple[str, dict]] = []
 

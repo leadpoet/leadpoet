@@ -360,7 +360,7 @@ async def test_credit_resume_event_is_deterministic_and_rpc_atomic(
     assert calls[0]["p_anchored_hash"] == calls[1]["p_anchored_hash"]
 
 
-def test_atomic_credit_resume_migration_is_expected_head_and_idempotent() -> None:
+def test_atomic_credit_resume_migration_is_declared_and_idempotent() -> None:
     sql = (
         Path(__file__).parents[1]
         / "scripts"
@@ -387,7 +387,7 @@ def test_atomic_credit_resume_migration_is_expected_head_and_idempotent() -> Non
         "scripts/148-research-lab-atomic-credit-resume.sql",
         "resume_research_lab_credit_blocked_run_v1",
     ) in REQUIRED_SUPABASE_V2_RPCS
-    assert ATOMIC_CREDIT_RESUME_MIGRATION == EXPECTED_APPLIED_MIGRATIONS[-1]
+    assert ATOMIC_CREDIT_RESUME_MIGRATION in EXPECTED_APPLIED_MIGRATIONS
 
 
 @pytest.mark.asyncio

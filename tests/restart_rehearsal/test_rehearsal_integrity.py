@@ -144,6 +144,20 @@ def _provider_persistence_batch_fixture() -> dict[str, Any]:
     }
 
 
+def _compact_weight_settlement_contract_fixture() -> dict[str, Any]:
+    return {
+        "schema_version": (
+            "leadpoet.research_lab_compact_weight_settlement_contract.v1"
+        ),
+        "max_authority_bytes": 8_388_608,
+        "size_constraint_valid": True,
+        "append_only_trigger_enabled": True,
+        "identity_unique_constraint_enabled": True,
+        "row_level_security_enabled": True,
+        "finalized_stage_supported": True,
+    }
+
+
 def _atomic_credit_resume_fixture() -> dict[str, Any]:
     return json.loads(json.dumps(EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE))
 
@@ -1070,6 +1084,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_attested_ancestry_activations_v2",
             "research_lab_allocation_settlement_frontiers_v2",
             "research_lab_allocation_settlement_frontier_activation_v2",
+            "research_lab_compact_weight_authorities_v2",
         }
     }
     relations["research_lab_finalized_allocation_epochs_v2"] = {
@@ -1118,8 +1133,12 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_source_catalog_replay_contract_v2",
             "research_lab_compact_checkpoint_graph_contract_v1",
             "resume_research_lab_credit_blocked_run_v1",
+            "research_lab_compact_weight_settlement_contract_v1",
         ],
         "atomic_credit_resume": _atomic_credit_resume_fixture(),
+        "compact_weight_settlement_contract": (
+            _compact_weight_settlement_contract_fixture()
+        ),
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
             "atomic_acquire": True,
@@ -1318,6 +1337,10 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                 "kind": "r",
                 "columns": ["netuid"],
             },
+            "research_lab_compact_weight_authorities_v2": {
+                "kind": "r",
+                "columns": ["authority_hash"],
+            },
             "research_lab_autoresearch_trees": {
                 "kind": "r",
                 "columns": ["tree_id", "run_id"],
@@ -1383,8 +1406,12 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "create_research_lab_git_tree_candidate_handoff",
             "research_lab_autoresearch_run_evaluation_usage",
             "resume_research_lab_credit_blocked_run_v1",
+            "research_lab_compact_weight_settlement_contract_v1",
         ],
         "atomic_credit_resume": _atomic_credit_resume_fixture(),
+        "compact_weight_settlement_contract": (
+            _compact_weight_settlement_contract_fixture()
+        ),
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
             "atomic_acquire": True,

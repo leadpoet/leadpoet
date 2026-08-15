@@ -10,6 +10,7 @@ async-timeout==5.0.1
 attrs==20.3.0
 babel==2.18.0
 beautifulsoup4==4.14.3
+bittensor-wallet==4.0.0
 cbor2==5.4.6
 certifi==2025.11.12
 cffi==1.15.1

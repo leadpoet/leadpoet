@@ -290,6 +290,9 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     ).read_text(encoding="utf-8")
     assert "publicsuffix2==2.20191221" in requirements_input
     assert "publicsuffix2==2.20191221" in requirements_lock
+    assert "bittensor-wallet==4.0.0" in requirements_input
+    assert "bittensor-wallet==4.0.0" in requirements_lock
+    assert "from bittensor_wallet import Keypair" in dockerfile
     assert "supabase==2.22.0" in requirements_input
     assert "supabase==2.22.0" in requirements_lock
     assert 'requirements-scoring-py39.lock' in stage_script

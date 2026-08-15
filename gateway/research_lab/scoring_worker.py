@@ -1032,6 +1032,24 @@ def _baseline_runner_for_attempt(
 ) -> AttestedPrivateModelRunnerV2:
     """Bind each baseline attempt to a deterministic worker proxy profile."""
 
+    worker_index = _baseline_worker_index_for_attempt(
+        item_index=item_index,
+        retry_round=retry_round,
+        worker_count=worker_count,
+    )
+    if int(worker_count) == 1:
+        return runner
+    return runner.with_worker_index(worker_index)
+
+
+def _baseline_worker_index_for_attempt(
+    *,
+    item_index: int,
+    retry_round: int,
+    worker_count: int,
+) -> int:
+    """Resolve the immutable worker proxy profile for one baseline attempt."""
+
     normalized_item_index = int(item_index)
     normalized_retry_round = int(retry_round)
     normalized_worker_count = int(worker_count)
@@ -1041,12 +1059,9 @@ def _baseline_runner_for_attempt(
         raise ValueError("private baseline retry round is invalid")
     if not 1 <= normalized_worker_count <= 500:
         raise ValueError("private baseline worker count is invalid")
-    if normalized_worker_count == 1:
-        return runner
-    worker_index = (
+    return (
         normalized_item_index - 1 + normalized_retry_round
     ) % normalized_worker_count
-    return runner.with_worker_index(worker_index)
 
 
 def _attested_receipts_from(*sources: Any) -> list[dict[str, Any]]:
@@ -4745,6 +4760,12 @@ def _provider_preflight_recovery_cooldown_seconds(
     return max(0.0, ttl_seconds - max(0.0, age_seconds))
 
 
+def _baseline_preflight_monotonic() -> float:
+    """Return the monotonic clock used for per-profile preflight freshness."""
+
+    return time.monotonic()
+
+
 def _systemic_provider_transport_failure(
     batch: Sequence[tuple[int, Mapping[str, Any]]],
 ) -> bool:
@@ -5467,11 +5488,57 @@ class ResearchLabGatewayScoringWorker:
                         "verdicts": [],
                         "retry_after_seconds": round(recovery_cooldown, 3),
                     }
+                baseline_profile_measurements = dict(
+                    getattr(
+                        self,
+                        "_baseline_profile_preflight_monotonic_at",
+                        {},
+                    )
+                    or {}
+                )
+                baseline_profile_count = max(
+                    1,
+                    int(self.config.scoring_worker_total_workers or 1),
+                )
+                baseline_full_fleet_proven = all(
+                    worker_index in baseline_profile_measurements
+                    for worker_index in range(baseline_profile_count)
+                )
                 preflight = await self._run_owned_provider_preflight(
                     maintenance_state=maintenance_state,
                     heartbeat=heartbeat,
+                    force_measurement=(
+                        self._is_private_baseline_owner()
+                        and not baseline_full_fleet_proven
+                    ),
                 )
             else:
+                if (
+                    bool(
+                        getattr(
+                            self.config,
+                            "private_baseline_rebenchmark_enabled",
+                            False,
+                        )
+                    )
+                    and self._is_private_baseline_owner()
+                ):
+                    # A baseline process may resume a durable checkpoint only
+                    # after it owns and freshly measures the complete scoring
+                    # proxy fleet.  Once today's baseline is published, the
+                    # same process may use its single-profile fallback for
+                    # ordinary candidate work.  This distinction also keeps
+                    # BASELINE_ANY_WORKER safe without reducing fleet capacity.
+                    daily_gate = await self._candidate_scoring_start_gate()
+                    self._last_candidate_start_gate = daily_gate
+                    if not bool(daily_gate.get("available")):
+                        return {
+                            "proceed": False,
+                            "reason": (
+                                "provider_preflight_full_fleet_owner_pending"
+                            ),
+                            "verdicts": [],
+                        }
                 # An unpaused non-owner verifies only its own bound proxy
                 # profile. Global pause/resume authority remains with the
                 # lease owner, which verifies the complete worker fleet.
@@ -5502,6 +5569,7 @@ class ResearchLabGatewayScoringWorker:
         *,
         maintenance_state: Mapping[str, Any],
         heartbeat: MaintenanceLeaseHeartbeat,
+        force_measurement: bool = False,
     ) -> Mapping[str, Any]:
         """Verify every scoring proxy profile before changing global state."""
 
@@ -5529,14 +5597,23 @@ class ResearchLabGatewayScoringWorker:
                     measurement_scope_key=(
                         "scoring:worker_profile:%d" % worker_index
                     ),
+                    force_measurement=force_measurement,
                 )
-                return worker_index, result
+                return worker_index, {
+                    **result,
+                    "_measurement_completed_monotonic": (
+                        _baseline_preflight_monotonic()
+                    ),
+                }
             except Exception as exc:  # noqa: BLE001 - aggregate fails closed
                 return worker_index, {
                     "proceed": False,
                     "healthy": False,
                     "pause_worthy": True,
                     "disabled": False,
+                    "_measurement_completed_monotonic": (
+                        _baseline_preflight_monotonic()
+                    ),
                     "verdicts": [
                         {
                             "provider": f"scoring_profile_{worker_index}",
@@ -5615,6 +5692,26 @@ class ResearchLabGatewayScoringWorker:
                 bool(systemic_transport_failure) and fresh_measurement
             ),
         )
+        if force_measurement:
+            forced_full_fleet_complete = (
+                healthy
+                and len(results) == total_workers
+                and all(
+                    not bool(result.get("measurement_cached"))
+                    for _, result in results
+                )
+            )
+            self._baseline_profile_preflight_monotonic_at = (
+                {
+                    int(worker_index): float(
+                        result.get("_measurement_completed_monotonic")
+                        or _baseline_preflight_monotonic()
+                    )
+                    for worker_index, result in results
+                }
+                if forced_full_fleet_complete
+                else {}
+            )
         return {
             "proceed": healthy,
             "reason": (
@@ -5622,6 +5719,72 @@ class ResearchLabGatewayScoringWorker:
             ),
             **aggregate,
         }
+
+    async def _enforce_baseline_wave_preflight_freshness(
+        self,
+        *,
+        run_start: float,
+        item_indexes: Sequence[int],
+        retry_round: int,
+        completed_icps: int,
+        total_icps: int,
+        start_delay_seconds: float = 0.0,
+    ) -> None:
+        """Recycle before a wave whose bound proxy proof is missing or stale.
+
+        A new baseline-owner process must hold the maintenance lease and force
+        the existing bounded full-fleet preflight before it can enter this
+        scheduler.  Long model waves can outlive those measurements' TTL.  At
+        that settled checkpoint boundary, exit before spending another model
+        attempt; the fresh process repeats the same lease-owned full-fleet
+        measurement and restores only the still-pending attempt rounds.
+        """
+
+        del run_start
+        ttl_seconds = max(
+            60.0,
+            float(provider_preflight_settings().get("ttl_seconds") or 600.0),
+        )
+        worker_count = max(
+            1,
+            int(getattr(self.config, "scoring_worker_total_workers", 1) or 1),
+        )
+        profile_indexes = sorted(
+            {
+                _baseline_worker_index_for_attempt(
+                    item_index=int(item_index),
+                    retry_round=int(retry_round),
+                    worker_count=worker_count,
+                )
+                for item_index in item_indexes
+            }
+        )
+        if not profile_indexes:
+            return
+        now = _baseline_preflight_monotonic()
+        profile_measurements = dict(
+            getattr(self, "_baseline_profile_preflight_monotonic_at", {}) or {}
+        )
+        stale_profiles = [
+            worker_index
+            for worker_index in profile_indexes
+            if worker_index not in profile_measurements
+            or now
+            + max(0.0, float(start_delay_seconds))
+            - float(profile_measurements[worker_index])
+            >= ttl_seconds
+        ]
+        if not stale_profiles:
+            return
+        raise BaselineCheckpointRecycle(
+            pressure={
+                "reason": "provider_preflight_refresh_required",
+                "provider_preflight_ttl_seconds": round(ttl_seconds, 3),
+                "provider_preflight_profile_count": len(stale_profiles),
+            },
+            completed_icps=completed_icps,
+            total_icps=total_icps,
+        )
 
     async def _candidate_claim_capacity(self) -> dict[str, Any]:
         host_pressure = _scoring_host_pressure_capacity(
@@ -15341,6 +15504,12 @@ class ResearchLabGatewayScoringWorker:
                 benchmark_date=benchmark_date,
                 telemetry_session=telemetry_session,
                 telemetry_model_role=telemetry_model_role,
+                provider_preflight_boundary=(
+                    self._enforce_baseline_wave_preflight_freshness
+                    if checkpoint_recycle_enabled
+                    and attempt_checkpoint is not None
+                    else None
+                ),
             )
 
     async def _run_baseline_batch_inner(
@@ -15363,6 +15532,7 @@ class ResearchLabGatewayScoringWorker:
         benchmark_date: str = "",
         telemetry_session: ScoringTelemetrySession | None = None,
         telemetry_model_role: str = "reference",
+        provider_preflight_boundary: Callable[..., Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Run all benchmark ICPs concurrently, then retry transient failures.
 
@@ -15562,6 +15732,16 @@ class ResearchLabGatewayScoringWorker:
                     benchmark_date=benchmark_date,
                 )
                 wave = run_items[wave_start : wave_start + first_pass_wave_width]
+                if provider_preflight_boundary is not None:
+                    await provider_preflight_boundary(
+                        run_start=run_start,
+                        item_indexes=tuple(
+                            item_index for item_index, _item in wave
+                        ),
+                        retry_round=0,
+                        completed_icps=completed_checkpoint_count(),
+                        total_icps=total_icps,
+                    )
                 wave_sequence = wave_start // first_pass_wave_width + 1
                 wave_started = time.monotonic()
                 _record_private_baseline_stage(
@@ -15772,6 +15952,26 @@ class ResearchLabGatewayScoringWorker:
                         benchmark_date=benchmark_date,
                     )
                     wave_indexes = pending[wave_start : wave_start + retry_width]
+                    if provider_preflight_boundary is not None:
+                        await provider_preflight_boundary(
+                            run_start=run_start,
+                            item_indexes=tuple(wave_indexes),
+                            retry_round=round_no,
+                            completed_icps=completed_checkpoint_count(),
+                            total_icps=total_icps,
+                            start_delay_seconds=max(
+                                (
+                                    float(
+                                        results.get(item_index, {}).get(
+                                            "_retry_backoff_seconds"
+                                        )
+                                        or 0.0
+                                    )
+                                    for item_index in wave_indexes
+                                ),
+                                default=0.0,
+                            ),
+                        )
                     retry_wave_started = time.monotonic()
                     watchdog = (
                         _baseline_wave_watchdog(

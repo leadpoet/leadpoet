@@ -12,6 +12,7 @@ from gateway.tee.scoring_executor import (
 )
 from gateway.tee.update_gateway_rebenchmark_retry_secret import (
     GatewayRebenchmarkRetryUpdateError,
+    _parse_shell_environment,
     update_gateway_rebenchmark_retry_secret,
 )
 
@@ -68,11 +69,34 @@ class FakeSecretsClient:
         }
 
 
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        (r"DUMMY=a\ b", "a b"),
+        (r'DUMMY="a\"b"', 'a"b'),
+        ("DUMMY='a''b'", "ab"),
+        ("DUMMY=plain words", "plain words"),
+        ("DUMMY='unmatched", "'unmatched"),
+    ],
+)
+def test_shell_parser_matches_restart_hydration_data_semantics(record, expected):
+    assert _parse_shell_environment(record + "\n")["DUMMY"] == expected
+
+
 def test_updates_absent_defaults_and_preserves_unrelated_shell_values(tmp_path):
     original = (
         "# production-shaped gateway secret\n"
+        "\n"
         "export UNRELATED_ONE='preserve me'\n"
         "UNRELATED_TWO=value-two\n"
+        "GIT_SSH_COMMAND=ssh -i /tmp/rehearsal-key -o IdentitiesOnly=yes\n"
+        "LESSOPEN=| /usr/bin/lesspipe %s\n"
+        "SSH_CLIENT=192.0.2.10 41000 22\n"
+        "SSH_CONNECTION=192.0.2.10 41000 192.0.2.20 22\n"
+        "which_declare=declare -f\n"
+        "DUPLICATE_NON_TARGET=same\n"
+        "DUPLICATE_NON_TARGET=same\n"
+        "UNMATCHED_QUOTE_IS_DATA='preserve literally\n"
     )
     client = FakeSecretsClient(original)
 
@@ -102,8 +126,7 @@ def test_updates_absent_defaults_and_preserves_unrelated_shell_values(tmp_path):
     )
 
     persisted = client.versions[client.current]
-    assert "export UNRELATED_ONE='preserve me'\n" in persisted
-    assert "UNRELATED_TWO=value-two\n" in persisted
+    assert persisted.startswith(original)
     assert "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2" in persisted
     assert "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1" in persisted
     assert result["status"] == "updated"
@@ -117,6 +140,114 @@ def test_updates_absent_defaults_and_preserves_unrelated_shell_values(tmp_path):
     assert backup_path.read_text(encoding="utf-8") == original
     assert backup_path.stat().st_mode & 0o777 == 0o600
     assert tmp_path.stat().st_mode & 0o777 == 0o700
+
+
+def test_updates_nul_separated_shell_values_without_rewriting_them(tmp_path):
+    original = (
+        "GIT_SSH_COMMAND=ssh -i /tmp/rehearsal-key\x00"
+        "SSH_CLIENT=192.0.2.10 41000 22\x00"
+    )
+    client = FakeSecretsClient(original)
+
+    result = update_gateway_rebenchmark_retry_secret(
+        secrets_client=client,
+        expected_prior_scoring_configuration_hash=_scoring_hash(
+            retry_rounds=None
+        ),
+        apply=True,
+        secret_id="gateway-secret",
+        backup_directory=tmp_path,
+    )
+
+    assert result["status"] == "updated"
+    assert client.versions[client.current].startswith(original)
+    assert Path(result["backup_path"]).read_text(encoding="utf-8") == original
+
+
+def test_replaces_explicit_shell_targets_once_and_preserves_surrounding_bytes(
+    tmp_path,
+):
+    before = "UNRELATED_BEFORE=keep before\n\n"
+    after = "export UNRELATED_AFTER='keep after'\n"
+    client = FakeSecretsClient(
+        before
+        + "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS='1'\n"
+        + "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=2\n"
+        + after
+    )
+
+    result = update_gateway_rebenchmark_retry_secret(
+        secrets_client=client,
+        expected_prior_scoring_configuration_hash=_scoring_hash(
+            retry_rounds="1"
+        ),
+        apply=True,
+        backup_directory=tmp_path,
+    )
+
+    persisted = client.versions[client.current]
+    assert result["status"] == "updated"
+    assert persisted.startswith(before + after)
+    assert persisted.count(
+        "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS="
+    ) == 1
+    assert persisted.count("RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=") == 1
+
+
+@pytest.mark.parametrize(
+    "target_name",
+    [
+        "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS",
+        "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY",
+    ],
+)
+def test_duplicate_target_setting_fails_before_backup_or_write(
+    tmp_path,
+    target_name,
+):
+    client = FakeSecretsClient(
+        f"{target_name}=1\n"
+        f"export {target_name}=1\n"
+    )
+
+    with pytest.raises(
+        GatewayRebenchmarkRetryUpdateError,
+        match="duplicate retry setting",
+    ):
+        update_gateway_rebenchmark_retry_secret(
+            secrets_client=client,
+            expected_prior_scoring_configuration_hash=_scoring_hash(
+                retry_rounds=None
+            ),
+            apply=True,
+            backup_directory=tmp_path,
+        )
+
+    assert client.put_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_duplicate_json_name_fails_before_backup_or_write(tmp_path):
+    client = FakeSecretsClient(
+        '{"RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS":"1",'
+        '"RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS":"1"}'
+    )
+
+    with pytest.raises(
+        GatewayRebenchmarkRetryUpdateError,
+        match="duplicate name",
+    ):
+        update_gateway_rebenchmark_retry_secret(
+            secrets_client=client,
+            expected_prior_scoring_configuration_hash=_scoring_hash(
+                retry_rounds="1"
+            ),
+            apply=True,
+            backup_directory=tmp_path,
+        )
+
+    assert client.put_calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_updates_exact_explicit_old_values_in_json(tmp_path):

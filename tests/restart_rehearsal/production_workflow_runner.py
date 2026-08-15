@@ -6290,6 +6290,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     )
     from gateway.research_lab.scoring_worker import (
         _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD,
+        BaselineCheckpointRecycle,
         BaselineHealthGateFailure,
         BaselineMaintenancePause,
         ResearchLabGatewayScoringWorker,
@@ -7720,6 +7721,10 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                     **_kwargs: Any,
                 ) -> dict[str, Any]:
                     retry_calls.append((item_index, retry_round))
+                    if retry_round == 1:
+                        # The settled retry exceeds the 600s provider proof
+                        # TTL before the next wave is allocated.
+                        clock["value"] = 601.0
                     retryable = retry_round < 2
                     return attempt_row(
                         item_index,
@@ -7761,7 +7766,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 private_baseline_concurrency=3,
                 private_baseline_retry_concurrency=3,
                 private_baseline_provider_retry_rounds=2,
+                scoring_worker_total_workers=25,
+                scoring_worker_index=0,
+                private_baseline_rebenchmark_enabled=True,
             )
+            retry_worker._lease_holder_ref = "rehearsal-baseline-retry-lease"
             retry_window = SimpleNamespace(
                 benchmark_items=[
                     {
@@ -7952,9 +7961,77 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             if restored_scope != ["sha256:" + "5" * 64]:
                 raise RuntimeError("partial retry provider-cost scope changed")
             retry_calls: list[tuple[int, int]] = []
+            persisted_extension_attempts: list[dict[str, Any]] = []
+            full_fleet_phases: list[bool] = []
+            clock = {"value": 0.0}
+            phase = {
+                "full_fleet_healthy": False,
+                "lease_available": False,
+            }
 
             async def unpaused() -> dict[str, Any]:
                 return {"paused": False}
+
+            async def lease_acquired(**_kwargs: Any) -> bool:
+                return bool(phase["lease_available"])
+
+            class RehearsalLeaseHeartbeat:
+                def __init__(self, **_kwargs: Any) -> None:
+                    self.held = False
+
+                async def start(self) -> None:
+                    self.held = True
+
+                def ensure_held(self) -> None:
+                    if not self.held:
+                        raise RuntimeError("rehearsal preflight lease was lost")
+
+                async def stop(self) -> None:
+                    self.held = False
+
+            async def owned_full_fleet(**kwargs: Any) -> dict[str, Any]:
+                if kwargs.get("force_measurement") is not True:
+                    raise RuntimeError("rehearsal full-fleet refresh was not forced")
+                healthy = bool(phase["full_fleet_healthy"])
+                full_fleet_phases.append(healthy)
+                if healthy:
+                    retry_worker._baseline_profile_preflight_monotonic_at = {
+                        worker_index: clock["value"]
+                        for worker_index in range(25)
+                    }
+                return {"proceed": healthy}
+
+            async def maintenance_noop() -> None:
+                return None
+
+            async def baseline_not_ready() -> dict[str, Any]:
+                return {"available": False}
+
+            async def checkpoint_attempt(
+                row: Mapping[str, Any],
+                *,
+                retry_round: int,
+            ) -> bool:
+                persisted_extension_attempts.append(
+                    _baseline_attempt_ledger_entry(
+                        row,
+                        retry_round=retry_round,
+                        gateway_runtime_commit_sha=current_runtime,
+                    )
+                )
+                return True
+
+            class RehearsalRunner:
+                def __init__(self, worker_index: int = 0) -> None:
+                    self.worker_index = worker_index
+
+                def with_worker_index(
+                    self,
+                    worker_index: int,
+                ) -> "RehearsalRunner":
+                    return RehearsalRunner(worker_index)
+
+            rehearsal_runner = RehearsalRunner()
 
             original_maintenance_reader = (
                 scoring_worker_module.get_scoring_maintenance_state
@@ -7962,19 +8039,117 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             original_retry_scope = (
                 scoring_worker_module._retry_runner_with_provider_cost_scope
             )
+            original_lease_acquire = (
+                scoring_worker_module.try_acquire_maintenance_lease
+            )
+            original_heartbeat = scoring_worker_module.MaintenanceLeaseHeartbeat
+            original_preflight_settings = (
+                scoring_worker_module.provider_preflight_settings
+            )
+            original_preflight_clock = (
+                scoring_worker_module._baseline_preflight_monotonic
+            )
             scoring_worker_module.get_scoring_maintenance_state = unpaused
             scoring_worker_module._retry_runner_with_provider_cost_scope = (
                 lambda runner, **_kwargs: runner
             )
+            scoring_worker_module.try_acquire_maintenance_lease = lease_acquired
+            scoring_worker_module.MaintenanceLeaseHeartbeat = (
+                RehearsalLeaseHeartbeat
+            )
+            scoring_worker_module.provider_preflight_settings = lambda: {
+                "ttl_seconds": 600.0
+            }
+            scoring_worker_module._baseline_preflight_monotonic = lambda: (
+                clock["value"]
+            )
+            retry_worker._run_owned_provider_preflight = owned_full_fleet
+            retry_worker._recover_stale_candidate_claims = maintenance_noop
+            retry_worker._alert_stuck_candidates = maintenance_noop
+            retry_worker._requeue_quarantined_candidates = maintenance_noop
+            retry_worker._candidate_scoring_start_gate = baseline_not_ready
+            retry_worker._baseline_profile_preflight_monotonic_at = {
+                worker_index: 0.0 for worker_index in range(25)
+            }
             try:
+                try:
+                    await retry_worker._run_baseline_batch_inner(
+                        runner=rehearsal_runner,
+                        retry_runner=rehearsal_runner,
+                        scorer=object(),
+                        window=retry_window,
+                        run_start=time.time(),
+                        resume_attempt_ledger=restored_attempts,
+                        attempt_checkpoint=checkpoint_attempt,
+                        provider_cost_base_scope=restored_scope[0],
+                        provider_preflight_boundary=(
+                            retry_worker._enforce_baseline_wave_preflight_freshness
+                        ),
+                    )
+                except BaselineCheckpointRecycle as exc:
+                    if (
+                        exc.pressure.get("reason")
+                        != "provider_preflight_refresh_required"
+                    ):
+                        raise
+                else:
+                    raise RuntimeError(
+                        "stale failed profile did not recycle before retry round 2"
+                    )
+                if retry_calls != [(3, 1)] or len(persisted_extension_attempts) != 1:
+                    raise RuntimeError(
+                        "preflight recycle did not preserve exactly retry round 1"
+                    )
+
+                phase["full_fleet_healthy"] = True
+                retry_worker._baseline_profile_preflight_monotonic_at = {}
+                clock["value"] = 602.0
+                pending_owner = await (
+                    retry_worker._run_lease_held_recovery_and_preflight(
+                        {"paused": False}
+                    )
+                )
+                if (
+                    pending_owner.get("proceed") is not False
+                    or pending_owner.get("reason")
+                    != "provider_preflight_full_fleet_owner_pending"
+                    or full_fleet_phases
+                ):
+                    raise RuntimeError(
+                        "retry resume bypassed its full-fleet lease owner"
+                    )
+                phase["lease_available"] = True
+                refreshed = await (
+                    retry_worker._run_lease_held_recovery_and_preflight(
+                        {"paused": False}
+                    )
+                )
+                if (
+                    refreshed.get("proceed") is not True
+                    or set(
+                        retry_worker._baseline_profile_preflight_monotonic_at
+                    )
+                    != set(range(25))
+                ):
+                    raise RuntimeError(
+                        "retry resume lacked forced full-fleet freshness"
+                    )
+                resumed_after_refresh = [
+                    *restored_attempts,
+                    *persisted_extension_attempts,
+                ]
                 rows, stats = await retry_worker._run_baseline_batch_inner(
-                    runner=object(),
-                    retry_runner=object(),
+                    runner=rehearsal_runner,
+                    retry_runner=rehearsal_runner,
                     scorer=object(),
                     window=retry_window,
                     run_start=time.time(),
-                    resume_attempt_ledger=restored_attempts,
+                    resume_attempt_ledger=resumed_after_refresh,
+                    attempt_checkpoint=checkpoint_attempt,
                     provider_cost_base_scope=restored_scope[0],
+                    provider_preflight_boundary=(
+                        retry_worker._enforce_baseline_wave_preflight_freshness
+                    ),
                 )
             finally:
                 scoring_worker_module.get_scoring_maintenance_state = (
@@ -7983,11 +8158,29 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 scoring_worker_module._retry_runner_with_provider_cost_scope = (
                     original_retry_scope
                 )
+                scoring_worker_module.try_acquire_maintenance_lease = (
+                    original_lease_acquire
+                )
+                scoring_worker_module.MaintenanceLeaseHeartbeat = (
+                    original_heartbeat
+                )
+                scoring_worker_module.provider_preflight_settings = (
+                    original_preflight_settings
+                )
+                scoring_worker_module._baseline_preflight_monotonic = (
+                    original_preflight_clock
+                )
             if (
                 retry_calls != [(3, 1), (1, 2), (2, 2), (3, 2)]
                 or any(round_number == 0 for _, round_number in retry_calls)
             ):
                 raise RuntimeError("partial retry round replayed settled attempts")
+            if (
+                full_fleet_phases != [True]
+            ):
+                raise RuntimeError(
+                    "stale-profile recycle did not bind forced fleet evidence"
+                )
             if len(rows) != 3 or stats != {
                 "retried": 6,
                 "recovered": 3,
@@ -8051,7 +8244,19 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             name: None for name in SCORING_RUNTIME_ENV_NAMES
         }
         expected_prior_hash = scoring_configuration_hash(prior_secret_values)
-        original_secret = "UNRELATED_REHEARSAL_VALUE=preserved\n"
+        original_secret = (
+            "# production-shaped shell data\n"
+            "\n"
+            "export UNRELATED_REHEARSAL_VALUE='preserve me'\n"
+            "GIT_SSH_COMMAND=ssh -i /tmp/rehearsal-key -o IdentitiesOnly=yes\n"
+            "LESSOPEN=| /usr/bin/lesspipe %s\n"
+            "SSH_CLIENT=192.0.2.10 41000 22\n"
+            "SSH_CONNECTION=192.0.2.10 41000 192.0.2.20 22\n"
+            "which_declare=declare -f\n"
+            "DUPLICATE_NON_TARGET=same\n"
+            "DUPLICATE_NON_TARGET=same\n"
+            "UNMATCHED_QUOTE_IS_DATA='preserve literally\n"
+        )
         with tempfile.TemporaryDirectory(
             prefix="leadpoet-retry-secret-update-"
         ) as backup_root:
@@ -8074,7 +8279,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             if (
                 updated["status"] != "updated"
                 or len(client.put_calls) != 1
-                or original_secret not in persisted_secret
+                or not persisted_secret.startswith(original_secret)
                 or "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2"
                 not in persisted_secret
                 or "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1"
@@ -8227,6 +8432,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "baseline_partial_retry_round_resume_exact": True,
         "baseline_retry_budget_extension_continuation_exact": True,
         "baseline_retry_budget_extension_guards_bound": True,
+        "baseline_wave_preflight_refresh_exact": True,
+        "baseline_wave_preflight_checkpoint_resume_exact": True,
         "retry_configuration_updater_verify_apply_bound": True,
         "retry_configuration_updater_cas_readback_rollback_bound": True,
         "baseline_exhausted_health_gate_contained": True,
@@ -9952,6 +10159,16 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("baseline_retry_budget_extension_guards_bound")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("baseline_wave_preflight_refresh_exact")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("baseline_wave_preflight_checkpoint_resume_exact")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

@@ -8,6 +8,7 @@ scoping), and the same-day baseline replacement guard.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import re
@@ -1846,6 +1847,495 @@ async def test_provider_preflight_pause_does_not_interrupt_active_wave(monkeypat
         completed_icps=0,
         total_icps=40,
     )
+
+
+@pytest.mark.asyncio
+async def test_baseline_owner_cannot_use_single_profile_without_lease(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_rebenchmark_enabled=True,
+        scoring_worker_index=0,
+        scoring_worker_total_workers=25,
+    )
+    worker._lease_holder_ref = "baseline-lease-holder"
+    worker._holds_maintenance_lease = False
+    worker._is_private_baseline_owner = lambda: True
+
+    async def lease_unavailable(**_kwargs):
+        return False
+
+    async def forbidden_profile_preflight(**_kwargs):
+        pytest.fail("baseline owner must not use a single-profile fallback")
+
+    async def baseline_not_ready():
+        return {"available": False}
+
+    monkeypatch.setattr(sw, "try_acquire_maintenance_lease", lease_unavailable)
+    monkeypatch.setattr(sw, "preflight_gate", forbidden_profile_preflight)
+    worker._candidate_scoring_start_gate = baseline_not_ready
+
+    result = await worker._run_lease_held_recovery_and_preflight(
+        {"paused": False, "reason": ""}
+    )
+
+    assert result == {
+        "proceed": False,
+        "reason": "provider_preflight_full_fleet_owner_pending",
+        "verdicts": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_any_worker_owner_requires_fleet_lease_until_baseline_ready(
+    monkeypatch,
+):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "any-worker-baseline"
+    worker.config = SimpleNamespace(
+        private_baseline_rebenchmark_enabled=True,
+        scoring_worker_index=7,
+        scoring_worker_total_workers=25,
+    )
+    worker._lease_holder_ref = "any-worker-lease-holder"
+    worker._holds_maintenance_lease = False
+    worker._is_private_baseline_owner = lambda: True
+    gate = {"available": False}
+    profile_calls: list[dict[str, object]] = []
+
+    async def lease_unavailable(**_kwargs):
+        return False
+
+    async def daily_gate():
+        return dict(gate)
+
+    async def profile_preflight(**kwargs):  # noqa: ANN003
+        profile_calls.append(dict(kwargs))
+        return {"proceed": True, "verdicts": []}
+
+    monkeypatch.setattr(sw, "try_acquire_maintenance_lease", lease_unavailable)
+    monkeypatch.setattr(sw, "preflight_gate", profile_preflight)
+    worker._candidate_scoring_start_gate = daily_gate
+
+    pending = await worker._run_lease_held_recovery_and_preflight(
+        {"paused": False, "reason": ""}
+    )
+    assert pending["reason"] == "provider_preflight_full_fleet_owner_pending"
+    assert profile_calls == []
+
+    gate["available"] = True
+    ready = await worker._run_lease_held_recovery_and_preflight(
+        {"paused": False, "reason": ""}
+    )
+    assert ready["proceed"] is True
+    assert [int(call["worker_index"]) for call in profile_calls] == [7]
+
+
+@pytest.mark.asyncio
+async def test_forced_owned_preflight_records_only_complete_fleet(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(scoring_worker_total_workers=9)
+    worker._baseline_profile_preflight_monotonic_at = {0: 1.0}
+    calls: list[dict[str, object]] = []
+    active = 0
+    max_active = 0
+    clock = 100.0
+    failed_profile = {"worker_index": None}
+
+    async def measured_preflight(**kwargs):  # noqa: ANN003
+        nonlocal active, max_active, clock
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        clock += 1.0
+        calls.append(dict(kwargs))
+        healthy = int(kwargs["worker_index"]) != failed_profile["worker_index"]
+        return {
+            "proceed": healthy,
+            "healthy": healthy,
+            "pause_worthy": not healthy,
+            "disabled": False,
+            "measurement_cached": False,
+            "verdicts": [],
+        }
+
+    async def no_control_write(**_kwargs):
+        return None
+
+    class Heartbeat:
+        def ensure_held(self):
+            return None
+
+    monkeypatch.setattr(sw, "preflight_gate", measured_preflight)
+    monkeypatch.setattr(sw, "apply_preflight_control_result", no_control_write)
+    monkeypatch.setattr(sw, "_baseline_preflight_monotonic", lambda: clock)
+
+    result = await worker._run_owned_provider_preflight(
+        maintenance_state={"paused": False},
+        heartbeat=Heartbeat(),
+        force_measurement=True,
+    )
+
+    assert result["proceed"] is True
+    assert [int(call["worker_index"]) for call in calls] == list(range(9))
+    assert all(call["force_measurement"] is True for call in calls)
+    assert max_active == 4
+    assert set(worker._baseline_profile_preflight_monotonic_at) == set(range(9))
+
+    failed_profile["worker_index"] = 3
+    failed = await worker._run_owned_provider_preflight(
+        maintenance_state={"paused": False},
+        heartbeat=Heartbeat(),
+        force_measurement=True,
+    )
+
+    assert failed["proceed"] is False
+    assert worker._baseline_profile_preflight_monotonic_at == {}
+
+
+@pytest.mark.asyncio
+async def test_baseline_wave_retry_backoff_cannot_cross_preflight_ttl(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(scoring_worker_total_workers=25)
+    worker._lease_holder_ref = "baseline-lease-holder"
+    worker._baseline_profile_preflight_monotonic_at = {4: 100.0, 5: 100.0}
+    monkeypatch.setattr(sw, "_baseline_preflight_monotonic", lambda: 685.0)
+    monkeypatch.setattr(
+        sw,
+        "provider_preflight_settings",
+        lambda: {"ttl_seconds": 600.0},
+    )
+
+    async def lease_unavailable(**_kwargs):
+        return False
+
+    monkeypatch.setattr(sw, "try_acquire_maintenance_lease", lease_unavailable)
+
+    with pytest.raises(sw.BaselineCheckpointRecycle) as raised:
+        await worker._enforce_baseline_wave_preflight_freshness(
+            run_start=0.0,
+            item_indexes=(4, 5),
+            retry_round=1,
+            completed_icps=3,
+            total_icps=40,
+            start_delay_seconds=15.0,
+        )
+
+    assert raised.value.pressure["reason"] == (
+        "provider_preflight_refresh_required"
+    )
+    assert raised.value.completed_icps == 3
+    assert raised.value.total_icps == 40
+
+
+@pytest.mark.asyncio
+async def test_baseline_wave_missing_profile_proof_is_never_fresh(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(scoring_worker_total_workers=25)
+    worker._lease_holder_ref = "baseline-lease-holder"
+    worker._baseline_profile_preflight_monotonic_at = {0: 100.0}
+    monkeypatch.setattr(sw, "_baseline_preflight_monotonic", lambda: 200.0)
+    monkeypatch.setattr(
+        sw,
+        "provider_preflight_settings",
+        lambda: {"ttl_seconds": 600.0},
+    )
+
+    async def lease_unavailable(**_kwargs):
+        return False
+
+    monkeypatch.setattr(sw, "try_acquire_maintenance_lease", lease_unavailable)
+
+    with pytest.raises(sw.BaselineCheckpointRecycle):
+        await worker._enforce_baseline_wave_preflight_freshness(
+            run_start=0.0,
+            item_indexes=(3,),
+            retry_round=0,
+            completed_icps=0,
+            total_icps=40,
+        )
+
+
+@pytest.mark.asyncio
+async def test_baseline_wave_stale_proof_recycles_without_inline_probe(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(scoring_worker_total_workers=25)
+    worker._lease_holder_ref = "baseline-lease-holder"
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(sw, "_baseline_preflight_monotonic", lambda: 701.0)
+    monkeypatch.setattr(
+        sw,
+        "provider_preflight_settings",
+        lambda: {"ttl_seconds": 600.0},
+    )
+
+    async def lease_acquired(**kwargs):  # noqa: ANN003
+        calls.append({"lease": dict(kwargs)})
+        return True
+
+    async def maintenance_state():
+        return {"paused": False}
+
+    async def owned_preflight(**kwargs):  # noqa: ANN003
+        calls.append({"preflight": dict(kwargs)})
+        worker._baseline_profile_preflight_monotonic_at = {
+            worker_index: 701.0 for worker_index in range(25)
+        }
+        return {"proceed": True}
+
+    class Heartbeat:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            calls.append({"heartbeat": dict(kwargs)})
+
+        async def start(self):
+            calls.append({"heartbeat_started": True})
+
+        def ensure_held(self):
+            calls.append({"heartbeat_held": True})
+
+        async def stop(self):
+            calls.append({"heartbeat_stopped": True})
+
+    monkeypatch.setattr(sw, "try_acquire_maintenance_lease", lease_acquired)
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(sw, "MaintenanceLeaseHeartbeat", Heartbeat)
+    monkeypatch.setattr(worker, "_run_owned_provider_preflight", owned_preflight)
+
+    with pytest.raises(sw.BaselineCheckpointRecycle) as raised:
+        await worker._enforce_baseline_wave_preflight_freshness(
+            run_start=0.0,
+            item_indexes=(4,),
+            retry_round=1,
+            completed_icps=3,
+            total_icps=40,
+        )
+
+    assert raised.value.pressure["reason"] == (
+        "provider_preflight_refresh_required"
+    )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_baseline_wave_stale_exact_profiles_do_not_probe_inline(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(scoring_worker_total_workers=25)
+    worker._lease_holder_ref = "baseline-lease-holder"
+    worker._baseline_profile_preflight_monotonic_at = {
+        worker_index: (100.0 if worker_index < 5 else 700.0)
+        for worker_index in range(25)
+    }
+    active = 0
+    max_active = 0
+    checked: list[dict[str, object]] = []
+    monkeypatch.setattr(sw, "_baseline_preflight_monotonic", lambda: 701.0)
+    monkeypatch.setattr(
+        sw,
+        "provider_preflight_settings",
+        lambda: {"ttl_seconds": 600.0},
+    )
+
+    async def lease_acquired(**_kwargs):
+        return True
+
+    async def maintenance_state():
+        return {"paused": False}
+
+    async def preflight(**kwargs):  # noqa: ANN003
+        nonlocal active, max_active
+        checked.append(dict(kwargs))
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return {
+            "proceed": True,
+            "healthy": True,
+            "pause_worthy": False,
+            "disabled": False,
+            "measurement_cached": False,
+            "verdicts": [],
+        }
+
+    async def forbidden_full_fleet(**_kwargs):
+        pytest.fail("healthy exact-profile refresh must not remeasure full fleet")
+
+    class Heartbeat:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        def ensure_held(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(sw, "try_acquire_maintenance_lease", lease_acquired)
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(sw, "preflight_gate", preflight)
+    monkeypatch.setattr(sw, "MaintenanceLeaseHeartbeat", Heartbeat)
+    monkeypatch.setattr(worker, "_run_owned_provider_preflight", forbidden_full_fleet)
+
+    with pytest.raises(sw.BaselineCheckpointRecycle) as raised:
+        await worker._enforce_baseline_wave_preflight_freshness(
+            run_start=0.0,
+            item_indexes=(1, 2, 3, 4, 5),
+            retry_round=0,
+            completed_icps=5,
+            total_icps=40,
+        )
+
+    assert raised.value.pressure["provider_preflight_profile_count"] == 5
+    assert checked == []
+    assert max_active == 0
+
+
+@pytest.mark.asyncio
+async def test_baseline_wave_stale_profile_does_not_change_global_pause(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(scoring_worker_total_workers=25)
+    worker._lease_holder_ref = "baseline-lease-holder"
+    worker._baseline_profile_preflight_monotonic_at = {4: 100.0}
+    state = {"paused": False, "reason": ""}
+    full_fleet_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(sw, "_baseline_preflight_monotonic", lambda: 701.0)
+    monkeypatch.setattr(
+        sw,
+        "provider_preflight_settings",
+        lambda: {"ttl_seconds": 600.0},
+    )
+
+    async def lease_acquired(**_kwargs):
+        return True
+
+    async def maintenance_state():
+        return dict(state)
+
+    async def failed_profile(**_kwargs):
+        return {
+            "proceed": False,
+            "healthy": False,
+            "pause_worthy": False,
+            "disabled": False,
+            "measurement_cached": False,
+            "verdicts": [
+                {
+                    "provider": "exa",
+                    "healthy": False,
+                    "status": "transport_failure",
+                }
+            ],
+        }
+
+    async def failed_full_fleet(**kwargs):  # noqa: ANN003
+        full_fleet_calls.append(dict(kwargs))
+        state.update(
+            {
+                "paused": True,
+                "reason": sw.PREFLIGHT_REASON_PREFIX + "exa=transport_failure",
+            }
+        )
+        return {"proceed": False}
+
+    class Heartbeat:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        def ensure_held(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(sw, "try_acquire_maintenance_lease", lease_acquired)
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(sw, "preflight_gate", failed_profile)
+    monkeypatch.setattr(sw, "MaintenanceLeaseHeartbeat", Heartbeat)
+    monkeypatch.setattr(worker, "_run_owned_provider_preflight", failed_full_fleet)
+
+    with pytest.raises(sw.BaselineCheckpointRecycle) as raised:
+        await worker._enforce_baseline_wave_preflight_freshness(
+            run_start=0.0,
+            item_indexes=(4,),
+            retry_round=1,
+            completed_icps=3,
+            total_icps=40,
+        )
+
+    assert raised.value.pressure["reason"] == (
+        "provider_preflight_refresh_required"
+    )
+    assert full_fleet_calls == []
+    assert state["paused"] is False
+
+
+@pytest.mark.asyncio
+async def test_baseline_wave_preflight_recycle_precedes_attempt(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=1,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=0,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[{"icp_ref": "icp-a", "icp_hash": "hash-a"}]
+    )
+    boundaries: list[dict[str, object]] = []
+
+    async def maintenance_state():
+        return {"paused": False}
+
+    async def preflight_boundary(**kwargs):  # noqa: ANN003
+        boundaries.append(dict(kwargs))
+        raise sw.BaselineCheckpointRecycle(
+            pressure={"reason": "provider_preflight_refresh_owner_pending"},
+            completed_icps=int(kwargs["completed_icps"]),
+            total_icps=int(kwargs["total_icps"]),
+        )
+
+    async def forbidden_run(*_args, **_kwargs):
+        pytest.fail("model attempt must not start after wave preflight fails")
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        forbidden_run,
+    )
+
+    with pytest.raises(sw.BaselineCheckpointRecycle):
+        await worker._run_baseline_batch_inner(
+            runner=object(),
+            retry_runner=object(),
+            scorer=object(),
+            window=window,
+            run_start=0.0,
+            provider_preflight_boundary=preflight_boundary,
+        )
+
+    assert boundaries == [
+        {
+            "run_start": 0.0,
+            "item_indexes": (1,),
+            "retry_round": 0,
+            "completed_icps": 0,
+            "total_icps": 1,
+        }
+    ]
 
 
 @pytest.mark.asyncio

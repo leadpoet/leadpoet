@@ -461,6 +461,7 @@ PROTECTED_SYMBOLS = {
         "settle_chain_realized_epoch_v1",
         "ensure_chain_realized_settlements_v1",
         "_load_allocation_parent_graphs_v2",
+        "execute_provider_preflight_v2",
     ),
     "gateway/research_lab/promotion.py": (
         "_promotion_reason_recorded",
@@ -477,12 +478,30 @@ PROTECTED_SYMBOLS = {
         "_candidate_icp_score",
     ),
     "gateway/research_lab/scoring_worker.py": (
+        "_baseline_preflight_monotonic",
+        "_baseline_worker_index_for_attempt",
+        "_baseline_runner_for_attempt",
         "_compatible_baseline_retry_extension",
         "_emit_private_baseline_retry_extension",
         "_load_baseline_scoring_progress",
         "_load_candidate_source_diff",
+        "ResearchLabGatewayScoringWorker._is_private_baseline_owner",
+        "ResearchLabGatewayScoringWorker._run_lease_held_recovery_and_preflight",
+        "ResearchLabGatewayScoringWorker._run_owned_provider_preflight",
+        "ResearchLabGatewayScoringWorker._enforce_baseline_wave_preflight_freshness",
+        "ResearchLabGatewayScoringWorker._run_baseline_batch",
+        "ResearchLabGatewayScoringWorker._run_baseline_batch_inner",
+    ),
+    "gateway/research_lab/provider_preflight.py": (
+        "ProviderPreflight.check",
+        "_cached_attested_preflight",
+        "preflight_gate",
     ),
     "gateway/tee/update_gateway_rebenchmark_retry_secret.py": (
+        "_json_object_without_duplicates",
+        "_parse_shell_environment",
+        "_parse_environment",
+        "_render_environment",
         "update_gateway_rebenchmark_retry_secret",
     ),
     "leadpoet_canonical/weight_computation.py": (
@@ -756,6 +775,7 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/tee/scoring_executor_v2.py": (
         "ScoringExecutorV2",
+        "ScoringExecutorV2._execute_provider_preflight",
     ),
 }
 

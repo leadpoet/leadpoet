@@ -271,7 +271,12 @@ class ProviderPreflight:
         """Return {"healthy": bool, "verdicts": [...], "pause_worthy": bool}."""
         effective = dict(settings or provider_preflight_settings())
         if not bool(effective.get("enabled")):
-            return {"healthy": True, "verdicts": [], "pause_worthy": False, "disabled": True}
+            return {
+                "healthy": True,
+                "verdicts": [],
+                "pause_worthy": False,
+                "disabled": True,
+            }
         ttl = max(60.0, float(effective["ttl_seconds"]))
         timeout = max(2.0, float(effective["timeout_seconds"]))
         now = time.time()
@@ -331,6 +336,7 @@ async def _cached_attested_preflight(
     worker_index: int,
     settings: Mapping[str, Any],
     authority_check: Callable[..., Any],
+    force_measurement: bool = False,
 ) -> dict[str, Any]:
     """Reuse one verified measured result for the configured probe TTL."""
 
@@ -342,7 +348,11 @@ async def _cached_attested_preflight(
     now = time.monotonic()
     with _attested_preflight_cache_lock:
         cached = _attested_preflight_cache.get(cache_key)
-        if cached is not None and now < float(cached["expires_at"]):
+        if (
+            not force_measurement
+            and cached is not None
+            and now < float(cached["expires_at"])
+        ):
             cached_result = copy.deepcopy(cached["result"])
             cached_result["_measurement_cached"] = True
             return cached_result
@@ -358,7 +368,7 @@ async def _cached_attested_preflight(
         scope_key=str(scope_key),
         worker_index=int(worker_index),
         settings=dict(settings),
-        force=False,
+        force=bool(force_measurement),
         provider_credential_profile=PROVIDER_PREFLIGHT_PROFILE,
     )
     if hasattr(result, "__await__"):
@@ -517,6 +527,7 @@ async def preflight_gate(
     prefetched_state: Any = None,
     may_change_pause_state: bool = True,
     measurement_scope_key: str | None = None,
+    force_measurement: bool = False,
 ) -> dict[str, Any]:
     """Async preflight gate for one maintenance scope (scoring/autoresearch).
 
@@ -529,7 +540,7 @@ async def preflight_gate(
     if authority_check is None and legacy_v1_enabled():
         result = await asyncio.to_thread(
             shared_preflight().check,
-            force=False,
+            force=bool(force_measurement),
             settings=provider_preflight_settings(),
         )
     else:
@@ -548,6 +559,7 @@ async def preflight_gate(
             worker_index=int(worker_index),
             settings=provider_preflight_settings(),
             authority_check=authority_check,
+            force_measurement=force_measurement,
         )
     if not isinstance(result, Mapping):
         raise RuntimeError("attested provider preflight result is invalid")
@@ -559,6 +571,7 @@ async def preflight_gate(
             "healthy": True,
             "pause_worthy": False,
             "disabled": True,
+            "measurement_cached": False,
         }
     verdicts = result.get("verdicts") or []
     normalized_result = {

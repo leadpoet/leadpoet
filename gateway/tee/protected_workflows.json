@@ -877,6 +877,66 @@
       "symbol": "validate_source_add_registration_diff"
     },
     {
+      "ast_sha256": "sha256:ba65bbfb019c0b78a756fd28f1d8e89e90556642d6583e3030ae245ab7118869",
+      "path": "gateway/research_lab/provider_preflight.py",
+      "symbol": "ProviderPreflight.check"
+    },
+    {
+      "ast_sha256": "sha256:cff6d74cd0999b0947ebf16711140fa0526d7643b961863f1b4e0d09f2a799c0",
+      "path": "gateway/research_lab/provider_preflight.py",
+      "symbol": "_cached_attested_preflight"
+    },
+    {
+      "ast_sha256": "sha256:5dc79583daa68f23b24222756cd8cfad9881a6f6d6a3d34b6c318097f6bd3261",
+      "path": "gateway/research_lab/provider_preflight.py",
+      "symbol": "preflight_gate"
+    },
+    {
+      "ast_sha256": "sha256:f056ac4b3da93813f2ce18fefc89e5ae4da5cd42056c62d771c6027d7361e504",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "ResearchLabGatewayScoringWorker._enforce_baseline_wave_preflight_freshness"
+    },
+    {
+      "ast_sha256": "sha256:07ef1c9424151020acfaac50b564800c200754159fd5c013691c482b716b8c6b",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "ResearchLabGatewayScoringWorker._is_private_baseline_owner"
+    },
+    {
+      "ast_sha256": "sha256:c00406cd0129fbcaf62caa90f8d555d2a5c0bca278e32c001eb41be50368335b",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "ResearchLabGatewayScoringWorker._run_baseline_batch"
+    },
+    {
+      "ast_sha256": "sha256:0995ba79221924ccdb31b997b9c1f6d40c9d77487fd53f214cf6cfc29b145e2e",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "ResearchLabGatewayScoringWorker._run_baseline_batch_inner"
+    },
+    {
+      "ast_sha256": "sha256:5e7dd66a5a1416277891114a1793be369d4bf0cb12584e25c564803d21506723",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "ResearchLabGatewayScoringWorker._run_lease_held_recovery_and_preflight"
+    },
+    {
+      "ast_sha256": "sha256:23759d1a02b551c357022187264fad48d774b9164d038ca7d4fa73a4cd79bb48",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "ResearchLabGatewayScoringWorker._run_owned_provider_preflight"
+    },
+    {
+      "ast_sha256": "sha256:176e37cb8da35e73b9a367c7e058816ab42064e399a00ccabfec52094342d4aa",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_baseline_preflight_monotonic"
+    },
+    {
+      "ast_sha256": "sha256:e720a6c841ade66a0bac0bc454801950e6db9e425cd6ca6372df7adc429d354f",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_baseline_runner_for_attempt"
+    },
+    {
+      "ast_sha256": "sha256:e37d0b5c790750466ca3b487e220667bfc7d70b1d1db5a2fa175e4a0f11219ca",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_baseline_worker_index_for_attempt"
+    },
+    {
       "ast_sha256": "sha256:b449015b5412ce9590a2ccb9bd1265e58716339ac3325fd95064305f2d248ee2",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "_compatible_baseline_retry_extension"
@@ -1005,6 +1065,11 @@
       "ast_sha256": "sha256:cbc90464532e76b03d1e370f773344928b73db0b87b604000053d5aa77470599",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "ensure_chain_realized_settlements_v1"
+    },
+    {
+      "ast_sha256": "sha256:dfce982d4649f11d1444801fc06f0dbd6ff5f9b0417aae43ba7709e18208c912",
+      "path": "gateway/research_lab/v2_authority.py",
+      "symbol": "execute_provider_preflight_v2"
     },
     {
       "ast_sha256": "sha256:08da5c2bce0a0a2481299ff01d87466c0e351d7ca435f374244f73b853e49a58",
@@ -1672,6 +1737,11 @@
       "symbol": "ScoringExecutorV2"
     },
     {
+      "ast_sha256": "sha256:187a79ce8cc0f04f8a072e20b489755e74e4eb1de54ba937a570db02370a68b8",
+      "path": "gateway/tee/scoring_executor_v2.py",
+      "symbol": "ScoringExecutorV2._execute_provider_preflight"
+    },
+    {
       "ast_sha256": "sha256:30846ada93a120d38a3d2aee8dfbcdcc2e71241c24894b7b2cf1fa1b395070f7",
       "path": "gateway/tee/source_add_runtime_v2.py",
       "symbol": "build_source_add_probe_job_envelope_v2"
@@ -1750,6 +1820,26 @@
       "ast_sha256": "sha256:d7fbf6bd23e18cc7b5ff11b9d2d84bd0b157b6af65edf86b71761da9e743a880",
       "path": "gateway/tee/tee_service.py",
       "symbol": "start_v2_tls_service"
+    },
+    {
+      "ast_sha256": "sha256:3fb69b53608890f5ccfe1791a72447118a8193dbf3708701ab0b2840e8d34e22",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_json_object_without_duplicates"
+    },
+    {
+      "ast_sha256": "sha256:754feaee3d4c470aa8310357ac5e82cab87aa195c96c7da7beecac84e38d8bea",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_parse_environment"
+    },
+    {
+      "ast_sha256": "sha256:1c4e81131331e539dcce605b3a82a67cadb19cae729652fc593a0f8a203f473e",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_parse_shell_environment"
+    },
+    {
+      "ast_sha256": "sha256:8352cc3946b967db7551e201bcca127d4c40d89de50afe09d5beefef9a7d8b23",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_render_environment"
     },
     {
       "ast_sha256": "sha256:2b1a8074a1b313094036519d84707890273df78569b69ec805a8e07f7ed17921",
@@ -2792,7 +2882,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:4c268b0258f84f2132aed7283ccc90cf6739aa87510a4bb8eff14fe56eed086d",
+  "manifest_hash": "sha256:8246b331bab689c0522f19ca774fc4b8c1199c5c1e8a821f25408a272945044c",
   "protected_source_commit": "79c8be65b7767429afa29582c53494aaba6d8693",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

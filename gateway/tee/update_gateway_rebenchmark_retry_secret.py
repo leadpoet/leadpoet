@@ -44,7 +44,23 @@ class GatewayRebenchmarkRetryUpdateError(RuntimeError):
     """The retry configuration could not be changed without losing state."""
 
 
+def _json_object_without_duplicates(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    decoded: dict[str, Any] = {}
+    for raw_name, value in pairs:
+        name = str(raw_name)
+        if name in decoded:
+            raise GatewayRebenchmarkRetryUpdateError(
+                "gateway secret JSON contains a duplicate name"
+            )
+        decoded[name] = value
+    return decoded
+
+
 def _parse_shell_environment(raw: str) -> dict[str, str]:
+    """Parse restart-hydrated KEY=VALUE records as data, never shell code."""
+
     parsed: dict[str, str] = {}
     for raw_line in raw.replace("\x00", "\n").splitlines():
         line = raw_line.strip()
@@ -54,18 +70,22 @@ def _parse_shell_environment(raw: str) -> dict[str, str]:
             line = line[len("export ") :].strip()
         try:
             parts = shlex.split(line, posix=True)
-        except ValueError as exc:
-            raise GatewayRebenchmarkRetryUpdateError(
-                "gateway secret environment is malformed"
-            ) from exc
-        if len(parts) != 1 or "=" not in parts[0]:
+        except ValueError:
+            parts = [line]
+        assignment = parts[0] if len(parts) == 1 else line
+        if "=" not in assignment:
             raise GatewayRebenchmarkRetryUpdateError(
                 "gateway secret environment is malformed"
             )
-        name, value = parts[0].split("=", 1)
+        name, value = assignment.split("=", 1)
+        name = name.strip()
         if not _ENVIRONMENT_NAME_RE.fullmatch(name):
             raise GatewayRebenchmarkRetryUpdateError(
                 "gateway secret environment contains an invalid name"
+            )
+        if name in _TARGET_NAMES and name in parsed:
+            raise GatewayRebenchmarkRetryUpdateError(
+                "gateway secret environment contains a duplicate retry setting"
             )
         parsed[name] = value
     return parsed
@@ -73,7 +93,10 @@ def _parse_shell_environment(raw: str) -> dict[str, str]:
 
 def _parse_environment(raw: str) -> tuple[dict[str, str], str]:
     try:
-        decoded = json.loads(raw)
+        decoded = json.loads(
+            raw,
+            object_pairs_hook=_json_object_without_duplicates,
+        )
     except json.JSONDecodeError:
         return _parse_shell_environment(raw), "shell"
     if not isinstance(decoded, Mapping):
@@ -90,23 +113,36 @@ def _render_environment(
     values: Mapping[str, str],
 ) -> str:
     if document_format == "json":
-        decoded = json.loads(raw)
+        decoded = json.loads(
+            raw,
+            object_pairs_hook=_json_object_without_duplicates,
+        )
         decoded.update(values)
         return json.dumps(decoded, sort_keys=True, separators=(",", ":"))
 
-    kept_lines = []
-    for raw_line in raw.splitlines():
+    kept_records = []
+    records = re.split(r"(\r\n|\n|\r|\x00)", raw)
+    for index in range(0, len(records), 2):
+        raw_line = records[index]
+        separator = records[index + 1] if index + 1 < len(records) else ""
         candidate = raw_line.strip()
         if candidate.startswith("export "):
             candidate = candidate[len("export ") :].strip()
-        name = candidate.split("=", 1)[0] if "=" in candidate else ""
+        name = (
+            candidate.split("=", 1)[0].strip()
+            if "=" in candidate
+            else ""
+        )
         if name not in _TARGET_NAMES:
-            kept_lines.append(raw_line)
-    kept_lines.extend(
+            kept_records.append(raw_line + separator)
+    rendered = "".join(kept_records)
+    if rendered and not rendered.endswith(("\n", "\r", "\x00")):
+        rendered += "\n"
+    rendered += "\n".join(
         "export %s=%s" % (name, shlex.quote(value))
         for name, value in sorted(values.items())
     )
-    return "\n".join(kept_lines).rstrip() + "\n"
+    return rendered + "\n"
 
 
 def _secret_string(response: Mapping[str, Any]) -> str:

@@ -663,6 +663,41 @@ def test_attested_preflight_reports_fresh_then_cached_measurement():
     assert len(calls) == 1
 
 
+def test_attested_preflight_force_measurement_bypasses_both_caches():
+    calls = []
+
+    def authority(**kwargs):
+        calls.append(kwargs)
+        return {"healthy": True, "pause_worthy": False, "verdicts": []}
+
+    settings = {
+        "enabled": True,
+        "ttl_seconds": 600.0,
+        "timeout_seconds": 12.0,
+        "failure_streak_threshold": 3,
+    }
+    asyncio.run(
+        pp._cached_attested_preflight(
+            scope_key="scoring:forced-worker-profile:0",
+            worker_index=0,
+            settings=settings,
+            authority_check=authority,
+        )
+    )
+    forced = asyncio.run(
+        pp._cached_attested_preflight(
+            scope_key="scoring:forced-worker-profile:0",
+            worker_index=0,
+            settings=settings,
+            authority_check=authority,
+            force_measurement=True,
+        )
+    )
+
+    assert forced["_measurement_cached"] is False
+    assert [call["force"] for call in calls] == [False, True]
+
+
 def test_prefetched_non_preflight_state_dedups_the_control_read(monkeypatch):
     # The ordinary healthy path must not add another control read. Only a
     # preflight-owned pause needs a fresh ownership check before auto-resume.

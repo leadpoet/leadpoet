@@ -19,7 +19,7 @@ class _Reader:
 
     def read(self, **kwargs):
         self.calls.append(dict(kwargs))
-        return list(self.rows_by_policy[kwargs["policy_id"]])
+        return list(self.rows_by_policy.get(kwargs["policy_id"], []))
 
 
 class _Chain:
@@ -141,12 +141,15 @@ def test_observation_uses_latest_finalized_primary_identity(monkeypatch):
     assert observed == _observation()
     assert chain.calls[0]["validator_hotkey"] == "validator-hotkey"
     assert reader.calls[0]["policy_id"] == (
-        "latest_finalized_allocation_authority_summaries"
+        "latest_compact_finalized_authority_summaries"
     )
     assert reader.calls[1]["policy_id"] == (
+        "latest_finalized_allocation_authority_summaries"
+    )
+    assert reader.calls[2]["policy_id"] == (
         "finalized_allocation_authority_by_bundle_hash"
     )
-    assert reader.calls[1]["parameters"] == {
+    assert reader.calls[2]["parameters"] == {
         "netuid": 71,
         "bundle_hash": HASH_B,
     }
@@ -322,7 +325,10 @@ def test_settlement_rereads_exact_vector_and_rejects_host_substitution(
             context=_context(graphs=graphs),
         )
 
-    filters = reader.calls[0]["parameters"]
+    assert reader.calls[0]["policy_id"] == (
+        "compact_finalized_authority_cutover"
+    )
+    filters = reader.calls[1]["parameters"]
     assert filters["source_epoch_id"] == 100
     assert filters["validator_hotkey"] == "validator-hotkey"
     assert filters["finalized_block"] == 1_345
@@ -490,6 +496,14 @@ def test_unattributed_settlement_rejects_existing_finalized_authority(
         "validate_receipt_graph",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        authority,
+        "select_chain_realized_bundle_candidate_v1",
+        lambda _rows, **_kwargs: {
+            "bundle_hash": HASH_B,
+            "finalization_receipt_hash": HASH_C,
+        },
+    )
 
     with pytest.raises(
         authority.CoordinatorChainRealizedSettlementV1Error,
@@ -516,3 +530,234 @@ def test_unattributed_settlement_rejects_existing_finalized_authority(
                 )
             ),
         )
+
+
+def test_post_cutover_settlement_uses_only_exact_compact_authority(
+    monkeypatch,
+):
+    observation = _observation()
+    observation_receipt = {
+        "receipt_hash": HASH_A,
+        "role": "gateway_coordinator",
+        "purpose": authority.CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+        "status": "succeeded",
+        "epoch_id": 101,
+        "output_root": sha256_json(observation),
+    }
+    finalization_receipt = {"receipt_hash": HASH_C}
+    candidate = {
+        "bundle_hash": HASH_B,
+        "finalization_receipt_hash": HASH_C,
+        "netuid": 71,
+        "epoch_id": 100,
+        "validator_hotkey": "validator-hotkey",
+        "finalized_block": 1_345,
+        "finalized_block_hash": "4" * 64,
+    }
+    verified = dict(candidate)
+    package = {
+        "settlement_doc": {"epoch_id": 101},
+        "settlement_hash": "sha256:" + "d" * 64,
+        "credits": [],
+    }
+    compact_row = {"bundle_hash": HASH_B, "compact": True}
+    reader = _Reader(
+        {
+            "compact_finalized_authority_cutover": [{"epoch_id": 100}],
+            "compact_finalized_authority_by_identity": [compact_row],
+        }
+    )
+    source = authority.CoordinatorChainRealizedSettlementV1(
+        reader=reader,
+        chain_source=_Chain(_chain_state()),
+        expected_lineage_id=HASH_A,
+        expected_chain="wss://chain.example:443",
+        boot_verifier=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        authority,
+        "select_compact_chain_realized_bundle_candidate_v2",
+        lambda rows, **_kwargs: candidate if rows == [compact_row] else None,
+    )
+    monkeypatch.setattr(
+        authority.CoordinatorChainRealizedSettlementV1,
+        "_verify_compact_authority",
+        lambda _self, row: (
+            (candidate, verified) if row == compact_row else (None, None)
+        ),
+    )
+    monkeypatch.setattr(
+        authority,
+        "build_compact_chain_realized_settlement_package_v2",
+        lambda **kwargs: (
+            package
+            if kwargs == {
+                "observation": observation,
+                "authority": candidate,
+                "verified": verified,
+            }
+            else None
+        ),
+    )
+
+    result = source.settle(
+        payload={
+            "schema_version": (
+                authority.CHAIN_REALIZED_SETTLEMENT_REQUEST_SCHEMA_VERSION_V1
+            ),
+            "netuid": 71,
+            "epoch_id": 101,
+            "observation": observation,
+            "observation_receipt_hash": HASH_A,
+            "authority_mode": "finalized_bundle",
+            "bundle_hash": HASH_B,
+        },
+        context=_context(
+            graphs=(
+                {
+                    "root_receipt_hash": HASH_A,
+                    "receipts": [observation_receipt],
+                },
+                {
+                    "root_receipt_hash": HASH_C,
+                    "receipts": [finalization_receipt],
+                },
+            )
+        ),
+    )
+
+    assert result == package
+    assert [call["policy_id"] for call in reader.calls] == [
+        "compact_finalized_authority_cutover",
+        "compact_finalized_authority_by_identity",
+    ]
+
+
+def test_compact_authority_verifier_uses_exact_binding_endpoint(monkeypatch):
+    observed = {}
+    preliminary = {"authority_doc": {"authority": True}}
+    verified = {"bundle_hash": HASH_B}
+    source = authority.CoordinatorChainRealizedSettlementV1(
+        reader=_Reader({}),
+        chain_source=_Chain(_chain_state()),
+        expected_lineage_id=HASH_A,
+        expected_chain="wss://entrypoint-finney.opentensor.ai:443",
+        boot_verifier=lambda *_args, **_kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        authority,
+        "_preliminary_compact_finalized_bundle_authority_v2",
+        lambda row: preliminary if row == {"row": True} else None,
+    )
+
+    def verify(document, **kwargs):
+        observed["document"] = document
+        observed.update(kwargs)
+        return verified
+
+    monkeypatch.setattr(
+        authority,
+        "verify_compact_published_weight_authority_v2",
+        verify,
+    )
+
+    assert source._verify_compact_authority({"row": True}) == (
+        preliminary,
+        verified,
+    )
+    assert observed["document"] == preliminary["authority_doc"]
+    assert observed["expected_lineage_id"] == HASH_A
+    assert observed["expected_chain"] == (
+        "wss://entrypoint-finney.opentensor.ai:443"
+    )
+    assert observed["chain_signing_profile"] is None
+    assert callable(observed["boot_verifier"])
+
+
+@pytest.mark.parametrize("authority_mode", ["unattributed", "finalized_bundle"])
+def test_post_cutover_missing_compact_authority_never_falls_back_to_legacy(
+    monkeypatch,
+    authority_mode,
+):
+    observation = _observation()
+    observation_receipt = {
+        "receipt_hash": HASH_A,
+        "role": "gateway_coordinator",
+        "purpose": authority.CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+        "status": "succeeded",
+        "epoch_id": 101,
+        "output_root": sha256_json(observation),
+    }
+    reader = _Reader(
+        {
+            "compact_finalized_authority_cutover": [{"epoch_id": 100}],
+            "compact_finalized_authority_by_identity": [],
+            "finalized_authority_by_chain_vector": [
+                {"bundle_hash": HASH_B, "legacy": True}
+            ],
+        }
+    )
+    source = authority.CoordinatorChainRealizedSettlementV1(
+        reader=reader,
+        chain_source=_Chain(_chain_state()),
+        expected_lineage_id=HASH_A,
+        expected_chain="wss://chain.example:443",
+        boot_verifier=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+
+    payload = {
+        "schema_version": (
+            authority.CHAIN_REALIZED_SETTLEMENT_REQUEST_SCHEMA_VERSION_V1
+        ),
+        "netuid": 71,
+        "epoch_id": 101,
+        "observation": observation,
+        "observation_receipt_hash": HASH_A,
+        "authority_mode": authority_mode,
+        "bundle_hash": None,
+    }
+    if authority_mode == "unattributed":
+        result = source.settle(
+            payload=payload,
+            context=_context(
+                graphs=(
+                    {
+                        "root_receipt_hash": HASH_A,
+                        "receipts": [observation_receipt],
+                    },
+                )
+            ),
+        )
+        assert result["credits"] == []
+    else:
+        with pytest.raises(
+            authority.CoordinatorChainRealizedSettlementV1Error,
+            match="no finalized canonical bundle",
+        ):
+            source.settle(
+                payload=payload,
+                context=_context(
+                    graphs=(
+                        {
+                            "root_receipt_hash": HASH_A,
+                            "receipts": [observation_receipt],
+                        },
+                    )
+                ),
+            )
+
+    assert [call["policy_id"] for call in reader.calls] == [
+        "compact_finalized_authority_cutover",
+        "compact_finalized_authority_by_identity",
+    ]

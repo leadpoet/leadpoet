@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Mapping, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Set
 
 from gateway.research_lab.champion_settlement_v2 import (
     CHAIN_REALIZED_SETTLEMENT_REQUEST_SCHEMA_VERSION_V1,
@@ -12,9 +12,12 @@ from gateway.research_lab.champion_settlement_v2 import (
     CHAIN_WEIGHT_OBSERVATION_RECEIPT_PURPOSE_V1,
     CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1,
     ChampionSettlementV2Error,
+    _preliminary_compact_finalized_bundle_authority_v2,
     _preliminary_finalized_bundle_authority_v1,
+    build_compact_chain_realized_settlement_package_v2,
     build_chain_realized_settlement_package_v1,
     build_unattributed_chain_realized_settlement_package_v2,
+    select_compact_chain_realized_bundle_candidate_v2,
     select_chain_realized_bundle_candidate_v1,
     validate_chain_weight_observation_v1,
     validate_finalized_allocation_authorities_v2,
@@ -23,6 +26,9 @@ from gateway.tee.coordinator_chain_source_v2 import CoordinatorChainSourceV2
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.supabase_source_v2 import SupabaseSourceReaderV2
 from leadpoet_canonical.attested_v2 import sha256_json, validate_receipt_graph
+from leadpoet_canonical.compact_auditor_authority_v2 import (
+    verify_compact_published_weight_authority_v2,
+)
 
 
 OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1 = "observe_chain_realized_weights_v1"
@@ -99,6 +105,63 @@ def _finalized_authority_summary_v1(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_finalized_authority_summary_v2(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    required = {
+        "bundle_hash",
+        "compact_submission_hash",
+        "netuid",
+        "epoch_id",
+        "validator_hotkey",
+        "authority_hash",
+        "lineage_id",
+        "finalization_receipt_hash",
+    }
+    if not isinstance(row, Mapping) or set(row) != required:
+        raise CoordinatorChainRealizedSettlementV1Error(
+            "compact finalized authority summary fields are invalid"
+        )
+    try:
+        netuid = int(row["netuid"])
+        epoch_id = int(row["epoch_id"])
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorChainRealizedSettlementV1Error(
+            "compact finalized authority summary scope is invalid"
+        ) from exc
+    hashes = {
+        field: str(row.get(field) or "").lower()
+        for field in (
+            "bundle_hash",
+            "compact_submission_hash",
+            "authority_hash",
+            "lineage_id",
+            "finalization_receipt_hash",
+        )
+    }
+    validator_hotkey = str(row.get("validator_hotkey") or "")
+    if (
+        isinstance(row["netuid"], bool)
+        or isinstance(row["epoch_id"], bool)
+        or netuid <= 0
+        or epoch_id < 0
+        or not validator_hotkey
+        or any(
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+            for value in hashes.values()
+        )
+    ):
+        raise CoordinatorChainRealizedSettlementV1Error(
+            "compact finalized authority summary is invalid"
+        )
+    return {
+        **hashes,
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "validator_hotkey": validator_hotkey,
+    }
+
+
 def _receipt_by_root(
     graphs: Sequence[Mapping[str, Any]],
     *,
@@ -127,9 +190,44 @@ class CoordinatorChainRealizedSettlementV1:
         *,
         reader: SupabaseSourceReaderV2,
         chain_source: CoordinatorChainSourceV2,
+        expected_lineage_id: Optional[str] = None,
+        expected_chain: Optional[str] = None,
+        boot_verifier: Optional[Callable[..., Any]] = None,
     ) -> None:
         self._reader = reader
         self._chain_source = chain_source
+        self._expected_lineage_id = str(expected_lineage_id or "")
+        self._expected_chain = str(expected_chain or "")
+        self._boot_verifier = boot_verifier
+
+    def _verify_compact_authority(
+        self, row: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if (
+            not self._expected_lineage_id
+            or not self._expected_chain
+            or self._boot_verifier is None
+        ):
+            raise CoordinatorChainRealizedSettlementV1Error(
+                "compact chain settlement verifier is unavailable"
+            )
+        try:
+            preliminary = _preliminary_compact_finalized_bundle_authority_v2(
+                row
+            )
+            verified = verify_compact_published_weight_authority_v2(
+                preliminary["authority_doc"],
+                identity_cache=None,
+                chain_signing_profile=None,
+                expected_lineage_id=self._expected_lineage_id,
+                expected_chain=self._expected_chain,
+                boot_verifier=self._boot_verifier,
+            )
+        except Exception as exc:
+            raise CoordinatorChainRealizedSettlementV1Error(
+                "compact chain settlement authority verification failed"
+            ) from exc
+        return preliminary, verified
 
     def observe(
         self,
@@ -142,62 +240,120 @@ class CoordinatorChainRealizedSettlementV1:
             context=context,
             schema_version=CHAIN_WEIGHT_OBSERVATION_REQUEST_SCHEMA_VERSION_V1,
         )
-        summary_rows = self._read(
-            "latest_finalized_allocation_authority_summaries",
+        compact_summary_rows = self._read(
+            "latest_compact_finalized_authority_summaries",
             {"netuid": netuid},
             context,
         )
-        summaries = [
-            _finalized_authority_summary_v1(row) for row in summary_rows
-        ]
-        if not summaries:
-            raise CoordinatorChainRealizedSettlementV1Error(
-                "no finalized canonical bundle identifies the primary validator"
-            )
-        latest_block = max(int(item["finalized_block"]) for item in summaries)
-        latest = [
-            item
-            for item in summaries
-            if int(item["finalized_block"]) == latest_block
-        ]
-        latest_hotkeys = {
-            str(item["validator_hotkey"])
-            for item in latest
-        }
-        if len(latest_hotkeys) != 1:
-            raise CoordinatorChainRealizedSettlementV1Error(
-                "primary validator identity is ambiguous"
-            )
-        selected_summary = min(latest, key=lambda item: item["bundle_hash"])
-        authority_rows = self._read(
-            "finalized_allocation_authority_by_bundle_hash",
-            {
-                "netuid": netuid,
-                "bundle_hash": selected_summary["bundle_hash"],
-            },
-            context,
-        )
-        if len(authority_rows) != 1:
-            raise CoordinatorChainRealizedSettlementV1Error(
-                "latest finalized allocation authority is unavailable"
-            )
-        authority = _preliminary_finalized_bundle_authority_v1(
-            authority_rows[0]
-        )
-        for field in (
-            "bundle_hash",
-            "netuid",
-            "epoch_id",
-            "validator_hotkey",
-            "finalized_block",
-            "finalized_block_hash",
-            "finalization_receipt_hash",
-        ):
-            if authority.get(field) != selected_summary[field]:
+        if compact_summary_rows:
+            summaries = [
+                _compact_finalized_authority_summary_v2(row)
+                for row in compact_summary_rows
+            ]
+            latest_epoch = max(int(item["epoch_id"]) for item in summaries)
+            latest = [
+                item
+                for item in summaries
+                if int(item["epoch_id"]) == latest_epoch
+            ]
+            latest_hotkeys = {str(item["validator_hotkey"]) for item in latest}
+            if len(latest_hotkeys) != 1:
                 raise CoordinatorChainRealizedSettlementV1Error(
-                    "finalized allocation authority summary differs at %s"
-                    % field
+                    "primary validator identity is ambiguous"
                 )
+            selected_summary = min(latest, key=lambda item: item["bundle_hash"])
+            authority_rows = self._read(
+                "compact_finalized_authority_by_bundle_hash",
+                {
+                    "netuid": netuid,
+                    "bundle_hash": selected_summary["bundle_hash"],
+                },
+                context,
+            )
+            if len(authority_rows) != 1:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "latest compact finalized authority is unavailable"
+                )
+            authority, verified = self._verify_compact_authority(
+                authority_rows[0]
+            )
+            for field in selected_summary:
+                if authority.get(field) != selected_summary[field]:
+                    raise CoordinatorChainRealizedSettlementV1Error(
+                        "compact finalized authority summary differs at %s"
+                        % field
+                    )
+            for field in (
+                "bundle_hash",
+                "netuid",
+                "epoch_id",
+                "validator_hotkey",
+                "finalized_block",
+                "finalized_block_hash",
+                "finalization_receipt_hash",
+            ):
+                if authority.get(field) != verified.get(field):
+                    raise CoordinatorChainRealizedSettlementV1Error(
+                        "verified compact authority differs at %s" % field
+                    )
+        else:
+            summary_rows = self._read(
+                "latest_finalized_allocation_authority_summaries",
+                {"netuid": netuid},
+                context,
+            )
+            summaries = [
+                _finalized_authority_summary_v1(row) for row in summary_rows
+            ]
+            if not summaries:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "no finalized canonical bundle identifies the primary validator"
+                )
+            latest_block = max(
+                int(item["finalized_block"]) for item in summaries
+            )
+            latest = [
+                item
+                for item in summaries
+                if int(item["finalized_block"]) == latest_block
+            ]
+            latest_hotkeys = {
+                str(item["validator_hotkey"]) for item in latest
+            }
+            if len(latest_hotkeys) != 1:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "primary validator identity is ambiguous"
+                )
+            selected_summary = min(latest, key=lambda item: item["bundle_hash"])
+            authority_rows = self._read(
+                "finalized_allocation_authority_by_bundle_hash",
+                {
+                    "netuid": netuid,
+                    "bundle_hash": selected_summary["bundle_hash"],
+                },
+                context,
+            )
+            if len(authority_rows) != 1:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "latest finalized allocation authority is unavailable"
+                )
+            authority = _preliminary_finalized_bundle_authority_v1(
+                authority_rows[0]
+            )
+            for field in (
+                "bundle_hash",
+                "netuid",
+                "epoch_id",
+                "validator_hotkey",
+                "finalized_block",
+                "finalized_block_hash",
+                "finalization_receipt_hash",
+            ):
+                if authority.get(field) != selected_summary[field]:
+                    raise CoordinatorChainRealizedSettlementV1Error(
+                        "finalized allocation authority summary differs at %s"
+                        % field
+                    )
         chain_state = self._chain_source.read_stateful_epoch_close_weights(
             netuid=netuid,
             epoch_id=epoch_id,
@@ -316,43 +472,100 @@ class CoordinatorChainRealizedSettlementV1:
             raise CoordinatorChainRealizedSettlementV1Error(
                 "chain settlement authority mode is invalid"
             )
-        rows = self._read(
-            "finalized_authority_by_chain_vector",
-            {
-                "netuid": netuid,
-                "uids": [int(item[0]) for item in observation["weights"]],
-                "weights_u16": [
-                    int(item[1]) for item in observation["weights"]
-                ],
-                "source_epoch_id": int(
-                    observation["active_source_epoch_id"]
-                ),
-                "validator_hotkey": str(
-                    observation["validator_hotkey"]
-                ),
-                "finalized_block": int(
-                    observation["last_update_block"]
-                ),
-                "finalized_block_hash": str(
-                    observation["last_update_block_hash"]
-                ),
-            },
+        compact_cutover_rows = self._read(
+            "compact_finalized_authority_cutover",
+            {"netuid": netuid},
             context,
         )
+        compact_cutover_epoch: int | None = None
+        if compact_cutover_rows:
+            if len(compact_cutover_rows) != 1 or set(
+                compact_cutover_rows[0]
+            ) != {"epoch_id"}:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "compact authority cutover is invalid"
+                )
+            raw_cutover_epoch = compact_cutover_rows[0]["epoch_id"]
+            if isinstance(raw_cutover_epoch, bool):
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "compact authority cutover is invalid"
+                )
+            try:
+                compact_cutover_epoch = int(raw_cutover_epoch)
+            except (TypeError, ValueError) as exc:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "compact authority cutover is invalid"
+                ) from exc
+            if compact_cutover_epoch < 0:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "compact authority cutover is invalid"
+                )
+        source_epoch_id = int(observation["active_source_epoch_id"])
+        use_compact = (
+            compact_cutover_epoch is not None
+            and source_epoch_id >= compact_cutover_epoch
+        )
+        if use_compact:
+            rows = self._read(
+                "compact_finalized_authority_by_identity",
+                {
+                    "netuid": netuid,
+                    "source_epoch_id": source_epoch_id,
+                    "validator_hotkey": str(observation["validator_hotkey"]),
+                },
+                context,
+            )
+            try:
+                selected = select_compact_chain_realized_bundle_candidate_v2(
+                    rows,
+                    observation=observation,
+                )
+            except ChampionSettlementV2Error as exc:
+                raise CoordinatorChainRealizedSettlementV1Error(str(exc)) from exc
+        else:
+            rows = self._read(
+                "finalized_authority_by_chain_vector",
+                {
+                    "netuid": netuid,
+                    "uids": [int(item[0]) for item in observation["weights"]],
+                    "weights_u16": [
+                        int(item[1]) for item in observation["weights"]
+                    ],
+                    "source_epoch_id": source_epoch_id,
+                    "validator_hotkey": str(
+                        observation["validator_hotkey"]
+                    ),
+                    "finalized_block": int(
+                        observation["last_update_block"]
+                    ),
+                    "finalized_block_hash": str(
+                        observation["last_update_block_hash"]
+                    ),
+                },
+                context,
+            )
+            try:
+                selected = (
+                    select_chain_realized_bundle_candidate_v1(
+                        rows, observation=observation
+                    )
+                    if rows
+                    else None
+                )
+            except ChampionSettlementV2Error as exc:
+                raise CoordinatorChainRealizedSettlementV1Error(str(exc)) from exc
         if authority_mode == "unattributed":
-            if rows or payload.get("bundle_hash") is not None:
+            if selected is not None or payload.get("bundle_hash") is not None:
                 raise CoordinatorChainRealizedSettlementV1Error(
                     "unattributed settlement has finalized bundle authority"
                 )
             return build_unattributed_chain_realized_settlement_package_v2(
                 observation=observation,
             )
-        try:
-            selected = select_chain_realized_bundle_candidate_v1(
-                rows, observation=observation
+        if selected is None:
+            raise CoordinatorChainRealizedSettlementV1Error(
+                "no finalized canonical bundle matches the active chain vector"
             )
-        except ChampionSettlementV2Error as exc:
-            raise CoordinatorChainRealizedSettlementV1Error(str(exc)) from exc
         if selected["bundle_hash"] != str(payload.get("bundle_hash") or ""):
             raise CoordinatorChainRealizedSettlementV1Error(
                 "host-selected chain settlement bundle is not authoritative"
@@ -373,6 +586,19 @@ class CoordinatorChainRealizedSettlementV1:
             context.external_receipt_graphs,
             receipt_hash=finalization_receipt_hash,
         )
+        if use_compact:
+            compact_authority, verified = self._verify_compact_authority(
+                selected_rows[0]
+            )
+            if compact_authority != selected:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "selected compact chain settlement authority changed"
+                )
+            return build_compact_chain_realized_settlement_package_v2(
+                observation=observation,
+                authority=compact_authority,
+                verified=verified,
+            )
         validated = validate_finalized_allocation_authorities_v2(
             selected_rows,
             finalization_graphs={

@@ -27,6 +27,11 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from leadpoet_canonical.attested_v2 import merkle_root
+from leadpoet_observability import (
+    hash_identifier as observability_hash_identifier,
+    record_retry as record_operation_retry,
+    record_stage as record_operation_stage,
+)
 from gateway.build_info import get_build_info
 from gateway.research_lab.bundles import build_research_lab_audit_bundle
 from gateway.research_lab.attested_scoring import (
@@ -227,6 +232,32 @@ from research_lab.observability.tracing import finish_score_bundle_observation
 
 
 logger = logging.getLogger(__name__)
+
+
+def _record_private_baseline_stage(
+    *,
+    worker_ref: str,
+    stage: str,
+    status: str,
+    benchmark_date: str,
+    duration_seconds: float | None = None,
+    **fields: Any,
+) -> None:
+    """Emit a bounded, private-data-free rebenchmark operation event."""
+
+    record_operation_stage(
+        component="research_lab",
+        operation="private_baseline_rebenchmark",
+        stage=stage,
+        status=status,
+        duration_seconds=duration_seconds,
+        correlation_id=observability_hash_identifier(
+            f"private_baseline_rebenchmark:{benchmark_date}:{worker_ref}"
+        ),
+        worker_id_hash=observability_hash_identifier(worker_ref),
+        benchmark_date=benchmark_date,
+        **fields,
+    )
 
 STALE_PARENT_REBASE_REPAIR_MAX_TOKENS = 32_768
 STALE_PARENT_REBASE_REPAIR_REASONING_BODY = {"enabled": True, "effort": "max"}
@@ -11479,6 +11510,25 @@ class ResearchLabGatewayScoringWorker:
             ),
             "elapsed_seconds": round(time.time() - float(context.get("started_at") or time.time()), 3),
         }
+        _record_private_baseline_stage(
+            worker_ref=str(getattr(self, "worker_ref", "unknown-worker")),
+            stage=str(event_doc["failure_stage"]),
+            status="failed",
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            epoch_id=context.get("evaluation_epoch"),
+            window_hash=window_hash,
+            manifest_hash=manifest_hash,
+            benchmark_bundle_id=str(
+                context.get("benchmark_bundle_id") or ""
+            ),
+            selected_icp_count=int(context.get("selected_icp_count") or 0),
+            exception_class=type(exc).__name__,
+            reason_code="baseline_publication_failed",
+            terminal=True,
+            retryable=False,
+            duration_seconds=float(event_doc["elapsed_seconds"]),
+        )
         try:
             await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
@@ -11558,6 +11608,7 @@ class ResearchLabGatewayScoringWorker:
         start: float,
         recover_existing: bool,
     ) -> dict[str, Any]:
+        publication_started = time.monotonic()
         validated = _validate_private_baseline_publication_bundle(
             bundle,
             artifact=artifact,
@@ -11566,6 +11617,29 @@ class ResearchLabGatewayScoringWorker:
         )
         bundle_payload = dict(validated["bundle_payload"])
         benchmark_bundle_id = str(validated["benchmark_bundle_id"])
+
+        def _publication_stage(
+            stage: str,
+            status: str = "passed",
+            **fields: Any,
+        ) -> None:
+            _record_private_baseline_stage(
+                worker_ref=str(getattr(self, "worker_ref", "unknown-worker")),
+                stage=stage,
+                status=status,
+                benchmark_date=str(validated["benchmark_date"]),
+                benchmark_attempt=int(validated["benchmark_attempt"]),
+                epoch_id=int(validated["evaluation_epoch"]),
+                window_hash=str(validated["rolling_window_hash"]),
+                manifest_hash=artifact.manifest_hash,
+                benchmark_bundle_id=benchmark_bundle_id,
+                bundle_hash=str(validated["benchmark_bundle_hash"]),
+                cache_hit=recover_existing,
+                duration_seconds=time.monotonic() - publication_started,
+                **fields,
+            )
+
+        _publication_stage("publication_bundle_validation")
         if recover_existing:
             if self._active_baseline_context is not None:
                 self._active_baseline_context["publication_stage"] = (
@@ -11594,6 +11668,7 @@ class ResearchLabGatewayScoringWorker:
                 raise RuntimeError(
                     "recovered private baseline bundle event is not durably completed"
                 )
+            _publication_stage("private_bundle_event_recovery")
 
         category_assignment = validated.get("category_assignment")
         if isinstance(category_assignment, Mapping):
@@ -11612,6 +11687,19 @@ class ResearchLabGatewayScoringWorker:
                     else ""
                 ),
                 preserve_existing_provenance=recover_existing,
+            )
+            _publication_stage(
+                "conditional_category_persistence",
+                assignment_hash=canonical_hash(category_assignment),
+                public_icp_count=int(
+                    validated["visibility_split"].get("public_count") or 0
+                ),
+                private_icp_count=int(
+                    validated["visibility_split"].get("private_count") or 0
+                ),
+                conditional_icp_count=int(
+                    validated["visibility_split"].get("conditional_count") or 0
+                ),
             )
 
         if attested_baseline_outcome is None:
@@ -11664,6 +11752,11 @@ class ResearchLabGatewayScoringWorker:
                         "receipts": list(receipt_lineage),
                     },
                 }
+                _publication_stage(
+                    "attested_summary_lineage_recovery",
+                    root_receipt_hash=str(root_receipt["receipt_hash"]),
+                    receipt_count=len(receipt_lineage),
+                )
         if self._active_baseline_context is not None:
             self._active_baseline_context["publication_stage"] = (
                 "attested_artifact_links"
@@ -11683,6 +11776,7 @@ class ResearchLabGatewayScoringWorker:
                 },
             ],
         )
+        _publication_stage("attested_artifact_link_persistence")
 
         completed_dispatch = await select_many(
             "research_lab_scoring_dispatch_events",
@@ -11773,6 +11867,13 @@ class ResearchLabGatewayScoringWorker:
                         "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
                     },
                 )
+            _publication_stage("completed_dispatch_persistence")
+        else:
+            _publication_stage(
+                "completed_dispatch_persistence",
+                status="skipped",
+                reason_code="completed_dispatch_already_durable",
+            )
 
         if self._active_baseline_context is not None:
             self._active_baseline_context["publication_stage"] = "public_report_build"
@@ -11836,6 +11937,11 @@ class ResearchLabGatewayScoringWorker:
             benchmark_quality="passed",
             report_doc=public_report_doc,
         )
+        _publication_stage(
+            "public_report_persistence",
+            publication_hash=str(public_report.get("report_hash") or ""),
+            aggregate_score=float(validated["aggregate_score"]),
+        )
         if recover_existing:
             durable_report = await select_one(
                 "research_lab_public_benchmark_report_current",
@@ -11858,6 +11964,7 @@ class ResearchLabGatewayScoringWorker:
             await self._write_audit_bundle_inner(int(validated["evaluation_epoch"]))
         else:
             await self._write_audit_bundle(int(validated["evaluation_epoch"]))
+        _publication_stage("audit_bundle_persistence")
         completed_event_doc = {
             "public_report_id": str(public_report["report_id"]),
             "selected_icp_count": len(window.item_refs),
@@ -11878,6 +11985,12 @@ class ResearchLabGatewayScoringWorker:
                 else False
             ),
             event_doc=completed_event_doc,
+        )
+        _publication_stage(
+            "run_completion_persistence",
+            status="completed",
+            publication_hash=str(public_report.get("report_hash") or ""),
+            aggregate_score=float(validated["aggregate_score"]),
         )
         self._baseline_publication_failures_in_process.discard(publication_scope_key)
         self._baseline_publication_failure_logged_key = None
@@ -11900,6 +12013,14 @@ class ResearchLabGatewayScoringWorker:
         baseline_start_offset = max(0, min(86399, baseline_start_offset))
         min_start_at = utc_day_start(now) + timedelta(seconds=baseline_start_offset)
         if now < min_start_at:
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="daily_activation_gate",
+                status="blocked",
+                benchmark_date=today,
+                reason_code="scheduled_start_not_reached",
+                duration_seconds=0.0,
+            )
             logger.info(
                 format_worker_block(
                     "RESEARCH LAB PRIVATE BASELINE WAITING FOR DAILY ICP ACTIVATION",
@@ -11933,6 +12054,21 @@ class ResearchLabGatewayScoringWorker:
             else self.config.lab_champion_eval_days
             * self.config.lab_champion_icps_per_day
         )
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="run_allocation",
+            status="started",
+            benchmark_date=today,
+            epoch_id=evaluation_epoch,
+            expected_icp_count=expected_icp_count,
+            policy_hash=expected_policy_hash or None,
+            retry_rounds=int(
+                getattr(self.config, "private_baseline_provider_retry_rounds", 1)
+            ),
+            concurrency=int(
+                getattr(self.config, "private_baseline_concurrency", 1)
+            ),
+        )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE ALLOCATED",
@@ -11956,6 +12092,17 @@ class ResearchLabGatewayScoringWorker:
             wait_for_repo_head=False,
         )
         if not bool(repo_head_sync.get("ok")):
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="model_lineage_sync",
+                status="blocked",
+                benchmark_date=today,
+                epoch_id=evaluation_epoch,
+                reason_code=str(
+                    repo_head_sync.get("status") or "repo_head_sync_failed"
+                ),
+                duration_seconds=time.time() - start,
+            )
             logger.warning(
                 format_worker_block(
                     "RESEARCH LAB PRIVATE BASELINE BLOCKED: REPO HEAD MANIFEST NOT READY",
@@ -11981,6 +12128,15 @@ class ResearchLabGatewayScoringWorker:
                 "benchmark_date": today,
                 "repo_head_sync": repo_head_sync,
             }
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="model_lineage_sync",
+            status="passed",
+            benchmark_date=today,
+            epoch_id=evaluation_epoch,
+            commit_sha=str(repo_head_sync.get("repo_main_sha") or ""),
+            duration_seconds=time.time() - start,
+        )
         expected_fresh_set_id = utc_set_id_for_datetime(now)
         try:
             window = await fetch_rolling_icp_window(
@@ -11992,6 +12148,16 @@ class ResearchLabGatewayScoringWorker:
                 require_fresh_set_active_at=now,
             )
         except RollingIcpWindowUnavailable as exc:
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="daily_icp_window",
+                status="blocked",
+                benchmark_date=today,
+                epoch_id=evaluation_epoch,
+                reason_code="daily_icp_window_not_ready",
+                exception_class=type(exc).__name__,
+                duration_seconds=time.time() - start,
+            )
             logger.warning(
                 format_worker_block(
                     "RESEARCH LAB PRIVATE BASELINE BLOCKED: DAILY ICP WINDOW NOT READY",
@@ -12010,8 +12176,30 @@ class ResearchLabGatewayScoringWorker:
                 "expected_fresh_set_id": expected_fresh_set_id,
                 "error": str(exc),
             }
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="daily_icp_window",
+            status="passed",
+            benchmark_date=today,
+            epoch_id=evaluation_epoch,
+            window_hash=window.window_hash,
+            selected_icp_count=len(window.item_refs),
+            expected_icp_count=expected_icp_count,
+            duration_seconds=time.time() - start,
+        )
         active = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active.artifact
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="active_model_resolution",
+            status="passed",
+            benchmark_date=today,
+            epoch_id=evaluation_epoch,
+            window_hash=window.window_hash,
+            manifest_hash=artifact.manifest_hash,
+            model_artifact_hash=artifact.model_artifact_hash,
+            duration_seconds=time.time() - start,
+        )
         baseline_repo_main_sha = str(repo_head_sync.get("repo_main_sha") or "")
         existing = await select_many(
             "research_lab_private_model_benchmark_current",
@@ -12035,6 +12223,21 @@ class ResearchLabGatewayScoringWorker:
         ]
         if valid_existing:
             existing_bundle = valid_existing[0]
+            existing_bundle_id = str(
+                existing_bundle.get("benchmark_bundle_id") or ""
+            )
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="durable_bundle_lookup",
+                status="passed",
+                benchmark_date=today,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                benchmark_bundle_id=existing_bundle_id,
+                cache_hit=True,
+                duration_seconds=time.time() - start,
+            )
             publication_scope_key = (
                 f"{today}:{window.window_hash}:{artifact.manifest_hash}"
             )
@@ -12052,6 +12255,19 @@ class ResearchLabGatewayScoringWorker:
                         recover_existing=True,
                     )
                 except Exception as exc:  # noqa: BLE001 - retry exact repair next pass
+                    _record_private_baseline_stage(
+                        worker_ref=self.worker_ref,
+                        stage="publication_recovery",
+                        status="failed",
+                        benchmark_date=today,
+                        epoch_id=evaluation_epoch,
+                        window_hash=window.window_hash,
+                        manifest_hash=artifact.manifest_hash,
+                        benchmark_bundle_id=existing_bundle_id,
+                        exception_class=type(exc).__name__,
+                        reason_code="existing_bundle_publication_recovery_failed",
+                        duration_seconds=time.time() - start,
+                    )
                     logger.warning(
                         "research_lab_private_baseline_publication_recovery_failed "
                         "benchmark_bundle_id=%s error=%s",
@@ -12069,6 +12285,17 @@ class ResearchLabGatewayScoringWorker:
                         "error": _short_error(exc),
                     }
                 self._baseline_publication_verified_keys.add(publication_scope_key)
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="publication_recovery",
+                status="completed",
+                benchmark_date=today,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                benchmark_bundle_id=existing_bundle_id,
+                duration_seconds=time.time() - start,
+            )
             already_key = f"{today}:{window.window_hash}:{artifact.manifest_hash}"
             if self._baseline_already_logged_date != already_key:
                 logger.info(
@@ -12106,6 +12333,20 @@ class ResearchLabGatewayScoringWorker:
                     stored_window_hash
                 )
                 if repair_window is None:
+                    _record_private_baseline_stage(
+                        worker_ref=self.worker_ref,
+                        stage="same_day_window_reconstruction",
+                        status="failed",
+                        benchmark_date=today,
+                        epoch_id=evaluation_epoch,
+                        window_hash=stored_window_hash,
+                        manifest_hash=artifact.manifest_hash,
+                        benchmark_bundle_id=str(
+                            same_day_reference.get("benchmark_bundle_id") or ""
+                        ),
+                        reason_code="persisted_window_unavailable",
+                        duration_seconds=time.time() - start,
+                    )
                     return {
                         "status": "baseline_publication_recovery_failed",
                         "benchmark_date": today,
@@ -12131,6 +12372,21 @@ class ResearchLabGatewayScoringWorker:
                         recover_existing=True,
                     )
                 except Exception as exc:  # noqa: BLE001 - retry exact repair next pass
+                    _record_private_baseline_stage(
+                        worker_ref=self.worker_ref,
+                        stage="same_day_publication_recovery",
+                        status="failed",
+                        benchmark_date=today,
+                        epoch_id=evaluation_epoch,
+                        window_hash=stored_window_hash,
+                        manifest_hash=artifact.manifest_hash,
+                        benchmark_bundle_id=str(
+                            same_day_reference.get("benchmark_bundle_id") or ""
+                        ),
+                        exception_class=type(exc).__name__,
+                        reason_code="same_day_publication_recovery_failed",
+                        duration_seconds=time.time() - start,
+                    )
                     logger.warning(
                         "research_lab_same_day_baseline_publication_recovery_failed "
                         "benchmark_bundle_id=%s error=%s",
@@ -12147,6 +12403,20 @@ class ResearchLabGatewayScoringWorker:
                         "error": _short_error(exc),
                     }
                 self._baseline_publication_verified_keys.add(publication_scope_key)
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="same_day_reference_reuse",
+                status="completed",
+                benchmark_date=today,
+                epoch_id=evaluation_epoch,
+                window_hash=stored_window_hash,
+                manifest_hash=artifact.manifest_hash,
+                benchmark_bundle_id=str(
+                    same_day_reference.get("benchmark_bundle_id") or ""
+                ),
+                reason_code="same_day_reference_is_immutable",
+                duration_seconds=time.time() - start,
+            )
             reuse_key = f"{today}:reuse:{artifact.manifest_hash}"
             if self._baseline_already_logged_date != reuse_key:
                 logger.warning(
@@ -12183,6 +12453,18 @@ class ResearchLabGatewayScoringWorker:
                 manifest_hash=artifact.manifest_hash,
             )
         except Exception as exc:  # noqa: BLE001 - fail closed before provider spend
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="dispatch_history",
+                status="failed",
+                benchmark_date=today,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                exception_class=type(exc).__name__,
+                reason_code="dispatch_history_unavailable",
+                duration_seconds=time.time() - start,
+            )
             logger.warning(
                 "research_lab_baseline_dispatch_history_unavailable "
                 "benchmark_date=%s window=%s error=%s",
@@ -12203,6 +12485,17 @@ class ResearchLabGatewayScoringWorker:
             in_process_failures=self._baseline_publication_failures_in_process,
         )
         if publication_retry_blocked:
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="publication_retry_gate",
+                status="blocked",
+                benchmark_date=today,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                reason_code="terminal_publication_failure_unchanged",
+                duration_seconds=time.time() - start,
+            )
             if self._baseline_publication_failure_logged_key != publication_scope_key:
                 logger.error(
                     format_worker_block(
@@ -12225,6 +12518,17 @@ class ResearchLabGatewayScoringWorker:
                 "automatic_retry_blocked": True,
             }
         if retry_authorization:
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="publication_retry_gate",
+                status="passed",
+                benchmark_date=today,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                reason_code="publication_retry_authorized",
+                duration_seconds=time.time() - start,
+            )
             logger.warning(
                 "research_lab_baseline_publication_retry_authorized "
                 "benchmark_date=%s window=%s reason=%s",
@@ -12233,9 +12537,41 @@ class ResearchLabGatewayScoringWorker:
                 retry_authorization,
             )
         if _env_flag("RESEARCH_LAB_BASELINE_ANY_WORKER") and await self._baseline_leased_by_other_worker(today):
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="worker_lease",
+                status="blocked",
+                benchmark_date=today,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                reason_code="leased_by_other_worker",
+                duration_seconds=time.time() - start,
+            )
             return {"status": "baseline_leased_elsewhere", "benchmark_date": today}
         benchmark_attempt = _next_benchmark_attempt([*existing, *dispatch_history])
         await create_rolling_icp_window(window)
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="run_execution",
+            status="started",
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            epoch_id=evaluation_epoch,
+            window_hash=window.window_hash,
+            manifest_hash=artifact.manifest_hash,
+            model_artifact_hash=artifact.model_artifact_hash,
+            policy_hash=expected_policy_hash or None,
+            selected_icp_count=len(window.item_refs),
+            expected_icp_count=expected_icp_count,
+            retry_rounds=int(
+                getattr(self.config, "private_baseline_provider_retry_rounds", 1)
+            ),
+            concurrency=int(
+                getattr(self.config, "private_baseline_concurrency", 1)
+            ),
+            duration_seconds=time.time() - start,
+        )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE STARTED",
@@ -12341,6 +12677,28 @@ class ResearchLabGatewayScoringWorker:
             )
             if telemetry_run is not None:
                 baseline_telemetry_session = ScoringTelemetrySession(telemetry_run)
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="scoring_telemetry_allocation",
+            status=("passed" if baseline_telemetry_session is not None else "skipped"),
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            epoch_id=evaluation_epoch,
+            window_hash=window.window_hash,
+            manifest_hash=artifact.manifest_hash,
+            scoring_run_id=(
+                baseline_telemetry_session.run.scoring_run_id
+                if baseline_telemetry_session is not None
+                and baseline_telemetry_session.run is not None
+                else None
+            ),
+            reason_code=(
+                None
+                if baseline_telemetry_session is not None
+                else "telemetry_disabled_or_unallocated"
+            ),
+            duration_seconds=time.time() - start,
+        )
         per_icp_summaries: list[dict[str, Any]] = []
         nonempty_output_count = 0
         retried_total = 0
@@ -12427,6 +12785,22 @@ class ResearchLabGatewayScoringWorker:
                     extra_env=runner_env,
                 )
             if baseline_progress_rows or baseline_progress_attempt_ledger:
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="checkpoint_restore",
+                    status="resumed",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    completed_icp_count=len(baseline_progress_rows),
+                    checkpoint_attempt_count=len(
+                        baseline_progress_attempt_ledger
+                    ),
+                    selected_icp_count=len(window.item_refs),
+                    duration_seconds=time.time() - start,
+                )
                 logger.info(
                     format_worker_block(
                         "RESEARCH LAB PRIVATE BASELINE PROGRESS RESUMED",
@@ -12498,6 +12872,24 @@ class ResearchLabGatewayScoringWorker:
                         checkpoint_persisted=False,
                         outcome="scored_without_checkpoint",
                     )
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="checkpoint_persistence",
+                    status="skipped",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    icp_ref_hash=observability_hash_identifier(
+                        _benchmark_item_ref_for_progress(row)
+                    ),
+                    retry_round=retry_round,
+                    result_status=(
+                        "terminal" if checkpointable else "retryable"
+                    ),
+                    reason_code="checkpoint_storage_disabled",
+                )
                 return False
             async with baseline_progress_lock:
                 progress_bucket, progress_key = baseline_progress_location
@@ -12581,6 +12973,25 @@ class ResearchLabGatewayScoringWorker:
                         baseline_progress_scoring_contract_hash
                     ),
                 )
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="checkpoint_persistence",
+                status="passed",
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                checkpoint_hash=checkpoint_hash,
+                checkpoint_attempt_count=len(baseline_progress_attempt_ledger),
+                completed_icp_count=len(baseline_progress_rows),
+                icp_ref_hash=observability_hash_identifier(ref),
+                icp_ordinal=int(attempt_entry["item_index"]),
+                retry_round=retry_round,
+                result_hash=attempt_entry.get("result_row_hash"),
+                result_status=("terminal" if checkpointable else "retryable"),
+                scored_company_count=int(row.get("company_count") or 0),
+            )
             if checkpointable and baseline_telemetry_session is not None:
                 await baseline_telemetry_session.complete_result(
                     row,
@@ -12595,6 +13006,7 @@ class ResearchLabGatewayScoringWorker:
         self._active_baseline_context = {
             "benchmark_date": today,
             "benchmark_attempt": benchmark_attempt,
+            "evaluation_epoch": evaluation_epoch,
             "rolling_window_hash": window.window_hash,
             "private_model_manifest_hash": artifact.manifest_hash,
             "selected_icp_count": len(window.item_refs),
@@ -12672,7 +13084,30 @@ class ResearchLabGatewayScoringWorker:
                         "cancelled",
                         failure_category="baseline_lease_lost",
                     )
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="worker_lease",
+                    status="blocked",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    reason_code="post_write_lease_lost",
+                    duration_seconds=time.time() - start,
+                )
                 return {"status": "baseline_leased_elsewhere", "benchmark_date": today}
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="worker_lease",
+                status="passed",
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                duration_seconds=time.time() - start,
+            )
             await emit_run_event(
                 baseline_telemetry_session.run if baseline_telemetry_session is not None else None,
                 "started",
@@ -12697,6 +13132,28 @@ class ResearchLabGatewayScoringWorker:
             total_icps = len(window.benchmark_items)
             if batch_execution and not legacy_v1_enabled():
                 _require_v2_baseline_receipt_capacity(total_icps)
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="icp_evaluation",
+                status="started",
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                expected_icp_count=total_icps,
+                completed_icp_count=len(baseline_progress_rows),
+                checkpoint_attempt_count=len(baseline_progress_attempt_ledger),
+                retry_rounds=int(
+                    getattr(self.config, "private_baseline_provider_retry_rounds", 1)
+                ),
+                concurrency=(
+                    int(getattr(self.config, "private_baseline_concurrency", 1))
+                    if batch_execution
+                    else 1
+                ),
+                duration_seconds=time.time() - start,
+            )
             if batch_execution:
                 retry_runner = AttestedPrivateModelRunnerV2(
                     artifact=artifact,
@@ -12777,6 +13234,27 @@ class ResearchLabGatewayScoringWorker:
                 label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
                 resumed_summary = baseline_resume_by_ref.get(label)
                 if resumed_summary is not None:
+                    _record_private_baseline_stage(
+                        worker_ref=self.worker_ref,
+                        stage="icp_attempt",
+                        status="resumed",
+                        benchmark_date=today,
+                        benchmark_attempt=benchmark_attempt,
+                        epoch_id=evaluation_epoch,
+                        window_hash=window.window_hash,
+                        manifest_hash=artifact.manifest_hash,
+                        expected_icp_count=total_icps,
+                        icp_ordinal=item_index,
+                        icp_ref_hash=observability_hash_identifier(label),
+                        retry_round=0,
+                        result_hash=canonical_hash(resumed_summary),
+                        result_status="checkpoint_reuse",
+                        scored_company_count=int(
+                            resumed_summary.get("company_count") or 0
+                        ),
+                        icp_score=float(resumed_summary.get("score") or 0.0),
+                        reason_code="durable_checkpoint_reuse",
+                    )
                     logger.info(
                         format_worker_block(
                             "RESEARCH LAB PRIVATE BASELINE ICP RESUMED FROM CHECKPOINT",
@@ -12797,6 +13275,20 @@ class ResearchLabGatewayScoringWorker:
                     benchmark_date=today,
                     item_index=item_index,
                     total_icps=total_icps,
+                )
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="icp_attempt",
+                    status="started",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    expected_icp_count=total_icps,
+                    icp_ordinal=item_index,
+                    icp_ref_hash=observability_hash_identifier(label),
+                    retry_round=0,
                 )
                 logger.info(
                     format_worker_block(
@@ -12821,6 +13313,7 @@ class ResearchLabGatewayScoringWorker:
                         retry_round=0,
                     )
                 runtime_error = ""
+                runtime_error_class = ""
                 # In-container trace collection (§9.1): asyncio.to_thread copies
                 # the contextvars context, so the runner thread sees the
                 # collector installed here.
@@ -12837,6 +13330,7 @@ class ResearchLabGatewayScoringWorker:
                 except PrivateModelRuntimeError as exc:
                     outputs = []
                     runtime_error = _short_error(exc)
+                    runtime_error_class = type(exc).__name__
                     logger.warning(
                         format_worker_block(
                             "RESEARCH LAB PRIVATE BASELINE ICP RUNTIME ERROR",
@@ -12867,6 +13361,7 @@ class ResearchLabGatewayScoringWorker:
                     nonempty_output_count += 1
                 score_breakdowns: list[dict[str, Any]] = []
                 scorer_error = ""
+                scorer_error_class = ""
                 if outputs:
                     if baseline_telemetry_session is not None:
                         await baseline_telemetry_session.lifecycle(
@@ -12886,6 +13381,7 @@ class ResearchLabGatewayScoringWorker:
                         )
                     except Exception as scorer_exc:  # noqa: BLE001 - §0-N6: non-fatal per ICP
                         scorer_error = _short_error(scorer_exc)
+                        scorer_error_class = type(scorer_exc).__name__
                         logger.warning(
                             format_worker_block(
                                 "RESEARCH LAB PRIVATE BASELINE ICP SCORER ERROR",
@@ -12963,6 +13459,50 @@ class ResearchLabGatewayScoringWorker:
                     telemetry_model_role="reference",
                 )
                 _apply_provider_cost_baseline_outcome(item_summary)
+                result_status = (
+                    "failed"
+                    if runtime_error or scorer_error
+                    else "provider_backed_empty"
+                    if not outputs
+                    else "completed"
+                )
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="icp_attempt",
+                    status=("failed" if runtime_error or scorer_error else "completed"),
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    expected_icp_count=total_icps,
+                    icp_ordinal=item_index,
+                    icp_ref_hash=observability_hash_identifier(label),
+                    retry_round=0,
+                    retryable=False,
+                    result_hash=canonical_hash(item_summary),
+                    result_status=result_status,
+                    sourced_company_count=len(outputs),
+                    scored_company_count=len(scores),
+                    icp_score=icp_score,
+                    exception_class=(
+                        runtime_error_class
+                        if runtime_error
+                        else scorer_error_class
+                        if scorer_error
+                        else None
+                    ),
+                    reason_code=(
+                        "runtime_provider_error"
+                        if runtime_error
+                        else "scorer_provider_error"
+                        if scorer_error
+                        else "provider_backed_empty"
+                        if not outputs
+                        else "scored"
+                    ),
+                    duration_seconds=time.time() - item_start,
+                )
                 if (
                     item_index >= PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER
                     and nonempty_output_count <= 0
@@ -13072,8 +13612,43 @@ class ResearchLabGatewayScoringWorker:
                 health_gate_enforced=bool(self.config.baseline_health_gate_enforced),
                 max_day_jump=_baseline_max_day_jump_points(),
             )
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="scoring_health_gate",
+                status="passed",
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                selected_icp_count=len(window.item_refs),
+                completed_icp_count=len(per_icp_summaries),
+                unresolved_icp_count=int(
+                    baseline_health.get("unresolved_provider_errors") or 0
+                ),
+                recovered_icp_count=recovered_total,
+                aggregate_score=aggregate_score,
+                decision_code=str(
+                    baseline_health.get("decision") or "observe_only"
+                ),
+                duration_seconds=time.time() - start,
+            )
         except BaselineUtcDayRollover as exc:
             await _stop_baseline_telemetry_heartbeat()
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="utc_day_rollover",
+                status="completed",
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                completed_icp_count=exc.completed_icps,
+                selected_icp_count=exc.total_icps,
+                reason_code="new_utc_day_allocated_next_pass",
+                duration_seconds=time.time() - start,
+            )
             event_doc = {
                 "benchmark_date": today,
                 "next_benchmark_date": exc.next_benchmark_date,
@@ -13166,6 +13741,20 @@ class ResearchLabGatewayScoringWorker:
             }
         except BaselineMaintenancePause as exc:
             await _stop_baseline_telemetry_heartbeat()
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="maintenance_boundary",
+                status="blocked",
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                completed_icp_count=exc.completed_icps,
+                selected_icp_count=exc.total_icps,
+                reason_code="scoring_maintenance_paused",
+                duration_seconds=time.time() - start,
+            )
             event_doc = {
                 "benchmark_date": today,
                 "benchmark_attempt": benchmark_attempt,
@@ -13250,6 +13839,20 @@ class ResearchLabGatewayScoringWorker:
             }
         except BaselineCheckpointRecycle as exc:
             await _stop_baseline_telemetry_heartbeat()
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="checkpoint_recycle",
+                status="completed",
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                completed_icp_count=exc.completed_icps,
+                selected_icp_count=exc.total_icps,
+                reason_code=str(exc.pressure.get("reason") or "resource_pressure"),
+                duration_seconds=time.time() - start,
+            )
             event_doc = {
                 "benchmark_date": today,
                 "benchmark_attempt": benchmark_attempt,
@@ -13344,6 +13947,23 @@ class ResearchLabGatewayScoringWorker:
         except Exception as exc:
             await _stop_baseline_telemetry_heartbeat()
             failure_policy = _baseline_computation_failure_policy(exc)
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage=str(failure_policy["failure_phase"]),
+                status="failed",
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                selected_icp_count=len(window.item_refs),
+                completed_icp_count=len(per_icp_summaries),
+                exception_class=type(exc).__name__,
+                reason_code="baseline_computation_failed",
+                terminal=bool(failure_policy["terminal_no_automatic_retry"]),
+                retryable=bool(failure_policy["telemetry_retryable"]),
+                duration_seconds=time.time() - start,
+            )
             if failure_policy["terminal_no_automatic_retry"]:
                 self._baseline_publication_failures_in_process.add(
                     publication_scope_key
@@ -13426,6 +14046,21 @@ class ResearchLabGatewayScoringWorker:
             expected_policy_hash=expected_policy_hash,
         )
         if pre_record_conflict is not None:
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="pre_record_conflict_check",
+                status="blocked",
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                epoch_id=evaluation_epoch,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+                benchmark_bundle_id=str(
+                    pre_record_conflict.get("benchmark_bundle_id") or ""
+                ),
+                reason_code="same_day_reference_already_recorded",
+                duration_seconds=time.time() - start,
+            )
             if conditional_policy.enabled:
                 try:
                     await _repair_baseline_category_results_from_row(
@@ -13521,6 +14156,33 @@ class ResearchLabGatewayScoringWorker:
         visibility_split = baseline_summary_result["visibility_split"]
         category_assignment = baseline_summary_result.get("category_assignment")
         noise_budget = baseline_summary_result["daily_noise_budget"]
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="aggregate_and_assignment",
+            status="passed",
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            epoch_id=evaluation_epoch,
+            window_hash=window.window_hash,
+            manifest_hash=artifact.manifest_hash,
+            aggregate_score=aggregate_score,
+            aggregate_hash=canonical_hash(
+                {"aggregate_score": aggregate_score}
+            ),
+            score_summary_hash=canonical_hash(score_summary_doc),
+            assignment_hash=(
+                canonical_hash(category_assignment)
+                if isinstance(category_assignment, Mapping)
+                else None
+            ),
+            selected_icp_count=len(per_icp_summaries),
+            public_icp_count=int(visibility_split.get("public_count") or 0),
+            private_icp_count=int(visibility_split.get("private_count") or 0),
+            conditional_icp_count=int(
+                visibility_split.get("conditional_count") or 0
+            ),
+            duration_seconds=time.time() - start,
+        )
         baseline_receipt_sources: tuple[Any, ...] = ()
         if legacy_v1_enabled():
             baseline_receipt_sources = (runner, retry_runner, scorer)
@@ -13535,6 +14197,19 @@ class ResearchLabGatewayScoringWorker:
                 ),
             ),
         )
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="attested_score_comparison",
+            status="passed",
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            epoch_id=evaluation_epoch,
+            window_hash=window.window_hash,
+            manifest_hash=artifact.manifest_hash,
+            score_summary_hash=canonical_hash(score_summary_doc),
+            receipt_count=len(baseline_progress_parent_receipt_hashes),
+            duration_seconds=time.time() - start,
+        )
         bundle_hash = canonical_hash(score_summary_doc)
         if self._active_baseline_context is not None:
             self._active_baseline_context["publication_stage"] = "kms_signature"
@@ -13543,6 +14218,18 @@ class ResearchLabGatewayScoringWorker:
             key_id=self.config.score_bundle_kms_key_id,
             digest_hash=bundle_hash,
             signature_uri_prefix=self.config.score_bundle_signature_uri_prefix,
+        )
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="kms_bundle_signature",
+            status="passed",
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            epoch_id=evaluation_epoch,
+            window_hash=window.window_hash,
+            manifest_hash=artifact.manifest_hash,
+            bundle_hash=bundle_hash,
+            duration_seconds=time.time() - start,
         )
         if self._active_baseline_context is not None:
             self._active_baseline_context["publication_stage"] = "private_bundle_insert"
@@ -13560,6 +14247,19 @@ class ResearchLabGatewayScoringWorker:
             signature_ref=signature_ref,
             score_summary_doc=score_summary_doc,
         )
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="private_bundle_persistence",
+            status="passed",
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            epoch_id=evaluation_epoch,
+            window_hash=window.window_hash,
+            manifest_hash=artifact.manifest_hash,
+            bundle_hash=bundle_hash,
+            benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
+            duration_seconds=time.time() - start,
+        )
         if self._active_baseline_context is not None:
             self._active_baseline_context["benchmark_bundle_id"] = str(bundle["benchmark_bundle_id"])
         publication = await self._publish_private_baseline_bundle(
@@ -13575,6 +14275,27 @@ class ResearchLabGatewayScoringWorker:
         )
         public_report = publication["public_report"]
         self._baseline_publication_verified_keys.add(publication_scope_key)
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="publication_persistence",
+            status="completed",
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            epoch_id=evaluation_epoch,
+            window_hash=window.window_hash,
+            manifest_hash=artifact.manifest_hash,
+            bundle_hash=bundle_hash,
+            benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
+            publication_hash=str(public_report.get("report_hash") or ""),
+            aggregate_score=aggregate_score,
+            selected_icp_count=len(window.item_refs),
+            public_icp_count=int(visibility_split.get("public_count") or 0),
+            private_icp_count=int(visibility_split.get("private_count") or 0),
+            conditional_icp_count=int(
+                visibility_split.get("conditional_count") or 0
+            ),
+            duration_seconds=time.time() - start,
+        )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE COMPLETED",
@@ -13901,6 +14622,21 @@ class ResearchLabGatewayScoringWorker:
         loop = asyncio.get_running_loop()
         item_start = time.time()
         label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
+        baseline_context = getattr(self, "_active_baseline_context", None) or {}
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="icp_attempt",
+            status="started",
+            benchmark_date=benchmark_date,
+            benchmark_attempt=baseline_context.get("benchmark_attempt"),
+            epoch_id=baseline_context.get("evaluation_epoch"),
+            window_hash=baseline_context.get("rolling_window_hash"),
+            manifest_hash=baseline_context.get("private_model_manifest_hash"),
+            expected_icp_count=total_icps,
+            icp_ordinal=item_index,
+            icp_ref_hash=observability_hash_identifier(label),
+            retry_round=retry_round,
+        )
         if telemetry_session is not None:
             await telemetry_session.attempt_started(
                 icp_ref=label,
@@ -13930,7 +14666,9 @@ class ResearchLabGatewayScoringWorker:
             )
         )
         runtime_error = ""
+        runtime_error_class = ""
         scorer_error = ""
+        scorer_error_class = ""
         retryable = False
         retry_backoff_seconds = 0.0
         attempt_receipt_hashes: set[str] = set()
@@ -13973,6 +14711,7 @@ class ResearchLabGatewayScoringWorker:
         except PrivateModelRuntimeError as exc:
             outputs = []
             runtime_error = _short_error(exc)
+            runtime_error_class = type(exc).__name__
             # Classify from the full exception text: _short_error truncates to
             # 300 chars and can drop the status marker the classifier needs.
             retryable = _baseline_error_is_retryable(str(exc))
@@ -14033,6 +14772,7 @@ class ResearchLabGatewayScoringWorker:
                 )
             except Exception as scorer_exc:  # noqa: BLE001 - §0-N6: non-fatal for the batch
                 scorer_error = _short_error(scorer_exc)
+                scorer_error_class = type(scorer_exc).__name__
                 retryable = retryable or _baseline_error_is_retryable(str(scorer_exc))
                 retry_backoff_seconds = max(
                     retry_backoff_seconds,
@@ -14164,6 +14904,76 @@ class ResearchLabGatewayScoringWorker:
                     ),
                     "error": runtime_error or scorer_error,
                 },
+            )
+        result_status = (
+            "retryable"
+            if retryable
+            else "failed"
+            if runtime_error or scorer_error
+            else "completed"
+        )
+        _record_private_baseline_stage(
+            worker_ref=self.worker_ref,
+            stage="icp_attempt",
+            status=("retrying" if retryable else result_status),
+            benchmark_date=benchmark_date,
+            benchmark_attempt=baseline_context.get("benchmark_attempt"),
+            epoch_id=baseline_context.get("evaluation_epoch"),
+            window_hash=baseline_context.get("rolling_window_hash"),
+            manifest_hash=baseline_context.get("private_model_manifest_hash"),
+            expected_icp_count=total_icps,
+            icp_ordinal=item_index,
+            icp_ref_hash=observability_hash_identifier(label),
+            retry_round=retry_round,
+            retryable=retryable,
+            result_status=result_status,
+            sourced_company_count=len(outputs),
+            scored_company_count=len(scores),
+            receipt_count=len(attempt_receipt_hashes),
+            exception_class=(
+                runtime_error_class
+                if runtime_error
+                else scorer_error_class
+                if scorer_error
+                else None
+            ),
+            reason_code=(
+                "runtime_provider_error"
+                if runtime_error
+                else "scorer_provider_error"
+                if scorer_error
+                else "provider_backed_empty"
+                if not outputs
+                else "scored"
+            ),
+            duration_seconds=time.time() - item_start,
+        )
+        if retryable:
+            record_operation_retry(
+                "rebenchmark.provider_attempt_retry",
+                component="research_lab",
+                stage="icp_attempt",
+                attempt=retry_round + 1,
+                attempts=(
+                    int(
+                        getattr(
+                            self.config,
+                            "private_baseline_provider_retry_rounds",
+                            1,
+                        )
+                    )
+                    + 1
+                ),
+                benchmark_date=benchmark_date,
+                benchmark_attempt=baseline_context.get("benchmark_attempt"),
+                epoch_id=baseline_context.get("evaluation_epoch"),
+                window_hash=baseline_context.get("rolling_window_hash"),
+                manifest_hash=baseline_context.get("private_model_manifest_hash"),
+                icp_ordinal=item_index,
+                icp_ref_hash=observability_hash_identifier(label),
+                retry_round=retry_round,
+                retryable=True,
+                backoff_seconds=retry_backoff_seconds,
             )
         return item_summary
 
@@ -14344,6 +15154,7 @@ class ResearchLabGatewayScoringWorker:
         total_icps = len(items)
         resumed_by_ref = _progress_rows_by_icp_ref(resume_results)
         results: dict[int, dict[str, Any]] = {}
+        baseline_context = getattr(self, "_active_baseline_context", None) or {}
         item_index_by_ref = {
             _benchmark_item_ref_for_progress(item): item_index
             for item_index, item in items
@@ -14418,6 +15229,20 @@ class ResearchLabGatewayScoringWorker:
             restored["_item_index"] = item_index
             results[item_index] = restored
         if resumed_by_ref or resume_attempt_ledger:
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="evaluation_plan_restore",
+                status="resumed",
+                benchmark_date=benchmark_date,
+                benchmark_attempt=baseline_context.get("benchmark_attempt"),
+                epoch_id=baseline_context.get("evaluation_epoch"),
+                window_hash=baseline_context.get("rolling_window_hash"),
+                manifest_hash=baseline_context.get("private_model_manifest_hash"),
+                completed_icp_count=len(resumed_by_ref),
+                checkpoint_attempt_count=len(resume_attempt_ledger),
+                selected_icp_count=total_icps,
+                row_count=len(run_items),
+            )
             logger.info(
                 format_worker_block(
                     "RESEARCH LAB PRIVATE BASELINE PARALLEL RESUME",
@@ -14506,6 +15331,23 @@ class ResearchLabGatewayScoringWorker:
                     benchmark_date=benchmark_date,
                 )
                 wave = run_items[wave_start : wave_start + first_pass_wave_width]
+                wave_sequence = wave_start // first_pass_wave_width + 1
+                wave_started = time.monotonic()
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="first_pass_wave",
+                    status="started",
+                    benchmark_date=benchmark_date,
+                    benchmark_attempt=baseline_context.get("benchmark_attempt"),
+                    epoch_id=baseline_context.get("evaluation_epoch"),
+                    window_hash=baseline_context.get("rolling_window_hash"),
+                    manifest_hash=baseline_context.get("private_model_manifest_hash"),
+                    sequence=wave_sequence,
+                    row_count=len(wave),
+                    completed_icp_count=completed_checkpoint_count(),
+                    selected_icp_count=total_icps,
+                    concurrency=concurrency,
+                )
                 watchdog = (
                     _baseline_wave_watchdog(
                         worker_ref=self.worker_ref,
@@ -14528,6 +15370,21 @@ class ResearchLabGatewayScoringWorker:
                     raise fatal[0]
                 for entry in settled:
                     results[entry["_item_index"]] = entry
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="first_pass_wave",
+                    status="completed",
+                    benchmark_date=benchmark_date,
+                    benchmark_attempt=baseline_context.get("benchmark_attempt"),
+                    epoch_id=baseline_context.get("evaluation_epoch"),
+                    window_hash=baseline_context.get("rolling_window_hash"),
+                    manifest_hash=baseline_context.get("private_model_manifest_hash"),
+                    sequence=wave_sequence,
+                    row_count=len(wave),
+                    completed_icp_count=completed_checkpoint_count(),
+                    selected_icp_count=total_icps,
+                    duration_seconds=time.monotonic() - wave_started,
+                )
                 more_first_pass_work = wave_start + len(wave) < len(run_items)
                 retry_work_waiting = any(
                     entry.get("_retryable") for entry in results.values()
@@ -14591,6 +15448,27 @@ class ResearchLabGatewayScoringWorker:
                             ("Retry concurrency", self.config.private_baseline_retry_concurrency),
                         ),
                     )
+                )
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="retry_round",
+                    status="started",
+                    benchmark_date=benchmark_date,
+                    benchmark_attempt=baseline_context.get("benchmark_attempt"),
+                    epoch_id=baseline_context.get("evaluation_epoch"),
+                    window_hash=baseline_context.get("rolling_window_hash"),
+                    manifest_hash=baseline_context.get("private_model_manifest_hash"),
+                    retry_round=round_no,
+                    retry_rounds=int(
+                        getattr(
+                            self.config,
+                            "private_baseline_provider_retry_rounds",
+                            1,
+                        )
+                    ),
+                    row_count=len(pending),
+                    unresolved_icp_count=len(retryable_indexes),
+                    concurrency=self.config.private_baseline_retry_concurrency,
                 )
                 retry_semaphore = asyncio.Semaphore(self.config.private_baseline_retry_concurrency)
                 round_retry_runner = _retry_runner_with_provider_cost_scope(
@@ -14663,6 +15541,7 @@ class ResearchLabGatewayScoringWorker:
                         benchmark_date=benchmark_date,
                     )
                     wave_indexes = pending[wave_start : wave_start + retry_width]
+                    retry_wave_started = time.monotonic()
                     watchdog = (
                         _baseline_wave_watchdog(
                             worker_ref=self.worker_ref,
@@ -14697,6 +15576,22 @@ class ResearchLabGatewayScoringWorker:
                         results[entry["_item_index"]] = entry
                     retried_total += len(wave_indexes)
                     recovered_total += recovered
+                    _record_private_baseline_stage(
+                        worker_ref=self.worker_ref,
+                        stage="retry_wave",
+                        status="completed",
+                        benchmark_date=benchmark_date,
+                        benchmark_attempt=baseline_context.get("benchmark_attempt"),
+                        epoch_id=baseline_context.get("evaluation_epoch"),
+                        window_hash=baseline_context.get("rolling_window_hash"),
+                        manifest_hash=baseline_context.get("private_model_manifest_hash"),
+                        retry_round=round_no,
+                        sequence=wave_start // retry_width + 1,
+                        row_count=len(wave_indexes),
+                        recovered_icp_count=recovered,
+                        completed_icp_count=completed_checkpoint_count(),
+                        duration_seconds=time.monotonic() - retry_wave_started,
+                    )
                     more_retry_work = wave_start + len(wave_indexes) < len(pending)
                     another_round_needed = (
                         round_no < self.config.private_baseline_provider_retry_rounds
@@ -14744,6 +15639,22 @@ class ResearchLabGatewayScoringWorker:
                         ("Elapsed", f"{time.time() - run_start:.1f}s"),
                     ),
                 )
+            )
+            _record_private_baseline_stage(
+                worker_ref=self.worker_ref,
+                stage="icp_evaluation",
+                status="completed",
+                benchmark_date=benchmark_date,
+                benchmark_attempt=baseline_context.get("benchmark_attempt"),
+                epoch_id=baseline_context.get("evaluation_epoch"),
+                window_hash=baseline_context.get("rolling_window_hash"),
+                manifest_hash=baseline_context.get("private_model_manifest_hash"),
+                selected_icp_count=total_icps,
+                completed_icp_count=len(results),
+                unresolved_icp_count=len(unresolved),
+                recovered_icp_count=recovered_total,
+                attempts=retried_total + total_icps,
+                duration_seconds=time.time() - run_start,
             )
             return (
                 [results[item_index] for item_index in sorted(results)],

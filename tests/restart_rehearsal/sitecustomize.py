@@ -3787,6 +3787,35 @@ def _local_urlopen(
         operation = "rpc"
     elif (
         parsed.path
+        == "/rest/v1/rpc/research_lab_compact_weight_settlement_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "compact weight settlement contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "compact weight settlement contract body differs"
+            )
+        body = json.dumps(
+            {
+                "schema_version": (
+                    "leadpoet.research_lab_compact_weight_settlement_contract.v1"
+                ),
+                "max_authority_bytes": 8_388_608,
+                "size_constraint_valid": True,
+                "append_only_trigger_enabled": True,
+                "identity_unique_constraint_enabled": True,
+                "row_level_security_enabled": True,
+                "finalized_stage_supported": True,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
         == "/rest/v1/research_lab_chain_realized_settlement_activation_v1"
         and "limit=2" in parsed.query
     ):

@@ -208,6 +208,103 @@ def test_allocation_frontier_receipt_query_rejects_hash_injection():
     assert provider.requests == []
 
 
+@pytest.mark.parametrize(
+    ("policy_id", "parameters", "expected"),
+    [
+        (
+            "compact_finalized_authority_cutover",
+            {"netuid": 71},
+            {
+                "netuid": "eq.71",
+                "authority_stage": "eq.finalized",
+                "order": "epoch_id.asc",
+                "limit": "1",
+            },
+        ),
+        (
+            "latest_compact_finalized_authority_summaries",
+            {"netuid": 71},
+            {
+                "netuid": "eq.71",
+                "authority_stage": "eq.finalized",
+                "order": "epoch_id.desc,bundle_hash.asc",
+                "limit": "2",
+            },
+        ),
+        (
+            "compact_finalized_authority_by_bundle_hash",
+            {"netuid": 71, "bundle_hash": HASH},
+            {
+                "netuid": "eq.71",
+                "bundle_hash": "eq." + HASH,
+                "authority_stage": "eq.finalized",
+                "limit": "1",
+            },
+        ),
+        (
+            "compact_finalized_authority_by_identity",
+            {
+                "netuid": 71,
+                "source_epoch_id": 24558,
+                "validator_hotkey": "validator-hotkey",
+            },
+            {
+                "netuid": "eq.71",
+                "epoch_id": "eq.24558",
+                "validator_hotkey": "eq.validator-hotkey",
+                "authority_stage": "eq.finalized",
+                "order": "bundle_hash.asc",
+                "limit": "2",
+            },
+        ),
+    ],
+)
+def test_compact_settlement_queries_are_exact_bounded_and_finalized(
+    policy_id,
+    parameters,
+    expected,
+):
+    provider = FakeProvider([{"rows": []}])
+
+    _read(provider, policy_id=policy_id, parameters=parameters)
+
+    url = urlsplit(provider.requests[0]["url"])
+    query = dict(parse_qsl(url.query, keep_blank_values=True))
+    assert url.path.endswith(
+        "/rest/v1/research_lab_compact_weight_authorities_v2"
+    )
+    assert expected.items() <= query.items()
+    assert QUERY_POLICIES[policy_id].max_pages == 1
+    if policy_id.endswith("by_bundle_hash") or policy_id.endswith(
+        "by_identity"
+    ):
+        assert "authority_doc" in query["select"].split(",")
+    else:
+        assert "authority_doc" not in query["select"].split(",")
+
+
+def test_compact_settlement_identity_url_encodes_hotkey_filter_syntax():
+    provider = FakeProvider([{"rows": []}])
+
+    _read(
+        provider,
+        policy_id="compact_finalized_authority_by_identity",
+        parameters={
+            "netuid": 71,
+            "source_epoch_id": 24558,
+            "validator_hotkey": "validator&authority_stage=eq.published",
+        },
+    )
+
+    query = parse_qsl(
+        urlsplit(provider.requests[0]["url"]).query,
+        keep_blank_values=True,
+    )
+    assert ("validator_hotkey", "eq.validator&authority_stage=eq.published") in query
+    assert query.count(("authority_stage", "eq.finalized")) == 1
+    assert ("authority_stage", "eq.published") not in query
+
+
 def test_uncapped_champion_query_includes_paid_projection():
     provider = FakeProvider([{"rows": []}])
     _read(

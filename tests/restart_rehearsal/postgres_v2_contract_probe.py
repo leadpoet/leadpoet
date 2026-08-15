@@ -221,6 +221,9 @@ SOURCE_CATALOG_AUTH_METADATA_MIGRATION = (
 ATOMIC_CREDIT_RESUME_MIGRATION = (
     "148-research-lab-atomic-credit-resume.sql"
 )
+COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION = (
+    "149-research-lab-compact-weight-settlement-authority.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -271,6 +274,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION,
     SOURCE_CATALOG_AUTH_METADATA_MIGRATION,
     ATOMIC_CREDIT_RESUME_MIGRATION,
+    COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -298,6 +302,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_146_private_benchmark_schema_contract_valid",
     "post_147_source_catalog_auth_metadata_contract_valid",
     "post_148_atomic_credit_resume_contract_valid",
+    "post_149_compact_weight_settlement_contract_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5211,6 +5216,33 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         database.apply_migration(scripts / ATOMIC_CREDIT_RESUME_MIGRATION)
         applied.append(ATOMIC_CREDIT_RESUME_MIGRATION)
         atomic_credit_resume = _atomic_credit_resume_postgres_contract(database)
+        database.apply_migration(
+            scripts / COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION
+        )
+        applied.append(COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION)
+        compact_weight_settlement_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_compact_weight_settlement_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if compact_weight_settlement_contract != {
+            "schema_version": (
+                "leadpoet.research_lab_compact_weight_settlement_contract.v1"
+            ),
+            "max_authority_bytes": 8_388_608,
+            "size_constraint_valid": True,
+            "append_only_trigger_enabled": True,
+            "identity_unique_constraint_enabled": True,
+            "row_level_security_enabled": True,
+            "finalized_stage_supported": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-149 compact weight settlement contract differs"
+            )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,
@@ -5323,6 +5355,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "rpcs": contract["rpcs"],
             "maintenance_lease": maintenance_lease,
             "atomic_credit_resume": atomic_credit_resume,
+            "compact_weight_settlement_contract": (
+                compact_weight_settlement_contract
+            ),
             "checks": {
                 name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS
             },

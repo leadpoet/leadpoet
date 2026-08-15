@@ -24,8 +24,17 @@ from leadpoet_canonical.legacy_settlement_v2 import (
     validate_legacy_nonfinalization_document_v2,
     validate_legacy_settlement_document_v2,
 )
+from leadpoet_canonical.compact_auditor_authority_v2 import (
+    validate_compact_published_weight_authority_shape_v2,
+)
+from leadpoet_canonical.compact_weight_authority_v2 import (
+    compact_weight_bundle_hash_v2,
+    validate_compact_weight_finalization_shape_v2,
+    validate_compact_weight_submission_shape_v2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
+    validate_weight_snapshot_v2,
     validate_weight_finalization_submission_v2,
 )
 from leadpoet_verifier.economics import (
@@ -48,6 +57,9 @@ CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1 = (
 )
 CHAIN_REALIZED_OBLIGATION_CREDIT_TABLE_V1 = (
     "research_lab_chain_realized_obligation_credits_v1"
+)
+COMPACT_WEIGHT_AUTHORITY_TABLE_V2 = (
+    "research_lab_compact_weight_authorities_v2"
 )
 CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1 = (
     "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
@@ -332,6 +344,175 @@ def _preliminary_finalized_bundle_authority_v1(
     }
 
 
+def _preliminary_compact_finalized_bundle_authority_v2(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the bounded row and derive its non-secret settlement shape.
+
+    This deliberately performs only deterministic shape and canonical-weight
+    validation. The measured coordinator independently verifies every signed
+    ancestry proof and boot identity before the row can grant credit.
+    """
+
+    required = {
+        "bundle_hash",
+        "compact_submission_hash",
+        "netuid",
+        "epoch_id",
+        "validator_hotkey",
+        "authority_stage",
+        "schema_version",
+        "lineage_id",
+        "authority_hash",
+        "publication_receipt_hash",
+        "compact_finalization_hash",
+        "finalization_receipt_hash",
+        "authority_doc",
+    }
+    if not isinstance(row, Mapping) or set(row) != required:
+        raise ChampionSettlementV2Error(
+            "compact chain settlement authority row fields are invalid"
+        )
+    authority_doc = row.get("authority_doc")
+    if not isinstance(authority_doc, Mapping):
+        raise ChampionSettlementV2Error(
+            "compact chain settlement authority document is missing"
+        )
+    try:
+        authority = validate_compact_published_weight_authority_shape_v2(
+            authority_doc
+        )
+        compact = validate_compact_weight_submission_shape_v2(
+            authority["compact_submission"]
+        )
+        finalized = authority.get("finalization")
+        if authority.get("authority_stage") != "finalized" or not isinstance(
+            finalized, Mapping
+        ):
+            raise ChampionSettlementV2Error(
+                "compact chain settlement authority is not finalized"
+            )
+        compact_finalization = validate_compact_weight_finalization_shape_v2(
+            finalized["compact_submission"]
+        )
+        weight_result = validate_weight_snapshot_v2(compact["weight_snapshot"])
+    except ChampionSettlementV2Error:
+        raise
+    except Exception as exc:
+        raise ChampionSettlementV2Error(
+            "compact chain settlement authority is invalid"
+        ) from exc
+    if dict(compact.get("weight_result") or {}) != weight_result:
+        raise ChampionSettlementV2Error(
+            "compact chain settlement weight result is not canonical"
+        )
+    finalization_doc = compact_finalization.get("finalization")
+    if not isinstance(finalization_doc, Mapping):
+        raise ChampionSettlementV2Error(
+            "compact chain settlement finalization document is missing"
+        )
+    try:
+        netuid = int(weight_result["netuid"])
+        epoch_id = int(weight_result["epoch_id"])
+        block = int(weight_result["block"])
+        finalized_block = int(finalization_doc["finalized_block"])
+        uids = [int(value) for value in weight_result["sparse_uids"]]
+        weights_u16 = [
+            int(value) for value in weight_result["sparse_weights_u16"]
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ChampionSettlementV2Error(
+            "compact chain settlement scope is invalid"
+        ) from exc
+    result = {
+        "bundle_hash": compact_weight_bundle_hash_v2(compact),
+        "compact_submission_hash": str(compact["compact_submission_hash"]),
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "block": block,
+        "validator_hotkey": str(compact["validator_hotkey"]),
+        "authority_stage": "finalized",
+        "schema_version": str(authority["schema_version"]),
+        "lineage_id": str(authority["lineage_id"]),
+        "authority_hash": str(authority["authority_hash"]),
+        "publication_receipt_hash": str(
+            authority["publication"]["publication_receipt_hash"]
+        ),
+        "compact_finalization_hash": str(
+            compact_finalization["compact_finalization_hash"]
+        ),
+        "finalization_receipt_hash": str(
+            compact_finalization["validator_receipt_delta"][
+                "root_receipt_hash"
+            ]
+        ),
+        "uids": uids,
+        "weights_u16": weights_u16,
+        "weights_hash": str(weight_result["weights_hash"]),
+        "weight_result": dict(weight_result),
+        "weight_snapshot": dict(compact["weight_snapshot"]),
+        "finalized_block": finalized_block,
+        "finalized_block_hash": str(
+            finalization_doc.get("finalized_block_hash") or ""
+        ),
+        "authority_doc": dict(authority),
+    }
+    row_bindings = {
+        key: result[key]
+        for key in required
+        if key != "authority_doc"
+    }
+    for field, expected in row_bindings.items():
+        if row.get(field) != expected:
+            raise ChampionSettlementV2Error(
+                "compact chain settlement row differs at %s" % field
+            )
+    return result
+
+
+def select_compact_chain_realized_bundle_candidate_v2(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    observation: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the one compact authority matching the realized chain vector."""
+
+    observed = validate_chain_weight_observation_v1(observation)
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        authority = _preliminary_compact_finalized_bundle_authority_v2(row)
+        if (
+            int(authority["netuid"]) == int(observed["netuid"])
+            and int(authority["epoch_id"])
+            == int(observed["active_source_epoch_id"])
+            and authority["validator_hotkey"] == observed["validator_hotkey"]
+            and int(authority["finalized_block"])
+            == int(observed["last_update_block"])
+            and authority["finalized_block_hash"]
+            == observed["last_update_block_hash"]
+            and [
+                [int(uid), int(weight)]
+                for uid, weight in zip(
+                    authority["uids"], authority["weights_u16"]
+                )
+            ]
+            == observed["weights"]
+        ):
+            candidates.append(authority)
+    identities = {
+        (
+            str(item["bundle_hash"]),
+            str(item["finalization_receipt_hash"]),
+        )
+        for item in candidates
+    }
+    if len(identities) > 1:
+        raise ChampionSettlementV2Error(
+            "active chain vector has ambiguous compact bundle authority"
+        )
+    return dict(candidates[0]) if candidates else None
+
+
 def select_chain_realized_bundle_candidate_v1(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -388,14 +569,56 @@ def build_chain_realized_settlement_package_v1(
     *,
     observation: Mapping[str, Any],
     authority: Mapping[str, Any],
+    compact_verified: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     observed = validate_chain_weight_observation_v1(observation)
-    bundle_doc = authority.get("bundle_doc")
-    if not isinstance(bundle_doc, Mapping):
-        raise ChampionSettlementV2Error(
-            "chain settlement bundle document is missing"
-        )
-    bundle = validate_published_weight_bundle_v2(bundle_doc)
+    if compact_verified is None:
+        bundle_doc = authority.get("bundle_doc")
+        if not isinstance(bundle_doc, Mapping):
+            raise ChampionSettlementV2Error(
+                "chain settlement bundle document is missing"
+            )
+        bundle = validate_published_weight_bundle_v2(bundle_doc)
+        weight_result = bundle_doc["weight_result"]
+        snapshot = bundle_doc["weight_snapshot"]
+    else:
+        required_verified_fields = {
+            "bundle_hash",
+            "validator_hotkey",
+            "netuid",
+            "epoch_id",
+            "block",
+            "uids",
+            "weights_u16",
+            "weights_hash",
+            "finalized_block",
+            "finalized_block_hash",
+            "finalization_receipt_hash",
+        }
+        if not required_verified_fields.issubset(compact_verified):
+            raise ChampionSettlementV2Error(
+                "verified compact chain settlement authority is incomplete"
+            )
+        for field in required_verified_fields:
+            if authority.get(field) != compact_verified.get(field):
+                raise ChampionSettlementV2Error(
+                    "verified compact chain settlement differs at %s" % field
+                )
+        weight_result = authority.get("weight_result")
+        snapshot = authority.get("weight_snapshot")
+        if not isinstance(weight_result, Mapping) or not isinstance(
+            snapshot, Mapping
+        ):
+            raise ChampionSettlementV2Error(
+                "compact chain settlement weight evidence is missing"
+            )
+        bundle = {
+            "bundle_hash": str(authority["bundle_hash"]),
+            "netuid": int(authority["netuid"]),
+            "epoch_id": int(authority["epoch_id"]),
+            "uids": list(authority["uids"]),
+            "weights_u16": list(authority["weights_u16"]),
+        }
     if (
         str(authority.get("bundle_hash") or "") != bundle["bundle_hash"]
         or int(bundle["netuid"]) != int(observed["netuid"])
@@ -408,7 +631,6 @@ def build_chain_realized_settlement_package_v1(
         raise ChampionSettlementV2Error(
             "chain settlement bundle differs from active weights"
         )
-    weight_result = bundle_doc["weight_result"]
     planned_uid_weight_percent = {
         int(uid): Decimal(str(weight)) * Decimal("100")
         for uid, weight in zip(
@@ -431,7 +653,6 @@ def build_chain_realized_settlement_package_v1(
         ).quantize(_CHAIN_DECIMAL_QUANTUM_V1, rounding=ROUND_HALF_EVEN)
         for uid, weight in observed["weights"]
     }
-    snapshot = bundle_doc["weight_snapshot"]
     calculation = snapshot["calculation_snapshot"]
     allocation = calculation.get("research_lab_allocation_doc")
     input_receipts = snapshot.get("input_receipt_hashes")
@@ -769,6 +990,21 @@ def build_chain_realized_settlement_package_v1(
         "settlement_hash": sha256_json(settlement_doc),
         "credits": credits,
     }
+
+
+def build_compact_chain_realized_settlement_package_v2(
+    *,
+    observation: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    verified: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build settlement credit only from independently verified compact data."""
+
+    return build_chain_realized_settlement_package_v1(
+        observation=observation,
+        authority=authority,
+        compact_verified=verified,
+    )
 
 
 def build_unattributed_chain_realized_settlement_package_v2(

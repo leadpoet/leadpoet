@@ -463,6 +463,55 @@ QUERY_POLICIES = {
         order="finalized_block.desc,bundle_hash.asc",
         limit=100,
     ),
+    "compact_finalized_authority_cutover": SupabaseQueryV2(
+        policy_id="compact_finalized_authority_cutover",
+        table="research_lab_compact_weight_authorities_v2",
+        select="epoch_id",
+        parameter_names=("netuid",),
+        max_pages=1,
+        order="epoch_id.asc",
+        limit=1,
+    ),
+    "latest_compact_finalized_authority_summaries": SupabaseQueryV2(
+        policy_id="latest_compact_finalized_authority_summaries",
+        table="research_lab_compact_weight_authorities_v2",
+        select=(
+            "bundle_hash,compact_submission_hash,netuid,epoch_id,"
+            "validator_hotkey,authority_hash,lineage_id,"
+            "finalization_receipt_hash"
+        ),
+        parameter_names=("netuid",),
+        max_pages=1,
+        order="epoch_id.desc,bundle_hash.asc",
+        limit=2,
+    ),
+    "compact_finalized_authority_by_bundle_hash": SupabaseQueryV2(
+        policy_id="compact_finalized_authority_by_bundle_hash",
+        table="research_lab_compact_weight_authorities_v2",
+        select=(
+            "bundle_hash,compact_submission_hash,netuid,epoch_id,"
+            "validator_hotkey,authority_stage,schema_version,lineage_id,"
+            "authority_hash,publication_receipt_hash,"
+            "compact_finalization_hash,finalization_receipt_hash,authority_doc"
+        ),
+        parameter_names=("netuid", "bundle_hash"),
+        max_pages=1,
+        limit=1,
+    ),
+    "compact_finalized_authority_by_identity": SupabaseQueryV2(
+        policy_id="compact_finalized_authority_by_identity",
+        table="research_lab_compact_weight_authorities_v2",
+        select=(
+            "bundle_hash,compact_submission_hash,netuid,epoch_id,"
+            "validator_hotkey,authority_stage,schema_version,lineage_id,"
+            "authority_hash,publication_receipt_hash,"
+            "compact_finalization_hash,finalization_receipt_hash,authority_doc"
+        ),
+        parameter_names=("netuid", "source_epoch_id", "validator_hotkey"),
+        max_pages=1,
+        order="bundle_hash.asc",
+        limit=2,
+    ),
     "legacy_finalized_allocation_migrations": SupabaseQueryV2(
         policy_id="legacy_finalized_allocation_migrations",
         table="research_lab_legacy_finalized_allocation_migrations_v2",
@@ -992,6 +1041,55 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
                 "eq.%d"
                 % _non_negative_int(parameters["netuid"], "netuid"),
             ),
+        )
+    if policy.policy_id in {
+        "compact_finalized_authority_cutover",
+        "latest_compact_finalized_authority_summaries",
+    }:
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+            ("authority_stage", "eq.finalized"),
+        )
+    if policy.policy_id == "compact_finalized_authority_by_bundle_hash":
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+            (
+                "bundle_hash",
+                "eq.%s"
+                % _content_hash(parameters["bundle_hash"], "bundle_hash"),
+            ),
+            ("authority_stage", "eq.finalized"),
+        )
+    if policy.policy_id == "compact_finalized_authority_by_identity":
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+            (
+                "epoch_id",
+                "eq.%d"
+                % _non_negative_int(
+                    parameters["source_epoch_id"], "source_epoch_id"
+                ),
+            ),
+            (
+                "validator_hotkey",
+                "eq.%s"
+                % _identifier(
+                    parameters["validator_hotkey"], "validator_hotkey"
+                ),
+            ),
+            ("authority_stage", "eq.finalized"),
         )
     if policy.policy_id == "finalized_allocation_authority_by_bundle_hash":
         return (

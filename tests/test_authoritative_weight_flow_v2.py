@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import gzip
 import json
+import logging
 import struct
 
 import pytest
@@ -237,6 +238,7 @@ async def test_post_json_authorizes_exact_compressed_transport(monkeypatch):
 @pytest.mark.asyncio
 async def test_compressed_transport_rejects_invalid_enclave_authorization(
     monkeypatch,
+    caplog,
 ):
     class Enclave:
         def sign_application_message_v2(self, _message):
@@ -247,6 +249,7 @@ async def test_compressed_transport_rejects_invalid_enclave_authorization(
             }
 
     monkeypatch.setattr(flow_module, "ValidatorEnclaveClient", Enclave)
+    caplog.set_level(logging.INFO, logger="leadpoet.operations")
     with pytest.raises(
         AuthoritativeWeightFlowV2Error,
         match="did not authorize",
@@ -259,6 +262,20 @@ async def test_compressed_transport_rejects_invalid_enclave_authorization(
             },
             30.0,
         )
+    events = [
+        json.loads(record.message.split(" ", 1)[1])
+        for record in caplog.records
+        if record.message.startswith("leadpoet_operation_event ")
+    ]
+    assert any(
+        event.get("stage") == "gateway_weight_http_transport"
+        and event.get("status") == "failed"
+        and event.get("reason_code")
+        == "gateway_transport_authorization_failed"
+        and event.get("exception_class")
+        == "AuthoritativeWeightFlowV2Error"
+        for event in events
+    )
 
 
 class Client:

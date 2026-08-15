@@ -493,6 +493,7 @@ def _migration_schema_contract(
         "146-research-lab-private-benchmark-schema-v11.sql",
         "147-research-lab-source-catalog-auth-metadata.sql",
         "148-research-lab-atomic-credit-resume.sql",
+        "149-research-lab-compact-weight-settlement-authority.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -569,6 +570,7 @@ def _migration_schema_contract(
         "research_lab_attested_ancestry_activations_v2",
         "research_lab_allocation_settlement_frontiers_v2",
         "research_lab_allocation_settlement_frontier_activation_v2",
+        "research_lab_compact_weight_authorities_v2",
     }
     if not required_relations <= set(relations):
         raise RuntimeError(
@@ -593,6 +595,7 @@ def _migration_schema_contract(
         "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
         "research_lab_allocation_frontier_bootstrap_contract_v2",
         "resume_research_lab_credit_blocked_run_v1",
+        "research_lab_compact_weight_settlement_contract_v1",
     }
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(
@@ -2918,6 +2921,24 @@ class Handler(BaseHTTPRequestHandler):
                     "outcome_append": "atomic_contiguous_batch",
                     "outcome_batch_max": 32,
                     "conflict_head_checkpoint_row": "encrypted_or_null",
+                }
+            elif name == (
+                "research_lab_compact_weight_settlement_contract_v1"
+            ):
+                if body not in ({}, None):
+                    raise ValueError(
+                        "compact weight settlement contract body is invalid"
+                    )
+                response = {
+                    "schema_version": (
+                        "leadpoet.research_lab_compact_weight_settlement_contract.v1"
+                    ),
+                    "max_authority_bytes": 8_388_608,
+                    "size_constraint_valid": True,
+                    "append_only_trigger_enabled": True,
+                    "identity_unique_constraint_enabled": True,
+                    "row_level_security_enabled": True,
+                    "finalized_stage_supported": True,
                 }
             elif name == "persist_research_lab_ancestry_checkpoint_v2":
                 response = self.server.state.persist_ancestry_checkpoint(body)

@@ -224,7 +224,9 @@ async def test_settle_chain_realized_epoch_executes_both_measured_authorities(
             },
         }
 
-    async def select_candidates(*_args, **_kwargs):
+    async def select_candidates(table, **_kwargs):
+        if table == settlement.COMPACT_WEIGHT_AUTHORITY_TABLE_V2:
+            return []
         return [{"candidate": True}]
 
     async def load_graph(root):
@@ -372,7 +374,9 @@ async def test_settle_chain_realized_epoch_rejects_missing_finalization_graph(
             },
         }
 
-    async def select_candidates(*_args, **_kwargs):
+    async def select_candidates(table, **_kwargs):
+        if table == settlement.COMPACT_WEIGHT_AUTHORITY_TABLE_V2:
+            return []
         return [{"candidate": True}]
 
     monkeypatch.setattr(
@@ -403,3 +407,92 @@ async def test_settle_chain_realized_epoch_rejects_missing_finalization_graph(
             select_candidates=select_candidates,
             load_graph=load_graph,
         )
+
+
+@pytest.mark.asyncio
+async def test_post_cutover_host_never_queries_legacy_full_authority(
+    monkeypatch,
+):
+    observation = _observation()
+    observation_hash = sha256_json(observation)
+    candidate = {
+        "bundle_hash": HASH_B,
+        "finalization_receipt_hash": HASH_C,
+    }
+    table_calls = []
+    measured_payloads = []
+
+    class StopAfterAuthoritySelection(RuntimeError):
+        pass
+
+    async def execute(**kwargs):
+        if kwargs["operation"] == v2_authority.OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1:
+            receipt = {
+                "receipt_hash": HASH,
+                "role": "gateway_coordinator",
+                "purpose": v2_authority.CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+                "status": "succeeded",
+                "epoch_id": 101,
+                "output_root": observation_hash,
+            }
+            return {
+                "result": observation,
+                "execution_receipt": receipt,
+                "execution_receipt_graph": {
+                    "root_receipt_hash": HASH,
+                    "receipts": [receipt],
+                },
+            }
+        measured_payloads.append(dict(kwargs["payload"]))
+        raise StopAfterAuthoritySelection
+
+    async def select_candidates(table, **kwargs):
+        table_calls.append((table, kwargs))
+        if kwargs.get("columns") == "epoch_id":
+            return [{"epoch_id": 100}]
+        if table == settlement.COMPACT_WEIGHT_AUTHORITY_TABLE_V2:
+            return [{"compact": True}]
+        raise AssertionError("legacy full authority must not be queried")
+
+    async def load_graph(root):
+        return {"root_receipt_hash": root, "receipts": []}
+
+    async def load_attempt_history(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "select_compact_chain_realized_bundle_candidate_v2",
+        lambda rows, **_kwargs: candidate if rows == [{"compact": True}] else None,
+    )
+
+    with pytest.raises(StopAfterAuthoritySelection):
+        await v2_authority.settle_chain_realized_epoch_v1(
+            epoch_id=101,
+            netuid=71,
+            execute=execute,
+            load_attempt_history=load_attempt_history,
+            select_candidates=select_candidates,
+            load_graph=load_graph,
+        )
+
+    assert [table for table, _kwargs in table_calls] == [
+        settlement.COMPACT_WEIGHT_AUTHORITY_TABLE_V2,
+        settlement.COMPACT_WEIGHT_AUTHORITY_TABLE_V2,
+    ]
+    assert measured_payloads == [
+        {
+            "schema_version": "leadpoet.chain_realized_settlement_request.v1",
+            "netuid": 71,
+            "epoch_id": 101,
+            "observation": observation,
+            "observation_receipt_hash": HASH,
+            "authority_mode": "finalized_bundle",
+            "bundle_hash": HASH_B,
+        }
+    ]

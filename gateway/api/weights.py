@@ -30,6 +30,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -164,6 +165,43 @@ def _weight_telemetry_fields(
             bundle_hash=bundle_hash,
         ),
     }
+
+
+def _begin_weight_stage(
+    stage: str,
+    telemetry: Mapping[str, Any],
+    **fields: Any,
+) -> float:
+    """Emit a bounded stage boundary without exposing authority documents."""
+
+    payload = {**dict(telemetry), **fields}
+    record_stage(
+        component="gateway",
+        operation="weight_bundle",
+        stage=stage,
+        status="started",
+        **payload,
+    )
+    return time.monotonic()
+
+
+def _finish_weight_stage(
+    stage: str,
+    started: float,
+    telemetry: Mapping[str, Any],
+    *,
+    status: str = "passed",
+    **fields: Any,
+) -> None:
+    payload = {**dict(telemetry), **fields}
+    record_stage(
+        component="gateway",
+        operation="weight_bundle",
+        stage=stage,
+        status=status,
+        duration_seconds=time.monotonic() - started,
+        **payload,
+    )
 
 
 async def _load_weight_authority_v2_singleflight(
@@ -385,6 +423,7 @@ def _weight_authority_http_response(
     """Serialize one authority once and gzip only its HTTP representation."""
 
     response = JSONResponse(content=dict(authority))
+    logical_bytes = len(response.body)
     accepts_gzip = False
     for item in str(accept_encoding or "").split(","):
         parts = [part.strip().lower() for part in item.split(";")]
@@ -397,8 +436,9 @@ def _weight_authority_http_response(
         break
     if not accepts_gzip or len(response.body) < _WEIGHT_AUTHORITY_GZIP_MIN_BYTES:
         response.headers["Vary"] = "Accept-Encoding"
+        setattr(response, "_leadpoet_logical_bytes", logical_bytes)
         return response
-    return Response(
+    compressed = Response(
         content=gzip.compress(response.body, compresslevel=1, mtime=0),
         media_type="application/json",
         headers={
@@ -406,6 +446,8 @@ def _weight_authority_http_response(
             "Vary": "Accept-Encoding",
         },
     )
+    setattr(compressed, "_leadpoet_logical_bytes", logical_bytes)
+    return compressed
 
 
 def _weight_authority_load_exception(
@@ -443,6 +485,46 @@ def _weight_authority_load_exception(
         str(exc)[:240],
     )
     return HTTPException(status_code=500, detail=failure_detail)
+
+
+async def _serialize_weight_authority_response(
+    authority: Mapping[str, Any],
+    *,
+    request: Request,
+    telemetry: Mapping[str, Any],
+    endpoint_kind: str,
+) -> Response:
+    stage = "weight_authority_http_serialization"
+    started = _begin_weight_stage(
+        stage,
+        telemetry,
+        endpoint_kind=endpoint_kind,
+        authority_stage=authority.get("authority_stage"),
+        authority_hash=authority.get("authority_hash"),
+    )
+    response = await asyncio.to_thread(
+        _weight_authority_http_response,
+        authority,
+        accept_encoding=request.headers.get("accept-encoding", ""),
+    )
+    _finish_weight_stage(
+        stage,
+        started,
+        telemetry,
+        endpoint_kind=endpoint_kind,
+        authority_stage=authority.get("authority_stage"),
+        authority_hash=authority.get("authority_hash"),
+        logical_bytes=getattr(
+            response, "_leadpoet_logical_bytes", len(response.body)
+        ),
+        response_bytes=len(response.body),
+        result_status=(
+            "gzip"
+            if response.headers.get("content-encoding") == "gzip"
+            else "identity"
+        ),
+    )
+    return response
 
 
 # ============================================================================
@@ -1655,9 +1737,19 @@ async def get_weight_inputs_v2(
 ) -> Response:
     """Return the complete measured gateway-owned input ancestry for one epoch."""
 
+    stage = "weight_input_request_shape"
+    started = _begin_weight_stage(stage, {})
     try:
         request = validate_weight_inputs_request_v2(authorization.request)
     except Exception as exc:
+        _finish_weight_stage(
+            stage,
+            started,
+            {},
+            status="rejected",
+            reason_code="request_shape_invalid",
+            exception_class=type(exc).__name__,
+        )
         raise HTTPException(status_code=400, detail=f"Invalid V2 weight input request: {exc}") from exc
     validator_hotkey = request["validator_hotkey"]
     telemetry = _weight_telemetry_fields(
@@ -1666,37 +1758,94 @@ async def get_weight_inputs_v2(
         validator_hotkey=validator_hotkey,
         request_hash=request["request_hash"],
     )
-    if not PRIMARY_VALIDATOR_HOTKEYS:
-        raise HTTPException(
-            status_code=503,
-            detail="PRIMARY_VALIDATOR_HOTKEYS is required for authoritative v2",
-        )
-    if validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS:
-        raise HTTPException(status_code=403, detail="Unauthorized validator hotkey")
-    if ALLOWED_NETUIDS and request["netuid"] not in ALLOWED_NETUIDS:
-        raise HTTPException(status_code=400, detail=f"Invalid netuid: {request['netuid']}")
+    _finish_weight_stage(
+        stage,
+        started,
+        telemetry,
+        request_hash=request["request_hash"],
+        submitted_block=request["block"],
+    )
 
-    calculation = authorization.calculation_snapshot
-    if sha256_json(calculation) != request["calculation_snapshot_hash"]:
-        raise HTTPException(
-            status_code=400,
-            detail="V2 weight input request does not bind the calculation snapshot",
+    stage = "weight_input_validator_authorization"
+    started = _begin_weight_stage(stage, telemetry)
+    authorization_reason = "authorized"
+    try:
+        if not PRIMARY_VALIDATOR_HOTKEYS:
+            authorization_reason = "primary_validator_configuration_missing"
+            raise HTTPException(
+                status_code=503,
+                detail="PRIMARY_VALIDATOR_HOTKEYS is required for authoritative v2",
+            )
+        if validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS:
+            authorization_reason = "validator_hotkey_unauthorized"
+            raise HTTPException(status_code=403, detail="Unauthorized validator hotkey")
+        if ALLOWED_NETUIDS and request["netuid"] not in ALLOWED_NETUIDS:
+            authorization_reason = "netuid_unauthorized"
+            raise HTTPException(status_code=400, detail=f"Invalid netuid: {request['netuid']}")
+    except HTTPException:
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            status="rejected",
+            reason_code=authorization_reason,
         )
-    for field in ("netuid", "epoch_id", "block"):
-        if calculation.get(field) != request[field]:
+        raise
+    _finish_weight_stage(
+        stage,
+        started,
+        telemetry,
+        reason_code=authorization_reason,
+    )
+
+    stage = "weight_input_snapshot_binding"
+    started = _begin_weight_stage(stage, telemetry)
+    calculation = authorization.calculation_snapshot
+    binding_reason = "snapshot_bound"
+    try:
+        if sha256_json(calculation) != request["calculation_snapshot_hash"]:
+            binding_reason = "calculation_snapshot_hash_mismatch"
             raise HTTPException(
                 status_code=400,
-                detail=f"V2 weight input request differs from snapshot at {field}",
+                detail="V2 weight input request does not bind the calculation snapshot",
             )
-    allocation_doc = calculation.get("research_lab_allocation_doc")
-    if (
-        not isinstance(allocation_doc, dict)
-        or allocation_doc.get("allocation_hash") != request["allocation_hash"]
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="V2 weight input request differs from the Research Lab allocation",
+        for field in ("netuid", "epoch_id", "block"):
+            if calculation.get(field) != request[field]:
+                binding_reason = "calculation_scope_mismatch"
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"V2 weight input request differs from snapshot at {field}",
+                )
+        allocation_doc = calculation.get("research_lab_allocation_doc")
+        if (
+            not isinstance(allocation_doc, dict)
+            or allocation_doc.get("allocation_hash") != request["allocation_hash"]
+        ):
+            binding_reason = "allocation_hash_mismatch"
+            raise HTTPException(
+                status_code=400,
+                detail="V2 weight input request differs from the Research Lab allocation",
+            )
+    except HTTPException:
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            status="rejected",
+            reason_code=binding_reason,
         )
+        raise
+    _finish_weight_stage(
+        stage,
+        started,
+        telemetry,
+        reason_code=binding_reason,
+        allocation_hash=request["allocation_hash"],
+        snapshot_hash=request["calculation_snapshot_hash"],
+    )
+
+    stage = "weight_input_signature_verification"
+    started = _begin_weight_stage(stage, telemetry)
     message = weight_inputs_request_message_v2(request)
     if not await asyncio.to_thread(
         verify_wallet_signature,
@@ -1704,27 +1853,69 @@ async def get_weight_inputs_v2(
         authorization.validator_hotkey_signature,
         validator_hotkey,
     ):
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            status="rejected",
+            reason_code="validator_signature_invalid",
+        )
         raise HTTPException(status_code=403, detail="Invalid V2 weight input signature")
+    _finish_weight_stage(
+        stage,
+        started,
+        telemetry,
+        reason_code="validator_signature_valid",
+    )
 
     # An exact signed retry may arrive after the original authorized build has
     # outlived MAX_BLOCK_DRIFT. Attach it to that same immutable work/result;
     # all new request hashes must still pass current chain authority.
     authorized_work = _weight_inputs_v2_has_authorized_work(request["request_hash"])
+    stage = "weight_input_epoch_authority"
+    started = _begin_weight_stage(
+        stage,
+        telemetry,
+        cache_hit=authorized_work,
+        submitted_block=request["block"],
+    )
     if not authorized_work:
-        await _verify_epoch_block_authority(
-            netuid=request["netuid"],
-            epoch_id=request["epoch_id"],
-            submitted_block=request["block"],
-            require_submission_window=False,
-        )
+        try:
+            await _verify_epoch_block_authority(
+                netuid=request["netuid"],
+                epoch_id=request["epoch_id"],
+                submitted_block=request["block"],
+                require_submission_window=False,
+            )
+        except Exception as exc:
+            _finish_weight_stage(
+                stage,
+                started,
+                telemetry,
+                status="rejected",
+                cache_hit=False,
+                submitted_block=request["block"],
+                reason_code="epoch_authority_rejected",
+                exception_class=type(exc).__name__,
+            )
+            raise
         _remember_weight_inputs_v2_authorization(request["request_hash"])
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            cache_hit=False,
+            submitted_block=request["block"],
+            reason_code="epoch_authority_verified",
+        )
     else:
-        record_stage(
-            component="gateway",
-            stage="weight_input_authorized_retry_join",
-            status="passed",
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
             cache_hit=True,
-            **telemetry,
+            submitted_block=request["block"],
+            reason_code="authorized_retry_join",
         )
 
     try:
@@ -1810,6 +2001,12 @@ async def get_weight_inputs_v2(
         == "compact-v2"
     )
     compact = result.get("compact_ancestry")
+    stage = "weight_input_protocol_selection"
+    started = _begin_weight_stage(
+        stage,
+        telemetry,
+        mechanism_id=("compact" if compact_requested else "legacy"),
+    )
     if compact_requested:
         if not isinstance(compact, Mapping):
             # A compact-capable validator has explicitly selected the bounded
@@ -1825,6 +2022,14 @@ async def get_weight_inputs_v2(
                 retryable=False,
                 fail_closed=True,
                 **telemetry,
+            )
+            _finish_weight_stage(
+                stage,
+                started,
+                telemetry,
+                status="blocked",
+                mechanism_id="compact",
+                reason_code="compact_ancestry_unavailable",
             )
             raise HTTPException(
                 status_code=503,
@@ -1851,9 +2056,22 @@ async def get_weight_inputs_v2(
             gateway_authority_event_hash=result["gateway_authority_event_hash"],
             upstream_receipt_set=result["upstream_receipt_set"],
         )
-    return _weight_authority_http_response(
-        response.model_dump(mode="json"),
-        accept_encoding=http_request.headers.get("accept-encoding", ""),
+    response_document = response.model_dump(mode="json")
+    _finish_weight_stage(
+        stage,
+        started,
+        telemetry,
+        mechanism_id=("compact" if compact_requested else "legacy"),
+        receipt_count=len(response.input_receipt_hashes),
+        result_hash=sha256_json(response_document),
+    )
+    return await _serialize_weight_authority_response(
+        response_document,
+        request=http_request,
+        telemetry=telemetry,
+        endpoint_kind=(
+            "weight_inputs_compact" if compact_requested else "weight_inputs_legacy"
+        ),
     )
 
 async def _submit_weights_v2_impl(
@@ -1865,17 +2083,54 @@ async def _submit_weights_v2_impl(
 ) -> WeightSubmissionV2Response:
     """Persist and publish the only authoritative V2 weight bundle."""
 
+    initial_payload = submission.model_dump(mode="python")
+    initial_result = initial_payload.get("weight_result") or {}
+    telemetry = _weight_telemetry_fields(
+        netuid=initial_result.get("netuid"),
+        epoch_id=initial_result.get("epoch_id"),
+        validator_hotkey=submission.validator_hotkey,
+        bundle_hash=initial_result.get("bundle_hash"),
+    )
+    current_stage = "canonical_bundle_shape_verification"
+    started = _begin_weight_stage(
+        current_stage,
+        telemetry,
+        expected_vector_count=len(initial_result.get("uids") or ()),
+    )
     try:
         verified, validator_boot = await asyncio.to_thread(
             _validate_authoritative_v2_submission,
             submission,
         )
     except Exception as exc:
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            status="rejected",
+            exception_class=type(exc).__name__,
+        )
         raise HTTPException(
             status_code=400,
             detail=f"Invalid authoritative v2 weight bundle: {exc}",
         ) from exc
+    telemetry = _weight_telemetry_fields(
+        netuid=verified["netuid"],
+        epoch_id=verified["epoch_id"],
+        validator_hotkey=submission.validator_hotkey,
+        bundle_hash=verified["bundle_hash"],
+    )
+    _finish_weight_stage(
+        current_stage,
+        started,
+        telemetry,
+        observed_vector_count=len(verified["uids"]),
+        weights_hash=verified["weights_hash"],
+        root_receipt_hash=verified["root_receipt_hash"],
+    )
 
+    current_stage = "canonical_bundle_identity_authorization"
+    started = _begin_weight_stage(current_stage, telemetry)
     if not PRIMARY_VALIDATOR_HOTKEYS:
         raise HTTPException(
             status_code=503,
@@ -1903,6 +2158,13 @@ async def _submit_weights_v2_impl(
         expected_code_hash=validator_boot["build_manifest_hash"],
     ):
         raise HTTPException(status_code=403, detail="Invalid v2 hotkey binding")
+    _finish_weight_stage(
+        current_stage,
+        started,
+        telemetry,
+        boot_identity_hash=validator_boot.get("boot_identity_hash"),
+        build_manifest_hash=validator_boot.get("build_manifest_hash"),
+    )
 
     from gateway.research_lab.attested_v2_store import (
         load_weight_bundle_v2,
@@ -1912,13 +2174,21 @@ async def _submit_weights_v2_impl(
         persist_weight_publication_v2,
     )
 
+    current_stage = "canonical_bundle_durable_lookup"
+    started = _begin_weight_stage(current_stage, telemetry)
     existing = await load_weight_bundle_v2(
         netuid=verified["netuid"],
         epoch_id=verified["epoch_id"],
         validator_hotkey=verified["validator_hotkey"],
     )
+    _finish_weight_stage(
+        current_stage,
+        started,
+        telemetry,
+        cache_hit=existing is not None,
+    )
     if existing is not None:
-        submitted_bundle = submission.model_dump(mode="python")
+        submitted_bundle = initial_payload
         if existing != submitted_bundle:
             raise HTTPException(
                 status_code=409,
@@ -1934,6 +2204,17 @@ async def _submit_weights_v2_impl(
                 detail="Existing authoritative V2 publication failed verification",
             ) from exc
         if existing_publication is not None:
+            record_stage(
+                component="gateway",
+                operation="weight_bundle",
+                stage="canonical_bundle_idempotent_readback",
+                status="passed",
+                cache_hit=True,
+                weight_submission_event_hash=existing_publication[
+                    "weight_submission_event_hash"
+                ],
+                **telemetry,
+            )
             return WeightSubmissionV2Response(
                 success=True,
                 epoch_id=verified["epoch_id"],
@@ -1949,18 +2230,41 @@ async def _submit_weights_v2_impl(
     # Verify on every attempt, including publication retries after the immutable
     # bundle was already inserted.  Otherwise the retry event would persist an
     # empty authority document and bypass the current chain/window checks.
+    current_stage = "canonical_bundle_epoch_authority"
+    started = _begin_weight_stage(
+        current_stage,
+        telemetry,
+        submitted_block=verified["block"],
+    )
     weight_epoch_authority = await _verify_epoch_block_authority(
         netuid=verified["netuid"],
         epoch_id=verified["epoch_id"],
         submitted_block=verified["block"],
         require_submission_window=True,
     )
+    _finish_weight_stage(
+        current_stage,
+        started,
+        telemetry,
+        submitted_block=verified["block"],
+    )
     try:
+        current_stage = "canonical_bundle_durable_persistence"
+        started = _begin_weight_stage(current_stage, telemetry)
         bundle_result = await persist_weight_bundle_v2(
-            submission.model_dump(mode="python")
+            initial_payload
+        )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            root_receipt_hash=bundle_result["root_receipt_hash"],
+            persistence_hash=bundle_result["durable_readback_hash"],
         )
         from gateway.utils.logger import log_event
 
+        current_stage = "canonical_bundle_transparency_event"
+        started = _begin_weight_stage(current_stage, telemetry)
         transparency = await log_event(
             "WEIGHT_SUBMISSION_V2",
             {
@@ -1982,6 +2286,12 @@ async def _submit_weights_v2_impl(
         )
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", transparency_hash):
             raise RuntimeError("signed transparency event hash is invalid")
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            publication_hash=transparency_hash,
+        )
         from gateway.research_lab.attested_coordinator_v2 import (
             execute_coordinator_v2,
         )
@@ -1989,6 +2299,8 @@ async def _submit_weights_v2_impl(
             OP_ATTEST_WEIGHT_PUBLICATION,
         )
 
+        current_stage = "canonical_bundle_measured_publication"
+        started = _begin_weight_stage(current_stage, telemetry)
         publication = await execute_coordinator_v2(
             operation=OP_ATTEST_WEIGHT_PUBLICATION,
             purpose="gateway.weights.publication.v2",
@@ -2014,10 +2326,30 @@ async def _submit_weights_v2_impl(
                 submission.receipt_graph
             ),
         )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            root_receipt_hash=(
+                publication.get("receipt", {}).get("receipt_hash")
+                if isinstance(publication, Mapping)
+                else None
+            ),
+        )
+        current_stage = "canonical_bundle_publication_persistence"
+        started = _begin_weight_stage(current_stage, telemetry)
         publication_result = await persist_weight_publication_v2(
             bundle_result=bundle_result,
             publication_graph=publication["receipt_graph"],
             publication_doc=publication["result"],
+        )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            weight_submission_event_hash=publication_result[
+                "weight_submission_event_hash"
+            ],
         )
     except HTTPException:
         raise
@@ -2028,7 +2360,7 @@ async def _submit_weights_v2_impl(
                 default="weight.authoritative_result_invalid",
             ),
             component="gateway",
-            stage="canonical_bundle_publication",
+            stage=current_stage,
             exception=exc,
             terminal=True,
             retryable=False,
@@ -2041,10 +2373,10 @@ async def _submit_weights_v2_impl(
             ),
         )
         logger.exception(
-            "authoritative_weight_submission_v2_failed epoch=%s type=%s error=%s",
+            "authoritative_weight_submission_v2_failed epoch=%s stage=%s type=%s",
             verified["epoch_id"],
+            current_stage,
             type(exc).__name__,
-            str(exc)[:300],
         )
         raise HTTPException(
             status_code=503,
@@ -2103,16 +2435,43 @@ async def submit_compact_weights_v2(
     """Verify and publish one bounded, first-class weight authority."""
 
     payload = submission.model_dump(mode="python")
+    initial_result = payload.get("weight_result") or {}
+    telemetry = _weight_telemetry_fields(
+        netuid=initial_result.get("netuid"),
+        epoch_id=initial_result.get("epoch_id"),
+        validator_hotkey=submission.validator_hotkey,
+        bundle_hash=initial_result.get("bundle_hash"),
+    )
+    current_stage = "compact_bundle_shape_verification"
+    started = _begin_weight_stage(
+        current_stage,
+        telemetry,
+        expected_vector_count=len(initial_result.get("uids") or ()),
+    )
     try:
         normalized = await asyncio.to_thread(
             validate_compact_weight_submission_shape_v2,
             payload,
         )
     except Exception as exc:
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            status="rejected",
+            exception_class=type(exc).__name__,
+        )
         raise HTTPException(
             status_code=400,
             detail=f"Invalid compact authoritative v2 submission: {exc}",
         ) from exc
+    _finish_weight_stage(
+        current_stage,
+        started,
+        telemetry,
+        observed_vector_count=len(normalized["weight_result"]["uids"]),
+        result_hash=normalized["compact_submission_hash"],
+    )
     if not PRIMARY_VALIDATOR_HOTKEYS:
         raise HTTPException(
             status_code=503,
@@ -2121,6 +2480,8 @@ async def submit_compact_weights_v2(
     if submission.validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS:
         raise HTTPException(status_code=403, detail="Unauthorized validator hotkey")
     try:
+        current_stage = "compact_bundle_cutover_authority"
+        started = _begin_weight_stage(current_stage, telemetry)
         cutover = load_subnet_epoch_cutover()
         from gateway.utils.epoch import validate_stateful_cutover_authority_async
 
@@ -2130,6 +2491,12 @@ async def submit_compact_weights_v2(
             cutover_mapping_hash=str(cutover.mapping_hash),
             network_genesis_hash=str(cutover.network_genesis_hash),
             netuid=int(cutover.netuid),
+        )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            lineage_hash=lineage_id,
         )
         from gateway.research_lab.attested_v2_store import (
             AttestedV2StoreError,
@@ -2142,6 +2509,8 @@ async def submit_compact_weights_v2(
             persist_receipt_graph_v2,
         )
 
+        current_stage = "compact_bundle_cryptographic_verification"
+        started = _begin_weight_stage(current_stage, telemetry)
         verified = await asyncio.to_thread(
             verify_compact_weight_submission_v2,
             normalized,
@@ -2150,12 +2519,29 @@ async def submit_compact_weights_v2(
             identity_cache=None,
             boot_verifier=_verify_authoritative_v2_boot,
         )
+        telemetry = _weight_telemetry_fields(
+            netuid=verified["netuid"],
+            epoch_id=verified["epoch_id"],
+            validator_hotkey=submission.validator_hotkey,
+            bundle_hash=verified["bundle_hash"],
+        )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            observed_vector_count=len(verified["uids"]),
+            weights_hash=verified["weights_hash"],
+            root_receipt_hash=verified["root_receipt_hash"],
+            lineage_hash=lineage_id,
+        )
         if ALLOWED_NETUIDS and verified["netuid"] not in ALLOWED_NETUIDS:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid netuid: {verified['netuid']}",
             )
 
+        current_stage = "compact_bundle_validator_ancestry_persistence"
+        started = _begin_weight_stage(current_stage, telemetry)
         validator_graph = await asyncio.to_thread(
             build_checkpointed_weight_graph_from_compact_v2,
             normalized,
@@ -2172,6 +2558,15 @@ async def submit_compact_weights_v2(
             boot_attestation_verifier=_verify_authoritative_v2_boot,
             allowed_issuer_roles={"validator_weights"},
         )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            root_receipt_hash=verified["root_receipt_hash"],
+            lineage_hash=lineage_id,
+        )
+        current_stage = "compact_bundle_durable_persistence"
+        started = _begin_weight_stage(current_stage, telemetry)
         bundle_result = await persist_compact_weight_submission_v2(normalized)
         if (
             bundle_result.get("bundle_hash") != verified["bundle_hash"]
@@ -2179,24 +2574,66 @@ async def submit_compact_weights_v2(
             != verified["root_receipt_hash"]
         ):
             raise RuntimeError("compact weight submission durable identity differs")
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            persistence_hash=bundle_result["durable_readback_hash"],
+            root_receipt_hash=bundle_result["binding_receipt_hash"],
+        )
 
+        current_stage = "compact_bundle_authority_readback"
+        started = _begin_weight_stage(current_stage, telemetry)
         compact_authority = await load_compact_weight_authority_v2(
             bundle_hash=verified["bundle_hash"],
             prefer_finalized=False,
         )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            cache_hit=compact_authority is not None,
+            authority_stage=(
+                compact_authority.get("authority_stage")
+                if isinstance(compact_authority, Mapping)
+                else None
+            ),
+        )
         if compact_authority is None:
+            current_stage = "compact_bundle_publication_intent_lookup"
+            started = _begin_weight_stage(current_stage, telemetry)
             intent = await load_compact_weight_publication_intent_v2(
                 bundle_hash=verified["bundle_hash"]
             )
+            _finish_weight_stage(
+                current_stage,
+                started,
+                telemetry,
+                cache_hit=intent is not None,
+            )
             if intent is None:
+                current_stage = "compact_bundle_epoch_authority"
+                started = _begin_weight_stage(
+                    current_stage,
+                    telemetry,
+                    submitted_block=verified["block"],
+                )
                 weight_epoch_authority = await _verify_epoch_block_authority(
                     netuid=verified["netuid"],
                     epoch_id=verified["epoch_id"],
                     submitted_block=verified["block"],
                     require_submission_window=True,
                 )
+                _finish_weight_stage(
+                    current_stage,
+                    started,
+                    telemetry,
+                    submitted_block=verified["block"],
+                )
                 from gateway.utils.logger import log_event
 
+                current_stage = "compact_bundle_transparency_event"
+                started = _begin_weight_stage(current_stage, telemetry)
                 transparency = await log_event(
                     "WEIGHT_SUBMISSION_V2",
                     {
@@ -2220,6 +2657,14 @@ async def submit_compact_weights_v2(
                 )
                 if not re.fullmatch(r"sha256:[0-9a-f]{64}", transparency_hash):
                     raise RuntimeError("signed transparency event hash is invalid")
+                _finish_weight_stage(
+                    current_stage,
+                    started,
+                    telemetry,
+                    publication_hash=transparency_hash,
+                )
+                current_stage = "compact_bundle_publication_intent_persistence"
+                started = _begin_weight_stage(current_stage, telemetry)
                 try:
                     intent = await persist_compact_weight_publication_intent_v2(
                         submission=normalized,
@@ -2238,6 +2683,13 @@ async def submit_compact_weights_v2(
                     )
                     if intent is None:
                         raise
+                _finish_weight_stage(
+                    current_stage,
+                    started,
+                    telemetry,
+                    persistence_hash=intent.get("intent_hash"),
+                    publication_hash=intent.get("transparency_event_hash"),
+                )
             if (
                 intent.get("bundle_hash") != verified["bundle_hash"]
                 or intent.get("compact_submission_hash")
@@ -2256,6 +2708,8 @@ async def submit_compact_weights_v2(
                 OP_ATTEST_WEIGHT_PUBLICATION,
             )
 
+            current_stage = "compact_bundle_measured_publication"
+            started = _begin_weight_stage(current_stage, telemetry)
             publication_outcome = await execute_coordinator_v2(
                 operation=OP_ATTEST_WEIGHT_PUBLICATION,
                 purpose="gateway.weights.publication.v2",
@@ -2305,6 +2759,14 @@ async def submit_compact_weights_v2(
                 or not isinstance(publication_proof, Mapping)
             ):
                 raise RuntimeError("measured compact publication differs")
+            _finish_weight_stage(
+                current_stage,
+                started,
+                telemetry,
+                root_receipt_hash=str(
+                    publication_receipt.get("receipt_hash") or ""
+                ),
+            )
             publication_root = str(
                 publication_receipt.get("receipt_hash") or ""
             )
@@ -2335,6 +2797,8 @@ async def submit_compact_weights_v2(
                 },
                 finalization=None,
             )
+            current_stage = "compact_bundle_authority_verification"
+            started = _begin_weight_stage(current_stage, telemetry)
             await asyncio.to_thread(
                 verify_compact_published_weight_authority_v2,
                 compact_authority,
@@ -2344,8 +2808,27 @@ async def submit_compact_weights_v2(
                 expected_chain=EXPECTED_CHAIN,
                 boot_verifier=_verify_authoritative_v2_boot,
             )
+            _finish_weight_stage(
+                current_stage,
+                started,
+                telemetry,
+                authority_stage="published",
+                authority_hash=compact_authority.get("authority_hash"),
+                weight_submission_event_hash=weight_submission_event_hash,
+            )
+            current_stage = "compact_bundle_authority_persistence"
+            started = _begin_weight_stage(current_stage, telemetry)
             await persist_compact_weight_authority_v2(compact_authority)
+            _finish_weight_stage(
+                current_stage,
+                started,
+                telemetry,
+                authority_stage="published",
+                authority_hash=compact_authority.get("authority_hash"),
+            )
         else:
+            current_stage = "compact_bundle_authority_verification"
+            started = _begin_weight_stage(current_stage, telemetry)
             compact_verified = await asyncio.to_thread(
                 verify_compact_published_weight_authority_v2,
                 compact_authority,
@@ -2361,6 +2844,16 @@ async def submit_compact_weights_v2(
                 or compact_verified["bundle_hash"] != verified["bundle_hash"]
             ):
                 raise RuntimeError("durable compact publication differs")
+            _finish_weight_stage(
+                current_stage,
+                started,
+                telemetry,
+                authority_stage=compact_authority.get("authority_stage"),
+                authority_hash=compact_authority.get("authority_hash"),
+                weight_submission_event_hash=compact_verified[
+                    "weight_submission_event_hash"
+                ],
+            )
 
         publication = compact_authority["publication"]
         publication_response = WeightSubmissionV2Response(
@@ -2374,6 +2867,8 @@ async def submit_compact_weights_v2(
             ],
             message="Compact authoritative V2 bundle durably published",
         )
+        current_stage = "compact_bundle_epoch_evidence"
+        started = _begin_weight_stage(current_stage, telemetry)
         epoch_evidence = await asyncio.to_thread(
             build_stateful_epoch_evidence_from_compact_v2,
             normalized,
@@ -2386,6 +2881,12 @@ async def submit_compact_weights_v2(
             epoch_ack = await persist_subnet_epoch_evidence_v1(
                 SubnetEpochEvidenceSubmissionV1.model_validate(epoch_evidence)
             )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            result_status=("persisted" if epoch_ack is not None else "not_applicable"),
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -2395,7 +2896,7 @@ async def submit_compact_weights_v2(
                 default="weight.authoritative_result_invalid",
             ),
             component="gateway",
-            stage="compact_bundle_publication",
+            stage=current_stage,
             exception=exc,
             terminal=True,
             retryable=False,
@@ -2408,10 +2909,10 @@ async def submit_compact_weights_v2(
             ),
         )
         logger.exception(
-            "authoritative_weight_compact_submission_v2_failed epoch=%s type=%s error=%s",
+            "authoritative_weight_compact_submission_v2_failed epoch=%s stage=%s type=%s",
             normalized.get("weight_result", {}).get("epoch_id"),
+            current_stage,
             type(exc).__name__,
-            str(exc)[:300],
         )
         raise HTTPException(
             status_code=503,
@@ -2446,10 +2947,27 @@ async def finalize_weights_v2(
     """Persist only enclave-proven finalized inclusion and chain state change."""
 
     payload = submission.model_dump(mode="python")
+    initial_finalization = payload.get("finalization") or {}
+    telemetry = _weight_telemetry_fields(
+        netuid=initial_finalization.get("netuid"),
+        epoch_id=initial_finalization.get("epoch_id"),
+        validator_hotkey=submission.validator_hotkey,
+        bundle_hash=initial_finalization.get("bundle_hash"),
+    )
+    current_stage = "primary_finalization_shape_verification"
+    started = _begin_weight_stage(current_stage, telemetry)
     try:
         verified = await asyncio.to_thread(
             validate_weight_finalization_submission_v2,
             payload,
+        )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            weights_hash=verified["weights_hash"],
+            extrinsic_hash=verified["extrinsic_hash"],
+            finalized_block=verified["finalized_block"],
         )
         from leadpoet_canonical.attested_v2 import validate_receipt_graph
 
@@ -2458,6 +2976,8 @@ async def finalize_weights_v2(
                 payload["receipt_graph"]
             )
         )
+        current_stage = "primary_finalization_receipt_graph_verification"
+        started = _begin_weight_stage(current_stage, telemetry)
         await asyncio.to_thread(
             validate_receipt_graph,
             payload["receipt_graph"],
@@ -2473,7 +2993,20 @@ async def finalize_weights_v2(
             _verify_authoritative_v2_boot,
             _receipt_root_boot_identity(payload["receipt_graph"]),
         )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            root_receipt_hash=payload["receipt_graph"].get("root_receipt_hash"),
+        )
     except Exception as exc:
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            status="rejected",
+            exception_class=type(exc).__name__,
+        )
         raise HTTPException(
             status_code=400,
             detail=f"Invalid authoritative v2 weight finalization: {exc}",
@@ -2490,12 +3023,34 @@ async def finalize_weights_v2(
             status_code=400,
             detail=f"Invalid netuid: {verified['netuid']}",
         )
+    telemetry = _weight_telemetry_fields(
+        netuid=verified["netuid"],
+        epoch_id=verified["epoch_id"],
+        validator_hotkey=verified["validator_hotkey"],
+        bundle_hash=verified.get("bundle_hash"),
+    )
     try:
         from gateway.research_lab.attested_v2_store import (
             persist_weight_finalization_v2,
         )
 
+        current_stage = "primary_finalization_persistence"
+        started = _begin_weight_stage(current_stage, telemetry)
         result = await persist_weight_finalization_v2(submission=payload)
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            weights_hash=verified["weights_hash"],
+            extrinsic_hash=verified["extrinsic_hash"],
+            finalized_block=verified["finalized_block"],
+            weight_submission_event_hash=verified[
+                "weight_submission_event_hash"
+            ],
+            weight_finalization_event_hash=result[
+                "weight_finalization_event_hash"
+            ],
+        )
     except Exception as exc:
         capture_failure(
             "weight.finalization_missing",
@@ -2561,12 +3116,29 @@ async def finalize_compact_weights_v2(
     payload = submission.model_dump(mode="python")
     normalized: Mapping[str, Any] | None = None
     finalization: Mapping[str, Any] | None = None
+    initial_finalization = payload.get("finalization") or {}
+    telemetry = _weight_telemetry_fields(
+        netuid=initial_finalization.get("netuid"),
+        epoch_id=initial_finalization.get("epoch_id"),
+        validator_hotkey=submission.validator_hotkey,
+        bundle_hash=initial_finalization.get("bundle_hash"),
+    )
+    current_stage = "compact_finalization_shape_verification"
+    started = _begin_weight_stage(current_stage, telemetry)
     try:
         normalized = await asyncio.to_thread(
             validate_compact_weight_finalization_shape_v2,
             payload,
         )
         finalization = normalized["finalization"]
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            extrinsic_hash=finalization.get("extrinsic_hash"),
+            finalized_block=finalization.get("finalized_block"),
+            result_hash=normalized.get("compact_finalization_hash"),
+        )
         if not PRIMARY_VALIDATOR_HOTKEYS:
             raise HTTPException(
                 status_code=503,
@@ -2582,6 +3154,8 @@ async def finalize_compact_weights_v2(
                 status_code=400,
                 detail=f"Invalid netuid: {finalization['netuid']}",
             )
+        current_stage = "compact_finalization_cutover_authority"
+        started = _begin_weight_stage(current_stage, telemetry)
         cutover = load_subnet_epoch_cutover()
         from gateway.utils.epoch import validate_stateful_cutover_authority_async
 
@@ -2592,6 +3166,12 @@ async def finalize_compact_weights_v2(
             network_genesis_hash=str(cutover.network_genesis_hash),
             netuid=int(cutover.netuid),
         )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            lineage_hash=lineage_id,
+        )
         from gateway.research_lab.attested_v2_store import (
             load_compact_weight_authority_for_identity_v2,
             persist_ancestry_checkpoint_v2,
@@ -2599,6 +3179,8 @@ async def finalize_compact_weights_v2(
             persist_receipt_graph_v2,
         )
 
+        current_stage = "compact_finalization_publication_readback"
+        started = _begin_weight_stage(current_stage, telemetry)
         published_authority = await load_compact_weight_authority_for_identity_v2(
             netuid=int(finalization["netuid"]),
             epoch_id=int(finalization["epoch_id"]),
@@ -2608,6 +3190,15 @@ async def finalize_compact_weights_v2(
             raise RuntimeError(
                 "compact finalization publication authority is unavailable"
             )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            authority_stage=published_authority.get("authority_stage"),
+            authority_hash=published_authority.get("authority_hash"),
+        )
+        current_stage = "compact_finalization_publication_verification"
+        started = _begin_weight_stage(current_stage, telemetry)
         published_verified = await asyncio.to_thread(
             verify_compact_published_weight_authority_v2,
             published_authority,
@@ -2621,6 +3212,15 @@ async def finalize_compact_weights_v2(
             "weight_submission_event_hash"
         ]:
             raise RuntimeError("compact finalization publication event differs")
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            weights_hash=published_verified["weights_hash"],
+            weight_submission_event_hash=published_verified[
+                "weight_submission_event_hash"
+            ],
+        )
 
         if published_authority["authority_stage"] == "finalized":
             durable_finalization = published_authority["finalization"]
@@ -2629,6 +3229,17 @@ async def finalize_compact_weights_v2(
                     status_code=409,
                     detail="Different compact finalization already exists",
                 )
+            record_stage(
+                component="gateway",
+                operation="weight_bundle",
+                stage="compact_finalization_idempotent_readback",
+                status="passed",
+                cache_hit=True,
+                weight_finalization_event_hash=published_verified[
+                    "weight_finalization_event_hash"
+                ],
+                **telemetry,
+            )
             return WeightFinalizationV2Response(
                 success=True,
                 epoch_id=published_verified["epoch_id"],
@@ -2683,6 +3294,8 @@ async def finalize_compact_weights_v2(
                 "compact_submission": normalized,
             },
         )
+        current_stage = "compact_finalization_authority_verification"
+        started = _begin_weight_stage(current_stage, telemetry)
         finalized_verified = await asyncio.to_thread(
             verify_compact_published_weight_authority_v2,
             finalized_authority,
@@ -2692,6 +3305,18 @@ async def finalize_compact_weights_v2(
             expected_chain=EXPECTED_CHAIN,
             boot_verifier=_verify_authoritative_v2_boot,
         )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            authority_stage="finalized",
+            authority_hash=finalized_authority.get("authority_hash"),
+            weight_finalization_event_hash=finalized_verified[
+                "weight_finalization_event_hash"
+            ],
+        )
+        current_stage = "compact_finalization_ancestry_persistence"
+        started = _begin_weight_stage(current_stage, telemetry)
         finalization_graph = await asyncio.to_thread(
             build_checkpointed_weight_finalization_graph_v2,
             normalized,
@@ -2711,14 +3336,30 @@ async def finalize_compact_weights_v2(
             boot_attestation_verifier=_verify_authoritative_v2_boot,
             allowed_issuer_roles={"validator_weights"},
         )
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            root_receipt_hash=finalization_receipt_hash,
+            lineage_hash=lineage_id,
+        )
+        current_stage = "compact_finalization_authority_persistence"
+        started = _begin_weight_stage(current_stage, telemetry)
         await persist_compact_weight_authority_v2(finalized_authority)
+        _finish_weight_stage(
+            current_stage,
+            started,
+            telemetry,
+            authority_stage="finalized",
+            authority_hash=finalized_authority.get("authority_hash"),
+        )
     except HTTPException:
         raise
     except Exception as exc:
         capture_failure(
             "weight.finalization_missing",
             component="gateway",
-            stage="compact_finalization_persistence",
+            stage=current_stage,
             exception=exc,
             terminal=True,
             retryable=False,
@@ -2731,10 +3372,10 @@ async def finalize_compact_weights_v2(
             ),
         )
         logger.exception(
-            "authoritative_weight_compact_finalization_v2_failed epoch=%s type=%s error=%s",
+            "authoritative_weight_compact_finalization_v2_failed epoch=%s stage=%s type=%s",
             finalization.get("epoch_id") if finalization is not None else None,
+            current_stage,
             type(exc).__name__,
-            str(exc)[:300],
         )
         raise HTTPException(
             status_code=503,
@@ -2784,6 +3425,14 @@ async def get_attested_weights_v2(
 ) -> Response:
     """Return only complete V2 authority with finalized-chain evidence."""
 
+    telemetry = _weight_telemetry_fields(netuid=netuid, epoch_id=epoch_id)
+    stage = "weight_authority_finalized_readback"
+    started = _begin_weight_stage(
+        stage,
+        telemetry,
+        endpoint_kind="finalized_full",
+        authority_stage="finalized",
+    )
     try:
         from gateway.research_lab.attested_v2_store import load_weight_authority_v2
 
@@ -2795,6 +3444,14 @@ async def get_attested_weights_v2(
             validator_hotkey=next(iter(PRIMARY_VALIDATOR_HOTKEYS)),
         )
     except Exception as exc:
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            status="failed",
+            endpoint_kind="finalized_full",
+            exception_class=type(exc).__name__,
+        )
         raise _weight_authority_load_exception(
             exc,
             netuid=netuid,
@@ -2803,14 +3460,31 @@ async def get_attested_weights_v2(
             failure_detail="v2 weight sidecar verification failed",
         ) from exc
     if authority is None:
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            status="blocked",
+            endpoint_kind="finalized_full",
+            reason_code="authority_not_ready",
+        )
         raise HTTPException(
             status_code=404,
             detail="finalized v2 weight authority not found",
         )
-    return await asyncio.to_thread(
-        _weight_authority_http_response,
+    _finish_weight_stage(
+        stage,
+        started,
+        telemetry,
+        endpoint_kind="finalized_full",
+        authority_stage=authority.get("authority_stage"),
+        authority_hash=authority.get("authority_hash"),
+    )
+    return await _serialize_weight_authority_response(
         authority,
-        accept_encoding=request.headers.get("accept-encoding", ""),
+        request=request,
+        telemetry=telemetry,
+        endpoint_kind="finalized_full",
     )
 
 
@@ -2830,6 +3504,13 @@ async def get_published_weights_v2(
     /v2/latest contract is unchanged for existing consumers.
     """
 
+    telemetry = _weight_telemetry_fields(netuid=netuid, epoch_id=epoch_id)
+    stage = "weight_authority_staged_readback"
+    started = _begin_weight_stage(
+        stage,
+        telemetry,
+        endpoint_kind="staged_full",
+    )
     try:
         if len(PRIMARY_VALIDATOR_HOTKEYS) != 1:
             raise RuntimeError("authoritative primary validator hotkey is ambiguous")
@@ -2840,6 +3521,14 @@ async def get_published_weights_v2(
             require_finalization=False,
         )
     except Exception as exc:
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            status="failed",
+            endpoint_kind="staged_full",
+            exception_class=type(exc).__name__,
+        )
         raise _weight_authority_load_exception(
             exc,
             netuid=netuid,
@@ -2848,14 +3537,31 @@ async def get_published_weights_v2(
             failure_detail="v2 staged weight authority load failed",
         ) from exc
     if authority is None:
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            status="blocked",
+            endpoint_kind="staged_full",
+            reason_code="authority_not_ready",
+        )
         raise HTTPException(
             status_code=404,
             detail="published v2 weight authority not found",
         )
-    return await asyncio.to_thread(
-        _weight_authority_http_response,
+    _finish_weight_stage(
+        stage,
+        started,
+        telemetry,
+        endpoint_kind="staged_full",
+        authority_stage=authority.get("authority_stage"),
+        authority_hash=authority.get("authority_hash"),
+    )
+    return await _serialize_weight_authority_response(
         authority,
-        accept_encoding=request.headers.get("accept-encoding", ""),
+        request=request,
+        telemetry=telemetry,
+        endpoint_kind="staged_full",
     )
 
 
@@ -2867,6 +3573,13 @@ async def get_compact_published_weights_v2(
 ) -> Response:
     """Return bounded recursive authority without loading the full graph."""
 
+    telemetry = _weight_telemetry_fields(netuid=netuid, epoch_id=epoch_id)
+    stage = "weight_authority_compact_readback"
+    started = _begin_weight_stage(
+        stage,
+        telemetry,
+        endpoint_kind="staged_compact",
+    )
     try:
         if len(PRIMARY_VALIDATOR_HOTKEYS) != 1:
             raise RuntimeError("authoritative primary validator hotkey is ambiguous")
@@ -2880,6 +3593,14 @@ async def get_compact_published_weights_v2(
             validator_hotkey=next(iter(PRIMARY_VALIDATOR_HOTKEYS)),
         )
     except Exception as exc:
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            status="failed",
+            endpoint_kind="staged_compact",
+            exception_class=type(exc).__name__,
+        )
         raise _weight_authority_load_exception(
             exc,
             netuid=netuid,
@@ -2888,14 +3609,31 @@ async def get_compact_published_weights_v2(
             failure_detail="compact v2 staged weight authority load failed",
         ) from exc
     if authority is None:
+        _finish_weight_stage(
+            stage,
+            started,
+            telemetry,
+            status="blocked",
+            endpoint_kind="staged_compact",
+            reason_code="authority_not_ready",
+        )
         raise HTTPException(
             status_code=404,
             detail="compact published v2 weight authority not found",
         )
-    return await asyncio.to_thread(
-        _weight_authority_http_response,
+    _finish_weight_stage(
+        stage,
+        started,
+        telemetry,
+        endpoint_kind="staged_compact",
+        authority_stage=authority.get("authority_stage"),
+        authority_hash=authority.get("authority_hash"),
+    )
+    return await _serialize_weight_authority_response(
         authority,
-        accept_encoding=request.headers.get("accept-encoding", ""),
+        request=request,
+        telemetry=telemetry,
+        endpoint_kind="staged_compact",
     )
 
 

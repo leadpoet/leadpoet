@@ -2018,11 +2018,22 @@ def get_v2_coordinator_job_manager():
         from gateway.tee.coordinator_chain_realized_settlement_v1 import (
             CoordinatorChainRealizedSettlementV1,
         )
+        from leadpoet_canonical.chain_source_v2 import (
+            CHAIN_ENDPOINT_HOST,
+            CHAIN_ENDPOINT_PORT,
+        )
 
         chain_realized_settlement_source = (
             CoordinatorChainRealizedSettlementV1(
                 reader=source_reader,
                 chain_source=chain_source,
+                expected_lineage_id=_gateway_ancestry_manager_kwargs(runtime)[
+                    "ancestry_lineage_id"
+                ],
+                expected_chain=(
+                    f"wss://{CHAIN_ENDPOINT_HOST}:{CHAIN_ENDPOINT_PORT}"
+                ),
+                boot_verifier=runtime.verify_release_lineage_boot,
             )
         )
         allocation_source = CoordinatorAllocationSourceV2(

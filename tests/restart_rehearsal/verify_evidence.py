@@ -790,6 +790,20 @@ def verify_migration_backed_database_contract(
         raise SystemExit(
             "migration-backed atomic credit resume evidence is missing"
         )
+    if document.get("compact_weight_settlement_contract") != {
+        "schema_version": (
+            "leadpoet.research_lab_compact_weight_settlement_contract.v1"
+        ),
+        "max_authority_bytes": 8_388_608,
+        "size_constraint_valid": True,
+        "append_only_trigger_enabled": True,
+        "identity_unique_constraint_enabled": True,
+        "row_level_security_enabled": True,
+        "finalized_stage_supported": True,
+    }:
+        raise SystemExit(
+            "migration-backed compact weight settlement contract is missing"
+        )
     if document.get("provider_outcome_contention_contract") != {
         "schema_version": "leadpoet.provider_outcome_contention_contract.v3",
         "lock_contention_status": "busy",

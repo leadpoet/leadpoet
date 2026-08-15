@@ -409,6 +409,22 @@ def _chain_realized_activation_response() -> bytes:
     ).encode()
 
 
+def _compact_weight_settlement_contract_response() -> bytes:
+    return json.dumps(
+        {
+            "schema_version": (
+                "leadpoet.research_lab_compact_weight_settlement_contract.v1"
+            ),
+            "max_authority_bytes": 8_388_608,
+            "size_constraint_valid": True,
+            "append_only_trigger_enabled": True,
+            "identity_unique_constraint_enabled": True,
+            "row_level_security_enabled": True,
+            "finalized_stage_supported": True,
+        }
+    ).encode()
+
+
 def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     requests = []
 
@@ -426,6 +442,12 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
             and "limit=2" in request.full_url
         ):
             return _SchemaResponse(body=_chain_realized_activation_response())
+        if request.full_url.endswith(
+            "/rpc/research_lab_compact_weight_settlement_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_compact_weight_settlement_contract_response()
+            )
         return _SchemaResponse()
 
     result = schema_preflight.verify_required_supabase_v2_schema(
@@ -439,14 +461,14 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["status"] == "ready"
     assert result["probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
-    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 1
+    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 2
     assert result["table_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
     )
     assert result["rpc_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_RPCS
     )
-    assert result["data_probe_count"] == 1
+    assert result["data_probe_count"] == 2
     assert result["schema_document_probe_count"] == 1
     assert result["chain_realized_settlement_activation"] == {
         "netuid": 71,
@@ -454,7 +476,10 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "source_bundle_hash": "sha256:" + "a" * 64,
         "source_finalized_block": 8715224,
     }
-    assert len(requests) == result["table_probe_count"] + 2
+    assert result["compact_weight_settlement_contract"] == json.loads(
+        _compact_weight_settlement_contract_response()
+    )
+    assert len(requests) == result["table_probe_count"] + 3
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
     table_requests = [
         request
@@ -473,13 +498,24 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         in request.full_url
         and "limit=2" in request.full_url
     ]
+    contract_requests = [
+        request
+        for request in table_requests
+        if request.full_url.endswith(
+            "/rpc/research_lab_compact_weight_settlement_contract_v1"
+        )
+    ]
     schema_table_requests = [
-        request for request in table_requests if request not in activation_requests
+        request
+        for request in table_requests
+        if request not in activation_requests
+        and request not in contract_requests
     ]
     assert all(
         "limit=0" in request.full_url for request in schema_table_requests
     )
     assert len(activation_requests) == 1
+    assert len(contract_requests) == 1
     assert len(schema_requests) == 1
     assert schema_requests[0].headers["Accept"] == "application/openapi+json"
     assert {
@@ -503,6 +539,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/145-research-lab-source-add-admission-control.sql",
         "scripts/146-research-lab-private-benchmark-schema-v11.sql",
         "scripts/148-research-lab-atomic-credit-resume.sql",
+        "scripts/149-research-lab-compact-weight-settlement-authority.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 

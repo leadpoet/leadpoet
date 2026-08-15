@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -110,6 +111,49 @@ def test_safe_fields_are_allowlisted_bounded_and_do_not_leak_secrets():
     assert "provider_payload" not in fields
     assert "person@example.com" not in encoded
     assert len(fields["query_fingerprint"]) <= 256
+
+
+def test_operation_log_is_single_line_joinable_and_private_fields_are_dropped(
+    caplog,
+):
+    secret = "sk-or-never-log-this"
+    with caplog.at_level(logging.INFO, logger="leadpoet.operations"):
+        sentry_operations.record_stage(
+            component="gateway",
+            operation="private_baseline_rebenchmark",
+            stage="icp_attempt_completed",
+            status="passed",
+            benchmark_date="2026-08-14",
+            epoch_id=24558,
+            icp_ref_hash="sha256:" + "ab" * 32,
+            result_hash="sha256:" + "cd" * 32,
+            authority_hash="sha256:" + "ef" * 32,
+            provider_payload={"authorization": secret},
+            raw_icp="private ICP text " + secret,
+            authorization=secret,
+        )
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "leadpoet.operations"
+    ]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "\n" not in message
+    assert secret not in message
+    assert "private ICP text" not in message
+    prefix = "leadpoet_operation_event "
+    assert message.startswith(prefix)
+    payload = json.loads(message[len(prefix) :])
+    assert payload["event_type"] == "stage"
+    assert payload["event_sequence"] == 1
+    assert payload["icp_ref_hash"] == "sha256:" + "ab" * 32
+    assert payload["result_hash"] == "sha256:" + "cd" * 32
+    assert payload["authority_hash"] == "sha256:" + "ef" * 32
+    assert "provider_payload" not in payload
+    assert "raw_icp" not in payload
+    assert "authorization" not in payload
 
 
 def test_correlations_are_deterministic_across_process_boundaries():

@@ -3,6 +3,64 @@ from __future__ import annotations
 import pytest
 
 
+def test_compact_authority_store_rejects_oversized_document(monkeypatch):
+    from gateway.research_lab import attested_v2_store as store
+
+    monkeypatch.setattr(
+        store,
+        "COMPACT_WEIGHT_AUTHORITY_MAX_BYTES_V2",
+        128,
+    )
+
+    with pytest.raises(
+        store.AttestedV2StoreError,
+        match="exceeds the 8 MiB transport bound",
+    ):
+        store._compact_weight_authority_row_from_normalized_v2(
+            {"oversized": "x" * 256}
+        )
+
+
+def test_compact_authority_store_size_check_is_ascii_conservative(monkeypatch):
+    from gateway.research_lab import attested_v2_store as store
+
+    observed = {}
+    monkeypatch.setattr(
+        store,
+        "validate_compact_weight_submission_shape_v2",
+        lambda value: observed.setdefault("compact", value),
+    )
+    monkeypatch.setattr(
+        store,
+        "COMPACT_WEIGHT_AUTHORITY_MAX_BYTES_V2",
+        2_048,
+    )
+    normalized = {
+        "bundle_hash": "sha256:" + "a" * 64,
+        "authority_stage": "published",
+        "schema_version": "schema",
+        "lineage_id": "sha256:" + "b" * 64,
+        "authority_hash": "sha256:" + "c" * 64,
+        "compact_submission": {
+            "weight_result": {
+                "netuid": 71,
+                "epoch_id": 1,
+            },
+            "validator_hotkey": "validator",
+            "compact_submission_hash": "sha256:" + "d" * 64,
+        },
+        "publication": {
+            "publication_receipt_hash": "sha256:" + "e" * 64,
+        },
+        "finalization": None,
+    }
+
+    row = store._compact_weight_authority_row_from_normalized_v2(normalized)
+
+    assert row["authority_doc"] == normalized
+    assert observed["compact"] == normalized["compact_submission"]
+
+
 @pytest.mark.asyncio
 async def test_compact_identity_read_never_loads_full_bundle(monkeypatch):
     from gateway.research_lab import attested_v2_store as store

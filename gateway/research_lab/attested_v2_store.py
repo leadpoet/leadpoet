@@ -7,6 +7,7 @@ import base64
 from datetime import datetime, timezone
 import hashlib
 import heapq
+import json
 import logging
 import re
 from typing import Any, Iterable, Mapping, Optional
@@ -82,6 +83,7 @@ COMPACT_WEIGHT_PUBLICATION_INTENT_TABLE = (
     "research_lab_compact_weight_publication_intents_v2"
 )
 COMPACT_WEIGHT_AUTHORITY_TABLE = "research_lab_compact_weight_authorities_v2"
+COMPACT_WEIGHT_AUTHORITY_MAX_BYTES_V2 = 8_388_608
 LEGACY_NONFINALIZATION_TABLE = (
     "research_lab_legacy_allocation_nonfinalizations_v2"
 )
@@ -1398,6 +1400,17 @@ def compact_weight_authority_storage_row_v2(
 def _compact_weight_authority_row_from_normalized_v2(
     normalized: Mapping[str, Any],
 ) -> dict[str, Any]:
+    authority_bytes = len(
+        json.dumps(
+            dict(normalized),
+            sort_keys=True,
+            ensure_ascii=True,
+        ).encode("utf-8")
+    )
+    if authority_bytes > COMPACT_WEIGHT_AUTHORITY_MAX_BYTES_V2:
+        raise AttestedV2StoreError(
+            "compact weight authority exceeds the 8 MiB transport bound"
+        )
     compact = validate_compact_weight_submission_shape_v2(
         normalized["compact_submission"]
     )

@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -52,12 +53,21 @@ INCIDENT_FAILURE_CODES = frozenset(
 _SAFE_FIELDS = frozenset(
     {
         "allocation_hash",
+        "aggregate_hash",
+        "aggregate_score",
         "approved_sha",
         "attempt",
         "attempts",
+        "assignment_hash",
         "authority_epoch_id",
+        "authority_hash",
+        "authority_mode",
         "authority_stage",
         "backoff_seconds",
+        "backlog_count",
+        "benchmark_attempt",
+        "benchmark_bundle_id",
+        "benchmark_date",
         "baseline_last_update",
         "block",
         "blocks_remaining",
@@ -71,19 +81,29 @@ _SAFE_FIELDS = frozenset(
         "candidate_sha",
         "chain_endpoint_alias",
         "cleanup_result",
+        "checkpoint_hash",
+        "checkpoint_attempt_count",
+        "checkpoint_sequence",
+        "coalesced_count",
         "commit_sha",
+        "completed_icp_count",
         "component",
+        "concurrency",
         "confirmation_attempt",
         "confirmation_stage",
+        "conditional_icp_count",
         "correlation_id",
         "current_block",
+        "cutover_epoch_id",
         "dependency",
         "destination_count",
+        "decision_code",
         "disk_available_bytes",
         "disk_required_bytes",
         "duration_ms",
         "duration_seconds",
         "elapsed_blocks",
+        "event_sequence",
         "epoch_block",
         "epoch_id",
         "endpoint_kind",
@@ -93,6 +113,7 @@ _SAFE_FIELDS = frozenset(
         "expected_commit_sha",
         "expected_pcr0_hash",
         "expected_vector_count",
+        "expected_icp_count",
         "extrinsic_hash",
         "fail_closed",
         "failure_code",
@@ -107,7 +128,10 @@ _SAFE_FIELDS = frozenset(
         "frontier_hash",
         "gateway_restart_invocation_id",
         "http_status",
+        "icp_score",
         "inclusion_block",
+        "icp_ordinal",
+        "icp_ref_hash",
         "last_successful_stage",
         "last_update",
         "lineage_hash",
@@ -119,38 +143,63 @@ _SAFE_FIELDS = frozenset(
         "migration_version",
         "mechanism_id",
         "missing_milestones",
+        "model_artifact_hash",
         "netuid",
         "observed_block",
         "observed_pcr0_hash",
         "observed_vector_count",
         "operation",
         "pages",
+        "parent_count",
+        "persistence_hash",
         "physical_role",
+        "policy_hash",
+        "private_icp_count",
+        "provider_id",
         "publication_hash",
+        "public_icp_count",
         "query_fingerprint",
+        "reason_code",
         "receipt_count",
+        "recovered_icp_count",
         "release_correlation_id",
         "release_attempts",
         "release_status",
         "request_hash",
+        "request_bytes",
         "response_bytes",
         "restart_invocation_id",
         "retryable",
+        "retry_round",
+        "retry_rounds",
         "role",
         "root_receipt_hash",
+        "row_count",
         "rpc_method",
         "runtime_sha",
         "schema_version",
+        "score_summary_hash",
+        "scoring_run_id",
+        "selected_icp_count",
+        "sequence",
+        "settlement_attempt",
+        "settlement_hash",
         "sdk_response_class",
         "sdk_version",
         "shutdown_started",
         "snapshot_hash",
+        "source_epoch_id",
         "sqlstate",
         "stage",
         "stage_ledger",
         "status",
+        "result_hash",
+        "scored_company_count",
+        "result_status",
+        "sourced_company_count",
         "subnet_epoch_index",
         "submission_epoch_id",
+        "submission_attempt",
         "submitted_block",
         "superseded_sha",
         "terminal",
@@ -158,6 +207,7 @@ _SAFE_FIELDS = frozenset(
         "transaction_name",
         "transport_session_id",
         "uid",
+        "unresolved_icp_count",
         "validator_id_hash",
         "validator_restart_invocation_id",
         "validator_role",
@@ -167,6 +217,8 @@ _SAFE_FIELDS = frozenset(
         "weight_finalization_event_hash",
         "weight_submission_event_hash",
         "weights_hash",
+        "window_hash",
+        "worker_id_hash",
     }
 )
 
@@ -227,6 +279,46 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,200}$")
 _current_context: ContextVar[Dict[str, Any]] = ContextVar(
     "leadpoet_sentry_operation_context", default={}
 )
+_operation_logger = logging.getLogger("leadpoet.operations")
+_event_sequence = 0
+_event_sequence_lock = threading.Lock()
+
+
+def _next_event_sequence() -> int:
+    global _event_sequence
+    with _event_sequence_lock:
+        _event_sequence += 1
+        return _event_sequence
+
+
+def _emit_operation_log(event_type: str, fields: Mapping[str, Any]) -> None:
+    """Emit one bounded single-line event into ordinary process logs."""
+
+    try:
+        payload = safe_fields(fields)
+        payload["event_sequence"] = _next_event_sequence()
+        payload = {
+            "event_type": str(event_type),
+            **payload,
+        }
+        level = (
+            logging.WARNING
+            if payload.get("status") in {"failed", "rejected", "blocked"}
+            or payload.get("terminal") is True
+            else logging.INFO
+        )
+        _operation_logger.log(
+            level,
+            "leadpoet_operation_event %s",
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+        )
+    except BaseException:
+        return
 
 
 def hash_identifier(value: Any) -> str:
@@ -441,11 +533,13 @@ def record_retry(
                 "terminal": False,
             }
         )
+        safe = safe_fields(payload)
+        _emit_operation_log("retry", safe)
         sentry_bootstrap.add_sentry_breadcrumb(
             category="leadpoet.retry",
             message=failure_code,
             level="warning",
-            data=safe_fields(payload),
+            data=safe,
         )
     except BaseException:
         return
@@ -467,6 +561,7 @@ def record_stage(
         if duration_seconds is not None:
             payload["duration_seconds"] = round(float(duration_seconds), 3)
         safe = safe_fields(payload)
+        _emit_operation_log("stage", safe)
         sentry_bootstrap.add_sentry_breadcrumb(
             category="leadpoet.stage",
             message=f"{component}.{stage}.{status}",
@@ -625,6 +720,7 @@ def capture_failure(
                 **retry_fields,
             )
             return False
+        _emit_operation_log("failure", safe)
         return sentry_bootstrap.capture_sentry_failure(
             failure_code=code,
             component=component,
@@ -1073,6 +1169,7 @@ def emit_release_summary(
 
 
 def _reset_for_tests() -> None:
-    global _terminal_limiter
+    global _event_sequence, _terminal_limiter
     _current_context.set({})
     _terminal_limiter = _TerminalLimiter()
+    _event_sequence = 0

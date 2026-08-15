@@ -742,6 +742,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_compact_checkpoint_graph_contract_v1",
     ),
     (
+        "scripts/149-research-lab-compact-weight-settlement-authority.sql",
+        "research_lab_compact_weight_settlement_contract_v1",
+    ),
+    (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
         "research_lab_source_add_admit",
     ),
@@ -801,6 +805,66 @@ class SupabaseSchemaPreflightV2Error(RuntimeError):
 
 
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
+
+
+def _verify_compact_weight_settlement_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_compact_weight_settlement_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "compact weight settlement schema contract is unavailable; apply "
+            "scripts/149-research-lab-compact-weight-settlement-authority.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "compact weight settlement schema contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "compact weight settlement schema contract is unavailable; apply "
+            "scripts/149-research-lab-compact-weight-settlement-authority.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "compact weight settlement schema contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": (
+            "leadpoet.research_lab_compact_weight_settlement_contract.v1"
+        ),
+        "max_authority_bytes": 8_388_608,
+        "size_constraint_valid": True,
+        "append_only_trigger_enabled": True,
+        "identity_unique_constraint_enabled": True,
+        "row_level_security_enabled": True,
+        "finalized_stage_supported": True,
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "compact weight settlement schema contract differs"
+        )
+    return dict(contract)
 
 
 def _verify_chain_realized_activation_v1(
@@ -1010,15 +1074,26 @@ def verify_required_supabase_v2_schema(
                 f"{function_name}; apply {migration} before restart"
             )
         migrations.add(migration)
+    compact_weight_settlement_contract = (
+        _verify_compact_weight_settlement_contract_v1(
+            headers=headers,
+            supabase_url=supabase_url,
+            opener=opener,
+            timeout_seconds=timeout_seconds,
+        )
+    )
     return {
         "status": "ready",
         "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA)
         + len(REQUIRED_SUPABASE_V2_RPCS)
-        + 1,
+        + 2,
         "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
         "rpc_probe_count": len(REQUIRED_SUPABASE_V2_RPCS),
-        "data_probe_count": 1,
+        "data_probe_count": 2,
         "schema_document_probe_count": 1,
         "chain_realized_settlement_activation": activation,
+        "compact_weight_settlement_contract": (
+            compact_weight_settlement_contract
+        ),
         "migration_files": sorted(migrations),
     }

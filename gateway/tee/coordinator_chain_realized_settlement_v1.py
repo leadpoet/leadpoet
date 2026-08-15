@@ -23,7 +23,10 @@ from gateway.research_lab.champion_settlement_v2 import (
     validate_finalized_allocation_authorities_v2,
 )
 from gateway.tee.coordinator_chain_source_v2 import CoordinatorChainSourceV2
-from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+from gateway.tee.execution_job_manager_v2 import (
+    ExecutionContextV2,
+    ExecutionJobV2Error,
+)
 from gateway.tee.supabase_source_v2 import SupabaseSourceReaderV2
 from leadpoet_canonical.attested_v2 import sha256_json, validate_receipt_graph
 from leadpoet_canonical.compact_auditor_authority_v2 import (
@@ -451,8 +454,16 @@ class CoordinatorChainRealizedSettlementV1:
         observation_receipt_hash = str(
             payload.get("observation_receipt_hash") or ""
         )
+        try:
+            parent_authority_graphs = (
+                context.external_receipt_authority_graphs()
+            )
+        except ExecutionJobV2Error as exc:
+            raise CoordinatorChainRealizedSettlementV1Error(
+                "chain settlement parent authority is invalid"
+            ) from exc
         _observation_graph, observation_receipt = _receipt_by_root(
-            context.external_receipt_graphs,
+            parent_authority_graphs,
             receipt_hash=observation_receipt_hash,
         )
         if (
@@ -583,7 +594,7 @@ class CoordinatorChainRealizedSettlementV1:
             selected["finalization_receipt_hash"]
         )
         finalization_graph, _finalization_receipt = _receipt_by_root(
-            context.external_receipt_graphs,
+            parent_authority_graphs,
             receipt_hash=finalization_receipt_hash,
         )
         if use_compact:

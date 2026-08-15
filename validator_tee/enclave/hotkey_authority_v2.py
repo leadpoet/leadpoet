@@ -229,14 +229,37 @@ class _Sr25519Backend:
 
 def load_chain_signing_profile(
     path: Path = Path("/app/validator_tee/enclave/chain_signing_profile_v2.json"),
+    *,
+    expected_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
-    try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+    resolved_path = Path(path)
+    if expected_hash is None:
+        from leadpoet_canonical.production_parity_boundary_v2 import (
+            configured_chain_signing_profile_path_v2,
+        )
+
+        resolved_path = configured_chain_signing_profile_path_v2(resolved_path)
+    paths = [resolved_path]
+    if expected_hash is not None:
+        paths.append(resolved_path.with_name("chain_signing_profile_test_v2.json"))
+    matches = []
+    for candidate in paths:
+        try:
+            value = json.loads(candidate.read_text(encoding="utf-8"))
+            normalized = validate_chain_signing_profile(value)
+        except (OSError, ValueError) as exc:
+            if expected_hash is None:
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "measured chain signing profile is unavailable"
+                ) from exc
+            continue
+        if expected_hash is None or sha256_json(normalized) == str(expected_hash):
+            matches.append(normalized)
+    if len(matches) != 1:
         raise ValidatorHotkeyAuthorityV2Error(
-            "measured chain signing profile is unavailable"
-        ) from exc
-    return validate_chain_signing_profile(value)
+            "measured chain signing profile hash is unavailable or ambiguous"
+        )
+    return matches[0]
 
 
 class ValidatorHotkeyAuthorityV2:

@@ -1,0 +1,18 @@
+[Unit]
+Description=Leadpoet disposable production-parity audit validator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=@@REPO_ROOT@@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 @@REPO_ROOT@@/scripts/run_production_parity_auditor.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -199,6 +199,117 @@ async def test_complete_exact_active_model_baseline_releases_admission(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_staging_evidence_commits_every_icp_and_exact_category_assignment(
+    monkeypatch,
+):
+    config = _config()
+    benchmark, report = _durable_rows(config)
+
+    async def load_active(_config, *, register_bootstrap):
+        assert register_bootstrap is False
+        return _active_model()
+
+    async def select_rows(table, **_kwargs):
+        if table == "research_lab_private_model_benchmark_current":
+            return [benchmark]
+        if table == "research_lab_public_benchmark_report_current":
+            return [report]
+        raise AssertionError(table)
+
+    monkeypatch.setattr(readiness_mod, "load_active_private_model", load_active)
+    monkeypatch.setattr(readiness_mod, "select_many", select_rows)
+
+    readiness = await readiness_mod.autoresearch_daily_baseline_readiness(
+        config,
+        now=NOW,
+        include_commitments=True,
+    )
+
+    commitments = readiness["completion_commitments"]
+    policy = config.conditional_validation_policy().to_dict()
+    assert commitments["all_icp_count"] == policy["total_icps"]
+    assert commitments["category_counts"] == {
+        "public": policy["public_total_icps"],
+        "private": policy["private_total_icps"],
+        "conditional": policy["conditional_total_icps"],
+    }
+    assert commitments["category_strength_counts"] == {
+        "public": {
+            "weak": policy["public_weak_total"],
+            "strong": policy["public_strong_total"],
+        },
+        "private": {
+            "weak": policy["private_weak_total"],
+            "strong": policy["private_strong_total"],
+        },
+        "conditional": {"center": policy["conditional_total_icps"]},
+    }
+    assert commitments["category_assignment_hash"].startswith("sha256:")
+    assert commitments["per_icp_summaries_hash"].startswith("sha256:")
+    assert commitments["conditional_policy_hash"] == policy["policy_hash"]
+
+
+@pytest.mark.asyncio
+async def test_assignment_score_divergence_remains_fail_closed(monkeypatch):
+    config = _config()
+    benchmark, report = _durable_rows(config)
+    benchmark["score_summary_doc"]["per_icp_summaries"][0]["score"] = 99.0
+
+    async def load_active(_config, *, register_bootstrap):
+        return _active_model()
+
+    async def select_rows(table, **_kwargs):
+        if table == "research_lab_private_model_benchmark_current":
+            return [benchmark]
+        if table == "research_lab_public_benchmark_report_current":
+            return [report]
+        raise AssertionError(table)
+
+    monkeypatch.setattr(readiness_mod, "load_active_private_model", load_active)
+    monkeypatch.setattr(readiness_mod, "select_many", select_rows)
+
+    readiness = await readiness_mod.autoresearch_daily_baseline_readiness(
+        config,
+        now=NOW,
+        include_commitments=True,
+    )
+
+    assert readiness == {
+        "available": False,
+        "reason": "daily_baseline_not_published",
+        "benchmark_date": "2026-08-11",
+    }
+
+
+@pytest.mark.asyncio
+async def test_staging_commitments_do_not_change_normal_admission(monkeypatch):
+    config = _config()
+    benchmark, report = _durable_rows(config)
+    benchmark["score_summary_doc"]["per_icp_summaries"][0]["score"] = 99.0
+
+    async def load_active(_config, *, register_bootstrap):
+        return _active_model()
+
+    async def select_rows(table, **_kwargs):
+        if table == "research_lab_private_model_benchmark_current":
+            return [benchmark]
+        if table == "research_lab_public_benchmark_report_current":
+            return [report]
+        raise AssertionError(table)
+
+    monkeypatch.setattr(readiness_mod, "load_active_private_model", load_active)
+    monkeypatch.setattr(readiness_mod, "select_many", select_rows)
+
+    readiness = await readiness_mod.autoresearch_daily_baseline_readiness(
+        config,
+        now=NOW,
+    )
+
+    assert readiness["available"] is True
+    assert "completion_commitments" not in readiness
+
+
+@pytest.mark.asyncio
 async def test_partial_assignment_remains_fail_closed(monkeypatch):
     config = _config()
     benchmark, report = _durable_rows(config)

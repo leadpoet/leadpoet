@@ -171,6 +171,14 @@ def _validate_release_configuration(
         raise RuntimeIdentityV2Error(
             "V2 Research Lab execution configuration hash mismatch"
         )
+    from gateway.tee.provider_broker_v2 import provider_registry_hash
+
+    if provider_registry_hash(
+        execution_config=normalized_research_lab_config
+    ) != configuration.get("provider_registry_hash"):
+        raise RuntimeIdentityV2Error(
+            "V2 provider registry differs from Research Lab execution configuration"
+        )
     from gateway.tee.artifact_persistence_v2 import validate_artifact_policy
 
     artifact_policy = configuration.get("encrypted_artifact_policy")

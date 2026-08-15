@@ -13,14 +13,21 @@ import base64
 import gzip
 import json
 import re
-from typing import Any, Dict, Mapping, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    PRODUCTION_CHAIN_ARCHIVE_HOST,
+    PRODUCTION_CHAIN_HOST,
+    configured_chain_source_boundary_v2,
+)
 
 
 CHAIN_SOURCE_SCHEMA_VERSION = "leadpoet.bittensor_chain_source.v2"
-CHAIN_ENDPOINT_HOST = "entrypoint-finney.opentensor.ai"
-CHAIN_ARCHIVE_ENDPOINT_HOST = "archive.chain.opentensor.ai"
+_CONFIGURED_CHAIN_BOUNDARY = configured_chain_source_boundary_v2()
+CHAIN_ENDPOINT_HOST = _CONFIGURED_CHAIN_BOUNDARY["chain_host"]
+CHAIN_ARCHIVE_ENDPOINT_HOST = _CONFIGURED_CHAIN_BOUNDARY["chain_archive_host"]
 CHAIN_ENDPOINT_PORT = 443
 CHAIN_ENDPOINT_PATH = "/"
 CHAIN_RPC_METHOD = "SubnetInfoRuntimeApi_get_selective_mechagraph"
@@ -47,11 +54,39 @@ class ChainSourceV2Error(ValueError):
     """A finalized chain response is malformed or outside the measured policy."""
 
 
-def chain_source_policy_document() -> Dict[str, Any]:
+def configure_chain_source_boundary_v2(
+    *, chain_host: str, chain_archive_host: str
+) -> Dict[str, str]:
+    """Configure the enclave boundary once before importing chain consumers."""
+
+    global CHAIN_ENDPOINT_HOST, CHAIN_ARCHIVE_ENDPOINT_HOST
+    requested = {
+        "chain_host": str(chain_host or "").strip().lower(),
+        "chain_archive_host": str(chain_archive_host or "").strip().lower(),
+    }
+    allowed = {
+        (PRODUCTION_CHAIN_HOST, PRODUCTION_CHAIN_ARCHIVE_HOST),
+        ("test.finney.opentensor.ai", "test.finney.opentensor.ai"),
+    }
+    if (requested["chain_host"], requested["chain_archive_host"]) not in allowed:
+        raise ChainSourceV2Error("chain source boundary is outside measured policy")
+    current = (CHAIN_ENDPOINT_HOST, CHAIN_ARCHIVE_ENDPOINT_HOST)
+    target = (requested["chain_host"], requested["chain_archive_host"])
+    if current != (PRODUCTION_CHAIN_HOST, PRODUCTION_CHAIN_ARCHIVE_HOST) and current != target:
+        raise ChainSourceV2Error("chain source boundary is already configured")
+    CHAIN_ENDPOINT_HOST, CHAIN_ARCHIVE_ENDPOINT_HOST = target
+    return dict(requested)
+
+
+def chain_source_policy_document(
+    *, chain_host: Optional[str] = None, chain_archive_host: Optional[str] = None
+) -> Dict[str, Any]:
+    live_host = str(chain_host or CHAIN_ENDPOINT_HOST)
+    archive_host = str(chain_archive_host or CHAIN_ARCHIVE_ENDPOINT_HOST)
     return {
         "schema_version": CHAIN_SOURCE_SCHEMA_VERSION,
-        "host": CHAIN_ENDPOINT_HOST,
-        "archive_host": CHAIN_ARCHIVE_ENDPOINT_HOST,
+        "host": live_host,
+        "archive_host": archive_host,
         "port": CHAIN_ENDPOINT_PORT,
         "path": CHAIN_ENDPOINT_PATH,
         "tls_terminates_in_enclave": True,
@@ -80,8 +115,47 @@ def chain_source_policy_document() -> Dict[str, Any]:
     }
 
 
-def chain_source_policy_hash() -> str:
-    return sha256_json(chain_source_policy_document())
+def chain_source_policy_hash(
+    *, chain_host: Optional[str] = None, chain_archive_host: Optional[str] = None
+) -> str:
+    return sha256_json(
+        chain_source_policy_document(
+            chain_host=chain_host,
+            chain_archive_host=chain_archive_host,
+        )
+    )
+
+
+def chain_source_boundary_for_profile_v2(
+    profile: Mapping[str, Any],
+) -> Dict[str, str]:
+    """Bind one measured signing profile to its reviewed live/archive hosts."""
+
+    from leadpoet_canonical.hotkey_authority_v2 import (
+        validate_chain_signing_profile,
+    )
+
+    normalized = validate_chain_signing_profile(profile)
+    endpoint = urlsplit(str(normalized["chain_endpoint"]))
+    host = str(endpoint.hostname or "").lower()
+    network = str(normalized["network"])
+    if endpoint.scheme != "wss" or endpoint.port not in (None, 443):
+        raise ChainSourceV2Error("chain signing endpoint is outside measured policy")
+    if network == "finney" and host == PRODUCTION_CHAIN_HOST:
+        archive_host = PRODUCTION_CHAIN_ARCHIVE_HOST
+    elif network == "test" and host == "test.finney.opentensor.ai":
+        archive_host = host
+    else:
+        raise ChainSourceV2Error("chain signing profile has no measured source boundary")
+    return {
+        "chain_host": host,
+        "chain_archive_host": archive_host,
+        "chain_source_policy_hash": chain_source_policy_hash(
+            chain_host=host,
+            chain_archive_host=archive_host,
+        ),
+        "chain_signing_profile_hash": sha256_json(normalized),
+    }
 
 
 def _compact_encode(value: int) -> bytes:

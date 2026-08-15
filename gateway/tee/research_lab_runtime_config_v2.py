@@ -30,6 +30,11 @@ from gateway.research_lab.config import (
     ResearchLabGitTreeConfigError,
 )
 from gateway.tee.scoring_executor import SCORING_CONFIG_ENV_NAMES
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    PRODUCTION_PARITY_ENV_NAMES,
+    ProductionParityBoundaryV2Error,
+    validate_production_parity_boundary_v2,
+)
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from research_lab.eval.private_runtime import (
     INCONTAINER_TRACE_CORPUS_MAX_CALL_BYTES,
@@ -49,7 +54,7 @@ from research_lab.eval.snapshot_store import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v6"
+SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v7"
 _CONFIG_FIELD_NAMES_HASH = (
     "sha256:881723154093057108b3eefdff043f0f9e5509b727d8eed3a8f9d539615f943b"
 )
@@ -153,6 +158,7 @@ BEHAVIOR_ENV_NAMES = tuple(
         | set(PROVIDER_PREFLIGHT_BEHAVIOR_ENV_NAMES)
         | set(ADDITIONAL_SCORING_BEHAVIOR_ENV_NAMES)
         | set(MODEL_BEHAVIOR_ENV_NAMES)
+        | set(PRODUCTION_PARITY_ENV_NAMES)
     )
 )
 
@@ -414,6 +420,19 @@ def validate_research_lab_execution_config(value: Mapping[str, Any]) -> Dict[str
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab credential environment shape is invalid"
         )
+    normalized_environment = _normalized_environment(
+        value.get("behavior_environment")
+    )
+    try:
+        validate_production_parity_boundary_v2(
+            normalized_environment,
+            network=network,
+            netuid=netuid,
+        )
+    except ProductionParityBoundaryV2Error as exc:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab production-parity boundary is invalid"
+        ) from exc
     normalized = {
         "schema_version": SCHEMA_VERSION,
         "deployment": {"network": network, "netuid": netuid},
@@ -423,9 +442,7 @@ def validate_research_lab_execution_config(value: Mapping[str, Any]) -> Dict[str
         "epoch_authority": _normalized_epoch_authority(
             value.get("epoch_authority")
         ),
-        "behavior_environment": _normalized_environment(
-            value.get("behavior_environment")
-        ),
+        "behavior_environment": normalized_environment,
     }
     # Canonicalization also rejects unsupported object types and NaN values.
     return json.loads(canonical_json(normalized))

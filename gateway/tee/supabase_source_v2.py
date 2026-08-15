@@ -13,15 +13,19 @@ from datetime import datetime, timezone
 import json
 import re
 import time
-from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlencode
 from uuid import UUID
 
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    PRODUCTION_SUPABASE_ORIGIN,
+    configured_supabase_origin_v2,
+)
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 
 
-SUPABASE_WEIGHT_SOURCE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
+SUPABASE_WEIGHT_SOURCE_ORIGIN = PRODUCTION_SUPABASE_ORIGIN
 SUPABASE_SOURCE_SCHEMA_VERSION = "leadpoet.supabase_source.v2"
 SUPABASE_READ_TIMEOUT_MS = 45_000
 SUPABASE_PAGE_SIZE = 1_000
@@ -1313,10 +1317,12 @@ class SupabaseSourceReaderV2:
         *,
         execute_provider: Callable[[Mapping[str, Any]], Mapping[str, Any]],
         retry_policy_hash: str,
+        origin: Optional[str] = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._execute_provider = execute_provider
         self._retry_policy_hash = str(retry_policy_hash or "")
+        self._origin = str(origin or configured_supabase_origin_v2())
         self._sleep = sleep
 
     def read(
@@ -1370,7 +1376,7 @@ class SupabaseSourceReaderV2:
         if policy.limit:
             query.append(("limit", str(policy.limit)))
         url = "%s/rest/v1/%s?%s" % (
-            SUPABASE_WEIGHT_SOURCE_ORIGIN,
+            self._origin,
             policy.table,
             urlencode(query),
         )

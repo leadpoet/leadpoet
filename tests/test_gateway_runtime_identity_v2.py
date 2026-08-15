@@ -9,7 +9,10 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.tee.build_identity import build_identity, write_identity
-from gateway.tee.provider_broker_v2 import expected_job_credential_slot_ref_hashes
+from gateway.tee.provider_broker_v2 import (
+    expected_job_credential_slot_ref_hashes,
+    provider_registry_hash,
+)
 from gateway.tee.research_lab_runtime_config_v2 import (
     build_research_lab_execution_config,
     research_lab_execution_config_hash,
@@ -152,7 +155,9 @@ def _configuration():
         "provider_retry_policy_hashes": {
             "openrouter": "sha256:" + "2" * 64
         },
-        "provider_registry_hash": "sha256:" + "1" * 64,
+        "provider_registry_hash": provider_registry_hash(
+            execution_config=research_lab_config
+        ),
         "protected_workflow_manifest_hash": "sha256:" + "e" * 64,
         "encrypted_artifact_policy": artifact_policy,
         "encrypted_artifact_policy_hash": sha256_json(artifact_policy),
@@ -232,7 +237,7 @@ def test_runtime_configuration_is_immutable_for_boot(tmp_path: Path):
         configuration=configuration,
         expected_config_hash=_configuration_hash(configuration),
     ) == first
-    changed = {**configuration, "provider_registry_hash": "sha256:" + "4" * 64}
+    changed = {**configuration, "configured_worker_count": 24}
     with pytest.raises(RuntimeIdentityV2Error, match="immutable"):
         manager.configure(
             configuration=changed,

@@ -75,6 +75,14 @@ def runtime_configuration_documents(
         measured_retry_policy_hashes,
         provider_registry_hash as measured_provider_registry_hash,
     )
+    from gateway.tee.research_lab_runtime_config_v2 import (
+        research_lab_execution_config_hash,
+        validate_research_lab_execution_config,
+    )
+
+    normalized_research_lab_config = validate_research_lab_execution_config(
+        research_lab_execution_config
+    )
 
     release = validate_release_manifest(release_manifest)
     from gateway.tee.release_lineage_v2 import (
@@ -97,7 +105,9 @@ def runtime_configuration_documents(
     ):
         if not _HASH_RE.fullmatch(str(digest or "").lower()):
             raise TEEV2BootstrapError("%s is invalid" % name)
-    if str(provider_registry_hash).lower() != measured_provider_registry_hash():
+    if str(provider_registry_hash).lower() != measured_provider_registry_hash(
+        execution_config=normalized_research_lab_config
+    ):
         raise TEEV2BootstrapError(
             "provider registry hash differs from measured broker routes"
         )
@@ -113,16 +123,8 @@ def runtime_configuration_documents(
             "provider retry hashes differ from protected workflow code"
         )
     from gateway.tee.artifact_persistence_v2 import validate_artifact_policy
-    from gateway.tee.research_lab_runtime_config_v2 import (
-        research_lab_execution_config_hash,
-        validate_research_lab_execution_config,
-    )
-
     normalized_artifact_policy = validate_artifact_policy(encrypted_artifact_policy)
     encrypted_artifact_policy_hash = sha256_json(normalized_artifact_policy)
-    normalized_research_lab_config = validate_research_lab_execution_config(
-        research_lab_execution_config
-    )
     normalized_research_lab_config_hash = research_lab_execution_config_hash(
         normalized_research_lab_config
     )
@@ -382,12 +384,15 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
     profile_set = verify_required_worker_proxy_profiles_v2(
         config_dir=args.config_dir
     )
+    research_lab_execution_config = build_research_lab_execution_config()
     documents = runtime_configuration_documents(
         release_manifest=release,
         gateway_release_lineage=gateway_release_lineage,
         provider_ref_hashes=provider_refs,
         provider_retry_policy_hashes=measured_retry_policy_hashes(protected_hash),
-        provider_registry_hash=provider_registry_hash(),
+        provider_registry_hash=provider_registry_hash(
+            execution_config=research_lab_execution_config
+        ),
         protected_workflow_manifest_hash=protected_hash,
         encrypted_artifact_policy=json.loads(
             args.encrypted_artifact_policy.read_text(encoding="utf-8")
@@ -395,7 +400,7 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
         artifact_master_key_ref_hash=str(
             artifact_envelopes[0]["credential_ref_hash"]
         ),
-        research_lab_execution_config=build_research_lab_execution_config(),
+        research_lab_execution_config=research_lab_execution_config,
         configured_worker_counts=profile_set["worker_counts"],
     )
     return await bootstrap_gateway_enclaves_v2(

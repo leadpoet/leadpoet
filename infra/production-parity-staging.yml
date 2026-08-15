@@ -1,0 +1,420 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Disposable physical V2 production-parity hosts
+
+Parameters:
+  RunId:
+    Type: String
+    AllowedPattern: "[a-z0-9-]{6,40}"
+  CandidateSha:
+    Type: String
+    AllowedPattern: "[0-9a-f]{40}"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  AllowedSshCidr:
+    Type: String
+    AllowedPattern: "[0-9./]+"
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+  GatewayImageId:
+    Type: AWS::EC2::Image::Id
+  ValidatorImageId:
+    Type: AWS::EC2::Image::Id
+  AuditorImageId:
+    Type: AWS::EC2::Image::Id
+  DatabaseImageId:
+    Type: AWS::EC2::Image::Id
+  DashboardImageId:
+    Type: AWS::EC2::Image::Id
+  GatewayInstanceType:
+    Type: String
+  ValidatorInstanceType:
+    Type: String
+  AuditorInstanceType:
+    Type: String
+  DatabaseInstanceType:
+    Type: String
+  DashboardInstanceType:
+    Type: String
+  GatewayInstanceProfile:
+    Type: String
+  ValidatorInstanceProfile:
+    Type: String
+  AuditorInstanceProfile:
+    Type: String
+  DatabaseInstanceProfile:
+    Type: String
+  DashboardInstanceProfile:
+    Type: String
+  DatabaseCertificateArn:
+    Type: String
+    AllowedPattern: "arn:aws[a-zA-Z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/[A-Za-z0-9-]+"
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+  BaseDomain:
+    Type: String
+    AllowedPattern: "[A-Za-z0-9.-]+"
+
+Resources:
+  ControllerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "Leadpoet parity ${RunId}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSshCidr
+      Tags:
+        - Key: Name
+          Value: !Sub "leadpoet-parity-${RunId}"
+        - Key: leadpoet:parity-run
+          Value: !Ref RunId
+        - Key: leadpoet:candidate-sha
+          Value: !Ref CandidateSha
+
+  GatewayWebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "Leadpoet parity gateway web ${RunId}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  DatabaseWebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "Leadpoet parity database TLS ${RunId}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref GatewayWebSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref DashboardWebSecurityGroup
+
+  DatabaseServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "Leadpoet parity database service ${RunId}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref DatabaseWebSecurityGroup
+
+  DashboardWebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "Leadpoet parity dashboard web ${RunId}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  Gateway:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref GatewayImageId
+      InstanceType: !Ref GatewayInstanceType
+      IamInstanceProfile: !Ref GatewayInstanceProfile
+      KeyName: !Ref KeyName
+      EnclaveOptions:
+        Enabled: true
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        InstanceMetadataTags: enabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref ControllerSecurityGroup
+            - !Ref GatewayWebSecurityGroup
+          SubnetId: !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: !Sub "leadpoet-parity-gateway-${RunId}"
+        - Key: leadpoet:parity-run
+          Value: !Ref RunId
+        - Key: leadpoet:parity-role
+          Value: gateway
+        - Key: leadpoet:candidate-sha
+          Value: !Ref CandidateSha
+
+  Validator:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ValidatorImageId
+      InstanceType: !Ref ValidatorInstanceType
+      IamInstanceProfile: !Ref ValidatorInstanceProfile
+      KeyName: !Ref KeyName
+      EnclaveOptions:
+        Enabled: true
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        InstanceMetadataTags: enabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref ControllerSecurityGroup
+          SubnetId: !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: !Sub "leadpoet-parity-validator-${RunId}"
+        - Key: leadpoet:parity-run
+          Value: !Ref RunId
+        - Key: leadpoet:parity-role
+          Value: primary-validator
+        - Key: leadpoet:candidate-sha
+          Value: !Ref CandidateSha
+
+  AuditorA:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AuditorImageId
+      InstanceType: !Ref AuditorInstanceType
+      IamInstanceProfile: !Ref AuditorInstanceProfile
+      KeyName: !Ref KeyName
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        InstanceMetadataTags: enabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref ControllerSecurityGroup
+          SubnetId: !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: !Sub "leadpoet-parity-auditor-a-${RunId}"
+        - Key: leadpoet:parity-run
+          Value: !Ref RunId
+        - Key: leadpoet:parity-role
+          Value: audit-validator-a
+        - Key: leadpoet:candidate-sha
+          Value: !Ref CandidateSha
+
+  AuditorB:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AuditorImageId
+      InstanceType: !Ref AuditorInstanceType
+      IamInstanceProfile: !Ref AuditorInstanceProfile
+      KeyName: !Ref KeyName
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        InstanceMetadataTags: enabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref ControllerSecurityGroup
+          SubnetId: !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: !Sub "leadpoet-parity-auditor-b-${RunId}"
+        - Key: leadpoet:parity-run
+          Value: !Ref RunId
+        - Key: leadpoet:parity-role
+          Value: audit-validator-b
+        - Key: leadpoet:candidate-sha
+          Value: !Ref CandidateSha
+
+  Database:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref DatabaseImageId
+      InstanceType: !Ref DatabaseInstanceType
+      IamInstanceProfile: !Ref DatabaseInstanceProfile
+      KeyName: !Ref KeyName
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        InstanceMetadataTags: enabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref ControllerSecurityGroup
+            - !Ref DatabaseServiceSecurityGroup
+          SubnetId: !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: !Sub "leadpoet-parity-database-${RunId}"
+        - Key: leadpoet:parity-run
+          Value: !Ref RunId
+        - Key: leadpoet:parity-role
+          Value: database
+        - Key: leadpoet:candidate-sha
+          Value: !Ref CandidateSha
+
+  Dashboard:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref DashboardImageId
+      InstanceType: !Ref DashboardInstanceType
+      IamInstanceProfile: !Ref DashboardInstanceProfile
+      KeyName: !Ref KeyName
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        InstanceMetadataTags: enabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref ControllerSecurityGroup
+            - !Ref DashboardWebSecurityGroup
+          SubnetId: !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: !Sub "leadpoet-parity-dashboard-${RunId}"
+        - Key: leadpoet:parity-run
+          Value: !Ref RunId
+        - Key: leadpoet:parity-role
+          Value: dashboard
+        - Key: leadpoet:candidate-sha
+          Value: !Ref CandidateSha
+
+  DatabaseLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: network
+      Scheme: internal
+      SecurityGroups:
+        - !Ref DatabaseWebSecurityGroup
+      Subnets:
+        - !Ref SubnetId
+      Tags:
+        - Key: leadpoet:parity-run
+          Value: !Ref RunId
+        - Key: leadpoet:candidate-sha
+          Value: !Ref CandidateSha
+
+  DatabaseTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 3000
+      TargetType: instance
+      HealthCheckProtocol: TCP
+      Targets:
+        - Id: !Ref Database
+          Port: 3000
+
+  DatabaseTlsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref DatabaseLoadBalancer
+      Port: 443
+      Protocol: TLS
+      Certificates:
+        - CertificateArn: !Ref DatabaseCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DatabaseTargetGroup
+
+  GatewayRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "gateway-${RunId}.${BaseDomain}"
+      Type: A
+      TTL: "30"
+      ResourceRecords: [!GetAtt Gateway.PublicIp]
+
+  DatabaseRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "database-${RunId}.${BaseDomain}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt DatabaseLoadBalancer.DNSName
+        HostedZoneId: !GetAtt DatabaseLoadBalancer.CanonicalHostedZoneID
+
+  DashboardRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "dashboard-${RunId}.${BaseDomain}"
+      Type: A
+      TTL: "30"
+      ResourceRecords: [!GetAtt Dashboard.PublicIp]
+
+Outputs:
+  SecurityGroupId:
+    Value: !Ref ControllerSecurityGroup
+  GatewayWebSecurityGroupId:
+    Value: !Ref GatewayWebSecurityGroup
+  DatabaseWebSecurityGroupId:
+    Value: !Ref DatabaseWebSecurityGroup
+  DatabaseServiceSecurityGroupId:
+    Value: !Ref DatabaseServiceSecurityGroup
+  DashboardWebSecurityGroupId:
+    Value: !Ref DashboardWebSecurityGroup
+  GatewayPublicIp:
+    Value: !GetAtt Gateway.PublicIp
+  GatewayPrivateIp:
+    Value: !GetAtt Gateway.PrivateIp
+  ValidatorPublicIp:
+    Value: !GetAtt Validator.PublicIp
+  AuditorAPublicIp:
+    Value: !GetAtt AuditorA.PublicIp
+  AuditorBPublicIp:
+    Value: !GetAtt AuditorB.PublicIp
+  DatabasePublicIp:
+    Value: !GetAtt Database.PublicIp
+  DatabasePrivateIp:
+    Value: !GetAtt Database.PrivateIp
+  DashboardPublicIp:
+    Value: !GetAtt Dashboard.PublicIp
+  GatewayDomain:
+    Value: !Sub "gateway-${RunId}.${BaseDomain}"
+  DatabaseDomain:
+    Value: !Sub "database-${RunId}.${BaseDomain}"
+  DashboardDomain:
+    Value: !Sub "dashboard-${RunId}.${BaseDomain}"
+  GatewayInstanceId:
+    Value: !Ref Gateway
+  ValidatorInstanceId:
+    Value: !Ref Validator
+  AuditorAInstanceId:
+    Value: !Ref AuditorA
+  AuditorBInstanceId:
+    Value: !Ref AuditorB
+  DatabaseInstanceId:
+    Value: !Ref Database
+  DashboardInstanceId:
+    Value: !Ref Dashboard

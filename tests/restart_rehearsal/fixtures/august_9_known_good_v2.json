@@ -1,0 +1,48 @@
+{
+  "schema_version": "leadpoet.production_parity_historical_oracle.v1",
+  "reference_window": {
+    "end_commit": "63785047493aeec87016c5747ba4d571f5871914",
+    "ended_at": "2026-08-09T23:59:59-07:00",
+    "evidence_basis": "operator-confirmed production behavior",
+    "started_at": "2026-08-09T00:00:00-07:00"
+  },
+  "required_behaviors": [
+    {
+      "behavior_id": "exact-attested-release",
+      "description": "gateway and validator activate one exact attested commit",
+      "fast_stage_ids": ["candidate-contract", "exact-n-minus-one-launchers", "protected-v2-workflows"],
+      "full_stage_ids": ["candidate-and-snapshot-identity", "exact-paired-restart", "candidate-not-superseded"]
+    },
+    {
+      "behavior_id": "daily-rebenchmark",
+      "description": "daily baseline scores configured ICPs and persists retry progress",
+      "fast_stage_ids": ["production-snapshot", "snapshot-restore-and-migrations", "production-data-shape", "production-weight-input-scale"],
+      "full_stage_ids": ["staging-control-boundary", "full-rebenchmark-and-assignment"]
+    },
+    {
+      "behavior_id": "aggregate-and-assignment",
+      "description": "aggregate score and public private conditional assignment publish only after complete scoring",
+      "fast_stage_ids": ["supabase-schema-and-rpc", "protected-v2-workflows"],
+      "full_stage_ids": ["full-rebenchmark-and-assignment", "dashboard-score-readback"]
+    },
+    {
+      "behavior_id": "canonical-weight-bundle",
+      "description": "gateway publishes one canonical epoch bundle",
+      "fast_stage_ids": ["canonical-bundle-generation"],
+      "full_stage_ids": ["canonical-weight-bundles"]
+    },
+    {
+      "behavior_id": "primary-auditor-equality",
+      "description": "primary and audit validators verify and submit the same canonical bundle",
+      "fast_stage_ids": ["primary-auditor-bundle-equality"],
+      "full_stage_ids": ["primary-finalization", "audit-finalization"]
+    },
+    {
+      "behavior_id": "finalized-chain-readback",
+      "description": "finalized chain readback confirms each validator submission",
+      "fast_stage_ids": ["sign-finalize-readback"],
+      "full_stage_ids": ["consecutive-epoch-readback"]
+    }
+  ],
+  "use_policy": "behavioral oracle only; never restore historical source or configuration"
+}

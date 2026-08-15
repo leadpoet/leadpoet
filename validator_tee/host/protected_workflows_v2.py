@@ -119,6 +119,25 @@ PROTECTED_SYMBOLS = {
         "validate_published_weight_bundle_v2",
         "validate_weight_finalization_submission_v2",
     ),
+    "leadpoet_canonical/chain_source_v2.py": (
+        "configure_chain_source_boundary_v2",
+        "chain_source_policy_document",
+        "chain_source_policy_hash",
+        "chain_source_boundary_for_profile_v2",
+    ),
+    "leadpoet_canonical/production_parity_boundary_v2.py": (
+        "PRODUCTION_SUPABASE_ORIGIN",
+        "PRODUCTION_CHAIN_HOST",
+        "PRODUCTION_CHAIN_ARCHIVE_HOST",
+        "PRODUCTION_PARITY_CHAIN_HOST",
+        "PRODUCTION_PARITY_ENV_NAMES",
+        "validate_production_parity_boundary_document_v2",
+        "validate_production_parity_boundary_v2",
+        "configured_boundary_document_v2",
+        "configured_supabase_origin_v2",
+        "configured_chain_source_boundary_v2",
+        "configured_chain_signing_profile_path_v2",
+    ),
     "leadpoet_canonical/hotkey_authority_v2.py": (
         "validate_chain_signing_profile",
         "chain_signing_profiles",
@@ -161,6 +180,7 @@ PROTECTED_SYMBOLS = {
         "ValidatorWeightAuthorityV2.validate_compact_weight_recovery",
     ),
     "validator_tee/enclave/hotkey_authority_v2.py": (
+        "load_chain_signing_profile",
         "ValidatorHotkeyAuthorityV2.provision_seed",
         "ValidatorHotkeyAuthorityV2.register_weight_result",
         "ValidatorHotkeyAuthorityV2._verify_recovery_validator_boot",

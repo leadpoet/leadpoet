@@ -11,6 +11,7 @@ VALIDATOR_RESTART="${LEADPOET_VALIDATOR_RESTART_PATH:-/home/ec2-user/validator_r
 VALIDATOR_REPO_ROOT="${LEADPOET_VALIDATOR_REPO_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-}"
 VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-}"
+RELEASE_PREFIX="${LEADPOET_RELEASE_PREFIX:-attested-v2/releases}"
 # Three-second retries allow up to 2.5 hours for the gateway rebuild, plus a
 # five-minute margin for the final bounded release probes.
 VALIDATOR_COORDINATION_ATTEMPTS=3000
@@ -159,6 +160,13 @@ for secret_id in "$GATEWAY_ENV_SECRET_ID" "$VALIDATOR_ENV_SECRET_ID"; do
     exit 2
   fi
 done
+case "$RELEASE_PREFIX" in
+  attested-v2/releases|attested-v2/candidates) ;;
+  *)
+    echo "ERROR: release prefix is outside the reviewed channels" >&2
+    exit 2
+    ;;
+esac
 
 temporary_root="$(mktemp -d /tmp/leadpoet-attested-restart.XXXXXX)"
 helper="$temporary_root/exact_commit_restart_v2.py"
@@ -228,7 +236,9 @@ run_gateway_restart() {
     secret_environment="LEADPOET_GATEWAY_ENV_SECRET_ID='$GATEWAY_ENV_SECRET_ID'"
   fi
   ssh -tt "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
-    "exec env $secret_environment bash '$GATEWAY_RESTART' --commit '$commit'"
+    "exec env $secret_environment \
+      GATEWAY_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \
+      bash '$GATEWAY_RESTART' --commit '$commit'"
 }
 
 run_validator_restart() {
@@ -276,6 +286,7 @@ run_validator_restart() {
       VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS='$VALIDATOR_COORDINATION_TIMEOUT_SECONDS' \
       VALIDATOR_COORDINATED_EXPECTED_COMMIT='$expected_forward_commit' \
       LEADPOET_VALIDATOR_ENV_SECRET_ID='$VALIDATOR_ENV_SECRET_ID' \
+      VALIDATOR_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \
       bash -c $launcher_command_quoted"
   )
   if [ "${VALIDATOR_RESTART_EXEC_SSH:-0}" = "1" ]; then

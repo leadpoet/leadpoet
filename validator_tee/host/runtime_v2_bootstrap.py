@@ -27,7 +27,11 @@ from validator_tee.enclave.runtime_v2 import (
 )
 from validator_tee.enclave.hotkey_authority_v2 import (
     hotkey_authority_configuration_hash,
+    load_chain_signing_profile,
     validate_hotkey_authority_configuration,
+)
+from leadpoet_canonical.chain_source_v2 import (
+    chain_source_boundary_for_profile_v2,
 )
 
 
@@ -47,6 +51,12 @@ def build_runtime_configuration(
     hotkey_config = validate_hotkey_authority_configuration(
         hotkey_authority_config
     )
+    chain_profile = load_chain_signing_profile(
+        Path(__file__).resolve().parents[1]
+        / "enclave"
+        / "chain_signing_profile_v2.json",
+        expected_hash=hotkey_config["chain_signing_profile_hash"],
+    )
     if validator["commit_sha"] != gateway["commit_sha"]:
         raise ValidatorRuntimeBootstrapV2Error(
             "validator and gateway V2 releases use different commits"
@@ -60,6 +70,12 @@ def build_runtime_configuration(
             "current gateway release differs from approved release lineage"
         )
     cutover = load_subnet_epoch_cutover()
+    if cutover.network_genesis_hash.lower() != (
+        "0x" + str(chain_profile["genesis_hash"]).lower()
+    ):
+        raise ValidatorRuntimeBootstrapV2Error(
+            "chain signing profile differs from the epoch authority"
+        )
     configuration = {
         "schema_version": VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
         "commit_sha": validator["commit_sha"],
@@ -68,6 +84,9 @@ def build_runtime_configuration(
         "gateway_release_hash": gateway["release_hash"],
         "hotkey_authority_config_hash": hotkey_authority_configuration_hash(
             hotkey_config
+        ),
+        "chain_source_boundary": chain_source_boundary_for_profile_v2(
+            chain_profile
         ),
         "gateway_release_lineage": lineage,
         "epoch_authority": {

@@ -24,6 +24,10 @@ from gateway.tee.provider_broker_v2 import (
 from gateway.tee.provider_evidence_v2 import (
     validate_signed_provider_evidence_record,
 )
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    PRODUCTION_SUPABASE_ORIGIN,
+    configured_supabase_origin_v2,
+)
 from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_bytes,
@@ -36,7 +40,9 @@ CACHE_PAYLOAD_SCHEMA_VERSION = "leadpoet.provider_evidence_cache_payload.v2"
 CACHE_ROW_SCHEMA_VERSION = "leadpoet.provider_evidence_cache_row.v2"
 CACHE_TABLE = "research_lab_provider_evidence_cache_v2"
 CACHE_PUT_RPC = "put_research_lab_provider_evidence_cache_v2"
-CACHE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
+
+
+CACHE_ORIGIN = PRODUCTION_SUPABASE_ORIGIN
 CACHE_TIMEOUT_MS = 45_000
 CACHE_TRANSPORT_ATTEMPTS = 5
 # Match provider-outcome persistence so a brief shared Supabase disturbance
@@ -107,11 +113,13 @@ class ProviderEvidenceCacheStoreV2:
         broker: ProviderBrokerV2,
         vault: EncryptedArtifactVaultV2,
         source_boot_verifier: Callable[[Mapping[str, Any]], Any],
+        origin: Optional[str] = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._broker = broker
         self._vault = vault
         self._source_boot_verifier = source_boot_verifier
+        self._origin = str(origin or configured_supabase_origin_v2())
         self._sleeper = sleeper
         retry_hash = str(broker.retry_policy_hashes.get("supabase") or "")
         self._retry_policy_hash = _hash(
@@ -176,7 +184,7 @@ class ProviderEvidenceCacheStoreV2:
         }
         put_result, put_attempts, put_artifacts = self._execute_with_retry(
             method="POST",
-            url="%s/rest/v1/rpc/%s" % (CACHE_ORIGIN, CACHE_PUT_RPC),
+            url="%s/rest/v1/rpc/%s" % (self._origin, CACHE_PUT_RPC),
             headers={
                 "accept": "application/json",
                 "content-type": "application/json",
@@ -634,7 +642,7 @@ class ProviderEvidenceCacheStoreV2:
         )
         result, attempts, artifacts = self._execute_with_retry(
             method="GET",
-            url="%s/rest/v1/%s?%s" % (CACHE_ORIGIN, CACHE_TABLE, query),
+            url="%s/rest/v1/%s?%s" % (self._origin, CACHE_TABLE, query),
             headers={"accept": "application/json"},
             body=b"",
             logical_operation_id=(

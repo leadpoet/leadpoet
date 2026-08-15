@@ -20,6 +20,10 @@ import urllib.response
 from urllib.parse import urljoin, urlsplit
 
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
+from leadpoet_canonical.chain_source_v2 import (
+    CHAIN_ARCHIVE_ENDPOINT_HOST,
+    CHAIN_ENDPOINT_HOST,
+)
 from leadpoet_canonical.attested_v2 import sha256_bytes, validate_transport_attempt
 from gateway.tee.source_add_runtime_v2 import (
     source_add_dynamic_retry_policy_hash,
@@ -220,10 +224,11 @@ _PROVIDER_BY_HOST = {
     "api.truelist.io": "truelist",
     "cloudflare-dns.com": "dns",
     "rdap.org": "rdap",
-    "entrypoint-finney.opentensor.ai": "bittensor_chain",
-    "archive.chain.opentensor.ai": "bittensor_archive",
+    CHAIN_ENDPOINT_HOST: "bittensor_chain",
     "arweave.net": "arweave",
 }
+if CHAIN_ARCHIVE_ENDPOINT_HOST != CHAIN_ENDPOINT_HOST:
+    _PROVIDER_BY_HOST[CHAIN_ARCHIVE_ENDPOINT_HOST] = "bittensor_archive"
 _CREDENTIAL_HEADERS = {
     "authorization",
     "proxy-authorization",

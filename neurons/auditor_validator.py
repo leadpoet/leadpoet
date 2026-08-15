@@ -2013,6 +2013,11 @@ class AuditorValidator:
                     ),
                 )
             ).expanduser()
+            from leadpoet_canonical.production_parity_boundary_v2 import (
+                configured_chain_signing_profile_path_v2,
+            )
+
+            profile_file = configured_chain_signing_profile_path_v2(profile_file)
             profile = json.loads(profile_file.read_text(encoding="utf-8"))
             if (
                 isinstance(authority, dict)

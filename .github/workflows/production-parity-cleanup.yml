@@ -1,0 +1,53 @@
+name: Production Parity Cleanup
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: production-parity-cleanup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  cleanup:
+    if: vars.LEADPOET_PARITY_INFRA_READY == 'true'
+    runs-on: ubuntu-latest
+    environment: production-parity-staging
+    timeout-minutes: 15
+    steps:
+      - name: Check out current cleanup authority
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Set up exact candidate controller
+        uses: ./.github/actions/setup-production-parity-controller
+
+      - name: Configure parity AWS role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.LEADPOET_PARITY_AWS_REGION }}
+
+      - name: Remove only stale tagged parity resources
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/cleanup_production_parity_staging.py \
+            --region "${{ vars.LEADPOET_PARITY_AWS_REGION }}" \
+            --max-age-hours 12 \
+            --apply > "$RUNNER_TEMP/production-parity-cleanup.json"
+
+      - name: Upload cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-parity-cleanup-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/production-parity-cleanup.json

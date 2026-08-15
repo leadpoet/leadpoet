@@ -2,6 +2,10 @@ import importlib
 from pathlib import Path
 
 from gateway.tee import provider_broker_v2, rpc_authority
+from gateway.tee.research_lab_runtime_config_v2 import (
+    build_research_lab_execution_config,
+)
+from tests.v2_epoch_test_utils import epoch_test_environment
 
 
 def test_coordinator_provider_broker_serializes_request_scoped_direct_transport(
@@ -12,6 +16,9 @@ def test_coordinator_provider_broker_serializes_request_scoped_direct_transport(
     )
     tee_service = importlib.import_module("gateway.tee.tee_service")
     captured = {}
+    execution_config = build_research_lab_execution_config(
+        environment=epoch_test_environment()
+    )
 
     class RuntimeIdentity:
         @staticmethod
@@ -24,6 +31,7 @@ def test_coordinator_provider_broker_serializes_request_scoped_direct_transport(
                         provider_broker_v2.provider_registry_hash()
                     ),
                     "job_lease_slot_ref_hashes": {},
+                    "research_lab_execution_config": execution_config,
                 }
             }
 
@@ -61,3 +69,6 @@ def test_coordinator_provider_broker_serializes_request_scoped_direct_transport(
         "reuse_upstream_proxy_connections": True,
     }
     assert captured["broker"]["transport"].__class__ is Transport
+    assert captured["broker"]["routes"]["supabase"].hosts == (
+        "qplwoislplkcegvdmbim.supabase.co",
+    )

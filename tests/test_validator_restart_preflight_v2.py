@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,8 @@ from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 from validator_tee.enclave.hotkey_authority_v2 import (
     HOTKEY_AUTHORITY_CONFIG_SCHEMA_VERSION,
     MEASURED_DRAND_LIBRARY_PATH,
+    ValidatorHotkeyAuthorityV2Error,
+    load_chain_signing_profile,
 )
 from validator_tee.host.hotkey_bootstrap_v2 import (
     HOTKEY_ENVELOPE_SCHEMA_VERSION,
@@ -44,6 +47,10 @@ from validator_tee.scripts.stage_runtime_artifacts_v2 import SCHEMA_VERSION
 COMMIT = "1" * 40
 HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 PUBLIC_KEY = "a6bfe69c29bf9e4db65c63ac6f6d1e23c252ca871744afb6edc5623d9bc39004"
+PRODUCTION_PROFILE = load_chain_signing_profile(
+    Path(__file__).resolve().parents[1]
+    / "validator_tee/enclave/chain_signing_profile_v2.json"
+)
 
 
 def _hash(character):
@@ -53,7 +60,7 @@ def _hash(character):
 @pytest.fixture(autouse=True)
 def _official_epoch_authority(monkeypatch):
     cutover = SubnetEpochCutover(
-        network_genesis_hash="0x" + "1" * 64,
+        network_genesis_hash="0x" + PRODUCTION_PROFILE["genesis_hash"],
         netuid=71,
         cutover_block=8_637_156,
         cutover_block_hash="0x" + "2" * 64,
@@ -141,7 +148,7 @@ def _hotkey_config():
         "schema_version": HOTKEY_AUTHORITY_CONFIG_SCHEMA_VERSION,
         "validator_hotkey": HOTKEY,
         "hotkey_public_key": PUBLIC_KEY,
-        "chain_signing_profile_hash": _hash("2"),
+        "chain_signing_profile_hash": sha256_json(PRODUCTION_PROFILE),
         "drand_library_path": MEASURED_DRAND_LIBRARY_PATH,
         "drand_library_sha256": "3" * 64,
     }
@@ -203,6 +210,16 @@ def test_validator_preflight_rejects_release_for_another_commit():
         match="validator V2 release is for another commit",
     ):
         _verify(deploy_commit="2" * 40)
+
+
+def test_validator_preflight_rejects_unmeasured_chain_profile():
+    config = _hotkey_config()
+    config["chain_signing_profile_hash"] = _hash("2")
+    with pytest.raises(
+        ValidatorHotkeyAuthorityV2Error,
+        match="profile hash is unavailable or ambiguous",
+    ):
+        _verify(hotkey_configuration=config)
 
 
 def test_validator_preflight_rejects_gateway_release_for_another_commit():

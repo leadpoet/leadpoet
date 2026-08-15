@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +36,7 @@ from validator_tee.host.runtime_v2_bootstrap import (
 from validator_tee.enclave.hotkey_authority_v2 import (
     HOTKEY_AUTHORITY_CONFIG_SCHEMA_VERSION,
     MEASURED_DRAND_LIBRARY_PATH,
+    load_chain_signing_profile,
 )
 from validator_tee.enclave.runtime_v2 import (
     VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
@@ -43,6 +45,11 @@ from validator_tee.enclave.runtime_v2 import (
 
 def _hash(character):
     return "sha256:" + character * 64
+
+
+PRODUCTION_GENESIS = (
+    "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+)
 
 
 def _gateway_release(commit="1" * 40):
@@ -116,12 +123,18 @@ def _gateway_lineage(commit="1" * 40):
     )
 
 
-def _hotkey_config():
+def _hotkey_config(profile_name="chain_signing_profile_v2.json"):
+    profile = load_chain_signing_profile(
+        Path(__file__).resolve().parents[1]
+        / "validator_tee"
+        / "enclave"
+        / profile_name
+    )
     return {
         "schema_version": HOTKEY_AUTHORITY_CONFIG_SCHEMA_VERSION,
         "validator_hotkey": "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK",
         "hotkey_public_key": "1" * 64,
-        "chain_signing_profile_hash": _hash("2"),
+        "chain_signing_profile_hash": sha256_json(profile),
         "drand_library_path": MEASURED_DRAND_LIBRARY_PATH,
         "drand_library_sha256": "3" * 64,
     }
@@ -130,7 +143,7 @@ def _hotkey_config():
 @pytest.fixture(autouse=True)
 def _official_epoch_authority(monkeypatch):
     cutover = SubnetEpochCutover(
-        network_genesis_hash="0x" + "1" * 64,
+        network_genesis_hash=PRODUCTION_GENESIS,
         netuid=71,
         cutover_block=8_637_156,
         cutover_block_hash="0x" + "2" * 64,
@@ -156,7 +169,7 @@ def test_runtime_configuration_requires_cutover_authority(monkeypatch):
 
 def test_stateful_runtime_configuration_measures_cutover(monkeypatch):
     cutover = SubnetEpochCutover(
-        network_genesis_hash="0x" + "1" * 64,
+        network_genesis_hash=PRODUCTION_GENESIS,
         netuid=71,
         cutover_block=8_637_156,
         cutover_block_hash="0x" + "2" * 64,
@@ -178,6 +191,9 @@ def test_stateful_runtime_configuration_measures_cutover(monkeypatch):
         config["schema_version"]
         == VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION
     )
+    assert config["chain_source_boundary"]["chain_host"] == (
+        "entrypoint-finney.opentensor.ai"
+    )
     assert config["epoch_authority"] == {
         "mode": "stateful_v1",
         "cutover_manifest": cutover.to_dict(),
@@ -187,6 +203,49 @@ def test_stateful_runtime_configuration_measures_cutover(monkeypatch):
     ) == set(ROLE_SPECS) | {"validator_weights"}
 
 
+def test_testnet_runtime_configuration_binds_profile_and_epoch_authority(monkeypatch):
+    test_genesis = (
+        "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+    )
+    cutover = SubnetEpochCutover(
+        network_genesis_hash=test_genesis,
+        netuid=1,
+        cutover_block=7_700_000,
+        cutover_block_hash="0x" + "4" * 64,
+        first_subnet_epoch_index=1,
+        first_settlement_epoch_id=1,
+        last_legacy_epoch_id=0,
+    )
+    monkeypatch.setenv(CUTOVER_JSON_ENV, json.dumps(cutover.to_dict()))
+    config = build_runtime_configuration(
+        validator_release=_validator_release(),
+        gateway_release=_gateway_release(),
+        gateway_release_lineage=_gateway_lineage(),
+        hotkey_authority_config=_hotkey_config(
+            "chain_signing_profile_test_v2.json"
+        ),
+    )
+    assert config["chain_source_boundary"]["chain_host"] == (
+        "test.finney.opentensor.ai"
+    )
+    assert config["chain_source_boundary"]["chain_archive_host"] == (
+        "test.finney.opentensor.ai"
+    )
+
+
+def test_runtime_configuration_rejects_profile_cutover_genesis_mismatch():
+    with pytest.raises(
+        ValidatorRuntimeBootstrapV2Error,
+        match="profile differs from the epoch authority",
+    ):
+        build_runtime_configuration(
+            validator_release=_validator_release(),
+            gateway_release=_gateway_release(),
+            gateway_release_lineage=_gateway_lineage(),
+            hotkey_authority_config=_hotkey_config(
+                "chain_signing_profile_test_v2.json"
+            ),
+        )
 def test_runtime_configuration_rejects_asymmetric_commits():
     with pytest.raises(ValidatorRuntimeBootstrapV2Error, match="different commits"):
         build_runtime_configuration(

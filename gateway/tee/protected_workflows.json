@@ -1522,7 +1522,7 @@
       "symbol": "MEASURED_TRANSPORT_REQUEST_HEADERS"
     },
     {
-      "ast_sha256": "sha256:020f51e8a0a4f7e29a1f841f7ff832b5e17e7e7fe0a6cd89ec2c1725d7d6e00f",
+      "ast_sha256": "sha256:8f0e4956a891b05d7528e5380322faaa8699d504f42e5f078802b74c822c2fb9",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -1532,7 +1532,7 @@
       "symbol": "_extract_tls_metadata"
     },
     {
-      "ast_sha256": "sha256:753fa674b8c2f76526c1dd0df53f1059e4986b9e76149450e0924eba8d4100dd",
+      "ast_sha256": "sha256:cdb3830013e84db22244d26cfd203a2c606ad563bf97a0b294d6aef4a52adfa4",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "provider_registry_document"
     },
@@ -1772,7 +1772,7 @@
       "symbol": "QUERY_POLICIES"
     },
     {
-      "ast_sha256": "sha256:c923ef9e3baef2946b2bfc66ee4182ea748f7e5438876ab7d8b9b2938d17b8f4",
+      "ast_sha256": "sha256:602cac74f14304028dcd0eccb80e7d9b02c68cac4bcb24351fc9cd1be567facd",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "SupabaseSourceReaderV2"
     },
@@ -1802,7 +1802,7 @@
       "symbol": "get_v2_inter_enclave_client"
     },
     {
-      "ast_sha256": "sha256:5bc3e7aa6e66035be3ecbd889893533d9a868159c59775c15e7a0e423e3f5e81",
+      "ast_sha256": "sha256:d7d97a77aab8b51a7c8351a7a2dc8ed95cf15bd3c2445f66fc916e8e1a66ab8a",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_provider_broker"
     },
@@ -2192,6 +2192,26 @@
       "symbol": "validate_local_delta_against_certificate_v2"
     },
     {
+      "ast_sha256": "sha256:6ee33a1eeaa8f1caee2c81862db72870578c2ec43ef02559154e4abb297ac656",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "chain_source_boundary_for_profile_v2"
+    },
+    {
+      "ast_sha256": "sha256:7892a613c0706a4155deb8d3c86144bb340fe49e0274e11a81c3cb04679fdbf4",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "chain_source_policy_document"
+    },
+    {
+      "ast_sha256": "sha256:e46c721ad5997f203327d8c7e48429bb6f2607c3ab49d30504834c6def89c0a2",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "chain_source_policy_hash"
+    },
+    {
+      "ast_sha256": "sha256:f3aea4bcf20e259e4f9f8a4ab9300284c2514aa9f694a83b1ba6093d58f8ce1a",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "configure_chain_source_boundary_v2"
+    },
+    {
       "ast_sha256": "sha256:8393b3f6da4f4545710a4c98d49d27c3150a515f996578f191f54388aacb6763",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "decode_last_update_storage"
@@ -2340,6 +2360,61 @@
       "ast_sha256": "sha256:53ea8ee882c257d9cf18c3669a5c2a7bd93f0faee7148c45452de9c9f1a464a3",
       "path": "leadpoet_canonical/legacy_settlement_v2.py",
       "symbol": "validate_legacy_weight_bundle_v2"
+    },
+    {
+      "ast_sha256": "sha256:6a593e822ba7f0d7d0d404167d0265dceaacf7da9563aa49013861e8e7205a29",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_CHAIN_ARCHIVE_HOST"
+    },
+    {
+      "ast_sha256": "sha256:e710e8ce009136f24b62d40b3d610620bda36c6d6f934dd9a5ecbec673a60e1e",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_CHAIN_HOST"
+    },
+    {
+      "ast_sha256": "sha256:866c5e96cd6bba9d173f7f49ae956f456184913538b0f5e79304d700ff14497a",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_PARITY_CHAIN_HOST"
+    },
+    {
+      "ast_sha256": "sha256:d940bc0bac77f99d548206e8b8b518fbb5b4fa9990bee14b0647b56a21bd443a",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_PARITY_ENV_NAMES"
+    },
+    {
+      "ast_sha256": "sha256:aad816c507423f832315daf5a03a724dbd6a92ff243d156626b13661d1590402",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_SUPABASE_ORIGIN"
+    },
+    {
+      "ast_sha256": "sha256:8e2caae484657222b37f8518487e1424bc93f3503946464cf2c52aa8278d757d",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "configured_boundary_document_v2"
+    },
+    {
+      "ast_sha256": "sha256:1b43bd7ea9732080d6048e6bbec87dcf31e9c762db7a5bd3b64bded610979745",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "configured_chain_signing_profile_path_v2"
+    },
+    {
+      "ast_sha256": "sha256:bc01821c5de51e80b7bd27918a8207f6aac53b57b28c21c68dd2fcabd833747a",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "configured_chain_source_boundary_v2"
+    },
+    {
+      "ast_sha256": "sha256:713109ab0de46b9e1cdb859f010f3bfa794589e592be08d3c972d21dded19c35",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "configured_supabase_origin_v2"
+    },
+    {
+      "ast_sha256": "sha256:f8d8bed1703f70b92de7a190cf95086a7c8a2bc79dab3ad9b63d647d6467e87e",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "validate_production_parity_boundary_document_v2"
+    },
+    {
+      "ast_sha256": "sha256:32187ea94aa4ec5f434b91d186caede5513317577d36e200ffd9ed97caaeab97",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "validate_production_parity_boundary_v2"
     },
     {
       "ast_sha256": "sha256:9da83659412c65a826b0c1e9c6aa9d7b9cce7bf255ae164fc120ea09f0641378",
@@ -2882,7 +2957,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:8246b331bab689c0522f19ca774fc4b8c1199c5c1e8a821f25408a272945044c",
+  "manifest_hash": "sha256:031e6d136f4d4bb87466129baeb3370ff96de5b710cc1289a4f60754834c4a78",
   "protected_source_commit": "79c8be65b7767429afa29582c53494aaba6d8693",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

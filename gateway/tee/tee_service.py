@@ -1525,6 +1525,24 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
     raise ValueError("Unknown V2 runtime method")
 
 
+def _v2_supabase_origin(configuration: Dict[str, Any]) -> str:
+    from leadpoet_canonical.production_parity_boundary_v2 import (
+        validate_production_parity_boundary_v2,
+    )
+    from gateway.tee.research_lab_runtime_config_v2 import (
+        validate_research_lab_execution_config,
+    )
+
+    execution_config = validate_research_lab_execution_config(
+        configuration["research_lab_execution_config"]
+    )
+    return validate_production_parity_boundary_v2(
+        execution_config["behavior_environment"],
+        network=str(execution_config["deployment"]["network"]),
+        netuid=int(execution_config["deployment"]["netuid"]),
+    )
+
+
 def get_v2_provider_broker():
     global v2_provider_broker
     with v2_provider_broker_lock:
@@ -1547,14 +1565,22 @@ def get_v2_provider_broker():
             retry_hashes, dict
         ):
             raise RuntimeError("provider broker configuration is incomplete")
-        from gateway.tee.provider_broker_v2 import provider_registry_hash
+        from gateway.tee.provider_broker_v2 import (
+            provider_registry_hash,
+            provider_routes_for_execution_config,
+        )
 
-        if configuration.get("provider_registry_hash") != provider_registry_hash():
+        execution_config = configuration["research_lab_execution_config"]
+        routes = provider_routes_for_execution_config(execution_config)
+        if configuration.get("provider_registry_hash") != provider_registry_hash(
+            routes
+        ):
             raise RuntimeError("provider registry differs from measured routes")
         get_provider_egress_proxy()
         v2_provider_broker = ProviderBrokerV2(
             credential_ref_hashes=credential_hashes,
             retry_policy_hashes=retry_hashes,
+            routes=routes,
             transport=HTTPXProviderTransport(
                 allow_authenticated_complete_body_eof=True,
                 # Provider-outcome persistence and weight reconstruction use
@@ -1626,6 +1652,9 @@ def get_v2_provider_cache_store():
             broker=get_v2_provider_broker(),
             vault=get_v2_artifact_vault(),
             source_boot_verifier=_verify_v2_provider_cache_source_boot,
+            origin=_v2_supabase_origin(
+                get_v2_runtime_identity().runtime_configuration()["configuration"]
+            ),
         )
         return v2_provider_cache_store
 
@@ -1643,6 +1672,9 @@ def get_v2_provider_outcome_store():
         v2_provider_outcome_store = ProviderOutcomeStoreV2(
             broker=get_v2_provider_broker(),
             vault=get_v2_artifact_vault(),
+            origin=_v2_supabase_origin(
+                get_v2_runtime_identity().runtime_configuration()["configuration"]
+            ),
         )
         return v2_provider_outcome_store
 
@@ -2001,6 +2033,7 @@ def get_v2_coordinator_job_manager():
         source_reader = SupabaseSourceReaderV2(
             execute_provider=get_v2_provider_broker().execute,
             retry_policy_hash=retry_hashes["supabase"],
+            origin=_v2_supabase_origin(configuration),
         )
         weight_source = CoordinatorWeightSourceV2(source_reader)
         chain_source = CoordinatorChainSourceV2(

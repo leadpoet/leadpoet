@@ -302,6 +302,26 @@
       "symbol": "verify_published_weight_authority_stage_v2"
     },
     {
+      "ast_sha256": "sha256:6ee33a1eeaa8f1caee2c81862db72870578c2ec43ef02559154e4abb297ac656",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "chain_source_boundary_for_profile_v2"
+    },
+    {
+      "ast_sha256": "sha256:7892a613c0706a4155deb8d3c86144bb340fe49e0274e11a81c3cb04679fdbf4",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "chain_source_policy_document"
+    },
+    {
+      "ast_sha256": "sha256:e46c721ad5997f203327d8c7e48429bb6f2607c3ab49d30504834c6def89c0a2",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "chain_source_policy_hash"
+    },
+    {
+      "ast_sha256": "sha256:f3aea4bcf20e259e4f9f8a4ab9300284c2514aa9f694a83b1ba6093d58f8ce1a",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "configure_chain_source_boundary_v2"
+    },
+    {
       "ast_sha256": "sha256:e42729deac58c01dd354e30e5d897bef3665d344e522d21afdb902b600f72976",
       "path": "leadpoet_canonical/compact_auditor_authority_v2.py",
       "symbol": "build_compact_published_weight_authority_v2"
@@ -467,6 +487,61 @@
       "symbol": "decrypt_kms_recipient_ciphertext"
     },
     {
+      "ast_sha256": "sha256:6a593e822ba7f0d7d0d404167d0265dceaacf7da9563aa49013861e8e7205a29",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_CHAIN_ARCHIVE_HOST"
+    },
+    {
+      "ast_sha256": "sha256:e710e8ce009136f24b62d40b3d610620bda36c6d6f934dd9a5ecbec673a60e1e",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_CHAIN_HOST"
+    },
+    {
+      "ast_sha256": "sha256:866c5e96cd6bba9d173f7f49ae956f456184913538b0f5e79304d700ff14497a",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_PARITY_CHAIN_HOST"
+    },
+    {
+      "ast_sha256": "sha256:d940bc0bac77f99d548206e8b8b518fbb5b4fa9990bee14b0647b56a21bd443a",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_PARITY_ENV_NAMES"
+    },
+    {
+      "ast_sha256": "sha256:aad816c507423f832315daf5a03a724dbd6a92ff243d156626b13661d1590402",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "PRODUCTION_SUPABASE_ORIGIN"
+    },
+    {
+      "ast_sha256": "sha256:8e2caae484657222b37f8518487e1424bc93f3503946464cf2c52aa8278d757d",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "configured_boundary_document_v2"
+    },
+    {
+      "ast_sha256": "sha256:1b43bd7ea9732080d6048e6bbec87dcf31e9c762db7a5bd3b64bded610979745",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "configured_chain_signing_profile_path_v2"
+    },
+    {
+      "ast_sha256": "sha256:bc01821c5de51e80b7bd27918a8207f6aac53b57b28c21c68dd2fcabd833747a",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "configured_chain_source_boundary_v2"
+    },
+    {
+      "ast_sha256": "sha256:713109ab0de46b9e1cdb859f010f3bfa794589e592be08d3c972d21dded19c35",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "configured_supabase_origin_v2"
+    },
+    {
+      "ast_sha256": "sha256:f8d8bed1703f70b92de7a190cf95086a7c8a2bc79dab3ad9b63d647d6467e87e",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "validate_production_parity_boundary_document_v2"
+    },
+    {
+      "ast_sha256": "sha256:32187ea94aa4ec5f434b91d186caede5513317577d36e200ffd9ed97caaeab97",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "validate_production_parity_boundary_v2"
+    },
+    {
       "ast_sha256": "sha256:9da83659412c65a826b0c1e9c6aa9d7b9cce7bf255ae164fc120ea09f0641378",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "build_weight_snapshot_v2"
@@ -562,7 +637,7 @@
       "symbol": "AuditorValidator.submit_weights_to_chain"
     },
     {
-      "ast_sha256": "sha256:2405d8f20198fc2d4d2599d81423518bb46b085be88814523c1560b12fce0abe",
+      "ast_sha256": "sha256:58e3520f6a5c9680e56a02b8f75946ababfcea9cf3236cbfd0cc67488247fd21",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.verify_attested_weights_v2"
     },
@@ -602,7 +677,7 @@
       "symbol": "Validator._research_lab_pre_weight_submission_guard"
     },
     {
-      "ast_sha256": "sha256:e03a31e79da36a7f9586dbfd346c15ac526702beb65ca43b78d14bec8a03442b",
+      "ast_sha256": "sha256:e89203db2ff96e2a30745eca4e690185b4837671d980e4d43d57a0b9a90e8246",
       "path": "neurons/validator.py",
       "symbol": "Validator._set_weights_until_epoch_end"
     },
@@ -712,6 +787,11 @@
       "symbol": "ValidatorHotkeyAuthorityV2.sign_weight_extrinsic"
     },
     {
+      "ast_sha256": "sha256:0833b6104b91e634540dc314d6a56222894c9a745ffbc3dd084c9bc9fda3a94d",
+      "path": "validator_tee/enclave/hotkey_authority_v2.py",
+      "symbol": "load_chain_signing_profile"
+    },
+    {
       "ast_sha256": "sha256:80f4383607986fea55d3787505ce0eaa05b8a55e7d307d3f32be23ef8b3b04b8",
       "path": "validator_tee/enclave/weight_authority_v2.py",
       "symbol": "ValidatorWeightAuthorityV2._validator_input_receipts"
@@ -807,7 +887,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:81ae7dd8060f9324f38dfb5c8035cddcf59a82b5672d2caba197068fc51e1f30",
+  "manifest_hash": "sha256:112bbd55a467994d98dfe793bdb993fdae4cdc131d79098c9e36c57a48945660",
   "protected_source_commit": "8d9b48d66cd11331336eb5aa9b30086b932b4c51",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

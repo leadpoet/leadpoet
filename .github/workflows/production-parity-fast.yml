@@ -1,0 +1,295 @@
+name: Production Parity Fast
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact main commit to validate
+        required: true
+        type: string
+      base_sha:
+        description: Exact deployed N-1 commit
+        required: true
+        type: string
+
+concurrency:
+  group: production-parity-fast-${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate:
+    if: vars.LEADPOET_PARITY_INFRA_READY == 'true'
+    runs-on: ubuntu-latest
+    environment: production-parity-staging
+    timeout-minutes: 10
+    env:
+      AWS_REGION: ${{ vars.LEADPOET_PARITY_AWS_REGION }}
+      SNAPSHOT_BUCKET: ${{ vars.LEADPOET_PARITY_SNAPSHOT_BUCKET }}
+      SNAPSHOT_KMS_KEY: ${{ vars.LEADPOET_PARITY_SNAPSHOT_KMS_KEY_ARN }}
+      PRODUCTION_DB_HOST: ${{ vars.LEADPOET_PARITY_PRODUCTION_DB_HOST }}
+      PRODUCTION_GATEWAY_URL: ${{ vars.LEADPOET_PARITY_PRODUCTION_GATEWAY_URL }}
+      POSTGRES_IMAGE: ${{ vars.LEADPOET_PARITY_POSTGRES_IMAGE }}
+      POSTGREST_IMAGE: ${{ vars.LEADPOET_PARITY_POSTGREST_IMAGE }}
+      PRODUCTION_GATEWAY_SECRET_ID: ${{ vars.LEADPOET_PARITY_PRODUCTION_GATEWAY_SECRET_ID }}
+    steps:
+      - name: Resolve exact candidate checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up exact candidate controller
+        uses: ./.github/actions/setup-production-parity-controller
+
+      - name: Configure parity AWS role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install PostgreSQL client
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Materialize exact candidate contract and snapshot
+        id: materialize
+        shell: bash
+        env:
+          EVENT_BASE_SHA: ${{ github.event.before }}
+          DISPATCH_BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          candidate="$(git rev-parse HEAD)"
+          base="$EVENT_BASE_SHA"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            base="$DISPATCH_BASE_SHA"
+          else
+            test -n "$PRODUCTION_GATEWAY_URL"
+            base="$(python3 scripts/resolve_production_parity_deployed_sha.py \
+              --gateway-url "$PRODUCTION_GATEWAY_URL" \
+              --candidate-sha "$candidate" \
+              --require-distinct)"
+          fi
+          printf '%s' "$base" | grep -Eq '^[0-9a-f]{40}$'
+          test "$base" != "0000000000000000000000000000000000000000"
+          test "$base" != "$candidate"
+          test -n "$PRODUCTION_GATEWAY_SECRET_ID"
+          python3 scripts/capture_production_parity_runtime_config.py \
+            --secret-id "$PRODUCTION_GATEWAY_SECRET_ID" \
+            --region "$AWS_REGION" \
+            --output "$RUNNER_TEMP/runtime-config.json"
+          python3 scripts/build_production_parity_contract.py \
+            --base-sha "$base" \
+            --candidate-sha "$candidate" \
+            --runtime-config "$RUNNER_TEMP/runtime-config.json" \
+            --require-runtime-config \
+            --output "$RUNNER_TEMP/candidate-contract.json"
+          python3 scripts/publish_production_parity_evidence.py \
+            --bucket "$SNAPSHOT_BUCKET" \
+            --key "production-parity/contracts/$candidate/contract.json" \
+            --file "$RUNNER_TEMP/candidate-contract.json" \
+            --kms-key-id "$SNAPSHOT_KMS_KEY" \
+            --region "$AWS_REGION" \
+            --object-lock-days 30 \
+            > "$RUNNER_TEMP/contract-publication.json"
+          aws s3 cp "s3://$SNAPSHOT_BUCKET/production-parity/snapshots/current.json" \
+            "$RUNNER_TEMP/current.json" --only-show-errors
+          python3 - "$RUNNER_TEMP/current.json" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if value.get("schema_version") != "leadpoet.production_parity_snapshot_pointer.v1":
+              raise SystemExit("snapshot pointer schema differs")
+          for key in ("archive_uri", "manifest_uri"):
+              item = str(value.get(key) or "")
+              if not re.fullmatch(r"s3://[A-Za-z0-9][A-Za-z0-9._-]*/[^\s]+", item):
+                  raise SystemExit(f"snapshot pointer {key} is invalid")
+              with Path(sys.argv[2]).open("a", encoding="utf-8") as output:
+                  output.write(f"{key}={item}\n")
+          for key in ("archive_version_id", "manifest_version_id"):
+              item = str(value.get(key) or "")
+              if not re.fullmatch(r"[A-Za-z0-9_.=+-]{1,1024}", item):
+                  raise SystemExit(f"snapshot pointer {key} is invalid")
+              with Path(sys.argv[2]).open("a", encoding="utf-8") as output:
+                  output.write(f"{key}={item}\n")
+          PY
+
+      - name: Download immutable production snapshot
+        run: |
+          set -Eeuo pipefail
+          manifest_uri="${{ steps.materialize.outputs.manifest_uri }}"
+          archive_uri="${{ steps.materialize.outputs.archive_uri }}"
+          manifest_location="${manifest_uri#s3://}"
+          archive_location="${archive_uri#s3://}"
+          manifest_bucket="${manifest_location%%/*}"
+          archive_bucket="${archive_location%%/*}"
+          manifest_key="${manifest_location#*/}"
+          archive_key="${archive_location#*/}"
+          aws s3api get-object \
+            --bucket "$manifest_bucket" \
+            --key "$manifest_key" \
+            --version-id "${{ steps.materialize.outputs.manifest_version_id }}" \
+            "$RUNNER_TEMP/snapshot-manifest.json" >/dev/null
+          aws s3api head-object \
+            --bucket "$manifest_bucket" \
+            --key "$manifest_key" \
+            --version-id "${{ steps.materialize.outputs.manifest_version_id }}" \
+            --checksum-mode ENABLED \
+            > "$RUNNER_TEMP/snapshot-manifest.head.json"
+          aws s3api get-object \
+            --bucket "$archive_bucket" \
+            --key "$archive_key" \
+            --version-id "${{ steps.materialize.outputs.archive_version_id }}" \
+            "$RUNNER_TEMP/production.dump" >/dev/null
+          aws s3api head-object \
+            --bucket "$archive_bucket" \
+            --key "$archive_key" \
+            --version-id "${{ steps.materialize.outputs.archive_version_id }}" \
+            --checksum-mode ENABLED \
+            > "$RUNNER_TEMP/production-dump.head.json"
+          python3 - \
+            "$RUNNER_TEMP/snapshot-manifest.json" \
+            "$RUNNER_TEMP/snapshot-manifest.head.json" \
+            "${{ steps.materialize.outputs.manifest_version_id }}" \
+            "$RUNNER_TEMP/production.dump" \
+            "$RUNNER_TEMP/production-dump.head.json" \
+            "${{ steps.materialize.outputs.archive_version_id }}" <<'PY'
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          def digest(path):
+              value = hashlib.sha256()
+              with Path(path).open("rb") as source:
+                  while chunk := source.read(1024 * 1024):
+                      value.update(chunk)
+              return value.hexdigest()
+          for path, head_path, version in (
+              (sys.argv[1], sys.argv[2], sys.argv[3]),
+              (sys.argv[4], sys.argv[5], sys.argv[6]),
+          ):
+              head = json.loads(Path(head_path).read_text(encoding="utf-8"))
+              retained = datetime.fromisoformat(
+                  str(head.get("ObjectLockRetainUntilDate") or "").replace("Z", "+00:00")
+              )
+              observed_digest = digest(path)
+              if (
+                  head.get("VersionId") != version
+                  or head.get("ServerSideEncryption") != "aws:kms"
+                  or head.get("SSEKMSKeyId") != os.environ["SNAPSHOT_KMS_KEY"]
+                  or head.get("ObjectLockMode") not in {"GOVERNANCE", "COMPLIANCE"}
+                  or retained <= datetime.now(timezone.utc)
+                  or head.get("Metadata", {}).get("sha256") != observed_digest
+              ):
+                  raise SystemExit("pinned production snapshot is not immutable and exact")
+          PY
+
+      - name: Run bounded candidate-derived production parity
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/run_production_parity_fast.py \
+            --contract "$RUNNER_TEMP/candidate-contract.json" \
+            --snapshot-manifest "$RUNNER_TEMP/snapshot-manifest.json" \
+            --snapshot-archive "$RUNNER_TEMP/production.dump" \
+            --ledger "$RUNNER_TEMP/fast-ledger.json" \
+            --production-db-host "$PRODUCTION_DB_HOST" \
+            --postgres-image "$POSTGRES_IMAGE" \
+            --postgrest-image "$POSTGREST_IMAGE"
+
+      - name: Publish exact-SHA fast success commitment
+        run: |
+          set -Eeuo pipefail
+          candidate="$(git rev-parse HEAD)"
+          python3 scripts/publish_production_parity_evidence.py \
+            --bucket "$SNAPSHOT_BUCKET" \
+            --key "production-parity/contracts/$candidate/fast-ledger.json" \
+            --file "$RUNNER_TEMP/fast-ledger.json" \
+            --kms-key-id "$SNAPSHOT_KMS_KEY" \
+            --region "$AWS_REGION" \
+            --object-lock-days 30 \
+            > "$RUNNER_TEMP/fast-ledger-publication.json"
+          python3 - \
+            "$RUNNER_TEMP/candidate-contract.json" \
+            "$RUNNER_TEMP/fast-ledger.json" \
+            "$RUNNER_TEMP/current.json" \
+            "$RUNNER_TEMP/contract-publication.json" \
+            "$RUNNER_TEMP/fast-ledger-publication.json" \
+            > "$RUNNER_TEMP/fast-success.json" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          contract = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          ledger = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          pointer = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+          contract_publication = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+          ledger_publication = json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
+          def file_hash(path):
+              return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+          if ledger.get("status") != "passed" or ledger.get("candidate_sha") != contract.get("candidate_sha"):
+              raise SystemExit("fast parity ledger did not pass for the candidate")
+          if pointer.get("manifest_hash") != ledger.get("snapshot_hash"):
+              raise SystemExit("fast parity snapshot pointer differs from the ledger")
+          if (
+              contract_publication.get("sha256") != file_hash(sys.argv[1])
+              or ledger_publication.get("sha256") != file_hash(sys.argv[2])
+          ):
+              raise SystemExit("fast parity immutable publication differs")
+          print(json.dumps({
+              "schema_version": "leadpoet.production_parity_fast_success.v1",
+              "candidate_sha": contract["candidate_sha"],
+              "contract_hash": contract["contract_hash"],
+              "contract_version_id": contract_publication["version_id"],
+              "ledger_hash": ledger["ledger_hash"],
+              "ledger_version_id": ledger_publication["version_id"],
+              "manifest_uri": pointer["manifest_uri"],
+              "manifest_version_id": pointer["manifest_version_id"],
+              "archive_uri": pointer["archive_uri"],
+              "archive_version_id": pointer["archive_version_id"],
+              "snapshot_hash": ledger["snapshot_hash"],
+          }, sort_keys=True))
+          PY
+          python3 scripts/publish_production_parity_evidence.py \
+            --bucket "$SNAPSHOT_BUCKET" \
+            --key "production-parity/contracts/$candidate/fast-success.json" \
+            --file "$RUNNER_TEMP/fast-success.json" \
+            --kms-key-id "$SNAPSHOT_KMS_KEY" \
+            --region "$AWS_REGION" \
+            --object-lock-days 30 \
+            > "$RUNNER_TEMP/fast-success-publication.json"
+
+      - name: Upload redacted fast evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-parity-fast-${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/candidate-contract.json
+            ${{ runner.temp }}/snapshot-manifest.json
+            ${{ runner.temp }}/fast-ledger.json
+            ${{ runner.temp }}/fast-success.json
+
+      - name: Remove production snapshot and runtime inputs
+        if: always()
+        run: |
+          rm -f -- \
+            "$RUNNER_TEMP/production.dump" \
+            "$RUNNER_TEMP/runtime-config.json"

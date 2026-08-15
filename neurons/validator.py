@@ -4947,6 +4947,11 @@ class Validator(BaseValidatorNeuron):
             / "enclave"
             / "chain_signing_profile_v2.json"
         )
+        from leadpoet_canonical.production_parity_boundary_v2 import (
+            configured_chain_signing_profile_path_v2,
+        )
+
+        profile_path = configured_chain_signing_profile_path_v2(profile_path)
         extrinsic_period = int(
             load_chain_signing_profile(profile_path)["extrinsic_period"]
         )

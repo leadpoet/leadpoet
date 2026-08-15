@@ -1,0 +1,44 @@
+name: Set up production parity controller
+description: Install the exact controller dependency constraints from the candidate
+
+runs:
+  using: composite
+  steps:
+    - name: Set up candidate Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: pip
+        cache-dependency-path: requirements.txt
+
+    - name: Install candidate-derived controller dependencies
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        python3 scripts/resolve_production_parity_controller_requirements.py \
+          --requirements requirements.txt \
+          --output "$RUNNER_TEMP/production-parity-controller-requirements.txt"
+        python3 -m pip install \
+          --disable-pip-version-check \
+          --requirement "$RUNNER_TEMP/production-parity-controller-requirements.txt"
+        python3 -m pip check
+
+    - name: Prove clean-runner controller imports
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        scripts=(
+          scripts/bootstrap_production_parity_staging.py
+          scripts/capture_production_parity_runtime_config.py
+          scripts/cleanup_production_parity_staging.py
+          scripts/materialize_production_parity_secrets.py
+          scripts/production_parity_snapshot.py
+          scripts/provision_production_parity_staging.py
+          scripts/publish_production_parity_evidence.py
+          scripts/read_production_parity_chain_state.py
+          scripts/run_physical_v2_staging.py
+          scripts/run_production_parity_fast.py
+        )
+        for script in "${scripts[@]}"; do
+          python3 "$script" --help >/dev/null
+        done

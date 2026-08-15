@@ -244,8 +244,6 @@ def configure_authoritative_v2(
 
     global validator_runtime_v2, validator_weight_authority_v2, validator_chain_source_v2
     from validator_tee.enclave.runtime_v2 import ValidatorRuntimeIdentityV2
-    from validator_tee.enclave.chain_source_v2 import ValidatorChainSourceV2
-    from validator_tee.enclave.weight_authority_v2 import ValidatorWeightAuthorityV2
 
     if validator_runtime_v2 is None:
         validator_runtime_v2 = ValidatorRuntimeIdentityV2(
@@ -255,6 +253,17 @@ def configure_authoritative_v2(
         configuration,
         expected_config_hash=expected_config_hash,
     )
+    chain_boundary = validator_runtime_v2.chain_source_boundary()
+    from leadpoet_canonical.chain_source_v2 import (
+        configure_chain_source_boundary_v2,
+    )
+
+    configure_chain_source_boundary_v2(
+        chain_host=chain_boundary["chain_host"],
+        chain_archive_host=chain_boundary["chain_archive_host"],
+    )
+    from validator_tee.enclave.chain_source_v2 import ValidatorChainSourceV2
+    from validator_tee.enclave.weight_authority_v2 import ValidatorWeightAuthorityV2
     if validator_chain_source_v2 is None:
         epoch_authority_supplier = getattr(
             validator_runtime_v2,
@@ -306,7 +315,22 @@ def configure_hotkey_authority_v2(
         raise RuntimeError("validator hotkey configuration hash mismatch")
     if observed_hash != validator_runtime_v2.hotkey_authority_config_hash():
         raise RuntimeError("validator hotkey configuration differs from boot release")
-    profile = load_chain_signing_profile()
+    if normalized["chain_signing_profile_hash"] != (
+        validator_runtime_v2.chain_source_boundary()[
+            "chain_signing_profile_hash"
+        ]
+    ):
+        raise RuntimeError("validator chain profile differs from boot release")
+    profile = load_chain_signing_profile(
+        expected_hash=normalized["chain_signing_profile_hash"]
+    )
+    epoch_authority = validator_runtime_v2.epoch_authority()
+    if (
+        not isinstance(epoch_authority, dict)
+        or epoch_authority["cutover_manifest"]["network_genesis_hash"]
+        != "0x" + profile["genesis_hash"]
+    ):
+        raise RuntimeError("validator chain profile differs from epoch authority")
     if sha256_json_v2(profile) != normalized["chain_signing_profile_hash"]:
         raise RuntimeError("measured chain signing profile hash mismatch")
     if validator_hotkey_authority_v2 is None:

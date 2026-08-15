@@ -18,21 +18,29 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
+  id-token: write
 
 jobs:
   accept:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
-    runs-on: [self-hosted, linux, x64, leadpoet-v2-physical-staging]
-    environment: physical-v2-staging
-    timeout-minutes: 240
+      vars.LEADPOET_PARITY_INFRA_READY == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (vars.LEADPOET_PARITY_ENFORCEMENT_ENABLED == 'true' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'))
+    runs-on: ubuntu-latest
+    environment: production-parity-staging
+    timeout-minutes: 360
     env:
+      AWS_REGION: ${{ vars.LEADPOET_PARITY_AWS_REGION }}
+      SNAPSHOT_BUCKET: ${{ vars.LEADPOET_PARITY_SNAPSHOT_BUCKET }}
+      SNAPSHOT_KMS_KEY: ${{ vars.LEADPOET_PARITY_SNAPSHOT_KMS_KEY_ARN }}
+      PRODUCTION_DB_HOST: ${{ vars.LEADPOET_PARITY_PRODUCTION_DB_HOST }}
       CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.event.workflow_run.head_sha }}
-      CONFIG_JSON: ${{ vars.LEADPOET_V2_STAGING_CONFIG_JSON }}
-      SSH_KEY: ${{ secrets.LEADPOET_V2_STAGING_SSH_KEY }}
+      INFRA_CONFIG_JSON: ${{ vars.LEADPOET_PARITY_INFRA_CONFIG_JSON }}
+      RELEASE_SOURCE_PREFIX: ${{ vars.LEADPOET_PARITY_ENFORCEMENT_ENABLED == 'true' && 'attested-v2/candidates' || 'attested-v2/releases' }}
     steps:
       - name: Check out exact attested candidate
         uses: actions/checkout@v4
@@ -40,42 +48,300 @@ jobs:
           ref: ${{ env.CANDIDATE_SHA }}
           fetch-depth: 0
 
-      - name: Materialize isolated staging controller inputs
+      - name: Set up exact candidate controller
+        uses: ./.github/actions/setup-production-parity-controller
+
+      - name: Configure parity AWS role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Load passing fast contract and pinned snapshot
+        id: inputs
         shell: bash
         run: |
           set -Eeuo pipefail
           umask 077
-          test -n "$CONFIG_JSON"
-          test -n "$SSH_KEY"
-          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/physical-v2-staging.pem"
-          printf '%s\n' "$CONFIG_JSON" > "$RUNNER_TEMP/physical-v2-staging.json"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse origin/main)" = "$CANDIDATE_SHA"
+          test -n "$INFRA_CONFIG_JSON"
+          test -n "$PRODUCTION_DB_HOST"
+          test -n "$SNAPSHOT_KMS_KEY"
+          printf '%s\n' "$INFRA_CONFIG_JSON" > "$RUNNER_TEMP/infra-config.json"
+          prefix="production-parity/contracts/$CANDIDATE_SHA"
+          for attempt in $(seq 1 60); do
+            if aws s3api head-object \
+                --bucket "$SNAPSHOT_BUCKET" \
+                --key "$prefix/fast-success.json" \
+                --checksum-mode ENABLED \
+                > "$RUNNER_TEMP/fast-success-head.json" 2>/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "ERROR: exact candidate has no passing fast parity commitment" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          success_version="$(python3 - "$RUNNER_TEMP/fast-success-head.json" <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import os
+          import sys
+          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          retained = datetime.fromisoformat(
+              str(value.get("ObjectLockRetainUntilDate") or "").replace("Z", "+00:00")
+          )
+          if (
+              value.get("ServerSideEncryption") != "aws:kms"
+              or value.get("SSEKMSKeyId") != os.environ["SNAPSHOT_KMS_KEY"]
+              or value.get("ObjectLockMode") not in {"GOVERNANCE", "COMPLIANCE"}
+              or retained <= datetime.now(timezone.utc)
+              or not str(value.get("VersionId") or "")
+          ):
+              raise SystemExit("fast success object is not immutable and KMS-bound")
+          print(value["VersionId"])
+          PY
+          )"
+          aws s3api get-object \
+            --bucket "$SNAPSHOT_BUCKET" \
+            --key "$prefix/fast-success.json" \
+            --version-id "$success_version" \
+            "$RUNNER_TEMP/fast-success.json" >/dev/null
+          readarray -t pinned < <(python3 - "$RUNNER_TEMP/fast-success.json" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if value.get("schema_version") != "leadpoet.production_parity_fast_success.v1":
+              raise SystemExit("fast success schema differs")
+          for key in ("contract_version_id", "ledger_version_id"):
+              item = str(value.get(key) or "")
+              if not re.fullmatch(r"[A-Za-z0-9_.=+-]{1,1024}", item):
+                  raise SystemExit(f"fast success {key} is invalid")
+              print(item)
+          PY
+          )
+          test "${#pinned[@]}" -eq 2
+          for item in \
+            "contract.json:${pinned[0]}:candidate-contract.json" \
+            "fast-ledger.json:${pinned[1]}:fast-ledger.json"; do
+            IFS=: read -r key version target <<< "$item"
+            aws s3api get-object \
+              --bucket "$SNAPSHOT_BUCKET" \
+              --key "$prefix/$key" \
+              --version-id "$version" \
+              "$RUNNER_TEMP/$target" >/dev/null
+            aws s3api head-object \
+              --bucket "$SNAPSHOT_BUCKET" \
+              --key "$prefix/$key" \
+              --version-id "$version" \
+              --checksum-mode ENABLED \
+              > "$RUNNER_TEMP/$target.head.json"
+          done
           python3 - \
-            "$RUNNER_TEMP/physical-v2-staging.json" \
-            "$RUNNER_TEMP/physical-v2-staging.pem" <<'PY'
+            "$RUNNER_TEMP/candidate-contract.json" \
+            "$RUNNER_TEMP/fast-success.json" \
+            "$RUNNER_TEMP/fast-ledger.json" \
+            "$RUNNER_TEMP/candidate-contract.json.head.json" \
+            "$RUNNER_TEMP/fast-ledger.json.head.json" \
+            "$GITHUB_OUTPUT" <<'PY'
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          from pathlib import Path
+          import os
+          import re
+          import sys
+
+          from leadpoet_canonical.production_parity import validate_contract, validate_ledger
+
+          contract = validate_contract(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")))
+          success = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          ledger = validate_ledger(json.loads(Path(sys.argv[3]).read_text(encoding="utf-8")))
+          heads = [json.loads(Path(path).read_text(encoding="utf-8")) for path in sys.argv[4:6]]
+          def file_hash(path):
+              return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+          for head, path, version_key in zip(
+              heads,
+              sys.argv[1:4:2],
+              ("contract_version_id", "ledger_version_id"),
+          ):
+              retained = datetime.fromisoformat(
+                  str(head.get("ObjectLockRetainUntilDate") or "").replace("Z", "+00:00")
+              )
+              if (
+                  head.get("VersionId") != success.get(version_key)
+                  or head.get("ServerSideEncryption") != "aws:kms"
+                  or head.get("SSEKMSKeyId") != os.environ["SNAPSHOT_KMS_KEY"]
+                  or head.get("ObjectLockMode") not in {"GOVERNANCE", "COMPLIANCE"}
+                  or retained <= datetime.now(timezone.utc)
+                  or head.get("Metadata", {}).get("sha256")
+                  != file_hash(path).removeprefix("sha256:")
+              ):
+                  raise SystemExit("pinned fast evidence is not immutable and exact")
+          if success.get("schema_version") != "leadpoet.production_parity_fast_success.v1":
+              raise SystemExit("fast success schema differs")
+          if success.get("candidate_sha") != contract.get("candidate_sha"):
+              raise SystemExit("fast success candidate differs")
+          if success.get("contract_hash") != contract.get("contract_hash"):
+              raise SystemExit("fast success contract differs")
+          if success.get("ledger_hash") != ledger.get("ledger_hash"):
+              raise SystemExit("fast success ledger differs")
+          if success.get("snapshot_hash") != ledger.get("snapshot_hash"):
+              raise SystemExit("fast success snapshot differs")
+          if ledger.get("status") != "passed":
+              raise SystemExit("fast parity ledger failed")
+          manifest_uri = str(success.get("manifest_uri") or "")
+          if not re.fullmatch(r"s3://[A-Za-z0-9][A-Za-z0-9._-]*/[^\s]+", manifest_uri):
+              raise SystemExit("snapshot manifest URI is invalid")
+          for key in ("manifest_version_id", "archive_version_id"):
+              if not re.fullmatch(r"[A-Za-z0-9_.=+-]{1,1024}", str(success.get(key) or "")):
+                  raise SystemExit(f"fast success {key} is invalid")
+          with Path(sys.argv[6]).open("a", encoding="utf-8") as output:
+              output.write(f"manifest_uri={manifest_uri}\n")
+              output.write(f"manifest_version_id={success['manifest_version_id']}\n")
+              output.write(f"archive_version_id={success['archive_version_id']}\n")
+          PY
+
+      - name: Download immutable snapshot manifest
+        run: |
+          set -Eeuo pipefail
+          manifest_uri="${{ steps.inputs.outputs.manifest_uri }}"
+          location="${manifest_uri#s3://}"
+          aws s3api get-object \
+            --bucket "${location%%/*}" \
+            --key "${location#*/}" \
+            --version-id "${{ steps.inputs.outputs.manifest_version_id }}" \
+            "$RUNNER_TEMP/snapshot-manifest.json" >/dev/null
+
+      - name: Provision candidate-bound disposable hosts
+        run: |
+          set -Eeuo pipefail
+          run_id="${CANDIDATE_SHA:0:12}-${GITHUB_RUN_ATTEMPT}"
+          python3 scripts/provision_production_parity_staging.py up \
+            --config "$RUNNER_TEMP/infra-config.json" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --run-id "$run_id" \
+            --output-dir "$RUNNER_TEMP/physical-stack"
+
+      - name: Materialize isolated run-scoped secrets
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/materialize_production_parity_secrets.py create \
+            --config "$RUNNER_TEMP/infra-config.json" \
+            --stack-state "$RUNNER_TEMP/physical-stack/stack-state.json" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --state "$RUNNER_TEMP/physical-stack/secret-state.json"
+
+      - name: Bootstrap exact N-1 hosts and production-shaped database
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/bootstrap_production_parity_staging.py \
+            --infra-config "$RUNNER_TEMP/infra-config.json" \
+            --physical-config "$RUNNER_TEMP/physical-stack/physical-staging.json" \
+            --stack-state "$RUNNER_TEMP/physical-stack/stack-state.json" \
+            --secret-state "$RUNNER_TEMP/physical-stack/secret-state.json" \
+            --contract "$RUNNER_TEMP/candidate-contract.json" \
+            --snapshot-manifest "$RUNNER_TEMP/snapshot-manifest.json" \
+            --snapshot-archive-version-id "${{ steps.inputs.outputs.archive_version_id }}" \
+            --output "$RUNNER_TEMP/physical-stack/bootstrap.json"
+
+      - name: Run exact physical production workflow acceptance
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/run_physical_v2_staging.py \
+            --config "$RUNNER_TEMP/physical-stack/physical-staging.json" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --contract "$RUNNER_TEMP/candidate-contract.json" \
+            --snapshot-manifest "$RUNNER_TEMP/snapshot-manifest.json" \
+            --production-db-host "$PRODUCTION_DB_HOST" \
+            --release-prefix "$RELEASE_SOURCE_PREFIX" \
+            --ledger "$RUNNER_TEMP/physical-v2-staging-ledger.json"
+
+      - name: Delete run-scoped secrets
+        id: secret_cleanup
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/physical-stack/secret-state.json" ]; then
+            python3 scripts/materialize_production_parity_secrets.py delete \
+              --state "$RUNNER_TEMP/physical-stack/secret-state.json" \
+              > "$RUNNER_TEMP/secret-cleanup.json"
+          fi
+
+      - name: Destroy disposable physical stack
+        id: stack_cleanup
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/physical-stack/stack-state.json" ]; then
+            python3 scripts/provision_production_parity_staging.py down \
+              --state "$RUNNER_TEMP/physical-stack/stack-state.json" \
+              > "$RUNNER_TEMP/stack-cleanup.json"
+          fi
+
+      - name: Publish immutable parity approval and promote production channel
+        if: success() && vars.LEADPOET_PARITY_ENFORCEMENT_ENABLED == 'true'
+        run: |
+          set -Eeuo pipefail
+          candidate_channel="$RUNNER_TEMP/release-channel-v2.json"
+          candidate_key="attested-v2/candidates/$CANDIDATE_SHA/release-channel-v2.json"
+          aws s3 cp "s3://leadpoet-attested-v2-artifacts-493765492819/$candidate_key" \
+            "$candidate_channel" --only-show-errors
+          python3 - "$RUNNER_TEMP/physical-v2-staging-ledger.json" "$candidate_channel" \
+            "$RUNNER_TEMP/secret-cleanup.json" "$RUNNER_TEMP/stack-cleanup.json" \
+            "$RUNNER_TEMP/parity-approval.json" <<'PY'
           import json
           from pathlib import Path
           import sys
 
-          config_path = Path(sys.argv[1])
-          key_path = str(Path(sys.argv[2]))
-          doc = json.loads(config_path.read_text(encoding="utf-8"))
-          doc["gateway"]["ssh_key"] = key_path
-          doc["primary_validator"]["ssh_key"] = key_path
-          for auditor in doc["audit_validators"]:
-              auditor["ssh_key"] = key_path
-          config_path.write_text(
-              json.dumps(doc, sort_keys=True) + "\n",
-              encoding="utf-8",
+          from gateway.tee.release_channel_v2 import validate_release_channel_v2
+          from leadpoet_canonical.production_parity import sha256_json, validate_ledger
+
+          ledger = validate_ledger(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")))
+          channel = validate_release_channel_v2(
+              json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")),
+              expected_commit=ledger["candidate_sha"],
+          )
+          secret_cleanup = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+          stack_cleanup = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+          if ledger["lane"] != "full" or ledger["status"] != "passed":
+              raise SystemExit("full production parity ledger did not pass")
+          if (
+              secret_cleanup.get("cleaned_secret_count") != 6
+              or stack_cleanup.get("stack_deleted") is not True
+              or stack_cleanup.get("key_deleted") is not True
+          ):
+              raise SystemExit("production parity cleanup evidence is incomplete")
+          body = {
+              "schema_version": "leadpoet.production_parity_approval.v1",
+              "candidate_sha": ledger["candidate_sha"],
+              "channel_hash": channel["channel_hash"],
+              "contract_hash": ledger["contract_hash"],
+              "ledger_hash": ledger["ledger_hash"],
+              "snapshot_hash": ledger["snapshot_hash"],
+              "secret_cleanup_hash": sha256_json(secret_cleanup),
+              "stack_cleanup_hash": sha256_json(stack_cleanup),
+          }
+          Path(sys.argv[5]).write_text(
+              json.dumps({**body, "approval_hash": sha256_json(body)}, sort_keys=True) + "\n",
+              encoding="ascii",
           )
           PY
-
-      - name: Run exact physical V2 acceptance
-        run: |
-          set -Eeuo pipefail
-          python3 scripts/run_physical_v2_staging.py \
-            --config "$RUNNER_TEMP/physical-v2-staging.json" \
-            --candidate-sha "$CANDIDATE_SHA" \
-            --ledger "$RUNNER_TEMP/physical-v2-staging-ledger.json"
+          python3 scripts/publish_production_parity_evidence.py \
+            --bucket leadpoet-attested-v2-artifacts-493765492819 \
+            --key "attested-v2/production-parity/$CANDIDATE_SHA/approval.json" \
+            --file "$RUNNER_TEMP/parity-approval.json" \
+            --kms-key-id "${{ vars.LEADPOET_PARITY_APPROVAL_KMS_KEY_ARN }}" \
+            --region "$AWS_REGION" \
+            --object-lock-days 365
+          python3 -m gateway.tee.release_channel_v2 \
+            --publish "$candidate_channel" \
+            --bucket leadpoet-attested-v2-artifacts-493765492819 \
+            --prefix attested-v2/releases \
+            --retention-days 365
 
       - name: Upload redacted acceptance ledger
         if: always()
@@ -84,11 +350,19 @@ jobs:
           name: physical-v2-staging-${{ env.CANDIDATE_SHA }}
           retention-days: 30
           if-no-files-found: warn
-          path: ${{ runner.temp }}/physical-v2-staging-ledger.json
+          path: |
+            ${{ runner.temp }}/candidate-contract.json
+            ${{ runner.temp }}/snapshot-manifest.json
+            ${{ runner.temp }}/physical-v2-staging-ledger.json
+            ${{ runner.temp }}/parity-approval.json
+            ${{ runner.temp }}/secret-cleanup.json
+            ${{ runner.temp }}/stack-cleanup.json
+            ${{ runner.temp }}/physical-stack/bootstrap.json
 
-      - name: Remove controller credentials
+      - name: Remove controller material
         if: always()
         run: |
-          rm -f -- \
-            "$RUNNER_TEMP/physical-v2-staging.pem" \
-            "$RUNNER_TEMP/physical-v2-staging.json"
+          rm -rf -- \
+            "$RUNNER_TEMP/infra-config.json" \
+            "$RUNNER_TEMP/fast-success.json" \
+            "$RUNNER_TEMP/physical-stack"

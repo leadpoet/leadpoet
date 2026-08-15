@@ -267,22 +267,52 @@ forward, rollback, roll-forward, full fault/concurrency matrix, and 100
 accelerated epochs. It is supplemental evidence, never the default pre-push
 gate. The old `--profile release` CLI spelling is intentionally invalid.
 
-## Physical V2 staging
+## Production-parity staging
 
-The local rehearsal is not evidence for physical Nitro, AF_VSOCK, host-kernel,
-real provider TLS, or chain-finalization behavior. Once the dedicated
-`physical-v2-staging` GitHub environment is configured, every attested runtime
-candidate must pass `Physical V2 Staging Acceptance` before a production
-restart. Never substitute either production host for staging.
+`LEADPOET_PARITY_INFRA_READY` and
+`LEADPOET_PARITY_ENFORCEMENT_ENABLED` are repository-level commissioning
+guards. Keep both false until the one-time staging prerequisites are installed.
+The fast, snapshot, cleanup, and full jobs must remain skipped while
+infrastructure readiness is false; existing attested production release
+behavior must remain unchanged. Enable enforcement only after an immutable
+snapshot plus manually dispatched fast and full lanes pass with cleanup proof.
 
-The staging gate must invoke `scripts/restart_attested_release_local.sh` on
-distinct Nitro-capable staging hosts with staging-only secrets and persistence,
-then require one finalized canonical testnet bundle and matching
-`submission_success` evidence from at least two independent audit validators.
-It derives scoring, ICP, settlement, and weight behavior from the exact
-candidate; do not duplicate those rules in the staging controller. Missing,
-failed, cancelled, or superseded physical evidence means the release is not
-production-ready. See `docs/physical_v2_staging.md`.
+After every push to `main`, `Production Parity Fast` is a mandatory post-push
+check. It must start while attestation builds, finish within the bounded
+5-10-minute lane, use the exact pushed SHA and encrypted read-only production
+snapshot, resolve N-1 from the live gateway's exact public build identity, and
+publish exact-SHA evidence. The snapshot migration frontier must come from that
+deployed source tree; candidate-only migrations are applied only after restore.
+Do not wait for it before starting attestation, but do not rely on a production
+restart when it is missing, failed, cancelled, stale, or superseded.
+
+Once `LEADPOET_PARITY_ENFORCEMENT_ENABLED=true`, attestation publishes only an
+immutable candidate channel. `Physical V2 Staging Acceptance` must then pass
+before that channel is promoted for production restart. It provisions fresh
+ephemeral hosts derived from the live production gateway and validator AMIs
+and sizes, runs the exact N-1 launchers to the candidate, restores the real
+production database snapshot into disposable PostgreSQL, executes a complete
+rebenchmark, proves dashboard publication, and requires identical finalized
+testnet bundles from the primary and at least two independent auditors.
+The fast/full handoff must pin exact S3 object version IDs and verify KMS,
+Object Lock, metadata hashes, and downloaded bytes. Full acceptance must also
+read finalized testnet `LastUpdate` and `Weights` independently for the primary
+and both auditors; validator self-report alone is not proof of submission.
+
+Both lanes derive migrations, configuration, ICP counts and splits, scoring,
+settlement, allocation, signing, and weight behavior from the exact candidate.
+Never duplicate or hard-code those product rules in a staging controller.
+The candidate's measured parity data boundary may select only its run-scoped
+TLS database clone on `test` with a non-production netuid; that origin must be
+committed by both the execution-config and provider-registry hashes and shared
+by reads and persistence. Production mode must retain the pinned production
+origin, and partial or cross-environment configuration must fail closed.
+Never target either production host or permit staging to write production
+Supabase, artifacts, wallets, model pointers, or chain state. Missing cleanup
+evidence fails the full lane and blocks promotion. See
+`docs/physical_v2_staging.md`.
+Hard-cancel resilience comes from the age-bounded `Production Parity Cleanup`
+workflow; never broaden its exact run/candidate name-and-tag scope.
 
 ## Rehearsal contract
 

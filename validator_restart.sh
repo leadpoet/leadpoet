@@ -735,6 +735,35 @@ PY
 export LEADPOET_SUBNET_EPOCH_CUTOVER_JSON
 unset LEADPOET_SUBNET_EPOCH_CUTOVER_PATH
 
+VALIDATOR_CHAIN_SIGNING_PROFILE="$VALIDATOR_ROOT/validator_tee/enclave/chain_signing_profile_v2.json"
+VALIDATOR_CHAIN_SIGNING_PROFILE="$(
+  PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" - \
+    "$VALIDATOR_CHAIN_SIGNING_PROFILE" \
+    "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
+    "${VALIDATOR_NETUID:-71}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    configured_chain_signing_profile_path_v2,
+    validate_production_parity_boundary_document_v2,
+)
+
+network = sys.argv[2]
+netuid = int(sys.argv[3])
+validate_production_parity_boundary_document_v2(
+    os.environ, network=network, netuid=netuid
+)
+print(configured_chain_signing_profile_path_v2(Path(sys.argv[1])))
+PY
+)"
+test -r "$VALIDATOR_CHAIN_SIGNING_PROFILE" || {
+  echo "ERROR: measured validator chain signing profile is unavailable" >&2
+  exit 1
+}
+export VALIDATOR_CHAIN_SIGNING_PROFILE
+
 VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"
 case "$VALIDATOR_WEIGHT_PROTOCOL" in
   authoritative_v2)
@@ -921,7 +950,7 @@ echo "Refreshing public validator hotkey measurements for the selected release"
 python3 -m validator_tee.host.refresh_hotkey_config_v2 \
   --config "$VALIDATOR_V2_HOTKEY_CONFIG" \
   --chain-profile \
-    "$VALIDATOR_ROOT/validator_tee/enclave/chain_signing_profile_v2.json" \
+    "$VALIDATOR_CHAIN_SIGNING_PROFILE" \
   --drand-hash \
     "$VALIDATOR_ROOT/validator_tee/enclave/libbittensor_drand_v2.sha256"
 
@@ -955,7 +984,7 @@ echo "Validating the measured chain signing profile against the live runtime"
 python3 -m validator_tee.host.verify_chain_signing_profile_v2 \
   --network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
   --profile \
-    "$VALIDATOR_ROOT/validator_tee/enclave/chain_signing_profile_v2.json"
+    "$VALIDATOR_CHAIN_SIGNING_PROFILE"
 
 actual_aws_account="$(aws sts get-caller-identity --query Account --output text)"
 if [ "$actual_aws_account" != "$EXPECTED_AWS_ACCOUNT" ]; then

@@ -6,7 +6,7 @@ import base64
 import json
 import re
 import time
-from typing import Any, Callable, Dict, Mapping
+from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlencode
 
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
@@ -17,6 +17,10 @@ from gateway.tee.provider_broker_v2 import (
 from gateway.tee.provider_outcome_v2 import (
     validate_provider_outcome_state_document_v2,
 )
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    PRODUCTION_SUPABASE_ORIGIN,
+    configured_supabase_origin_v2,
+)
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
 
 
@@ -25,7 +29,9 @@ CHECKPOINT_ROW_SCHEMA_VERSION = "leadpoet.provider_outcome_checkpoint_row.v2"
 CHECKPOINT_TABLE = "research_lab_provider_outcome_checkpoints_v2"
 CHECKPOINT_APPEND_RPC = "append_research_lab_provider_outcome_checkpoint_v2"
 CHECKPOINT_BATCH_APPEND_RPC = "append_research_lab_provider_outcome_checkpoints_v2"
-CHECKPOINT_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
+
+
+CHECKPOINT_ORIGIN = PRODUCTION_SUPABASE_ORIGIN
 CHECKPOINT_TIMEOUT_MS = 45_000
 CHECKPOINT_TRANSPORT_ATTEMPTS = 5
 MAX_CHECKPOINT_BATCH_SIZE = 32
@@ -65,10 +71,12 @@ class ProviderOutcomeStoreV2:
         *,
         broker: ProviderBrokerV2,
         vault: EncryptedArtifactVaultV2,
+        origin: Optional[str] = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._broker = broker
         self._vault = vault
+        self._origin = str(origin or configured_supabase_origin_v2())
         self._sleeper = sleeper
         self._retry_policy_hash = _hash(
             broker.retry_policy_hashes.get("supabase"),
@@ -234,7 +242,7 @@ class ProviderOutcomeStoreV2:
         result, append_attempts, append_artifacts = self._execute_with_retry(
             method="POST",
             url="%s/rest/v1/rpc/%s"
-            % (CHECKPOINT_ORIGIN, CHECKPOINT_BATCH_APPEND_RPC),
+            % (self._origin, CHECKPOINT_BATCH_APPEND_RPC),
             headers={
                 "accept": "application/json",
                 "content-type": "application/json",
@@ -379,7 +387,7 @@ class ProviderOutcomeStoreV2:
         }
         result, append_attempts, append_artifacts = self._execute_with_retry(
             method="POST",
-            url="%s/rest/v1/rpc/%s" % (CHECKPOINT_ORIGIN, CHECKPOINT_APPEND_RPC),
+            url="%s/rest/v1/rpc/%s" % (self._origin, CHECKPOINT_APPEND_RPC),
             headers={
                 "accept": "application/json",
                 "content-type": "application/json",
@@ -893,7 +901,7 @@ class ProviderOutcomeStoreV2:
             query_items.append(("order", "sequence.desc"))
         query_items.append(("limit", "1" if order_latest else "2"))
         request_url = "%s/rest/v1/%s?%s" % (
-            CHECKPOINT_ORIGIN,
+            self._origin,
             CHECKPOINT_TABLE,
             urlencode(query_items),
         )

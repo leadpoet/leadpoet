@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -252,7 +252,59 @@ BUILTIN_PROVIDER_ROUTES = {
 }
 
 
-def provider_registry_document() -> Dict[str, Any]:
+def provider_routes_for_execution_config(
+    execution_config: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, ProviderRouteV2]:
+    from leadpoet_canonical.production_parity_boundary_v2 import (
+        configured_boundary_document_v2,
+        configured_supabase_origin_v2,
+        validate_production_parity_boundary_document_v2,
+    )
+
+    if execution_config is None:
+        boundary = configured_boundary_document_v2()
+        origin = configured_supabase_origin_v2()
+    else:
+        from gateway.tee.research_lab_runtime_config_v2 import (
+            validate_research_lab_execution_config,
+        )
+
+        normalized = validate_research_lab_execution_config(execution_config)
+        boundary = validate_production_parity_boundary_document_v2(
+            normalized["behavior_environment"],
+            network=str(normalized["deployment"]["network"]),
+            netuid=int(normalized["deployment"]["netuid"]),
+        )
+        origin = str(boundary["supabase_origin"])
+    hostname = str(urlsplit(origin).hostname or "").lower()
+    if not hostname:
+        raise ProviderBrokerV2Error("Supabase provider origin is invalid")
+    routes = dict(BUILTIN_PROVIDER_ROUTES)
+    routes["supabase"] = replace(routes["supabase"], hosts=(hostname,))
+    routes["bittensor_chain"] = replace(
+        routes["bittensor_chain"], hosts=(str(boundary["chain_host"]),)
+    )
+    routes["bittensor_archive"] = replace(
+        routes["bittensor_archive"],
+        hosts=(str(boundary["chain_archive_host"]),),
+    )
+    return routes
+
+
+def provider_registry_document(
+    routes: Optional[Mapping[str, ProviderRouteV2]] = None,
+    *,
+    execution_config: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    if routes is not None and execution_config is not None:
+        raise ProviderBrokerV2Error(
+            "provider registry accepts routes or execution config, not both"
+        )
+    resolved_routes = dict(
+        routes
+        if routes is not None
+        else provider_routes_for_execution_config(execution_config)
+    )
     def route_document(route: ProviderRouteV2) -> Dict[str, Any]:
         document = {
             "hosts": list(route.hosts),
@@ -298,13 +350,19 @@ def provider_registry_document() -> Dict[str, Any]:
         },
         "routes": {
             provider_id: route_document(route)
-            for provider_id, route in sorted(BUILTIN_PROVIDER_ROUTES.items())
+            for provider_id, route in sorted(resolved_routes.items())
         },
     }
 
 
-def provider_registry_hash() -> str:
-    return sha256_json(provider_registry_document())
+def provider_registry_hash(
+    routes: Optional[Mapping[str, ProviderRouteV2]] = None,
+    *,
+    execution_config: Optional[Mapping[str, Any]] = None,
+) -> str:
+    return sha256_json(
+        provider_registry_document(routes, execution_config=execution_config)
+    )
 
 
 def expected_provider_credential_slots() -> Tuple[str, ...]:
@@ -1228,14 +1286,16 @@ class ProviderBrokerV2:
         *,
         credential_ref_hashes: Mapping[str, str],
         retry_policy_hashes: Mapping[str, str],
-        routes: Mapping[str, ProviderRouteV2] = BUILTIN_PROVIDER_ROUTES,
+        routes: Optional[Mapping[str, ProviderRouteV2]] = None,
         transport: Optional[Callable[..., Mapping[str, Any]]] = None,
         artifact_sink: Optional[Callable[..., Mapping[str, Any]]] = None,
         job_credential_slot_ref_hashes: Optional[Mapping[str, str]] = None,
         clock: Callable[[], str] = _timestamp,
         monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.routes = dict(routes)
+        self.routes = dict(
+            routes if routes is not None else provider_routes_for_execution_config()
+        )
         self.credential_ref_hashes = {
             str(name): str(value).lower()
             for name, value in credential_ref_hashes.items()
@@ -1368,7 +1428,7 @@ class ProviderBrokerV2:
             "released_terminal_count": released_terminal_count,
             "expired_terminal_count": expired_terminal_count,
             "job_credential_lease_count": job_lease_count,
-            "registry_hash": provider_registry_hash(),
+            "registry_hash": provider_registry_hash(self.routes),
             "job_credential_slot_ref_hashes": dict(
                 sorted(self.job_credential_slot_ref_hashes.items())
             ),

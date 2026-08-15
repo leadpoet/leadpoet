@@ -22,7 +22,7 @@ from leadpoet_canonical.attested_v2 import (
 
 
 VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION = (
-    "leadpoet.validator_runtime_config.v4"
+    "leadpoet.validator_runtime_config.v5"
 )
 GATEWAY_RELEASE_LINEAGE_SCHEMA_VERSION = "leadpoet.attested_release_lineage.v1"
 VALIDATOR_PHYSICAL_ROLE = "validator_weights"
@@ -185,6 +185,7 @@ def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
         "gateway_release_hash",
         "gateway_release_lineage",
         "hotkey_authority_config_hash",
+        "chain_source_boundary",
         "epoch_authority",
     }
     if not isinstance(value, Mapping) or set(value) != fields:
@@ -204,6 +205,37 @@ def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
     ):
         if not _HASH_RE.fullmatch(str(value.get(field) or "")):
             raise ValidatorRuntimeV2Error("validator V2 %s is invalid" % field)
+    chain_boundary = value.get("chain_source_boundary")
+    if not isinstance(chain_boundary, Mapping) or set(chain_boundary) != {
+        "chain_host",
+        "chain_archive_host",
+        "chain_source_policy_hash",
+        "chain_signing_profile_hash",
+    }:
+        raise ValidatorRuntimeV2Error("validator chain source boundary is invalid")
+    from leadpoet_canonical.chain_source_v2 import chain_source_policy_hash
+
+    chain_host = str(chain_boundary.get("chain_host") or "").lower()
+    chain_archive_host = str(
+        chain_boundary.get("chain_archive_host") or ""
+    ).lower()
+    allowed_chain_boundaries = {
+        ("entrypoint-finney.opentensor.ai", "archive.chain.opentensor.ai"),
+        ("test.finney.opentensor.ai", "test.finney.opentensor.ai"),
+    }
+    if (chain_host, chain_archive_host) not in allowed_chain_boundaries:
+        raise ValidatorRuntimeV2Error("validator chain source hosts are invalid")
+    expected_policy_hash = chain_source_policy_hash(
+        chain_host=chain_host,
+        chain_archive_host=chain_archive_host,
+    )
+    if (
+        chain_boundary.get("chain_source_policy_hash") != expected_policy_hash
+        or not _HASH_RE.fullmatch(
+            str(chain_boundary.get("chain_signing_profile_hash") or "")
+        )
+    ):
+        raise ValidatorRuntimeV2Error("validator chain source hashes are invalid")
     lineage = validate_gateway_release_lineage(value["gateway_release_lineage"])
     if lineage["current_commit_sha"] != commit:
         raise ValidatorRuntimeV2Error(
@@ -224,6 +256,14 @@ def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
         "hotkey_authority_config_hash": str(
             value["hotkey_authority_config_hash"]
         ).lower(),
+        "chain_source_boundary": {
+            "chain_host": chain_host,
+            "chain_archive_host": chain_archive_host,
+            "chain_source_policy_hash": expected_policy_hash,
+            "chain_signing_profile_hash": str(
+                chain_boundary["chain_signing_profile_hash"]
+            ).lower(),
+        },
         "gateway_release_lineage": lineage,
         "epoch_authority": epoch_authority,
     }
@@ -504,3 +544,11 @@ class ValidatorRuntimeIdentityV2:
                     "validator V2 runtime is not configured"
                 )
             return str(self._configuration["hotkey_authority_config_hash"])
+
+    def chain_source_boundary(self) -> Dict[str, str]:
+        with self._lock:
+            if self._configuration is None:
+                raise ValidatorRuntimeV2Error(
+                    "validator V2 runtime is not configured"
+                )
+            return dict(self._configuration["chain_source_boundary"])

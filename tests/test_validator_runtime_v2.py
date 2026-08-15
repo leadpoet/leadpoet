@@ -5,6 +5,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
+from leadpoet_canonical.chain_source_v2 import chain_source_policy_hash
 from validator_tee.enclave.runtime_v2 import (
     VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
     ValidatorRuntimeIdentityV2,
@@ -76,6 +77,12 @@ def _configuration():
         "dependency_lock_hash": _hash("c"),
         "gateway_release_hash": _hash("d"),
         "hotkey_authority_config_hash": _hash("f"),
+        "chain_source_boundary": {
+            "chain_host": "entrypoint-finney.opentensor.ai",
+            "chain_archive_host": "archive.chain.opentensor.ai",
+            "chain_source_policy_hash": chain_source_policy_hash(),
+            "chain_signing_profile_hash": _hash("2"),
+        },
         "gateway_release_lineage": {
             **lineage_body,
             "lineage_hash": sha256_json(lineage_body),

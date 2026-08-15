@@ -7,6 +7,8 @@ from validator_tee.host.verify_chain_signing_profile_v2 import (
     ChainSigningProfileV2Error,
     verify_chain_signing_profile_v2,
 )
+from leadpoet_canonical.attested_v2 import sha256_json
+from validator_tee.enclave.hotkey_authority_v2 import load_chain_signing_profile
 
 
 def _profile():
@@ -30,6 +32,31 @@ def _compatible_profile():
         "spec_version": 438,
         "supported_spec_versions": [437, 438],
     }
+
+
+def test_candidate_bundles_hash_selectable_testnet_profile(monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    production_path = (
+        root / "validator_tee/enclave/chain_signing_profile_v2.json"
+    )
+    test_profile = json.loads(
+        production_path.with_name("chain_signing_profile_test_v2.json").read_text()
+    )
+    selected = load_chain_signing_profile(
+        production_path, expected_hash=sha256_json(test_profile)
+    )
+    assert selected["network"] == "test"
+    assert selected["chain_endpoint"] == "wss://test.finney.opentensor.ai:443"
+    assert selected["genesis_hash"] == (
+        "8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+    )
+    assert selected["tempo"] == 99
+    result = verify_chain_signing_profile_v2(
+        profile=selected,
+        runtime_version={"specVersion": 447, "transactionVersion": 1},
+        genesis_hash="0x" + selected["genesis_hash"],
+    )
+    assert result["status"] == "ready"
 
 
 def test_chain_signing_profile_accepts_exact_live_runtime():

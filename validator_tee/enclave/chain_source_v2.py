@@ -121,20 +121,30 @@ class EnclaveChainRpcTransportV2:
         sleep: Callable[[float], None] = time.sleep,
         ca_bundle_path: str = DEFAULT_CA_BUNDLE,
         destination_host: str = CHAIN_ENDPOINT_HOST,
+        provider_id: Optional[str] = None,
     ) -> None:
         self._socket_factory = socket_factory
         self._clock = clock
         self._sleep = sleep
         self._ca_bundle_path = str(ca_bundle_path)
         self._ssl_context_factory = ssl_context_factory or self._default_context
-        if destination_host == CHAIN_ENDPOINT_HOST:
-            self._provider_id = "bittensor_chain"
-        elif destination_host == CHAIN_ARCHIVE_ENDPOINT_HOST:
-            self._provider_id = "bittensor_archive"
-        else:
+        allowed = {
+            ("bittensor_chain", CHAIN_ENDPOINT_HOST),
+            ("bittensor_archive", CHAIN_ARCHIVE_ENDPOINT_HOST),
+        }
+        resolved_provider = str(
+            provider_id
+            or (
+                "bittensor_chain"
+                if destination_host == CHAIN_ENDPOINT_HOST
+                else "bittensor_archive"
+            )
+        )
+        if (resolved_provider, destination_host) not in allowed:
             raise ValidatorChainSourceV2Error(
                 "chain RPC destination is outside measured policy"
             )
+        self._provider_id = resolved_provider
         self._destination_host = str(destination_host)
 
     def _default_context(self) -> Any:
@@ -370,6 +380,7 @@ class ValidatorChainSourceV2:
         elif rpc_call is None:
             self._archive_rpc_call = EnclaveChainRpcTransportV2(
                 destination_host=CHAIN_ARCHIVE_ENDPOINT_HOST,
+                provider_id="bittensor_archive",
             ).call
         else:
             self._archive_rpc_call = None

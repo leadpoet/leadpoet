@@ -6296,10 +6296,13 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     }
     if compressed_routes != {
         "exa": {"Accept-Encoding": "gzip"},
-        "supabase": {"Accept-Encoding": "gzip"},
     }:
         raise RuntimeError(
-            "measured Exa/Supabase routes do not bind gzip response framing"
+            "measured provider response encodings differ from the production contract"
+        )
+    if BUILTIN_PROVIDER_ROUTES["supabase"].request_headers:
+        raise RuntimeError(
+            "measured Supabase route overrides identity response encoding"
         )
 
     import gzip

@@ -190,10 +190,9 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
-        # Preserve the compressed PostgREST wire profile used by the last
-        # release that produced a finalized canonical weight bundle. The gzip
-        # footer proves body completeness if the raw relay loses END_STREAM.
-        request_headers=(("Accept-Encoding", "gzip"),),
+        # Retain the global identity profile used by the known-good measured
+        # PostgREST path. The bounded JSON document provides the objective
+        # completeness boundary if a raw HTTP/2 relay loses only END_STREAM.
     ),
     "truelist": ProviderRouteV2(
         provider_id="truelist",

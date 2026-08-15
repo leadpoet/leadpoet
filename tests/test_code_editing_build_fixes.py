@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from pathlib import Path
+import shlex
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -579,6 +582,52 @@ def test_candidate_build_deadline_rejects_later_commands(monkeypatch):
             timeout_seconds=10,
         )
     assert not hasattr(code_build._BUILD_DEADLINE, "value")
+
+
+def test_candidate_private_test_imports_exact_workspace_with_safe_path(tmp_path):
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir()
+    (candidate_root / "research_lab_adapter.py").write_text(
+        "WORKSPACE_ID = 'candidate-workspace'\n",
+        encoding="utf-8",
+    )
+    inherited_root = tmp_path / "inherited"
+    inherited_root.mkdir()
+    (inherited_root / "research_lab_adapter.py").write_text(
+        "WORKSPACE_ID = 'wrong-workspace'\n",
+        encoding="utf-8",
+    )
+    env = code_build._candidate_private_test_env(
+        {
+            **os.environ,
+            "PYTHONSAFEPATH": "1",
+            "PYTHONPATH": str(inherited_root),
+        },
+        repo_dir=candidate_root,
+    )
+    command = " ".join(
+        (
+            shlex.quote(sys.executable),
+            "-c",
+            shlex.quote(
+                "import research_lab_adapter; "
+                "assert research_lab_adapter.WORKSPACE_ID == "
+                "'candidate-workspace'"
+            ),
+        )
+    )
+
+    code_build._run_shell(
+        command,
+        cwd=candidate_root,
+        env=env,
+        timeout_seconds=10,
+    )
+
+    assert env["PYTHONPATH"].split(os.pathsep) == [
+        str(candidate_root.resolve()),
+        str(inherited_root),
+    ]
 
 
 def test_git_apply_accepts_exact_replacement_hunk_without_trailing_context(tmp_path):

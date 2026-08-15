@@ -959,10 +959,8 @@ class CodeEditCandidateBuilder:
             try:
                 _py_compile_changed_files(repo_dir, changed_files)
                 _sourcing_contract_gate(repo_dir)
-                _run_shell(
-                    self.config.private_test_cmd,
-                    cwd=repo_dir,
-                    env=self._build_env(
+                private_test_env = _candidate_private_test_env(
+                    self._build_env(
                         draft_path=draft_path,
                         parent_manifest_path=parent_manifest_path,
                         diff_path=diff_path,
@@ -970,6 +968,12 @@ class CodeEditCandidateBuilder:
                         candidate_index=candidate_index,
                         include_aws=False,
                     ),
+                    repo_dir=repo_dir,
+                )
+                _run_shell(
+                    self.config.private_test_cmd,
+                    cwd=repo_dir,
+                    env=private_test_env,
                     timeout_seconds=self.config.code_edit_build_timeout_seconds,
                 )
             except CodeEditBuildError as exc:
@@ -1140,6 +1144,25 @@ _PROVIDER_OR_SECRET_ENV_MARKERS = (
     "private_key",
     "webshare",
 )
+
+
+def _candidate_private_test_env(
+    env: Mapping[str, str],
+    *,
+    repo_dir: Path,
+) -> dict[str, str]:
+    """Bind private-test imports to the exact candidate workspace."""
+
+    result = dict(env)
+    candidate_root = str(repo_dir.resolve())
+    existing = [
+        item
+        for item in str(result.get("PYTHONPATH") or "").split(os.pathsep)
+        if item and item != candidate_root
+    ]
+    result["PYTHONPATH"] = os.pathsep.join((candidate_root, *existing))
+    return result
+
 
 _AWS_BUILD_ENV_NAMES = (
     "AWS_ACCESS_KEY_ID",

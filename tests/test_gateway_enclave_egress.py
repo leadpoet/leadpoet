@@ -1911,7 +1911,7 @@ def test_coordinator_direct_transport_rehearsal_contract(monkeypatch):
     evidence = _exercise_artifact_egress_sustained_readback()
 
     assert evidence["ordinary_provider_transport_unchanged"] is True
-    assert evidence["ordinary_direct_generation_recovery_verified"] is True
+    assert evidence["ordinary_direct_requests_isolated"] is True
 
 
 def test_enclave_proxy_accepts_upstream_proxy_only_as_loopback_control_metadata():

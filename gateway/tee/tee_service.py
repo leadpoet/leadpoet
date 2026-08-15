@@ -1557,11 +1557,11 @@ def get_v2_provider_broker():
             retry_policy_hashes=retry_hashes,
             transport=HTTPXProviderTransport(
                 allow_authenticated_complete_body_eof=True,
-                # Direct and job-scoped assigned-proxy reads retain one HTTP/2
-                # generation instead of closing one raw VSOCK tunnel per
-                # attempt. Any request failure retires only that generation;
-                # job credential release closes its scoped proxy client.
-                reuse_direct_connections=True,
+                # Provider-outcome persistence and weight reconstruction use
+                # the direct raw relay. Keep those reads request-scoped so a
+                # provider-first close cannot poison sibling work or retries;
+                # assigned providers retain only their immutable job scope.
+                reuse_direct_connections=False,
                 reuse_upstream_proxy_connections=True,
             ),
             job_credential_slot_ref_hashes=configuration.get(

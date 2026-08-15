@@ -742,12 +742,12 @@
       "symbol": "_verify_host_vector"
     },
     {
-      "ast_sha256": "sha256:15b37f108a9687d7808c6974c8c734ce8aa1924fd5e2021ab7393034c7333c93",
+      "ast_sha256": "sha256:973ce158143339da4f07fffb4223b8d131b7a184c507b0ec1aea5c23305fd060",
       "path": "validator_tee/host/authoritative_weight_flow_v2.py",
       "symbol": "finalize_authoritative_weight_publication_v2"
     },
     {
-      "ast_sha256": "sha256:68a8e63a76912bc3e1301bacc437ea88f3606cb6123eb78019987cea2b73ef7c",
+      "ast_sha256": "sha256:1858e5f32231bbe0c7b74fc86486dafe2a2e23966590ca454cca0b0799a86dc1",
       "path": "validator_tee/host/authoritative_weight_flow_v2.py",
       "symbol": "prepare_authoritative_weight_publication_v2"
     },
@@ -807,7 +807,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:e3f3a9e6e167eba77af46b321e83c794a1b40dddaf154c1de6a6ff7b665f92df",
-  "protected_source_commit": "a3ead32ee99776e0af3d80c29a9de19ebf2df17d",
+  "manifest_hash": "sha256:8401c1f00366480a9b3cb3be95538276434239a7a1a8d045494e31bf59e6ffe7",
+  "protected_source_commit": "3a50299caf5e56f4b0aa409ac0f1568e2b393512",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

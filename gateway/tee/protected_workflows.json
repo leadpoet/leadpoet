@@ -1432,7 +1432,7 @@
       "symbol": "write_identity_to_tmpfs"
     },
     {
-      "ast_sha256": "sha256:ffb31b1b99ec7a6f6e3486daf724d7ae25ae01b2bab360f923b0519e810ec4dc",
+      "ast_sha256": "sha256:7c4b47fd43edde3c14b8c7df18240dfa8e2c943cc092e1ca1d9057ee9ee55466",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -1442,7 +1442,7 @@
       "symbol": "MEASURED_TRANSPORT_REQUEST_HEADERS"
     },
     {
-      "ast_sha256": "sha256:a973d778639927486ca62c5d6fc233afdfbb8bc791360ee4f54a00d98611361b",
+      "ast_sha256": "sha256:020f51e8a0a4f7e29a1f841f7ff832b5e17e7e7fe0a6cd89ec2c1725d7d6e00f",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -1717,7 +1717,7 @@
       "symbol": "get_v2_inter_enclave_client"
     },
     {
-      "ast_sha256": "sha256:9c5c1e1e0d440f137cd608b5d3c32b9965cc1616d5d48a1e36b536e4128b284b",
+      "ast_sha256": "sha256:7c8518205464e319b89e2b8e0dc1f39cd1b6bbd6a72c9a338820d8d6b86c3f87",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_provider_broker"
     },
@@ -2772,7 +2772,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:9fe4fbf34b1014b3498dd6f16cb2beb16361eb8dd35bd8a3706db4bcbf5bdec8",
+  "manifest_hash": "sha256:5c8e95bd68c39bbfb4dfab19534b4fe9c538ff3e91657dc206fce6428ac6e4aa",
   "protected_source_commit": "79c8be65b7767429afa29582c53494aaba6d8693",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

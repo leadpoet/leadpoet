@@ -709,6 +709,7 @@ class HTTPXProviderTransport:
         parent_tunnel_framing: str = "",
         upstream_parent_tunnel_framing: Optional[str] = None,
         reuse_direct_connections: bool = False,
+        reuse_upstream_proxy_connections: bool = False,
     ) -> None:
         if (
             isinstance(response_body_ceiling_bytes, bool)
@@ -739,6 +740,10 @@ class HTTPXProviderTransport:
             raise ProviderBrokerV2Error(
                 "provider transport connection reuse policy is invalid"
             )
+        if not isinstance(reuse_upstream_proxy_connections, bool):
+            raise ProviderBrokerV2Error(
+                "provider transport upstream proxy reuse policy is invalid"
+            )
         self.proxy_url = proxy_url
         self.ca_bundle = ca_bundle
         self.response_body_ceiling_bytes = response_body_ceiling_bytes
@@ -752,17 +757,26 @@ class HTTPXProviderTransport:
             else upstream_parent_tunnel_framing
         )
         self.reuse_direct_connections = reuse_direct_connections
+        self.reuse_upstream_proxy_connections = (
+            reuse_upstream_proxy_connections
+        )
         self._direct_client = None
         self._direct_client_lock = threading.Lock()
         self._direct_client_generation = 0
         self._direct_client_leases: Dict[int, int] = {}
         self._retired_direct_clients: Dict[int, Any] = {}
+        self._proxy_clients: Dict[str, Tuple[Any, int]] = {}
+        self._proxy_client_lock = threading.Lock()
+        self._proxy_client_generation = 0
+        self._proxy_client_leases: Dict[int, int] = {}
+        self._retired_proxy_clients: Dict[int, Any] = {}
 
     def _new_client(
         self,
         *,
         proxy_headers: Optional[Mapping[str, str]] = None,
         allow_http2: bool = True,
+        retain_assigned_proxy_connections: bool = False,
     ) -> Any:
         import certifi
         import httpx
@@ -796,10 +810,14 @@ class HTTPXProviderTransport:
             http2=allow_http2,
             limits=httpx.Limits(
                 max_connections=64,
-                # Assigned-proxy clients are credential-bound and request-scoped.
-                # Retaining their one connection cannot provide reuse, but it can
-                # leave a relay tunnel alive when cleanup loses its final EOF.
-                max_keepalive_connections=(0 if assigned_proxy else 32),
+                # An assigned-proxy client may retain connections only when the
+                # measured broker has supplied its immutable job/credential
+                # scope. Request-scoped fallback clients still retain none.
+                max_keepalive_connections=(
+                    32
+                    if not assigned_proxy or retain_assigned_proxy_connections
+                    else 0
+                ),
                 keepalive_expiry=DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
             ),
             cookies=CookieJar(policy=RejectAllCookies()),
@@ -849,6 +867,87 @@ class HTTPXProviderTransport:
         if close_client is not None:
             _close_client_nonfatal(close_client)
 
+    @contextmanager
+    def _lease_proxy_client(
+        self,
+        *,
+        connection_scope: str,
+        proxy_headers: Mapping[str, str],
+        allow_http2: bool,
+    ):
+        with self._proxy_client_lock:
+            current = self._proxy_clients.get(connection_scope)
+            if current is None:
+                client = self._new_client(
+                    proxy_headers=proxy_headers,
+                    allow_http2=allow_http2,
+                    retain_assigned_proxy_connections=True,
+                )
+                self._proxy_client_generation += 1
+                generation = self._proxy_client_generation
+                self._proxy_clients[connection_scope] = (client, generation)
+            else:
+                client, generation = current
+            self._proxy_client_leases[generation] = (
+                self._proxy_client_leases.get(generation, 0) + 1
+            )
+        try:
+            yield client, generation
+        finally:
+            close_client = None
+            with self._proxy_client_lock:
+                remaining = self._proxy_client_leases.get(generation, 0) - 1
+                if remaining > 0:
+                    self._proxy_client_leases[generation] = remaining
+                else:
+                    self._proxy_client_leases.pop(generation, None)
+                    close_client = self._retired_proxy_clients.pop(
+                        generation,
+                        None,
+                    )
+            if close_client is not None:
+                _close_client_nonfatal(close_client)
+
+    def _retire_proxy_client(
+        self,
+        *,
+        connection_scope: str,
+        client: Any,
+        generation: int,
+    ) -> None:
+        close_client = None
+        with self._proxy_client_lock:
+            current = self._proxy_clients.get(connection_scope)
+            if (
+                current is not None
+                and current[0] is client
+                and current[1] == generation
+            ):
+                self._proxy_clients.pop(connection_scope, None)
+                if self._proxy_client_leases.get(generation, 0) > 0:
+                    self._retired_proxy_clients[generation] = client
+                else:
+                    close_client = client
+        if close_client is not None:
+            _close_client_nonfatal(close_client)
+
+    def release_connection_scope(self, connection_scope: str) -> None:
+        if not _HASH_RE.fullmatch(str(connection_scope or "")):
+            raise ProviderBrokerV2Error(
+                "provider transport connection scope is invalid"
+            )
+        close_client = None
+        with self._proxy_client_lock:
+            current = self._proxy_clients.pop(connection_scope, None)
+            if current is not None:
+                client, generation = current
+                if self._proxy_client_leases.get(generation, 0) > 0:
+                    self._retired_proxy_clients[generation] = client
+                else:
+                    close_client = client
+        if close_client is not None:
+            _close_client_nonfatal(close_client)
+
     def close(self) -> None:
         with self._direct_client_lock:
             clients = list(self._retired_direct_clients.values())
@@ -857,6 +956,14 @@ class HTTPXProviderTransport:
             self._direct_client = None
             self._direct_client_leases.clear()
             self._retired_direct_clients.clear()
+        with self._proxy_client_lock:
+            clients.extend(
+                client for client, _generation in self._proxy_clients.values()
+            )
+            clients.extend(self._retired_proxy_clients.values())
+            self._proxy_clients.clear()
+            self._proxy_client_leases.clear()
+            self._retired_proxy_clients.clear()
         for client in dict.fromkeys(clients):
             _close_client_nonfatal(client)
 
@@ -976,6 +1083,7 @@ class HTTPXProviderTransport:
         upstream_proxy_url: Optional[str] = None,
         max_response_bytes: int = MAX_RESPONSE_BODY_BYTES,
         allow_http2: bool = True,
+        connection_scope: str = "",
     ) -> Dict[str, Any]:
         if (
             isinstance(max_response_bytes, bool)
@@ -987,6 +1095,13 @@ class HTTPXProviderTransport:
             raise ProviderBrokerV2Error("provider response limit is invalid")
         if not isinstance(allow_http2, bool):
             raise ProviderBrokerV2Error("provider HTTP/2 policy is invalid")
+        normalized_connection_scope = str(connection_scope or "")
+        if normalized_connection_scope and not _HASH_RE.fullmatch(
+            normalized_connection_scope
+        ):
+            raise ProviderBrokerV2Error(
+                "provider transport connection scope is invalid"
+            )
 
         proxy_headers = None
         if upstream_proxy_url:
@@ -996,6 +1111,37 @@ class HTTPXProviderTransport:
                 ).decode("ascii")
             }
         timeout_seconds = max(0.001, timeout_ms / 1000.0)
+        if proxy_headers is not None and self.reuse_upstream_proxy_connections:
+            if not normalized_connection_scope:
+                raise ProviderBrokerV2Error(
+                    "provider upstream proxy connection scope is required"
+                )
+            if allow_http2:
+                with self._lease_proxy_client(
+                    connection_scope=normalized_connection_scope,
+                    proxy_headers=proxy_headers,
+                    allow_http2=True,
+                ) as (client, generation):
+                    try:
+                        return self._execute_with_client(
+                            client,
+                            method=method,
+                            url=url,
+                            headers=headers,
+                            body=body,
+                            timeout_seconds=timeout_seconds,
+                            max_response_bytes=max_response_bytes,
+                            allow_authenticated_complete_body_eof=(
+                                self.allow_authenticated_complete_body_eof
+                            ),
+                        )
+                    except BaseException:
+                        self._retire_proxy_client(
+                            connection_scope=normalized_connection_scope,
+                            client=client,
+                            generation=generation,
+                        )
+                        raise
         if proxy_headers is None and self.reuse_direct_connections and allow_http2:
             with self._lease_direct_client() as (client, generation):
                 try:
@@ -1327,10 +1473,19 @@ class ProviderBrokerV2:
 
     def release_job_credentials(self, job_id: str) -> Dict[str, Any]:
         normalized_job_id = str(job_id or "")
+        proxy_connection_scope = ""
         with self._lock:
             credential_keys = [
                 key for key in self._job_credentials if key[0] == normalized_job_id
             ]
+            proxy_lease = self._job_credentials.get(
+                (normalized_job_id, EGRESS_PROXY_CREDENTIAL_SLOT)
+            )
+            if proxy_lease is not None:
+                proxy_connection_scope = self._proxy_connection_scope(
+                    normalized_job_id,
+                    str(proxy_lease["credential_ref_hash"]),
+                )
             for key in credential_keys:
                 del self._job_credentials[key]
             terminal_keys = tuple(
@@ -1339,12 +1494,29 @@ class ProviderBrokerV2:
             for key in terminal_keys:
                 self._records.pop(key, None)
             self._released_terminal_count += len(terminal_keys)
+        release_connection_scope = getattr(
+            self._transport,
+            "release_connection_scope",
+            None,
+        )
+        if proxy_connection_scope and callable(release_connection_scope):
+            release_connection_scope(proxy_connection_scope)
         return {
             "status": "released",
             "job_id": normalized_job_id,
             "released_slot_count": len(credential_keys),
             "released_terminal_count": len(terminal_keys),
         }
+
+    @staticmethod
+    def _proxy_connection_scope(job_id: str, credential_ref_hash: str) -> str:
+        return sha256_json(
+            {
+                "schema_version": "leadpoet.provider_connection_scope.v2",
+                "job_id": str(job_id),
+                "egress_proxy_ref_hash": str(credential_ref_hash),
+            }
+        )
 
     def credential_available(self, *, job_id: str, slot: str) -> bool:
         """Return only credential availability; never expose credential bytes."""
@@ -1878,6 +2050,10 @@ class ProviderBrokerV2:
                 transport_kwargs["allow_http2"] = False
             if egress_proxy_url is not None:
                 transport_kwargs["upstream_proxy_url"] = egress_proxy_url
+                transport_kwargs["connection_scope"] = self._proxy_connection_scope(
+                    str(request["job_id"] or ""),
+                    egress_proxy_ref_hash,
+                )
             if max_response_bytes != MAX_RESPONSE_BODY_BYTES:
                 transport_kwargs["max_response_bytes"] = max_response_bytes
             response = dict(self._transport(**transport_kwargs))

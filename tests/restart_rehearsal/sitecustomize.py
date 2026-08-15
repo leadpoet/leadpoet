@@ -1638,9 +1638,23 @@ def _local_provider_transport(
     upstream_proxy_url: Optional[str] = None,
     max_response_bytes: int = 8 * 1024 * 1024,
     allow_http2: bool = True,
+    connection_scope: str = "",
 ) -> dict[str, Any]:
     if not isinstance(allow_http2, bool):
         raise ValueError("local provider HTTP/2 policy is invalid")
+    normalized_connection_scope = str(connection_scope or "")
+    if upstream_proxy_url:
+        if not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            normalized_connection_scope,
+        ):
+            raise ValueError(
+                "local paid-provider request lacks its measured connection scope"
+            )
+    elif normalized_connection_scope:
+        raise ValueError(
+            "local direct-provider request supplied an unexpected connection scope"
+        )
     parsed = urlsplit(url)
     if parsed.scheme != "https" or parsed.port not in {None, 443}:
         raise ValueError("local provider boundary requires production HTTPS")
@@ -1754,6 +1768,7 @@ def _local_provider_transport(
         host=host,
         path=parsed.path,
         http2_allowed=allow_http2,
+        connection_scoped=bool(normalized_connection_scope),
         status=status,
         response_bytes=len(response_body),
     )

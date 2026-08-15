@@ -1264,6 +1264,115 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
     assert clients[0].closed is True
 
 
+def test_httpx_transport_reuses_assigned_proxy_only_within_exact_scope(monkeypatch):
+    clients = []
+
+    class Client:
+        def __init__(self):
+            self.closed = False
+            clients.append(self)
+
+        def close(self):
+            self.closed = True
+
+    transport = HTTPXProviderTransport(
+        reuse_upstream_proxy_connections=True,
+    )
+    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: Client())
+    monkeypatch.setattr(
+        transport,
+        "_execute_with_client",
+        lambda _client, **_kwargs: {
+            "http_status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": b'{"ok":true}',
+            "tls_peer_chain_hash": "sha256:" + "b" * 64,
+            "tls_protocol": "TLSv1.3",
+        },
+    )
+    request = {
+        "method": "GET",
+        "url": "https://api.exa.ai/search",
+        "headers": {"Accept-Encoding": "identity"},
+        "body": b"",
+        "timeout_ms": 1000,
+        "upstream_proxy_url": "https://worker:secret@proxy.example.com:443",
+    }
+    first_scope = sha256_bytes(b"job-1:proxy-1")
+    second_scope = sha256_bytes(b"job-2:proxy-1")
+
+    with pytest.raises(ProviderBrokerV2Error, match="scope is required"):
+        transport(**request)
+
+    assert transport(**request, connection_scope=first_scope)["body"] == b'{"ok":true}'
+    assert transport(**request, connection_scope=first_scope)["body"] == b'{"ok":true}'
+    assert transport(**request, connection_scope=second_scope)["body"] == b'{"ok":true}'
+
+    assert len(clients) == 2
+    assert clients[0].closed is False
+    assert clients[1].closed is False
+    transport.release_connection_scope(first_scope)
+    assert clients[0].closed is True
+    assert clients[1].closed is False
+
+    transport(**request, connection_scope=first_scope)
+    assert len(clients) == 3
+    assert clients[2].closed is False
+    transport.close()
+    assert clients[1].closed is True
+    assert clients[2].closed is True
+
+
+def test_httpx_transport_retires_failed_assigned_proxy_generation(monkeypatch):
+    clients = []
+
+    class Client:
+        def __init__(self):
+            self.closed = False
+            clients.append(self)
+
+        def close(self):
+            self.closed = True
+
+    transport = HTTPXProviderTransport(
+        reuse_upstream_proxy_connections=True,
+    )
+    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: Client())
+
+    def execute(client, **_kwargs):
+        if client is clients[0]:
+            raise RuntimeError("expired assigned-proxy tunnel")
+        return {
+            "http_status": 200,
+            "headers": {},
+            "body": b"ok",
+            "tls_peer_chain_hash": "sha256:" + "b" * 64,
+            "tls_protocol": "TLSv1.3",
+        }
+
+    monkeypatch.setattr(transport, "_execute_with_client", execute)
+    request = {
+        "method": "GET",
+        "url": "https://api.exa.ai/search",
+        "headers": {},
+        "body": b"",
+        "timeout_ms": 1000,
+        "upstream_proxy_url": "https://worker:secret@proxy.example.com:443",
+        "connection_scope": sha256_bytes(b"job-1:proxy-1"),
+    }
+
+    with pytest.raises(RuntimeError, match="expired assigned-proxy tunnel"):
+        transport(**request)
+
+    assert len(clients) == 1
+    assert clients[0].closed is True
+    assert transport(**request)["body"] == b"ok"
+    assert len(clients) == 2
+    assert clients[1].closed is False
+    transport.close()
+    assert clients[1].closed is True
+
+
 def test_httpx_transport_can_frame_upstream_without_framing_direct(monkeypatch):
     proxies = []
 
@@ -1289,9 +1398,13 @@ def test_httpx_transport_can_frame_upstream_without_framing_direct(monkeypatch):
         upstream_parent_tunnel_framing=TUNNEL_FRAMING_MODE,
     )
 
-    transport._new_client()
-    transport._new_client(
+    direct_client = transport._new_client()
+    request_scoped_proxy_client = transport._new_client(
         proxy_headers={"X-Leadpoet-Upstream-Proxy-B64": "opaque"}
+    )
+    retained_proxy_client = transport._new_client(
+        proxy_headers={"X-Leadpoet-Upstream-Proxy-B64": "opaque"},
+        retain_assigned_proxy_connections=True,
     )
 
     assert proxies == [
@@ -1303,7 +1416,20 @@ def test_httpx_transport_can_frame_upstream_without_framing_direct(monkeypatch):
                 TUNNEL_FRAMING_HEADER: TUNNEL_FRAMING_MODE,
             },
         },
+        {
+            "url": "http://127.0.0.1:18080",
+            "headers": {
+                "X-Leadpoet-Upstream-Proxy-B64": "opaque",
+                TUNNEL_FRAMING_HEADER: TUNNEL_FRAMING_MODE,
+            },
+        },
     ]
+    assert direct_client["limits"]["max_keepalive_connections"] == 32
+    assert (
+        request_scoped_proxy_client["limits"]["max_keepalive_connections"]
+        == 0
+    )
+    assert retained_proxy_client["limits"]["max_keepalive_connections"] == 32
 
 
 def test_httpx_transport_does_not_share_direct_failure_fate(monkeypatch):
@@ -2484,7 +2610,15 @@ def test_abandoned_terminal_records_expire_before_capacity_is_reused(monkeypatch
     ),
 )
 def test_job_scoped_proxy_is_bound_to_transport_receipt(proxy_url):
-    transport = FakeTransport()
+    class ScopedTransport(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.released_connection_scopes = []
+
+        def release_connection_scope(self, connection_scope):
+            self.released_connection_scopes.append(connection_scope)
+
+    transport = ScopedTransport()
     broker = _broker(transport)
     proxy_hash = credential_value_hash(proxy_url)
     broker.provision_job_credential(
@@ -2496,8 +2630,10 @@ def test_job_scoped_proxy_is_bound_to_transport_receipt(proxy_url):
 
     result = broker.execute(_request())
     references = broker.transport_reference_hashes(_request())
+    expected_scope = broker._proxy_connection_scope("job-1", proxy_hash)
 
     assert transport.calls[0]["upstream_proxy_url"] == proxy_url
+    assert transport.calls[0]["connection_scope"] == expected_scope
     assert result["transport_attempt"]["egress_proxy_ref_hash"] == proxy_hash
     assert references == {
         "credential_ref_hash": result["transport_attempt"][
@@ -2507,6 +2643,8 @@ def test_job_scoped_proxy_is_bound_to_transport_receipt(proxy_url):
     }
     validate_transport_attempt(result["transport_attempt"])
     assert proxy_url not in str(result)
+    assert broker.release_job_credentials("job-1")["released_slot_count"] == 1
+    assert transport.released_connection_scopes == [expected_scope]
 
 
 @pytest.mark.parametrize(

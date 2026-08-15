@@ -8512,7 +8512,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
 
     ordinary_transport = HTTPXProviderTransport(
         allow_authenticated_complete_body_eof=True,
-        reuse_direct_connections=False,
+        reuse_direct_connections=True,
     )
     ordinary_transport._new_client = (  # type: ignore[method-assign]
         lambda **_kwargs: OrdinaryClient()
@@ -8531,19 +8531,19 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         except RuntimeError as exc:
             first_direct_failed = str(exc) == "expired relay generation"
         second_direct = ordinary_transport(**ordinary_request)
-        ordinary_transport_request_scoped = (
+        ordinary_transport_generation_safe = (
             ordinary_transport.allow_authenticated_complete_body_eof
             and ordinary_transport.parent_tunnel_framing == ""
             and ordinary_transport.upstream_parent_tunnel_framing == ""
-            and not ordinary_transport.reuse_direct_connections
+            and ordinary_transport.reuse_direct_connections
         )
         ordinary_direct_generation_recovered = (
             first_direct_failed
             and second_direct.get("body") == b'{"ok":true}'
             and len(ordinary_clients) == 2
             and ordinary_clients[0].closed is True
-            and ordinary_clients[1].closed is True
-            and ordinary_transport._direct_client is None
+            and ordinary_clients[1].closed is False
+            and ordinary_transport._direct_client is ordinary_clients[1]
         )
     finally:
         ordinary_transport.close()
@@ -8558,7 +8558,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         != [concurrent_requests_per_worker] * concurrent_workers
         or parent_tunnel_count != 1 + concurrent_workers
         or proxy_status.get("last_failure")
-        or not ordinary_transport_request_scoped
+        or not ordinary_transport_generation_safe
         or not ordinary_direct_generation_recovered
         or not ordinary_direct_cleanup
         or not stale_transport_evicted
@@ -8574,8 +8574,8 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
                     "concurrent_request_count": len(concurrent_requests_seen),
                     "parent_tunnel_count": parent_tunnel_count,
                     "proxy_failure": proxy_status.get("last_failure"),
-                    "ordinary_transport_request_scoped": (
-                        ordinary_transport_request_scoped
+                    "ordinary_transport_generation_safe": (
+                        ordinary_transport_generation_safe
                     ),
                     "ordinary_direct_generation_recovered": (
                         ordinary_direct_generation_recovered
@@ -8597,7 +8597,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         "complete_chunked_json_eof_recovered": True,
         "truncated_frame_rejected": True,
         "ordinary_provider_transport_unchanged": True,
-        "ordinary_direct_requests_isolated": True,
+        "ordinary_direct_generation_recovery_verified": True,
         "stale_pooled_transport_evicted_before_relay_timeout": True,
         "failed_pooled_generation_evicted_before_retry": True,
         "request_count": request_count,
@@ -8674,35 +8674,44 @@ def _exercise_measured_upstream_proxy_transport(
         )
         provider_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         provider_listener.bind(("127.0.0.1", 0))
-        provider_listener.listen(request_count)
+        provider_listener.listen(1)
         provider_address = provider_listener.getsockname()
         upstream_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         upstream_listener.bind(("127.0.0.1", 0))
-        upstream_listener.listen(request_count)
+        upstream_listener.listen(1)
         upstream_address = upstream_listener.getsockname()
 
         def serve_provider() -> None:
             try:
                 requests = observed.setdefault("provider_requests", [])
-                for _ordinal in range(request_count):
-                    connection, _address = provider_listener.accept()
-                    protected = provider_tls.wrap_socket(
-                        connection, server_side=True
-                    )
-                    request = bytearray()
-                    while b"\r\n\r\n" not in request:
-                        chunk = protected.recv(4096)
-                        if not chunk:
-                            raise RuntimeError("provider request ended early")
-                        request.extend(chunk)
-                    requests.append(bytes(request))
-                    protected.sendall(
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: 11\r\n"
-                        b"Connection: close\r\n\r\n"
-                        b'{"ok":true}'
-                    )
+                connection, _address = provider_listener.accept()
+                protected = provider_tls.wrap_socket(
+                    connection, server_side=True
+                )
+                try:
+                    for ordinal in range(request_count):
+                        request = bytearray()
+                        while b"\r\n\r\n" not in request:
+                            chunk = protected.recv(4096)
+                            if not chunk:
+                                raise RuntimeError("provider request ended early")
+                            request.extend(chunk)
+                        requests.append(bytes(request))
+                        connection_header = (
+                            b"close"
+                            if ordinal + 1 == request_count
+                            else b"keep-alive"
+                        )
+                        protected.sendall(
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: application/json\r\n"
+                            b"Content-Length: 11\r\n"
+                            b"Connection: "
+                            + connection_header
+                            + b"\r\n\r\n"
+                            b'{"ok":true}'
+                        )
+                finally:
                     protected.close()
             except Exception as exc:
                 errors.append(type(exc).__name__ + ":" + str(exc))
@@ -8712,36 +8721,35 @@ def _exercise_measured_upstream_proxy_transport(
         def serve_upstream_proxy() -> None:
             try:
                 proxy_requests = observed.setdefault("proxy_headers", [])
-                for _ordinal in range(request_count):
-                    connection = None
-                    provider = None
-                    try:
-                        connection, _address = upstream_listener.accept()
-                        headers = bytearray()
-                        while b"\r\n\r\n" not in headers:
-                            chunk = connection.recv(4096)
-                            if not chunk:
-                                raise RuntimeError("proxy CONNECT ended early")
-                            headers.extend(chunk)
-                        proxy_requests.append(bytes(headers))
-                        connection.sendall(
-                            b"HTTP/1.1 200 Connection Established\r\n\r\n"
-                        )
-                        provider = socket.create_connection(
-                            provider_address, timeout=2
-                        )
-                        _relay_bidirectional(
-                            connection,
-                            provider,
-                            idle_timeout_seconds=5,
-                        )
-                    finally:
-                        for candidate in (connection, provider):
-                            if candidate is not None:
-                                try:
-                                    candidate.close()
-                                except Exception:
-                                    pass
+                connection = None
+                provider = None
+                try:
+                    connection, _address = upstream_listener.accept()
+                    headers = bytearray()
+                    while b"\r\n\r\n" not in headers:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            raise RuntimeError("proxy CONNECT ended early")
+                        headers.extend(chunk)
+                    proxy_requests.append(bytes(headers))
+                    connection.sendall(
+                        b"HTTP/1.1 200 Connection Established\r\n\r\n"
+                    )
+                    provider = socket.create_connection(
+                        provider_address, timeout=2
+                    )
+                    _relay_bidirectional(
+                        connection,
+                        provider,
+                        idle_timeout_seconds=5,
+                    )
+                finally:
+                    for candidate in (connection, provider):
+                        if candidate is not None:
+                            try:
+                                candidate.close()
+                            except Exception:
+                                pass
             except Exception as exc:
                 errors.append(type(exc).__name__ + ":" + str(exc))
             finally:
@@ -8832,6 +8840,19 @@ def _exercise_measured_upstream_proxy_transport(
             parent_tunnel_framing="",
             upstream_parent_tunnel_framing=upstream_parent_tunnel_framing,
             reuse_direct_connections=False,
+            reuse_upstream_proxy_connections=True,
+        )
+        connection_scope = sha256_json(
+            {
+                "schema_version": "leadpoet.provider_connection_scope.v2",
+                "job_id": "rehearsal-scoring-job",
+                "egress_proxy_ref_hash": sha256_json(
+                    {
+                        "schema_version": "leadpoet.rehearsal_proxy_ref.v1",
+                        "profile": "assigned-scoring-proxy",
+                    }
+                ),
+            }
         )
         original_certifi_where = certifi.where
         try:
@@ -8850,6 +8871,7 @@ def _exercise_measured_upstream_proxy_transport(
                             "http://rehearsal-worker:rehearsal-secret@"
                             f"example.com:{upstream_proxy_port}"
                         ),
+                        connection_scope=connection_scope,
                     )
                 )
         finally:
@@ -8877,9 +8899,8 @@ def _exercise_measured_upstream_proxy_transport(
             not str(result.get("tls_protocol") or "").startswith("TLSv1.")
             for result in results
         )
-        or parent_destinations
-        != [("example.com", upstream_proxy_port)] * request_count
-        or len(proxy_headers) != request_count
+        or parent_destinations != [("example.com", upstream_proxy_port)]
+        or len(proxy_headers) != 1
         or any(
             not headers.startswith(b"CONNECT example.com:443 HTTP/1.1")
             for headers in proxy_headers
@@ -8890,6 +8911,7 @@ def _exercise_measured_upstream_proxy_transport(
             not request.startswith(f"GET /search/{ordinal} HTTP/".encode("ascii"))
             for ordinal, request in enumerate(provider_requests)
         )
+        or not transport.reuse_upstream_proxy_connections
         or proxy_status.get("last_failure")
         or provider_thread.is_alive()
         or upstream_thread.is_alive()
@@ -8929,6 +8951,9 @@ def _exercise_measured_upstream_proxy_transport(
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
         "production_http_connect_proxy_verified": True,
+        "job_scoped_proxy_generation_reuse_verified": (
+            transport.reuse_upstream_proxy_connections
+        ),
         "repeated_request_count": request_count,
     }
 
@@ -9660,6 +9685,11 @@ def main() -> int:
             and behavior_evidence.get(
                 "measured-assigned-proxy-raw-transport",
                 {},
+            ).get("job_scoped_proxy_generation_reuse_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-assigned-proxy-raw-transport",
+                {},
             ).get("repeated_request_count")
             == 8
         ),
@@ -9740,6 +9770,11 @@ def main() -> int:
                 "artifact-egress-sustained-readback",
                 {},
             ).get("ordinary_provider_transport_unchanged")
+            is True
+            and behavior_evidence.get(
+                "artifact-egress-sustained-readback",
+                {},
+            ).get("ordinary_direct_generation_recovery_verified")
             is True
             and behavior_evidence.get(
                 "artifact-egress-sustained-readback",

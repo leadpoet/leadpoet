@@ -5274,6 +5274,7 @@ def test_rehearsal_provider_boundaries_require_job_credentials_and_tls_proxy(
         "https://rehearsal-scoring:rehearsal-scoring-password@"
         "93.184.216.34:443"
     )
+    connection_scope = "sha256:" + "a" * 64
     exa = rehearsal_sitecustomize._local_provider_transport(
         method="POST",
         url="https://api.exa.ai/search",
@@ -5284,6 +5285,7 @@ def test_rehearsal_provider_boundaries_require_job_credentials_and_tls_proxy(
         body=b'{"numResults":1,"query":"provider preflight"}',
         timeout_ms=12_000,
         upstream_proxy_url=proxy,
+        connection_scope=connection_scope,
     )
     scrapingdog = rehearsal_sitecustomize._local_provider_transport(
         method="GET",
@@ -5295,6 +5297,7 @@ def test_rehearsal_provider_boundaries_require_job_credentials_and_tls_proxy(
         body=b"",
         timeout_ms=12_000,
         upstream_proxy_url=proxy,
+        connection_scope=connection_scope,
     )
 
     assert exa["http_status"] == scrapingdog["http_status"] == 200
@@ -5305,6 +5308,24 @@ def test_rehearsal_provider_boundaries_require_job_credentials_and_tls_proxy(
             headers={"x-api-key": "rehearsal-exa"},
             body=b'{"numResults":1,"query":"provider preflight"}',
             timeout_ms=12_000,
+        )
+    with pytest.raises(ValueError, match="measured connection scope"):
+        rehearsal_sitecustomize._local_provider_transport(
+            method="POST",
+            url="https://api.exa.ai/search",
+            headers={"x-api-key": "rehearsal-exa"},
+            body=b'{"numResults":1,"query":"provider preflight"}',
+            timeout_ms=12_000,
+            upstream_proxy_url=proxy,
+        )
+    with pytest.raises(ValueError, match="unexpected connection scope"):
+        rehearsal_sitecustomize._local_provider_transport(
+            method="GET",
+            url="https://api.coingecko.com/api/v3/simple/price",
+            headers={},
+            body=b"",
+            timeout_ms=12_000,
+            connection_scope=connection_scope,
         )
 
 

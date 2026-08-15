@@ -1872,6 +1872,7 @@ def test_measured_assigned_proxy_raw_transport_scenario(monkeypatch):
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
         "production_http_connect_proxy_verified": True,
+        "job_scoped_proxy_generation_reuse_verified": True,
         "repeated_request_count": 8,
     }
 
@@ -1893,6 +1894,7 @@ def test_measured_coordinator_raw_transport_scenario(monkeypatch):
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
         "production_http_connect_proxy_verified": True,
+        "job_scoped_proxy_generation_reuse_verified": True,
         "repeated_request_count": 8,
         "raw_parent_tunnel_verified": True,
     }
@@ -1909,7 +1911,7 @@ def test_coordinator_direct_transport_rehearsal_contract(monkeypatch):
     evidence = _exercise_artifact_egress_sustained_readback()
 
     assert evidence["ordinary_provider_transport_unchanged"] is True
-    assert evidence["ordinary_direct_requests_isolated"] is True
+    assert evidence["ordinary_direct_generation_recovery_verified"] is True
 
 
 def test_enclave_proxy_accepts_upstream_proxy_only_as_loopback_control_metadata():

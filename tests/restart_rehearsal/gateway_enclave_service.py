@@ -647,9 +647,21 @@ def main() -> int:
                     sort_keys=True,
                     separators=(",", ":"),
                 ).encode()
-                connection.sendall(
-                    len(encoded).to_bytes(4, "big") + encoded
-                )
+                try:
+                    connection.sendall(
+                        len(encoded).to_bytes(4, "big") + encoded
+                    )
+                except (
+                    BrokenPipeError,
+                    ConnectionAbortedError,
+                    ConnectionResetError,
+                ):
+                    # A restarted worker can disappear after the enclave has
+                    # accepted its request. Isolate that client lifecycle so
+                    # the persistent role remains available to the replacement
+                    # worker; all request execution failures still fail closed
+                    # through the structured error response above.
+                    continue
     finally:
         server.close()
         socket_path.unlink(missing_ok=True)

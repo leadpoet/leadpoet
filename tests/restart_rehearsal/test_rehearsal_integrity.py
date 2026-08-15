@@ -3284,6 +3284,34 @@ def test_local_vsock_runs_real_framing_and_rejects_unknown_rpc(
             time.sleep(0.02)
         assert socket_path.is_socket()
 
+        # A worker may be terminated after sending an RPC but before reading
+        # the response. The persistent role process must isolate that client
+        # disconnect and remain available to the resumed worker.
+        abandoned = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        abandoned.connect(str(socket_path))
+        abandoned_request = json.dumps(
+            {
+                "method": "unknown_rpc",
+                "params": {"padding": "x" * (8 * 1024 * 1024)},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        abandoned.sendall(
+            len(abandoned_request).to_bytes(4, "big")
+            + abandoned_request
+        )
+        abandoned.shutdown(socket.SHUT_RDWR)
+        abandoned.close()
+        for _attempt in range(100):
+            if service.poll() is not None:
+                stdout, stderr = service.communicate(timeout=5)
+                raise AssertionError(
+                    "persistent gateway enclave exited after a client "
+                    "disconnect: %s %s" % (stdout, stderr)
+                )
+            time.sleep(0.02)
+
         local_socket = rehearsal_sitecustomize._LocalVsock(
             40, socket.SOCK_STREAM
         )

@@ -1467,6 +1467,156 @@ def test_httpx_framed_transport_recovers_complete_chunked_json_before_eof(
     assert result["body"] == body
 
 
+def test_httpx_direct_transport_serializes_concurrent_raw_tunnel_reuse(
+    tmp_path: Path,
+):
+    request_count = 8
+    certificate_path, private_key_path = _write_test_server_identity(tmp_path)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(
+        certfile=str(certificate_path),
+        keyfile=str(private_key_path),
+    )
+    origin_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    origin_listener.settimeout(5)
+    origin_listener.bind(("127.0.0.1", 0))
+    origin_listener.listen(1)
+    origin_address = origin_listener.getsockname()
+    origin_errors = []
+    requests_seen = []
+
+    def serve_origin():
+        try:
+            connection, _address = origin_listener.accept()
+            protected = tls_context.wrap_socket(connection, server_side=True)
+            try:
+                for index in range(request_count):
+                    request = bytearray()
+                    while b"\r\n\r\n" not in request:
+                        chunk = protected.recv(4096)
+                        if not chunk:
+                            raise AssertionError("direct provider client closed early")
+                        request.extend(chunk)
+                    requests_seen.append(bytes(request))
+                    body = b'{"ok":true}'
+                    connection_header = (
+                        b"close" if index == request_count - 1 else b"keep-alive"
+                    )
+                    protected.sendall(
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Content-Type: application/json\r\n"
+                        b"Content-Length: 11\r\n"
+                        b"Connection: "
+                        + connection_header
+                        + b"\r\n\r\n"
+                        + body
+                    )
+            finally:
+                protected.close()
+        except Exception as exc:
+            origin_errors.append(exc)
+        finally:
+            origin_listener.close()
+
+    origin_thread = threading.Thread(target=serve_origin, daemon=True)
+    origin_thread.start()
+    host_threads = []
+    opened_parent_tunnels = []
+
+    def open_parent_tunnel(_host, _port, *, tunnel_framing=""):
+        assert tunnel_framing == ""
+        opened_parent_tunnels.append((_host, _port))
+        enclave_side, host_side = socket.socketpair()
+        host_thread = threading.Thread(
+            target=_handle_connection,
+            kwargs={
+                "connection": host_side,
+                "connector": lambda _name, _number: socket.create_connection(
+                    origin_address,
+                    timeout=2,
+                ),
+                "idle_timeout_seconds": 3,
+            },
+            daemon=True,
+        )
+        host_thread.start()
+        host_threads.append(host_thread)
+        enclave_side.sendall(
+            _frame(
+                {
+                    "method": "connect",
+                    "params": {
+                        "host": "example.com",
+                        "port": 443,
+                        "policy_hash": destination_policy_hash(),
+                    },
+                }
+            )
+        )
+        assert _read_frame(enclave_side)["result"]["status"] == "connected"
+        return enclave_side
+
+    proxy_port = _unused_loopback_port()
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        local_port=proxy_port,
+        loopback_initializer=lambda: None,
+        idle_timeout_seconds=3,
+    )
+    proxy._open_parent_tunnel = open_parent_tunnel
+    proxy._configure_environment = lambda: None
+    proxy.start()
+    transport = HTTPXProviderTransport(
+        proxy_url=f"http://127.0.0.1:{proxy_port}",
+        ca_bundle=str(certificate_path),
+        reuse_direct_connections=True,
+    )
+    barrier = threading.Barrier(request_count + 1)
+    results = []
+    request_errors = []
+
+    def request_direct():
+        try:
+            barrier.wait(timeout=2)
+            results.append(
+                transport(
+                    method="GET",
+                    url="https://example.com/rest/v1/weight_input",
+                    headers={"accept": "application/json"},
+                    body=b"",
+                    timeout_ms=3000,
+                )
+            )
+        except Exception as exc:
+            request_errors.append(exc)
+
+    request_threads = [
+        threading.Thread(target=request_direct, daemon=True)
+        for _index in range(request_count)
+    ]
+    try:
+        for thread in request_threads:
+            thread.start()
+        barrier.wait(timeout=2)
+        for thread in request_threads:
+            thread.join(timeout=5)
+    finally:
+        transport.close()
+        proxy.stop()
+        origin_thread.join(timeout=5)
+        for thread in host_threads:
+            thread.join(timeout=5)
+
+    assert request_errors == []
+    assert all(not thread.is_alive() for thread in request_threads)
+    assert origin_errors == []
+    assert len(results) == request_count
+    assert all(result["body"] == b'{"ok":true}' for result in results)
+    assert len(requests_seen) == request_count
+    assert len(opened_parent_tunnels) == 1
+    assert proxy.status().get("last_failure") is None
+
+
 @pytest.mark.parametrize(
     (
         "reuse_direct_connections",
@@ -1911,7 +2061,10 @@ def test_coordinator_direct_transport_rehearsal_contract(monkeypatch):
     evidence = _exercise_artifact_egress_sustained_readback()
 
     assert evidence["ordinary_provider_transport_unchanged"] is True
-    assert evidence["ordinary_direct_requests_isolated"] is True
+    assert (
+        evidence["ordinary_direct_serialized_generation_recovery_verified"]
+        is True
+    )
 
 
 def test_enclave_proxy_accepts_upstream_proxy_only_as_loopback_control_metadata():

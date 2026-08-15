@@ -1234,7 +1234,10 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
     assert all(not thread.is_alive() for thread in threads)
     assert len(clients) == 1
     assert len(clients[0].stream_calls) == 8
-    assert clients[0].stream_calls[0][1]["timeout"] == 1.2
+    assert clients[0].stream_calls[0][1]["timeout"] == pytest.approx(
+        1.2,
+        abs=0.01,
+    )
     assert clients[0].closed is False
     assert proxies[0] == {
         "url": "http://127.0.0.1:18080",
@@ -1531,6 +1534,25 @@ def test_httpx_transport_does_not_share_direct_failure_fate(monkeypatch):
     assert all(client.closed for client in clients)
 
 
+def test_httpx_request_scoped_direct_slot_wait_is_timeout_bounded():
+    transport = HTTPXProviderTransport()
+    assert transport._direct_request_slot.acquire(timeout=0.1)
+    try:
+        with pytest.raises(
+            TimeoutError,
+            match="direct provider concurrency slot timed out",
+        ):
+            transport(
+                method="GET",
+                url="https://example.com/data",
+                headers={},
+                body=b"",
+                timeout_ms=10,
+            )
+    finally:
+        transport._direct_request_slot.release()
+
+
 def test_job_scoped_client_cleanup_cannot_replace_request_result(monkeypatch):
     class TLS:
         def getpeercert(self, binary_form=False, /):
@@ -1674,14 +1696,12 @@ def test_httpx_transport_retry_uses_fresh_client_after_direct_failure(monkeypatc
     assert clients[1].closed is True
 
 
-def test_httpx_transport_retires_failed_generation_after_concurrent_leases(
+def test_httpx_transport_serializes_and_retires_failed_direct_generation(
     monkeypatch,
 ):
+    first_started = threading.Event()
+    release_first = threading.Event()
     second_started = threading.Event()
-    release_second = threading.Event()
-    first_done = threading.Event()
-    calls_lock = threading.Lock()
-    call_count = 0
 
     class TLS:
         def getpeercert(self, binary_form=False, /):
@@ -1705,36 +1725,35 @@ def test_httpx_transport_retires_failed_generation_after_concurrent_leases(
             yield b'{"ok":true}'
 
     class ResponseContext:
-        def __init__(self, index):
-            self.index = index
+        def __init__(self, client_index):
+            self.client_index = client_index
 
         def __enter__(self):
-            if self.index == 0:
-                assert second_started.wait(timeout=2)
+            if self.client_index == 0:
+                first_started.set()
+                assert release_first.wait(timeout=2)
                 raise RuntimeError("stale enclave tunnel")
             second_started.set()
-            assert release_second.wait(timeout=2)
             return Response()
 
         def __exit__(self, *_args):
             return False
 
     class Client:
-        closed = False
+        def __init__(self):
+            self.index = len(clients)
+            self.closed = False
+            clients.append(self)
 
         def stream(self, *_args, **_kwargs):
-            nonlocal call_count
-            with calls_lock:
-                index = call_count
-                call_count += 1
-            return ResponseContext(index)
+            return ResponseContext(self.index)
 
         def close(self):
             self.closed = True
 
-    client = Client()
+    clients = []
     transport = HTTPXProviderTransport(reuse_direct_connections=True)
-    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: client)
+    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: Client())
     request = {
         "method": "GET",
         "url": "https://example.com/data",
@@ -1749,22 +1768,26 @@ def test_httpx_transport_retires_failed_generation_after_concurrent_leases(
             transport(**request)
         except Exception as exc:
             errors.append(exc)
-        finally:
-            if errors:
-                first_done.set()
 
     threads = [threading.Thread(target=run_request) for _ in range(2)]
     for thread in threads:
         thread.start()
-    assert first_done.wait(timeout=2)
-    assert client.closed is False
-    release_second.set()
+    assert first_started.wait(timeout=2)
+    assert second_started.is_set() is False
+    assert len(clients) == 1
+    assert clients[0].closed is False
+    release_first.set()
     for thread in threads:
         thread.join(timeout=2)
 
     assert all(not thread.is_alive() for thread in threads)
     assert len(errors) == 1
-    assert client.closed is True
+    assert str(errors[0]) == "stale enclave tunnel"
+    assert second_started.is_set()
+    assert len(clients) == 2
+    assert clients[0].closed is True
+    assert clients[1].closed is False
+    assert transport._direct_client is clients[1]
 
 
 def test_provider_registry_hash_binds_measured_https_routes():

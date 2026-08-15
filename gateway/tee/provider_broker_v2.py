@@ -760,6 +760,12 @@ class HTTPXProviderTransport:
         self.reuse_upstream_proxy_connections = (
             reuse_upstream_proxy_connections
         )
+        # Weight reconstruction fans out several independent direct Supabase
+        # jobs at once. Admit only one direct TLS exchange at a time whether
+        # the caller retains or isolates its raw relay generation, preventing
+        # both concurrent handshakes and failure sharing between requests.
+        # Assigned-proxy jobs retain their separate immutable-scope clients.
+        self._direct_request_slot = threading.Lock()
         self._direct_client = None
         self._direct_client_lock = threading.Lock()
         self._direct_client_generation = 0
@@ -866,6 +872,19 @@ class HTTPXProviderTransport:
                     close_client = client
         if close_client is not None:
             _close_client_nonfatal(close_client)
+
+    @contextmanager
+    def _lease_direct_request_slot(self, timeout_seconds: float):
+        started = time.monotonic()
+        if not self._direct_request_slot.acquire(timeout=timeout_seconds):
+            raise TimeoutError("direct provider concurrency slot timed out")
+        try:
+            yield max(
+                0.001,
+                timeout_seconds - (time.monotonic() - started),
+            )
+        finally:
+            self._direct_request_slot.release()
 
     @contextmanager
     def _lease_proxy_client(
@@ -1143,52 +1162,62 @@ class HTTPXProviderTransport:
                         )
                         raise
         if proxy_headers is None and self.reuse_direct_connections and allow_http2:
-            with self._lease_direct_client() as (client, generation):
-                try:
-                    return self._execute_with_client(
-                        client,
-                        method=method,
-                        url=url,
-                        headers=headers,
-                        body=body,
-                        timeout_seconds=timeout_seconds,
-                        max_response_bytes=max_response_bytes,
-                        allow_authenticated_complete_body_eof=(
-                            self.allow_authenticated_complete_body_eof
-                        ),
-                    )
-                except BaseException:
-                    # The measured caller owns retry accounting. Retire only
-                    # this transport generation so its next measured attempt
-                    # cannot inherit a dead relay tunnel. Existing leases may
-                    # finish before the failed generation is closed.
-                    self._retire_direct_client(client, generation)
-                    raise
+            with self._lease_direct_request_slot(timeout_seconds) as remaining:
+                with self._lease_direct_client() as (client, generation):
+                    try:
+                        return self._execute_with_client(
+                            client,
+                            method=method,
+                            url=url,
+                            headers=headers,
+                            body=body,
+                            timeout_seconds=remaining,
+                            max_response_bytes=max_response_bytes,
+                            allow_authenticated_complete_body_eof=(
+                                self.allow_authenticated_complete_body_eof
+                            ),
+                        )
+                    except BaseException:
+                        # The measured caller owns retry accounting. Retire
+                        # this serialized generation so the next attempt opens
+                        # one fresh tunnel before admitting another request.
+                        self._retire_direct_client(client, generation)
+                        raise
 
         # Direct coordinator requests are request-scoped by default. A relay
         # tunnel can expire between otherwise independent jobs or epochs; one
         # stale pooled generation must not make their measured retries share a
         # failure fate. Framed artifact-only callers may explicitly opt into
         # reuse after proving their terminal handshake contract.
-        client = self._new_client(
-            proxy_headers=proxy_headers,
-            allow_http2=allow_http2,
-        )
-        try:
-            return self._execute_with_client(
-                client,
-                method=method,
-                url=url,
-                headers=headers,
-                body=body,
-                timeout_seconds=timeout_seconds,
-                max_response_bytes=max_response_bytes,
-                allow_authenticated_complete_body_eof=(
-                    self.allow_authenticated_complete_body_eof
-                ),
+        def execute_request_scoped(
+            *, request_timeout_seconds: float = timeout_seconds
+        ) -> Dict[str, Any]:
+            client = self._new_client(
+                proxy_headers=proxy_headers,
+                allow_http2=allow_http2,
             )
-        finally:
-            _close_client_nonfatal(client)
+            try:
+                return self._execute_with_client(
+                    client,
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    body=body,
+                    timeout_seconds=request_timeout_seconds,
+                    max_response_bytes=max_response_bytes,
+                    allow_authenticated_complete_body_eof=(
+                        self.allow_authenticated_complete_body_eof
+                    ),
+                )
+            finally:
+                _close_client_nonfatal(client)
+
+        if proxy_headers is None:
+            with self._lease_direct_request_slot(timeout_seconds) as remaining:
+                return execute_request_scoped(
+                    request_timeout_seconds=remaining
+                )
+        return execute_request_scoped()
 
 
 class ProviderBrokerV2:

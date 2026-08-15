@@ -1558,10 +1558,10 @@ def get_v2_provider_broker():
             transport=HTTPXProviderTransport(
                 allow_authenticated_complete_body_eof=True,
                 # Provider-outcome persistence and weight reconstruction use
-                # the direct raw relay. Keep those reads request-scoped so a
-                # provider-first close cannot poison sibling work or retries;
-                # assigned providers retain only their immutable job scope.
-                reuse_direct_connections=False,
+                # one serialized direct generation. A failure retires it
+                # before the next request enters, preventing both stale-relay
+                # sharing and concurrent fresh-tunnel handshake bursts.
+                reuse_direct_connections=True,
                 reuse_upstream_proxy_connections=True,
             ),
             job_credential_slot_ref_hashes=configuration.get(

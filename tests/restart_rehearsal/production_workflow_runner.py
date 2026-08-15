@@ -8512,7 +8512,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
 
     ordinary_transport = HTTPXProviderTransport(
         allow_authenticated_complete_body_eof=True,
-        reuse_direct_connections=False,
+        reuse_direct_connections=True,
     )
     ordinary_transport._new_client = (  # type: ignore[method-assign]
         lambda **_kwargs: OrdinaryClient()
@@ -8531,19 +8531,20 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         except RuntimeError as exc:
             first_direct_failed = str(exc) == "expired relay generation"
         second_direct = ordinary_transport(**ordinary_request)
-        ordinary_transport_request_scoped = (
+        ordinary_transport_generation_safe = (
             ordinary_transport.allow_authenticated_complete_body_eof
             and ordinary_transport.parent_tunnel_framing == ""
             and ordinary_transport.upstream_parent_tunnel_framing == ""
-            and not ordinary_transport.reuse_direct_connections
+            and ordinary_transport.reuse_direct_connections
+            and ordinary_transport._direct_request_slot is not None
         )
         ordinary_direct_generation_recovered = (
             first_direct_failed
             and second_direct.get("body") == b'{"ok":true}'
             and len(ordinary_clients) == 2
             and ordinary_clients[0].closed is True
-            and ordinary_clients[1].closed is True
-            and ordinary_transport._direct_client is None
+            and ordinary_clients[1].closed is False
+            and ordinary_transport._direct_client is ordinary_clients[1]
         )
     finally:
         ordinary_transport.close()
@@ -8558,7 +8559,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         != [concurrent_requests_per_worker] * concurrent_workers
         or parent_tunnel_count != 1 + concurrent_workers
         or proxy_status.get("last_failure")
-        or not ordinary_transport_request_scoped
+        or not ordinary_transport_generation_safe
         or not ordinary_direct_generation_recovered
         or not ordinary_direct_cleanup
         or not stale_transport_evicted
@@ -8574,8 +8575,8 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
                     "concurrent_request_count": len(concurrent_requests_seen),
                     "parent_tunnel_count": parent_tunnel_count,
                     "proxy_failure": proxy_status.get("last_failure"),
-                    "ordinary_transport_request_scoped": (
-                        ordinary_transport_request_scoped
+                    "ordinary_transport_generation_safe": (
+                        ordinary_transport_generation_safe
                     ),
                     "ordinary_direct_generation_recovered": (
                         ordinary_direct_generation_recovered
@@ -8597,7 +8598,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         "complete_chunked_json_eof_recovered": True,
         "truncated_frame_rejected": True,
         "ordinary_provider_transport_unchanged": True,
-        "ordinary_direct_requests_isolated": True,
+        "ordinary_direct_serialized_generation_recovery_verified": True,
         "stale_pooled_transport_evicted_before_relay_timeout": True,
         "failed_pooled_generation_evicted_before_retry": True,
         "request_count": request_count,
@@ -9774,7 +9775,7 @@ def main() -> int:
             and behavior_evidence.get(
                 "artifact-egress-sustained-readback",
                 {},
-            ).get("ordinary_direct_requests_isolated")
+            ).get("ordinary_direct_serialized_generation_recovery_verified")
             is True
             and behavior_evidence.get(
                 "artifact-egress-sustained-readback",

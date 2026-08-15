@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import hashlib
+import json
+import logging
 import os
 import re
+import time
 import uuid
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
 from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
@@ -63,14 +68,100 @@ from leadpoet_canonical.attested_v2 import (
     validate_receipt_graph,
     validate_receipt_graphs,
 )
-from leadpoet_observability.sentry_operations import (
-    hash_identifier as observability_hash_identifier,
-    record_stage as record_operation_stage,
-    sentry_stage as operation_stage,
+_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_MEASURED_OPERATION_LOGGER = logging.getLogger(
+    "leadpoet.measured.operations"
+)
+_MEASURED_OPERATION_FIELDS = frozenset(
+    {
+        "authority_epoch_id",
+        "authority_mode",
+        "backlog_count",
+        "bundle_hash",
+        "component",
+        "correlation_id",
+        "cutover_epoch_id",
+        "duration_seconds",
+        "epoch_id",
+        "frontier_epoch",
+        "netuid",
+        "observed_block",
+        "observed_vector_count",
+        "operation",
+        "parent_count",
+        "reason_code",
+        "root_receipt_hash",
+        "row_count",
+        "runtime_sha",
+        "sequence",
+        "settlement_attempt",
+        "settlement_hash",
+        "source_epoch_id",
+        "stage",
+        "status",
+        "validator_id_hash",
+        "vector_hash",
+    }
 )
 
 
-_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+def observability_hash_identifier(value: Any) -> str:
+    """Return an enclave-local, non-reversible telemetry join key."""
+
+    encoded = str(value or "").encode("utf-8", errors="replace")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def record_operation_stage(**fields: Any) -> None:
+    """Emit bounded measured-runtime telemetry without host SDK imports."""
+
+    try:
+        payload = {
+            str(key): value
+            for key, value in fields.items()
+            if key in _MEASURED_OPERATION_FIELDS
+            and value is not None
+            and isinstance(value, (bool, int, float, str))
+        }
+        _MEASURED_OPERATION_LOGGER.log(
+            logging.WARNING
+            if payload.get("status") in {"failed", "rejected", "blocked"}
+            else logging.INFO,
+            "leadpoet_measured_operation_event %s",
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+        )
+    except BaseException:
+        return
+
+
+@contextmanager
+def operation_stage(**fields: Any) -> Iterator[None]:
+    """Record one measured stage while preserving fail-closed exceptions."""
+
+    started = time.monotonic()
+    record_operation_stage(status="started", **fields)
+    try:
+        yield
+    except BaseException:
+        record_operation_stage(
+            status="failed",
+            duration_seconds=round(time.monotonic() - started, 3),
+            **fields,
+        )
+        raise
+    else:
+        record_operation_stage(
+            status="passed",
+            duration_seconds=round(time.monotonic() - started, 3),
+            **fields,
+        )
+
+
 _PURPOSE_V2 = {
     "research_lab.candidate_score.v1": "research_lab.candidate_score.v2",
     "research_lab.baseline_score.v1": "research_lab.baseline_score.v2",

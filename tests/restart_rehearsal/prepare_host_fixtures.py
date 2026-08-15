@@ -76,9 +76,21 @@ def _extract_candidate(*, source_repo: Path, commit: str, destination: Path) -> 
         bundle.extractall(destination)
 
 
-def _prepare_offline_root(*, source_root: Path, destination: Path) -> None:
+def _prepare_offline_root(
+    *,
+    source_root: Path,
+    destination: Path,
+    commit: str,
+) -> None:
+    scoring_wheelhouse = (
+        Path("/opt/leadpoet/scoring-wheelhouses") / commit
+    )
+    if not scoring_wheelhouse.is_dir():
+        raise SystemExit(
+            "exact scoring wheelhouse is unavailable for fixture commit"
+        )
     shutil.copytree(
-        "/opt/leadpoet/scoring-wheelhouse",
+        scoring_wheelhouse,
         destination / "scoring-wheelhouse-py39",
     )
     external = Path("/opt/leadpoet/external-artifacts")
@@ -218,7 +230,11 @@ def _release_build_input(*, commit: str, destination: Path) -> dict:
         commit=commit,
         destination=source_root,
     )
-    _prepare_offline_root(source_root=source_root, destination=offline_root)
+    _prepare_offline_root(
+        source_root=source_root,
+        destination=offline_root,
+        commit=commit,
+    )
     app_manifest_hash, dependency_lock_hash = _materialize_validator_app(
         source_root=source_root,
         offline_root=offline_root,

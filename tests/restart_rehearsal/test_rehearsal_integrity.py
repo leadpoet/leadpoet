@@ -3870,6 +3870,7 @@ def test_rehearsal_build_binds_the_platform_specific_base(
         "leadpoet-test:platform",
         harness_sha="a" * 40,
         docker_platform="linux/amd64",
+        wheelhouse_shas=("b" * 40, "a" * 40),
     )
 
     assert commands == [
@@ -3882,12 +3883,18 @@ def test_rehearsal_build_binds_the_platform_specific_base(
                 "--build-arg",
                 "REHEARSAL_BASE_IMAGE="
                 + rehearsal.REHEARSAL_BASE_IMAGES["linux/amd64"],
+                "--build-arg",
+                "REHEARSAL_HARNESS_SHA=" + "a" * 40,
                 "--tag",
                 "leadpoet-test:platform",
                 ".",
             ],
             tmp_path,
         )
+    ]
+    assert sorted(path.name for path in (tmp_path / "scoring-locks").iterdir()) == [
+        "a" * 40 + ".lock",
+        "b" * 40 + ".lock",
     ]
 
 

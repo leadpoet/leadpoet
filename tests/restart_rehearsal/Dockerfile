@@ -1,5 +1,6 @@
 ARG REHEARSAL_BASE_IMAGE=public.ecr.aws/amazonlinux/amazonlinux@sha256:7dfb72e165c7b2f5fd2ee050c202160ee0cced24991f14736b831221f2004eee
 FROM ${REHEARSAL_BASE_IMAGE}
+ARG REHEARSAL_HARNESS_SHA
 
 RUN dnf install -y \
       diffutils \
@@ -34,19 +35,27 @@ RUN python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
       minio \
       awscli
 
-COPY requirements-scoring-py39.in /opt/leadpoet/requirements-scoring-py39.in
-COPY requirements-scoring-py39.lock /opt/leadpoet/requirements-scoring-py39.lock
-RUN mkdir -p /opt/leadpoet/scoring-wheelhouse \
-    && python3.11 -m pip download \
-      --require-hashes \
-      --no-deps \
-      --only-binary=:all: \
-      --platform manylinux2014_x86_64 \
-      --python-version 3.9 \
-      --implementation cp \
-      --abi cp39 \
-      --dest /opt/leadpoet/scoring-wheelhouse \
-      --requirement /opt/leadpoet/requirements-scoring-py39.lock
+COPY scoring-locks/ /opt/leadpoet/scoring-locks/
+RUN mkdir -p /opt/leadpoet/scoring-wheelhouses \
+    && for lock in /opt/leadpoet/scoring-locks/*.lock; do \
+      commit="$(basename "${lock}" .lock)"; \
+      destination="/opt/leadpoet/scoring-wheelhouses/${commit}"; \
+      mkdir -p "${destination}"; \
+      python3.11 -m pip download \
+        --require-hashes \
+        --no-deps \
+        --only-binary=:all: \
+        --platform manylinux2014_x86_64 \
+        --python-version 3.9 \
+        --implementation cp \
+        --abi cp39 \
+        --dest "${destination}" \
+        --requirement "${lock}"; \
+    done \
+    && test -d "/opt/leadpoet/scoring-wheelhouses/${REHEARSAL_HARNESS_SHA}" \
+    && ln -s \
+      "/opt/leadpoet/scoring-wheelhouses/${REHEARSAL_HARNESS_SHA}" \
+      /opt/leadpoet/scoring-wheelhouse
 
 COPY runsc-runtime.lock.json /opt/leadpoet/runsc-runtime.lock.json
 COPY runtime-artifacts-v2.lock.json /opt/leadpoet/runtime-artifacts-v2.lock.json

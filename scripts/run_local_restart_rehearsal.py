@@ -298,7 +298,12 @@ def _rehearsal_base_image(docker_platform: str) -> str:
         ) from exc
 
 
-def _image_tag(harness_sha: str, *, docker_platform: str) -> str:
+def _image_tag(
+    harness_sha: str,
+    *,
+    docker_platform: str,
+    wheelhouse_shas: Sequence[str],
+) -> str:
     digest = hashlib.sha256()
     digest.update(b"harness_sha")
     digest.update(harness_sha.encode("ascii"))
@@ -306,9 +311,12 @@ def _image_tag(harness_sha: str, *, docker_platform: str) -> str:
     digest.update(docker_platform.encode("ascii"))
     digest.update(b"requirements.txt")
     digest.update(_git_file(harness_sha, "requirements.txt"))
-    for path in SCORING_WHEELHOUSE_PATHS:
-        digest.update(path.encode("utf-8"))
-        digest.update(_git_file(harness_sha, path))
+    for wheelhouse_sha in sorted(set(wheelhouse_shas)):
+        digest.update(b"wheelhouse_sha")
+        digest.update(wheelhouse_sha.encode("ascii"))
+        for path in SCORING_WHEELHOUSE_PATHS:
+            digest.update(path.encode("utf-8"))
+            digest.update(_git_file(wheelhouse_sha, path))
     for path in EXTERNAL_ARTIFACT_LOCK_PATHS:
         digest.update(path.encode("utf-8"))
         digest.update(_git_file(harness_sha, path))
@@ -323,6 +331,7 @@ def _build_image(
     *,
     harness_sha: str,
     docker_platform: str,
+    wheelhouse_shas: Sequence[str],
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="leadpoet-restart-image-") as raw:
         context = Path(raw)
@@ -335,9 +344,14 @@ def _build_image(
                 "tests/restart_rehearsal/Dockerfile",
             )
         )
-        for path in SCORING_WHEELHOUSE_PATHS:
-            (context / Path(path).name).write_bytes(
-                _git_file(harness_sha, path)
+        scoring_locks = context / "scoring-locks"
+        scoring_locks.mkdir()
+        for wheelhouse_sha in sorted(set(wheelhouse_shas)):
+            (scoring_locks / f"{wheelhouse_sha}.lock").write_bytes(
+                _git_file(
+                    wheelhouse_sha,
+                    "gateway/tee/requirements-scoring-py39.lock",
+                )
             )
         for path in EXTERNAL_ARTIFACT_LOCK_PATHS:
             (context / Path(path).name).write_bytes(
@@ -359,6 +373,8 @@ def _build_image(
                 "--build-arg",
                 "REHEARSAL_BASE_IMAGE="
                 + _rehearsal_base_image(docker_platform),
+                "--build-arg",
+                f"REHEARSAL_HARNESS_SHA={harness_sha}",
                 "--tag",
                 tag,
                 ".",
@@ -1294,12 +1310,18 @@ def _run_profile(args: argparse.Namespace) -> int:
     _verify_driver_identity(harness_sha)
 
     docker_platform = _docker_platform(args.profile)
-    tag = _image_tag(harness_sha, docker_platform=docker_platform)
+    wheelhouse_shas = (from_sha, candidate_sha)
+    tag = _image_tag(
+        harness_sha,
+        docker_platform=docker_platform,
+        wheelhouse_shas=wheelhouse_shas,
+    )
     if args.rebuild_image or not _image_exists(tag):
         _build_image(
             tag,
             harness_sha=harness_sha,
             docker_platform=docker_platform,
+            wheelhouse_shas=wheelhouse_shas,
         )
 
     with _isolated_source_snapshot(

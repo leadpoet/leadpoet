@@ -32,6 +32,7 @@ from gateway.tee.model_sandbox_v2 import (
     _sandbox_visible_workspace,
     model_source_import_bootstrap,
     prepare_model_sandbox_cgroup_v2,
+    trusted_model_sandbox_import_bootstrap,
 )
 from gateway.tee.sandbox_runtime_artifact import (
     build_rootfs_manifest,
@@ -1089,6 +1090,86 @@ print(model_validator.ORIGIN)
         "source",
         "source",
     ]
+
+
+def test_model_source_cannot_shadow_trusted_provider_helper_imports(tmp_path):
+    source_root = tmp_path / "source"
+    qualification = source_root / "qualification"
+    qualification.mkdir(parents=True)
+    (qualification / "__init__.py").write_text(
+        "ORIGIN = 'model-source'\n",
+        encoding="utf-8",
+    )
+    code = (
+        "import pathlib, sys\n"
+        "from gateway.tee.sandbox_http_shim_v2 import "
+        "_cached_terminal, _snapshot_terminal\n"
+        + trusted_model_sandbox_import_bootstrap()
+        + model_source_import_bootstrap(str(source_root))
+        + """
+import qualification
+
+assert pathlib.Path(qualification.__file__).is_relative_to(
+    pathlib.Path(_lp_source_root)
+)
+assert qualification.ORIGIN == 'model-source'
+assert 'research_lab.eval.evaluator' not in sys.modules
+assert _cached_terminal(
+    method='GET',
+    url='https://example.com',
+    body=b'',
+    mode='cache_live',
+    cache={},
+) is None
+assert _snapshot_terminal(
+    method='GET',
+    url='https://example.com',
+    body=b'',
+) is None
+assert 'research_lab.eval.evaluator' not in sys.modules
+print('trusted-provider-helpers-with-model-qualification')
+"""
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "trusted-provider-helpers-with-model-qualification"
+
+
+def test_eval_package_exports_are_lazy_and_backward_compatible(tmp_path):
+    code = """
+import sys
+import research_lab.eval as evaluation
+
+assert 'research_lab.eval.evaluator' not in sys.modules
+assert 'research_lab.eval.private_runtime' not in sys.modules
+assert evaluation.PrivateModelRuntimeError.__name__ == 'PrivateModelRuntimeError'
+assert 'research_lab.eval.private_runtime' in sys.modules
+assert 'research_lab.eval.evaluator' not in sys.modules
+assert evaluation.RealEvaluatorRequired.__name__ == 'RealEvaluatorRequired'
+assert 'research_lab.eval.evaluator' in sys.modules
+assert set(evaluation.__all__) == set(evaluation.lazy_import_contract())
+print('lazy-exports-ok')
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "lazy-exports-ok"
 
 
 def test_private_baseline_builds_exact_measured_provider_evidence_tape(tmp_path):

@@ -114,11 +114,13 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_contract_v11.json",
         "research_lab/sourcing_model_contract_v12.json",
         "research_lab/sourcing_model_contract_v13.json",
+        "research_lab/sourcing_model_contract_v26.json",
         "research_lab/sourcing_model_contract_v7.json",
         "research_lab/sourcing_model_parity_fixtures.json",
         "research_lab/sourcing_model_parity_fixtures_v11.json",
         "research_lab/sourcing_model_parity_fixtures_v12.json",
         "research_lab/sourcing_model_parity_fixtures_v13.json",
+        "research_lab/sourcing_model_parity_fixtures_v26.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
     } <= set(MEASURED_DATA_PATHS)
     contract_data_paths = {
@@ -126,11 +128,13 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_contract_v11.json",
         "research_lab/sourcing_model_contract_v12.json",
         "research_lab/sourcing_model_contract_v13.json",
+        "research_lab/sourcing_model_contract_v26.json",
         "research_lab/sourcing_model_contract_v7.json",
         "research_lab/sourcing_model_parity_fixtures.json",
         "research_lab/sourcing_model_parity_fixtures_v11.json",
         "research_lab/sourcing_model_parity_fixtures_v12.json",
         "research_lab/sourcing_model_parity_fixtures_v13.json",
+        "research_lab/sourcing_model_parity_fixtures_v26.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
     }
     for role_manifest in manifest["role_manifests"].values():

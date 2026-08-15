@@ -2486,6 +2486,37 @@ def test_provider_backed_empty_retry_becomes_checkpointable_zero():
 
 
 @pytest.mark.parametrize(
+    ("has_outputs", "runtime_error", "scorer_error", "diagnostics", "expected"),
+    [
+        (True, "", "", {}, "scored"),
+        (False, "runtime failed", "", {}, "runtime_provider_error"),
+        (False, "", "scorer failed", {}, "scorer_provider_error"),
+        (False, "", "", {}, "provider_evidence_missing"),
+        (
+            False,
+            "",
+            "",
+            {"empty_result_provider_evidence_validated": True},
+            "provider_backed_empty",
+        ),
+    ],
+)
+def test_baseline_attempt_reason_requires_validated_provider_evidence(
+    has_outputs,
+    runtime_error,
+    scorer_error,
+    diagnostics,
+    expected,
+):
+    assert sw._baseline_attempt_reason_code(
+        {"diagnostics": diagnostics},
+        has_outputs=has_outputs,
+        runtime_error=runtime_error,
+        scorer_error=scorer_error,
+    ) == expected
+
+
+@pytest.mark.parametrize(
     ("retry_round", "runtime_error", "scorer_error", "cost_overrides"),
     [
         (0, "", "", {}),

@@ -497,6 +497,15 @@ if _lp_source_gateway not in _lp_gateway.__path__:
 """
 
 
+def trusted_model_sandbox_import_bootstrap() -> str:
+    """Pin host-owned provider helpers before model packages become visible."""
+
+    return """
+import research_lab.eval.provider_evidence_cache as _lp_trusted_evidence_cache
+import research_lab.eval.snapshot_store as _lp_trusted_snapshot_store
+"""
+
+
 def provider_evidence_tape_input_root(cache_ref: str, cache_hash: str) -> str:
     normalized_ref = str(cache_ref or "").lower()
     normalized_hash = str(cache_hash or "").lower()
@@ -2101,14 +2110,19 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 "context": dict(raw_input["context"]),
             }
             bootstrap = (
-                "from gateway.tee.sandbox_http_shim_v2 import install as _lp_install;"
-                "_lp_install();\n"
+                "from gateway.tee.sandbox_http_shim_v2 import install as _lp_install;\n"
+                + trusted_model_sandbox_import_bootstrap()
+                + "_lp_install();\n"
                 + model_source_import_bootstrap()
                 + _DOCKER_ADAPTER_BOOTSTRAP
             )
         else:
             stdin_payload = {}
-            bootstrap = model_source_import_bootstrap() + _DOCKER_METADATA_BOOTSTRAP
+            bootstrap = (
+                trusted_model_sandbox_import_bootstrap()
+                + model_source_import_bootstrap()
+                + _DOCKER_METADATA_BOOTSTRAP
+            )
         encoded_input = canonical_json(stdin_payload)
         process_timeout_seconds = _model_sandbox_process_timeout_seconds(value)
         bundle = tmp_root / "bundle"

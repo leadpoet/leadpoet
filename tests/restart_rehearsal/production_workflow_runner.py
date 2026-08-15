@@ -4972,6 +4972,7 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
         model_sandbox_job_cgroup_path,
         model_source_import_bootstrap,
         prepare_model_sandbox_cgroup_v2,
+        trusted_model_sandbox_import_bootstrap,
     )
     from gateway.tee.provider_client_v2 import (
         BrokeredProviderTransportV2,
@@ -5179,6 +5180,56 @@ print(",".join((
             "trusted,trusted,trusted,source,source,source"
         ):
             raise RuntimeError("model sandbox import origins differ")
+
+        provider_helper_code = (
+            "import pathlib, sys\n"
+            "from gateway.tee.sandbox_http_shim_v2 import "
+            "_cached_terminal, _snapshot_terminal\n"
+            + trusted_model_sandbox_import_bootstrap()
+            + model_source_import_bootstrap(str(source_root))
+            + """
+import qualification
+if not pathlib.Path(qualification.__file__).is_relative_to(
+    pathlib.Path(_lp_source_root)
+):
+    raise RuntimeError('model qualification ownership differs')
+if 'research_lab.eval.evaluator' in sys.modules:
+    raise RuntimeError('provider helper imported the host evaluator')
+if _cached_terminal(
+    method='GET', url='https://example.com', body=b'',
+    mode='cache_live', cache={},
+) is not None:
+    raise RuntimeError('empty provider cache returned a terminal')
+if _snapshot_terminal(
+    method='GET', url='https://example.com', body=b'',
+) is not None:
+    raise RuntimeError('unconfigured snapshot store returned a terminal')
+if 'research_lab.eval.evaluator' in sys.modules:
+    raise RuntimeError('model-owned qualification reached the host evaluator')
+print('trusted-provider-helpers-with-model-qualification')
+"""
+        )
+        provider_helper_probe = subprocess.run(
+            [sys.executable, "-c", provider_helper_code],
+            cwd=neutral_root,
+            env={
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join((str(SOURCE_ROOT), str(source_root))),
+            },
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        if provider_helper_probe.returncode != 0:
+            raise RuntimeError(
+                "model sandbox trusted provider helper import failed: "
+                + str(provider_helper_probe.stderr or "")[-500:]
+            )
+        if provider_helper_probe.stdout.strip() != (
+            "trusted-provider-helpers-with-model-qualification"
+        ):
+            raise RuntimeError("model sandbox provider helper result differs")
 
     with tempfile.TemporaryDirectory(prefix="lp-") as raw_tmp:
         root = Path(raw_tmp)

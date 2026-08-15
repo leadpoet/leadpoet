@@ -135,6 +135,24 @@ def test_gateway_runtime_change_reuses_measured_rows():
     assert attempts[0]["gateway_runtime_commit_sha"] == RUNTIME_SHA
 
 
+def test_scoring_contract_hash_tracks_model_sandbox_import_contract(monkeypatch):
+    import research_lab.eval as evaluation_package
+
+    sw._baseline_scoring_contract_hash.cache_clear()
+    original = sw._baseline_scoring_contract_hash()
+    original_contract = evaluation_package.lazy_import_contract
+    monkeypatch.setattr(
+        evaluation_package,
+        "lazy_import_contract",
+        lambda: {**original_contract(), "future_export": "future:export"},
+    )
+    sw._baseline_scoring_contract_hash.cache_clear()
+    changed = sw._baseline_scoring_contract_hash()
+    sw._baseline_scoring_contract_hash.cache_clear()
+
+    assert changed != original
+
+
 def test_scoring_configuration_change_discards():
     assert _load(
         _doc(),

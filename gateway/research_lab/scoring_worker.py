@@ -688,6 +688,17 @@ def _validate_baseline_checkpoint_model_identity(
 def _baseline_scoring_contract_hash() -> str:
     """Hash score-producing code without binding checkpoints to a release SHA."""
 
+    import research_lab.eval as evaluation_package
+    from gateway.tee.model_sandbox_v2 import (
+        model_source_import_bootstrap,
+        trusted_model_sandbox_import_bootstrap,
+    )
+    from gateway.tee.sandbox_http_shim_v2 import (
+        _cached_terminal,
+        _snapshot_terminal,
+        execute as execute_sandbox_provider_request,
+    )
+
     worker_type = globals().get("ResearchLabGatewayScoringWorker")
     sources: list[tuple[str, str]] = []
     callables: list[Any] = [
@@ -696,6 +707,13 @@ def _baseline_scoring_contract_hash() -> str:
         sanitize_benchmark_item_summary,
         QualificationStyleCompanyScorer,
         _accept_provider_backed_empty_retry,
+        evaluation_package.__getattr__,
+        evaluation_package.lazy_import_contract,
+        model_source_import_bootstrap,
+        trusted_model_sandbox_import_bootstrap,
+        _cached_terminal,
+        _snapshot_terminal,
+        execute_sandbox_provider_request,
     ]
     if worker_type is not None:
         callables.extend(
@@ -718,7 +736,8 @@ def _baseline_scoring_contract_hash() -> str:
         ) from exc
     return sha256_json(
         {
-            "schema_version": "research_lab_baseline_scoring_contract.v1",
+            "schema_version": "research_lab_baseline_scoring_contract.v2",
+            "lazy_import_contract": evaluation_package.lazy_import_contract(),
             "sources": sources,
         }
     )
@@ -2074,6 +2093,29 @@ def _accept_provider_backed_empty_retry(
     updated["empty_result_retry_round"] = int(retry_round)
     item_summary["diagnostics"] = updated
     return True
+
+
+def _baseline_attempt_reason_code(
+    item_summary: Mapping[str, Any],
+    *,
+    has_outputs: bool,
+    runtime_error: str,
+    scorer_error: str,
+) -> str:
+    """Describe empty attempts without claiming unverified provider execution."""
+
+    if runtime_error:
+        return "runtime_provider_error"
+    if scorer_error:
+        return "scorer_provider_error"
+    if has_outputs:
+        return "scored"
+    diagnostics = item_summary.get("diagnostics")
+    if isinstance(diagnostics, Mapping) and bool(
+        diagnostics.get("empty_result_provider_evidence_validated")
+    ):
+        return "provider_backed_empty"
+    return "provider_evidence_missing"
 
 
 def _icp_company_goal(icp: Any) -> int | None:
@@ -13459,12 +13501,18 @@ class ResearchLabGatewayScoringWorker:
                     telemetry_model_role="reference",
                 )
                 _apply_provider_cost_baseline_outcome(item_summary)
+                attempt_reason_code = _baseline_attempt_reason_code(
+                    item_summary,
+                    has_outputs=bool(outputs),
+                    runtime_error=runtime_error,
+                    scorer_error=scorer_error,
+                )
                 result_status = (
                     "failed"
                     if runtime_error or scorer_error
-                    else "provider_backed_empty"
-                    if not outputs
                     else "completed"
+                    if outputs
+                    else attempt_reason_code
                 )
                 _record_private_baseline_stage(
                     worker_ref=self.worker_ref,
@@ -13492,15 +13540,7 @@ class ResearchLabGatewayScoringWorker:
                         if scorer_error
                         else None
                     ),
-                    reason_code=(
-                        "runtime_provider_error"
-                        if runtime_error
-                        else "scorer_provider_error"
-                        if scorer_error
-                        else "provider_backed_empty"
-                        if not outputs
-                        else "scored"
-                    ),
+                    reason_code=attempt_reason_code,
                     duration_seconds=time.time() - item_start,
                 )
                 if (
@@ -14878,6 +14918,12 @@ class ResearchLabGatewayScoringWorker:
             scorer_error=scorer_error,
         ):
             retryable = False
+        attempt_reason_code = _baseline_attempt_reason_code(
+            item_summary,
+            has_outputs=bool(outputs),
+            runtime_error=runtime_error,
+            scorer_error=scorer_error,
+        )
         diagnostics = item_summary.get("diagnostics")
         if isinstance(diagnostics, Mapping):
             categories = {str(value) for value in diagnostics.get("failure_categories") or []}
@@ -14937,15 +14983,7 @@ class ResearchLabGatewayScoringWorker:
                 if scorer_error
                 else None
             ),
-            reason_code=(
-                "runtime_provider_error"
-                if runtime_error
-                else "scorer_provider_error"
-                if scorer_error
-                else "provider_backed_empty"
-                if not outputs
-                else "scored"
-            ),
+            reason_code=attempt_reason_code,
             duration_seconds=time.time() - item_start,
         )
         if retryable:

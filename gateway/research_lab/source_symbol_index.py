@@ -503,6 +503,20 @@ class _SymbolVisitor(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
         self._visit_function(node, is_async=True)
 
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        if not self.scope_kinds:
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.isupper():
+                    self._append_assignment(node, target.id)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
+        if (
+            not self.scope_kinds
+            and isinstance(node.target, ast.Name)
+            and node.target.id.isupper()
+        ):
+            self._append_assignment(node, node.target.id)
+
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, *, is_async: bool) -> None:
         is_method = bool(self.scope_kinds and self.scope_kinds[-1] == "class")
         kind = (
@@ -536,6 +550,22 @@ class _SymbolVisitor(ast.NodeVisitor):
         if summary:
             record["summary"] = summary
         self.symbols.append(record)
+
+    def _append_assignment(self, node: ast.AST, name: str) -> None:
+        self.symbols.append(
+            {
+                "name": name,
+                "qualified_name": name,
+                "kind": "module_assignment",
+                "parameters": [],
+                "start_line": int(getattr(node, "lineno", 0) or 0),
+                "end_line": int(
+                    getattr(node, "end_lineno", 0)
+                    or getattr(node, "lineno", 0)
+                    or 0
+                ),
+            }
+        )
 
 
 def _symbols_from_tree(tree: ast.AST) -> list[dict[str, Any]]:

@@ -71,6 +71,41 @@ class Provider:
     assert "abcdefghijklmnop" not in serialized
 
 
+def test_exact_binding_indexes_module_level_assignments_without_values(tmp_path):
+    target = tmp_path / "sourcing_model" / "routing" / "runtime.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "SOURCE_ADD_ROUTING_REGISTRATIONS: tuple[str, ...] = ('private-value',)\n"
+        "LEGACY_REGISTRATIONS = ('another-private-value',)\n"
+        "runtime_cache = ('do-not-spend-symbol-budget',)\n",
+        encoding="utf-8",
+    )
+    editable = ("sourcing_model/routing/runtime.py",)
+    index = _build(tmp_path, editable)
+
+    symbols = index["files"][0]["symbols"]
+    assert [item["name"] for item in symbols] == [
+        "SOURCE_ADD_ROUTING_REGISTRATIONS",
+        "LEGACY_REGISTRATIONS",
+    ]
+    assert all(item["kind"] == "module_assignment" for item in symbols)
+    assert "private-value" not in json.dumps(index)
+    assert "another-private-value" not in json.dumps(index)
+
+    binding = bind_source_references_exact(
+        index_doc=index,
+        source_root=tmp_path,
+        editable_files=editable,
+        references=(
+            "sourcing_model/routing/runtime.py::SOURCE_ADD_ROUTING_REGISTRATIONS",
+        ),
+    )
+    assert binding.valid is True
+    assert binding.normalized_references == (
+        "sourcing_model/routing/runtime.py::SOURCE_ADD_ROUTING_REGISTRATIONS",
+    )
+
+
 def test_index_finds_symbol_beyond_first_24kb(tmp_path):
     target = tmp_path / "model" / "large.py"
     target.parent.mkdir(parents=True)

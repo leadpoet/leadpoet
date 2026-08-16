@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -23,6 +24,7 @@ from gateway.utils.pcr0_builder import (
     PCR0_COPY_PATHS,
     compute_files_content_hash,
 )
+from research_lab import docker_operation_lock_v2 as docker_lock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -497,6 +499,92 @@ async def test_pcr0_builder_waits_for_shared_docker_operation_lock(
     os.close(owner_fd)
     await asyncio.wait_for(task, timeout=1)
     assert entered.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_queued_pcr0_writer_blocks_late_shared_reader(
+    tmp_path,
+    monkeypatch,
+):
+    lock_path = tmp_path / "docker-operation.lock"
+    lock_path.touch()
+    lock_alias = tmp_path / "docker-operation-alias.lock"
+    lock_alias.symlink_to(lock_path)
+    admission_path = Path(f"{lock_path.resolve()}.admission")
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_FILE",
+        str(lock_alias),
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS",
+        3,
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_POLL_SECONDS",
+        0.01,
+    )
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE", str(lock_alias)
+    )
+    monkeypatch.setenv("LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS", "3")
+    monkeypatch.setattr(
+        docker_lock.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["docker", "info"], returncode=0
+        ),
+    )
+
+    first_reader_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(first_reader_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    writer_entered = asyncio.Event()
+    release_writer = asyncio.Event()
+    late_reader_entered = threading.Event()
+
+    async def writer() -> None:
+        async with pcr0_builder._docker_operation_lock_scope():
+            writer_entered.set()
+            await release_writer.wait()
+
+    writer_task = asyncio.create_task(writer())
+    admission_probe_fd = os.open(
+        admission_path, os.O_CREAT | os.O_RDWR, 0o600
+    )
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            fcntl.flock(
+                admission_probe_fd,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError:
+            break
+        else:
+            fcntl.flock(admission_probe_fd, fcntl.LOCK_UN)
+        if time.monotonic() >= deadline:
+            pytest.fail("PCR0 writer never acquired Docker admission")
+        await asyncio.sleep(0.01)
+    os.close(admission_probe_fd)
+
+    def late_reader() -> None:
+        with docker_lock.shared_docker_operation_lock(timeout_seconds=3):
+            late_reader_entered.set()
+
+    late_reader_task = asyncio.create_task(asyncio.to_thread(late_reader))
+    await asyncio.sleep(0.05)
+    assert late_reader_entered.is_set() is False
+    fcntl.flock(first_reader_fd, fcntl.LOCK_UN)
+    os.close(first_reader_fd)
+    await asyncio.wait_for(writer_entered.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+    assert late_reader_entered.is_set() is False
+    release_writer.set()
+    await asyncio.wait_for(writer_task, timeout=1)
+    await asyncio.wait_for(late_reader_task, timeout=1)
+    assert late_reader_entered.is_set() is True
 
 
 @pytest.mark.asyncio

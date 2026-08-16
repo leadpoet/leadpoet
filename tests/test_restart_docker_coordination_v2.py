@@ -30,11 +30,23 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     assert acquire < shutdown < enclave < repair < release < launch
     assert shutdown < cleanup < prune < enclave
     emergency = script.index("emergency_disk_preflight()")
-    assert (
-        script.index("leadpoet_acquire_docker_operation_lock_v2", emergency)
-        < script.index("sudo docker system prune -af --volumes", emergency)
-        < script.index("leadpoet_release_docker_operation_lock_v2", emergency)
+    emergency_end = script.index(
+        "stop_research_lab_private_model_containers()", emergency
     )
+    emergency_source = script[emergency:emergency_end]
+    assert "validator_tee/scripts/reclaim_docker_storage_v2.sh" in emergency_source
+    assert "sudo docker system prune" not in emergency_source
+    assert (
+        emergency_source.index("leadpoet_acquire_docker_operation_lock_v2")
+        < emergency_source.index("run_bounded_restart_artifact_cleanup")
+        < emergency_source.index("reclaim_docker_storage_v2.sh")
+        < emergency_source.index("leadpoet_release_docker_operation_lock_v2")
+    )
+    reset = script.index("reset_orphaned_docker_storage_if_needed()")
+    reset_end = script.index("ensure_docker_ready()", reset)
+    reset_source = script[reset:reset_end]
+    assert "validator_tee/scripts/reclaim_docker_storage_v2.sh" in reset_source
+    assert "systemctl stop docker" not in reset_source
     assert "sudo rm -rf /tmp/research-lab-*" not in script
     assert (
         '--docker-lock-owner-pid "${LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID:-$$}"'
@@ -44,7 +56,7 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     assert "wait_for_gateway_build_memory" in script
     assert "--watch-parent" not in script
     assert "PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT=" in script
-    assert script.count("< /dev/null 7>&- 9>&- &") == 2
+    assert script.count("< /dev/null 7>&- 8>&- 9>&- &") == 2
 
 
 def test_validator_holds_shared_host_lock_through_late_activation_barrier() -> None:
@@ -96,7 +108,7 @@ def test_validator_holds_shared_host_lock_through_late_activation_barrier() -> N
         '--docker-lock-owner-pid "${LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID:-$$}"'
         in restart
     )
-    assert "7>&- &" in restart
+    assert "7>&- 8>&- &" in restart
     assert "leadpoet_run_docker_build_with_retry_v2" in deploy
     assert "pkill -TERM" not in deploy
     assert "pkill -KILL" not in deploy

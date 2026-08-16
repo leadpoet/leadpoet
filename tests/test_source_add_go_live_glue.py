@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -148,6 +151,111 @@ class TestSandboxRunner:
         entry = build_trial_registry_entry(record)
         assert entry.auth_kind == "none"
         assert entry.credential_ref == ()
+
+    def test_default_executor_holds_shared_docker_lifecycle(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from gateway.research_lab import source_add_trial_runner as runner_module
+        from research_lab import docker_operation_lock_v2 as docker_lock
+
+        record = _submission(adapter_id="adapter:glue-lock-1")
+        output = _output_doc(record.adapter_id, "icp:1")
+        lock_file = tmp_path / "docker-operation.lock"
+        monkeypatch.setenv(
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE", str(lock_file)
+        )
+        monkeypatch.setattr(
+            docker_lock.subprocess,
+            "run",
+            lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                args=["docker", "info"], returncode=0
+            ),
+        )
+
+        def _fake_default(argv, timeout):
+            assert argv[:3] == ["docker", "run", "--rm"]
+            assert timeout > 0
+            exclusive_fd = os.open(
+                lock_file, os.O_CREAT | os.O_RDWR, 0o600
+            )
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(
+                        exclusive_fd, fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+            finally:
+                os.close(exclusive_fd)
+            return 0, json.dumps(output), ""
+
+        monkeypatch.setattr(
+            runner_module, "_subprocess_docker_exec", _fake_default
+        )
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        (bundle / "adapter.py").write_text("print('{}')\n", encoding="utf-8")
+        runner, shutdown = build_source_add_sandbox_runner(
+            record=record,
+            bundle_dir=bundle,
+            work_dir=tmp_path / "work",
+        )
+        try:
+            result = runner(record, "icp:1")
+        finally:
+            shutdown()
+        assert result["output"] == output
+
+    def test_default_executor_removes_named_container_on_timeout(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from gateway.research_lab import source_add_trial_runner as runner_module
+
+        record = _submission(adapter_id="adapter:glue-timeout-1")
+        lock_file = tmp_path / "docker-operation.lock"
+        removed: list[str] = []
+        monkeypatch.setenv(
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE", str(lock_file)
+        )
+
+        def _fake_run(command, **kwargs):
+            command = list(command)
+            if command[-1:] == ["info"]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if command[1:3] == ["rm", "-f"]:
+                exclusive_fd = os.open(
+                    lock_file, os.O_CREAT | os.O_RDWR, 0o600
+                )
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(
+                            exclusive_fd, fcntl.LOCK_EX | fcntl.LOCK_NB
+                        )
+                finally:
+                    os.close(exclusive_fd)
+                removed.append(command[-1])
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            raise subprocess.TimeoutExpired(command, timeout=kwargs["timeout"])
+
+        monkeypatch.setattr(runner_module.subprocess, "run", _fake_run)
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        (bundle / "adapter.py").write_text("print('{}')\n", encoding="utf-8")
+        runner, shutdown = build_source_add_sandbox_runner(
+            record=record,
+            bundle_dir=bundle,
+            work_dir=tmp_path / "work",
+            timeout_seconds=30,
+        )
+        try:
+            result = runner(record, "icp:1")
+        finally:
+            shutdown()
+        assert result["error"] == "timeout"
+        assert len(removed) == 1
+        assert removed[0].startswith("leadpoet-source-add-trial-")
 
 
 class TestFullTrialThroughRunner:

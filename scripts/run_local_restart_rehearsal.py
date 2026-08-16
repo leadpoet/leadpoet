@@ -70,6 +70,7 @@ COMMITTED_HARNESS_PATHS = (
     "tests/restart_rehearsal/dev_snapshot_boundary/sitecustomize.py",
     "tests/restart_rehearsal/dev_snapshot_workflow.py",
     "tests/restart_rehearsal/dynamic_rebenchmark_n_minus_one.py",
+    "tests/restart_rehearsal/dynamic_docker_collision_workflow.py",
     "tests/restart_rehearsal/dynamic_rebenchmark_workflow.py",
     "tests/restart_rehearsal/dynamic_rebenchmark_workflow_v2.py",
     "tests/restart_rehearsal/gateway_boundary_service.py",

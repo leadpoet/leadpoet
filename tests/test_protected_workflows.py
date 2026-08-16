@@ -49,10 +49,59 @@ def test_private_artifact_signature_boundary_is_protected():
         "DEFAULT_PRIVATE_TEST_CMD",
         "DEFAULT_PRIVATE_BUILD_CMD",
     } <= set(PROTECTED_SYMBOLS["gateway/research_lab/config.py"])
+
+
+def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
     assert {
+        "_EXACT_HOST_GATEWAY_ARGS",
+        "_HOST_GATEWAY_PYTHON_COMMAND",
+        "_MAX_HOST_GATEWAY_CMDLINE_BYTES",
+        "inspect_exact_host_gateway_runtime",
+    } <= set(
+        PROTECTED_SYMBOLS[
+            "validator_tee/host/docker_operation_guard_v2.py"
+        ]
+    )
+    assert {"_run_named_docker"} <= set(
+        PROTECTED_SYMBOLS["scripts/record_research_lab_dev_snapshots.py"]
+    )
+    assert {
+        "_DOCKER_OPERATION_LOCK_DEFAULT_TIMEOUT_SECONDS",
+        "_SHELL_PROCESS_GROUP_TERMINATION_SECONDS",
+        "_docker_operation_lock_timeout_seconds",
+        "_docker_operation_lock_scope",
+        "_extract_parent_image_source",
+        "_terminate_shell_process_group",
+        "_run_shell",
+        "_run_private_build_under_docker_operation_lock",
         "_verify_built_candidate_artifact",
         "CodeEditCandidateBuilder._build_under_deadline",
     } <= set(PROTECTED_SYMBOLS["gateway/research_lab/code_build.py"])
+    assert {
+        "docker_operation_admission_lock_path",
+        "docker_operation_lock_path",
+        "_acquire_file_lock_until",
+        "wait_for_docker_daemon_ready",
+        "shared_docker_operation_lock",
+        "shared_docker_operation_source_paths",
+    } <= set(PROTECTED_SYMBOLS["research_lab/docker_operation_lock_v2.py"])
+    assert {
+        "_docker_operation_admission_lock_file",
+        "_docker_operation_lock_scope",
+        "_run_sync_build_step_to_completion",
+        "_communicate_build_process_to_completion",
+    } <= set(PROTECTED_SYMBOLS["gateway/utils/pcr0_builder.py"])
+    assert {
+        "_docker_private_model_lifecycle",
+        "DockerPrivateModelRunner._pull_image",
+        "DockerPrivateModelRunner._run_json",
+    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
+    assert "DockerReplayDevEvaluator._run_icp_in_docker_default" in (
+        PROTECTED_SYMBOLS["gateway/research_lab/dev_eval_runner.py"]
+    )
+    assert "build_source_add_sandbox_runner" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/source_add_trial_runner.py"
+    ]
     assert {
         "_promotion_reason_recorded",
         "_ensure_source_add_leg2_reward_activation",
@@ -64,6 +113,10 @@ def test_private_artifact_signature_boundary_is_protected():
 
 
 def test_scoring_receipt_failure_policy_is_protected():
+    assert {
+        "_baseline_failure_completed_icp_count",
+        "_benchmark_item_ref_for_progress",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/scoring_worker.py"])
     assert {
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
         "ExecutionContextV2.record_transport",

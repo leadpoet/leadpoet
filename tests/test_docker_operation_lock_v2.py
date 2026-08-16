@@ -113,6 +113,46 @@ def test_shell_lock_excludes_competing_docker_operation(tmp_path: Path) -> None:
     assert acquired_after_release.returncode == 0
 
 
+def test_shell_and_python_canonicalize_symlinked_turnstile_paths(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _fake_flock(bin_dir)
+    resource_target = tmp_path / "resource.lock"
+    resource_target.touch()
+    resource_alias = tmp_path / "resource-alias.lock"
+    resource_alias.symlink_to(resource_target)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'. "{LOCK_HELPER}"; '
+                "leadpoet_acquire_docker_operation_lock_v2; "
+                'printf "RESOURCE=%s\\nADMISSION=%s\\n" '
+                '"$LEADPOET_DOCKER_OPERATION_LOCK_FILE" '
+                '"$LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE"; '
+                "leadpoet_release_docker_operation_lock_v2"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(resource_alias),
+            "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": "2",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    canonical_resource = resource_target.resolve()
+    assert result.returncode == 0, result.stderr
+    assert f"RESOURCE={canonical_resource}" in result.stdout
+    assert f"ADMISSION={canonical_resource}.admission" in result.stdout
+
+
 def test_post_activation_reacquires_lock_missing_from_older_launcher(
     tmp_path: Path,
 ) -> None:

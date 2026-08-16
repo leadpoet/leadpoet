@@ -12397,7 +12397,6 @@ def _exercise_full_rebenchmark_publication_path(
                     for summary, result_row in zip(
                         summaries,
                         published_terminal_rows,
-                        strict=True,
                     )
                 )
                 if (
@@ -13842,6 +13841,158 @@ def _exercise_dynamic_rebenchmark_restart_recovery() -> dict[str, Any]:
     }
 
 
+def _exercise_dynamic_docker_lifecycle_collision() -> dict[str, Any]:
+    from dynamic_docker_collision_workflow import (
+        exercise_dynamic_docker_collision_from_releases,
+    )
+    from dynamic_rebenchmark_workflow import (
+        patched_rebenchmark_launch_environment,
+        rebenchmark_launch_environment,
+    )
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+    from gateway.research_lab.scoring_worker import _model_invocation_timeout_seconds
+
+    from_sha = str(os.environ.get("REHEARSAL_FROM_SHA") or "")
+    candidate_sha = str(os.environ.get("REHEARSAL_CANDIDATE_SHA") or "")
+    launch_environment = rebenchmark_launch_environment()
+    with patched_rebenchmark_launch_environment(launch_environment):
+        config = ResearchLabGatewayConfig.from_env()
+        model_timeout_seconds = _model_invocation_timeout_seconds(
+            float(config.scoring_worker_model_timeout_seconds)
+        )
+    return exercise_dynamic_docker_collision_from_releases(
+        source_root=SOURCE_ROOT,
+        from_sha=from_sha,
+        candidate_sha=candidate_sha,
+        launch_environment=launch_environment,
+        scoring_worker_count=int(config.scoring_worker_total_workers),
+        scoring_memory_floor_mib=int(config.scoring_worker_min_available_memory_mb),
+        model_timeout_seconds=max(1, int(model_timeout_seconds)),
+    )
+
+
+def _dynamic_docker_collision_evidence_is_complete(evidence: Any) -> bool:
+    if not isinstance(evidence, Mapping):
+        return False
+    try:
+        from dynamic_rebenchmark_workflow import (
+            git_blob_identity,
+            transition_source_paths_by_commit,
+        )
+        from research_lab.docker_operation_lock_v2 import (
+            shared_docker_operation_source_paths,
+        )
+
+        from_sha = str(evidence.get("from_sha") or "")
+        candidate_sha = str(evidence.get("candidate_sha") or "")
+        expected_inventory = transition_source_paths_by_commit(
+            from_sha=from_sha,
+            candidate_sha=candidate_sha,
+        )
+        expected_pairs = {
+            (commit, path)
+            for commit, paths in expected_inventory.items()
+            for path in paths
+        }
+        source_identities = evidence.get("source_identities")
+        observed_identities = {
+            (str(row.get("commit_sha") or ""), str(row.get("path") or "")): str(
+                row.get("sha256") or ""
+            )
+            for row in source_identities or ()
+            if isinstance(row, Mapping)
+            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256") or ""))
+        }
+        expected_identities = {
+            (commit, path): git_blob_identity(SOURCE_ROOT, commit, path)["sha256"]
+            for commit, paths in expected_inventory.items()
+            for path in paths
+        }
+        source_inventory = evidence.get("source_inventory")
+        expected_inventory_document = {
+            commit: list(paths) for commit, paths in expected_inventory.items()
+        }
+        worker_count = int(evidence.get("scoring_worker_count") or 0)
+        memory_floor_mib = int(evidence.get("scoring_memory_floor_mib") or 0)
+        live_floor_bytes = int(evidence.get("live_runtime_floor_bytes") or 0)
+        available_bytes = int(evidence.get("available_runtime_bytes") or 0)
+        n_minus = evidence.get("n_minus_one_source_extraction")
+        strict_commands = (
+            n_minus.get("strict_docker_commands")
+            if isinstance(n_minus, Mapping)
+            else None
+        )
+        return bool(
+            re.fullmatch(r"[0-9a-f]{40}", from_sha)
+            and re.fullmatch(r"[0-9a-f]{40}", candidate_sha)
+            and from_sha != candidate_sha
+            and isinstance(source_identities, list)
+            and len(source_identities) == len(expected_pairs)
+            and set(observed_identities) == expected_pairs
+            and observed_identities == expected_identities
+            and source_inventory == expected_inventory_document
+            and worker_count > 0
+            and memory_floor_mib > 0
+            and live_floor_bytes == memory_floor_mib * 1024 * 1024
+            and available_bytes
+            == live_floor_bytes + max(1, live_floor_bytes // worker_count)
+            and evidence.get("collision_events")
+            == [
+                "cleanup_guard_ready",
+                "n_minus_reader_started",
+                "host_gateway_detect",
+                "n_minus_source_extracted",
+            ]
+            and isinstance(n_minus, Mapping)
+            and n_minus.get("strict_docker_boundary_executed") is True
+            and n_minus.get("exact_model_authority_module")
+            == "gateway/research_lab/model_authority_v2.py"
+            and n_minus.get("exact_code_build_module")
+            == "gateway/research_lab/code_build.py"
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(n_minus.get("source_tree_hash") or ""),
+            )
+            is not None
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(n_minus.get("source_bundle_hash") or ""),
+            )
+            is not None
+            and isinstance(strict_commands, list)
+            and len(strict_commands) == 5
+            and int(evidence.get("shared_holder_count") or 0) == 2
+            and int(evidence.get("shared_lifecycle_operation_count") or 0) == 10
+            and evidence.get("shared_lock_source_paths")
+            == list(shared_docker_operation_source_paths())
+            and evidence.get("exact_candidate_code_build_module")
+            == "gateway/research_lab/code_build.py"
+            and evidence.get("exact_candidate_lock_module")
+            == "research_lab/docker_operation_lock_v2.py"
+            and evidence.get("exact_candidate_snapshot_module")
+            == "scripts/record_research_lab_dev_snapshots.py"
+            and all(
+                evidence.get(name) is True
+                for name in (
+                    "cleanup_guard_then_late_reader_order_exact",
+                    "host_live_prevented_docker_stop_or_reset",
+                    "candidate_gateway_emergency_uses_guarded_reclaim",
+                    "first_activation_requires_preexisting_disk_reserve",
+                    "exclusive_waited_for_both_shared_holders",
+                    "shared_lock_timeout_fail_closed",
+                    "daemon_not_ready_fail_closed",
+                    "cancellation_preserved_live_holder",
+                    "cleanup_failure_released_shared_holder",
+                    "snapshot_shared_lifecycle_excluded_maintenance",
+                    "named_container_timeout_cleanup_before_unlock",
+                    "dynamic_docker_collision_exact",
+                )
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _dynamic_rebenchmark_evidence_is_complete(
     recovery: Any,
 ) -> bool:
@@ -13864,6 +14015,8 @@ def _dynamic_rebenchmark_evidence_is_complete(
         "dynamic_pressure_negative_boundaries_exact",
         "dynamic_watchdog_supervised_resume_bound",
         "dynamic_n_minus_one_candidate_resume_exact",
+        "dynamic_peer_interruption_resume_exact",
+        "dynamic_docker_collision_exact",
         "dynamic_recovered_bank_publication_join_exact",
     )
     publication_flags = (
@@ -13881,7 +14034,10 @@ def _dynamic_rebenchmark_evidence_is_complete(
         "scoring_worker_count",
     )
     try:
-        from dynamic_rebenchmark_workflow import TRANSITION_SOURCE_PATHS
+        from dynamic_rebenchmark_workflow import (
+            git_blob_identity,
+            transition_source_paths_by_commit,
+        )
         from gateway.research_lab.scoring_worker import (
             _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP,
         )
@@ -13930,13 +14086,15 @@ def _dynamic_rebenchmark_evidence_is_complete(
         )
         expected_first_pass_retryables = configured - expected_first_pass_successes
         expected_n_minus_completed = expected_first_pass_successes + (
-            retry_width if retry_rounds == 1 else 0
+            1 if retry_rounds == 1 else 0
         )
-        expected_n_minus_attempts = configured + retry_width
+        expected_n_minus_attempts = configured + 1
+        expected_n_minus_started_attempts = configured + retry_width
+        expected_n_minus_completed_attempts = configured + 2
         expected_n_minus_receipt_frontier = (
             expected_first_pass_successes * completed_receipts_per_attempt
             + expected_first_pass_retryables * retryable_receipts_per_attempt
-            + retry_width
+            + 1
             * (
                 completed_receipts_per_attempt
                 if retry_rounds == 1
@@ -14013,29 +14171,29 @@ def _dynamic_rebenchmark_evidence_is_complete(
             and int(recovery.get("baseline_concurrency") or 0)
             == int(candidate_config.get("private_baseline_concurrency") or 0)
             and retry_width
-            == int(
-                candidate_config.get("private_baseline_retry_concurrency") or 0
-            )
+            == int(candidate_config.get("private_baseline_retry_concurrency") or 0)
             and retry_rounds
-            == int(
-                candidate_config.get("private_baseline_provider_retry_rounds") or 0
-            )
+            == int(candidate_config.get("private_baseline_provider_retry_rounds") or 0)
             and worker_count
             == int(candidate_config.get("scoring_worker_total_workers") or 0)
             and n_minus_baseline_width
             == int(n_minus_config.get("private_baseline_concurrency") or 0)
             and n_minus_retry_width
-            == int(
-                n_minus_config.get("private_baseline_retry_concurrency") or 0
-            )
+            == int(n_minus_config.get("private_baseline_retry_concurrency") or 0)
+        )
+        expected_source_inventory = transition_source_paths_by_commit(
+            from_sha=from_sha,
+            candidate_sha=candidate_sha,
         )
         expected_source_pairs = {
             (commit, path)
-            for commit in (from_sha, candidate_sha)
-            for path in TRANSITION_SOURCE_PATHS
+            for commit, paths in expected_source_inventory.items()
+            for path in paths
         }
-        observed_source_pairs = {
-            (str(row.get("commit_sha") or ""), str(row.get("path") or ""))
+        observed_source_identities = {
+            (str(row.get("commit_sha") or ""), str(row.get("path") or "")): str(
+                row.get("sha256") or ""
+            )
             for row in source_identities or ()
             if isinstance(row, Mapping)
             and re.fullmatch(
@@ -14043,34 +14201,45 @@ def _dynamic_rebenchmark_evidence_is_complete(
                 str(row.get("sha256") or ""),
             )
         }
+        expected_source_identities = {
+            (commit, path): git_blob_identity(SOURCE_ROOT, commit, path)["sha256"]
+            for commit, paths in expected_source_inventory.items()
+            for path in paths
+        }
         return bool(
             configured > 0
             and re.fullmatch(r"[0-9a-f]{40}", from_sha) is not None
             and re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is not None
             and isinstance(source_identities, list)
             and len(source_identities) == len(expected_source_pairs)
-            and observed_source_pairs == expected_source_pairs
+            and set(observed_source_identities) == expected_source_pairs
+            and observed_source_identities == expected_source_identities
             and release_launch_configs_exact
             and top_level_launch_config_exact
             and int(recovery.get("completed_icp_count") or 0) == configured
             and int(publication.get("configured_icp_count") or 0) == configured
             and first_pass_successes == expected_first_pass_successes > 0
             and first_pass_retryables == expected_first_pass_retryables
-            and first_pass_retryables > retry_width > 0
+            and first_pass_retryables > retry_width > 1
             and first_pass_successes + first_pass_retryables == configured
             and int(recovery.get("checkpoint_write_count") or 0)
             == int(recovery.get("expected_attempt_count") or 0)
-            == configured
-            + first_pass_retryables * retry_rounds
-            and int(
-                recovery.get("n_minus_one_checkpoint_completed_icp_count") or 0
-            )
+            == configured + first_pass_retryables * retry_rounds
+            and int(recovery.get("n_minus_one_checkpoint_completed_icp_count") or 0)
             == expected_n_minus_completed
             and int(recovery.get("n_minus_one_checkpoint_attempt_count") or 0)
             == expected_n_minus_attempts
-            and int(
-                recovery.get("n_minus_one_checkpoint_receipt_frontier_count") or 0
-            )
+            and int(recovery.get("n_minus_one_started_attempt_count") or 0)
+            == expected_n_minus_started_attempts
+            and int(recovery.get("n_minus_one_completed_attempt_count") or 0)
+            == expected_n_minus_completed_attempts
+            and int(recovery.get("n_minus_one_uncheckpointed_peer_count") or 0)
+            == retry_width - 1
+            and int(recovery.get("candidate_replayed_uncheckpointed_peer_count") or 0)
+            == retry_width - 1
+            and recovery.get("n_minus_one_checkpointed_peer_call")
+            != recovery.get("n_minus_one_interrupted_peer_call")
+            and int(recovery.get("n_minus_one_checkpoint_receipt_frontier_count") or 0)
             == expected_n_minus_receipt_frontier
             and int(recovery.get("receipt_frontier_count") or 0)
             == int(recovery.get("expected_receipt_frontier_count") or 0)
@@ -14127,17 +14296,15 @@ def _dynamic_rebenchmark_evidence_is_complete(
             and int(recovery.get("lease_non_owner_measurement_count") or 0) == 0
             and int(recovery.get("lease_owner_forced_measurement_count") or 0)
             == worker_count
-            and int(
-                recovery.get("n_minus_one_envelope_scoring_worker_count") or 0
-            )
-            == int(
-                recovery.get("n_minus_one_sealed_scoring_profile_count") or 0
-            )
+            and int(recovery.get("n_minus_one_envelope_scoring_worker_count") or 0)
+            == int(recovery.get("n_minus_one_sealed_scoring_profile_count") or 0)
             == int(recovery.get("n_minus_one_fleet_launcher_worker_count") or 0)
             == int(recovery.get("n_minus_one_supervisor_scoring_running") or 0)
             == int(recovery.get("scoring_worker_count") or 0)
-            and int(recovery.get("n_minus_one_supervisor_respawn_count") or 0)
-            >= 1
+            and int(recovery.get("n_minus_one_supervisor_respawn_count") or 0) >= 1
+            and _dynamic_docker_collision_evidence_is_complete(
+                recovery.get("docker_collision")
+            )
             and int(publication.get("model_invocation_count") or 0) == 0
             and int(publication.get("scorer_invocation_count") or 0) == 0
             and publication.get("recovered_terminal_rows_hash")
@@ -14200,6 +14367,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     ),
     "dynamic-rebenchmark-restart-recovery": (
         _exercise_dynamic_rebenchmark_restart_recovery
+    ),
+    "dynamic-docker-lifecycle-collision": (
+        _exercise_dynamic_docker_lifecycle_collision
     ),
     "restart-summary-deadline-classification": (
         _exercise_restart_summary_deadline_classification
@@ -14923,6 +15093,14 @@ def main() -> int:
             _dynamic_rebenchmark_evidence_is_complete(
                 behavior_evidence.get(
                     "dynamic-rebenchmark-restart-recovery",
+                    {},
+                )
+            )
+        ),
+        "dynamic_docker_lifecycle_collision_verified": (
+            _dynamic_docker_collision_evidence_is_complete(
+                behavior_evidence.get(
+                    "dynamic-docker-lifecycle-collision",
                     {},
                 )
             )

@@ -5,14 +5,22 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
+import re
+import sys
 import time
 from typing import Optional
 
 
 class DockerOperationGuardV2Error(RuntimeError):
     pass
+
+
+_EXACT_HOST_GATEWAY_ARGS = (b"-u", b"-m", b"gateway.main")
+_HOST_GATEWAY_PYTHON_COMMAND = re.compile(r"python(?:3(?:\.\d+)?)?\Z")
+_MAX_HOST_GATEWAY_CMDLINE_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -155,6 +163,88 @@ def find_foreign_docker_operations(
     return sorted(blockers, key=lambda item: int(item["pid"]))
 
 
+def inspect_exact_host_gateway_runtime(
+    *,
+    proc_root: Path = Path("/proc"),
+    max_process_entries: int = 32_768,
+    timeout_seconds: float = 5.0,
+) -> dict[str, object]:
+    """Find the exact host gateway launcher without an unbounded process grep."""
+
+    if max_process_entries < 1:
+        raise DockerOperationGuardV2Error("max_process_entries must be positive")
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise DockerOperationGuardV2Error("timeout_seconds must be positive")
+
+    deadline = time.monotonic() + timeout_seconds
+    scanned_entry_count = 0
+    scanned_process_count = 0
+    try:
+        with os.scandir(proc_root) as entries:
+            for entry in entries:
+                scanned_entry_count += 1
+                if scanned_entry_count > max_process_entries:
+                    raise DockerOperationGuardV2Error(
+                        "process table exceeded the bounded host gateway scan"
+                    )
+                if time.monotonic() >= deadline:
+                    raise DockerOperationGuardV2Error(
+                        "host gateway process scan exceeded its deadline"
+                    )
+                if not entry.name.isdigit():
+                    continue
+                scanned_process_count += 1
+
+                try:
+                    with (Path(entry.path) / "cmdline").open("rb") as handle:
+                        raw_cmdline = handle.read(_MAX_HOST_GATEWAY_CMDLINE_BYTES + 1)
+                except (FileNotFoundError, ProcessLookupError):
+                    # Processes can exit between the directory and cmdline reads.
+                    continue
+                except OSError as exc:
+                    raise DockerOperationGuardV2Error(
+                        f"cannot inspect process {entry.name} cmdline: {exc}"
+                    ) from exc
+
+                # The production gateway argv is short. An oversized argv cannot
+                # equal it, so no unbounded read is needed.
+                if len(raw_cmdline) > _MAX_HOST_GATEWAY_CMDLINE_BYTES:
+                    continue
+                argv = tuple(item for item in raw_cmdline.split(b"\0") if item)
+                if len(argv) != 4 or argv[1:] != _EXACT_HOST_GATEWAY_ARGS:
+                    continue
+                try:
+                    command = Path(os.fsdecode(argv[0])).name
+                except UnicodeError:
+                    continue
+                if _HOST_GATEWAY_PYTHON_COMMAND.fullmatch(command) is None:
+                    continue
+                return {
+                    "schema_version": "leadpoet.host_gateway_process_guard.v1",
+                    "status": "live",
+                    "gateway_process": {
+                        "pid": int(entry.name),
+                        "command": command,
+                    },
+                    "scanned_entry_count": scanned_entry_count,
+                    "scanned_process_count": scanned_process_count,
+                }
+    except DockerOperationGuardV2Error:
+        raise
+    except OSError as exc:
+        raise DockerOperationGuardV2Error(
+            f"cannot inspect process table: {exc}"
+        ) from exc
+
+    return {
+        "schema_version": "leadpoet.host_gateway_process_guard.v1",
+        "status": "absent",
+        "gateway_process": None,
+        "scanned_entry_count": scanned_entry_count,
+        "scanned_process_count": scanned_process_count,
+    }
+
+
 def wait_for_foreign_docker_operations(
     *,
     timeout_seconds: float,
@@ -182,30 +272,50 @@ def wait_for_foreign_docker_operations(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wait", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--wait", action="store_true")
+    mode.add_argument("--detect-exact-host-gateway", action="store_true")
     parser.add_argument("--timeout-seconds", type=float, default=1800)
     parser.add_argument("--interval-seconds", type=float, default=3)
     parser.add_argument("--proc-root", type=Path, default=Path("/proc"))
+    parser.add_argument("--max-process-entries", type=int, default=32_768)
+    parser.add_argument("--scan-timeout-seconds", type=float, default=5.0)
     args = parser.parse_args()
-    if args.timeout_seconds < 0:
+    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds < 0:
         parser.error("--timeout-seconds must be non-negative")
-    if args.interval_seconds <= 0:
+    if not math.isfinite(args.interval_seconds) or args.interval_seconds <= 0:
         parser.error("--interval-seconds must be positive")
+    if args.max_process_entries < 1:
+        parser.error("--max-process-entries must be positive")
+    if not math.isfinite(args.scan_timeout_seconds) or args.scan_timeout_seconds <= 0:
+        parser.error("--scan-timeout-seconds must be positive")
 
-    if args.wait:
-        report = wait_for_foreign_docker_operations(
-            timeout_seconds=args.timeout_seconds,
-            interval_seconds=args.interval_seconds,
-            proc_root=args.proc_root,
-        )
-    else:
-        blockers = find_foreign_docker_operations(proc_root=args.proc_root)
-        report = {
-            "schema_version": "leadpoet.docker_operation_guard.v2",
-            "status": "ready" if not blockers else "blocked",
-            "foreign_operations": blockers,
-        }
+    try:
+        if args.detect_exact_host_gateway:
+            report = inspect_exact_host_gateway_runtime(
+                proc_root=args.proc_root,
+                max_process_entries=args.max_process_entries,
+                timeout_seconds=args.scan_timeout_seconds,
+            )
+        elif args.wait:
+            report = wait_for_foreign_docker_operations(
+                timeout_seconds=args.timeout_seconds,
+                interval_seconds=args.interval_seconds,
+                proc_root=args.proc_root,
+            )
+        else:
+            blockers = find_foreign_docker_operations(proc_root=args.proc_root)
+            report = {
+                "schema_version": "leadpoet.docker_operation_guard.v2",
+                "status": "ready" if not blockers else "blocked",
+                "foreign_operations": blockers,
+            }
+    except DockerOperationGuardV2Error as exc:
+        print(f"ERROR: {exc}", file=sys.stderr, flush=True)
+        return 1
     print(json.dumps(report, sort_keys=True), flush=True)
+    if args.detect_exact_host_gateway:
+        return 0
     return 0 if report["status"] == "ready" else 2
 
 

@@ -4489,6 +4489,12 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "dynamic_rebenchmark_restart_recovery_verified" in set(
         behavior_contract["required_invariant_ids"]
     )
+    assert "dynamic-docker-lifecycle-collision" in set(
+        behavior_contract["behavior_scenarios"]
+    )
+    assert "dynamic_docker_lifecycle_collision_verified" in set(
+        behavior_contract["required_invariant_ids"]
+    )
     assert "restart-summary-deadline-classification" in set(
         behavior_contract["behavior_scenarios"]
     )
@@ -4519,12 +4525,20 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "gateway/tee/rpc_authority.py",
         "gateway/main.py",
         "gateway/research_lab/worker_autostart.py",
+        "gateway/research_lab/code_build.py",
+        "gateway/research_lab/source_add_trial_runner.py",
         "gateway/research_lab/worker_process.py",
         "gateway/tee/prepare_gateway_envelopes_v2.py",
         "gateway/tee/topology.json",
         "scripts/run_research_lab_scoring_worker.py",
         "scripts/run_research_lab_scoring_worker_fleet.py",
+        "scripts/record_research_lab_dev_snapshots.py",
+        "research_lab/docker_operation_lock_v2.py",
+        "validator_tee/host/docker_operation_guard_v2.py",
+        "validator_tee/scripts/docker_operation_lock_v2.sh",
+        "validator_tee/scripts/reclaim_docker_storage_v2.sh",
         "tests/restart_rehearsal/dynamic_rebenchmark_n_minus_one.py",
+        "tests/restart_rehearsal/dynamic_docker_collision_workflow.py",
         "tests/restart_rehearsal/dynamic_rebenchmark_workflow.py",
         "tests/restart_rehearsal/dynamic_rebenchmark_workflow_v2.py",
     } <= set(behavior_contract["production_source_paths"])
@@ -5572,6 +5586,8 @@ def test_dynamic_rebenchmark_restart_recovery_follows_exact_launch(
             "dynamic_pressure_negative_boundaries_exact",
             "dynamic_watchdog_supervised_resume_bound",
             "dynamic_n_minus_one_candidate_resume_exact",
+            "dynamic_peer_interruption_resume_exact",
+            "dynamic_docker_collision_exact",
             "dynamic_recovered_bank_publication_join_exact",
         )
     )
@@ -5593,12 +5609,32 @@ def test_dynamic_rebenchmark_restart_recovery_follows_exact_launch(
         expected_first_pass_retryables
     )
     assert evidence["lease_non_owner_measurement_count"] == 0
-    assert evidence["lease_owner_forced_measurement_count"] == evidence[
-        "scoring_worker_count"
-    ]
-    assert evidence["receipt_frontier_count"] == evidence[
-        "expected_receipt_frontier_count"
-    ]
+    assert (
+        evidence["lease_owner_forced_measurement_count"]
+        == evidence["scoring_worker_count"]
+    )
+    assert evidence["n_minus_one_checkpoint_attempt_count"] == configured_icps + 1
+    assert evidence["n_minus_one_started_attempt_count"] == (
+        configured_icps + evidence["retry_concurrency"]
+    )
+    assert evidence["n_minus_one_completed_attempt_count"] == configured_icps + 2
+    assert evidence["n_minus_one_uncheckpointed_peer_count"] == (
+        evidence["retry_concurrency"] - 1
+    )
+    assert evidence["candidate_replayed_uncheckpointed_peer_count"] == (
+        evidence["retry_concurrency"] - 1
+    )
+    assert (
+        evidence["n_minus_one_checkpointed_peer_call"]
+        != evidence["n_minus_one_interrupted_peer_call"]
+    )
+    assert production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
+        evidence["docker_collision"]
+    )
+    assert (
+        evidence["receipt_frontier_count"]
+        == evidence["expected_receipt_frontier_count"]
+    )
     completed_receipts_per_attempt = int(
         scoring_worker_module._V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
     )
@@ -5645,6 +5681,50 @@ def test_dynamic_rebenchmark_restart_recovery_follows_exact_launch(
     corrupted_lease["lease_non_owner_measurement_count"] = 1
     assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
         corrupted_lease
+    )
+    corrupted_peer = copy.deepcopy(evidence)
+    corrupted_peer["candidate_replayed_uncheckpointed_peer_count"] -= 1
+    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
+        corrupted_peer
+    )
+    corrupted_collision = copy.deepcopy(evidence)
+    corrupted_collision["docker_collision"][
+        "host_live_prevented_docker_stop_or_reset"
+    ] = False
+    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
+        corrupted_collision
+    )
+    assert (
+        not production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
+            corrupted_collision["docker_collision"]
+        )
+    )
+    corrupted_collision_inventory = copy.deepcopy(evidence)
+    corrupted_collision_inventory["docker_collision"]["source_inventory"][
+        candidate_sha
+    ].remove("gateway/tee/protected_workflows.json")
+    assert (
+        not production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
+            corrupted_collision_inventory["docker_collision"]
+        )
+    )
+    corrupted_collision_identity = copy.deepcopy(evidence)
+    protected_manifest_identity = next(
+        row
+        for row in corrupted_collision_identity["docker_collision"]["source_identities"]
+        if row["commit_sha"] == candidate_sha
+        and row["path"] == "gateway/tee/protected_workflows.json"
+    )
+    protected_manifest_identity["sha256"] = "0" * 64
+    assert (
+        not production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
+            corrupted_collision_identity["docker_collision"]
+        )
+    )
+    corrupted_recovery_identity = copy.deepcopy(evidence)
+    corrupted_recovery_identity["source_identities"][0]["sha256"] = "0" * 64
+    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
+        corrupted_recovery_identity
     )
 
 

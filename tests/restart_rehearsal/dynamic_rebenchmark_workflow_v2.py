@@ -22,10 +22,10 @@ from typing import Any, Mapping
 from unittest.mock import patch
 
 from dynamic_rebenchmark_workflow import (
-    TRANSITION_SOURCE_PATHS,
     git_blob_identity,
     patched_rebenchmark_launch_environment,
     rebenchmark_launch_environment,
+    transition_source_paths_by_commit,
 )
 
 
@@ -138,7 +138,8 @@ def _run_exact_n_minus_one(
     if completed.returncode != 0:
         raise RuntimeError(
             "exact N-1 rebenchmark producer failed "
-            f"with exit code {completed.returncode}"
+            f"with exit code {completed.returncode}: "
+            + str(completed.stderr or completed.stdout)[-1000:]
         )
     output_lines = [line for line in completed.stdout.splitlines() if line.strip()]
     if not output_lines:
@@ -438,6 +439,22 @@ def exercise_transition(
             full_launch_environment=full_launch_environment,
             context=n_minus_context,
         )
+        from dynamic_docker_collision_workflow import (
+            exercise_dynamic_docker_collision,
+        )
+
+        docker_collision = exercise_dynamic_docker_collision(
+            source_root=normalized_root,
+            exact_root=exact_root,
+            from_sha=normalized_from,
+            candidate_sha=normalized_candidate,
+            launch_environment=launch_environment,
+            scoring_worker_count=int(candidate_config.scoring_worker_total_workers),
+            scoring_memory_floor_mib=int(
+                candidate_config.scoring_worker_min_available_memory_mb
+            ),
+            model_timeout_seconds=max(1, int(model_invocation_timeout_seconds)),
+        )
     n_minus_config = dict(n_minus["config"])
     if (
         any(
@@ -458,14 +475,34 @@ def exercise_transition(
     n_minus_calls = [
         tuple(int(value) for value in row) for row in n_minus["attempt_calls"]
     ]
-    expected_n_minus_calls = total_icps + retry_width
+    n_minus_started_calls = [
+        tuple(int(value) for value in row)
+        for row in n_minus["started_attempt_calls"]
+    ]
+    n_minus_completed_calls = [
+        tuple(int(value) for value in row)
+        for row in n_minus["completed_attempt_calls"]
+    ]
+    checkpointed_peer_call = tuple(
+        int(value) for value in n_minus["checkpointed_peer_call"]
+    )
+    interrupted_peer_call = tuple(
+        int(value) for value in n_minus["interrupted_peer_call"]
+    )
+    expected_retry_wave_calls = {
+        (item_index, 1)
+        for item_index in sorted(retryable_indexes)[:retry_width]
+    }
+    uncheckpointed_n_minus_calls = set(n_minus_started_calls) - set(n_minus_calls)
+    expected_n_minus_calls = total_icps + 1
+    expected_n_minus_started_calls = total_icps + retry_width
     expected_n_minus_completed = first_pass_success_count + (
-        retry_width if retry_rounds == 1 else 0
+        1 if retry_rounds == 1 else 0
     )
     expected_n_minus_receipt_frontier = (
         first_pass_success_count * completed_receipts_per_attempt
         + retryable_count * retryable_receipts_per_attempt
-        + retry_width
+        + 1
         * (
             completed_receipts_per_attempt
             if retry_rounds == 1
@@ -475,6 +512,19 @@ def exercise_transition(
     if (
         len(n_minus_calls) != expected_n_minus_calls
         or len(set(n_minus_calls)) != len(n_minus_calls)
+        or len(n_minus_started_calls) != expected_n_minus_started_calls
+        or len(set(n_minus_started_calls)) != len(n_minus_started_calls)
+        or len(n_minus_completed_calls) != total_icps + 2
+        or set(n_minus_started_calls[-retry_width:]) != expected_retry_wave_calls
+        or set(n_minus_completed_calls) - set(n_minus_calls)
+        != {interrupted_peer_call}
+        or uncheckpointed_n_minus_calls
+        != expected_retry_wave_calls - {checkpointed_peer_call}
+        or checkpointed_peer_call not in n_minus_calls
+        or interrupted_peer_call in n_minus_calls
+        or interrupted_peer_call not in n_minus_completed_calls
+        or n_minus["peer_interruption"].get("reason")
+        != "peer_interrupted_after_checkpoint"
         or int(n_minus["checkpoint_attempt_count"]) != expected_n_minus_calls
         or int(n_minus["checkpoint_completed_icp_count"]) != expected_n_minus_completed
         or int(n_minus["checkpoint_receipt_frontier_count"])
@@ -490,6 +540,15 @@ def exercise_transition(
         != "scripts/run_research_lab_scoring_worker.py"
         or n_minus["exact_supervisor_module"]
         != "gateway/research_lab/worker_autostart.py"
+        or docker_collision.get("dynamic_docker_collision_exact") is not True
+        or docker_collision.get(
+            "candidate_gateway_emergency_uses_guarded_reclaim"
+        )
+        is not True
+        or docker_collision.get(
+            "first_activation_requires_preexisting_disk_reserve"
+        )
+        is not True
     ):
         raise RuntimeError("N-1 did not execute exact production paths")
 
@@ -921,6 +980,9 @@ def exercise_transition(
             )
         )
     all_calls = [*n_minus_calls, *candidate_calls]
+    candidate_replayed_uncheckpointed = set(candidate_calls) & set(
+        n_minus_started_calls
+    )
     expected_attempt_count = total_icps + retryable_count * retry_rounds
     retry_attempt_counts_by_round = [
         sum(
@@ -934,6 +996,7 @@ def exercise_transition(
     if (
         len(all_calls) != expected_attempt_count
         or len(set(all_calls)) != len(all_calls)
+        or candidate_replayed_uncheckpointed != uncheckpointed_n_minus_calls
         or len(final_rows) != total_icps
         or retry_stats
         != {
@@ -1223,10 +1286,20 @@ def exercise_transition(
     ):
         raise RuntimeError("terminal checkpoint receipt graph frontier differs")
 
+    source_inventory = transition_source_paths_by_commit(
+        from_sha=normalized_from,
+        candidate_sha=normalized_candidate,
+    )
     source_identities = [
         git_blob_identity(normalized_root, commit, path)
-        for commit in (normalized_from, normalized_candidate)
-        for path in TRANSITION_SOURCE_PATHS
+        for commit, paths in source_inventory.items()
+        for path in paths
+    ]
+    docker_collision["source_inventory"] = {
+        commit: list(paths) for commit, paths in source_inventory.items()
+    }
+    docker_collision["source_identities"] = [
+        dict(identity) for identity in source_identities
     ]
     if any(
         identity["sha256"]
@@ -1329,6 +1402,16 @@ def exercise_transition(
         "n_minus_one_checkpoint_receipt_frontier_count": int(
             n_minus["checkpoint_receipt_frontier_count"]
         ),
+        "n_minus_one_started_attempt_count": len(n_minus_started_calls),
+        "n_minus_one_completed_attempt_count": len(n_minus_completed_calls),
+        "n_minus_one_checkpointed_peer_call": list(checkpointed_peer_call),
+        "n_minus_one_interrupted_peer_call": list(interrupted_peer_call),
+        "n_minus_one_uncheckpointed_peer_count": len(
+            uncheckpointed_n_minus_calls
+        ),
+        "candidate_replayed_uncheckpointed_peer_count": len(
+            candidate_replayed_uncheckpointed
+        ),
         "receipt_frontier_count": len(final_roots),
         "expected_receipt_frontier_count": expected_receipt_frontier_count,
         "receipt_frontier_capacity": receipt_frontier_capacity,
@@ -1344,6 +1427,7 @@ def exercise_transition(
         "repo_git_sha": repo_git_sha,
         "checkpoint_document": checkpoint_document,
         "receipt_graphs": receipt_graphs,
+        "docker_collision": docker_collision,
         "dynamic_launch_config_candidate_n_minus_one_bound": True,
         "dynamic_exact_n_minus_one_worker_executed": True,
         "dynamic_n_minus_one_envelope_launcher_supervisor_exact": True,
@@ -1357,4 +1441,8 @@ def exercise_transition(
         "dynamic_pressure_negative_boundaries_exact": True,
         "dynamic_watchdog_supervised_resume_bound": True,
         "dynamic_n_minus_one_candidate_resume_exact": True,
+        "dynamic_peer_interruption_resume_exact": True,
+        "dynamic_docker_collision_exact": True,
+        "candidate_gateway_emergency_uses_guarded_reclaim": True,
+        "first_activation_requires_preexisting_disk_reserve": True,
     }

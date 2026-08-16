@@ -1386,6 +1386,7 @@ docker_storage_counts() {
 reset_orphaned_docker_storage_if_needed() {
   local free_kb_after_prune="$1"
   local reason="${2:-orphaned Docker storage}"
+  local reclaim_script
   docker_storage_counts
 
   if [ "${IMAGE_COUNT:-0}" -eq 0 ] \
@@ -1394,23 +1395,15 @@ reset_orphaned_docker_storage_if_needed() {
      && { [ "${free_kb_after_prune:-0}" -lt "$MIN_FREE_KB" ] || [ "${DOCKER_ROOT_KB:-0}" -gt 1024 ] || [ "${OVERLAY_DIRS:-0}" -gt 0 ]; }; then
     echo "Detected ${reason} with no tracked Docker objects; resetting full Docker data root"
     echo "docker root usage: ${DOCKER_ROOT_KB:-0} KiB; overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
-    sudo systemctl stop docker.socket docker 2>/dev/null || true
-    mapfile -t docker_mounts < <(
-      sudo nsenter -t 1 -m -- \
-        findmnt -rn -o TARGET 2>/dev/null |
-        awk '$0 == "/var/lib/docker" || index($0, "/var/lib/docker/") == 1 {
-          print length($0), $0
-        }' |
-        sort -rn |
-        cut -d' ' -f2- || true
-    )
-    for mount_path in "${docker_mounts[@]}"; do
-      sudo nsenter -t 1 -m -- umount "$mount_path"
-    done
-    sudo nsenter -t 1 -m -- rm -rf /var/lib/docker
-    sudo nsenter -t 1 -m -- mkdir -p /var/lib/docker
-    ensure_docker_ready
-    sudo docker system df 2>/dev/null || true
+    reclaim_script="$LEADPOET_REPO_ROOT/validator_tee/scripts/reclaim_docker_storage_v2.sh"
+    if [ ! -r "$reclaim_script" ]; then
+      echo "ERROR: guarded Docker storage reclaim helper is unavailable" >&2
+      return 1
+    fi
+    VALIDATOR_DOCKER_MIN_FREE_BYTES=$((MIN_FREE_KB * 1024)) \
+      VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
+      VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
+      bash "$reclaim_script"
   fi
 }
 
@@ -1531,7 +1524,7 @@ run_bounded_restart_artifact_cleanup() {
 }
 
 emergency_disk_preflight() {
-  local free_kb free_kb_after_prune
+  local free_kb emergency_lock_helper
   free_kb="$(root_free_kb)"
   if [ "${free_kb:-0}" -ge "$MIN_FREE_KB" ]; then
     return 0
@@ -1545,32 +1538,26 @@ emergency_disk_preflight() {
     \( -name "gateway.env.before-gw-restart.*.bak" -o -name "gateway.env.before-secret-hydrate.*" \) \
     -delete 2>/dev/null || true
   sudo journalctl --vacuum-size=200M 2>/dev/null || true
-  local emergency_lock_helper
   emergency_lock_helper="$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
-  if [ -r "$emergency_lock_helper" ]; then
-    . "$emergency_lock_helper"
-    if leadpoet_acquire_docker_operation_lock_v2; then
-      if PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-          -m validator_tee.host.docker_operation_guard_v2 \
-          --wait \
-          --timeout-seconds 1800 \
-          --interval-seconds 3; then
-        run_bounded_restart_artifact_cleanup
-        sudo docker container prune -f 2>/dev/null || true
-        sudo docker builder prune -af 2>/dev/null || true
-        sudo docker system prune -af --volumes 2>/dev/null || true
-        free_kb_after_prune="$(root_free_kb)"
-        reset_orphaned_docker_storage_if_needed \
-          "$free_kb_after_prune" \
-          "orphaned Docker storage after emergency cleanup"
-      else
-        echo "WARNING: emergency Docker cleanup deferred because the operation guard failed" >&2
-      fi
-      leadpoet_release_docker_operation_lock_v2
-    fi
-  else
-    echo "WARNING: emergency Docker cleanup deferred until the shared lock helper is available" >&2
+  if [ ! -r "$emergency_lock_helper" ]; then
+    echo "ERROR: emergency Docker lock helper is unavailable" >&2
+    return 1
   fi
+  . "$emergency_lock_helper"
+  if ! leadpoet_acquire_docker_operation_lock_v2; then
+    echo "ERROR: emergency Docker cleanup could not acquire its operation lock" >&2
+    return 1
+  fi
+  run_bounded_restart_artifact_cleanup
+  if ! VALIDATOR_DOCKER_MIN_FREE_BYTES=$((MIN_FREE_KB * 1024)) \
+      VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
+      VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
+      bash "$LEADPOET_REPO_ROOT/validator_tee/scripts/reclaim_docker_storage_v2.sh"; then
+    leadpoet_release_docker_operation_lock_v2 || true
+    echo "ERROR: guarded emergency Docker cleanup failed closed" >&2
+    return 1
+  fi
+  leadpoet_release_docker_operation_lock_v2
 
   echo "Disk after emergency cleanup"
   df -h / /var/lib/docker 2>/dev/null || df -h /
@@ -2782,7 +2769,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   echo "Starting parent-side opaque enclave egress forwarder"
   cd "$LEADPOET_REPO_ROOT"
   PYTHONPATH="$LEADPOET_REPO_ROOT" setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
-    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null 7>&- 9>&- &
+    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null 7>&- 8>&- 9>&- &
   TEE_EGRESS_FORWARDER_PID="$!"
   sleep 2
   if ! ps -p "$TEE_EGRESS_FORWARDER_PID" >/dev/null 2>&1; then
@@ -2794,7 +2781,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   echo "Starting opaque inter-enclave TLS relay"
   cd "$LEADPOET_REPO_ROOT"
   PYTHONPATH="$LEADPOET_REPO_ROOT" setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
-    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null 7>&- 9>&- &
+    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null 7>&- 8>&- 9>&- &
   INTER_ENCLAVE_RELAY_PID="$!"
   sleep 2
   if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then

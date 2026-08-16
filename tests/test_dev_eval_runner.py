@@ -1142,6 +1142,8 @@ def test_default_docker_runner_disables_network_and_mounts_read_only(tmp_path, m
     captured: dict = {}
 
     def _fake_run(command, **kwargs):
+        if list(command)[-1:] == ["info"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         captured["command"] = list(command)
         captured["input"] = kwargs.get("input")
         options = json.loads(kwargs["input"])["context"]["runtime_options"]
@@ -1180,6 +1182,10 @@ def test_default_docker_runner_disables_network_and_mounts_read_only(tmp_path, m
             stderr="sourcing_branch_receipt " + json.dumps(receipt) + "\n",
         )
 
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        str(tmp_path / "docker-operation.lock"),
+    )
     monkeypatch.setattr(runner_module.subprocess, "run", _fake_run)
     evaluator = DockerReplayDevEvaluator(snapshot_uri=str(tmp_path))
     result = evaluator._run_icp_in_docker_default(
@@ -1206,3 +1212,39 @@ def test_default_docker_runner_disables_network_and_mounts_read_only(tmp_path, m
         "finalization_reserve_seconds": 2.7,
         "agent_timeout_seconds": 24,
     }
+
+
+def test_default_docker_runner_removes_named_container_on_timeout(
+    tmp_path,
+    monkeypatch,
+):
+    import subprocess
+
+    from gateway.research_lab import dev_eval_runner as runner_module
+
+    removed = []
+
+    def _fake_run(command, **kwargs):
+        if list(command)[-1:] == ["info"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if list(command)[1:3] == ["rm", "-f"]:
+            removed.append(list(command)[-1])
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise subprocess.TimeoutExpired(command, timeout=kwargs["timeout"])
+
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        str(tmp_path / "docker-operation.lock"),
+    )
+    monkeypatch.setattr(runner_module.subprocess, "run", _fake_run)
+    evaluator = DockerReplayDevEvaluator(snapshot_uri=str(tmp_path))
+    with pytest.raises(subprocess.TimeoutExpired):
+        evaluator._run_icp_in_docker_default(
+            image_digest=IMAGE_DIGEST,
+            icp=_dev_icp(0),
+            context={"dev_eval": True},
+            snapshot_dir=tmp_path,
+            timeout_seconds=30,
+        )
+    assert len(removed) == 1
+    assert removed[0].startswith("leadpoet-dev-replay-")

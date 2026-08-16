@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import subprocess
+import time
 from typing import Optional
 
 
@@ -34,11 +35,33 @@ def _run_recovery(
     stale_overlay_mounts: int = 0,
     available_after_stale_reclaim: Optional[int] = None,
     live_restore_enabled: bool = True,
+    host_gateway_live: bool = False,
+    host_gateway_live_after_inventory: bool = False,
+    fail_umount: bool = False,
+    fail_systemctl_stop: bool = False,
+    fail_daemon_recovery: bool = False,
+    hang_daemon_probe: bool = False,
+    hang_ctr_probe: bool = False,
+    hang_systemctl_start: bool = False,
+    hang_systemctl_stop: bool = False,
+    daemon_ready_attempts: int = 3,
+    daemon_probe_timeout_seconds: int = 1,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     proc_root = tmp_path / "proc"
     proc_root.mkdir()
+    if host_gateway_live:
+        gateway_proc = proc_root / "200"
+        gateway_proc.mkdir()
+        (gateway_proc / "status").write_text(
+            "Name:\tpython3\nPPid:\t1\n",
+            encoding="utf-8",
+        )
+        (gateway_proc / "cmdline").write_bytes(
+            b"/home/ec2-user/venv311/bin/python3\0"
+            b"-u\0-m\0gateway.main\0"
+        )
     sudo_log = tmp_path / "sudo.log"
 
     _write_executable(
@@ -62,6 +85,17 @@ emit_rows() {
     index=$((index + 1))
   done
 }
+if [ "${1:-}" = "info" ] && [ -f "$FAKE_DAEMONS_STOPPED_MARKER" ]; then
+  if [ "$FAKE_HANG_DAEMON_PROBE" = "1" ]; then
+    exec /bin/sleep 60
+  fi
+  probe=0
+  if [ -f "$FAKE_DAEMON_READY_PROBE_STATE" ]; then
+    probe="$(cat "$FAKE_DAEMON_READY_PROBE_STATE")"
+  fi
+  printf '%s\n' "$((probe + 1))" > "$FAKE_DAEMON_READY_PROBE_STATE"
+  exit 1
+fi
 case "${1:-}:${2:-}" in
   info:)
     exit 0
@@ -192,6 +226,12 @@ case "$command" in
     esac
     ;;
   ctr)
+    if [ "$FAKE_HANG_CTR_PROBE" = "1" ]; then
+      exec /bin/sleep 60
+    fi
+    if [ -f "$FAKE_DAEMONS_STOPPED_MARKER" ]; then
+      exit 1
+    fi
     if [ -f "$FAKE_CONTAINERD_RESET_MARKER" ]; then
       exit 0
     fi
@@ -234,6 +274,9 @@ case "$command" in
     ;;
   umount)
     printf '%s %s\\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
+    if [ "$FAKE_FAIL_UMOUNT" = "1" ]; then
+      exit 1
+    fi
     touch "$FAKE_STALE_RECLAIM_MARKER"
     ;;
   rm)
@@ -242,7 +285,29 @@ case "$command" in
       touch "$FAKE_CONTAINERD_RESET_MARKER"
     fi
     ;;
-  systemctl|install|pkill)
+  systemctl)
+    printf '%s %s\\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
+    case "${1:-}" in
+      stop)
+        touch "$FAKE_DAEMONS_STOPPED_MARKER"
+        if [ "$FAKE_HANG_SYSTEMCTL_STOP" = "1" ]; then
+          exec /bin/sleep 60
+        fi
+        if [ "$FAKE_FAIL_SYSTEMCTL_STOP" = "1" ]; then
+          exit 1
+        fi
+        ;;
+      start)
+        if [ "$FAKE_HANG_SYSTEMCTL_START" = "1" ]; then
+          exec /bin/sleep 60
+        fi
+        if [ "$FAKE_FAIL_DAEMON_RECOVERY" != "1" ]; then
+          rm -f "$FAKE_DAEMONS_STOPPED_MARKER"
+        fi
+        ;;
+    esac
+    ;;
+  install|pkill)
     printf '%s %s\\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
     ;;
   *)
@@ -254,6 +319,15 @@ esac
     _write_executable(
         bin_dir / "pgrep",
         """#!/bin/bash
+if [ "$FAKE_HOST_GATEWAY_LIVE_AFTER_INVENTORY" = "1" ] \
+    && [ ! -f "$FAKE_LATE_HOST_GATEWAY_MARKER" ]; then
+  mkdir -p "$LEADPOET_PROC_ROOT/201"
+  printf 'Name:\tpython3\nPPid:\t1\n' \
+    > "$LEADPOET_PROC_ROOT/201/status"
+  printf '/home/ec2-user/venv311/bin/python3\\0-u\\0-m\\0gateway.main\\0' \
+    > "$LEADPOET_PROC_ROOT/201/cmdline"
+  touch "$FAKE_LATE_HOST_GATEWAY_MARKER"
+fi
 if [ -f "$FAKE_CONTAINERD_RESET_MARKER" ]; then
   printf '0\\n'
 else
@@ -274,6 +348,7 @@ fi
             tmp_path / "docker-operation.lock"
         ),
         "LEADPOET_PROC_ROOT": str(proc_root),
+        "LEADPOET_DOCKER_ALLOW_NONSTANDARD_PROC_ROOT": "1",
         "FAKE_AVAILABLE": str(available),
         "FAKE_AVAILABLE_AFTER_STALE_RECLAIM": str(
             available
@@ -302,9 +377,35 @@ fi
         "FAKE_STALE_OVERLAY_MOUNTS": str(stale_overlay_mounts),
         "FAKE_STALE_RECLAIM_MARKER": str(tmp_path / "stale-mounts-reclaimed"),
         "FAKE_CONTAINERD_RESET_MARKER": str(tmp_path / "containerd-reset"),
+        "FAKE_DAEMONS_STOPPED_MARKER": str(tmp_path / "daemons-stopped"),
+        "FAKE_DAEMON_READY_PROBE_STATE": str(
+            tmp_path / "daemon-ready-probes"
+        ),
+        "FAKE_FAIL_UMOUNT": "1" if fail_umount else "0",
+        "FAKE_FAIL_SYSTEMCTL_STOP": "1" if fail_systemctl_stop else "0",
+        "FAKE_FAIL_DAEMON_RECOVERY": "1" if fail_daemon_recovery else "0",
+        "FAKE_HANG_DAEMON_PROBE": "1" if hang_daemon_probe else "0",
+        "FAKE_HANG_CTR_PROBE": "1" if hang_ctr_probe else "0",
+        "FAKE_HANG_SYSTEMCTL_START": "1" if hang_systemctl_start else "0",
+        "FAKE_HANG_SYSTEMCTL_STOP": "1" if hang_systemctl_stop else "0",
+        "FAKE_HOST_GATEWAY_LIVE_AFTER_INVENTORY": (
+            "1" if host_gateway_live_after_inventory else "0"
+        ),
+        "FAKE_LATE_HOST_GATEWAY_MARKER": str(
+            tmp_path / "late-host-gateway"
+        ),
         "FAKE_DOCKER_ROOT_BYTES": "229720371200",
         "FAKE_SUDO_LOG": str(sudo_log),
         "VALIDATOR_DOCKER_PRUNE_ATTEMPTS": str(system_prune_failures + 1),
+        "VALIDATOR_DOCKER_DAEMON_READY_ATTEMPTS": str(
+            daemon_ready_attempts
+        ),
+        "VALIDATOR_DOCKER_DAEMON_PROBE_TIMEOUT_SECONDS": str(
+            daemon_probe_timeout_seconds
+        ),
+        "VALIDATOR_DOCKER_DAEMON_CONTROL_TIMEOUT_SECONDS": str(
+            daemon_probe_timeout_seconds
+        ),
         "VALIDATOR_DOCKER_SETTLE_ATTEMPTS": str(
             max(
                 1,
@@ -332,7 +433,10 @@ def test_validator_docker_recovery_is_guarded_and_runs_after_shutdown():
         ROOT / ".github" / "workflows" / "attested-v2-release.yml"
     ).read_text(encoding="utf-8")
 
-    assert 'CONTAINER_COUNT="$(docker ps -aq' in recovery
+    assert (
+        'CONTAINER_COUNT="$(run_bounded_daemon_inventory docker ps -aq'
+        in recovery
+    )
     assert 'if [ "$CONTAINER_COUNT" -ne 0 ]' in recovery
     assert 'if [ "$IMAGE_COUNT" -ne 0 ]' in recovery
     assert 'if [ "$VOLUME_COUNT" -ne 0 ]' in recovery
@@ -382,6 +486,25 @@ def test_validator_docker_recovery_is_guarded_and_runs_after_shutdown():
     )
 
 
+def test_nonstandard_proc_root_requires_explicit_rehearsal_flag(
+    tmp_path: Path,
+) -> None:
+    result = subprocess.run(
+        ["bash", str(ROOT / "validator_tee/scripts/reclaim_docker_storage_v2.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "LEADPOET_PROC_ROOT": str(tmp_path / "empty-proc"),
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(tmp_path / "lock"),
+        },
+    )
+
+    assert result.returncode == 2
+    assert "only in explicit rehearsal" in result.stderr
+
+
 def test_validator_docker_recovery_resets_orphaned_empty_root_above_floor(
     tmp_path: Path,
 ) -> None:
@@ -398,6 +521,84 @@ def test_validator_docker_recovery_resets_orphaned_empty_root_above_floor(
     assert "systemctl stop docker.service docker.socket containerd.service" in sudo_log
     assert "rm -rf --one-file-system /var/lib/docker" in sudo_log
     assert "rm -rf --one-file-system /var/lib/containerd" in sudo_log
+
+
+def test_failed_reset_recovery_bounds_a_hanging_daemon_probe(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        layerdb_images=1,
+        stale_overlay_mounts=1,
+        fail_umount=True,
+        fail_daemon_recovery=True,
+        hang_daemon_probe=True,
+        daemon_ready_attempts=1,
+        daemon_probe_timeout_seconds=1,
+    )
+
+    assert result.returncode != 0
+    assert time.monotonic() - started < 4
+    assert "Recovering Docker/containerd readiness" in result.stderr
+    assert "systemctl start containerd.service docker.service" in sudo_log
+
+
+def test_initial_readiness_bounds_a_hanging_ctr_probe(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        hang_ctr_probe=True,
+        daemon_ready_attempts=1,
+        daemon_probe_timeout_seconds=1,
+    )
+
+    assert result.returncode != 0
+    assert time.monotonic() - started < 4
+    assert "did not recover before storage inventory" in result.stderr
+    assert "systemctl start containerd.service docker.service" in sudo_log
+
+
+def test_initial_recovery_bounds_a_hanging_systemctl_start(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        hang_ctr_probe=True,
+        hang_systemctl_start=True,
+        daemon_ready_attempts=1,
+        daemon_probe_timeout_seconds=1,
+    )
+
+    assert result.returncode != 0
+    assert time.monotonic() - started < 4
+    assert "systemctl start containerd.service docker.service" in sudo_log
+
+
+def test_reset_bounds_hanging_systemctl_stop_and_recovers_daemons(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        layerdb_images=1,
+        hang_systemctl_stop=True,
+        daemon_ready_attempts=1,
+        daemon_probe_timeout_seconds=1,
+    )
+
+    assert result.returncode != 0
+    assert time.monotonic() - started < 4
+    assert "systemctl stop docker.service docker.socket containerd.service" in sudo_log
+    assert "systemctl start containerd.service docker.service" in sudo_log
+    assert "readiness recovered" in result.stderr
 
 
 def test_validator_docker_recovery_resets_stale_containerd_state(
@@ -417,6 +618,146 @@ def test_validator_docker_recovery_resets_stale_containerd_state(
     assert "moby_shims=20" in result.stdout
     assert "orphaned=1" in result.stdout
     assert "systemctl stop docker.service docker.socket containerd.service" in sudo_log
+
+
+def test_validator_docker_recovery_defers_reset_for_exact_live_host_gateway(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        layerdb_images=1,
+        host_gateway_live=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"status": "live"' in result.stdout
+    assert "runtime_mode=host-gateway-live" in result.stdout
+    assert "storage maintenance deferred while the exact host gateway is live" in result.stdout
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl stop" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
+def test_validator_docker_recovery_fails_closed_for_low_space_host_gateway(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=17_999_999_999,
+        layerdb_images=1,
+        host_gateway_live=True,
+    )
+
+    assert result.returncode == 1
+    assert "exact host gateway runtime has only 17999999999 free bytes" in result.stderr
+    assert "refusing Docker maintenance, daemon stop, or data-root reset" in result.stderr
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl stop" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
+def test_validator_docker_recovery_rechecks_gateway_immediately_before_stop(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        layerdb_images=1,
+        host_gateway_live_after_inventory=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count('"status": "absent"') == 1
+    assert result.stdout.count('"status": "live"') == 1
+    assert "runtime_mode=host-gateway-live phase=pre-reset" in result.stdout
+    assert "storage maintenance deferred while the exact host gateway is live" in result.stdout
+    assert "systemctl stop" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
+def test_validator_docker_recovery_late_gateway_low_space_fails_closed(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=17_999_999_999,
+        layerdb_images=1,
+        host_gateway_live_after_inventory=True,
+    )
+
+    assert result.returncode == 1
+    assert "runtime_mode=host-gateway-live phase=pre-reset" in result.stdout
+    assert "exact host gateway runtime has only 17999999999 free bytes" in result.stderr
+    assert "systemctl stop" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
+def test_validator_docker_recovery_restores_daemons_after_unmount_failure(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        layerdb_images=1,
+        stale_overlay_mounts=1,
+        fail_umount=True,
+    )
+
+    assert result.returncode == 1
+    assert "Recovering Docker/containerd readiness after failed data-root reset" in result.stderr
+    assert "readiness recovered after failed data-root reset" in result.stderr
+    stop = sudo_log.index(
+        "systemctl stop docker.service docker.socket containerd.service"
+    )
+    failed_unmount = sudo_log.index("umount /var/lib/docker/overlay2/")
+    recovery_start = sudo_log.index(
+        "systemctl start containerd.service docker.service",
+        failed_unmount,
+    )
+    assert stop < failed_unmount < recovery_start
+    assert not (tmp_path / "daemons-stopped").exists()
+
+
+def test_validator_docker_recovery_restores_after_partial_stop_failure(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        layerdb_images=1,
+        fail_systemctl_stop=True,
+    )
+
+    assert result.returncode == 1
+    assert "readiness recovered after failed data-root reset" in result.stderr
+    stop = sudo_log.index(
+        "systemctl stop docker.service docker.socket containerd.service"
+    )
+    recovery_start = sudo_log.index(
+        "systemctl start containerd.service docker.service",
+        stop,
+    )
+    assert stop < recovery_start
+    assert not (tmp_path / "daemons-stopped").exists()
+
+
+def test_validator_docker_recovery_bounds_failed_exit_readiness_attempts(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        layerdb_images=1,
+        fail_systemctl_stop=True,
+        fail_daemon_recovery=True,
+        daemon_ready_attempts=2,
+    )
+
+    assert result.returncode == 1
+    assert "recovery remained unavailable after failed data-root reset" in result.stderr
+    assert "systemctl start containerd.service docker.service" in sudo_log
+    assert (tmp_path / "daemon-ready-probes").read_text(encoding="utf-8") == "2\n"
 
 
 def test_validator_docker_recovery_refuses_running_containerd_task(

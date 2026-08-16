@@ -467,9 +467,54 @@
       "symbol": "validate_legacy_settlement_migrations_v2"
     },
     {
-      "ast_sha256": "sha256:8f1283c1d6ae8a859cbe6946b4c7a03a8c6238ceb712137632aa76dce5aea998",
+      "ast_sha256": "sha256:90ca2ff9dd8b2832c416b00c3c9c9d4b123ea4f2fad55f227ac1e1b7d3598952",
       "path": "gateway/research_lab/code_build.py",
       "symbol": "CodeEditCandidateBuilder._build_under_deadline"
+    },
+    {
+      "ast_sha256": "sha256:4e42ec2c63823ecb36b13162f109b062f741c316796c40412779c27344480779",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_DOCKER_OPERATION_LOCK_DEFAULT_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:0b09a35493415f3f1cc9fc2fa5b36297176dce51755b926dc417c3825f50eda7",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_SHELL_PROCESS_GROUP_TERMINATION_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:aeb43a42684ff0a07ab83e021869478ef96de3f5d95a8b3ca3b8db9c57c78dcc",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_docker_operation_lock_scope"
+    },
+    {
+      "ast_sha256": "sha256:6687d166458c8b9712e427a44ffdc8d5867ec4faca8e8779edd81fc5f504ed6b",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_docker_operation_lock_timeout_seconds"
+    },
+    {
+      "ast_sha256": "sha256:847768cdc4db4ac085ca3ed34b74a380432327b9b638fe649450168077b79618",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_extract_parent_image_source"
+    },
+    {
+      "ast_sha256": "sha256:7aa6704ab16bc4f5de572b647b87f676943f02cb86da80e5fe3dbd8d962b4648",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_run_private_build_under_docker_operation_lock"
+    },
+    {
+      "ast_sha256": "sha256:9019b1ee81691147793cfb453f3a8dace81f642444060b1a60e99f5347bba919",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_run_shell"
+    },
+    {
+      "ast_sha256": "sha256:3864c72499ec77106925aee67d0e9e99101ec2f866314f24d9538f7e9f740c80",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_shell_process_group_exists"
+    },
+    {
+      "ast_sha256": "sha256:6c10a1ec3718e89a612b5be2152848ae1aa98ad62110b4192610985887db588a",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_terminate_shell_process_group"
     },
     {
       "ast_sha256": "sha256:c25d69005a275bb7508a817868a4383fd4e5ee0cf018f6a8cbcea804ea020695",
@@ -507,9 +552,14 @@
       "symbol": "AttestedReplayDevEvaluatorV2"
     },
     {
-      "ast_sha256": "sha256:e7ed3cace0fdf095c577d5fc0fbca8b1e3ee3304b6b2ffd19228ff99e16dc9eb",
+      "ast_sha256": "sha256:791b9ff528163905b3016e6c89bfe10453ea769dea2fa06e6aed1c33002167ae",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "DockerReplayDevEvaluator"
+    },
+    {
+      "ast_sha256": "sha256:399f21c10db7d6003f45331d06054ae5d282082e17465afd4fe2a5e38c644166",
+      "path": "gateway/research_lab/dev_eval_runner.py",
+      "symbol": "DockerReplayDevEvaluator._run_icp_in_docker_default"
     },
     {
       "ast_sha256": "sha256:4a20c974029ac8af0a9e91a4d46cc34c6a9e1955de925e159c42af5505837ab5",
@@ -952,6 +1002,11 @@
       "symbol": "ResearchLabGatewayScoringWorker._run_owned_provider_preflight"
     },
     {
+      "ast_sha256": "sha256:7e4e840730c3584c20186cc794382fc2a59cbcf6a7726cbb45b2c90890bdc0a1",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_baseline_failure_completed_icp_count"
+    },
+    {
       "ast_sha256": "sha256:176e37cb8da35e73b9a367c7e058816ab42064e399a00ccabfec52094342d4aa",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "_baseline_preflight_monotonic"
@@ -970,6 +1025,11 @@
       "ast_sha256": "sha256:e37d0b5c790750466ca3b487e220667bfc7d70b1d1db5a2fa175e4a0f11219ca",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "_baseline_worker_index_for_attempt"
+    },
+    {
+      "ast_sha256": "sha256:813195cfbecf33be9ceafa7f5132948aa2e3dbf9cc39852bb0caaff3e27b6442",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_benchmark_item_ref_for_progress"
     },
     {
       "ast_sha256": "sha256:b449015b5412ce9590a2ccb9bd1265e58716339ac3325fd95064305f2d248ee2",
@@ -1020,6 +1080,16 @@
       "ast_sha256": "sha256:6a48b3ee755dc3d2176e5833334ee517f528752c0c83b5e3d4935a2d06347a86",
       "path": "gateway/research_lab/source_add_provenance.py",
       "symbol": "sanitize_source_add_precheck_doc"
+    },
+    {
+      "ast_sha256": "sha256:fa20efb6471afccacdc38b90ed3080510c583dda634023cfd301e891ef9e24f4",
+      "path": "gateway/research_lab/source_add_trial_runner.py",
+      "symbol": "_remove_interrupted_source_add_container"
+    },
+    {
+      "ast_sha256": "sha256:39f5a8bef5bafbc870ee790c858257c2f117b9a0f9656309dbdc97f5546aed1c",
+      "path": "gateway/research_lab/source_add_trial_runner.py",
+      "symbol": "build_source_add_sandbox_runner"
     },
     {
       "ast_sha256": "sha256:eb58f58a3cff3bd9f0503ce0fd0150e46766dfd3d5da2fbfe6055156b34d953f",
@@ -2432,6 +2502,41 @@
       "symbol": "wait_for_confirmation"
     },
     {
+      "ast_sha256": "sha256:d9366b344af8f090604e2081ef2167e8b48aea9a333c8a49b4f73d2911f8dd9e",
+      "path": "gateway/utils/pcr0_builder.py",
+      "symbol": "DOCKER_OPERATION_ADMISSION_LOCK_FILE_ENV"
+    },
+    {
+      "ast_sha256": "sha256:d9ffa23e9027a0a8a0f37583cc6076d0c7481c5949cac02d526e7e92d16ed610",
+      "path": "gateway/utils/pcr0_builder.py",
+      "symbol": "DOCKER_OPERATION_LOCK_FILE"
+    },
+    {
+      "ast_sha256": "sha256:b962e6c96b82ee397746a8088a9e0d1bbd67c8e2cda8eaebf301a8517fb66180",
+      "path": "gateway/utils/pcr0_builder.py",
+      "symbol": "DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:6e91e053e0c4aa7f9be5470621fecb9f135995217e9ba08be00a22b38c21f639",
+      "path": "gateway/utils/pcr0_builder.py",
+      "symbol": "_communicate_build_process_to_completion"
+    },
+    {
+      "ast_sha256": "sha256:bf60e36be47748cb1081650cd56bdbb40def926cfd24adcebcd88208b2d94a29",
+      "path": "gateway/utils/pcr0_builder.py",
+      "symbol": "_docker_operation_admission_lock_file"
+    },
+    {
+      "ast_sha256": "sha256:e6cc1830904563437f36cccbd826bcac23b47e3e4b87aa8db1468ed6af07146b",
+      "path": "gateway/utils/pcr0_builder.py",
+      "symbol": "_docker_operation_lock_scope"
+    },
+    {
+      "ast_sha256": "sha256:9c65ed6e35d691cdb0777a1f6b10def2606a5a76d633edf5fc67b3adb8445cdf",
+      "path": "gateway/utils/pcr0_builder.py",
+      "symbol": "_run_sync_build_step_to_completion"
+    },
+    {
       "ast_sha256": "sha256:2f21930addb905d5ebac8d889a00c79d5dd9a8cbe332f074cf17e377e792aa41",
       "path": "gateway/utils/tee_egress_forwarder.py",
       "symbol": "TEEEgressForwarder"
@@ -3252,6 +3357,91 @@
       "symbol": "validate_code_edit_draft"
     },
     {
+      "ast_sha256": "sha256:e2ab8993885689eba460298cd4c7b5baf9eea6157ad9191c1897dedc01ce8c91",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "DEFAULT_DOCKER_DAEMON_READY_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:4b61c437d178087c26eeb9925a6a3e47d972dcaec5f77b2867ef7412f984300e",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "DEFAULT_DOCKER_OPERATION_LOCK_FILE"
+    },
+    {
+      "ast_sha256": "sha256:786e611067b6a14caf6a83c3e5b75d17c8b7a9e9e53da184bb78083f531dbbe4",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "DEFAULT_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:981ee6d289006157779f64b48fb2a72a2e8d1f3828b8003bbdafab82f155d048",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "DOCKER_DAEMON_READY_TIMEOUT_ENV"
+    },
+    {
+      "ast_sha256": "sha256:d9366b344af8f090604e2081ef2167e8b48aea9a333c8a49b4f73d2911f8dd9e",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "DOCKER_OPERATION_ADMISSION_LOCK_FILE_ENV"
+    },
+    {
+      "ast_sha256": "sha256:2e74c1cc1322242c15824421822da0bc45c0da86d81bba069851ad8f90aa29ef",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "DOCKER_OPERATION_LOCK_FILE_ENV"
+    },
+    {
+      "ast_sha256": "sha256:e0dc5ef4e979f4ce0d82c060c15e9a455c8e643bafaa2a7a9d9ebca79b748f59",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "DOCKER_OPERATION_LOCK_TIMEOUT_ENV"
+    },
+    {
+      "ast_sha256": "sha256:b2c12665a5917038cd662bc8bb4de76aa8ef5a0d3dd8ea1ce9a5e823985ae982",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "DockerOperationLockError"
+    },
+    {
+      "ast_sha256": "sha256:f4e641aeab34575b7098179d78c7472254a540b2fab2a041f251003b01f12f87",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "_acquire_file_lock_until"
+    },
+    {
+      "ast_sha256": "sha256:25583d2c2e37f50514dacdc616dab3c60a049e13c42f16c8b8afa3d4f2637372",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "_bounded_deadline"
+    },
+    {
+      "ast_sha256": "sha256:a03ab90af336206c95a7305674869cae2dd9d3f9d01b50f90bc5a5eee10fcdb7",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "_docker_ready_environment"
+    },
+    {
+      "ast_sha256": "sha256:20bab2f5934ead23b1c8104afc9b6dae34d03200da1d6a95e7670b19f578ad53",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "_positive_integer_environment"
+    },
+    {
+      "ast_sha256": "sha256:149bf45e9a07ec542e9bc970bbf8247a548ae253d024329b3b3a37ac6583c092",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "docker_operation_admission_lock_path"
+    },
+    {
+      "ast_sha256": "sha256:9c2670ae4fe72410d5fd034eabf74a1ff039d863cf8aea20cd933528205212ef",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "docker_operation_lock_path"
+    },
+    {
+      "ast_sha256": "sha256:a0e3057c136845054c3482d5b3c686da5de32b4182baeae97936938453675039",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "shared_docker_operation_lock"
+    },
+    {
+      "ast_sha256": "sha256:db44198e9b858ee32036e35b4e095a0bbbf3023cf12239342d78eebd267e70bb",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "shared_docker_operation_source_paths"
+    },
+    {
+      "ast_sha256": "sha256:a2c73bfc9e7749a246fe835bb371ce25d4b9e0eef0536031279eab590a36eeff",
+      "path": "research_lab/docker_operation_lock_v2.py",
+      "symbol": "wait_for_docker_daemon_ready"
+    },
+    {
       "ast_sha256": "sha256:fe8f080d5ba3fbaa33517de4eb0142928e21bb860fc1750c531196718df1521e",
       "path": "research_lab/employee_buckets.py",
       "symbol": "LINKEDIN_EMPLOYEE_BUCKETS"
@@ -3377,6 +3567,16 @@
       "symbol": "score_private_model_pair_items"
     },
     {
+      "ast_sha256": "sha256:0895f96accd1152bee5c36bd94a086f3d8619d3ac1a603f919b9d7740afecb35",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "DockerPrivateModelRunner._pull_image"
+    },
+    {
+      "ast_sha256": "sha256:361c49eb00fb6695a49aeb81ca7c6eaa6bc7bbcdb7eca1f2c73459ff5a6f36e3",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "DockerPrivateModelRunner._run_json"
+    },
+    {
       "ast_sha256": "sha256:48946b3e3ad9bdcd86fafe88ac5b06c70c423f9f53532f1b04730ce0d2090eda",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "EXPECTED_ROUTING_COMPILER_VERSION"
@@ -3392,6 +3592,16 @@
       "symbol": "_REVIEWED_CONSUMER_MANIFEST_PAIRS"
     },
     {
+      "ast_sha256": "sha256:c191686558d7a166ce1fc1674b769d73d63c97be2c94240221878e884ec48d61",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_docker_lifecycle_remaining_seconds"
+    },
+    {
+      "ast_sha256": "sha256:b7b646e3b42ab71543f8d61de82858ec4ec043bc215c58d6c6f0becea8b3f17f",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_docker_private_model_lifecycle"
+    },
+    {
       "ast_sha256": "sha256:b3865748f3d116eed4679d5f715f8029db9e0732d65a5372e003f8204d6b5e36",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_private_manifest_hash_payload"
@@ -3405,6 +3615,11 @@
       "ast_sha256": "sha256:a64698301ae510d05b808d2d081264b58f89b61d662ca5bf0bca3dee902f5d42",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_raise_on_empty_provider_error"
+    },
+    {
+      "ast_sha256": "sha256:59c7bb6a7068dd39d57998934af1bf53362d5424375779fd963bc2a3ca4461ec",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_remove_private_model_container"
     },
     {
       "ast_sha256": "sha256:df1eb782f4c7cb25ffcca337dd898d2c0c3c43c87aa88590b040388889bdb707",
@@ -3570,9 +3785,34 @@
       "ast_sha256": "sha256:e45535d006aa839564ca448535fad6245a1eb521e37ca83e5a59212db5e1d45a",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "verify_source_tree_contract"
+    },
+    {
+      "ast_sha256": "sha256:b06242a59a4651527b92835d362724527107d24a5b0aa97d5c16f75787987bcf",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_run_named_docker"
+    },
+    {
+      "ast_sha256": "sha256:fe6e11699b3f43121cbf0153a9ccdecaad6e02f7320e9fbc700d1cd3f90cd7cd",
+      "path": "validator_tee/host/docker_operation_guard_v2.py",
+      "symbol": "_EXACT_HOST_GATEWAY_ARGS"
+    },
+    {
+      "ast_sha256": "sha256:f4eb36660157b3899065d7091197b9298279ada62bb5904786cbde11b4ddbdee",
+      "path": "validator_tee/host/docker_operation_guard_v2.py",
+      "symbol": "_HOST_GATEWAY_PYTHON_COMMAND"
+    },
+    {
+      "ast_sha256": "sha256:c428e2fe478d88754d6e927455e9295ecc5e8b1a468b10b8c0a1ada3c7ac7a60",
+      "path": "validator_tee/host/docker_operation_guard_v2.py",
+      "symbol": "_MAX_HOST_GATEWAY_CMDLINE_BYTES"
+    },
+    {
+      "ast_sha256": "sha256:18c96a1a61ea1419900128e0f9bd04186ee55a252e69b1d075f5cc1fa9ff9b8e",
+      "path": "validator_tee/host/docker_operation_guard_v2.py",
+      "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:e26ce7c3b09d2dd6151e0bff961a652bc45629061852ec2f363255a6e6909dbe",
-  "protected_source_commit": "86bb729cda7a0904b7151c5c2cc4b6d7dd364248",
+  "manifest_hash": "sha256:bdb2822ca07e8a3b0d51e93e8eb7603d8ee237a2e1f6dc14b8c8bf10b6fb9eb4",
+  "protected_source_commit": "34913f318324fb9b26809c90ddd8244e5b75ef9e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

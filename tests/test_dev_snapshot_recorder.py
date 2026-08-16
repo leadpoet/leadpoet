@@ -138,15 +138,24 @@ def test_snapshot_runtime_context_finishes_before_host_timeout():
     assert options["runtime_cap_seconds"] <= 300 - 30
 
 
-def test_named_docker_is_removed_when_host_run_is_interrupted(monkeypatch):
+def test_named_docker_is_removed_when_host_run_is_interrupted(
+    monkeypatch,
+    tmp_path,
+):
     calls = []
 
     def run(command, **kwargs):
+        if list(command)[-1:] == ["info"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         calls.append((list(command), dict(kwargs)))
         if len(calls) == 1:
             raise subprocess.TimeoutExpired(command, timeout=5)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        str(tmp_path / "docker-operation.lock"),
+    )
     monkeypatch.setattr(recorder.subprocess, "run", run)
 
     try:

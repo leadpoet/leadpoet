@@ -37,13 +37,19 @@ from research_lab.eval.provider_costs import (
 )
 
 
-def _docker_cost_scope_for_seed(monkeypatch, evaluation_scope: str) -> str:
+def _docker_cost_scope_for_seed(monkeypatch, tmp_path, evaluation_scope: str) -> str:
     captured_commands: list[list[str]] = []
 
     def fake_run(command, **kwargs):  # noqa: ANN001
+        if list(command)[-1:] == ["info"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         captured_commands.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
 
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        str(tmp_path / "docker-operation.lock"),
+    )
     monkeypatch.setattr(subprocess, "run", fake_run)
     image_digest = "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "a" * 64
     runner = DockerPrivateModelRunner(
@@ -80,9 +86,13 @@ def _docker_cost_scope_for_seed(monkeypatch, evaluation_scope: str) -> str:
     return scope_args[0]
 
 
-def test_docker_provider_cost_scope_includes_evaluation_scope(monkeypatch):
-    first = _docker_cost_scope_for_seed(monkeypatch, "sha256:" + "1" * 64)
-    second = _docker_cost_scope_for_seed(monkeypatch, "sha256:" + "2" * 64)
+def test_docker_provider_cost_scope_includes_evaluation_scope(monkeypatch, tmp_path):
+    first = _docker_cost_scope_for_seed(
+        monkeypatch, tmp_path, "sha256:" + "1" * 64
+    )
+    second = _docker_cost_scope_for_seed(
+        monkeypatch, tmp_path, "sha256:" + "2" * 64
+    )
 
     assert first != second
 

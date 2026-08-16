@@ -92,17 +92,37 @@ PCR0_STARTUP_HISTORICAL_WARM_ENABLED = os.environ.get(
     "true",
 ).lower() in {"1", "true", "yes", "y", "on"}
 
-DOCKER_OPERATION_LOCK_FILE = os.path.expanduser(
-    os.environ.get(
-        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
-        "/home/ec2-user/.config/leadpoet/docker-operation-v2.lock",
+DOCKER_OPERATION_LOCK_FILE = os.path.realpath(
+    os.path.expanduser(
+        os.environ.get(
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+            "/home/ec2-user/.config/leadpoet/docker-operation-v2.lock",
+        )
     )
+)
+DOCKER_OPERATION_ADMISSION_LOCK_FILE_ENV = (
+    "LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE"
 )
 DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS = max(
     1,
     int(os.environ.get("LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS", "3600")),
 )
 DOCKER_OPERATION_LOCK_POLL_SECONDS = 0.25
+
+
+def _docker_operation_admission_lock_file() -> str:
+    configured = str(
+        os.environ.get(DOCKER_OPERATION_ADMISSION_LOCK_FILE_ENV, "") or ""
+    ).strip()
+    resource_path = os.path.realpath(DOCKER_OPERATION_LOCK_FILE)
+    path = os.path.realpath(
+        os.path.expanduser(configured or f"{resource_path}.admission")
+    )
+    if path == resource_path:
+        raise RuntimeError(
+            "Docker operation admission and resource locks must differ"
+        )
+    return path
 
 # NOTE: No TTL needed with pinned Dockerfile!
 # With pinned base image + pinned pip versions, builds are DETERMINISTIC.
@@ -235,21 +255,53 @@ _build_in_progress = False
 async def _docker_operation_lock_scope():
     """Coordinate background PCR0 builds with release and restart Docker work."""
 
-    parent = os.path.dirname(DOCKER_OPERATION_LOCK_FILE) or "."
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-    os.chmod(parent, 0o700)
-    fd = os.open(
-        DOCKER_OPERATION_LOCK_FILE,
+    admission_lock_file = _docker_operation_admission_lock_file()
+    resource_lock_file = os.path.realpath(DOCKER_OPERATION_LOCK_FILE)
+    for lock_file in (admission_lock_file, resource_lock_file):
+        parent = os.path.dirname(lock_file) or "."
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        os.chmod(parent, 0o700)
+    admission_fd = os.open(
+        admission_lock_file,
         os.O_CREAT | os.O_RDWR,
         0o600,
     )
-    os.chmod(DOCKER_OPERATION_LOCK_FILE, 0o600)
+    os.chmod(admission_lock_file, 0o600)
+    fd = os.open(
+        resource_lock_file,
+        os.O_CREAT | os.O_RDWR,
+        0o600,
+    )
+    os.chmod(resource_lock_file, 0o600)
+    admission_acquired = False
     acquired = False
     deadline = time.monotonic() + DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS
     try:
         logger.info(
+            "[PCR0] Waiting for exclusive Docker maintenance admission: %s",
+            admission_lock_file,
+        )
+        while True:
+            try:
+                fcntl.flock(
+                    admission_fd,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+                admission_acquired = True
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "timed out waiting for exclusive Docker "
+                        "maintenance admission"
+                    )
+                await asyncio.sleep(
+                    min(DOCKER_OPERATION_LOCK_POLL_SECONDS, remaining)
+                )
+        logger.info(
             "[PCR0] Waiting for exclusive Docker build/maintenance access: %s",
-            DOCKER_OPERATION_LOCK_FILE,
+            resource_lock_file,
         )
         while True:
             try:
@@ -272,7 +324,10 @@ async def _docker_operation_lock_scope():
         if acquired:
             fcntl.flock(fd, fcntl.LOCK_UN)
             logger.info("[PCR0] Exclusive Docker build/maintenance access released")
+        if admission_acquired:
+            fcntl.flock(admission_fd, fcntl.LOCK_UN)
         os.close(fd)
+        os.close(admission_fd)
 
 
 async def _run_sync_build_step_to_completion(function, *args):

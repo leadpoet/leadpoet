@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,7 +80,150 @@ class _Runner:
         return _Runner(worker_index)
 
 
+def _append_collision_event(path: Path, event: str) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(event + "\n")
+        handle.flush()
+
+
+def _run_exact_docker_source_extraction(exact_root: Path) -> int:
+    """Exercise archived model-authority source extraction at Docker only."""
+
+    _install_exact_root(exact_root)
+    context = json.loads(sys.stdin.read())
+    if not isinstance(context, Mapping):
+        raise RuntimeError("exact N-1 Docker extraction context is invalid")
+
+    from gateway.research_lab import code_build as code_build_module
+    from gateway.research_lab import model_authority_v2 as authority_module
+    from gateway.research_lab.code_build import CodeEditBuildError
+    from gateway.tee.source_bundle_v2 import compute_private_source_tree_hash
+
+    image_digest = str(context["image_digest"])
+    event_path = Path(str(context["event_path"]))
+    host_detect_path = Path(str(context["host_detect_path"]))
+    collision_timeout_seconds = float(context["collision_timeout_seconds"])
+    strict_commands: list[list[str]] = []
+    container_id = "strict-exact-n-minus-one-container"
+    reader_started = False
+
+    with tempfile.TemporaryDirectory(prefix="exact-n-minus-one-docker-source-") as raw:
+        fixture_root = Path(raw) / "fixture"
+        fixture_root.mkdir()
+        required_dirs = tuple(code_build_module._REQUIRED_PARENT_APP_DIRS)
+        required_files = tuple(code_build_module._REQUIRED_PARENT_APP_FILES)
+        for relative in required_dirs:
+            directory = fixture_root / relative
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "rehearsal_source.py").write_text(
+                f"SOURCE_PATH = {relative!r}\n",
+                encoding="utf-8",
+            )
+        for relative in required_files:
+            target = fixture_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                f"exact N-1 source fixture: {relative}\n",
+                encoding="utf-8",
+            )
+        expected_tree_hash = compute_private_source_tree_hash(fixture_root)
+
+        def strict_run(command: list[str], *, cwd: Path, timeout_seconds: int) -> str:
+            nonlocal reader_started
+            del cwd, timeout_seconds
+            normalized = [str(value) for value in command]
+            if not normalized or normalized[0] != "docker":
+                raise RuntimeError(
+                    "exact N-1 source extraction crossed a non-Docker boundary"
+                )
+            strict_commands.append(normalized)
+            if normalized[1:3] == ["image", "inspect"]:
+                if normalized[3:] != [image_digest]:
+                    raise RuntimeError("exact N-1 inspected another image")
+                if not reader_started:
+                    reader_started = True
+                    _append_collision_event(event_path, "n_minus_reader_started")
+                    deadline = time.monotonic() + collision_timeout_seconds
+                    while not host_detect_path.exists():
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(
+                                "candidate host-live detection did not overlap "
+                                "the exact N-1 reader"
+                            )
+                        time.sleep(
+                            min(
+                                0.02,
+                                max(0.001, collision_timeout_seconds / 100.0),
+                            )
+                        )
+                raise CodeEditBuildError("strict cold image cache")
+            if normalized[1] == "pull":
+                if normalized[-1] != image_digest:
+                    raise RuntimeError("exact N-1 pulled another image")
+                return "strict pull complete"
+            if normalized[1] == "create":
+                if image_digest not in normalized:
+                    raise RuntimeError("exact N-1 created from another image")
+                return container_id
+            if normalized[1] == "cp":
+                if normalized[2] != f"{container_id}:/app/.":
+                    raise RuntimeError("exact N-1 copied another container path")
+                destination = Path(normalized[3])
+                shutil.copytree(fixture_root, destination, dirs_exist_ok=True)
+                return "strict copy complete"
+            if normalized[1:3] == ["rm", "-f"]:
+                if normalized[3:] != [container_id]:
+                    raise RuntimeError("exact N-1 cleaned another container")
+                return "strict cleanup complete"
+            raise RuntimeError(
+                "exact N-1 source extraction issued an unknown Docker command"
+            )
+
+        artifact = SimpleNamespace(
+            model_artifact_hash=expected_tree_hash,
+            image_digest=image_digest,
+        )
+        with authority_module._SOURCE_BUNDLE_CACHE_LOCK:
+            authority_module._SOURCE_BUNDLE_CACHE.clear()
+            authority_module._SOURCE_BUNDLE_BUILD_LOCKS.clear()
+        with patch.object(code_build_module, "_run", strict_run):
+            bundle = authority_module._source_bundle_for_artifact(
+                artifact,
+                timeout_seconds=int(context["timeout_seconds"]),
+            )
+        if bundle.get("source_tree_hash") != expected_tree_hash:
+            raise RuntimeError("exact N-1 source bundle changed its tree identity")
+        observed_operations = [" ".join(command[1:3]) for command in strict_commands]
+        expected_operations = [
+            "image inspect",
+            "pull --platform",
+            "create --platform",
+            "cp " + f"{container_id}:/app/.",
+            "rm -f",
+        ]
+        if observed_operations != expected_operations:
+            raise RuntimeError("exact N-1 Docker extraction command order differs")
+        _append_collision_event(event_path, "n_minus_source_extracted")
+
+    result = {
+        "source_tree_hash": expected_tree_hash,
+        "source_bundle_hash": str(bundle["archive_sha256"]),
+        "strict_docker_commands": strict_commands,
+        "exact_model_authority_module": str(
+            Path(authority_module.__file__).resolve().relative_to(exact_root)
+        ),
+        "exact_code_build_module": str(
+            Path(code_build_module.__file__).resolve().relative_to(exact_root)
+        ),
+        "strict_docker_boundary_executed": True,
+    }
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--docker-source-extraction":
+        return _run_exact_docker_source_extraction(Path(sys.argv[2]).resolve())
     if len(sys.argv) != 2:
         raise RuntimeError("exact N-1 root argument is required")
     exact_root = Path(sys.argv[1]).resolve()
@@ -95,7 +239,6 @@ def main() -> int:
     from gateway.research_lab.config import ResearchLabGatewayConfig
     from gateway.research_lab import scoring_worker as scoring_worker_module
     from gateway.research_lab.scoring_worker import (
-        BaselineCheckpointRecycle,
         ResearchLabGatewayScoringWorker,
         _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD,
         _BASELINE_WAVE_STALL_EXIT_CODE,
@@ -165,7 +308,7 @@ def main() -> int:
     if not 0 < first_pass_success_count < total_icps:
         raise RuntimeError("exact N-1 skew is invalid")
     retryable_indexes = set(range(first_pass_success_count + 1, total_icps + 1))
-    if retry_rounds < 1 or len(retryable_indexes) <= retry_width:
+    if retry_rounds < 1 or retry_width < 2 or len(retryable_indexes) <= retry_width:
         raise RuntimeError("exact N-1 cannot settle a partial retry wave")
 
     signing_key = Ed25519PrivateKey.generate()
@@ -331,23 +474,49 @@ def main() -> int:
         raise RuntimeError("exact N-1 per-ICP scoring path differs")
 
     clock = {"value": preflight_ttl_seconds / 2.0}
-    retry_completions = 0
     active_by_round: dict[int, int] = {}
     maximum_active_by_round: dict[int, int] = {}
-    attempt_calls: list[tuple[int, int]] = []
+    started_attempt_calls: list[tuple[int, int]] = []
+    completed_attempt_calls: list[tuple[int, int]] = []
+    settled_attempt_calls: list[tuple[int, int]] = []
+    retry_peers = sorted(retryable_indexes)[:2]
+    checkpointed_peer_call = (retry_peers[0], 1)
+    interrupted_peer_call = (retry_peers[1], 1)
+    peer_checkpointed = None
+    peer_interrupted = None
+
+    class ExactPeerInterrupted(RuntimeError):
+        pass
+
+    class ExactPeerWaveAborted(RuntimeError):
+        pass
 
     class ExactNMinusOneWorker(ResearchLabGatewayScoringWorker):
         async def _run_baseline_icp(
             self, *, item_index: int, retry_round: int, **_kwargs: Any
         ) -> dict[str, Any]:
-            nonlocal retry_completions
+            nonlocal peer_checkpointed, peer_interrupted
             active_by_round[retry_round] = active_by_round.get(retry_round, 0) + 1
             maximum_active_by_round[retry_round] = max(
                 maximum_active_by_round.get(retry_round, 0),
                 active_by_round[retry_round],
             )
+            call = (item_index, retry_round)
+            started_attempt_calls.append(call)
             try:
                 await asyncio.sleep(0)
+                if retry_round == 1:
+                    if peer_checkpointed is None:
+                        peer_checkpointed = asyncio.Event()
+                        peer_interrupted = asyncio.Event()
+                    if call == interrupted_peer_call:
+                        await peer_checkpointed.wait()
+                    elif call != checkpointed_peer_call:
+                        assert peer_interrupted is not None
+                        await peer_interrupted.wait()
+                        raise ExactPeerWaveAborted(
+                            "exact N-1 retry peer cancelled after fleet interruption"
+                        )
                 retryable = (
                     item_index in retryable_indexes and retry_round < retry_rounds
                 )
@@ -356,7 +525,7 @@ def main() -> int:
                     retry_round=retry_round,
                     terminal=not retryable,
                 )
-                attempt_calls.append((item_index, retry_round))
+                completed_attempt_calls.append(call)
                 row = {
                     "icp_ref": str(items[item_index - 1]["icp_ref"]),
                     "icp_hash": str(items[item_index - 1].get("icp_hash") or ""),
@@ -379,11 +548,6 @@ def main() -> int:
                     "_retry_round": retry_round,
                     _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: roots,
                 }
-                if retry_round == 1:
-                    retry_completions += 1
-                    if retry_completions == retry_width:
-                        ttl = preflight_ttl_seconds
-                        clock["value"] = ttl + max(1.0, ttl / max(1, total_icps))
                 return row
             finally:
                 active_by_round[retry_round] -= 1
@@ -394,6 +558,16 @@ def main() -> int:
     parent_roots: set[str] = set()
 
     async def checkpoint_attempt(row: Mapping[str, Any], *, retry_round: int) -> bool:
+        call = (int(row["_item_index"]), retry_round)
+        if call == interrupted_peer_call:
+            for root in row.get(_BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD, ()):
+                receipt_graphs.pop(str(root), None)
+            if peer_interrupted is None:
+                raise RuntimeError("exact N-1 peer interrupt event is unavailable")
+            peer_interrupted.set()
+            raise ExactPeerInterrupted(
+                "exact N-1 stopped after one peer checkpoint and one late reader"
+            )
         attempt_ledger.append(
             _baseline_attempt_ledger_entry(
                 row,
@@ -423,6 +597,11 @@ def main() -> int:
                 provider_cost_base_scope_hash=str(context["provider_cost_scope_hash"]),
                 scoring_contract_hash_value=str(context["scoring_contract_hash"]),
             )
+        settled_attempt_calls.append(call)
+        if call == checkpointed_peer_call:
+            if peer_checkpointed is None:
+                raise RuntimeError("exact N-1 peer checkpoint event is unavailable")
+            peer_checkpointed.set()
         return True
 
     async def unpaused() -> dict[str, Any]:
@@ -467,12 +646,22 @@ def main() -> int:
                     ),
                 )
             )
-        except BaselineCheckpointRecycle as exc:
-            stale_recycle = dict(exc.pressure)
+        except ExactPeerInterrupted as exc:
+            peer_interruption = {
+                "reason": "peer_interrupted_after_checkpoint",
+                "error": str(exc),
+                "checkpointed_peer_call": list(checkpointed_peer_call),
+                "interrupted_peer_call": list(interrupted_peer_call),
+            }
         else:
-            raise RuntimeError("exact N-1 did not stop at its stale proof boundary")
-    if stale_recycle.get("reason") != "provider_preflight_refresh_required":
-        raise RuntimeError("exact N-1 stopped for the wrong reason")
+            raise RuntimeError("exact N-1 did not stop at its peer interruption")
+    if (
+        peer_interruption.get("reason") != "peer_interrupted_after_checkpoint"
+        or checkpointed_peer_call not in settled_attempt_calls
+        or interrupted_peer_call in settled_attempt_calls
+        or interrupted_peer_call not in completed_attempt_calls
+    ):
+        raise RuntimeError("exact N-1 peer interruption boundary differs")
 
     checkpoint_location = (
         str(context["checkpoint_bucket"]),
@@ -723,10 +912,14 @@ with module._baseline_wave_watchdog(
             checkpoint_document["attested_parent_receipt_hashes"]
         ),
         "receipt_graphs": list(receipt_graphs.values()),
-        "attempt_calls": attempt_calls,
+        "attempt_calls": settled_attempt_calls,
+        "started_attempt_calls": started_attempt_calls,
+        "completed_attempt_calls": completed_attempt_calls,
+        "checkpointed_peer_call": list(checkpointed_peer_call),
+        "interrupted_peer_call": list(interrupted_peer_call),
+        "peer_interruption": peer_interruption,
         "maximum_active_by_round": maximum_active_by_round,
         "checkpoint_write_count": checkpoint_s3.put_count,
-        "stale_recycle": stale_recycle,
         "envelope_scoring_worker_count": expected_scoring_workers,
         "envelope_hosted_worker_count": int(envelope_report["hosted_worker_count"]),
         "sealed_scoring_profile_count": int(

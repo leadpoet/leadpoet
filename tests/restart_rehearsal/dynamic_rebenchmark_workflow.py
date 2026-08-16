@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import lru_cache
 import hashlib
 import os
 from pathlib import Path
@@ -47,17 +48,49 @@ _REBENCHMARK_LAUNCH_ENV_PREFIXES = (
     "RESEARCH_LAB_SCORING_WORKER_PROXY_",
 )
 TRANSITION_SOURCE_PATHS = (
+    "gw_restart.sh",
+    "gateway/research_lab/code_build.py",
     "gateway/research_lab/config.py",
+    "gateway/research_lab/dev_eval_runner.py",
+    "gateway/research_lab/model_authority_v2.py",
     "gateway/research_lab/provider_preflight.py",
     "gateway/research_lab/scoring_worker.py",
+    "gateway/research_lab/source_add_trial_runner.py",
     "gateway/research_lab/worker_autostart.py",
     "gateway/research_lab/worker_process.py",
     "gateway/tee/prepare_gateway_envelopes_v2.py",
+    "gateway/tee/protected_workflows.json",
+    "gateway/tee/protected_workflows.py",
     "gateway/tee/scoring_executor.py",
     "gateway/tee/topology.json",
+    "research_lab/eval/private_runtime.py",
+    "scripts/record_research_lab_dev_snapshots.py",
     "scripts/run_research_lab_scoring_worker.py",
     "scripts/run_research_lab_scoring_worker_fleet.py",
+    "validator_tee/host/docker_operation_guard_v2.py",
+    "validator_tee/scripts/docker_operation_lock_v2.sh",
+    "validator_tee/scripts/reclaim_docker_storage_v2.sh",
 )
+
+
+def transition_source_paths_by_commit(
+    *, from_sha: str, candidate_sha: str
+) -> dict[str, tuple[str, ...]]:
+    """Return the release-specific exact source inventory for this transition."""
+
+    from research_lab.docker_operation_lock_v2 import (
+        shared_docker_operation_source_paths,
+    )
+
+    candidate_paths = tuple(
+        dict.fromkeys(
+            (*TRANSITION_SOURCE_PATHS, *shared_docker_operation_source_paths())
+        )
+    )
+    return {
+        str(from_sha): tuple(TRANSITION_SOURCE_PATHS),
+        str(candidate_sha): candidate_paths,
+    }
 
 
 def rebenchmark_launch_environment() -> dict[str, str]:
@@ -117,17 +150,26 @@ def patched_rebenchmark_launch_environment(
                 os.environ.pop(name, None)
 
 
-def git_blob_identity(source_root: Path, commit_sha: str, path: str) -> dict[str, str]:
+@lru_cache(maxsize=1024)
+def _git_blob_sha256(source_root: str, commit_sha: str, path: str) -> str:
     completed = subprocess.run(
         ["git", "show", f"{commit_sha}:{path}"],
         cwd=source_root,
         check=True,
         capture_output=True,
     )
+    return hashlib.sha256(completed.stdout).hexdigest()
+
+
+def git_blob_identity(source_root: Path, commit_sha: str, path: str) -> dict[str, str]:
     return {
         "path": path,
         "commit_sha": commit_sha,
-        "sha256": hashlib.sha256(completed.stdout).hexdigest(),
+        "sha256": _git_blob_sha256(
+            str(source_root.resolve()),
+            str(commit_sha),
+            str(path),
+        ),
     }
 
 

@@ -317,7 +317,7 @@ class TestParentImagePrepull:
         )
 
     def test_build_prepulls_before_the_build_command(self):
-        """The pre-pull call sits inside build() BEFORE the private build cmd."""
+        """Pre-pull and build share one lock, in that exact order."""
         tree = ast.parse(CODE_BUILD_SOURCE.read_text())
         build_fn = next(
             node
@@ -325,10 +325,24 @@ class TestParentImagePrepull:
             if isinstance(node, ast.FunctionDef)
             and node.name == "_build_under_deadline"
         )
+        locked_build_fn = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_run_private_build_under_docker_operation_lock"
+        )
+        assert any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id
+            == "_run_private_build_under_docker_operation_lock"
+            for node in ast.walk(build_fn)
+        )
         call_linenos: dict[str, int] = {}
-        for node in ast.walk(build_fn):
+        for node in ast.walk(locked_build_fn):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 call_linenos.setdefault(node.func.id, node.lineno)
+        assert "_docker_operation_lock_scope" in call_linenos
         assert "_prepull_parent_image_for_build" in call_linenos
         assert "_run_private_build_cmd_with_infra_retry" in call_linenos
         assert (

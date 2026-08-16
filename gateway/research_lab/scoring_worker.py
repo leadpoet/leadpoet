@@ -1920,6 +1920,23 @@ def _completed_icp_count_from_progress_doc(doc: Mapping[str, Any] | None) -> int
     return len(rows) if isinstance(rows, list) else 0
 
 
+def _baseline_failure_completed_icp_count(
+    *,
+    checkpoint_rows: Sequence[Mapping[str, Any]],
+    checkpoint_authority_exists: bool,
+) -> int:
+    """Report only unique terminal rows known to be durably checkpointed."""
+
+    if not checkpoint_authority_exists:
+        return 0
+    refs = {
+        _benchmark_item_ref_for_progress(row)
+        for row in checkpoint_rows
+        if _benchmark_item_ref_for_progress(row)
+    }
+    return len(refs)
+
+
 def _safe_scoring_progress_summary(
     *,
     source: str,
@@ -13113,6 +13130,7 @@ class ResearchLabGatewayScoringWorker:
         retried_total = 0
         recovered_total = 0
         baseline_progress_rows: list[dict[str, Any]] = []
+        baseline_durable_progress_rows: list[dict[str, Any]] = []
         baseline_progress_location = (
             _baseline_progress_s3_location(
                 artifact.manifest_uri,
@@ -13181,6 +13199,7 @@ class ResearchLabGatewayScoringWorker:
                 ),
                 benchmark_items=window.benchmark_items,
             )
+            baseline_durable_progress_rows[:] = list(baseline_progress_rows)
             if len(baseline_progress_retry_budget_extensions) > 1:
                 raise RuntimeError(
                     "baseline checkpoint retry-budget extension is ambiguous"
@@ -13426,6 +13445,9 @@ class ResearchLabGatewayScoringWorker:
                     scoring_contract_hash_value=(
                         baseline_progress_scoring_contract_hash
                     ),
+                )
+                baseline_durable_progress_rows[:] = list(
+                    baseline_progress_rows
                 )
             _record_private_baseline_stage(
                 worker_ref=self.worker_ref,
@@ -14031,6 +14053,7 @@ class ResearchLabGatewayScoringWorker:
                         manifest_hash=str(artifact.manifest_hash or ""),
                     )
                     baseline_progress_rows.clear()
+                    baseline_durable_progress_rows.clear()
                     logger.error(
                         "research_lab_baseline_progress_invalidated "
                         "reason=globally_all_zero benchmark_date=%s "
@@ -14399,6 +14422,15 @@ class ResearchLabGatewayScoringWorker:
         except Exception as exc:
             await _stop_baseline_telemetry_heartbeat()
             failure_policy = _baseline_computation_failure_policy(exc)
+            durable_completed_icp_count = (
+                _baseline_failure_completed_icp_count(
+                    checkpoint_rows=baseline_durable_progress_rows,
+                    checkpoint_authority_exists=(
+                        baseline_progress_location is not None
+                    ),
+                )
+            )
+            in_process_completed_icp_count = len(per_icp_summaries)
             _record_private_baseline_stage(
                 worker_ref=self.worker_ref,
                 stage=str(failure_policy["failure_phase"]),
@@ -14409,7 +14441,10 @@ class ResearchLabGatewayScoringWorker:
                 window_hash=window.window_hash,
                 manifest_hash=artifact.manifest_hash,
                 selected_icp_count=len(window.item_refs),
-                completed_icp_count=len(per_icp_summaries),
+                completed_icp_count=durable_completed_icp_count,
+                in_process_completed_icp_count=(
+                    in_process_completed_icp_count
+                ),
                 exception_class=type(exc).__name__,
                 reason_code="baseline_computation_failed",
                 terminal=bool(failure_policy["terminal_no_automatic_retry"]),
@@ -14440,6 +14475,10 @@ class ResearchLabGatewayScoringWorker:
                     "benchmark_date": today,
                     "benchmark_attempt": benchmark_attempt,
                     "selected_icp_count": len(window.item_refs),
+                    "completed_icp_count": durable_completed_icp_count,
+                    "in_process_completed_icp_count": (
+                        in_process_completed_icp_count
+                    ),
                     "private_model_manifest_hash": artifact.manifest_hash,
                     "failure_phase": failure_policy["failure_phase"],
                     "terminal_no_automatic_retry": failure_policy[
@@ -14486,6 +14525,10 @@ class ResearchLabGatewayScoringWorker:
                 "status": failure_policy["status"],
                 "benchmark_date": today,
                 "rolling_window_hash": window.window_hash,
+                "completed_icp_count": durable_completed_icp_count,
+                "in_process_completed_icp_count": (
+                    in_process_completed_icp_count
+                ),
                 "error": str(exc)[:300],
             }
         await _stop_baseline_telemetry_heartbeat()

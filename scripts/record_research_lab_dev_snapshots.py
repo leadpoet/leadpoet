@@ -64,6 +64,10 @@ from gateway.research_lab.config import (  # noqa: E402
     ResearchLabGitTreeConfigError,
 )
 from research_lab.eval.private_runtime import SECRET_MARKERS  # noqa: E402
+from research_lab.docker_operation_lock_v2 import (  # noqa: E402
+    DockerOperationLockError,
+    shared_docker_operation_lock,
+)
 from research_lab.eval.snapshot_store import (  # noqa: E402
     RECORDED_PROVIDER_MODELS_NAME,
     SNAPSHOT_MISS_SENTINEL,
@@ -171,26 +175,59 @@ def _run_named_docker(
 ) -> subprocess.CompletedProcess[str]:
     """Run one uniquely named container and remove it on interruption."""
 
+    deadline = time.monotonic() + max(1.0, float(timeout_seconds))
     try:
-        return subprocess.run(
-            command,
-            input=input_text,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            env=dict(environment),
-            check=False,
-        )
-    except BaseException:
-        subprocess.run(
-            [str(command[0]), "rm", "-f", container_name],
-            text=True,
-            capture_output=True,
-            timeout=30,
-            env={"PATH": os.environ.get("PATH", "")},
-            check=False,
-        )
-        raise
+        with shared_docker_operation_lock(
+            timeout_seconds=float(timeout_seconds),
+            docker_executable=str(command[0]),
+            environment=environment,
+            deadline_monotonic=deadline,
+        ):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DockerOperationLockError(
+                    "dev snapshot Docker lifecycle deadline was exhausted"
+                )
+            try:
+                return subprocess.run(
+                    command,
+                    input=input_text,
+                    text=True,
+                    capture_output=True,
+                    timeout=max(0.1, remaining),
+                    env=dict(environment),
+                    check=False,
+                )
+            except BaseException:
+                try:
+                    cleanup = subprocess.run(
+                        [str(command[0]), "rm", "-f", container_name],
+                        text=True,
+                        capture_output=True,
+                        timeout=30,
+                        env={"PATH": os.environ.get("PATH", "")},
+                        check=False,
+                    )
+                except (OSError, subprocess.SubprocessError) as cleanup_exc:
+                    print(
+                        "WARNING: interrupted dev snapshot Docker cleanup "
+                        f"failed for {container_name}: "
+                        f"{type(cleanup_exc).__name__}",
+                        file=sys.stderr,
+                    )
+                else:
+                    if cleanup.returncode != 0:
+                        print(
+                            "WARNING: interrupted dev snapshot Docker cleanup "
+                            f"failed for {container_name}: "
+                            f"exit={cleanup.returncode}",
+                            file=sys.stderr,
+                        )
+                raise
+    except DockerOperationLockError as exc:
+        raise RuntimeError(
+            f"dev snapshot Docker lifecycle unavailable: {exc}"
+        ) from exc
 
 
 def _record_icp_with_subprocess(

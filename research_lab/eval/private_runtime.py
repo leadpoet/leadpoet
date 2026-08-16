@@ -7,6 +7,7 @@ boundary and execute it through a small JSON contract.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import base64
 import contextvars
@@ -19,9 +20,15 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import Any, Mapping, Sequence
+import time
+import uuid
+from typing import Any, Iterator, Mapping, Sequence
 
 from research_lab.canonical import sha256_bytes, sha256_json
+from research_lab.docker_operation_lock_v2 import (
+    DockerOperationLockError,
+    shared_docker_operation_lock,
+)
 from research_lab.employee_buckets import (
     normalize_employee_count_bucket as _normalize_linkedin_employee_count_bucket,
     normalize_employee_count_buckets,
@@ -514,6 +521,70 @@ class DockerPrivateModelSpec:
         )
 
 
+def _docker_lifecycle_remaining_seconds(deadline_monotonic: float) -> float:
+    remaining = float(deadline_monotonic) - time.monotonic()
+    if remaining <= 0:
+        raise PrivateModelRuntimeError(
+            "docker private model lifecycle deadline was exhausted"
+        )
+    return max(0.1, remaining)
+
+
+def _remove_private_model_container(
+    spec: DockerPrivateModelSpec,
+    *,
+    container_name: str,
+) -> None:
+    """Best-effort bounded cleanup while shared lifecycle access is held."""
+
+    try:
+        completed = subprocess.run(
+            [spec.docker_executable, "rm", "-f", container_name],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            env=_build_docker_process_env(spec),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "docker_private_model_interrupted_cleanup_failed container=%s "
+            "error=%s",
+            container_name,
+            type(exc).__name__,
+        )
+        return
+    if completed.returncode != 0:
+        logger.warning(
+            "docker_private_model_interrupted_cleanup_nonzero container=%s "
+            "exit=%s",
+            container_name,
+            completed.returncode,
+        )
+
+
+@contextmanager
+def _docker_private_model_lifecycle(
+    spec: DockerPrivateModelSpec,
+) -> Iterator[float]:
+    """Exclude destructive maintenance for the whole pull/run/cleanup call."""
+
+    deadline = time.monotonic() + max(1.0, float(spec.timeout_seconds))
+    environment = _build_docker_process_env(spec)
+    try:
+        with shared_docker_operation_lock(
+            timeout_seconds=float(spec.timeout_seconds),
+            docker_executable=spec.docker_executable,
+            environment=environment,
+            deadline_monotonic=deadline,
+        ):
+            yield deadline
+    except DockerOperationLockError as exc:
+        raise PrivateModelRuntimeError(
+            f"docker private model lifecycle unavailable: {exc}"
+        ) from exc
+
+
 class DockerPrivateModelRunner:
     """Execute a private model adapter from an immutable ECR image digest."""
 
@@ -557,14 +628,15 @@ class DockerPrivateModelRunner:
         return validate_sourcing_adapter_metadata(decoded)
 
     def _pull_image(self) -> None:
-        completed = subprocess.run(
-            [self.spec.docker_executable, "pull", *_docker_platform_args(self.spec), self.spec.image_digest],
-            text=True,
-            capture_output=True,
-            timeout=self.spec.timeout_seconds,
-            env=_build_docker_process_env(self.spec),
-            check=False,
-        )
+        with _docker_private_model_lifecycle(self.spec) as deadline:
+            completed = subprocess.run(
+                [self.spec.docker_executable, "pull", *_docker_platform_args(self.spec), self.spec.image_digest],
+                text=True,
+                capture_output=True,
+                timeout=_docker_lifecycle_remaining_seconds(deadline),
+                env=_build_docker_process_env(self.spec),
+                check=False,
+            )
         if completed.returncode != 0:
             stderr = _sanitize_text(completed.stderr)[-1200:]
             raise PrivateModelRuntimeError(f"docker pull failed with code {completed.returncode}: {stderr}")
@@ -627,6 +699,8 @@ class DockerPrivateModelRunner:
             self.spec.docker_executable,
             "run",
             "--rm",
+            "--name",
+            "leadpoet-private-model-" + uuid.uuid4().hex,
             "-i",
             *_docker_platform_args(self.spec),
             *_docker_env_args(self.spec),
@@ -638,16 +712,25 @@ class DockerPrivateModelRunner:
             bootstrap,
             *argv,
         ]
+        container_name = command[command.index("--name") + 1]
         try:
-            completed = subprocess.run(
-                command,
-                input=json.dumps(stdin_payload, separators=(",", ":"), sort_keys=True),
-                text=True,
-                capture_output=True,
-                timeout=self.spec.timeout_seconds,
-                env=_build_docker_process_env(self.spec),
-                check=False,
-            )
+            with _docker_private_model_lifecycle(self.spec) as deadline:
+                try:
+                    completed = subprocess.run(
+                        command,
+                        input=json.dumps(stdin_payload, separators=(",", ":"), sort_keys=True),
+                        text=True,
+                        capture_output=True,
+                        timeout=_docker_lifecycle_remaining_seconds(deadline),
+                        env=_build_docker_process_env(self.spec),
+                        check=False,
+                    )
+                except BaseException:
+                    _remove_private_model_container(
+                        self.spec,
+                        container_name=container_name,
+                    )
+                    raise
         except subprocess.TimeoutExpired as exc:
             # Harvest whatever trace the container emitted before the kill;
             # timeouts are exactly where the in-flight behavior matters.

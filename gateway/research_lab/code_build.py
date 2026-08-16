@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
 import logging
 import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.source_symbol_index import (
@@ -31,6 +33,10 @@ from research_lab.code_editing import (
     git_diff_structural_metadata,
     validate_code_edit_draft,
 )
+from research_lab.docker_operation_lock_v2 import (
+    DockerOperationLockError,
+    shared_docker_operation_lock,
+)
 from research_lab.eval import (
     DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
     PrivateModelArtifactManifest,
@@ -44,6 +50,8 @@ from research_lab.eval import (
 logger = logging.getLogger(__name__)
 
 _BUILD_DEADLINE = threading.local()
+_DOCKER_OPERATION_LOCK_DEFAULT_TIMEOUT_SECONDS = 3600
+_SHELL_PROCESS_GROUP_TERMINATION_SECONDS = 5.0
 
 _PRIVATE_SOURCE_DIFF_ARTIFACT_FIELDS = frozenset(
     {
@@ -503,6 +511,70 @@ class CodeEditInfraFailureError(CodeEditImageBuildError):
 
     default_failure_stage = "candidate_build_infra_failed"
     retryable = True
+
+
+def _docker_operation_lock_timeout_seconds(timeout_seconds: int) -> float:
+    """Bound lock waiting by both the shared-host and candidate deadlines."""
+
+    raw = str(
+        os.getenv(
+            "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS",
+            str(_DOCKER_OPERATION_LOCK_DEFAULT_TIMEOUT_SECONDS),
+        )
+        or ""
+    ).strip()
+    try:
+        configured = int(raw)
+    except ValueError as exc:
+        raise CodeEditInfraFailureError(
+            "Docker operation lock timeout must be a positive integer"
+        ) from exc
+    if configured < 1:
+        raise CodeEditInfraFailureError(
+            "Docker operation lock timeout must be a positive integer"
+        )
+    wait_seconds = float(min(configured, max(1, int(timeout_seconds))))
+    candidate_deadline = getattr(_BUILD_DEADLINE, "value", None)
+    if candidate_deadline is not None:
+        remaining = candidate_deadline - time.monotonic()
+        if remaining <= 0:
+            raise CodeEditInfraFailureError(
+                "candidate build deadline exhausted while waiting for "
+                "shared Docker lifecycle access"
+            )
+        wait_seconds = min(wait_seconds, remaining)
+    return wait_seconds
+
+
+@contextmanager
+def _docker_operation_lock_scope(
+    *, timeout_seconds: int
+) -> Iterator[None]:
+    """Share Docker access while excluding restart/release maintenance."""
+
+    wait_seconds = _docker_operation_lock_timeout_seconds(timeout_seconds)
+    candidate_deadline = getattr(_BUILD_DEADLINE, "value", None)
+    acquired = False
+    try:
+        logger.info(
+            "research-lab code build: waiting for shared Docker lifecycle access"
+        )
+        with shared_docker_operation_lock(
+            timeout_seconds=wait_seconds,
+            deadline_monotonic=candidate_deadline,
+        ):
+            acquired = True
+            logger.info(
+                "research-lab code build: shared Docker lifecycle access acquired"
+            )
+            yield
+    except DockerOperationLockError as exc:
+        raise CodeEditInfraFailureError(str(exc)) from exc
+    finally:
+        if acquired:
+            logger.info(
+                "research-lab code build: shared Docker lifecycle access released"
+            )
 
 
 PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID_ENV = (
@@ -1016,8 +1088,8 @@ class CodeEditCandidateBuilder:
             # command starts, so a cold registry pull never eats the build budget
             # (matters especially on the source_context path, which touches no
             # docker image until this point).
-            _prepull_parent_image_for_build(parent_artifact.image_digest)
-            _run_private_build_cmd_with_infra_retry(
+            _run_private_build_under_docker_operation_lock(
+                parent_image_ref=parent_artifact.image_digest,
                 cmd=self.config.private_build_cmd,
                 cwd=repo_dir,
                 env={
@@ -1296,8 +1368,16 @@ def _extract_parent_image_source(
     if source_dir.exists() and any(source_dir.iterdir()):
         shutil.rmtree(source_dir)
     source_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_parent_image_available(image_ref, timeout_seconds=timeout_seconds)
-    _extract_parent_image_app(image_ref, repo_dir=source_dir, timeout_seconds=timeout_seconds)
+    with _docker_operation_lock_scope(timeout_seconds=timeout_seconds):
+        _ensure_parent_image_available(
+            image_ref,
+            timeout_seconds=timeout_seconds,
+        )
+        _extract_parent_image_app(
+            image_ref,
+            repo_dir=source_dir,
+            timeout_seconds=timeout_seconds,
+        )
     _validate_parent_app_runtime(source_dir)
     return compute_private_source_tree_hash(source_dir), _top_level_paths(source_dir)
 
@@ -2250,6 +2330,26 @@ def _run_private_build_cmd_with_infra_retry(
             ) from retry_exc
 
 
+def _run_private_build_under_docker_operation_lock(
+    *,
+    parent_image_ref: str,
+    cmd: str,
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout_seconds: int,
+) -> str:
+    """Keep parent preparation and the complete Docker build/push atomic."""
+
+    with _docker_operation_lock_scope(timeout_seconds=timeout_seconds):
+        _prepull_parent_image_for_build(parent_image_ref)
+        return _run_private_build_cmd_with_infra_retry(
+            cmd=cmd,
+            cwd=cwd,
+            env=env,
+            timeout_seconds=timeout_seconds,
+        )
+
+
 def _py_compile_changed_files(repo_dir: Path, changed_files: list[str]) -> None:
     py_files = [str(repo_dir / path) for path in changed_files if path.endswith(".py")]
     if not py_files:
@@ -2509,30 +2609,117 @@ def _can_retry_git_apply_without_edge_context(unified_diff: str) -> bool:
     return needs_fallback
 
 
-def _run_shell(cmd: str, *, cwd: Path, env: Mapping[str, str], timeout_seconds: int) -> str:
+def _shell_process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_shell_process_group(
+    process: subprocess.Popen[str],
+) -> tuple[str, str]:
+    """Terminate and reap a timed-out shell plus every foreground descendant."""
+
+    deadline = time.monotonic() + _SHELL_PROCESS_GROUP_TERMINATION_SECONDS
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    stdout = ""
+    stderr = ""
+    try:
+        stdout, stderr = process.communicate(
+            timeout=max(0.1, min(2.0, deadline - time.monotonic()))
+        )
+    except subprocess.TimeoutExpired:
+        pass
+
+    # The shell can exit promptly while a same-group descendant ignores TERM
+    # and closes its inherited pipes. Always inspect the whole process group
+    # after the grace period and KILL any remainder before the lifecycle lock
+    # is allowed to unwind.
+    if _shell_process_group_exists(process.pid):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    try:
+        stdout, stderr = process.communicate(
+            timeout=max(0.1, deadline - time.monotonic())
+        )
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise CodeEditBuildError(
+            "timed-out private build/test process group did not terminate"
+        ) from exc
+
+    while _shell_process_group_exists(process.pid):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CodeEditBuildError(
+                "timed-out private build/test process group did not terminate"
+            )
+        time.sleep(min(0.01, remaining))
+    return str(stdout or ""), str(stderr or "")
+
+
+def _run_shell(
+    cmd: str,
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout_seconds: int,
+) -> str:
+    process: subprocess.Popen[str] | None = None
     try:
         timeout_seconds = _bounded_command_timeout(timeout_seconds)
-        completed = subprocess.run(
+        process = subprocess.Popen(
             cmd,
             cwd=str(cwd),
             env=dict(env),
             shell=True,
-            check=True,
             text=True,
-            capture_output=True,
-            timeout=max(1, int(timeout_seconds)),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
-        return completed.stdout.strip()
+        stdout, stderr = process.communicate(
+            timeout=max(1, int(timeout_seconds))
+        )
     except subprocess.TimeoutExpired as exc:
-        raise CodeEditBuildError("configured private build/test command timed out") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr_summary = _safe_text(exc.stderr, tail=True)
+        if process is None:  # pragma: no cover - Popen succeeded before communicate
+            raise CodeEditBuildError(
+                "configured private build/test command timed out"
+            ) from exc
+        stdout, stderr = _terminate_shell_process_group(process)
         raise CodeEditBuildError(
-            f"configured private build/test command failed exit={exc.returncode} stderr_tail={stderr_summary}",
-            stderr=_safe_text(exc.stderr, limit=12000),
-            stdout=_safe_text(exc.stdout, limit=12000),
-            exit_code=int(exc.returncode),
+            "configured private build/test command timed out",
+            stderr=_safe_text(stderr, limit=12000),
+            stdout=_safe_text(stdout, limit=12000),
         ) from exc
+    except OSError as exc:
+        raise CodeEditBuildError(
+            "configured private build/test command could not start"
+        ) from exc
+
+    if process.returncode != 0:
+        stderr_summary = _safe_text(stderr, tail=True)
+        raise CodeEditBuildError(
+            f"configured private build/test command failed exit={process.returncode} stderr_tail={stderr_summary}",
+            stderr=_safe_text(stderr, limit=12000),
+            stdout=_safe_text(stdout, limit=12000),
+            exit_code=int(process.returncode),
+        )
+    return stdout.strip()
 
 
 def _safe_cmd(cmd: list[str]) -> str:

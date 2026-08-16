@@ -1136,7 +1136,7 @@ echo "Terminating existing validator Nitro enclaves"
   echo "Starting validator-enclave opaque chain TLS relay"
   CHAIN_RELAY_LOG="${VALIDATOR_CHAIN_RELAY_LOG:-/home/ec2-user/validator-chain-relay-v2.log}"
   setsid env PYTHONPATH="$VALIDATOR_ROOT" python3 -m validator_tee.host.chain_relay_v2 \
-    >> "$CHAIN_RELAY_LOG" 2>&1 < /dev/null 7>&- &
+    >> "$CHAIN_RELAY_LOG" 2>&1 < /dev/null 7>&- 8>&- &
   CHAIN_RELAY_PID=$!
   sleep 2
   if ! kill -0 "$CHAIN_RELAY_PID" 2>/dev/null; then

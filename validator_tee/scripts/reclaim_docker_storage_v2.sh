@@ -8,16 +8,32 @@ LIVE_RUNTIME_MIN_FREE_BYTES="${VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-180
 ALLOW_DATA_ROOT_RESET="${VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET:-0}"
 PRUNE_ATTEMPTS="${VALIDATOR_DOCKER_PRUNE_ATTEMPTS:-5}"
 SETTLE_ATTEMPTS="${VALIDATOR_DOCKER_SETTLE_ATTEMPTS:-30}"
+DAEMON_READY_ATTEMPTS="${VALIDATOR_DOCKER_DAEMON_READY_ATTEMPTS:-30}"
+DAEMON_PROBE_TIMEOUT_SECONDS="${VALIDATOR_DOCKER_DAEMON_PROBE_TIMEOUT_SECONDS:-10}"
+DAEMON_CONTROL_TIMEOUT_SECONDS="${VALIDATOR_DOCKER_DAEMON_CONTROL_TIMEOUT_SECONDS:-30}"
+DAEMON_COMMAND_TIMEOUT_SECONDS="${VALIDATOR_DOCKER_DAEMON_COMMAND_TIMEOUT_SECONDS:-600}"
+PROC_ROOT="${LEADPOET_PROC_ROOT:-/proc}"
+ALLOW_NONSTANDARD_PROC_ROOT="${LEADPOET_DOCKER_ALLOW_NONSTANDARD_PROC_ROOT:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-for setting in PRUNE_ATTEMPTS SETTLE_ATTEMPTS; do
+for setting in PRUNE_ATTEMPTS SETTLE_ATTEMPTS DAEMON_READY_ATTEMPTS DAEMON_PROBE_TIMEOUT_SECONDS DAEMON_CONTROL_TIMEOUT_SECONDS; do
   value="${!setting}"
   if ! [[ "$value" =~ ^[1-9][0-9]*$ ]] || [ "$value" -gt 300 ]; then
     echo "ERROR: $setting must be between 1 and 300" >&2
     exit 2
   fi
 done
+if [ "$PROC_ROOT" != "/proc" ] \
+    && [ "$ALLOW_NONSTANDARD_PROC_ROOT" != "1" ]; then
+  echo "ERROR: nonstandard process roots are allowed only in explicit rehearsal" >&2
+  exit 2
+fi
+if ! [[ "$DAEMON_COMMAND_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+    || [ "$DAEMON_COMMAND_TIMEOUT_SECONDS" -gt 3600 ]; then
+  echo "ERROR: DAEMON_COMMAND_TIMEOUT_SECONDS must be between 1 and 3600" >&2
+  exit 2
+fi
 for setting in MIN_FREE_BYTES LIVE_RUNTIME_MIN_FREE_BYTES; do
   value="${!setting}"
   if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
@@ -33,19 +49,154 @@ PYTHONPATH="$REPO_ROOT" python3 \
   --wait \
   --timeout-seconds 1800 \
   --interval-seconds 3 \
-  --proc-root "${LEADPOET_PROC_ROOT:-/proc}"
+  --proc-root "$PROC_ROOT"
 
 available_bytes() {
   df --output=avail -B1 / | tail -1 | tr -d '[:space:]'
 }
 
-if ! docker info >/dev/null 2>&1; then
+protect_exact_host_gateway_runtime() {
+  local phase="$1"
+
+  if ! HOST_GATEWAY_REPORT="$(
+    PYTHONPATH="$REPO_ROOT" python3 \
+      -m validator_tee.host.docker_operation_guard_v2 \
+      --detect-exact-host-gateway \
+      --proc-root "$PROC_ROOT"
+  )"; then
+    echo "ERROR: exact host gateway process state is unreadable; refusing Docker maintenance" >&2
+    exit 1
+  fi
+  printf '%s\n' "$HOST_GATEWAY_REPORT"
+  if ! HOST_GATEWAY_LIVE="$(
+    printf '%s' "$HOST_GATEWAY_REPORT" | python3 -c '
+import json
+import sys
+
+document = json.load(sys.stdin)
+if document.get("schema_version") != "leadpoet.host_gateway_process_guard.v1":
+    raise SystemExit("invalid host gateway process report schema")
+status = document.get("status")
+process = document.get("gateway_process")
+if status == "live":
+    if not isinstance(process, dict) or not isinstance(process.get("pid"), int):
+        raise SystemExit("invalid live host gateway process report")
+    print(1)
+elif status == "absent":
+    if process is not None:
+        raise SystemExit("invalid absent host gateway process report")
+    print(0)
+else:
+    raise SystemExit("invalid host gateway process status")
+'
+  )"; then
+    echo "ERROR: exact host gateway process report is invalid; refusing Docker maintenance" >&2
+    exit 1
+  fi
+  if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
+    AVAILABLE="$(available_bytes)"
+    echo "Docker storage requirement: runtime_mode=host-gateway-live phase=$phase required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
+    if [ "$AVAILABLE" -ge "$LIVE_RUNTIME_MIN_FREE_BYTES" ]; then
+      echo "Docker storage maintenance deferred while the exact host gateway is live: phase=$phase free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
+      exit 0
+    fi
+    echo "ERROR: exact host gateway runtime has only $AVAILABLE free bytes; $LIVE_RUNTIME_MIN_FREE_BYTES are required for an independent release build" >&2
+    echo "ERROR: refusing Docker maintenance, daemon stop, or data-root reset while the host gateway is live" >&2
+    exit 1
+  fi
+}
+
+protect_exact_host_gateway_runtime "entry"
+
+run_bounded_subprocess() {
+  local timeout_seconds="$1"
+  shift
+  python3 - "$timeout_seconds" "$@" <<'PY'
+import subprocess
+import os
+import signal
+import sys
+import time
+
+timeout_seconds = int(sys.argv[1])
+command = sys.argv[2:]
+try:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        return_code = process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            group_exists = False
+        else:
+            group_exists = True
+        if group_exists:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            raise SystemExit(125)
+        group_deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                break
+            if time.monotonic() >= group_deadline:
+                raise SystemExit(125)
+            time.sleep(0.01)
+        raise SystemExit(124)
+except OSError:
+    raise SystemExit(127)
+raise SystemExit(return_code)
+PY
+}
+
+run_bounded_daemon_probe() {
+  run_bounded_subprocess "$DAEMON_PROBE_TIMEOUT_SECONDS" "$@" \
+    >/dev/null 2>&1
+}
+
+run_bounded_daemon_inventory() {
+  run_bounded_subprocess "$DAEMON_PROBE_TIMEOUT_SECONDS" "$@"
+}
+
+run_bounded_daemon_control() {
+  run_bounded_subprocess "$DAEMON_CONTROL_TIMEOUT_SECONDS" "$@"
+}
+
+run_bounded_daemon_command() {
+  run_bounded_subprocess "$DAEMON_COMMAND_TIMEOUT_SECONDS" "$@"
+}
+
+docker_daemons_ready() {
+  run_bounded_daemon_probe docker info \
+    && run_bounded_daemon_probe sudo ctr -n moby containers list -q
+}
+
+if ! docker_daemons_ready; then
   echo "Docker is unavailable; recovering builder daemons before inventory"
-  sudo systemctl start containerd.service docker.service
+  run_bounded_daemon_control \
+    sudo systemctl start containerd.service docker.service
   DAEMON_READY=0
-  for _attempt in $(seq 1 30); do
-    if docker info >/dev/null 2>&1 \
-        && sudo ctr -n moby containers list -q >/dev/null 2>&1; then
+  for _attempt in $(seq 1 "$DAEMON_READY_ATTEMPTS"); do
+    if docker_daemons_ready; then
       DAEMON_READY=1
       break
     fi
@@ -57,12 +208,44 @@ if ! docker info >/dev/null 2>&1; then
   fi
 fi
 
+start_docker_daemons_and_wait() {
+  local attempt
+  if ! run_bounded_daemon_control \
+      sudo systemctl start containerd.service docker.service; then
+    echo "Docker/containerd start command failed; continuing bounded readiness recovery" >&2
+  fi
+  for attempt in $(seq 1 "$DAEMON_READY_ATTEMPTS"); do
+    if docker_daemons_ready; then
+      return 0
+    fi
+    if [ "$attempt" -lt "$DAEMON_READY_ATTEMPTS" ]; then
+      sleep 1
+    fi
+  done
+  return 1
+}
+
+DOCKER_RESET_STARTED=0
+recover_docker_daemons_on_exit() {
+  local exit_status=$?
+  trap - EXIT
+  if [ "$DOCKER_RESET_STARTED" -eq 1 ]; then
+    echo "Recovering Docker/containerd readiness after failed data-root reset" >&2
+    if start_docker_daemons_and_wait; then
+      echo "Docker/containerd readiness recovered after failed data-root reset" >&2
+    else
+      echo "ERROR: Docker/containerd recovery remained unavailable after failed data-root reset" >&2
+    fi
+  fi
+  exit "$exit_status"
+}
+
 run_prune_with_retry() {
   local label="$1"
   shift
   local attempt
   for attempt in $(seq 1 "$PRUNE_ATTEMPTS"); do
-    if "$@" >/dev/null; then
+    if run_bounded_daemon_command "$@" >/dev/null; then
       return 0
     fi
     if [ "$attempt" -lt "$PRUNE_ATTEMPTS" ]; then
@@ -82,7 +265,9 @@ run_prune_with_retry system docker system prune --all --force
 # containers are intentionally running. Wait for containerd teardown only
 # after Docker reports an empty runtime, which is the restart/data-root
 # recovery path. Healthy live containers are inventoried and preserved below.
-if ! INITIAL_CONTAINER_IDS="$(docker ps -aq 2>/dev/null)"; then
+if ! INITIAL_CONTAINER_IDS="$(
+  run_bounded_daemon_inventory docker ps -aq 2>/dev/null
+)"; then
   echo "ERROR: Docker container inventory is unreadable after prune" >&2
   exit 1
 fi
@@ -122,7 +307,8 @@ print(int(any(document[field] for field in fields)))
 '
   )"
   if ! LIVE_RESTORE_ENABLED="$(
-    docker info --format '{{json .LiveRestoreEnabled}}' 2>/dev/null
+    run_bounded_daemon_inventory \
+      docker info --format '{{json .LiveRestoreEnabled}}' 2>/dev/null
   )"; then
     echo "ERROR: Docker live-restore status is unreadable" >&2
     exit 1
@@ -151,9 +337,14 @@ if [ "$INITIAL_CONTAINER_COUNT" -eq 0 ]; then
   CONTAINERD_RUNNING_TASK_COUNT=-1
   for attempt in $(seq 1 "$SETTLE_ATTEMPTS"); do
     TEARDOWN_PROBE_FAILED=0
-    if ! CONTAINER_IDS="$(docker ps -aq 2>/dev/null)"; then
+    if ! CONTAINER_IDS="$(
+      run_bounded_daemon_inventory docker ps -aq 2>/dev/null
+    )"; then
       TEARDOWN_PROBE_FAILED=1
-    elif ! CONTAINERD_TASKS="$(sudo ctr -n moby tasks list 2>/dev/null)"; then
+    elif ! CONTAINERD_TASKS="$(
+      run_bounded_daemon_inventory \
+        sudo ctr -n moby tasks list 2>/dev/null
+    )"; then
       TEARDOWN_PROBE_FAILED=1
     else
       CONTAINER_COUNT="$(printf '%s\n' "$CONTAINER_IDS" | awk 'NF { count += 1 } END { print count + 0 }')"
@@ -192,24 +383,26 @@ if [ "$INITIAL_CONTAINER_COUNT" -eq 0 ]; then
 fi
 
 AVAILABLE="$(available_bytes)"
-CONTAINER_COUNT="$(docker ps -aq | wc -l | tr -d '[:space:]')"
-IMAGE_COUNT="$(docker image ls -aq | sort -u | sed '/^$/d' | wc -l | tr -d '[:space:]')"
-VOLUME_COUNT="$(docker volume ls -q | wc -l | tr -d '[:space:]')"
-DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
+CONTAINER_COUNT="$(run_bounded_daemon_inventory docker ps -aq | wc -l | tr -d '[:space:]')"
+IMAGE_COUNT="$(run_bounded_daemon_inventory docker image ls -aq | sort -u | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+VOLUME_COUNT="$(run_bounded_daemon_inventory docker volume ls -q | wc -l | tr -d '[:space:]')"
+DOCKER_ROOT="$(run_bounded_daemon_inventory docker info --format '{{.DockerRootDir}}')"
 CONTAINERD_ROOT="${VALIDATOR_CONTAINERD_ROOT:-/var/lib/containerd}"
 DOCKER_ROOT_BYTES="$(sudo du -sx -B1 "$DOCKER_ROOT" | awk '{print $1}')"
 CONTAINERD_CONTAINER_COUNT="$(
-  sudo ctr -n moby containers list -q | sed '/^$/d' | wc -l | tr -d '[:space:]'
+  run_bounded_daemon_inventory sudo ctr -n moby containers list -q \
+    | sed '/^$/d' | wc -l | tr -d '[:space:]'
 )"
 CONTAINERD_TASK_COUNT="$(
-  sudo ctr -n moby tasks list -q | sed '/^$/d' | wc -l | tr -d '[:space:]'
+  run_bounded_daemon_inventory sudo ctr -n moby tasks list -q \
+    | sed '/^$/d' | wc -l | tr -d '[:space:]'
 )"
 CONTAINERD_RUNNING_TASK_COUNT="$(
-  sudo ctr -n moby tasks list \
+  run_bounded_daemon_inventory sudo ctr -n moby tasks list \
     | awk 'NR > 1 && $3 == "RUNNING" { count += 1 } END { print count + 0 }'
 )"
 NON_MOBY_NAMESPACE_COUNT="$(
-  sudo ctr namespaces list -q \
+  run_bounded_daemon_inventory sudo ctr namespaces list -q \
     | sed '/^$/d; /^moby$/d' \
     | wc -l \
     | tr -d '[:space:]'
@@ -306,18 +499,30 @@ if [ "$NON_MOBY_NAMESPACE_COUNT" -ne 0 ]; then
   exit 1
 fi
 
+# Inventory/prune can take long enough for the deployed N-1 gateway to start
+# after the entry scan. Re-read the bounded exact process identity at the last
+# possible boundary before arming recovery or stopping either daemon.
+protect_exact_host_gateway_runtime "pre-reset"
+
 echo "Resetting orphaned Docker and containerd roots after guarded empty-runtime check"
-sudo systemctl stop docker.service docker.socket containerd.service
-sudo pkill -TERM -f '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' 2>/dev/null || true
+DOCKER_RESET_STARTED=1
+trap recover_docker_daemons_on_exit EXIT
+run_bounded_daemon_control \
+  sudo systemctl stop docker.service docker.socket containerd.service
+run_bounded_daemon_control \
+  sudo pkill -TERM -f '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' \
+  2>/dev/null || true
 sleep 2
-sudo pkill -KILL -f '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' 2>/dev/null || true
+run_bounded_daemon_control \
+  sudo pkill -KILL -f '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' \
+  2>/dev/null || true
 
 # Stale overlay mounts can survive daemon shutdown even though every guarded
 # runtime inventory above is empty. Unmount only descendants of the two exact
 # validated data roots, deepest paths first, and refuse a lazy/forced unmount.
 while IFS= read -r mount_target; do
   echo "Unmounting stale empty-runtime mount: $mount_target"
-  sudo umount "$mount_target"
+  run_bounded_daemon_command sudo umount "$mount_target"
 done < <(
   findmnt -rn -o TARGET \
     | awk -v docker_root="$DOCKER_ROOT/" -v containerd_root="$CONTAINERD_ROOT/" \
@@ -334,28 +539,21 @@ if findmnt -rn -o TARGET \
   exit 1
 fi
 
-sudo rm -rf --one-file-system "$DOCKER_ROOT"
-sudo rm -rf --one-file-system "$CONTAINERD_ROOT"
-sudo install -d -m 0711 -o root -g root "$DOCKER_ROOT"
-sudo install -d -m 0711 -o root -g root "$CONTAINERD_ROOT"
-sudo systemctl start containerd.service docker.service
-
-RUNTIME_READY=0
-for _attempt in $(seq 1 30); do
-  if docker info >/dev/null 2>&1 \
-      && sudo ctr -n moby containers list -q >/dev/null 2>&1; then
-    RUNTIME_READY=1
-    break
-  fi
-  sleep 1
-done
-if [ "$RUNTIME_READY" -ne 1 ]; then
+run_bounded_daemon_command \
+  sudo rm -rf --one-file-system "$DOCKER_ROOT"
+run_bounded_daemon_command \
+  sudo rm -rf --one-file-system "$CONTAINERD_ROOT"
+run_bounded_daemon_command \
+  sudo install -d -m 0711 -o root -g root "$DOCKER_ROOT"
+run_bounded_daemon_command \
+  sudo install -d -m 0711 -o root -g root "$CONTAINERD_ROOT"
+if ! start_docker_daemons_and_wait; then
   echo "ERROR: Docker/containerd did not become ready after reset" >&2
   exit 1
 fi
 
-if [ "$(sudo ctr -n moby containers list -q | sed '/^$/d' | wc -l | tr -d '[:space:]')" -ne 0 ] \
-    || [ "$(sudo ctr -n moby tasks list -q | sed '/^$/d' | wc -l | tr -d '[:space:]')" -ne 0 ] \
+if [ "$(run_bounded_daemon_inventory sudo ctr -n moby containers list -q | sed '/^$/d' | wc -l | tr -d '[:space:]')" -ne 0 ] \
+    || [ "$(run_bounded_daemon_inventory sudo ctr -n moby tasks list -q | sed '/^$/d' | wc -l | tr -d '[:space:]')" -ne 0 ] \
     || [ "$(pgrep -fc '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' || true)" -ne 0 ]; then
   echo "ERROR: Docker/containerd reset left stale moby runtime state" >&2
   exit 1
@@ -366,4 +564,6 @@ if [ "$AVAILABLE" -lt "$MIN_FREE_BYTES" ]; then
   echo "ERROR: Docker data-root reset left only $AVAILABLE free bytes" >&2
   exit 1
 fi
+DOCKER_RESET_STARTED=0
+trap - EXIT
 echo "Docker storage recovered: free_bytes=$AVAILABLE"

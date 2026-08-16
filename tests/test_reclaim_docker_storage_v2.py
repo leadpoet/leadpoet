@@ -7,12 +7,14 @@ SCRIPT = Path("validator_tee/scripts/reclaim_docker_storage_v2.sh").read_text()
 
 
 def test_builder_daemons_recover_before_any_docker_inventory():
-    recovery = SCRIPT.index("if ! docker info >/dev/null 2>&1; then")
+    recovery = SCRIPT.index("if ! docker_daemons_ready; then")
     start = SCRIPT.index("sudo systemctl start containerd.service docker.service")
     inventory = SCRIPT.index("docker image prune --all --force")
 
     assert recovery < start < inventory
     assert "Docker/containerd did not recover before storage inventory" in SCRIPT
+    assert "docker_daemons_ready" in SCRIPT
+    assert "timeout=timeout_seconds" in SCRIPT
 
 
 def test_data_root_reset_unmounts_only_after_empty_runtime_guards():
@@ -45,6 +47,42 @@ def test_data_root_reset_fails_if_mounts_remain():
     assert check < remove
 
 
+def test_exact_host_gateway_guard_precedes_any_data_root_reset():
+    acquire = SCRIPT.index("leadpoet_acquire_docker_operation_lock_v2")
+    detect = SCRIPT.index("--detect-exact-host-gateway")
+    defer = SCRIPT.index(
+        "Docker storage maintenance deferred while the exact host gateway is live"
+    )
+    prune = SCRIPT.index("docker image prune --all --force")
+    stop = SCRIPT.index("sudo systemctl stop docker.service")
+
+    assert acquire < detect < defer < prune < stop
+    assert "runtime_mode=host-gateway-live" in SCRIPT[detect:prune]
+    assert "pgrep -f.*gateway.main" not in SCRIPT
+
+
+def test_exact_host_gateway_guard_is_rechecked_at_the_stop_boundary():
+    prune = SCRIPT.index("docker image prune --all --force")
+    final_detect = SCRIPT.rindex('protect_exact_host_gateway_runtime "pre-reset"')
+    arm = SCRIPT.index("trap recover_docker_daemons_on_exit EXIT")
+    stop = SCRIPT.index("sudo systemctl stop docker.service")
+
+    assert prune < final_detect < arm < stop
+    assert SCRIPT.count("protect_exact_host_gateway_runtime") == 3
+
+
+def test_data_root_reset_failure_recovers_daemons_before_exit():
+    recovery = SCRIPT.index("recover_docker_daemons_on_exit()")
+    arm = SCRIPT.index("trap recover_docker_daemons_on_exit EXIT")
+    stop = SCRIPT.index("sudo systemctl stop docker.service")
+    ready = SCRIPT.index("if ! start_docker_daemons_and_wait; then", stop)
+    disarm = SCRIPT.index("trap - EXIT", ready)
+
+    assert recovery < arm < stop < ready < disarm
+    assert "DOCKER_RESET_STARTED=1" in SCRIPT[arm - 80 : arm]
+    assert "Recovering Docker/containerd readiness after failed data-root reset" in SCRIPT
+
+
 def test_live_runtime_reclaims_stale_state_before_rechecking_capacity():
     initial_inventory = SCRIPT.index('INITIAL_CONTAINER_COUNT="$(')
     reclaim = SCRIPT.index("docker_stale_mount_reclaimer_v2")
@@ -52,7 +90,7 @@ def test_live_runtime_reclaims_stale_state_before_rechecking_capacity():
         "run_prune_with_retry image docker image prune --all --force",
         reclaim,
     )
-    capacity = SCRIPT.index('AVAILABLE="$(available_bytes)"')
+    capacity = SCRIPT.index('AVAILABLE="$(available_bytes)"', repeated_prune)
 
     assert initial_inventory < reclaim < repeated_prune < capacity
     assert 'if [ "$INITIAL_CONTAINER_COUNT" -ne 0 ]' in SCRIPT

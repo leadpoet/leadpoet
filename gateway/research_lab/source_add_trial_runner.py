@@ -22,10 +22,12 @@ run. Per trial:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import logging
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -35,6 +37,10 @@ from gateway.research_lab.provider_evidence_proxy import (
     validate_provider_registry_entries,
 )
 from research_lab.source_add_execution import SourceAddSubmissionRecord
+from research_lab.docker_operation_lock_v2 import (
+    DockerOperationLockError,
+    shared_docker_operation_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +60,32 @@ def _subprocess_docker_exec(argv: list[str], timeout_seconds: float) -> tuple[in
         timeout=timeout_seconds,
     )
     return completed.returncode, completed.stdout, completed.stderr
+
+
+def _remove_interrupted_source_add_container(container_name: str) -> None:
+    try:
+        completed = subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "research_lab_source_add_trial_interrupted_cleanup_failed "
+            "container=%s error=%s",
+            container_name,
+            type(exc).__name__,
+        )
+        return
+    if completed.returncode != 0:
+        logger.warning(
+            "research_lab_source_add_trial_interrupted_cleanup_nonzero "
+            "container=%s exit=%s",
+            container_name,
+            completed.returncode,
+        )
 
 
 def build_trial_registry_entry(
@@ -183,8 +215,10 @@ def build_source_add_sandbox_runner(
 
     def _runner(rec: SourceAddSubmissionRecord, icp_ref: str) -> Mapping[str, Any]:
         cost_before = _ledger_cost_cents(ledger_path)
+        container_name = "leadpoet-source-add-trial-" + str(uuid.uuid4().hex)
         argv = [
             "docker", "run", "--rm",
+            "--name", container_name,
             "--network", "host",  # loopback proxy reach; no credentials inside
             "--memory", "1g",
             "--cpus", "1",
@@ -198,10 +232,50 @@ def build_source_add_sandbox_runner(
             "python", f"/adapter/{SOURCE_ADD_ADAPTER_ENTRYPOINT}",
         ]
         started = time.monotonic()
+        lifecycle_deadline = time.monotonic() + max(
+            1.0, float(timeout_seconds)
+        )
         try:
-            exit_code, stdout, stderr = execute(argv, float(timeout_seconds))
+            # The injectable executor is an explicit external-boundary test
+            # seam.  The production subprocess path owns shared lifecycle
+            # access until Docker's --rm cleanup has completed.
+            lifecycle = (
+                shared_docker_operation_lock(
+                    timeout_seconds=float(timeout_seconds),
+                    deadline_monotonic=lifecycle_deadline,
+                )
+                if docker_exec is None
+                else nullcontext()
+            )
+            with lifecycle:
+                remaining = lifecycle_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DockerOperationLockError(
+                        "SOURCE_ADD Docker lifecycle deadline was exhausted"
+                    )
+                try:
+                    exit_code, stdout, stderr = execute(
+                        argv,
+                        (
+                            max(0.1, remaining)
+                            if docker_exec is None
+                            else float(timeout_seconds)
+                        ),
+                    )
+                except BaseException:
+                    if docker_exec is None:
+                        _remove_interrupted_source_add_container(container_name)
+                    raise
         except subprocess.TimeoutExpired:
             return {"error": "timeout", "cost_cents": max(0, _ledger_cost_cents(ledger_path) - cost_before)}
+        except DockerOperationLockError as exc:
+            logger.warning(
+                "research_lab_source_add_trial_docker_lifecycle_unavailable "
+                "adapter=%s error=%s",
+                rec.adapter_id,
+                str(exc)[:200],
+            )
+            return {"error": "docker_lifecycle_unavailable", "cost_cents": 0}
         except Exception as exc:
             logger.warning(
                 "research_lab_source_add_trial_exec_failed adapter=%s error=%s",

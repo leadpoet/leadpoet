@@ -890,6 +890,40 @@ def test_progress_doc_completed_icp_count_variants():
     assert sw._completed_icp_count_from_progress_doc({"completed_icp_count": "bad"}) == 0
 
 
+def test_baseline_failure_progress_prefers_durable_checkpoint_rows():
+    assert (
+        sw._baseline_failure_completed_icp_count(
+            checkpoint_rows=[{"icp_ref": str(index)} for index in range(14)],
+            checkpoint_authority_exists=True,
+        )
+        == 14
+    )
+    assert (
+        sw._baseline_failure_completed_icp_count(
+            checkpoint_rows=[
+                {"icp_ref": "restored"},
+                {"icp_ref": "restored"},
+            ],
+            checkpoint_authority_exists=True,
+        )
+        == 1
+    )
+    assert (
+        sw._baseline_failure_completed_icp_count(
+            checkpoint_rows=[{"icp_ref": "in-process-only"}],
+            checkpoint_authority_exists=False,
+        )
+        == 0
+    )
+    assert (
+        sw._baseline_failure_completed_icp_count(
+            checkpoint_rows=[],
+            checkpoint_authority_exists=True,
+        )
+        == 0
+    )
+
+
 def test_latest_scoring_progress_from_events_prefers_largest_safe_count():
     rows = [
         {"event_doc": {"completed_icp_count": 1, "rolling_window_hash": "sha256:" + "1" * 64}},

@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -52,6 +53,10 @@ from gateway.research_lab.config import (
     MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT,
 )
 from leadpoet_canonical.attested_v2 import sha256_json
+from research_lab.docker_operation_lock_v2 import (
+    DockerOperationLockError,
+    shared_docker_operation_lock,
+)
 from research_lab.eval.dev_eval import (
     CURRENT_DAY_DEV_BANK_SCHEMA_VERSION,
     DevIcpSet,
@@ -658,6 +663,8 @@ class DockerReplayDevEvaluator:
             self._docker_executable,
             "run",
             "--rm",
+            "--name",
+            "leadpoet-dev-replay-" + uuid.uuid4().hex,
             "-i",
             # Replay serves every provider call from the mounted snapshot
             # directory, so the container needs no network at all; with it
@@ -676,15 +683,65 @@ class DockerReplayDevEvaluator:
             "research_lab_adapter",
             "run_icp",
         ]
-        completed = subprocess.run(
-            command,
-            input=json.dumps(payload, separators=(",", ":"), sort_keys=True),
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            env={**os.environ},
-            check=False,
-        )
+        container_name = command[command.index("--name") + 1]
+        deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+        try:
+            with shared_docker_operation_lock(
+                timeout_seconds=float(timeout_seconds),
+                docker_executable=self._docker_executable,
+                environment=os.environ,
+                deadline_monotonic=deadline,
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DevEvalRunnerError(
+                        "dev replay Docker lifecycle deadline was exhausted"
+                    )
+                try:
+                    completed = subprocess.run(
+                        command,
+                        input=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                        text=True,
+                        capture_output=True,
+                        timeout=max(0.1, remaining),
+                        env={**os.environ},
+                        check=False,
+                    )
+                except BaseException:
+                    try:
+                        cleanup = subprocess.run(
+                            [
+                                self._docker_executable,
+                                "rm",
+                                "-f",
+                                container_name,
+                            ],
+                            text=True,
+                            capture_output=True,
+                            timeout=30,
+                            env={**os.environ},
+                            check=False,
+                        )
+                    except (OSError, subprocess.SubprocessError) as cleanup_exc:
+                        logger.warning(
+                            "research_lab_dev_replay_interrupted_cleanup_failed "
+                            "container=%s error=%s",
+                            container_name,
+                            type(cleanup_exc).__name__,
+                        )
+                    else:
+                        if cleanup.returncode != 0:
+                            logger.warning(
+                                "research_lab_dev_replay_interrupted_cleanup_nonzero "
+                                "container=%s exit=%s",
+                                container_name,
+                                cleanup.returncode,
+                            )
+                    raise
+        except DockerOperationLockError as exc:
+            raise DevEvalRunnerError(
+                f"dev replay Docker lifecycle unavailable: {exc}"
+            ) from exc
         if completed.returncode != 0:
             stderr = str(completed.stderr or "")
             if SNAPSHOT_MISS_SENTINEL in stderr:

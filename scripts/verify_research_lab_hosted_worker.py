@@ -1425,6 +1425,8 @@ def _write_fake_docker(root: Path) -> Path:
             log_path.open("a", encoding="utf-8").write(" ".join(sys.argv[1:]) + "\\n")
 
             args = sys.argv[1:]
+            if args == ["info"]:
+                sys.exit(0)
             if args[:2] == ["image", "inspect"]:
                 sys.exit(0)
             if args and args[0] == "pull":

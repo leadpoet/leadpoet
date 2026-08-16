@@ -36,6 +36,35 @@ PROTECTED_SYMBOLS = {
     "gateway/tee/coordinator_epoch_cutover_v2.py": (
         "attest_subnet_epoch_cutover_v2",
     ),
+    "gateway/tee/code_hash.py": (
+        "ATTESTED_RUNTIME_DIR",
+        "ATTESTED_RUNTIME_PACKAGES",
+        "ATTESTED_RUNTIME_FILES",
+        "ATTESTED_RUNTIME_GENERATED_FILES",
+        "_ATTESTED_RUNTIME_ROLES",
+        "_FULL_COMMIT_RE",
+        "_FALLBACK_COMMAND_TIMEOUT_SECONDS",
+        "ROOT_FILES",
+        "INCLUDE_DIRS",
+        "HASH_SUFFIXES",
+        "EXCLUDED_DIRS",
+        "EXCLUDED_SUFFIXES",
+        "EXCLUDED_NAMES",
+        "GatewayCodeHashError",
+        "_is_hashable",
+        "_iter_files",
+        "_fallback_environment",
+        "_run_fallback_command",
+        "_fallback_commit",
+        "materialize_gateway_code_hash_runtime",
+        "iter_gateway_code_hash_files",
+        "iter_gateway_code_hash_payloads",
+        "compute_gateway_code_hash",
+    ),
+    "gateway/tee/protected_workflows.py": (
+        "stage_external_protected_sources",
+        "main",
+    ),
     "gateway/tee/execution_job_manager_v2.py": (
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
         "ExecutionContextV2.record_transport",
@@ -1079,6 +1108,38 @@ def _source_path(root: Path, relative_path: str) -> Path:
     return direct
 
 
+def stage_external_protected_sources(source_root: Path, destination_root: Path) -> int:
+    """Stage non-gateway protected sources into the measured runtime tree."""
+
+    source_root = source_root.resolve()
+    destination_root = destination_root.resolve()
+    staged_count = 0
+    for relative_path in sorted(PROTECTED_SYMBOLS):
+        if relative_path.startswith("gateway/"):
+            continue
+        source = source_root / relative_path
+        if not source.is_file() or source.is_symlink():
+            raise ProtectedWorkflowError(
+                "external protected source is unavailable: %s" % relative_path
+            )
+        destination = destination_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            if not destination.is_file() or destination.is_symlink():
+                raise ProtectedWorkflowError(
+                    "staged protected source is invalid: %s" % relative_path
+                )
+            if destination.read_bytes() != source.read_bytes():
+                raise ProtectedWorkflowError(
+                    "staged protected source differs: %s" % relative_path
+                )
+        else:
+            destination.write_bytes(source.read_bytes())
+            destination.chmod(source.stat().st_mode & 0o777)
+        staged_count += 1
+    return staged_count
+
+
 def _git_commit(root: Path) -> str:
     try:
         return subprocess.run(
@@ -1206,10 +1267,16 @@ def main(argv: Sequence[str] = ()) -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--stage-external-root", type=Path)
     parser.add_argument("--baseline-commit", default="")
     parser.add_argument("--protected-source-commit", default="")
     args = parser.parse_args(list(argv) if argv else None)
-    if args.write:
+    if args.write and args.stage_external_root is not None:
+        parser.error("--write and --stage-external-root are mutually exclusive")
+    if args.stage_external_root is not None:
+        count = stage_external_protected_sources(args.root, args.stage_external_root)
+        print("protected_external_sources_staged=%s" % count)
+    elif args.write:
         write_manifest(
             build_manifest(
                 args.root,

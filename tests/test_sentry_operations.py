@@ -60,6 +60,7 @@ def test_failure_code_inventory_is_stable_and_complete():
     ("signature", "expected"),
     (
         ("worker import preflight failed: staged packages are out of sync", "release.source_tree_mismatch"),
+        ("cannot parse protected file scripts/runtime.py", "release.source_tree_mismatch"),
         ("PGRST204 benchmark_attempt column missing from schema cache", "release.schema_contract_mismatch"),
         ("approved V2 release is not published", "release.channel_unavailable"),
         ("No space left on device while builder reclaimed stale mount", "release.builder_resource_exhausted"),
@@ -88,6 +89,19 @@ def test_each_incident_signature_maps_to_semantic_failure_code(signature, expect
             error, default="restart.terminal_failure"
         )
         == expected
+    )
+
+
+def test_failure_classifier_reads_bounded_exception_tail():
+    error = RuntimeError(
+        ("build output\n" * 200)
+        + "cannot parse protected file scripts/record_research_lab_dev_snapshots.py"
+    )
+    assert (
+        sentry_operations.failure_code_for_exception(
+            error, default="restart.terminal_failure"
+        )
+        == "release.source_tree_mismatch"
     )
 
 
@@ -600,3 +614,32 @@ def test_release_summary_preserves_stage_ledger_and_reports_first_failure(monkey
     assert stages[1]["duration_seconds"] == 12.5
     assert failures[0][1]["last_successful_stage"] == "source_checkout"
     assert failures[0][1]["blocked_stages"] == ["gateway_validator_build"]
+
+
+def test_release_summary_does_not_invent_build_resource_exhaustion(monkeypatch):
+    failures = []
+    monkeypatch.setattr(
+        sentry_operations,
+        "capture_failure",
+        lambda *args, **kwargs: failures.append((args, kwargs)),
+    )
+    monkeypatch.setattr(sentry_operations, "record_stage", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        sentry_operations.sentry_bootstrap,
+        "record_sentry_distribution",
+        lambda *args, **kwargs: None,
+    )
+
+    sentry_operations.emit_release_summary(
+        component="attested-release",
+        physical_role="gateway-parent",
+        status="failed",
+        candidate_sha="ab" * 20,
+        stage_statuses=(
+            ("source_checkout", "success"),
+            ("gateway_validator_build", "failure"),
+        ),
+    )
+
+    assert failures[0][0] == ("restart.terminal_failure",)
+    assert failures[0][1]["stage"] == "gateway_validator_build"

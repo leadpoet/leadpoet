@@ -733,7 +733,10 @@ def capture_failure(
 
 
 _SIGNATURE_CODES = (
-    (re.compile(r"cannot import name|out of sync", re.I), "release.source_tree_mismatch"),
+    (
+        re.compile(r"cannot import name|out of sync|cannot parse protected file", re.I),
+        "release.source_tree_mismatch",
+    ),
     (re.compile(r"schema cache|does not exist|undefined (?:column|function)|PGRST", re.I), "release.schema_contract_mismatch"),
     (re.compile(r"approved .*release.*(?:unavailable|not published)|release channel unavailable", re.I), "release.channel_unavailable"),
     (re.compile(r"no space left|insufficient disk|stale .*mount|builder.*(?:disk|space)", re.I), "release.builder_resource_exhausted"),
@@ -814,7 +817,7 @@ _RELEASE_STAGE_CODES = {
     "schema_preflight": "release.schema_contract_mismatch",
     "host_memory_guard": "release.builder_resource_exhausted",
     "storage_reclaim": "release.builder_resource_exhausted",
-    "gateway_validator_build": "release.builder_resource_exhausted",
+    "gateway_validator_build": "restart.terminal_failure",
     "evidence_upload": "release.channel_unavailable",
     "evidence_download": "release.channel_unavailable",
     "manifest_assembly": "release.source_tree_mismatch",
@@ -886,11 +889,14 @@ def failure_code_for_exception(
         current: Optional[BaseException] = exception
         seen = set()
         fragments = []
-        while current is not None and id(current) not in seen and len(fragments) < 6:
+        while current is not None and id(current) not in seen and len(seen) < 6:
             seen.add(id(current))
             fragments.append(type(current).__name__)
             try:
-                fragments.append(str(current)[:500])
+                message = str(current)
+                fragments.append(message[:500])
+                if len(message) > 500:
+                    fragments.append(message[-1000:])
             except BaseException:
                 pass
             current = current.__cause__ or current.__context__

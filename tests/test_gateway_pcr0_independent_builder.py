@@ -120,6 +120,31 @@ def test_independent_builder_marks_extracted_git_archive_clean():
     assert '"ATTESTED_RUNTIME_SOURCE_IS_CLEAN_GIT_ARCHIVE": "1"' in source
 
 
+def test_independent_builder_does_not_invent_resource_exhaustion(monkeypatch):
+    failures = []
+    monkeypatch.setattr(gateway_pcr0_builder, "init_sentry", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "configure_sentry_context",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "main",
+        lambda: (_ for _ in ()).throw(RuntimeError("unclassified build failure")),
+    )
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "capture_failure",
+        lambda *args, **kwargs: failures.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="unclassified build failure"):
+        gateway_pcr0_builder._run_cli()
+
+    assert failures[0][0] == ("restart.terminal_failure",)
+
+
 def test_gateway_build_command_binds_reproducible_epoch(tmp_path):
     command = gateway_pcr0_builder._deterministic_docker_build_command(
         gateway_root=tmp_path / "gateway",

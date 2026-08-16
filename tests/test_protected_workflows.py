@@ -10,6 +10,7 @@ from gateway.tee.protected_workflows import (
     ProtectedWorkflowError,
     build_manifest,
     load_manifest,
+    stage_external_protected_sources,
     verify_manifest,
 )
 
@@ -52,6 +53,35 @@ def test_private_artifact_signature_boundary_is_protected():
 
 
 def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
+    assert {
+        "ATTESTED_RUNTIME_DIR",
+        "ATTESTED_RUNTIME_PACKAGES",
+        "ATTESTED_RUNTIME_FILES",
+        "ATTESTED_RUNTIME_GENERATED_FILES",
+        "_ATTESTED_RUNTIME_ROLES",
+        "_FULL_COMMIT_RE",
+        "_FALLBACK_COMMAND_TIMEOUT_SECONDS",
+        "ROOT_FILES",
+        "INCLUDE_DIRS",
+        "HASH_SUFFIXES",
+        "EXCLUDED_DIRS",
+        "EXCLUDED_SUFFIXES",
+        "EXCLUDED_NAMES",
+        "GatewayCodeHashError",
+        "_is_hashable",
+        "_iter_files",
+        "_fallback_environment",
+        "_run_fallback_command",
+        "_fallback_commit",
+        "materialize_gateway_code_hash_runtime",
+        "iter_gateway_code_hash_files",
+        "iter_gateway_code_hash_payloads",
+        "compute_gateway_code_hash",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/code_hash.py"])
+    assert {
+        "stage_external_protected_sources",
+        "main",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/protected_workflows.py"])
     assert {
         "_EXACT_HOST_GATEWAY_ARGS",
         "_HOST_GATEWAY_PYTHON_COMMAND",
@@ -110,6 +140,49 @@ def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
         "ResearchLabPromotionController._maybe_create_source_add_implementation_rewards",
         "_load_valid_artifact",
     } <= set(PROTECTED_SYMBOLS["gateway/research_lab/promotion.py"])
+
+
+def test_enclave_surface_stages_every_external_protected_source(tmp_path: Path):
+    enclave_root = tmp_path / "gateway"
+    for relative_path in PROTECTED_SYMBOLS:
+        if not relative_path.startswith("gateway/"):
+            continue
+        source = ROOT / relative_path
+        destination = enclave_root / relative_path.split("/", 1)[1]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+
+    staged_root = enclave_root / "_attested_runtime"
+    expected_external_count = sum(
+        not relative_path.startswith("gateway/")
+        for relative_path in PROTECTED_SYMBOLS
+    )
+    assert (
+        stage_external_protected_sources(ROOT, staged_root)
+        == expected_external_count
+    )
+    assert (
+        staged_root / "scripts" / "record_research_lab_dev_snapshots.py"
+    ).is_file()
+    assert (
+        staged_root
+        / "validator_tee"
+        / "host"
+        / "docker_operation_guard_v2.py"
+    ).is_file()
+    verify_manifest(enclave_root, load_manifest(MANIFEST_PATH))
+
+
+def test_external_protected_source_staging_rejects_mismatched_existing_file(
+    tmp_path: Path,
+):
+    staged = tmp_path / "staged"
+    target = staged / "scripts" / "record_research_lab_dev_snapshots.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(ProtectedWorkflowError, match="staged protected source differs"):
+        stage_external_protected_sources(ROOT, staged)
 
 
 def test_scoring_receipt_failure_policy_is_protected():

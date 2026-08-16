@@ -1317,6 +1317,121 @@
       "symbol": "load_latest_checkpointed_allocation_source_v2"
     },
     {
+      "ast_sha256": "sha256:6690569cb9ece217df3c70dfd2719a8a2409332b977dd5bd376349e1bcd1af3a",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "ATTESTED_RUNTIME_DIR"
+    },
+    {
+      "ast_sha256": "sha256:16f66c4af17545ed18be8aa7c6d0453157deadac19087522c1efca8eba7720a1",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "ATTESTED_RUNTIME_FILES"
+    },
+    {
+      "ast_sha256": "sha256:efaae789903b972d1d165db23b8a45311efc7736541cc41be623eed1268cda64",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "ATTESTED_RUNTIME_GENERATED_FILES"
+    },
+    {
+      "ast_sha256": "sha256:1a40ed8c4e2d4f358649f31c610d73a95aafb2dcf5bc7782c147bf012dafeb3a",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "ATTESTED_RUNTIME_PACKAGES"
+    },
+    {
+      "ast_sha256": "sha256:06fc2e8df9b4c1af1b4e4f29285a3379d159b6edd3939af647f6faadedf45d20",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "EXCLUDED_DIRS"
+    },
+    {
+      "ast_sha256": "sha256:038d1e24aaca3a3eca30cfee39905b876629621d972761815d24382adaca1aaa",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "EXCLUDED_NAMES"
+    },
+    {
+      "ast_sha256": "sha256:c25dd8b894327ab7cc20732a538d7c88a4c4de577c9f7e5c7ac38a8f0a44225c",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "EXCLUDED_SUFFIXES"
+    },
+    {
+      "ast_sha256": "sha256:b3fe8d6b51ad3110dd171b6cb5dad32b72bdd8af22489998cb31db1cf0d7afc4",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "GatewayCodeHashError"
+    },
+    {
+      "ast_sha256": "sha256:637fd01d81fc2823f9fd3161e31d2d89112b3c6c4729d356874c317e6ad7c24b",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "HASH_SUFFIXES"
+    },
+    {
+      "ast_sha256": "sha256:d32e77d4cb95d6f22ee20b3d2bfe9c3e2401c313872a86a335ff09634298c7e9",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "INCLUDE_DIRS"
+    },
+    {
+      "ast_sha256": "sha256:0b07b8245944a4a49ac3ea70379f0666bbe10c4952b14e1e577817210258c410",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "ROOT_FILES"
+    },
+    {
+      "ast_sha256": "sha256:08634be6ab760d6fc53b336d2e7ca9afe3784b4cc9b6d5ca49d99abbb44becea",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "_ATTESTED_RUNTIME_ROLES"
+    },
+    {
+      "ast_sha256": "sha256:64fb12ec16609eda69f65f9996a2fbd2aad4abcb66f2094fd344bf2cc0e829a2",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "_FALLBACK_COMMAND_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:616e88233265fbcfd26c1d9bb10c47c77244311989415313d6f45696ae7a6568",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "_FULL_COMMIT_RE"
+    },
+    {
+      "ast_sha256": "sha256:9f39121bd2f6cccec1ee1d8c94a3b71abc8f1ddfa3413f77ccea4e7e1c008b4c",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "_fallback_commit"
+    },
+    {
+      "ast_sha256": "sha256:bc04a1996c799e353d7db8680f18954612044081be904ffaefd1f1fba87e9132",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "_fallback_environment"
+    },
+    {
+      "ast_sha256": "sha256:644b73eccd5c31676bbb6404cd835643f7944b77eba4b11802acaf1af6a6feb7",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "_is_hashable"
+    },
+    {
+      "ast_sha256": "sha256:44c267153831c0448a45eaf715eabc5b665f95cb67a9d27d69c1f1ade8d6b7d6",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "_iter_files"
+    },
+    {
+      "ast_sha256": "sha256:7eba277c4504bdf8969511126bdd52930e794bed11fd75caf2cbbf3e71b4b876",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "_run_fallback_command"
+    },
+    {
+      "ast_sha256": "sha256:c2a3a869b44681c55aef3db723418abada2e92c0371489aaf59403e16994cf06",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "compute_gateway_code_hash"
+    },
+    {
+      "ast_sha256": "sha256:9cba9b2791ad85f3d8a5a7c3be981629dcec1a4639a3cf6ce07edcbae5a8d6ee",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "iter_gateway_code_hash_files"
+    },
+    {
+      "ast_sha256": "sha256:05f6f09dde3e920b4cf916f29dd8ca1ec4245d27f78e1415182098d5bc173f06",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "iter_gateway_code_hash_payloads"
+    },
+    {
+      "ast_sha256": "sha256:1042a0f50d7936c020f165ab5f17d6e49acbc64fba54994b776de0b7a0d2d208",
+      "path": "gateway/tee/code_hash.py",
+      "symbol": "materialize_gateway_code_hash_runtime"
+    },
+    {
       "ast_sha256": "sha256:9fa97722538aeaa9c8666bace401e74fb468132a0b4df3e70ab6adbf87c2987d",
       "path": "gateway/tee/coordinator_active_model_source_v2.py",
       "symbol": "CoordinatorActiveModelSourceV2"
@@ -1730,6 +1845,16 @@
       "ast_sha256": "sha256:8d2f56c23dadc75302319d7e0d0b4d10bbddc7f7f1815d3a906b2fc7d603ebbb",
       "path": "gateway/tee/mtls_identity.py",
       "symbol": "write_identity_to_tmpfs"
+    },
+    {
+      "ast_sha256": "sha256:e062583abf045bdcad6adaedb09d7c93432ce9da058f4507acd4153e0de8f1de",
+      "path": "gateway/tee/protected_workflows.py",
+      "symbol": "main"
+    },
+    {
+      "ast_sha256": "sha256:ea611a1db37679ef44118530920b4e5cc90cfcf179a6b6f659442c21154c724f",
+      "path": "gateway/tee/protected_workflows.py",
+      "symbol": "stage_external_protected_sources"
     },
     {
       "ast_sha256": "sha256:3ce329e1947d9ae7f5ac32af3873e53d28e76da899813c8663216e92b376f49c",
@@ -3812,7 +3937,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:bdb2822ca07e8a3b0d51e93e8eb7603d8ee237a2e1f6dc14b8c8bf10b6fb9eb4",
-  "protected_source_commit": "34913f318324fb9b26809c90ddd8244e5b75ef9e",
+  "manifest_hash": "sha256:7c5730e511239996fa377f86d3e00bcb91973090a6bc3680dd43b82a23d1480b",
+  "protected_source_commit": "e15cd6de1d4551821b8c3db6faf15b7efd559f91",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

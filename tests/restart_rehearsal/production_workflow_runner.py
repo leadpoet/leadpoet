@@ -13885,6 +13885,12 @@ def _dynamic_docker_collision_evidence_is_complete(evidence: Any) -> bool:
 
         from_sha = str(evidence.get("from_sha") or "")
         candidate_sha = str(evidence.get("candidate_sha") or "")
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", from_sha) is None
+            or re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None
+            or from_sha == candidate_sha
+        ):
+            return False
         expected_inventory = transition_source_paths_by_commit(
             from_sha=from_sha,
             candidate_sha=candidate_sha,
@@ -13923,10 +13929,7 @@ def _dynamic_docker_collision_evidence_is_complete(evidence: Any) -> bool:
             else None
         )
         return bool(
-            re.fullmatch(r"[0-9a-f]{40}", from_sha)
-            and re.fullmatch(r"[0-9a-f]{40}", candidate_sha)
-            and from_sha != candidate_sha
-            and isinstance(source_identities, list)
+            isinstance(source_identities, list)
             and len(source_identities) == len(expected_pairs)
             and set(observed_identities) == expected_pairs
             and observed_identities == expected_identities

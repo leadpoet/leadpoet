@@ -570,12 +570,10 @@ def test_gateway_restart_does_not_kill_colocated_runner_builds() -> None:
     assert 'pkill -TERM -f "docker build' not in script
     assert 'pkill -KILL -f "docker build' not in script
     assert "ensure_docker_ready" in script
-    assert "sudo nsenter -t 1 -m --" in script
-    assert 'findmnt -rn -o TARGET' in script
-    assert 'index($0, "/var/lib/docker/") == 1' in script
-    assert 'nsenter -t 1 -m -- umount "$mount_path"' in script
-    assert "nsenter -t 1 -m -- rm -rf /var/lib/docker" in script
-    assert "nsenter -t 1 -m -- mkdir -p /var/lib/docker" in script
+    assert "validator_tee/scripts/reclaim_docker_storage_v2.sh" in script
+    assert 'bash "$reclaim_script"' in script
+    assert "VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1" in script
+    assert "sudo nsenter -t 1 -m --" not in script
     assert "GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120" in script
     assert script.count(
         'export SUPABASE_TIMEOUT_SECONDS="'
@@ -1872,7 +1870,7 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
     launch = (
         '-m gateway.utils.tee_egress_forwarder \\\n'
         '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
-        '2>&1 < /dev/null 7>&- 9>&- &'
+        '2>&1 < /dev/null 7>&- 8>&- 9>&- &'
     )
     readiness = '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
 
@@ -1896,7 +1894,7 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
     assert (
         '-m gateway.utils.tee_inter_enclave_relay \\\n'
         '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" '
-        '2>&1 < /dev/null 7>&- 9>&- &'
+        '2>&1 < /dev/null 7>&- 8>&- 9>&- &'
     ) in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script

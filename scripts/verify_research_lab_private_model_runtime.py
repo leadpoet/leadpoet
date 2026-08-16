@@ -285,7 +285,20 @@ def run_icp(icp, context):
             )(research_lab_icp, {})
         finally:
             private_runtime_module.subprocess.run = original_run
-        if not captured_commands or "--platform" not in captured_commands[0] or "linux/amd64" not in captured_commands[0]:
+        docker_run_command = next(
+            (
+                command
+                for command in captured_commands
+                if len(command) >= 2
+                and Path(command[0]).name == "docker"
+                and command[1] == "run"
+            ),
+            (),
+        )
+        if (
+            "--platform" not in docker_run_command
+            or "linux/amd64" not in docker_run_command
+        ):
             errors.append("docker private model runner did not pin linux/amd64 platform")
 
         class _ProviderErrorCompleted:

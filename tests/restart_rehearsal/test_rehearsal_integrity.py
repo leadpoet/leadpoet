@@ -4528,7 +4528,10 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "gateway/research_lab/code_build.py",
         "gateway/research_lab/source_add_trial_runner.py",
         "gateway/research_lab/worker_process.py",
+        "gateway/tee/code_hash.py",
         "gateway/tee/prepare_gateway_envelopes_v2.py",
+        "gateway/tee/protected_workflows.py",
+        "gateway/tee/stage_attested_runtime.sh",
         "gateway/tee/topology.json",
         "scripts/run_research_lab_scoring_worker.py",
         "scripts/run_research_lab_scoring_worker_fleet.py",
@@ -7332,6 +7335,9 @@ def test_workflow_runner_continues_across_failed_release_epochs(
         production_workflow_runner,
         "_run_independent_epoch_diagnostics",
         lambda **_kwargs: None,
+    )
+    assert not production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
+        {}
     )
     monkeypatch.setattr(
         sys,

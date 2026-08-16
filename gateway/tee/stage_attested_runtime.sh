@@ -114,6 +114,14 @@ for package in "${PACKAGES[@]}"; do
     "$source_dir/" "$dest_dir/"
 done
 
+# The protected manifest also covers narrowly selected host/release sources
+# outside the top-level runtime packages above. Stage those exact files under
+# _attested_runtime so the enclave build can independently re-verify every
+# protected AST against the same measured source bytes.
+python3 "$SOURCE_GATEWAY_ROOT/tee/protected_workflows.py" \
+  --root "$SOURCE_ROOT" \
+  --stage-external-root "$TMP_ROOT"
+
 python3 "$SOURCE_GATEWAY_ROOT/tee/scoring_import_closure.py" build \
   --gateway-root "$SOURCE_GATEWAY_ROOT" \
   --source-root "$SOURCE_ROOT" \

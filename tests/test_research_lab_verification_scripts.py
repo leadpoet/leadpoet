@@ -46,6 +46,12 @@ def test_research_lab_workflow_verifier_runs_without_production_credentials(
             path for path in sys.path if path and "site-packages" in Path(path).parts
         ),
         "TMPDIR": str(tmp_path),
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(
+            tmp_path / "docker-operation-v2.lock"
+        ),
+        "LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE": str(
+            tmp_path / "docker-operation-v2.lock.admission"
+        ),
     }
 
     completed = subprocess.run(

@@ -18,7 +18,14 @@ from gateway.tee.scoring_import_closure import (
     verify_staged_manifest,
     write_manifest,
 )
-from gateway.tee.code_hash import iter_gateway_code_hash_files
+from gateway.tee.code_hash import (
+    ATTESTED_RUNTIME_FILES,
+    ATTESTED_RUNTIME_GENERATED_FILES,
+    compute_gateway_code_hash,
+    iter_gateway_code_hash_files,
+    iter_gateway_code_hash_payloads,
+    materialize_gateway_code_hash_runtime,
+)
 from gateway.tee.normalize_attested_runtime import normalize_runtime_tree
 from gateway.tee.build_identity import build_identity, load_identity, write_identity
 
@@ -200,6 +207,43 @@ def test_gateway_code_hash_includes_verifier_runtime_data():
     )
 
 
+def test_gateway_code_hash_fallback_matches_production_staged_runtime(
+    tmp_path: Path,
+):
+    gateway_root = tmp_path / "gateway"
+    shutil.copytree(ROOT / "gateway", gateway_root)
+    staged_runtime = gateway_root / "_attested_runtime"
+    materialize_gateway_code_hash_runtime(
+        gateway_root=gateway_root,
+        runtime_fallback_root=ROOT,
+        destination_root=staged_runtime,
+    )
+
+    staged_payloads = dict(iter_gateway_code_hash_payloads(gateway_root))
+    fallback_payloads = dict(
+        iter_gateway_code_hash_payloads(
+            ROOT / "gateway",
+            runtime_fallback_root=ROOT,
+        )
+    )
+
+    assert fallback_payloads == staged_payloads
+    assert compute_gateway_code_hash(
+        ROOT / "gateway",
+        runtime_fallback_root=ROOT,
+        verbose=False,
+    ) == compute_gateway_code_hash(gateway_root, verbose=False)
+    assert "_attested_runtime/Leadpoet/__init__.py" in fallback_payloads
+    assert {
+        f"_attested_runtime/{relative_path}"
+        for relative_path in ATTESTED_RUNTIME_FILES
+    } <= fallback_payloads.keys()
+    assert {
+        f"_attested_runtime/{relative_path}"
+        for relative_path in ATTESTED_RUNTIME_GENERATED_FILES
+    } <= fallback_payloads.keys()
+
+
 def test_staged_manifest_verifies_every_recorded_file(tmp_path: Path):
     manifest = build_manifest(gateway_root=ROOT / "gateway", source_root=ROOT)
     _stage_manifest_files(manifest, tmp_path)
@@ -269,6 +313,7 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert "build_identity.py verify" in dockerfile
     assert "protected_workflows.py" in dockerfile
     assert "protected_workflows.py" in stage_script
+    assert '--stage-external-root "$TMP_ROOT"' in stage_script
     assert "--protected-manifest" in stage_script
     assert "--topology-manifest" in stage_script
     assert "gateway_scoring gateway_autoresearch" in stage_script

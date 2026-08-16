@@ -600,7 +600,7 @@ def _run_cli() -> int:
         capture_failure(
             failure_code_for_exception(
                 exc,
-                default="release.builder_resource_exhausted",
+                default="restart.terminal_failure",
             ),
             component="release-gateway-pcr0-builder",
             stage="gateway_reproducible_pcr0_build",

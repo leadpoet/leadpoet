@@ -95,6 +95,8 @@ def _redacted_cli_argv_shapes() -> dict[str, list[str]]:
             "<active-config-hash>",
             "--private-model-manifest-hash",
             "<active-manifest-hash>",
+            "--timeout-seconds",
+            "<snapshot-icp-timeout-seconds>",
             "--cancel-file",
             "<refresh>/cancel-recording",
             "--record",

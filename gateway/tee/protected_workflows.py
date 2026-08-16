@@ -251,6 +251,14 @@ PROTECTED_SYMBOLS = {
         "inspect_exact_host_gateway_runtime",
     ),
     "scripts/record_research_lab_dev_snapshots.py": (
+        "MAX_SNAPSHOT_CLOSURE_ROUNDS",
+        "MAX_SNAPSHOT_RECORD_ATTEMPTS",
+        "SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS",
+        "DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS",
+        "SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS",
+        "SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS",
+        "snapshot_export_bank_size",
+        "snapshot_record_workflow_timeout_seconds",
         "_run_named_docker",
     ),
     "gateway/utils/pcr0_builder.py": (

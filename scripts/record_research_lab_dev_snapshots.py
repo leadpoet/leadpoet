@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -81,6 +82,9 @@ SNAPSHOT_EXECUTION_CONTEXT_MARKER = "dev_snapshot_recording"
 MAX_SNAPSHOT_RECORD_ATTEMPTS = 3
 SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS = (5.0, 15.0)
 SNAPSHOT_RECORD_CANCELLED_EXIT_CODE = 75
+DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS = 900
+SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS = 30
+SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS = 300
 
 PROVIDER_KEY_GROUPS = (
     ("EXA_API_KEY",),
@@ -96,6 +100,62 @@ class SnapshotRecordingCancelled(RuntimeError):
 def _raise_if_snapshot_record_cancelled(cancel_file: Path | None) -> None:
     if cancel_file is not None and cancel_file.is_file():
         raise SnapshotRecordingCancelled("active_private_model_changed")
+
+
+def snapshot_record_workflow_timeout_seconds(
+    *,
+    item_count: int,
+    item_timeout_seconds: int = DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+) -> int:
+    """Return a finite outer bound for the sequential full-bank recorder.
+
+    Every bank item can run once during initial capture, once in each closure
+    round, and once during offline replay. Capture and closure runs use the
+    bounded retry policy; every Docker attempt also reserves time for named
+    container cleanup. The deliberately conservative bound lets the recorder
+    finish or fail closed under its own limits instead of being killed by a
+    shorter controller timeout.
+    """
+
+    if isinstance(item_count, bool) or not isinstance(item_count, int):
+        raise ValueError("snapshot bank item count must be an integer")
+    if item_count < 1:
+        raise ValueError("snapshot bank item count must be positive")
+    if (
+        isinstance(item_timeout_seconds, bool)
+        or not isinstance(item_timeout_seconds, int)
+        or item_timeout_seconds < 1
+    ):
+        raise ValueError("snapshot ICP timeout must be a positive integer")
+    if not SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS:
+        raise ValueError("snapshot retry delays must not be empty")
+
+    retry_delay_seconds = math.ceil(
+        sum(
+            SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS[
+                min(
+                    attempt_index,
+                    len(SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS) - 1,
+                )
+            ]
+            for attempt_index in range(MAX_SNAPSHOT_RECORD_ATTEMPTS - 1)
+        )
+    )
+    docker_attempt_seconds = (
+        item_timeout_seconds + SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS
+    )
+    capture_or_closure_seconds = (
+        MAX_SNAPSHOT_RECORD_ATTEMPTS * docker_attempt_seconds
+        + retry_delay_seconds
+    )
+    per_item_seconds = (
+        (1 + MAX_SNAPSHOT_CLOSURE_ROUNDS) * capture_or_closure_seconds
+        + docker_attempt_seconds
+    )
+    return (
+        item_count * per_item_seconds
+        + SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS
+    )
 
 
 def _load_json_file(path: str) -> Any:
@@ -131,6 +191,21 @@ def _load_source_export(path: str) -> tuple[list[dict[str, Any]], dict[str, Any]
     if len(items) != len(decoded["items"]):
         raise ValueError("source ICP export contains an invalid item")
     return items, dict(decoded["daily_bank_manifest"])
+
+
+def snapshot_export_bank_size(path: str) -> int:
+    """Return the full exported bank size only when its envelope is coherent."""
+
+    items, manifest = _load_source_export(path)
+    bank_size = manifest.get("bank_size")
+    if (
+        isinstance(bank_size, bool)
+        or not isinstance(bank_size, int)
+        or bank_size < 1
+        or bank_size != len(items)
+    ):
+        raise ValueError("source ICP export bank size differs from its items")
+    return bank_size
 
 
 def _provider_key_presence() -> dict[str, bool]:
@@ -214,7 +289,7 @@ def _run_named_docker(
                         [str(command[0]), "rm", "-f", container_name],
                         text=True,
                         capture_output=True,
-                        timeout=30,
+                        timeout=SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS,
                         env={"PATH": os.environ.get("PATH", "")},
                         check=False,
                     )
@@ -778,7 +853,11 @@ def main() -> int:
     )
     parser.add_argument("--module-name", default="research_lab_adapter")
     parser.add_argument("--callable-name", default="run_icp")
-    parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+    )
     parser.add_argument(
         "--cancel-file",
         default="",

@@ -726,6 +726,8 @@ if _state_path_raw:
                 "<active-config-hash>",
                 "--private-model-manifest-hash",
                 "<active-manifest-hash>",
+                "--timeout-seconds",
+                "<snapshot-icp-timeout-seconds>",
                 "--cancel-file",
                 "<refresh>/cancel-recording",
                 "--record",
@@ -805,8 +807,12 @@ if _state_path_raw:
             ]
         elif script_name == "record_research_lab_dev_snapshots.py":
             phase = "record"
-            if len(argv) < 15:
+            if len(argv) < 17:
                 raise RuntimeError("dev-snapshot recorder argv shape differs")
+            from scripts.record_research_lab_dev_snapshots import (
+                DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+            )
+
             source_icps = Path(str(argv[3])).resolve()
             work_dir = _bind_refresh_work_dir(source_icps.parents[1])
             provider_args: list[str] = []
@@ -827,6 +833,8 @@ if _state_path_raw:
                 str(_active_artifact["config_hash"]),
                 "--private-model-manifest-hash",
                 str(_active_artifact["manifest_hash"]),
+                "--timeout-seconds",
+                str(DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS),
                 "--cancel-file",
                 str(work_dir / "cancel-recording"),
                 "--record",

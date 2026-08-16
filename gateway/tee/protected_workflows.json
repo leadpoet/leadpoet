@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "7c9766b71d4c08b0059f6e3230dbe742b1d58e79",
+  "baseline_commit": "7a0f07f89791ed823a25e276848538120ec02445",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -3912,9 +3912,49 @@
       "symbol": "verify_source_tree_contract"
     },
     {
-      "ast_sha256": "sha256:b06242a59a4651527b92835d362724527107d24a5b0aa97d5c16f75787987bcf",
+      "ast_sha256": "sha256:b8aace8c25dce9edee38cc55d9de58f5946b950fcf780181db578f033920e634",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:b880b19d0554eaf4c9f7e0f7f00eb8872d70648adf8891dbc9814437fd66ba53",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "MAX_SNAPSHOT_CLOSURE_ROUNDS"
+    },
+    {
+      "ast_sha256": "sha256:07b459b3d1b78108d6fb2d5396937a1837ecd08bc6340c57ce539a080ee12407",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "MAX_SNAPSHOT_RECORD_ATTEMPTS"
+    },
+    {
+      "ast_sha256": "sha256:0b64bd72ec47e8a059ff2f5c101d465fb51341a5ffa2d080f6b6911cb214343f",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:d3a909743663e78451e3ba0fc1f333e8c11c3adba9a9fa5202b4580d7afeee25",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:67a54caffcdcd183020a760fe8e30b96ff2fa2294265463e386dc535abd35cd3",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:3f908577f23b109bdb86d7f8b38b4c68a5278f4626a8a3a53d76ff692eb18998",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "_run_named_docker"
+    },
+    {
+      "ast_sha256": "sha256:048b8a1028295b618869ccd120d907c7f7e1283f872e108f9aa68cbabed83bc7",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "snapshot_export_bank_size"
+    },
+    {
+      "ast_sha256": "sha256:10920ea19cbd79f3d7ea538ef3f82bcd9eb8aa0ca2f64dc5b5313086333d5deb",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "snapshot_record_workflow_timeout_seconds"
     },
     {
       "ast_sha256": "sha256:fe6e11699b3f43121cbf0153a9ccdecaad6e02f7320e9fbc700d1cd3f90cd7cd",

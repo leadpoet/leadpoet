@@ -92,8 +92,21 @@ def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
             "validator_tee/host/docker_operation_guard_v2.py"
         ]
     )
-    assert {"_run_named_docker"} <= set(
+    assert {
+        "MAX_SNAPSHOT_CLOSURE_ROUNDS",
+        "MAX_SNAPSHOT_RECORD_ATTEMPTS",
+        "SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS",
+        "DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS",
+        "SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS",
+        "SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS",
+        "snapshot_export_bank_size",
+        "snapshot_record_workflow_timeout_seconds",
+        "_run_named_docker",
+    } <= set(
         PROTECTED_SYMBOLS["scripts/record_research_lab_dev_snapshots.py"]
+    )
+    assert {"maybe_refresh_dev_snapshot"} <= set(
+        PROTECTED_SYMBOLS["gateway/research_lab/snapshot_refresh.py"]
     )
     assert {
         "_DOCKER_OPERATION_LOCK_DEFAULT_TIMEOUT_SECONDS",

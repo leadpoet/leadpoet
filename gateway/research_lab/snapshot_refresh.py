@@ -22,10 +22,18 @@ from gateway.research_lab.config import (
     DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
     RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD,
 )
-from gateway.research_lab.dev_eval_runner import snapshot_readiness
+from gateway.research_lab.dev_eval_runner import (
+    MAX_DEV_SNAPSHOT_BANK_ICP_COUNT,
+    snapshot_readiness,
+)
 from gateway.research_lab.git_tree_models import TreePolicy
 from gateway.research_lab.promotion import load_active_private_model
 from research_lab.eval.snapshot_store import POINTER_NAME, SNAPSHOT_URI_ENV
+from scripts.record_research_lab_dev_snapshots import (
+    DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+    snapshot_export_bank_size,
+    snapshot_record_workflow_timeout_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -499,6 +507,18 @@ async def maybe_refresh_dev_snapshot(
                     env,
                     timeout_seconds,
                 )
+                bank_size = snapshot_export_bank_size(
+                    str(inputs_dir / "source_icps.json")
+                )
+                if bank_size > MAX_DEV_SNAPSHOT_BANK_ICP_COUNT:
+                    raise RuntimeError("snapshot exporter bank size exceeds the safety cap")
+                record_timeout_seconds = max(
+                    timeout_seconds,
+                    snapshot_record_workflow_timeout_seconds(
+                        item_count=bank_size,
+                        item_timeout_seconds=DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+                    ),
+                )
                 record_command: list[str] = [
                     sys.executable,
                     _runtime_script(source_root, "record_research_lab_dev_snapshots.py"),
@@ -514,6 +534,8 @@ async def maybe_refresh_dev_snapshot(
                     identity_before[2],
                     "--private-model-manifest-hash",
                     identity_before[3],
+                    "--timeout-seconds",
+                    str(DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS),
                     "--cancel-file",
                     str(cancel_file),
                     "--record",
@@ -529,7 +551,7 @@ async def maybe_refresh_dev_snapshot(
                     command_runner=command_runner,
                     command=tuple(record_command),
                     env=env,
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=record_timeout_seconds,
                     active_loader=active_loader,
                     expected_identity=identity_before,
                     cancel_file=cancel_file,

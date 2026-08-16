@@ -138,6 +138,41 @@ def test_snapshot_runtime_context_finishes_before_host_timeout():
     assert options["runtime_cap_seconds"] <= 300 - 30
 
 
+def test_full_bank_recording_timeout_covers_every_bounded_sequential_stage():
+    assert recorder.snapshot_record_workflow_timeout_seconds(
+        item_count=40,
+        item_timeout_seconds=recorder.DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+    ) == 1_049_100
+
+    for invalid in (0, -1, True):
+        with pytest.raises(ValueError):
+            recorder.snapshot_record_workflow_timeout_seconds(
+                item_count=invalid,
+                item_timeout_seconds=recorder.DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+            )
+    with pytest.raises(ValueError):
+        recorder.snapshot_record_workflow_timeout_seconds(
+            item_count=40,
+            item_timeout_seconds=0,
+        )
+
+
+def test_snapshot_export_bank_size_matches_full_exported_items(tmp_path):
+    source = tmp_path / "source_icps.json"
+    document = {
+        "schema_version": "research_lab.dev_icp_export.v2",
+        "items": [{"icp_ref": f"icp-{index}"} for index in range(40)],
+        "daily_bank_manifest": {"bank_size": 40},
+    }
+    source.write_text(json.dumps(document), encoding="utf-8")
+    assert recorder.snapshot_export_bank_size(str(source)) == 40
+
+    document["daily_bank_manifest"]["bank_size"] = 5
+    source.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ValueError, match="bank size differs"):
+        recorder.snapshot_export_bank_size(str(source))
+
+
 def test_named_docker_is_removed_when_host_run_is_interrupted(
     monkeypatch,
     tmp_path,
@@ -172,7 +207,9 @@ def test_named_docker_is_removed_when_host_run_is_interrupted(
         raise AssertionError("the host timeout must propagate")
 
     assert calls[1][0] == ["docker", "rm", "-f", "snapshot-test"]
-    assert calls[1][1]["timeout"] == 30
+    assert calls[1][1]["timeout"] == (
+        recorder.SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS
+    )
 
 
 @pytest.mark.parametrize("reuse_existing", [False, True])

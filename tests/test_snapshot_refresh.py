@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 import threading
 import time
@@ -53,6 +54,29 @@ def _ready(**overrides: Any) -> dict[str, Any]:
 
 def _publish_output() -> str:
     return "snapshot_uri=s3://private-bucket/dev/" + "e" * 64 + "\n"
+
+
+def _pipeline_output(command: Sequence[str], *, bank_size: int = 40) -> str:
+    if command[1].endswith("export_research_lab_dev_icp_inputs.py"):
+        out_dir = Path(command[command.index("--out-dir") + 1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "source_icps.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "research_lab.dev_icp_export.v2",
+                    "items": [
+                        {"icp_ref": f"test-icp-{index}"}
+                        for index in range(bank_size)
+                    ],
+                    "daily_bank_manifest": {"bank_size": bank_size},
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return f"daily_bank_icps={bank_size}\n"
+    return _publish_output() if "--skip-current-pointer" in command else "ok"
 
 
 def test_published_snapshot_uri_requires_one_content_addressed_target():
@@ -116,7 +140,7 @@ def test_any_paid_worker_can_refresh_under_shared_lock(monkeypatch, tmp_path):
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         calls.append(list(command))
-        return _publish_output() if "--skip-current-pointer" in command else "ok"
+        return _pipeline_output(command)
 
     readiness = iter(
         [
@@ -238,7 +262,7 @@ def test_recent_model_a_check_does_not_delay_model_b_refresh(monkeypatch, tmp_pa
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
-        return _publish_output() if "--skip-current-pointer" in command else "ok"
+        return _pipeline_output(command)
 
     second = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
@@ -404,6 +428,7 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
     _configure(monkeypatch, tmp_path)
     commands: list[list[str]] = []
     command_envs: list[dict[str, str]] = []
+    command_timeouts: list[int] = []
     readiness = iter(
         [
             _ready(ready=False, reason="snapshot_not_ready"),
@@ -418,7 +443,8 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
         command_envs.append(dict(_env))
-        return _publish_output() if "--skip-current-pointer" in command else "ok"
+        command_timeouts.append(_timeout)
+        return _pipeline_output(command)
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
@@ -436,6 +462,20 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
     assert commands[0][1].endswith("export_research_lab_dev_icp_inputs.py")
     assert commands[1][1].endswith("record_research_lab_dev_snapshots.py")
     assert "--size" not in commands[1]
+    timeout_index = commands[1].index("--timeout-seconds")
+    assert commands[1][timeout_index + 1] == str(
+        snapshot_refresh.DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS
+    )
+    expected_record_timeout = snapshot_refresh.snapshot_record_workflow_timeout_seconds(
+        item_count=40,
+        item_timeout_seconds=snapshot_refresh.DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+    )
+    assert command_timeouts == [
+        snapshot_refresh.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        expected_record_timeout,
+        snapshot_refresh.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        snapshot_refresh.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    ]
     assert all(
         env[RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD["live_max_icps_per_node"]]
         == "5"
@@ -445,6 +485,85 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
     assert "--skip-current-pointer" in commands[2]
     assert "--skip-current-pointer" not in commands[3]
     assert not any((tmp_path / "work").glob("refresh-*"))
+
+
+def test_missing_exported_bank_size_fails_before_paid_recording(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    commands: list[list[str]] = []
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return _active()
+
+    def command_runner(
+        command: Sequence[str],
+        _env: Mapping[str, str],
+        _timeout: int,
+    ) -> str:
+        commands.append(list(command))
+        return "export completed without a bank-size commitment\n"
+
+    result = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: _ready(
+                ready=False,
+                reason="snapshot_not_ready",
+            ),
+            active_loader=active_loader,
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert "source_icps.json" in result["last_error"]
+    assert len(commands) == 1
+    assert commands[0][1].endswith("export_research_lab_dev_icp_inputs.py")
+
+
+def test_exported_bank_over_safety_cap_fails_before_paid_recording(
+    monkeypatch, tmp_path
+):
+    _configure(monkeypatch, tmp_path)
+    commands: list[list[str]] = []
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return _active()
+
+    def command_runner(
+        command: Sequence[str],
+        _env: Mapping[str, str],
+        _timeout: int,
+    ) -> str:
+        commands.append(list(command))
+        return _pipeline_output(
+            command,
+            bank_size=snapshot_refresh.MAX_DEV_SNAPSHOT_BANK_ICP_COUNT + 1,
+        )
+
+    result = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: _ready(
+                ready=False,
+                reason="snapshot_not_ready",
+            ),
+            active_loader=active_loader,
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["last_error"] == (
+        "RuntimeError:snapshot exporter bank size exceeds the safety cap"
+    )
+    assert len(commands) == 1
+    assert commands[0][1].endswith("export_research_lab_dev_icp_inputs.py")
 
 
 def test_due_refresh_uses_observed_model_provenance_without_manual_ids(
@@ -466,7 +585,7 @@ def test_due_refresh_uses_observed_model_provenance_without_manual_ids(
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
-        return _publish_output() if "--skip-current-pointer" in command else "ok"
+        return _pipeline_output(command)
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
@@ -498,7 +617,7 @@ def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_p
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
-        return _publish_output() if "--skip-current-pointer" in command else "ok"
+        return _pipeline_output(command)
 
     readiness = iter(
         [
@@ -610,7 +729,7 @@ def test_utc_rollover_never_promotes_stale_snapshot_pointer(monkeypatch, tmp_pat
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
-        return _publish_output() if "--skip-current-pointer" in command else "ok"
+        return _pipeline_output(command)
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
@@ -646,7 +765,7 @@ def test_recording_failure_is_visible_and_never_promotes_pointer(monkeypatch, tm
         commands.append(list(command))
         if command[1].endswith("record_research_lab_dev_snapshots.py"):
             raise RuntimeError("recording failed")
-        return "ok"
+        return _pipeline_output(command)
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(

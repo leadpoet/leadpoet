@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 import errno
 import gzip
 import socket
@@ -21,6 +22,7 @@ from gateway.tee.egress_framing import (
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
     DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
+    EGRESS_POLICY_JOB_PROXY_ALLOWED,
     HTTPXProviderTransport,
     MAX_RESPONSE_BODY_BYTES,
     MAX_TRANSPORT_RESPONSE_BODY_BYTES,
@@ -45,7 +47,10 @@ from gateway.tee.provider_broker_v2 import (
     provider_registry_hash,
 )
 from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
-from leadpoet_canonical.attested_v2 import validate_transport_attempt
+from leadpoet_canonical.attested_v2 import (
+    DIRECT_EGRESS_REF_HASH,
+    validate_transport_attempt,
+)
 from leadpoet_canonical.attested_v2 import sha256_bytes
 
 
@@ -1985,6 +1990,137 @@ def test_httpx_transport_serializes_request_scoped_direct_failure_isolation(
     assert activity == {"current": 0, "maximum": 1}
 
 
+def test_httpx_transport_concurrent_assigned_requests_are_isolated(
+    monkeypatch,
+):
+    clients = []
+    transports = []
+    results = []
+    errors = []
+    activity = {"current": 0, "maximum": 0}
+    activity_lock = threading.Lock()
+    entered = threading.Barrier(8)
+
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+        def close(self):
+            return None
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        extensions = {"network_stream": Stream()}
+
+        def iter_bytes(self):
+            yield b'{"ok":true}'
+
+    class ResponseContext:
+        def __init__(self, error):
+            self.error = error
+
+        def __enter__(self):
+            with activity_lock:
+                activity["current"] += 1
+                activity["maximum"] = max(
+                    activity["maximum"],
+                    activity["current"],
+                )
+            entered.wait(timeout=2.0)
+            if self.error is not None:
+                with activity_lock:
+                    activity["current"] -= 1
+                raise self.error
+            return Response()
+
+        def __exit__(self, *_args):
+            with activity_lock:
+                activity["current"] -= 1
+            return False
+
+    class Client:
+        def __init__(self, **_options):
+            self.index = len(clients)
+            self.closed = False
+            clients.append(self)
+
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext(
+                RuntimeError("one assigned relay expired")
+                if self.index == 0
+                else None
+            )
+
+        def close(self):
+            self.closed = True
+
+    class HTTPTransport:
+        def __init__(self, **_options):
+            self.closed = False
+            transports.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(
+            Client=Client,
+            HTTPTransport=HTTPTransport,
+            Limits=lambda **kwargs: kwargs,
+            Proxy=lambda *_args, **_kwargs: object(),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "certifi",
+        SimpleNamespace(where=lambda: "/tmp/test-ca.pem"),
+    )
+
+    transport = HTTPXProviderTransport()
+    request = {
+        "method": "GET",
+        "url": "https://api.exa.ai/search",
+        "headers": {},
+        "body": b"",
+        "timeout_ms": 1000,
+        "upstream_proxy_url": "https://worker:secret@proxy.example.com:443",
+        "connection_scope": sha256_bytes(b"job-1:proxy-1"),
+    }
+
+    def run_request():
+        try:
+            results.append(transport(**request))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run_request) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert [str(error) for error in errors] == ["one assigned relay expired"]
+    assert len(results) == 7
+    assert len(clients) == len(transports) == 8
+    assert all(client.closed for client in clients)
+    assert all(item.closed for item in transports)
+    assert activity["current"] == 0
+    assert activity["maximum"] == 8
+
+
 def test_httpx_request_scoped_direct_slot_wait_is_timeout_bounded():
     transport = HTTPXProviderTransport()
     assert transport._direct_request_slot.acquire(timeout=0.1)
@@ -2356,6 +2492,16 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "egress_proxy",
         "openrouter_management",
     }
+
+
+def test_provider_registry_hash_rejects_direct_only_policy_tampering():
+    tampered = dict(BUILTIN_PROVIDER_ROUTES)
+    tampered["supabase"] = replace(
+        tampered["supabase"],
+        egress_policy=EGRESS_POLICY_JOB_PROXY_ALLOWED,
+    )
+
+    assert provider_registry_hash(tampered) != provider_registry_hash()
 
 
 class FakeTransport:
@@ -3222,6 +3368,69 @@ def test_job_scoped_proxy_is_bound_to_transport_receipt(proxy_url):
     assert proxy_url not in str(result)
     assert broker.release_job_credentials("job-1")["released_slot_count"] == 1
     assert transport.released_connection_scopes == [expected_scope]
+
+
+def test_supabase_direct_only_ignores_job_proxy_in_selection_and_references():
+    transport = FakeTransport()
+    broker = _broker(transport)
+    proxy_url = "https://worker:secret@proxy.example.com:443"
+    proxy_hash = credential_value_hash(proxy_url)
+    broker.provision_job_credential(
+        job_id="job-1",
+        slot="egress_proxy",
+        credential=proxy_url,
+        credential_value_hash_expected=proxy_hash,
+    )
+    request = _request(
+        provider_id="supabase",
+        method="GET",
+        url=(
+            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/"
+            "research_lab_rebenchmark_controls?select=sequence"
+        ),
+        body_b64="",
+        logical_operation_id="supabase-direct-only",
+    )
+
+    references = broker.transport_reference_hashes(request)
+    result = broker.execute(request)
+
+    assert references["egress_proxy_ref_hash"] == DIRECT_EGRESS_REF_HASH
+    assert (
+        result["transport_attempt"]["egress_proxy_ref_hash"]
+        == DIRECT_EGRESS_REF_HASH
+    )
+    assert "upstream_proxy_url" not in transport.calls[0]
+    assert "connection_scope" not in transport.calls[0]
+    assert proxy_hash not in str(result)
+
+
+def test_transport_reference_hashes_cannot_be_supplied_or_tampered_by_caller():
+    transport = FakeTransport()
+    broker = _broker(transport)
+    request = _request(
+        provider_id="supabase",
+        method="GET",
+        url=(
+            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/"
+            "research_lab_rebenchmark_controls?select=sequence"
+        ),
+        body_b64="",
+        logical_operation_id="supabase-ref-tamper",
+    )
+
+    with pytest.raises(
+        ProviderBrokerV2Error,
+        match="request fields are invalid",
+    ):
+        broker.execute(
+            {
+                **request,
+                "egress_proxy_ref_hash": "sha256:" + "f" * 64,
+            }
+        )
+
+    assert transport.calls == []
 
 
 @pytest.mark.parametrize(

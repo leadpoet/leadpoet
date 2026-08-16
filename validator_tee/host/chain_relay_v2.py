@@ -7,6 +7,7 @@ terminates in the validator enclave.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import select
@@ -14,7 +15,7 @@ import socket
 import threading
 import time
 import os
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ARCHIVE_ENDPOINT_HOST,
@@ -33,10 +34,34 @@ MAX_BYTES_PER_DIRECTION = 32 * 1024 * 1024
 RELAY_CHUNK_BYTES = 64 * 1024
 CONNECT_TIMEOUT_SECONDS = 15.0
 IDLE_TIMEOUT_SECONDS = 90.0
+_TRANSIENT_ACCEPT_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EINTR,
+        errno.ECONNABORTED,
+        getattr(errno, "EPROTO", None),
+    )
+    if value is not None
+)
 
 
 class ValidatorChainRelayV2Error(RuntimeError):
     """The parent relay request or destination violates the fixed policy."""
+
+
+def _shutdown_and_close_socket(candidate: Any) -> bool:
+    """Attempt full-duplex shutdown and require descriptor release."""
+
+    if candidate is None:
+        return True
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        return candidate.close() is not False
+    except Exception:
+        return False
 
 
 def _recv_exact(connection: Any, size: int) -> bytes:
@@ -148,7 +173,10 @@ def _connect_chain(
             return connection
         except Exception as exc:
             last_error = exc
-            connection.close()
+            if not _shutdown_and_close_socket(connection):
+                raise ValidatorChainRelayV2Error(
+                    "chain connection cleanup failed"
+                ) from exc
     raise ValidatorChainRelayV2Error("chain connection failed") from last_error
 
 
@@ -182,9 +210,16 @@ def _relay(left: Any, right: Any) -> None:
 
 
 def handle_chain_relay_connection(
-    connection: Any, *, connector: Callable[[str], Any] = _connect_chain
+    connection: Any,
+    *,
+    connector: Callable[[str], Any] = _connect_chain,
+    cleanup_failure_callback: Optional[
+        Callable[[Any, str, Optional[Exception]], None]
+    ] = None,
 ) -> None:
     upstream = None
+    primary_error = None  # type: Optional[Exception]
+    cleanup_failed = False
     try:
         request = _read_control(connection)
         destination_host = _validate_control(request)
@@ -197,13 +232,32 @@ def handle_chain_relay_connection(
             },
         )
         _relay(connection, upstream)
+    except Exception as exc:
+        primary_error = exc
+        raise
     finally:
-        for candidate in (upstream, connection):
-            if candidate is not None:
-                try:
-                    candidate.close()
-                except Exception:
-                    pass
+        for endpoint, candidate in (
+            ("upstream", upstream),
+            ("enclave", connection),
+        ):
+            if candidate is not None and not _shutdown_and_close_socket(candidate):
+                cleanup_failed = True
+                if cleanup_failure_callback is not None:
+                    try:
+                        cleanup_failure_callback(
+                            candidate,
+                            endpoint,
+                            primary_error,
+                        )
+                    except Exception as cleanup_error:
+                        if primary_error is None:
+                            raise ValidatorChainRelayV2Error(
+                                "chain relay cleanup accounting failed"
+                            ) from cleanup_error
+        if cleanup_failed and primary_error is None:
+            raise ValidatorChainRelayV2Error(
+                "chain relay endpoint cleanup failed"
+            )
 
 
 class ValidatorChainRelayV2:
@@ -220,43 +274,244 @@ class ValidatorChainRelayV2:
         self._listener = None  # type: Optional[Any]
         self._thread = None  # type: Optional[threading.Thread]
         self._stop = threading.Event()
+        self._lifecycle_lock = threading.RLock()
+        self._status_lock = threading.Lock()
+        self._last_failure = None  # type: Optional[Dict[str, Any]]
+        self._socket_cleanup_failure_count = 0
+        self._pending_endpoint_cleanup = []  # type: List[Any]
+
+    @property
+    def running(self) -> bool:
+        with self._status_lock:
+            endpoint_cleanup_pending = bool(self._pending_endpoint_cleanup)
+        return bool(
+            not self._stop.is_set()
+            and not endpoint_cleanup_pending
+            and self._thread is not None
+            and self._thread.is_alive()
+            and self._listener is not None
+        )
+
+    def _record_failure(
+        self,
+        stage: str,
+        *,
+        error: Optional[Exception] = None,
+        endpoint: str = "none",
+        primary_error: Optional[Exception] = None,
+        cleanup_failure: bool = False,
+    ) -> None:
+        with self._status_lock:
+            if cleanup_failure:
+                self._socket_cleanup_failure_count += 1
+            self._last_failure = {
+                "stage": str(stage),
+                "error_type": (
+                    type(error).__name__
+                    if error is not None
+                    else "ValidatorChainRelayV2Error"
+                ),
+                "errno": int(getattr(error, "errno", 0) or 0),
+                "endpoint": str(endpoint),
+                "primary_error_type": (
+                    type(primary_error).__name__
+                    if primary_error is not None
+                    else "none"
+                ),
+            }
+
+    def _retain_endpoint_cleanup_failure(
+        self,
+        candidate: Any,
+        endpoint: str,
+        primary_error: Optional[Exception],
+    ) -> None:
+        with self._status_lock:
+            if not any(
+                pending is candidate for pending in self._pending_endpoint_cleanup
+            ):
+                self._pending_endpoint_cleanup.append(candidate)
+            self._socket_cleanup_failure_count += 1
+            self._last_failure = {
+                "stage": "handler_endpoint_cleanup",
+                "error_type": "ValidatorChainRelayV2Error",
+                "errno": 0,
+                "endpoint": str(endpoint),
+                "primary_error_type": (
+                    type(primary_error).__name__
+                    if primary_error is not None
+                    else "none"
+                ),
+            }
+
+    def _retry_pending_endpoint_cleanup_locked(self) -> bool:
+        with self._status_lock:
+            pending = list(self._pending_endpoint_cleanup)
+        remaining = []
+        for candidate in pending:
+            if not _shutdown_and_close_socket(candidate):
+                remaining.append(candidate)
+        with self._status_lock:
+            self._pending_endpoint_cleanup = remaining
+        return not remaining
+
+    def _cleanup_lifecycle_locked(self) -> None:
+        self._stop.set()
+        listener = self._listener
+        thread = self._thread
+        listener_clean = True
+        if listener is not None:
+            listener_clean = _shutdown_and_close_socket(listener)
+            if not listener_clean:
+                self._record_failure(
+                    "listener_cleanup",
+                    endpoint="listener",
+                    cleanup_failure=True,
+                )
+        thread_clean = True
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+            thread_clean = not thread.is_alive()
+            if not thread_clean:
+                self._record_failure(
+                    "accept_loop_cleanup",
+                    error=ValidatorChainRelayV2Error(
+                        "validator chain relay accept loop did not terminate"
+                    ),
+                )
+        endpoints_clean = self._retry_pending_endpoint_cleanup_locked()
+        if listener_clean and thread_clean and endpoints_clean:
+            self._listener = None
+            self._thread = None
+            return
+        if not listener_clean:
+            raise ValidatorChainRelayV2Error(
+                "validator chain relay listener cleanup failed"
+            )
+        if not thread_clean:
+            raise ValidatorChainRelayV2Error(
+                "validator chain relay accept loop did not terminate"
+            )
+        raise ValidatorChainRelayV2Error(
+            "validator chain relay endpoint cleanup failed"
+        )
 
     def start(self) -> dict:
-        if self._thread is not None and self._thread.is_alive():
+        with self._lifecycle_lock:
+            if self.running:
+                return self.status()
+            if (
+                self._listener is not None
+                or self._thread is not None
+                or self._pending_endpoint_cleanup
+            ):
+                self._cleanup_lifecycle_locked()
+            stop_event = threading.Event()
+            self._stop = stop_event
+            listener = None
+            try:
+                listener = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
+                listener.bind((VMADDR_CID_ANY, self.port))
+                listener.listen(8)
+            except Exception as exc:
+                stop_event.set()
+                if listener is not None and not _shutdown_and_close_socket(listener):
+                    self._listener = listener
+                    self._record_failure(
+                        "listener_start_cleanup",
+                        endpoint="listener",
+                        primary_error=exc,
+                        cleanup_failure=True,
+                    )
+                    raise ValidatorChainRelayV2Error(
+                        "validator chain relay listener cleanup failed after startup"
+                    ) from exc
+                raise
+            self._listener = listener
+            thread = threading.Thread(
+                target=self._accept_loop,
+                args=(listener, stop_event),
+                name="validator-chain-relay-v2",
+                daemon=True,
+            )
+            self._thread = thread
+            try:
+                thread.start()
+            except Exception as exc:
+                stop_event.set()
+                if not _shutdown_and_close_socket(listener):
+                    self._record_failure(
+                        "listener_start_cleanup",
+                        endpoint="listener",
+                        primary_error=exc,
+                        cleanup_failure=True,
+                    )
+                    raise ValidatorChainRelayV2Error(
+                        "validator chain relay listener cleanup failed after startup"
+                    ) from exc
+                self._listener = None
+                self._thread = None
+                raise
             return self.status()
-        listener = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
-        listener.bind((VMADDR_CID_ANY, self.port))
-        listener.listen(8)
-        self._listener = listener
-        self._thread = threading.Thread(
-            target=self._accept_loop,
-            name="validator-chain-relay-v2",
-            daemon=True,
-        )
-        self._thread.start()
-        return self.status()
 
     def status(self) -> dict:
-        return {
-            "status": "running"
-            if self._thread is not None and self._thread.is_alive()
-            else "stopped",
+        with self._status_lock:
+            last_failure = dict(self._last_failure or {})
+            cleanup_count = self._socket_cleanup_failure_count
+            pending_cleanup_count = len(self._pending_endpoint_cleanup)
+        cleanup_incomplete = bool(
+            pending_cleanup_count
+            or (
+                self._stop.is_set()
+                and (
+                    self._listener is not None
+                    or self._thread is not None
+                )
+            )
+        )
+        accept_loop_failed = bool(
+            not self._stop.is_set()
+            and self._thread is not None
+            and not self._thread.is_alive()
+        )
+        result = {
+            "status": (
+                "running"
+                if self.running
+                else "cleanup_failed"
+                if cleanup_incomplete
+                else "failed"
+                if accept_loop_failed
+                else "stopped"
+            ),
             "port": self.port,
             "policy_hash": chain_source_policy_hash(),
+            "socket_cleanup_failure_count": cleanup_count,
+            "pending_endpoint_cleanup_count": pending_cleanup_count,
         }
+        if last_failure:
+            result["last_failure"] = last_failure
+        return result
 
     def stop(self) -> None:
-        self._stop.set()
-        if self._listener is not None:
-            self._listener.close()
-        self._listener = None
+        with self._lifecycle_lock:
+            self._cleanup_lifecycle_locked()
 
-    def _accept_loop(self) -> None:
-        while not self._stop.is_set():
+    def _accept_loop(
+        self,
+        listener: Any,
+        stop_event: threading.Event,
+    ) -> None:
+        while not stop_event.is_set():
             try:
-                connection, _address = self._listener.accept()
+                connection, _address = listener.accept()
             except Exception as exc:
-                if not self._stop.is_set():
+                if stop_event.is_set():
+                    return
+                if int(getattr(exc, "errno", 0) or 0) in _TRANSIENT_ACCEPT_ERRNOS:
+                    continue
+                self._record_failure("accept_loop", error=exc)
+                if not stop_event.is_set():
                     capture_failure(
                         "runtime.enclave_relay_unavailable",
                         component="validator",
@@ -272,11 +527,20 @@ class ValidatorChainRelayV2:
                         ),
                     )
                 return
-            threading.Thread(
-                target=self._serve_connection,
-                args=(connection,),
-                daemon=True,
-            ).start()
+            try:
+                threading.Thread(
+                    target=self._serve_connection,
+                    args=(connection,),
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                if not _shutdown_and_close_socket(connection):
+                    self._retain_endpoint_cleanup_failure(
+                        connection,
+                        "enclave",
+                        exc,
+                    )
+                self._record_failure("start_handler", error=exc)
 
     def _serve_connection(self, connection: Any) -> None:
         started = time.monotonic()
@@ -284,6 +548,7 @@ class ValidatorChainRelayV2:
             handle_chain_relay_connection(
                 connection,
                 connector=self._connector,
+                cleanup_failure_callback=self._retain_endpoint_cleanup_failure,
             )
         except Exception as exc:
             record_retry(
@@ -315,13 +580,39 @@ class ValidatorChainRelayV2:
                 ),
             )
 
+    def wait_for_accept_loop(self, *, poll_seconds: float = 1.0) -> int:
+        """Wait for the listener thread and distinguish expected shutdown."""
 
-def main() -> None:
+        while True:
+            with self._lifecycle_lock:
+                thread = self._thread
+                stop_event = self._stop
+            with self._status_lock:
+                endpoint_cleanup_pending = bool(
+                    self._pending_endpoint_cleanup
+                )
+            if endpoint_cleanup_pending:
+                return 1
+            if thread is None:
+                return 0 if stop_event.is_set() else 1
+            thread.join(timeout=max(0.01, float(poll_seconds)))
+            if not thread.is_alive():
+                return 0 if stop_event.is_set() else 1
+
+
+def main() -> int:
     relay = ValidatorChainRelayV2()
     print(json.dumps(relay.start(), sort_keys=True), flush=True)
-    while True:
-        time.sleep(3600)
+    try:
+        exit_code = relay.wait_for_accept_loop()
+    except KeyboardInterrupt:
+        relay.stop()
+        return 0
+    if exit_code != 0:
+        relay.stop()
+        return 1
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

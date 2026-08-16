@@ -5,6 +5,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import json
 from types import SimpleNamespace
 import threading
@@ -25,11 +26,15 @@ from gateway.research_lab.provider_evidence_proxy import (
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
     PROVIDER_BROKER_SCHEMA_VERSION,
+    PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION,
     ProviderBrokerV2,
+    ProviderBrokerV2Error,
+    ProviderTransportCleanupError,
     _provider_rpc_response_body_limit,
     credential_reference_hash,
     credential_value_hash,
     expected_provider_credential_slots,
+    validate_provider_transport_failure_diagnostic,
 )
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
 from gateway.tee.inter_enclave_tls import (
@@ -63,6 +68,7 @@ from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_bytes,
     sha256_json,
+    validate_transport_attempt,
 )
 from research_lab.eval.provider_costs import decode_cost_event_header
 from research_lab.eval.provider_evidence_cache import canonical_request_fingerprint
@@ -1442,7 +1448,12 @@ def test_oversized_provider_response_is_signed_and_checkpointed_after_busy_retry
     assert result["failure_code"] == "response_too_large"
     assert result["transport_attempt"]["failure_code"] == "response_too_large"
     assert broker.health()["terminal_count"] == 1
-    assert len(broker_artifacts.values) == 1
+    assert len(broker_artifacts.values) == 2
+    diagnostic = json.loads(broker_artifacts.values[1][0])
+    assert diagnostic["schema_version"] == (
+        PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION
+    )
+    assert diagnostic["failure_stage"] == "provider_request"
     assert outcome_store.persist_attempts == 2
     assert outcome_store.persist_count == 1
     assert len(
@@ -1450,6 +1461,143 @@ def test_oversized_provider_response_is_signed_and_checkpointed_after_busy_retry
             {"result": result, "channel_id": "f" * 32}
         ).encode("utf-8")
     ) <= frame_bytes
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "cleanup_resource_kind"),
+    (
+        ("response_stream_cleanup", "network_stream"),
+        ("client_transport_cleanup", "client_transport"),
+    ),
+)
+def test_transport_cleanup_failure_seals_only_strict_diagnostic_commitments(
+    failure_stage,
+    cleanup_resource_kind,
+) -> None:
+    artifacts = _Artifacts()
+    primary_error = ValueError(
+        "secret-primary https://user:password@example.invalid/private"
+    )
+    cleanup_error = OSError(errno.ENOBUFS, "secret-cleanup-token")
+
+    def transport(**_request):
+        raise ProviderTransportCleanupError(
+            stage=failure_stage,
+            primary_error=primary_error,
+            cleanup_error=cleanup_error,
+        )
+
+    credentials = {
+        slot: "%s-secret" % slot for slot in expected_provider_credential_slots()
+    }
+    broker = ProviderBrokerV2(
+        credential_ref_hashes={
+            slot: credential_reference_hash(secret)
+            for slot, secret in credentials.items()
+        },
+        retry_policy_hashes={
+            provider_id: sha256_json({"retry": provider_id})
+            for provider_id in BUILTIN_PROVIDER_ROUTES
+        },
+        transport=transport,
+        artifact_sink=artifacts.seal,
+        clock=lambda: "2026-07-10T00:00:00Z",
+    )
+    broker.provision_credentials(credentials)
+
+    result = broker.execute(_request())
+
+    assert result["terminal_status"] == "transport_failure"
+    validate_transport_attempt(result["transport_attempt"])
+    assert set(result["transport_attempt"]) == {
+        "schema_version",
+        "request_id",
+        "request_hash",
+        "logical_operation_id",
+        "job_id",
+        "purpose",
+        "provider_id",
+        "attempt_number",
+        "method",
+        "destination_host",
+        "destination_port",
+        "path_hash",
+        "nonsecret_headers_hash",
+        "body_hash",
+        "credential_ref_hash",
+        "egress_proxy_ref_hash",
+        "retry_policy_hash",
+        "timeout_ms",
+        "started_at",
+        "terminal_status",
+        "http_status",
+        "response_hash",
+        "request_artifact_hash",
+        "response_artifact_hash",
+        "tls_peer_chain_hash",
+        "tls_protocol",
+        "failure_code",
+        "completed_at",
+        "attempt_hash",
+    }
+    assert len(artifacts.values) == 2
+    diagnostic_bytes, diagnostic_descriptor = artifacts.values[1]
+    diagnostic = json.loads(diagnostic_bytes)
+    assert diagnostic == {
+        "schema_version": (
+            PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION
+        ),
+        "provider": "exa",
+        "request_hash": result["transport_attempt"]["request_hash"],
+        "attempt_number": 0,
+        "failure_stage": failure_stage,
+        "outer_error_type": "ProviderTransportCleanupError",
+        "primary_error_type": "ValueError",
+        "cleanup_error_type": "OSError",
+        "cleanup_errno": errno.ENOBUFS,
+        "cleanup_resource_kind": cleanup_resource_kind,
+    }
+    assert validate_provider_transport_failure_diagnostic(diagnostic) == diagnostic
+    assert {
+        diagnostic_descriptor["artifact_id"],
+        diagnostic_descriptor["plaintext_hash"],
+        diagnostic_descriptor["ciphertext_hash"],
+        diagnostic_descriptor["encryption_context_hash"],
+    }.issubset(result["evidence_artifact_hashes"])
+    assert "diagnostic" not in result
+    assert "secret-primary" not in str(result)
+    assert "secret-cleanup-token" not in str(result)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda doc: {**doc, "unknown": "field"},
+        lambda doc: {**doc, "failure_stage": "unknown"},
+        lambda doc: {**doc, "cleanup_resource_kind": "client_transport"},
+        lambda doc: {**doc, "cleanup_errno": 65536},
+        lambda doc: {**doc, "outer_error_type": "unsafe.type"},
+        lambda doc: {**doc, "cleanup_error_type": ""},
+    ),
+)
+def test_transport_failure_diagnostic_rejects_malformed_projection(mutation):
+    document = {
+        "schema_version": (
+            PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION
+        ),
+        "provider": "exa",
+        "request_hash": _hash("a"),
+        "attempt_number": 0,
+        "failure_stage": "response_stream_cleanup",
+        "outer_error_type": "ProviderTransportCleanupError",
+        "primary_error_type": "RuntimeError",
+        "cleanup_error_type": "OSError",
+        "cleanup_errno": errno.ENOBUFS,
+        "cleanup_resource_kind": "network_stream",
+    }
+
+    with pytest.raises(ProviderBrokerV2Error):
+        validate_provider_transport_failure_diagnostic(mutation(document))
 
 
 def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() -> None:
@@ -1908,6 +2056,184 @@ def test_failed_outcome_persistence_removes_uncommitted_job_artifacts():
         failed["encrypted_request_artifact_id"]
     ]
     assert [item["artifact_kind"] for item in retained] == ["provider_request"]
+
+
+def test_semantics_rollback_reseals_cleanup_diagnostic_with_outer_cause():
+    vault = EncryptedArtifactVaultV2(
+        master_key=bytes(range(32)),
+        boot_identity_hash=_hash("b"),
+        retention_days=30,
+        clock=lambda: datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+    sealed = []
+
+    def seal(plaintext, **kwargs):
+        descriptor = vault.seal(plaintext, **kwargs)
+        sealed.append((bytes(plaintext), dict(kwargs), dict(descriptor)))
+        return descriptor
+
+    primary_error = ValueError(
+        "secret-primary https://user:password@example.invalid/private"
+    )
+    cleanup_error = OSError(errno.ENOBUFS, "secret-cleanup-token")
+
+    def transport(**_request):
+        raise ProviderTransportCleanupError(
+            stage="client_transport_cleanup",
+            primary_error=primary_error,
+            cleanup_error=cleanup_error,
+        )
+
+    credentials = {
+        slot: "%s-secret" % slot for slot in expected_provider_credential_slots()
+    }
+    broker = ProviderBrokerV2(
+        credential_ref_hashes={
+            slot: credential_reference_hash(secret)
+            for slot, secret in credentials.items()
+        },
+        retry_policy_hashes={
+            provider_id: sha256_json({"retry": provider_id})
+            for provider_id in BUILTIN_PROVIDER_ROUTES
+        },
+        transport=transport,
+        artifact_sink=seal,
+        clock=lambda: "2026-07-10T00:00:00Z",
+    )
+    broker.provision_credentials(credentials)
+    prior_broker_results = []
+    broker_execute = broker.execute
+
+    def recording_broker_execute(request):
+        broker_result = broker_execute(request)
+        prior_broker_results.append(dict(broker_result))
+        return broker_result
+
+    broker.execute = recording_broker_execute
+    outcome_store = _OutcomeStore()
+    outcome_store.fail_persist = True
+    authority, _broker, _cache, _artifacts = _authority(
+        broker=broker,
+        artifacts=SimpleNamespace(seal=seal),
+        outcome_store=outcome_store,
+        artifact_transaction=vault.transient_artifact_transaction,
+    )
+
+    result = authority.execute(_request())
+
+    assert result["terminal_status"] == "transport_failure"
+    assert result["failure_stage"] == "provider_semantics"
+    assert result["failure_error_type"] == "RuntimeError"
+    validate_transport_attempt(result["transport_attempt"])
+    assert broker.health()["terminal_count"] == 0
+    retained = vault.job_artifacts(
+        job_id="job-provider-semantics",
+        purpose="research_lab.company_score.v2",
+    )
+    assert sorted(item["artifact_kind"] for item in retained) == [
+        "provider_request",
+        "provider_transport_failure_diagnostic",
+    ]
+    retained_by_kind = {item["artifact_kind"]: item for item in retained}
+    diagnostic_descriptor = retained_by_kind[
+        "provider_transport_failure_diagnostic"
+    ]
+    diagnostic_plaintext = vault.decrypt_storage_document(
+        vault.export_ciphertext(diagnostic_descriptor["artifact_id"])[
+            "storage_document"
+        ]
+    )
+    diagnostic = json.loads(diagnostic_plaintext)
+    assert diagnostic["outer_error_type"] == "RuntimeError"
+    assert diagnostic["primary_error_type"] == "ValueError"
+    assert diagnostic["cleanup_error_type"] == "OSError"
+    assert diagnostic["cleanup_errno"] == errno.ENOBUFS
+    assert diagnostic["cleanup_resource_kind"] == "client_transport"
+    validate_provider_transport_failure_diagnostic(diagnostic)
+    request_descriptor = retained_by_kind["provider_request"]
+    request_plaintext = vault.decrypt_storage_document(
+        vault.export_ciphertext(request_descriptor["artifact_id"])[
+            "storage_document"
+        ]
+    )
+    request_document = json.loads(request_plaintext)
+    assert set(request_document) == {
+        "schema_version",
+        "logical_operation_id",
+        "job_id",
+        "purpose",
+        "provider_id",
+        "attempt_number",
+        "method",
+        "destination_host",
+        "path_hash",
+        "nonsecret_headers_hash",
+        "body_hash",
+        "retry_policy_hash",
+        "timeout_ms",
+        "failure_stage",
+        "failure_error_type",
+        "provider_transport_failure_diagnostic_hash",
+    }
+    assert request_document[
+        "provider_transport_failure_diagnostic_hash"
+    ] == sha256_bytes(diagnostic_plaintext)
+    retained_hashes = {
+        value
+        for descriptor in retained
+        for field in (
+            "artifact_id",
+            "plaintext_hash",
+            "ciphertext_hash",
+            "encryption_context_hash",
+        )
+        for value in (descriptor[field],)
+    }
+    assert retained_hashes.issubset(result["evidence_artifact_hashes"])
+    diagnostic_seals = [
+        item
+        for item in sealed
+        if item[1]["artifact_kind"]
+        == "provider_transport_failure_diagnostic"
+    ]
+    assert len(diagnostic_seals) == 2
+    assert diagnostic_seals[0][2]["artifact_id"] not in {
+        item["artifact_id"] for item in retained
+    }
+    assert diagnostic_seals[0][2]["artifact_id"] not in result[
+        "evidence_artifact_hashes"
+    ]
+    combined = "%s%s%s" % (
+        canonical_json(result),
+        diagnostic_plaintext.decode("utf-8"),
+        request_plaintext.decode("utf-8"),
+    )
+    assert "secret-primary" not in combined
+    assert "secret-cleanup-token" not in combined
+    assert "password" not in combined
+    assert len(prior_broker_results) == 1
+    with pytest.raises(RuntimeError, match="second outer commit failed"):
+        with vault.transient_artifact_transaction():
+            broker.reseal_transport_failure_diagnostic(
+                prior_result=prior_broker_results[0],
+                outer_error=OSError("second persistence failure"),
+            )
+            raise RuntimeError("second outer commit failed")
+    with vault.transient_artifact_transaction():
+        recovered_descriptor = broker.reseal_transport_failure_diagnostic(
+            prior_result=prior_broker_results[0],
+            outer_error=TimeoutError("third persistence failure"),
+        )
+    assert recovered_descriptor is not None
+    recovered_plaintext = vault.decrypt_storage_document(
+        vault.export_ciphertext(recovered_descriptor["artifact_id"])[
+            "storage_document"
+        ]
+    )
+    recovered = json.loads(recovered_plaintext)
+    assert recovered["outer_error_type"] == "TimeoutError"
+    assert recovered["primary_error_type"] == "ValueError"
+    assert recovered["cleanup_error_type"] == "OSError"
 
 
 def test_preflight_retry_recreates_terminal_record_and_encrypted_artifacts():

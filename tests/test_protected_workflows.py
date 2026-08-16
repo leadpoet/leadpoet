@@ -154,33 +154,37 @@ def test_artifact_egress_transport_boundaries_are_protected():
     } <= set(PROTECTED_SYMBOLS["qualification/scoring/lead_scorer.py"])
     assert {
         "PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION",
+        "PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION",
         "EGRESS_POLICY_DIRECT_ONLY",
         "_PROVIDER_TERMINAL_STATUSES",
         "_CHAIN_WEIGHT_OBSERVATION_PURPOSE",
+        "_SAFE_ERROR_TYPE_RE",
+        "_PROVIDER_ID_RE",
+        "_PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_FIELDS",
+        "_PROVIDER_TRANSPORT_FAILURE_STAGES",
+        "_CLEANUP_RESOURCE_KIND_BY_STAGE",
+        "_MAX_DIAGNOSTIC_ERRNO",
         "_local_resource_failure",
+        "_safe_error_type",
         "_failure_code",
+        "validate_provider_transport_failure_diagnostic",
+        "_provider_transport_failure_diagnostic",
         "_force_close_response_network_stream",
         "_close_client_transports",
         "ProviderTransportCleanupError",
         "ProviderRouteV2",
         "HTTPXProviderTransport",
+        "ProviderBrokerV2.reseal_transport_failure_diagnostic",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/provider_broker_v2.py"])
     assert {
+        "_FAIL_CLOSED_REQUEST_SCHEMA_VERSION",
         "_SEMANTICS_HEALTH_STAGES",
         "ProviderSemanticsAuthorityV2",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/provider_semantics_v2.py"])
-    assert {
-        "PROVIDER_IDLE_MIN_SECONDS",
-        "PROVIDER_MIN_NOFILE_HEADROOM",
-        "PROVIDER_MIN_EPHEMERAL_PORT_HEADROOM",
-        "_provider_health_snapshot",
-        "_require_provider_resource_headroom",
-        "_pause_staging_provider_work",
-        "_wait_for_provider_idle_window",
-        "_wait_for_post_idle_provider_proof",
-        "_validate_post_idle_cleanup_and_resources",
-        "run",
-    } <= set(PROTECTED_SYMBOLS["scripts/run_physical_v2_staging.py"])
+    # Host-only physical validation is not imported into the gateway enclave.
+    # Its complete Git blob is bound by the production parity contract instead
+    # of being represented as measured enclave AST symbols.
+    assert "scripts/run_physical_v2_staging.py" not in PROTECTED_SYMBOLS
     assert {
         "TUNNEL_FRAMING_HEADER",
         "TUNNEL_FRAMING_MODE",
@@ -199,19 +203,28 @@ def test_artifact_egress_transport_boundaries_are_protected():
         "_proc_tcp_address_is_loopback",
         "_loopback_tcp_state_counts",
         "_process_transport_resource_health",
+        "_shutdown_and_close_socket",
+        "EnclaveEgressProxyCleanupError",
         "_FramedParentBridge",
         "_ManagedProxyStream",
         "EnclaveEgressProxy",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/egress_proxy.py"])
     assert {
+        "ArtifactTransportCleanupError",
         "_ArtifactVerificationTransportPool",
         "_ArtifactVerificationTransportSession",
         "ArtifactPersistenceVerifierV2",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/artifact_persistence_v2.py"])
     assert {
         "_handle_connection",
+        "_shutdown_and_close_socket",
         "TEEEgressForwarder",
+        "main",
     } <= set(PROTECTED_SYMBOLS["gateway/utils/tee_egress_forwarder.py"])
+    assert {
+        "_shutdown_and_close_socket",
+        "SandboxProviderSocketServerV2",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/sandbox_provider_socket_v2.py"])
 
 
 def test_protected_manifest_detects_logic_change(tmp_path: Path):

@@ -810,6 +810,47 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
 # VSOCK SERVER
 # ============================================================================
 
+class ValidatorVSOCKRPCCleanupError(RuntimeError):
+    """An accepted validator RPC socket could not prove descriptor release."""
+
+    def __init__(
+        self,
+        *,
+        primary_error: BaseException,
+        cleanup_error: BaseException,
+        resource: Any,
+    ) -> None:
+        super().__init__("validator vsock RPC transport cleanup failed")
+        self.primary_error_type = type(primary_error).__name__
+        self.cleanup_error_type = type(cleanup_error).__name__
+        # Never serialized. The synchronous listener supervisor observes this
+        # terminal error before ownership can leave scope.
+        self._resource = resource
+
+
+class _ExplicitVSOCKCloseFailure(RuntimeError):
+    """A socket adapter explicitly reported retained ownership."""
+
+
+def _close_vsock_rpc_required(candidate: Any) -> Optional[BaseException]:
+    """Attempt full-duplex shutdown and return any close-proof failure."""
+
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        # A peer may have closed immediately after reading the response.
+        # close() remains the accepted descriptor's ownership boundary.
+        pass
+    try:
+        if candidate.close() is False:
+            return _ExplicitVSOCKCloseFailure(
+                "validator vsock RPC close was not confirmed"
+            )
+    except BaseException as exc:
+        return exc
+    return None
+
+
 def _recv_exact(client: Any, size: int) -> bytes:
     output = bytearray()
     while len(output) < size:
@@ -861,6 +902,7 @@ def _receive_request(client: Any) -> tuple[Dict[str, Any], bool]:
 def _handle_vsock_client(client: Any, addr: Any) -> None:
     """Handle one validator RPC with a bounded abandoned-client lifetime."""
 
+    primary_error = None  # type: Optional[BaseException]
     try:
         client.settimeout(VSOCK_RPC_RECEIVE_TIMEOUT_SECONDS)
         print(f"[TEE] Connection from CID {addr[0]}", flush=True)
@@ -886,15 +928,20 @@ def _handle_vsock_client(client: Any, addr: Any) -> None:
                 raise ValueError("legacy response exceeds maximum size")
             client.sendall(response_data)
     except Exception as exc:
-        print(f"[TEE] ❌ Server error: {exc}", flush=True)
-        import traceback
-
-        traceback.print_exc()
+        primary_error = exc
+        print(
+            "[TEE] ❌ Server error type=%s" % type(exc).__name__,
+            flush=True,
+        )
     finally:
-        try:
-            client.close()
-        except Exception:
-            pass
+        cleanup_error = _close_vsock_rpc_required(client)
+        if cleanup_error is not None:
+            cleanup_primary = primary_error or cleanup_error
+            raise ValidatorVSOCKRPCCleanupError(
+                primary_error=cleanup_primary,
+                cleanup_error=cleanup_error,
+                resource=client,
+            ) from cleanup_primary
 
 def run_vsock_server():
     """

@@ -40,6 +40,7 @@ from gateway.tee.egress_policy import (
 )
 from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
 from gateway.tee import egress_proxy
+from gateway.utils import tee_egress_forwarder
 from gateway.tee.egress_proxy import (
     IFF_UP,
     SIOCGIFFLAGS,
@@ -52,10 +53,12 @@ from gateway.tee.egress_proxy import (
 )
 from gateway.utils.tee_client import _recv_exact
 from gateway.utils.tee_egress_forwarder import (
+    TEEEgressForwarder,
     TEEEgressForwarderError,
     _global_address_infos,
     _handle_connection,
     _relay_bidirectional,
+    _shutdown_and_close_socket as _shutdown_and_close_forwarder_socket,
 )
 
 
@@ -336,6 +339,182 @@ def test_parent_forwarder_rejects_policy_mismatch_before_connecting():
     finally:
         client.close()
         thread.join(timeout=2)
+
+
+def test_parent_forwarder_listener_cleanup_retains_failed_ownership():
+    class Listener:
+        def __init__(self):
+            self.close_result = False
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return self.close_result
+
+    listener = Listener()
+    assert _shutdown_and_close_forwarder_socket(listener) is False
+    forwarder = TEEEgressForwarder()
+    forwarder._listener = listener
+
+    with pytest.raises(TEEEgressForwarderError, match="listener cleanup failed"):
+        forwarder.stop()
+
+    assert forwarder._listener is listener
+    assert forwarder.status()["status"] == "cleanup_failed"
+    assert forwarder.status()["socket_cleanup_failure_count"] == 1
+
+    listener.close_result = None
+    forwarder.stop()
+    assert forwarder._listener is None
+    assert forwarder.status()["status"] == "stopped"
+
+    class LiveThread:
+        def __init__(self):
+            self.joined = False
+
+        def join(self, timeout=None):
+            assert timeout == 2.0
+            self.joined = True
+
+        def is_alive(self):
+            return True
+
+    live_thread = LiveThread()
+    forwarder._stop = threading.Event()
+    forwarder._listener = listener
+    forwarder._thread = live_thread
+    with pytest.raises(
+        TEEEgressForwarderError,
+        match="accept loop did not terminate",
+    ):
+        forwarder.stop()
+    assert live_thread.joined is True
+    assert forwarder._listener is listener
+    assert forwarder._thread is live_thread
+    assert forwarder.status()["status"] == "cleanup_failed"
+
+
+def test_parent_forwarder_start_preserves_primary_and_cleanup_failure():
+    class Listener:
+        def bind(self, _address):
+            raise RuntimeError("primary bind failure")
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return False
+
+    listener = Listener()
+    forwarder = TEEEgressForwarder(socket_factory=lambda *_args: listener)
+
+    with pytest.raises(
+        TEEEgressForwarderError,
+        match="listener cleanup failed after startup",
+    ) as captured:
+        forwarder.start()
+
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert str(captured.value.__cause__) == "primary bind failure"
+    assert forwarder._listener is listener
+    assert forwarder.status()["last_failure"]["primary_error_type"] == "RuntimeError"
+
+
+def test_parent_forwarder_accept_loop_death_is_observable(monkeypatch):
+    class Listener:
+        def bind(self, _address):
+            return None
+
+        def listen(self, _backlog):
+            return None
+
+        def accept(self):
+            raise OSError(errno.EIO, "redacted")
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        tee_egress_forwarder.logger,
+        "exception",
+        lambda *_args, **_kwargs: None,
+    )
+    forwarder = TEEEgressForwarder(socket_factory=lambda *_args: Listener())
+    forwarder.start()
+    forwarder._thread.join(timeout=1)
+
+    assert forwarder._thread.is_alive() is False
+    assert forwarder.wait_for_accept_loop(poll_seconds=0.01) == 1
+    status = forwarder.status()
+    assert status["status"] == "failed"
+    assert status["last_failure"]["stage"] == "accept_loop"
+    assert status["last_failure"]["errno"] == errno.EIO
+    forwarder.stop()
+
+
+def test_parent_forwarder_main_exits_nonzero_when_accept_loop_dies(monkeypatch):
+    observed = []
+
+    class Forwarder:
+        def wait_for_accept_loop(self):
+            return 1
+
+        def stop(self):
+            observed.append("stop")
+
+    forwarder = Forwarder()
+    monkeypatch.setattr(tee_egress_forwarder, "_FORWARDER", forwarder)
+    monkeypatch.setattr(
+        tee_egress_forwarder,
+        "ensure_tee_egress_forwarder",
+        lambda: {"status": "running"},
+    )
+
+    assert tee_egress_forwarder.main() == 1
+    assert observed == ["stop"]
+
+
+def test_parent_forwarder_handler_cleanup_is_retained_with_primary_failure():
+    class Connection:
+        def __init__(self):
+            self.close_result = False
+            self.responses = []
+
+        def recv(self, _size):
+            return b""
+
+        def sendall(self, payload):
+            self.responses.append(payload)
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return self.close_result
+
+    connection = Connection()
+    forwarder = TEEEgressForwarder()
+
+    forwarder._serve_connection(connection)
+
+    status = forwarder.status()
+    assert status["socket_cleanup_failure_count"] == 1
+    assert status["pending_endpoint_cleanup_count"] == 1
+    assert status["last_failure"] == {
+        "stage": "handler_endpoint_cleanup",
+        "error_type": "TEEEgressForwarderError",
+        "errno": 0,
+        "endpoint": "enclave",
+        "primary_error_type": "TEEEgressForwarderError",
+    }
+    assert connection.responses
+    connection.close_result = None
+    forwarder.stop()
+    assert forwarder.status()["pending_endpoint_cleanup_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -2329,6 +2508,489 @@ def test_enclave_proxy_ensure_running_is_lightweight_and_restartable(monkeypatch
         proxy.stop()
 
 
+def test_listener_cleanup_explicit_false_is_a_lifecycle_failure(monkeypatch):
+    class Listener:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return False
+
+    listener = Listener()
+    assert egress_proxy._shutdown_and_close_socket(listener) is False
+
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        loopback_initializer=lambda: None,
+    )
+    proxy._listener = listener
+    monkeypatch.setattr(
+        proxy,
+        "_start_locked",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("must not rebind after failed listener cleanup")
+        ),
+    )
+
+    with pytest.raises(
+        EnclaveEgressProxyError,
+        match="listener cleanup failed",
+    ):
+        proxy.ensure_running()
+
+    assert proxy._listener is listener
+    status = proxy.status()
+    assert status["socket_cleanup_failure_count"] == 1
+    assert status["last_failure"]["stage"] == "listener_cleanup"
+
+
+def test_listener_start_failure_preserves_primary_when_cleanup_fails(
+    monkeypatch,
+):
+    class Listener:
+        def setsockopt(self, *_args):
+            return None
+
+        def bind(self, _address):
+            return None
+
+        def listen(self, _backlog):
+            return None
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return False
+
+    listener = Listener()
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        socket_factory=lambda *_args: listener,
+        loopback_initializer=lambda: None,
+    )
+    monkeypatch.setattr(
+        egress_proxy,
+        "_verify_loopback_listener",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("primary listener self-test failure")
+        ),
+    )
+
+    with pytest.raises(
+        EnclaveEgressProxyError,
+        match="listener cleanup failed",
+    ) as captured:
+        proxy.start()
+
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert str(captured.value.__cause__) == "primary listener self-test failure"
+    assert proxy._listener is listener
+    assert proxy._loopback_verified is False
+    status = proxy.status()
+    assert status["socket_cleanup_failure_count"] == 1
+    assert status["last_failure"]["stage"] == "listener_start_cleanup"
+
+
+def test_loopback_self_test_cleanup_retains_resource_and_primary_cause():
+    primary = RuntimeError("redacted accept failure")
+
+    class Client:
+        def settimeout(self, _timeout):
+            return None
+
+        def connect(self, _address):
+            return None
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return False
+
+    class Listener:
+        def accept(self):
+            raise primary
+
+    client = Client()
+    with pytest.raises(
+        egress_proxy.EnclaveEgressProxyCleanupError,
+        match="transport cleanup failed",
+    ) as captured:
+        egress_proxy._verify_loopback_listener(
+            Listener(),
+            local_port=18080,
+            socket_factory=lambda *_args: client,
+        )
+
+    assert captured.value.__cause__ is primary
+    assert captured.value.primary_error is primary
+    assert captured.value._resources == (client,)
+
+
+def test_parent_tunnel_cleanup_is_retained_and_retried_before_new_work():
+    primary = ConnectionError("redacted parent connection failure")
+
+    class Parent:
+        def __init__(self):
+            self.close_calls = 0
+
+        def connect(self, _address):
+            raise primary
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            self.close_calls += 1
+            return False if self.close_calls == 1 else None
+
+    parent = Parent()
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        socket_factory=lambda *_args: parent,
+    )
+
+    with pytest.raises(
+        egress_proxy.EnclaveEgressProxyCleanupError,
+        match="transport cleanup failed",
+    ) as captured:
+        proxy._open_parent_tunnel("immutable.example", 443)
+
+    assert captured.value.__cause__ is primary
+    assert proxy._retired_cleanup_resources == {id(parent): ("socket", parent)}
+    assert proxy._retry_retired_cleanup() is True
+    assert parent.close_calls == 2
+    assert proxy._retired_cleanup_resources == {}
+
+
+def test_retired_cleanup_retries_are_serialized_across_requests():
+    release_close = threading.Event()
+    close_started = threading.Event()
+
+    class Resource:
+        def __init__(self):
+            self.close_calls = 0
+            self.active = 0
+            self.maximum_active = 0
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            self.close_calls += 1
+            self.active += 1
+            self.maximum_active = max(self.maximum_active, self.active)
+            close_started.set()
+            assert release_close.wait(timeout=1)
+            self.active -= 1
+
+    resource = Resource()
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+    proxy._retain_cleanup_resource(resource, stage="test_cleanup")
+    results = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(proxy._retry_retired_cleanup())
+        )
+        for _index in range(2)
+    ]
+    threads[0].start()
+    assert close_started.wait(timeout=1)
+    threads[1].start()
+    release_close.set()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert results == [True, True]
+    assert resource.close_calls == 1
+    assert resource.maximum_active == 1
+    assert proxy._retired_cleanup_resources == {}
+
+
+def test_running_status_prioritizes_retained_cleanup_failure():
+    class Thread:
+        @staticmethod
+        def is_alive():
+            return True
+
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+    proxy._listener = object()
+    proxy._thread = Thread()
+    resource = object()
+    proxy._retain_cleanup_resource(resource, stage="handler_endpoint_cleanup")
+
+    assert proxy.running is True
+    assert proxy.status()["status"] == "cleanup_failed"
+
+
+def test_handler_start_cleanup_retains_unclosed_accepted_socket(monkeypatch):
+    stop_event = threading.Event()
+
+    class Connection:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return False
+
+    class Listener:
+        def accept(self):
+            stop_event.set()
+            return connection, ("127.0.0.1", 1)
+
+    class HandlerThread:
+        def __init__(self, **_options):
+            return None
+
+        def start(self):
+            raise RuntimeError("redacted thread start failure")
+
+    connection = Connection()
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+    monkeypatch.setattr(egress_proxy.threading, "Thread", HandlerThread)
+
+    proxy._accept_loop(Listener(), stop_event)
+
+    assert proxy._retired_cleanup_resources == {
+        id(connection): ("socket", connection)
+    }
+    assert proxy.status()["last_failure"]["stage"] == "start_handler"
+
+
+def test_start_preserves_loopback_initializer_cleanup_stage():
+    resource = object()
+    primary = RuntimeError("redacted loopback failure")
+
+    def fail_initializer():
+        raise egress_proxy.EnclaveEgressProxyCleanupError(
+            stage="loopback_interface_cleanup",
+            primary_error=primary,
+            resources=(resource,),
+        ) from primary
+
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        loopback_initializer=fail_initializer,
+    )
+
+    with pytest.raises(egress_proxy.EnclaveEgressProxyCleanupError):
+        proxy.start()
+
+    assert proxy._retired_cleanup_resources == {
+        id(resource): ("socket", resource)
+    }
+    assert proxy.status()["last_failure"]["stage"] == (
+        "loopback_interface_cleanup"
+    )
+
+
+def test_framed_bridge_close_retains_failed_socket_and_live_thread():
+    class Resource:
+        def __init__(self):
+            self.close_result = False
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return self.close_result
+
+    class Thread:
+        def __init__(self):
+            self.alive = True
+
+        def join(self, timeout=None):
+            del timeout
+
+        def is_alive(self):
+            return self.alive
+
+    application = Resource()
+    thread = Thread()
+    bridge = object.__new__(egress_proxy._FramedParentBridge)
+    bridge._application = application
+    bridge._relay = None
+    bridge._framed = None
+    bridge._done = threading.Event()
+    bridge._done.set()
+    bridge._error = None
+    bridge._cleanup_lock = threading.Lock()
+    bridge._cleanup_failure_count = 0
+    bridge._last_cleanup_error_type = ""
+    bridge._thread = thread
+
+    with pytest.raises(egress_proxy.EnclaveEgressProxyCleanupError):
+        bridge.close()
+
+    assert bridge._application is application
+    assert bridge.stopped is False
+
+    application.close_result = None
+    thread.alive = False
+    bridge.close()
+    assert bridge._application is None
+    assert bridge.stopped is True
+
+
+def test_managed_proxy_stream_marks_closed_only_after_bridge_cleanup():
+    class Stream:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            return False if self.close_calls == 1 else None
+
+    class Bridge:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise EOFError("redacted bridge cleanup failure")
+
+    stream = Stream()
+    bridge = Bridge()
+    managed = egress_proxy._ManagedProxyStream(stream, bridge)
+
+    with pytest.raises(
+        egress_proxy.EnclaveEgressProxyCleanupError,
+        match="transport cleanup failed",
+    ):
+        managed.close()
+
+    assert managed._closed is False
+    assert managed._stream_closed is False
+    assert managed._bridge_closed is False
+
+    managed.close()
+    assert managed._closed is True
+    assert stream.close_calls == 2
+    assert bridge.close_calls == 2
+
+
+def test_upstream_proxy_cleanup_retains_bridge_and_preserves_primary(
+    monkeypatch,
+):
+    primary = ValueError("redacted upstream response failure")
+
+    class Socket:
+        def sendall(self, _payload):
+            return None
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return None
+
+    class Bridge:
+        def __init__(self, _parent, *, idle_timeout_seconds):
+            del idle_timeout_seconds
+            self.stream = Socket()
+            self.close_calls = 0
+
+        def take_stream(self):
+            return self.stream
+
+        def close(self):
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise EOFError("redacted bridge cleanup failure")
+
+    parent = Socket()
+    bridge_instances = []
+
+    def bridge_factory(*args, **kwargs):
+        instance = Bridge(*args, **kwargs)
+        bridge_instances.append(instance)
+        return instance
+
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+    monkeypatch.setattr(proxy, "_open_parent_tunnel", lambda *_args, **_kwargs: parent)
+    monkeypatch.setattr(egress_proxy, "_FramedParentBridge", bridge_factory)
+    monkeypatch.setattr(
+        egress_proxy,
+        "_read_headers",
+        lambda _stream: (_ for _ in ()).throw(primary),
+    )
+
+    with pytest.raises(
+        egress_proxy.EnclaveEgressProxyCleanupError,
+        match="transport cleanup failed",
+    ) as captured:
+        proxy._open_upstream_proxy_tunnel(
+            proxy_url="http://proxy.example.com:6162",
+            destination_host="openrouter.ai",
+            destination_port=443,
+            tunnel_framing=TUNNEL_FRAMING_MODE,
+        )
+
+    bridge = bridge_instances[0]
+    assert captured.value.__cause__ is primary
+    assert proxy._retired_cleanup_resources == {
+        id(bridge): ("transport", bridge)
+    }
+    assert proxy._retry_retired_cleanup() is True
+    assert bridge.close_calls == 2
+    assert proxy._retired_cleanup_resources == {}
+
+
+def test_stop_does_not_forget_listener_or_live_accept_loop(monkeypatch):
+    class Listener:
+        def __init__(self, close_result=True):
+            self.close_result = close_result
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return self.close_result
+
+    class Thread:
+        def __init__(self, alive):
+            self.alive = alive
+            self.joined = False
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout=None):
+            del timeout
+            self.joined = True
+
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+    failed_listener = Listener(close_result=False)
+    proxy._listener = failed_listener
+
+    with pytest.raises(
+        EnclaveEgressProxyError,
+        match="listener cleanup failed",
+    ):
+        proxy.stop()
+    assert proxy._listener is failed_listener
+    assert proxy.running is False
+    assert proxy.status()["status"] == "cleanup_failed"
+
+    listener = Listener(close_result=True)
+    thread = Thread(alive=True)
+    proxy._listener = listener
+    proxy._thread = thread
+    with pytest.raises(
+        EnclaveEgressProxyError,
+        match="accept loop did not terminate",
+    ):
+        proxy.stop()
+    assert thread.joined is True
+    assert proxy._listener is listener
+    assert proxy._thread is thread
+    assert proxy.running is False
+    assert proxy.status()["status"] == "cleanup_failed"
+
+
 def test_enclave_proxy_accept_loop_retries_transient_error(monkeypatch):
     stop_event = threading.Event()
     client, accepted = socket.socketpair()
@@ -2405,6 +3067,9 @@ def test_enclave_proxy_handler_records_socket_cleanup_failures(monkeypatch):
     assert status["completed_tunnel_count"] == 1
     assert status["failed_tunnel_count"] == 0
     assert status["socket_cleanup_failure_count"] == 2
+    assert {
+        resource for _kind, resource in proxy._retired_cleanup_resources.values()
+    } == {client, parent}
 
 
 def test_enclave_proxy_start_fails_closed_when_loopback_initialization_fails():

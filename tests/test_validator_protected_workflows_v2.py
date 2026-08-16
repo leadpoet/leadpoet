@@ -48,6 +48,12 @@ def test_committed_validator_protected_manifest_matches_source():
         "Validator._finalize_weight_publication_v2_with_retry"
         in PROTECTED_SYMBOLS["neurons/validator.py"]
     )
+    assert {
+        "_shutdown_and_close_socket",
+        "handle_chain_relay_connection",
+        "ValidatorChainRelayV2",
+        "main",
+    } <= set(PROTECTED_SYMBOLS["validator_tee/host/chain_relay_v2.py"])
 
 
 def test_validator_protected_manifest_detects_weight_logic_change(tmp_path: Path):

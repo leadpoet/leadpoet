@@ -15,7 +15,7 @@ import subprocess
 import base64
 import hashlib
 import threading
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 
@@ -37,6 +37,44 @@ class TEEEnclaveRPCError(RuntimeError):
     def __init__(self, message: str, *, error_type: str = "") -> None:
         super().__init__(f"Enclave error: {message}")
         self.error_type = str(error_type or "")
+
+
+class TEETransportCleanupError(RuntimeError):
+    """A one-shot enclave RPC socket could not prove descriptor release."""
+
+    def __init__(
+        self,
+        *,
+        primary_error: BaseException,
+        cleanup_error: BaseException,
+        resource: Any,
+    ) -> None:
+        super().__init__("enclave RPC transport cleanup failed")
+        self.primary_error_type = type(primary_error).__name__
+        self.cleanup_error_type = type(cleanup_error).__name__
+        # Keep the still-owned descriptor reachable without serializing it.
+        self._resource = resource
+
+
+class _ExplicitCloseFailure(RuntimeError):
+    """A socket adapter explicitly reported retained ownership."""
+
+
+def _close_rpc_socket_required(candidate: Any) -> Optional[BaseException]:
+    """Attempt full-duplex shutdown and return any close-proof failure."""
+
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        # The enclave normally closes its write side after the response.
+        # close() remains the descriptor-release boundary.
+        pass
+    try:
+        if candidate.close() is False:
+            return _ExplicitCloseFailure("enclave RPC close was not confirmed")
+    except BaseException as exc:
+        return exc
+    return None
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -135,6 +173,9 @@ class TEEClient:
         """Perform one complete RPC on one socket owned by this call."""
 
         rpc_socket: Optional[socket.socket] = None
+        missing_result = object()
+        result: Any = missing_result
+        primary_error = None  # type: Optional[BaseException]
         try:
             try:
                 rpc_socket = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
@@ -168,17 +209,27 @@ class TEEClient:
                     str(response.get("error") or "unknown enclave error"),
                     error_type=str(response.get("error_type") or ""),
                 )
-            return response.get("result", {})
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            raise RuntimeError(f"RPC failed: {exc}") from exc
-        finally:
-            if rpc_socket is not None:
-                try:
-                    rpc_socket.close()
-                except Exception:
-                    pass
+            result = response.get("result", {})
+        except BaseException as exc:
+            primary_error = exc
+        if rpc_socket is not None:
+            cleanup_error = _close_rpc_socket_required(rpc_socket)
+            if cleanup_error is not None:
+                cleanup_primary = primary_error or cleanup_error
+                raise TEETransportCleanupError(
+                    primary_error=cleanup_primary,
+                    cleanup_error=cleanup_error,
+                    resource=rpc_socket,
+                ) from cleanup_primary
+        if primary_error is not None:
+            if isinstance(primary_error, RuntimeError):
+                raise primary_error
+            if isinstance(primary_error, Exception):
+                raise RuntimeError(f"RPC failed: {primary_error}") from primary_error
+            raise primary_error
+        if result is missing_result:
+            raise RuntimeError("RPC result is unavailable")
+        return result
     
     async def _send_rpc(self, method: str, params: Optional[Dict] = None) -> Dict:
         """

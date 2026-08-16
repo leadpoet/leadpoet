@@ -125,6 +125,12 @@ PROTECTED_SYMBOLS = {
         "chain_source_policy_hash",
         "chain_source_boundary_for_profile_v2",
     ),
+    "validator_tee/host/chain_relay_v2.py": (
+        "_shutdown_and_close_socket",
+        "handle_chain_relay_connection",
+        "ValidatorChainRelayV2",
+        "main",
+    ),
     "leadpoet_canonical/production_parity_boundary_v2.py": (
         "PRODUCTION_SUPABASE_ORIGIN",
         "PRODUCTION_CHAIN_HOST",

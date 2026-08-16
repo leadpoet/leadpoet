@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 from datetime import datetime, timezone
 import http.client
 import json
@@ -60,6 +59,21 @@ _DNS_RE = re.compile(
 
 class ArtifactPersistenceV2Error(RuntimeError):
     """An artifact policy or authenticated persistence result is invalid."""
+
+
+class ArtifactTransportCleanupError(ArtifactPersistenceV2Error):
+    """A request failed and its owned artifact transport did not close."""
+
+    def __init__(
+        self,
+        *,
+        primary_error: BaseException,
+        cleanup_error: BaseException,
+    ) -> None:
+        super().__init__("artifact verification transport cleanup failed")
+        self.primary_error = primary_error
+        self.primary_error_type = type(primary_error).__name__
+        self.cleanup_error_type = type(cleanup_error).__name__
 
 
 def _timestamp() -> str:
@@ -137,6 +151,8 @@ def _validate_presigned_url(
 
 
 def _transport_failure_code(exc: BaseException) -> str:
+    if isinstance(exc, ArtifactTransportCleanupError):
+        return _transport_failure_code(exc.primary_error)
     text = (type(exc).__name__ + " " + str(exc)).lower()
     for token, code in (
         ("cannot assign requested address", "proxy_failure"),
@@ -188,13 +204,46 @@ class _ArtifactHTTPSProxyTransport:
         self._response_body_ceiling_bytes = response_body_ceiling_bytes
         self._connection = None  # type: Optional[http.client.HTTPSConnection]
         self._destination = None  # type: Optional[tuple[str, int]]
+        self._response = None  # type: Optional[http.client.HTTPResponse]
+
+    def _close_response(self) -> None:
+        response = getattr(self, "_response", None)
+        if response is None:
+            return
+        try:
+            closed = response.close()
+        except BaseException as exc:
+            raise ArtifactPersistenceV2Error(
+                "artifact response cleanup failed"
+            ) from exc
+        if closed is False:
+            raise ArtifactPersistenceV2Error(
+                "artifact response cleanup failed"
+            )
+        if self._response is response:
+            self._response = None
 
     def close(self) -> None:
+        self._close_response()
         connection = self._connection
-        self._connection = None
-        self._destination = None
-        if connection is not None:
-            connection.close()
+        if connection is None:
+            self._destination = None
+            return
+        try:
+            closed = connection.close()
+        except BaseException as exc:
+            raise ArtifactPersistenceV2Error(
+                "artifact HTTPS connection cleanup failed"
+            ) from exc
+        if closed is False:
+            raise ArtifactPersistenceV2Error(
+                "artifact HTTPS connection cleanup failed"
+            )
+        # Clear ownership only after the connection confirms close. A failed
+        # close remains reachable so the pool can retire and retry it.
+        if self._connection is connection:
+            self._connection = None
+            self._destination = None
 
     def _client(
         self,
@@ -300,6 +349,7 @@ class _ArtifactHTTPSProxyTransport:
                     "authenticated artifact response lacks TLS evidence"
                 )
             response = connection.getresponse()
+            self._response = response
             transfer_encoding = str(
                 response.headers.get("transfer-encoding") or ""
             ).strip()
@@ -331,12 +381,19 @@ class _ArtifactHTTPSProxyTransport:
                 "tls_peer_chain_hash": sha256_bytes(bytes(certificate)),
                 "tls_protocol": str(protocol),
             }
-            response.close()
+            self._close_response()
             return result
-        except Exception:
-            if response is not None:
-                response.close()
-            self.close()
+        except BaseException as primary_error:
+            cleanup_error = None  # type: Optional[BaseException]
+            try:
+                self.close()
+            except BaseException as exc:
+                cleanup_error = exc
+            if cleanup_error is not None:
+                raise ArtifactTransportCleanupError(
+                    primary_error=primary_error,
+                    cleanup_error=cleanup_error,
+                ) from primary_error
             raise
 
 
@@ -364,6 +421,7 @@ class _ArtifactVerificationTransportPool:
                 "artifact verification transport pool configuration is invalid"
             )
         self._condition = threading.Condition()
+        self._cleanup_lock = threading.RLock()
         self._maximum_transports = maximum_transports
         self._wait_seconds = float(wait_seconds)
         self._maximum_idle_seconds = float(maximum_idle_seconds)
@@ -371,6 +429,9 @@ class _ArtifactVerificationTransportPool:
         self._generation = 0
         self._idle = []  # type: list[tuple[float, int, Any]]
         self._leased_generations = {}  # type: dict[int, int]
+        self._retired_transports = {}  # type: dict[int, Any]
+        self._cleanup_failure_count = 0
+        self._last_cleanup_error_type = ""
         self._transport_count = 0
 
     @staticmethod
@@ -389,7 +450,6 @@ class _ArtifactVerificationTransportPool:
                 or max(0.0, now - released_at) >= self._maximum_idle_seconds
             ):
                 expired.append(transport)
-                self._transport_count -= 1
             else:
                 reusable.append((released_at, generation, transport))
         self._idle = reusable
@@ -397,35 +457,73 @@ class _ArtifactVerificationTransportPool:
             self._condition.notify_all()
         return expired
 
-    @staticmethod
-    def _close_all(transports: Sequence[Any]) -> None:
-        for transport in transports:
-            with suppress(Exception):
-                transport.close()
+    def _close_all(self, transports: Sequence[Any]) -> None:
+        """Close retired transports without losing ownership on failure."""
+
+        with self._cleanup_lock:
+            unique = {id(transport): transport for transport in transports}
+            if not unique:
+                return
+            with self._condition:
+                self._retired_transports.update(unique)
+            closed_ids = []
+            failures = []
+            for transport_id, transport in unique.items():
+                try:
+                    closed = transport.close()
+                    if closed is False:
+                        raise ArtifactPersistenceV2Error(
+                            "artifact verification transport cleanup failed"
+                        )
+                except BaseException as exc:
+                    failures.append(exc)
+                else:
+                    closed_ids.append(transport_id)
+            with self._condition:
+                for transport_id in closed_ids:
+                    if self._retired_transports.pop(transport_id, None) is not None:
+                        self._transport_count -= 1
+                if failures:
+                    self._cleanup_failure_count += len(failures)
+                    self._last_cleanup_error_type = type(failures[-1]).__name__
+                self._condition.notify_all()
+
+    def _retry_retired(self) -> None:
+        with self._cleanup_lock:
+            with self._condition:
+                retired = list(self._retired_transports.values())
+            self._close_all(retired)
 
     def acquire(self) -> Callable[..., Mapping[str, Any]]:
         deadline = time.monotonic() + self._wait_seconds
-        expired = []
+        self._retry_retired()
         selected = None
         create_new = False
         timed_out = False
-        with self._condition:
-            while True:
-                expired.extend(self._expire_idle_locked())
-                if self._idle:
+        while True:
+            expired = []
+            with self._condition:
+                expired = self._expire_idle_locked()
+                if expired:
+                    # Prove cleanup outside the condition before deciding
+                    # whether the released capacity can be reused.
+                    pass
+                elif self._idle:
                     _released_at, generation, selected = self._idle.pop()
                     self._leased_generations[id(selected)] = generation
                     break
-                if self._transport_count < self._maximum_transports:
+                elif self._transport_count < self._maximum_transports:
                     self._transport_count += 1
                     create_new = True
                     break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                self._condition.wait(timeout=remaining)
-        self._close_all(expired)
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    self._condition.wait(timeout=remaining)
+            if expired:
+                self._close_all(expired)
         if timed_out:
             raise ArtifactPersistenceV2Error(
                 "artifact verification transport pool exhausted"
@@ -463,11 +561,9 @@ class _ArtifactVerificationTransportPool:
                 # later and repopulate the pool with dead framed connections.
                 self._generation += 1
                 to_close = [transport, *(item[2] for item in self._idle)]
-                self._transport_count -= len(to_close)
                 self._idle = []
             elif failed or generation != self._generation:
                 to_close = [transport]
-                self._transport_count -= 1
             else:
                 self._idle.append(
                     (self._idle_clock(), self._generation, transport)

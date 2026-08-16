@@ -35,6 +35,7 @@ from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_bytes,
     sha256_json,
+    validate_transport_attempt,
 )
 from gateway.tee.source_add_runtime_v2 import (
     source_add_dynamic_job_slot,
@@ -45,6 +46,9 @@ from gateway.tee.source_add_runtime_v2 import (
 
 PROVIDER_BROKER_SCHEMA_VERSION = "leadpoet.provider_broker.v2"
 PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION = "leadpoet.provider_transport_health.v2"
+PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION = (
+    "leadpoet.provider_transport_failure_diagnostic.v2"
+)
 MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 PROVIDER_RPC_RESPONSE_RESERVE_BYTES = 8 * 1024 * 1024
 
@@ -132,6 +136,7 @@ _LOCAL_RESOURCE_ERRNO_KINDS = {
     for error_number, _token, kind in _LOCAL_RESOURCE_FAILURES
 }
 _SAFE_ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_PROVIDER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,79}$")
 _TRANSPORT_ROUTES = ("direct", "assigned_proxy")
 _PROVIDER_TERMINAL_STATUSES = (
     "authenticated_response",
@@ -141,6 +146,32 @@ _CHAIN_WEIGHT_OBSERVATION_PURPOSE = (
     "research_lab.chain_weight_observation.v1"
 )
 _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE = "_leadpoet_explicit_http_transport"
+_PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "schema_version",
+        "provider",
+        "request_hash",
+        "attempt_number",
+        "failure_stage",
+        "outer_error_type",
+        "primary_error_type",
+        "cleanup_error_type",
+        "cleanup_errno",
+        "cleanup_resource_kind",
+    }
+)
+_PROVIDER_TRANSPORT_FAILURE_STAGES = frozenset(
+    {
+        "provider_request",
+        "response_stream_cleanup",
+        "client_transport_cleanup",
+    }
+)
+_CLEANUP_RESOURCE_KIND_BY_STAGE = {
+    "response_stream_cleanup": "network_stream",
+    "client_transport_cleanup": "client_transport",
+}
+_MAX_DIAGNOSTIC_ERRNO = 65535
 
 
 class ProviderBrokerV2Error(RuntimeError):
@@ -619,6 +650,168 @@ def _exception_errno(exc: BaseException) -> int:
 def _safe_error_type(exc: BaseException) -> str:
     name = str(type(exc).__name__ or "")
     return name if _SAFE_ERROR_TYPE_RE.fullmatch(name) else "Exception"
+
+
+def validate_provider_transport_failure_diagnostic(
+    value: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Validate the exact encrypted-only transport failure projection."""
+
+    if (
+        not isinstance(value, Mapping)
+        or frozenset(value) != _PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_FIELDS
+    ):
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic fields are invalid"
+        )
+    if (
+        value.get("schema_version")
+        != PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION
+    ):
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic schema is invalid"
+        )
+    provider = str(value.get("provider") or "")
+    request_hash = str(value.get("request_hash") or "")
+    attempt_number = value.get("attempt_number")
+    failure_stage = str(value.get("failure_stage") or "")
+    outer_error_type = str(value.get("outer_error_type") or "")
+    primary_error_type = str(value.get("primary_error_type") or "")
+    cleanup_error_type = str(value.get("cleanup_error_type") or "")
+    cleanup_errno = value.get("cleanup_errno")
+    cleanup_resource_kind = str(value.get("cleanup_resource_kind") or "")
+    if not _PROVIDER_ID_RE.fullmatch(provider):
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic provider is invalid"
+        )
+    if not _HASH_RE.fullmatch(request_hash):
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic request hash is invalid"
+        )
+    if (
+        isinstance(attempt_number, bool)
+        or not isinstance(attempt_number, int)
+        or attempt_number < 0
+    ):
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic attempt is invalid"
+        )
+    if failure_stage not in _PROVIDER_TRANSPORT_FAILURE_STAGES:
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic stage is invalid"
+        )
+    if not _SAFE_ERROR_TYPE_RE.fullmatch(outer_error_type):
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic outer error is invalid"
+        )
+    if primary_error_type and not _SAFE_ERROR_TYPE_RE.fullmatch(
+        primary_error_type
+    ):
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic primary error is invalid"
+        )
+    if cleanup_error_type and not _SAFE_ERROR_TYPE_RE.fullmatch(
+        cleanup_error_type
+    ):
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic cleanup error is invalid"
+        )
+    if (
+        isinstance(cleanup_errno, bool)
+        or not isinstance(cleanup_errno, int)
+        or not 0 <= cleanup_errno <= _MAX_DIAGNOSTIC_ERRNO
+    ):
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic cleanup errno is invalid"
+        )
+    expected_resource_kind = _CLEANUP_RESOURCE_KIND_BY_STAGE.get(
+        failure_stage,
+        "",
+    )
+    if cleanup_resource_kind != expected_resource_kind:
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic cleanup resource is invalid"
+        )
+    if failure_stage == "provider_request":
+        if (
+            not primary_error_type
+            or cleanup_error_type
+            or cleanup_errno
+        ):
+            raise ProviderBrokerV2Error(
+                "provider transport failure diagnostic request error is invalid"
+            )
+    elif not cleanup_error_type:
+        raise ProviderBrokerV2Error(
+            "provider transport failure diagnostic cleanup provenance is invalid"
+        )
+    return {
+        "schema_version": PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION,
+        "provider": provider,
+        "request_hash": request_hash,
+        "attempt_number": attempt_number,
+        "failure_stage": failure_stage,
+        "outer_error_type": outer_error_type,
+        "primary_error_type": primary_error_type,
+        "cleanup_error_type": cleanup_error_type,
+        "cleanup_errno": cleanup_errno,
+        "cleanup_resource_kind": cleanup_resource_kind,
+    }
+
+
+def _provider_transport_failure_diagnostic(
+    *,
+    provider: str,
+    request_hash: str,
+    attempt_number: int,
+    exc: BaseException,
+) -> Dict[str, Any]:
+    failure_stage = (
+        str(getattr(exc, "failure_stage", "") or "")
+        if isinstance(exc, ProviderTransportCleanupError)
+        else "provider_request"
+    )
+    if failure_stage not in _CLEANUP_RESOURCE_KIND_BY_STAGE:
+        failure_stage = "provider_request"
+    if failure_stage == "provider_request":
+        primary_error_type = _safe_error_type(exc)
+        cleanup_error_type = ""
+        cleanup_errno = 0
+        cleanup_resource_kind = ""
+    else:
+        primary_error_type = str(
+            getattr(exc, "primary_error_type", "") or ""
+        )
+        cleanup_error_type = str(
+            getattr(exc, "cleanup_error_type", "") or ""
+        )
+        raw_cleanup_errno = getattr(exc, "cleanup_errno", 0)
+        cleanup_errno = (
+            int(raw_cleanup_errno)
+            if isinstance(raw_cleanup_errno, int)
+            and not isinstance(raw_cleanup_errno, bool)
+            and 0 <= raw_cleanup_errno <= _MAX_DIAGNOSTIC_ERRNO
+            else 0
+        )
+        cleanup_resource_kind = _CLEANUP_RESOURCE_KIND_BY_STAGE[
+            failure_stage
+        ]
+    return validate_provider_transport_failure_diagnostic(
+        {
+            "schema_version": (
+                PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION
+            ),
+            "provider": str(provider),
+            "request_hash": str(request_hash),
+            "attempt_number": attempt_number,
+            "failure_stage": failure_stage,
+            "outer_error_type": _safe_error_type(exc),
+            "primary_error_type": primary_error_type,
+            "cleanup_error_type": cleanup_error_type,
+            "cleanup_errno": cleanup_errno,
+            "cleanup_resource_kind": cleanup_resource_kind,
+        }
+    )
 
 
 def _failure_code(exc: BaseException) -> str:
@@ -1760,6 +1953,9 @@ class ProviderBrokerV2:
         self._job_credentials = {}  # type: Dict[Tuple[str, str], Dict[str, str]]
         self._records = {}  # type: Dict[Tuple[str, int], Dict[str, Any]]
         self._pending_records = {}  # type: Dict[Tuple[str, int], Dict[str, Any]]
+        self._rolled_back_transport_failure_diagnostics = (
+            {}
+        )  # type: Dict[str, Dict[str, Any]]
         self._record_keys_by_job = {}  # type: Dict[str, set[Tuple[str, int]]]
         self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event, object]]
         self._released_terminal_count = 0
@@ -1857,6 +2053,40 @@ class ProviderBrokerV2:
                                 str(record["job_id"]),
                                 set(),
                             ).add(key)
+                        else:
+                            diagnostic = pending["record"].get(
+                                "transport_failure_diagnostic"
+                            )
+                            attempt = pending["record"].get("result", {}).get(
+                                "transport_attempt"
+                            )
+                            attempt_hash = (
+                                str(attempt.get("attempt_hash") or "")
+                                if isinstance(attempt, Mapping)
+                                else ""
+                            )
+                            if (
+                                isinstance(diagnostic, Mapping)
+                                and _HASH_RE.fullmatch(attempt_hash)
+                            ):
+                                if (
+                                    len(
+                                        self._rolled_back_transport_failure_diagnostics
+                                    )
+                                    >= MAX_DEDUPLICATION_RECORDS
+                                ):
+                                    oldest = next(
+                                        iter(
+                                            self._rolled_back_transport_failure_diagnostics
+                                        )
+                                    )
+                                    self._rolled_back_transport_failure_diagnostics.pop(
+                                        oldest,
+                                        None,
+                                    )
+                                self._rolled_back_transport_failure_diagnostics[
+                                    attempt_hash
+                                ] = dict(diagnostic)
                         inflight = self._inflight.get(key)
                         if (
                             inflight is not None
@@ -1867,6 +2097,124 @@ class ProviderBrokerV2:
                 del self._transaction_state.current
                 for wait_event in wait_events:
                     wait_event.set()
+
+    def reseal_transport_failure_diagnostic(
+        self,
+        *,
+        prior_result: Mapping[str, Any],
+        outer_error: BaseException,
+    ) -> Dict[str, Any] | None:
+        """Reseal safe cleanup provenance after a surrounding rollback.
+
+        The broker result exposes only artifact commitments.  The validated
+        projection stays coordinator-local and is recovered by the immutable
+        attempt hash when semantics persistence rolls the first envelope back.
+        """
+
+        if not isinstance(prior_result, Mapping):
+            raise ProviderBrokerV2Error(
+                "prior provider transport result is invalid"
+            )
+        if str(prior_result.get("terminal_status") or "") != "transport_failure":
+            return None
+        attempt = prior_result.get("transport_attempt")
+        if not isinstance(attempt, Mapping):
+            raise ProviderBrokerV2Error(
+                "prior provider transport attempt is invalid"
+            )
+        try:
+            validate_transport_attempt(attempt)
+        except Exception as exc:
+            raise ProviderBrokerV2Error(
+                "prior provider transport attempt is invalid"
+            ) from exc
+        attempt_hash = str(attempt.get("attempt_hash") or "")
+        key = (
+            str(attempt.get("logical_operation_id") or ""),
+            int(attempt.get("attempt_number")),
+        )
+        with self._lock:
+            diagnostic = self._rolled_back_transport_failure_diagnostics.get(
+                attempt_hash
+            )
+            if diagnostic is not None:
+                diagnostic = dict(diagnostic)
+            else:
+                record = self._records.get(key)
+                record_attempt = (
+                    record.get("result", {}).get("transport_attempt")
+                    if isinstance(record, Mapping)
+                    else None
+                )
+                if (
+                    isinstance(record_attempt, Mapping)
+                    and str(record_attempt.get("attempt_hash") or "")
+                    == attempt_hash
+                    and isinstance(
+                        record.get("transport_failure_diagnostic"),
+                        Mapping,
+                    )
+                ):
+                    diagnostic = dict(
+                        record["transport_failure_diagnostic"]
+                    )
+        if diagnostic is None:
+            raise ProviderBrokerV2Error(
+                "provider transport failure diagnostic projection is unavailable"
+            )
+        validated = validate_provider_transport_failure_diagnostic(diagnostic)
+        if (
+            validated["provider"] != str(attempt.get("provider_id") or "")
+            or validated["request_hash"]
+            != str(attempt.get("request_hash") or "")
+            or validated["attempt_number"] != attempt.get("attempt_number")
+        ):
+            raise ProviderBrokerV2Error(
+                "provider transport failure diagnostic binding differs"
+            )
+        resealed_document = validate_provider_transport_failure_diagnostic(
+            {
+                **validated,
+                "outer_error_type": _safe_error_type(outer_error),
+            }
+        )
+        payload = canonical_json(resealed_document).encode("utf-8")
+        descriptor = dict(
+            self._artifact_sink(
+                payload,
+                job_id=str(attempt.get("job_id") or ""),
+                purpose=str(attempt.get("purpose") or ""),
+                artifact_kind="provider_transport_failure_diagnostic",
+            )
+        )
+        expected_plaintext_hash = sha256_bytes(payload)
+        if descriptor.get("plaintext_hash") != expected_plaintext_hash:
+            raise ProviderBrokerV2Error(
+                "provider transport failure diagnostic plaintext differs"
+            )
+        descriptor_hashes = {
+            str(descriptor.get(field) or "")
+            for field in (
+                "artifact_id",
+                "plaintext_hash",
+                "ciphertext_hash",
+                "encryption_context_hash",
+            )
+            if descriptor.get(field)
+        }
+        if (
+            not _HASH_RE.fullmatch(str(descriptor.get("artifact_id") or ""))
+            or any(not _HASH_RE.fullmatch(item) for item in descriptor_hashes)
+        ):
+            raise ProviderBrokerV2Error(
+                "provider transport failure diagnostic descriptor is invalid"
+            )
+        # Retain this bounded, commitment-keyed projection until its oldest
+        # entry is evicted. The artifact sink returns before the surrounding
+        # semantics artifact/terminal transaction commits; deleting here would
+        # make a second outer commit failure permanently erase the only safe
+        # provenance needed for the next retry.
+        return descriptor
 
     def _purge_expired_records_locked(self, now: float) -> int:
         cutoff = float(now) - TERMINAL_RECORD_RETENTION_SECONDS
@@ -2643,6 +2991,8 @@ class ProviderBrokerV2:
         terminal_kwargs = {}  # type: Dict[str, Any]
         response_payload = None
         failure_stage = "provider_transport"
+        transport_failure_diagnostic = None  # type: Optional[Dict[str, Any]]
+        transport_failure_error = None  # type: Optional[BaseException]
         try:
             transport_kwargs = {
                 "method": method,
@@ -2726,6 +3076,8 @@ class ProviderBrokerV2:
                 "encrypted_artifact_id": artifact_id,
             }
         except Exception as exc:
+            if failure_stage == "provider_transport":
+                transport_failure_error = exc
             terminal_kwargs = {
                 "terminal_status": "transport_failure",
                 "http_status": None,
@@ -2764,6 +3116,55 @@ class ProviderBrokerV2:
             completed_at=self._clock(),
             **terminal_kwargs,
         )
+        if transport_failure_error is not None:
+            transport_failure_diagnostic = (
+                _provider_transport_failure_diagnostic(
+                    provider=provider_id,
+                    request_hash=str(attempt["request_hash"]),
+                    attempt_number=attempt_number,
+                    exc=transport_failure_error,
+                )
+            )
+            diagnostic_bytes = canonical_json(
+                transport_failure_diagnostic
+            ).encode("utf-8")
+            diagnostic_artifact = dict(
+                self._artifact_sink(
+                    diagnostic_bytes,
+                    job_id=str(request["job_id"] or ""),
+                    purpose=str(request["purpose"] or ""),
+                    artifact_kind="provider_transport_failure_diagnostic",
+                )
+            )
+            if diagnostic_artifact.get("plaintext_hash") != sha256_bytes(
+                diagnostic_bytes
+            ):
+                raise ProviderBrokerV2Error(
+                    "provider transport failure diagnostic plaintext differs"
+                )
+            diagnostic_hashes = {
+                str(diagnostic_artifact.get(field) or "")
+                for field in (
+                    "artifact_id",
+                    "plaintext_hash",
+                    "ciphertext_hash",
+                    "encryption_context_hash",
+                )
+                if diagnostic_artifact.get(field)
+            }
+            if (
+                not _HASH_RE.fullmatch(
+                    str(diagnostic_artifact.get("artifact_id") or "")
+                )
+                or any(
+                    not _HASH_RE.fullmatch(item)
+                    for item in diagnostic_hashes
+                )
+            ):
+                raise ProviderBrokerV2Error(
+                    "provider transport failure diagnostic descriptor is invalid"
+                )
+            evidence_artifact_hashes.update(diagnostic_hashes)
         result = {
             **response_payload,
             "transport_attempt": attempt,
@@ -2790,6 +3191,11 @@ class ProviderBrokerV2:
                 "http_status": int(result.get("http_status") or 0),
                 "request_fingerprint": request_fingerprint,
                 "result": dict(result),
+                "transport_failure_diagnostic": (
+                    dict(transport_failure_diagnostic)
+                    if transport_failure_diagnostic is not None
+                    else None
+                ),
                 "completed_monotonic": self._monotonic_clock(),
             }
             transaction = getattr(self._transaction_state, "current", None)

@@ -44,6 +44,8 @@ MAX_RPC_DELIVERY_ATTEMPTS = 6
 RPC_DELIVERY_BACKOFF_SECONDS = 0.05
 RPC_DELIVERY_ATTEMPT_TIMEOUT_SECONDS = 300.0
 SCHEMA_VERSION = "leadpoet.inter_enclave_rpc.v2"
+TRANSPORT_HEALTH_SCHEMA_VERSION = "leadpoet.inter_enclave_transport_health.v2"
+MAX_TRANSPORT_CLEANUP_EVENT_COUNT = (1 << 63) - 1
 _CHANNEL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
@@ -54,6 +56,49 @@ class InterEnclaveTLSError(RuntimeError):
 
 class _RetryableInterEnclaveTransportError(InterEnclaveTLSError):
     """A connection ended without an authenticated terminal response."""
+
+
+class InterEnclaveTransportCleanupError(InterEnclaveTLSError):
+    """An owned RPC transport could not prove descriptor release."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        primary_error: BaseException,
+        cleanup_error: BaseException,
+        resource: Any,
+    ) -> None:
+        super().__init__("inter-enclave RPC transport cleanup failed")
+        self.stage = str(stage)
+        self.primary_error_type = type(primary_error).__name__
+        self.cleanup_error_type = type(cleanup_error).__name__
+        # The resource is private and never crosses an RPC or health boundary.
+        # Retaining it avoids declaring ownership released without proof.
+        self._resource = resource
+
+
+class _ExplicitCloseFailure(RuntimeError):
+    """A transport adapter explicitly reported retained ownership."""
+
+
+def _close_transport_required(candidate: Any) -> Optional[BaseException]:
+    """Attempt full-duplex shutdown and return any close-proof failure."""
+
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        # TLS and relay peers can already be half-closed. close() is the
+        # descriptor ownership boundary; shutdown() only terminates live I/O.
+        pass
+    try:
+        if candidate.close() is False:
+            return _ExplicitCloseFailure(
+                "inter-enclave transport close was not confirmed"
+            )
+    except BaseException as exc:
+        return exc
+    return None
 
 
 def _recv_exact(connection: Any, size: int) -> bytes:
@@ -322,10 +367,14 @@ class AttestedTLSRPCClient:
         try:
             connection.settimeout(self._delivery_attempt_timeout_seconds)
         except (AttributeError, OSError) as exc:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            cleanup_error = _close_transport_required(connection)
+            if cleanup_error is not None:
+                raise InterEnclaveTransportCleanupError(
+                    stage="client_timeout_setup_cleanup",
+                    primary_error=exc,
+                    cleanup_error=cleanup_error,
+                    resource=connection,
+                ) from exc
             raise _RetryableInterEnclaveTransportError(
                 "inter-enclave delivery timeout could not be applied"
             ) from exc
@@ -339,7 +388,14 @@ class AttestedTLSRPCClient:
         try:
             connection.connect((PARENT_CID, RELAY_PORT))
         except OSError as exc:
-            connection.close()
+            cleanup_error = _close_transport_required(connection)
+            if cleanup_error is not None:
+                raise InterEnclaveTransportCleanupError(
+                    stage="client_connect_cleanup",
+                    primary_error=exc,
+                    cleanup_error=cleanup_error,
+                    resource=connection,
+                ) from exc
             raise _RetryableInterEnclaveTransportError(
                 "inter-enclave parent relay connection failed"
             ) from exc
@@ -388,6 +444,8 @@ class AttestedTLSRPCClient:
         target_spec = role_spec(target_physical_role)
         connection = self._connect_relay()
         tls = None
+        result = None  # type: Optional[Dict[str, Any]]
+        primary_error = None  # type: Optional[BaseException]
         try:
             _send_frame(
                 connection,
@@ -454,14 +512,26 @@ class AttestedTLSRPCClient:
             result = response["result"]
             if not isinstance(result, Mapping):
                 raise InterEnclaveTLSError("inter-enclave response result is invalid")
-            return dict(result)
-        finally:
-            for candidate in (tls, connection):
-                if candidate is not None:
-                    try:
-                        candidate.close()
-                    except Exception:
-                        pass
+            result = dict(result)
+        except BaseException as exc:
+            primary_error = exc
+        # Once wrap_socket succeeds the TLS object owns the underlying socket;
+        # closing both objects would manufacture a second cleanup boundary.
+        owned_transport = tls if tls is not None else connection
+        cleanup_error = _close_transport_required(owned_transport)
+        if cleanup_error is not None:
+            cleanup_primary = primary_error or cleanup_error
+            raise InterEnclaveTransportCleanupError(
+                stage="client_rpc_cleanup",
+                primary_error=cleanup_primary,
+                cleanup_error=cleanup_error,
+                resource=owned_transport,
+            ) from cleanup_primary
+        if primary_error is not None:
+            raise primary_error
+        if result is None:
+            raise InterEnclaveTLSError("inter-enclave response result is unavailable")
+        return result
 
 
 class AttestedTLSRPCServer:
@@ -487,6 +557,51 @@ class AttestedTLSRPCServer:
         self._replay_cache_bytes = 0
         self._replay_inflight = {}
         self._replay_lock = threading.Lock()
+        self._transport_health_lock = threading.Lock()
+        self._transport_cleanup_attempt_count = 0
+        self._transport_cleanup_failure_count = 0
+        self._last_cleanup_primary_error_type = ""
+        self._last_cleanup_error_type = ""
+
+    def _record_transport_cleanup(
+        self,
+        *,
+        primary_error: Optional[BaseException],
+        cleanup_error: Optional[BaseException],
+    ) -> None:
+        with self._transport_health_lock:
+            self._transport_cleanup_attempt_count = min(
+                MAX_TRANSPORT_CLEANUP_EVENT_COUNT,
+                self._transport_cleanup_attempt_count + 1,
+            )
+            if cleanup_error is not None:
+                self._transport_cleanup_failure_count = min(
+                    MAX_TRANSPORT_CLEANUP_EVENT_COUNT,
+                    self._transport_cleanup_failure_count + 1,
+                )
+                self._last_cleanup_primary_error_type = (
+                    type(primary_error).__name__
+                    if primary_error is not None
+                    else type(cleanup_error).__name__
+                )
+                self._last_cleanup_error_type = type(cleanup_error).__name__
+
+    def transport_health(self) -> Dict[str, Any]:
+        """Return a bounded, text-free projection of accepted-RPC cleanup."""
+
+        with self._transport_health_lock:
+            return {
+                "schema_version": TRANSPORT_HEALTH_SCHEMA_VERSION,
+                "status": (
+                    "error"
+                    if self._transport_cleanup_failure_count
+                    else "healthy"
+                ),
+                "cleanup_attempt_count": self._transport_cleanup_attempt_count,
+                "cleanup_failure_count": self._transport_cleanup_failure_count,
+                "last_primary_error_type": self._last_cleanup_primary_error_type,
+                "last_cleanup_error_type": self._last_cleanup_error_type,
+            }
 
     @staticmethod
     def _request_hash(request: Mapping[str, Any]) -> str:
@@ -617,13 +732,15 @@ class AttestedTLSRPCServer:
             raise
 
     def handle_connection(self, connection: Any) -> None:
-        context = create_mutual_tls_context(
-            identity_paths=self.identity_paths,
-            trusted_peer_certificate_pem=self.peer_registry.trusted_certificates(),
-            server_side=True,
-        )
-        tls = context.wrap_socket(connection, server_side=True)
+        tls = None
+        primary_error = None  # type: Optional[BaseException]
         try:
+            context = create_mutual_tls_context(
+                identity_paths=self.identity_paths,
+                trusted_peer_certificate_pem=self.peer_registry.trusted_certificates(),
+                server_side=True,
+            )
+            tls = context.wrap_socket(connection, server_side=True)
             peer = self.peer_registry.peer_for_certificate(
                 tls.getpeercert(binary_form=True)
             )
@@ -641,11 +758,24 @@ class AttestedTLSRPCServer:
                 tls,
                 self._cached_response(request=request, peer=peer),
             )
-        finally:
-            try:
-                tls.close()
-            except Exception:
-                pass
+        except BaseException as exc:
+            primary_error = exc
+        owned_transport = tls if tls is not None else connection
+        cleanup_error = _close_transport_required(owned_transport)
+        self._record_transport_cleanup(
+            primary_error=primary_error,
+            cleanup_error=cleanup_error,
+        )
+        if cleanup_error is not None:
+            cleanup_primary = primary_error or cleanup_error
+            raise InterEnclaveTransportCleanupError(
+                stage="server_rpc_cleanup",
+                primary_error=cleanup_primary,
+                cleanup_error=cleanup_error,
+                resource=owned_transport,
+            ) from cleanup_primary
+        if primary_error is not None:
+            raise primary_error
 
     def serve_forever(self, *, listener: Optional[Any] = None) -> None:
         if listener is None:

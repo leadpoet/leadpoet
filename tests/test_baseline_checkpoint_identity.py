@@ -179,6 +179,52 @@ def test_scoring_contract_hash_tracks_employee_scorer_source(monkeypatch):
     assert changed != original
 
 
+def test_scoring_contract_hash_binds_complete_dynamic_lead_scorer_module(
+    monkeypatch,
+):
+    from qualification.scoring import lead_scorer
+
+    sw._baseline_scoring_contract_hash.cache_clear()
+    original = sw._baseline_scoring_contract_hash()
+    original_getsource = sw.inspect.getsource
+
+    def changed_module_source(value):
+        source = original_getsource(value)
+        if value is lead_scorer:
+            return source + "\n# changed otherwise-unlisted scorer helper\n"
+        return source
+
+    monkeypatch.setattr(sw.inspect, "getsource", changed_module_source)
+    sw._baseline_scoring_contract_hash.cache_clear()
+    try:
+        changed = sw._baseline_scoring_contract_hash()
+    finally:
+        sw._baseline_scoring_contract_hash.cache_clear()
+
+    assert changed != original
+
+
+def test_transport_only_source_change_does_not_invalidate_scoring_contract(
+    monkeypatch,
+):
+    from gateway.tee import provider_broker_v2
+
+    sw._baseline_scoring_contract_hash.cache_clear()
+    original = sw._baseline_scoring_contract_hash()
+    monkeypatch.setattr(
+        provider_broker_v2,
+        "_failure_code",
+        lambda _exc: "proxy_failure",
+    )
+    sw._baseline_scoring_contract_hash.cache_clear()
+    try:
+        unchanged = sw._baseline_scoring_contract_hash()
+    finally:
+        sw._baseline_scoring_contract_hash.cache_clear()
+
+    assert unchanged == original
+
+
 def test_scoring_contract_hash_tracks_employee_bucket_values(monkeypatch):
     from research_lab import employee_buckets
 

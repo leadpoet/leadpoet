@@ -837,6 +837,26 @@
       "symbol": "resume_prepared_weight_publication_v2"
     },
     {
+      "ast_sha256": "sha256:9cc8921132f95d5f031830ce7d00cb98bf9bde3ddb71209d6e2092e4255616c4",
+      "path": "validator_tee/host/chain_relay_v2.py",
+      "symbol": "ValidatorChainRelayV2"
+    },
+    {
+      "ast_sha256": "sha256:4332a15377be3a658cef20b5e5e3b5b38232a0d7c214ecc48f1549ad19361af1",
+      "path": "validator_tee/host/chain_relay_v2.py",
+      "symbol": "_shutdown_and_close_socket"
+    },
+    {
+      "ast_sha256": "sha256:cc3133c23f4dec56b9342e01e6eb650d00344a8dd2a42a538b1e911a18e16549",
+      "path": "validator_tee/host/chain_relay_v2.py",
+      "symbol": "handle_chain_relay_connection"
+    },
+    {
+      "ast_sha256": "sha256:533f9137139c9a82ce6aeb2e4d450bad5379386cec061222e107ec82959c0073",
+      "path": "validator_tee/host/chain_relay_v2.py",
+      "symbol": "main"
+    },
+    {
       "ast_sha256": "sha256:d463a848131b46d2b2e039d89836f00b7f0571b71c99c5032844d1c1cd6c74c4",
       "path": "validator_tee/host/gateway_weight_inputs_v2.py",
       "symbol": "_validate_compact_ancestry"
@@ -887,7 +907,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:112bbd55a467994d98dfe793bdb993fdae4cdc131d79098c9e36c57a48945660",
-  "protected_source_commit": "8d9b48d66cd11331336eb5aa9b30086b932b4c51",
+  "manifest_hash": "sha256:6caea9233f8a79e68538170a8e4589461bf5806dad409fb2a783397f562e5e79",
+  "protected_source_commit": "4a742ea440e94b615c7bc407195bae98df4500d4",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

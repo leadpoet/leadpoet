@@ -801,6 +801,17 @@ def _baseline_scoring_contract_hash() -> str:
             )
         )
     try:
+        # The baseline adapter dynamically imports the qualification scorer.
+        # Bind the complete source modules so changes anywhere in that real
+        # scoring call-closure invalidate a checkpoint without tying measured
+        # rows to transport-only gateway releases.
+        for module in (lead_scorer_module, employee_buckets_module):
+            sources.append(
+                (
+                    f"{module.__name__}.__module_source__",
+                    inspect.getsource(module),
+                )
+            )
         for value in callables:
             sources.append(
                 (

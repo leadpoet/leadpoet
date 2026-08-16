@@ -13,7 +13,9 @@ from gateway.tee.artifact_persistence_v2 import (
     ARTIFACT_POLICY_SCHEMA_VERSION,
     MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
     ArtifactPersistenceV2Error,
+    ArtifactTransportCleanupError,
     ArtifactPersistenceVerifierV2,
+    _ArtifactHTTPSProxyTransport,
     _ArtifactVerificationTransportPool,
     validate_artifact_policy,
 )
@@ -930,6 +932,203 @@ def test_transport_pool_bounds_concurrency_and_reuses_released_client(
     assert acquired == [first]
     assert transports == [first]
     assert first.closed is False
+
+
+def test_artifact_https_close_retains_connection_until_cleanup_is_proven():
+    class Connection:
+        def __init__(self):
+            self.fail = True
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            if self.fail:
+                raise EOFError("redacted close failure")
+            return None
+
+    connection = Connection()
+    transport = object.__new__(_ArtifactHTTPSProxyTransport)
+    transport._connection = connection
+    transport._destination = ("immutable.example", 443)
+
+    with pytest.raises(
+        ArtifactPersistenceV2Error,
+        match="connection cleanup failed",
+    ) as captured:
+        transport.close()
+
+    assert isinstance(captured.value.__cause__, EOFError)
+    assert transport._connection is connection
+    assert transport._destination == ("immutable.example", 443)
+
+    connection.fail = False
+    transport.close()
+    assert connection.close_calls == 2
+    assert transport._connection is None
+    assert transport._destination is None
+
+
+def test_artifact_https_close_retains_response_before_connection_cleanup():
+    class Response:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            return False if self.close_calls == 1 else None
+
+    class Connection:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    response = Response()
+    connection = Connection()
+    transport = object.__new__(_ArtifactHTTPSProxyTransport)
+    transport._response = response
+    transport._connection = connection
+    transport._destination = ("immutable.example", 443)
+
+    with pytest.raises(
+        ArtifactPersistenceV2Error,
+        match="response cleanup failed",
+    ):
+        transport.close()
+
+    assert transport._response is response
+    assert transport._connection is connection
+    assert connection.close_calls == 0
+
+    transport.close()
+    assert response.close_calls == 2
+    assert connection.close_calls == 1
+    assert transport._response is None
+    assert transport._connection is None
+
+
+def test_artifact_transport_cleanup_preserves_primary_error_and_ownership():
+    primary = TimeoutError("redacted request timeout")
+
+    class Connection:
+        sock = None
+
+        def request(self, *_args, **_kwargs):
+            raise primary
+
+        def close(self):
+            raise EOFError("redacted cleanup failure")
+
+    connection = Connection()
+    transport = object.__new__(_ArtifactHTTPSProxyTransport)
+    transport._connection = connection
+    transport._destination = ("immutable.example", 443)
+    transport._response_body_ceiling_bytes = 1024
+    transport._client = lambda **_kwargs: connection
+
+    with pytest.raises(ArtifactTransportCleanupError) as captured:
+        transport(
+            method="GET",
+            url="https://immutable.example/item",
+            headers={"accept": "application/json"},
+            body=b"",
+            timeout_ms=1000,
+            max_response_bytes=1024,
+        )
+
+    assert captured.value.primary_error is primary
+    assert captured.value.__cause__ is primary
+    assert captured.value.primary_error_type == "TimeoutError"
+    assert captured.value.cleanup_error_type == "ArtifactPersistenceV2Error"
+    assert transport._connection is connection
+
+
+def test_transport_pool_retries_retired_cleanup_without_forgetting_capacity(
+    monkeypatch,
+) -> None:
+    transports = []
+
+    class RetryCloseTransport:
+        def __init__(self, **_options):
+            self.close_calls = 0
+            self.closed = False
+            transports.append(self)
+
+        def close(self):
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise EOFError("redacted cleanup failure")
+            self.closed = True
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
+        RetryCloseTransport,
+    )
+    pool = _ArtifactVerificationTransportPool(
+        maximum_transports=1,
+        wait_seconds=0.2,
+    )
+    failed = pool.acquire()
+
+    pool.release(failed, failed=True)
+
+    assert pool._transport_count == 1
+    assert pool._retired_transports == {id(failed): failed}
+    assert pool._cleanup_failure_count == 1
+    replacement = pool.acquire()
+
+    assert failed.closed is True
+    assert failed.close_calls == 2
+    assert pool._retired_transports == {}
+    assert pool._transport_count == 1
+    assert replacement is not failed
+
+
+def test_transport_pool_serializes_concurrent_retired_cleanup(monkeypatch) -> None:
+    transports = []
+
+    class RetryCloseTransport:
+        def __init__(self, **_options):
+            self.close_calls = 0
+            transports.append(self)
+
+        def close(self):
+            self.close_calls += 1
+            if self.close_calls == 1:
+                return False
+
+    monkeypatch.setattr(
+        "gateway.tee.artifact_persistence_v2._ArtifactHTTPSProxyTransport",
+        RetryCloseTransport,
+    )
+    pool = _ArtifactVerificationTransportPool(
+        maximum_transports=1,
+        wait_seconds=1,
+    )
+    failed = pool.acquire()
+    pool.release(failed, failed=True)
+    gate = threading.Barrier(3)
+    acquired = []
+
+    def lease_once():
+        gate.wait(timeout=1)
+        transport = pool.acquire()
+        acquired.append(transport)
+        pool.release(transport)
+
+    threads = [threading.Thread(target=lease_once) for _index in range(2)]
+    for thread in threads:
+        thread.start()
+    gate.wait(timeout=1)
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert failed.close_calls == 2
+    assert len(acquired) == 2
+    assert acquired[0] is acquired[1]
+    assert pool._transport_count == 1
 
 
 def test_transport_pool_replaces_client_before_egress_relay_idle_timeout(

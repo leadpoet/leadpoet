@@ -93,6 +93,27 @@ class EnclaveEgressProxyError(RuntimeError):
     """The measured enclave proxy rejected or could not relay a request."""
 
 
+class EnclaveEgressProxyCleanupError(EnclaveEgressProxyError):
+    """An owned local transport could not prove bounded cleanup."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        primary_error: BaseException,
+        resources: Tuple[Any, ...] = (),
+    ) -> None:
+        super().__init__("enclave egress transport cleanup failed")
+        self.stage = str(stage)
+        self.primary_error = primary_error
+        self.primary_error_type = type(primary_error).__name__
+        # Resources are deliberately private and never serialized. They keep
+        # local ownership alive until a later bounded cleanup retry succeeds.
+        self._resources = tuple(
+            resource for resource in resources if resource is not None
+        )
+
+
 def _proc_tcp_address_is_loopback(value: str, *, ipv6: bool) -> bool:
     normalized = str(value or "").strip().upper()
     if ipv6:
@@ -211,8 +232,10 @@ def _shutdown_and_close_socket(candidate: Any) -> bool:
         # release boundary; shutdown failure alone is not a leaked descriptor.
         pass
     try:
-        candidate.close()
-        return True
+        # Real socket.close() returns None. Test doubles and transport
+        # adapters may explicitly return False to report that the descriptor
+        # is still owned; preserve that signal instead of declaring cleanup.
+        return candidate.close() is not False
     except Exception:
         return False
 
@@ -270,6 +293,7 @@ def _ensure_loopback_interface(
         ioctl = fcntl.ioctl
     control = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
     request = struct.pack("16sH22s", b"lo", 0, b"")
+    primary_error = None  # type: Optional[BaseException]
     try:
         response = ioctl(control.fileno(), SIOCGIFFLAGS, request)
         _name, flags, _padding = struct.unpack("16sH22s", response)
@@ -283,14 +307,23 @@ def _ensure_loopback_interface(
             _name, flags, _padding = struct.unpack("16sH22s", response)
         if not flags & IFF_UP:
             raise EnclaveEgressProxyError("enclave loopback interface is not up")
-    except EnclaveEgressProxyError:
-        raise
     except Exception as exc:
+        primary_error = exc
+    if not _shutdown_and_close_socket(control):
+        cleanup_primary = primary_error or EnclaveEgressProxyError(
+            "enclave loopback interface cleanup failed"
+        )
+        raise EnclaveEgressProxyCleanupError(
+            stage="loopback_interface_cleanup",
+            primary_error=cleanup_primary,
+            resources=(control,),
+        ) from cleanup_primary
+    if primary_error is not None:
+        if isinstance(primary_error, EnclaveEgressProxyError):
+            raise primary_error
         raise EnclaveEgressProxyError(
             "enclave loopback interface initialization failed"
-        ) from exc
-    finally:
-        control.close()
+        ) from primary_error
 
 
 def _verify_loopback_listener(
@@ -303,22 +336,32 @@ def _verify_loopback_listener(
 
     client = None
     accepted = None
+    primary_error = None  # type: Optional[BaseException]
     try:
         client = socket_factory(socket.AF_INET, socket.SOCK_STREAM)
         client.settimeout(2.0)
         client.connect(("127.0.0.1", int(local_port)))
         accepted, _address = listener.accept()
     except Exception as exc:
+        primary_error = exc
+    cleanup_failures = tuple(
+        candidate
+        for candidate in (accepted, client)
+        if candidate is not None and not _shutdown_and_close_socket(candidate)
+    )
+    if cleanup_failures:
+        cleanup_primary = primary_error or EnclaveEgressProxyError(
+            "enclave loopback proxy self-test cleanup failed"
+        )
+        raise EnclaveEgressProxyCleanupError(
+            stage="loopback_self_test_cleanup",
+            primary_error=cleanup_primary,
+            resources=cleanup_failures,
+        ) from cleanup_primary
+    if primary_error is not None:
         raise EnclaveEgressProxyError(
             "enclave loopback proxy self-test failed"
-        ) from exc
-    finally:
-        for candidate in (accepted, client):
-            if candidate is not None:
-                try:
-                    candidate.close()
-                except Exception:
-                    pass
+        ) from primary_error
 
 
 def _read_headers(connection: Any) -> Tuple[bytes, bytes]:
@@ -489,12 +532,29 @@ class _FramedParentBridge:
         self._idle_timeout_seconds = float(idle_timeout_seconds)
         self._done = threading.Event()
         self._error = None  # type: Optional[BaseException]
-        self._thread = threading.Thread(
-            target=self._run,
-            name="gateway-enclave-framed-upstream-proxy",
-            daemon=True,
-        )
-        self._thread.start()
+        self._cleanup_lock = threading.Lock()
+        self._cleanup_failure_count = 0
+        self._last_cleanup_error_type = ""
+        try:
+            self._thread = threading.Thread(
+                target=self._run,
+                name="gateway-enclave-framed-upstream-proxy",
+                daemon=True,
+            )
+            self._thread.start()
+        except BaseException as primary_error:
+            cleanup_failures = tuple(
+                resource
+                for resource in (application, relay, framed)
+                if not _shutdown_and_close_socket(resource)
+            )
+            if cleanup_failures:
+                raise EnclaveEgressProxyCleanupError(
+                    stage="framed_parent_bridge_start_cleanup",
+                    primary_error=primary_error,
+                    resources=cleanup_failures,
+                ) from primary_error
+            raise
 
     def take_stream(self) -> Any:
         if self._application is None:
@@ -504,10 +564,12 @@ class _FramedParentBridge:
         return application
 
     def _run(self) -> None:
+        relay = self._relay
+        framed = self._framed
         try:
             relay_raw_and_framed(
-                self._relay,
-                self._framed,
+                relay,
+                framed,
                 idle_timeout_seconds=self._idle_timeout_seconds,
                 max_bytes_per_direction=MAX_TUNNEL_BYTES_PER_DIRECTION,
                 raw_label="upstream_proxy",
@@ -517,31 +579,57 @@ class _FramedParentBridge:
         except BaseException as exc:  # noqa: BLE001 - bridge failure closes its stream
             self._error = exc
         finally:
-            for candidate in (self._relay, self._framed):
-                try:
-                    candidate.close()
-                except Exception:
-                    pass
+            self._close_owned("_relay", relay)
+            self._close_owned("_framed", framed)
             self._done.set()
 
+    def _close_owned(self, attribute: str, expected: Any = None) -> bool:
+        with self._cleanup_lock:
+            candidate = getattr(self, attribute)
+            if candidate is None:
+                return True
+            if expected is not None and candidate is not expected:
+                return True
+            if not _shutdown_and_close_socket(candidate):
+                self._cleanup_failure_count += 1
+                self._last_cleanup_error_type = "EnclaveEgressProxyError"
+                return False
+            if getattr(self, attribute) is candidate:
+                setattr(self, attribute, None)
+            return True
+
     def close(self) -> None:
-        if self._application is not None:
-            try:
-                self._application.close()
-            except Exception:
-                pass
-            self._application = None
+        cleanup_failed = not self._close_owned("_application")
         if not self._done.wait(timeout=1.0):
-            for candidate in (self._relay, self._framed):
-                try:
-                    candidate.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
+            # Closing both owned endpoints is the bounded cancellation path.
+            # The references remain on this bridge if either close cannot be
+            # proven, so a caller can retry without losing ownership.
+            cleanup_failed = not self._close_owned("_relay") or cleanup_failed
+            cleanup_failed = not self._close_owned("_framed") or cleanup_failed
             self._done.wait(timeout=1.5)
+        cleanup_failed = not self._close_owned("_relay") or cleanup_failed
+        cleanup_failed = not self._close_owned("_framed") or cleanup_failed
+        self._thread.join(timeout=0.1)
+        if self._thread.is_alive() or not self._done.is_set():
+            cleanup_failed = True
+        if cleanup_failed:
+            primary = self._error or EnclaveEgressProxyError(
+                "framed parent bridge termination failed"
+            )
+            raise EnclaveEgressProxyCleanupError(
+                stage="framed_parent_bridge_cleanup",
+                primary_error=primary,
+                resources=(self,),
+            ) from primary
 
     @property
     def stopped(self) -> bool:
-        return self._done.is_set() and not self._thread.is_alive()
+        with self._cleanup_lock:
+            resources_closed = all(
+                resource is None
+                for resource in (self._application, self._relay, self._framed)
+            )
+        return self._done.is_set() and not self._thread.is_alive() and resources_closed
 
 
 class _ManagedProxyStream:
@@ -550,6 +638,8 @@ class _ManagedProxyStream:
     def __init__(self, stream: Any, bridge: _FramedParentBridge) -> None:
         self._stream = stream
         self._bridge = bridge
+        self._stream_closed = False
+        self._bridge_closed = False
         self._closed = False
 
     def fileno(self) -> int:
@@ -567,11 +657,32 @@ class _ManagedProxyStream:
     def close(self) -> None:
         if self._closed:
             return
+        cleanup_error = None  # type: Optional[BaseException]
+        if not self._stream_closed:
+            try:
+                if self._stream.close() is False:
+                    raise EnclaveEgressProxyError(
+                        "managed proxy stream cleanup failed"
+                    )
+            except BaseException as exc:
+                cleanup_error = exc
+            else:
+                self._stream_closed = True
+        if not self._bridge_closed:
+            try:
+                self._bridge.close()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            else:
+                self._bridge_closed = True
+        if cleanup_error is not None:
+            raise EnclaveEgressProxyCleanupError(
+                stage="managed_proxy_stream_cleanup",
+                primary_error=cleanup_error,
+                resources=(self,),
+            ) from cleanup_error
         self._closed = True
-        try:
-            self._stream.close()
-        finally:
-            self._bridge.close()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
@@ -607,19 +718,94 @@ class EnclaveEgressProxy:
         self._completed_tunnel_count = 0
         self._failed_tunnel_count = 0
         self._socket_cleanup_failure_count = 0
+        self._retired_cleanup_lock = threading.Lock()
+        self._retired_cleanup_attempt_lock = threading.RLock()
+        self._retired_cleanup_resources = {}  # type: Dict[int, Tuple[str, Any]]
 
     @property
     def running(self) -> bool:
-        return bool(self._thread and self._thread.is_alive() and self._listener is not None)
+        return bool(
+            not self._stop.is_set()
+            and self._thread
+            and self._thread.is_alive()
+            and self._listener is not None
+        )
 
     def start(self) -> Dict[str, Any]:
         self.ensure_running()
         return self.status()
 
+    def _record_listener_cleanup_failure(self, stage: str) -> None:
+        with self._status_lock:
+            self._socket_cleanup_failure_count += 1
+            self._last_failure = {
+                "stage": str(stage),
+                "error_type": "EnclaveEgressProxyError",
+                "errno": 0,
+                "destination_ref": "unknown",
+            }
+
+    def _retain_cleanup_resource(
+        self,
+        resource: Any,
+        *,
+        stage: str,
+        kind: str = "socket",
+    ) -> None:
+        if resource is None:
+            return
+        with self._retired_cleanup_lock:
+            self._retired_cleanup_resources[id(resource)] = (kind, resource)
+        self._record_listener_cleanup_failure(stage)
+
+    def _retain_cleanup_error(
+        self,
+        error: BaseException,
+        *,
+        stage: str,
+        kind: str = "socket",
+    ) -> None:
+        if not isinstance(error, EnclaveEgressProxyCleanupError):
+            return
+        for resource in error._resources:
+            self._retain_cleanup_resource(resource, stage=stage, kind=kind)
+
+    @staticmethod
+    def _close_cleanup_resource(kind: str, resource: Any) -> bool:
+        if kind == "socket":
+            return _shutdown_and_close_socket(resource)
+        try:
+            return resource.close() is not False
+        except BaseException:
+            return False
+
+    def _retry_retired_cleanup(self) -> bool:
+        with self._retired_cleanup_attempt_lock:
+            with self._retired_cleanup_lock:
+                retired = list(self._retired_cleanup_resources.items())
+            failed = False
+            for resource_id, (kind, resource) in retired:
+                if not self._close_cleanup_resource(kind, resource):
+                    failed = True
+                    continue
+                with self._retired_cleanup_lock:
+                    current = self._retired_cleanup_resources.get(resource_id)
+                    if current is not None and current[1] is resource:
+                        self._retired_cleanup_resources.pop(resource_id, None)
+            if failed:
+                self._record_listener_cleanup_failure(
+                    "retired_transport_cleanup"
+                )
+            return not failed
+
     def ensure_running(self) -> Dict[str, Any]:
         """Recover a stopped accept loop before admitting another request."""
 
         with self._lifecycle_lock:
+            if not self._retry_retired_cleanup():
+                raise EnclaveEgressProxyError(
+                    "retired enclave egress transport cleanup failed"
+                )
             if self.running:
                 # This is called on every ordinary provider request. Keep the
                 # readiness guard constant-time; the explicit health RPC owns
@@ -632,11 +818,20 @@ class EnclaveEgressProxy:
             prior_thread = self._thread
             prior_listener = self._listener
             self._stop.set()
-            if prior_listener is not None:
-                _shutdown_and_close_socket(prior_listener)
+            self._loopback_verified = False
+            if prior_listener is not None and not _shutdown_and_close_socket(
+                prior_listener
+            ):
+                self._record_listener_cleanup_failure("listener_cleanup")
+                raise EnclaveEgressProxyError(
+                    "stopped enclave egress listener cleanup failed"
+                )
             if prior_thread is not None and prior_thread is not threading.current_thread():
                 prior_thread.join(timeout=2.0)
                 if prior_thread.is_alive():
+                    self._record_listener_cleanup_failure(
+                        "accept_loop_cleanup"
+                    )
                     raise EnclaveEgressProxyError(
                         "stopped enclave egress accept loop did not terminate"
                     )
@@ -654,8 +849,8 @@ class EnclaveEgressProxy:
         if self.running:
             return
         listener = None
-        self._loopback_initializer()
         try:
+            self._loopback_initializer()
             listener = self._socket_factory(socket.AF_INET, socket.SOCK_STREAM)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", self.local_port))
@@ -665,12 +860,25 @@ class EnclaveEgressProxy:
                 local_port=self.local_port,
                 socket_factory=self._socket_factory,
             )
-        except Exception:
-            if listener is not None:
-                try:
-                    listener.close()
-                except Exception:
-                    pass
+        except Exception as exc:
+            self._retain_cleanup_error(
+                exc,
+                stage=(
+                    exc.stage
+                    if isinstance(exc, EnclaveEgressProxyCleanupError)
+                    else "loopback_self_test_cleanup"
+                ),
+            )
+            if listener is not None and not _shutdown_and_close_socket(listener):
+                # Retain ownership so stop()/ensure_running() can retry the
+                # close; a detected cleanup failure must not become an
+                # untracked descriptor.
+                self._listener = listener
+                self._loopback_verified = False
+                self._record_listener_cleanup_failure("listener_start_cleanup")
+                raise EnclaveEgressProxyError(
+                    "enclave egress listener cleanup failed after startup"
+                ) from exc
             raise
         self._listener = listener
         self._loopback_verified = True
@@ -697,8 +905,20 @@ class EnclaveEgressProxy:
                     self._socket_cleanup_failure_count
                 ),
             }
+        cleanup_incomplete = bool(
+            self._stop.is_set()
+            and (self._listener is not None or self._thread is not None)
+        )
+        with self._retired_cleanup_lock:
+            cleanup_incomplete = bool(
+                cleanup_incomplete or self._retired_cleanup_resources
+            )
         result = {
-            "status": "running" if self.running else "stopped",
+            "status": (
+                "cleanup_failed"
+                if cleanup_incomplete
+                else "running" if self.running else "stopped"
+            ),
             "local_port": self.local_port,
             "forwarder_port": self.forwarder_port,
             "policy_hash": destination_policy_hash(),
@@ -719,14 +939,29 @@ class EnclaveEgressProxy:
     def stop(self) -> None:
         with self._lifecycle_lock:
             self._stop.set()
+            self._loopback_verified = False
             listener = self._listener
             thread = self._thread
-            self._listener = None
-            self._loopback_verified = False
-            if listener is not None:
-                _shutdown_and_close_socket(listener)
+            if listener is not None and not _shutdown_and_close_socket(listener):
+                self._record_listener_cleanup_failure("listener_cleanup")
+                raise EnclaveEgressProxyError(
+                    "enclave egress listener cleanup failed"
+                )
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=2.0)
+                if thread.is_alive():
+                    self._record_listener_cleanup_failure(
+                        "accept_loop_cleanup"
+                    )
+                    raise EnclaveEgressProxyError(
+                        "enclave egress accept loop did not terminate"
+                    )
+            self._listener = None
+            self._thread = None
+            if not self._retry_retired_cleanup():
+                raise EnclaveEgressProxyError(
+                    "retired enclave egress transport cleanup failed"
+                )
 
     def _configure_environment(self) -> None:
         proxy_url = "http://127.0.0.1:%s" % self.local_port
@@ -771,8 +1006,10 @@ class EnclaveEgressProxy:
                 ).start()
             except Exception as exc:
                 if not _shutdown_and_close_socket(connection):
-                    with self._status_lock:
-                        self._socket_cleanup_failure_count += 1
+                    self._retain_cleanup_resource(
+                        connection,
+                        stage="handler_start_cleanup",
+                    )
                 with self._status_lock:
                     self._failed_tunnel_count += 1
                     self._last_failure = {
@@ -790,6 +1027,10 @@ class EnclaveEgressProxy:
         purpose: str = "provider",
         tunnel_framing: str = "",
     ) -> Any:
+        if not self._retry_retired_cleanup():
+            raise EnclaveEgressProxyError(
+                "retired enclave egress transport cleanup failed"
+            )
         parent = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
         try:
             parent.connect((PARENT_CID, self.forwarder_port))
@@ -835,11 +1076,17 @@ class EnclaveEgressProxy:
             if str(result.get("tunnel_framing") or "") != tunnel_framing:
                 raise EnclaveEgressProxyError("parent egress tunnel framing mismatch")
             return parent
-        except Exception:
-            try:
-                parent.close()
-            except Exception:
-                pass
+        except BaseException as primary_error:
+            if not _shutdown_and_close_socket(parent):
+                self._retain_cleanup_resource(
+                    parent,
+                    stage="parent_tunnel_cleanup",
+                )
+                raise EnclaveEgressProxyCleanupError(
+                    stage="parent_tunnel_cleanup",
+                    primary_error=primary_error,
+                    resources=(parent,),
+                ) from primary_error
             raise
 
     def _open_upstream_proxy_tunnel(
@@ -938,18 +1185,44 @@ class EnclaveEgressProxy:
             if bridge is not None:
                 return _ManagedProxyStream(protected, bridge)
             return protected
-        except Exception:
-            try:
-                protected.close()
-            except Exception:
-                pass
+        except BaseException as primary_error:
+            cleanup_resources = []
+            if isinstance(primary_error, EnclaveEgressProxyCleanupError):
+                for resource in primary_error._resources:
+                    cleanup_resources.append(resource)
+                    self._retain_cleanup_resource(
+                        resource,
+                        stage=primary_error.stage,
+                    )
+            if not _shutdown_and_close_socket(protected):
+                cleanup_resources.append(protected)
+                self._retain_cleanup_resource(
+                    protected,
+                    stage="upstream_proxy_stream_cleanup",
+                )
             if bridge is not None:
-                bridge.close()
-            elif protected is not parent:
                 try:
-                    parent.close()
-                except Exception:
-                    pass
+                    bridge.close()
+                except BaseException:
+                    cleanup_resources.append(bridge)
+                    self._retain_cleanup_resource(
+                        bridge,
+                        stage="upstream_proxy_bridge_cleanup",
+                        kind="transport",
+                    )
+            elif protected is not parent:
+                if not _shutdown_and_close_socket(parent):
+                    cleanup_resources.append(parent)
+                    self._retain_cleanup_resource(
+                        parent,
+                        stage="upstream_proxy_parent_cleanup",
+                    )
+            if cleanup_resources:
+                raise EnclaveEgressProxyCleanupError(
+                    stage="upstream_proxy_cleanup",
+                    primary_error=primary_error,
+                    resources=tuple(cleanup_resources),
+                ) from primary_error
             raise
 
     def _handle_client(self, client: Any) -> None:
@@ -1051,8 +1324,15 @@ class EnclaveEgressProxy:
         finally:
             for candidate in (parent, client):
                 if not _shutdown_and_close_socket(candidate):
-                    with self._status_lock:
-                        self._socket_cleanup_failure_count += 1
+                    self._retain_cleanup_resource(
+                        candidate,
+                        stage="handler_endpoint_cleanup",
+                        kind=(
+                            "transport"
+                            if isinstance(candidate, _ManagedProxyStream)
+                            else "socket"
+                        ),
+                    )
             with self._status_lock:
                 self._active_tunnel_count = max(
                     0,

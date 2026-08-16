@@ -79,6 +79,10 @@ MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
 VSOCK_RPC_LISTEN_BACKLOG = 128
 VSOCK_RPC_MAX_CONNECTIONS = 64
 VSOCK_RPC_CONNECTION_TIMEOUT_SECONDS = 30.0
+VSOCK_RPC_TRANSPORT_HEALTH_SCHEMA_VERSION = (
+    "leadpoet.gateway_vsock_rpc_transport_health.v2"
+)
+MAX_VSOCK_RPC_CLEANUP_EVENT_COUNT = (1 << 63) - 1
 
 # Note: The enclave's actual CID (e.g., 16, 26, 27) is assigned by AWS
 # and visible to the parent EC2, but the enclave binds to VMADDR_CID_ANY
@@ -138,6 +142,11 @@ v2_provider_cache_store_lock = Lock()
 v2_provider_outcome_store = None
 v2_provider_outcome_store_lock = Lock()
 v2_provider_semantics_authority = None
+vsock_rpc_transport_health_lock = Lock()
+vsock_rpc_cleanup_attempt_count = 0
+vsock_rpc_cleanup_failure_count = 0
+vsock_rpc_last_primary_error_type = ""
+vsock_rpc_last_cleanup_error_type = ""
 v2_provider_semantics_authority_lock = Lock()
 v2_provider_evidence_authority = None
 v2_provider_evidence_authority_lock = Lock()
@@ -2450,6 +2459,7 @@ def handle_inter_enclave_rpc(
             "peer_role": peer["physical_role"],
             "local_boot_identity_hash": get_v2_runtime_identity()
             .boot_identity()["boot_identity_hash"],
+            "transport": _inter_enclave_transport_health(),
         }
     if method == "provider_execute":
         if active_enclave_role() != "gateway_coordinator":
@@ -2520,6 +2530,13 @@ def start_v2_tls_service() -> Dict[str, Any]:
             "status": "running",
             "registered_roles": list(registry.registered_roles()),
         }
+
+
+def _inter_enclave_transport_health() -> Dict[str, Any]:
+    server = v2_tls_server
+    if server is None:
+        return {"status": "unavailable"}
+    return server.transport_health()
 
 
 def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -2639,6 +2656,8 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
                     "public_key": get_public_key_bytes().hex(),
                     "pcr0": pcr_measurements.get("PCR0"),
                     "v2_runtime": v2_status,
+                    "parent_rpc_transport": vsock_rpc_transport_health(),
+                    "inter_enclave_transport": _inter_enclave_transport_health(),
                 }
             }
 
@@ -2684,6 +2703,90 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
 # VSOCK SERVER (Parent EC2 ↔ Enclave Communication)
 # ============================================================================
 
+class VSOCKRPCCleanupError(RuntimeError):
+    """An accepted parent RPC socket could not prove descriptor release."""
+
+    def __init__(
+        self,
+        *,
+        primary_error: BaseException,
+        cleanup_error: BaseException,
+        resource: Any,
+    ) -> None:
+        super().__init__("gateway vsock RPC transport cleanup failed")
+        self.primary_error_type = type(primary_error).__name__
+        self.cleanup_error_type = type(cleanup_error).__name__
+        # Never serialized. Preserve ownership until the worker failure has
+        # been observed by the bounded transport-health latch.
+        self._resource = resource
+
+
+class _ExplicitVSOCKCloseFailure(RuntimeError):
+    """A socket adapter explicitly reported retained ownership."""
+
+
+def _close_vsock_rpc_required(candidate: Any) -> Optional[BaseException]:
+    """Attempt full-duplex shutdown and return any close-proof failure."""
+
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        # The peer can already be half-closed after a complete response.
+        # close() is the accepted descriptor's ownership boundary.
+        pass
+    try:
+        if candidate.close() is False:
+            return _ExplicitVSOCKCloseFailure(
+                "gateway vsock RPC close was not confirmed"
+            )
+    except BaseException as exc:
+        return exc
+    return None
+
+
+def _record_vsock_rpc_cleanup(
+    *,
+    primary_error: Optional[BaseException],
+    cleanup_error: Optional[BaseException],
+) -> None:
+    global vsock_rpc_cleanup_attempt_count
+    global vsock_rpc_cleanup_failure_count
+    global vsock_rpc_last_primary_error_type
+    global vsock_rpc_last_cleanup_error_type
+    with vsock_rpc_transport_health_lock:
+        vsock_rpc_cleanup_attempt_count = min(
+            MAX_VSOCK_RPC_CLEANUP_EVENT_COUNT,
+            vsock_rpc_cleanup_attempt_count + 1,
+        )
+        if cleanup_error is not None:
+            vsock_rpc_cleanup_failure_count = min(
+                MAX_VSOCK_RPC_CLEANUP_EVENT_COUNT,
+                vsock_rpc_cleanup_failure_count + 1,
+            )
+            vsock_rpc_last_primary_error_type = (
+                type(primary_error).__name__
+                if primary_error is not None
+                else type(cleanup_error).__name__
+            )
+            vsock_rpc_last_cleanup_error_type = type(cleanup_error).__name__
+
+
+def vsock_rpc_transport_health() -> Dict[str, Any]:
+    """Return bounded, text-free accepted-RPC cleanup health."""
+
+    with vsock_rpc_transport_health_lock:
+        return {
+            "schema_version": VSOCK_RPC_TRANSPORT_HEALTH_SCHEMA_VERSION,
+            "status": (
+                "error" if vsock_rpc_cleanup_failure_count else "healthy"
+            ),
+            "cleanup_attempt_count": vsock_rpc_cleanup_attempt_count,
+            "cleanup_failure_count": vsock_rpc_cleanup_failure_count,
+            "last_primary_error_type": vsock_rpc_last_primary_error_type,
+            "last_cleanup_error_type": vsock_rpc_last_cleanup_error_type,
+        }
+
+
 def _recv_exact(conn: Any, size: int) -> bytes:
     """Read an exact bounded frame segment or return the partial bytes."""
 
@@ -2699,6 +2802,7 @@ def _recv_exact(conn: Any, size: int) -> bytes:
 def _handle_vsock_connection(conn: Any, addr: Any) -> None:
     """Handle one bounded RPC without allowing a dead peer to wedge the role."""
 
+    primary_error = None  # type: Optional[BaseException]
     try:
         conn.settimeout(VSOCK_RPC_CONNECTION_TIMEOUT_SECONDS)
         print(f"[TEE] Connection from CID {addr[0]}, port {addr[1]}", flush=True)
@@ -2730,8 +2834,11 @@ def _handle_vsock_connection(conn: Any, addr: Any) -> None:
             params = request.get("params", {})
             print(f"[TEE] RPC call: {method}", flush=True)
             response = handle_rpc(method, params)
-        except json.JSONDecodeError as exc:
-            response = {"error": f"Invalid JSON: {str(exc)}"}
+        except json.JSONDecodeError:
+            response = {
+                "error": "Invalid JSON",
+                "error_type": "JSONDecodeError",
+            }
 
         response_bytes = json.dumps(response).encode("utf-8")
         conn.sendall(
@@ -2740,15 +2847,24 @@ def _handle_vsock_connection(conn: Any, addr: Any) -> None:
         )
         print(f"[TEE] ✅ Response sent ({len(response_bytes)} bytes)", flush=True)
     except Exception as exc:
-        print(f"[TEE] ❌ Connection error: {exc}", flush=True)
-        import traceback
-
-        traceback.print_exc()
+        primary_error = exc
+        print(
+            "[TEE] ❌ Connection error type=%s" % type(exc).__name__,
+            flush=True,
+        )
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        cleanup_error = _close_vsock_rpc_required(conn)
+        _record_vsock_rpc_cleanup(
+            primary_error=primary_error,
+            cleanup_error=cleanup_error,
+        )
+        if cleanup_error is not None:
+            cleanup_primary = primary_error or cleanup_error
+            raise VSOCKRPCCleanupError(
+                primary_error=cleanup_primary,
+                cleanup_error=cleanup_error,
+                resource=conn,
+            ) from cleanup_primary
 
 
 def _serve_vsock_connections(
@@ -2779,14 +2895,35 @@ def _serve_vsock_connections(
                 raise
             try:
                 future = executor.submit(_handle_vsock_connection, conn, addr)
-            except Exception:
+            except Exception as exc:
                 connection_slots.release()
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                cleanup_error = _close_vsock_rpc_required(conn)
+                _record_vsock_rpc_cleanup(
+                    primary_error=exc,
+                    cleanup_error=cleanup_error,
+                )
+                if cleanup_error is not None:
+                    raise VSOCKRPCCleanupError(
+                        primary_error=exc,
+                        cleanup_error=cleanup_error,
+                        resource=conn,
+                    ) from exc
                 raise
-            future.add_done_callback(lambda _future: connection_slots.release())
+
+            def _release_connection_slot(completed_future: Any) -> None:
+                try:
+                    worker_error = completed_future.exception()
+                except BaseException as exc:
+                    worker_error = exc
+                if worker_error is not None:
+                    print(
+                        "[TEE] vsock RPC worker terminal type=%s"
+                        % type(worker_error).__name__,
+                        flush=True,
+                    )
+                connection_slots.release()
+
+            future.add_done_callback(_release_connection_slot)
     finally:
         executor.shutdown(wait=True)
 

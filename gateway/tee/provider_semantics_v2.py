@@ -311,10 +311,13 @@ class ProviderSemanticsAuthorityV2:
         return result
 
     def execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
+        prior_result = None  # type: Optional[Dict[str, Any]]
+        self._semantic_owner_state.prior_broker_result = None
         try:
             try:
                 with self._terminal_transaction(), self._artifact_transaction():
                     result = dict(self._execute(request))
+                    prior_result = dict(result)
                     persistence = self._record_provider_outcome(request, result)
                     if persistence:
                         result["additional_transport_attempts"] = [
@@ -361,17 +364,34 @@ class ProviderSemanticsAuthorityV2:
                     type(exc).__name__,
                 )
                 with self._terminal_transaction(), self._artifact_transaction():
-                    return self._fail_closed_terminal(request, exc=exc)
+                    retained_prior_result = prior_result or getattr(
+                        self._semantic_owner_state,
+                        "prior_broker_result",
+                        None,
+                    )
+                    return self._fail_closed_terminal(
+                        request,
+                        exc=exc,
+                        prior_result=retained_prior_result,
+                    )
         finally:
             # Exact semantic replays are not released until the terminal,
             # encrypted cache work, and durable provider outcome all commit.
-            self._release_semantic_owner()
+            try:
+                self._release_semantic_owner()
+            finally:
+                if hasattr(
+                    self._semantic_owner_state,
+                    "prior_broker_result",
+                ):
+                    del self._semantic_owner_state.prior_broker_result
 
     def _fail_closed_terminal(
         self,
         request: Mapping[str, Any],
         *,
         exc: BaseException,
+        prior_result: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         normalized, body, parsed, _fingerprint = self._request(request)
         if parsed.scheme != "https" or not parsed.hostname:
@@ -390,6 +410,32 @@ class ProviderSemanticsAuthorityV2:
             raise ProviderSemanticsV2Error(
                 "provider semantics failure transport references are invalid"
             ) from exc
+        diagnostic_artifact = None  # type: Optional[Dict[str, Any]]
+        if prior_result is not None:
+            reseal_diagnostic = getattr(
+                self._broker,
+                "reseal_transport_failure_diagnostic",
+                None,
+            )
+            if callable(reseal_diagnostic):
+                resealed = reseal_diagnostic(
+                    prior_result=prior_result,
+                    outer_error=exc,
+                )
+                if resealed is not None:
+                    diagnostic_artifact = dict(resealed)
+        diagnostic_plaintext_hash = (
+            str(diagnostic_artifact.get("plaintext_hash") or "")
+            if diagnostic_artifact is not None
+            else ""
+        )
+        if diagnostic_plaintext_hash and not _HASH_RE.fullmatch(
+            diagnostic_plaintext_hash
+        ):
+            raise ProviderSemanticsV2Error(
+                "provider semantics failure diagnostic commitment is invalid"
+            ) from exc
+        failure_error_type = _safe_error_type(exc)
         request_doc = {
             "schema_version": _FAIL_CLOSED_REQUEST_SCHEMA_VERSION,
             "logical_operation_id": normalized["logical_operation_id"],
@@ -409,7 +455,10 @@ class ProviderSemanticsAuthorityV2:
             "retry_policy_hash": normalized["retry_policy_hash"],
             "timeout_ms": normalized["timeout_ms"],
             "failure_stage": "provider_semantics",
-            "failure_error_type": type(exc).__name__[:128],
+            "failure_error_type": failure_error_type,
+            "provider_transport_failure_diagnostic_hash": (
+                diagnostic_plaintext_hash
+            ),
         }
         request_bytes = canonical_json(request_doc).encode("utf-8")
         request_artifact = dict(
@@ -459,16 +508,19 @@ class ProviderSemanticsAuthorityV2:
             failure_code="unexpected_eof",
             completed_at=self._clock(),
         )
+        evidence_artifacts = _descriptor_hashes(request_artifact)
+        if diagnostic_artifact is not None:
+            evidence_artifacts.update(
+                _descriptor_hashes(diagnostic_artifact)
+            )
         return {
             "terminal_status": "transport_failure",
             "failure_code": "unexpected_eof",
             "failure_stage": "provider_semantics",
-            "failure_error_type": type(exc).__name__[:128],
+            "failure_error_type": failure_error_type,
             "encrypted_request_artifact_id": request_artifact_id,
             "transport_attempt": attempt,
-            "evidence_artifact_hashes": sorted(
-                _descriptor_hashes(request_artifact)
-            ),
+            "evidence_artifact_hashes": sorted(evidence_artifacts),
         }
 
     def _execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1088,6 +1140,11 @@ class ProviderSemanticsAuthorityV2:
                 }
         with self._track_stage("provider_transport"):
             result = dict(self._broker.execute(request))
+        # Keep the coordinator-only result until the surrounding terminal and
+        # artifact transactions commit.  If later cache/outcome persistence
+        # rolls them back, execute() can rebind sanitized failure provenance to
+        # the fresh fail-closed terminal without exposing diagnostic plaintext.
+        self._semantic_owner_state.prior_broker_result = dict(result)
         broker_artifacts = list(result.get("evidence_artifact_hashes") or [])
         additional_attempts = list(lookup_attempts)
         evidence_artifacts = set(lookup_artifacts) | set(broker_artifacts)

@@ -102,3 +102,19 @@ async def test_runtime_ready_fails_when_provider_semantics_is_not_ready():
     clients["gateway_coordinator"].v2_provider_semantics_health = unavailable
     with pytest.raises(V2RuntimeReadinessError, match="semantics"):
         await verify_v2_runtime_ready(clients)
+
+
+@pytest.mark.asyncio
+async def test_runtime_ready_rejects_tampered_provider_registry_hash():
+    clients = {role: _Client(role) for role in ROLE_SPECS}
+
+    async def tampered_provider_policy():
+        value = await _Client("gateway_coordinator").v2_provider_broker_health()
+        value["registry_hash"] = "sha256:" + "f" * 64
+        return value
+
+    clients[
+        "gateway_coordinator"
+    ].v2_provider_broker_health = tampered_provider_policy
+    with pytest.raises(V2RuntimeReadinessError, match="provider broker"):
+        await verify_v2_runtime_ready(clients)

@@ -22,6 +22,10 @@ MAX_CONTROL_BYTES = 16 * 1024
 MAX_CHANNEL_BYTES_PER_DIRECTION = 512 * 1024 * 1024
 RELAY_CHUNK_BYTES = 64 * 1024
 IDLE_TIMEOUT_SECONDS = 1800.0
+RELAY_TRANSPORT_HEALTH_SCHEMA_VERSION = (
+    "leadpoet.inter_enclave_relay_transport_health.v2"
+)
+MAX_RELAY_CLEANUP_EVENT_COUNT = (1 << 63) - 1
 _CHANNEL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 _CID_BY_ROLE = {role: int(spec["cid"]) for role, spec in ROLE_SPECS.items()}
@@ -34,10 +38,95 @@ _APPROVED_PAIRS = frozenset(
         (_CID_BY_ROLE["gateway_autoresearch"], _COORDINATOR_CID),
     }
 )
+_RELAY_TRANSPORT_HEALTH_LOCK = threading.Lock()
+_relay_cleanup_attempt_count = 0
+_relay_cleanup_failure_count = 0
+_relay_last_primary_error_type = ""
+_relay_last_cleanup_error_type = ""
 
 
 class InterEnclaveRelayError(RuntimeError):
     """A relay request violates the fixed V2 topology or framing contract."""
+
+
+class InterEnclaveRelayCleanupError(InterEnclaveRelayError):
+    """An accepted relay transport could not prove descriptor release."""
+
+    def __init__(
+        self,
+        *,
+        primary_error: BaseException,
+        cleanup_error: BaseException,
+        resources: Sequence[Any],
+    ) -> None:
+        super().__init__("inter-enclave relay transport cleanup failed")
+        self.primary_error_type = type(primary_error).__name__
+        self.cleanup_error_type = type(cleanup_error).__name__
+        # Keep ownership reachable until the process supervisor observes the
+        # terminal cleanup failure. These resources are never serialized.
+        self._resources = tuple(resources)
+
+
+class _ExplicitCloseFailure(RuntimeError):
+    """A transport adapter explicitly reported that it retained ownership."""
+
+
+def _close_transport_required(candidate: Any) -> Optional[BaseException]:
+    """Attempt full-duplex shutdown and return any descriptor-release failure."""
+
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        # Relay peers normally half-close before the relay exits. Descriptor
+        # ownership is therefore proven by close(), not by shutdown().
+        pass
+    try:
+        if candidate.close() is False:
+            return _ExplicitCloseFailure("relay transport close was not confirmed")
+    except BaseException as exc:
+        return exc
+    return None
+
+
+def _record_relay_transport_cleanup(
+    *,
+    primary_error: Optional[BaseException],
+    cleanup_error: Optional[BaseException],
+) -> None:
+    global _relay_cleanup_attempt_count
+    global _relay_cleanup_failure_count
+    global _relay_last_primary_error_type
+    global _relay_last_cleanup_error_type
+    with _RELAY_TRANSPORT_HEALTH_LOCK:
+        _relay_cleanup_attempt_count = min(
+            MAX_RELAY_CLEANUP_EVENT_COUNT,
+            _relay_cleanup_attempt_count + 1,
+        )
+        if cleanup_error is not None:
+            _relay_cleanup_failure_count = min(
+                MAX_RELAY_CLEANUP_EVENT_COUNT,
+                _relay_cleanup_failure_count + 1,
+            )
+            _relay_last_primary_error_type = (
+                type(primary_error).__name__
+                if primary_error is not None
+                else type(cleanup_error).__name__
+            )
+            _relay_last_cleanup_error_type = type(cleanup_error).__name__
+
+
+def relay_transport_health() -> dict[str, Any]:
+    """Return a bounded, text-free projection of relay cleanup health."""
+
+    with _RELAY_TRANSPORT_HEALTH_LOCK:
+        return {
+            "schema_version": RELAY_TRANSPORT_HEALTH_SCHEMA_VERSION,
+            "status": "error" if _relay_cleanup_failure_count else "healthy",
+            "cleanup_attempt_count": _relay_cleanup_attempt_count,
+            "cleanup_failure_count": _relay_cleanup_failure_count,
+            "last_primary_error_type": _relay_last_primary_error_type,
+            "last_cleanup_error_type": _relay_last_cleanup_error_type,
+        }
 
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
@@ -146,6 +235,7 @@ def _handle_connection(
     idle_timeout: float = IDLE_TIMEOUT_SECONDS,
 ) -> None:
     target = None
+    primary_error = None  # type: Optional[BaseException]
     try:
         request = _read_control(connection)
         target_cid, target_port, channel_id = _validated_target(
@@ -165,6 +255,7 @@ def _handle_connection(
         )
         _relay_opaque(connection, target, idle_timeout=idle_timeout)
     except Exception as exc:
+        primary_error = exc
         try:
             _send_frame(
                 connection,
@@ -175,13 +266,25 @@ def _handle_connection(
             )
         except Exception:
             pass
-    finally:
-        for candidate in (target, connection):
-            if candidate is not None:
-                try:
-                    candidate.close()
-                except Exception:
-                    pass
+    cleanup_failures = []
+    for candidate in (target, connection):
+        if candidate is None:
+            continue
+        cleanup_error = _close_transport_required(candidate)
+        if cleanup_error is not None:
+            cleanup_failures.append((candidate, cleanup_error))
+    _record_relay_transport_cleanup(
+        primary_error=primary_error,
+        cleanup_error=(cleanup_failures[0][1] if cleanup_failures else None),
+    )
+    if cleanup_failures:
+        cleanup_error = cleanup_failures[0][1]
+        cleanup_primary = primary_error or cleanup_error
+        raise InterEnclaveRelayCleanupError(
+            primary_error=cleanup_primary,
+            cleanup_error=cleanup_error,
+            resources=tuple(candidate for candidate, _error in cleanup_failures),
+        ) from cleanup_primary
 
 
 def serve_forever(*, port: int = DEFAULT_RELAY_PORT) -> None:

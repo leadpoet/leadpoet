@@ -157,6 +157,19 @@ def _blob(root: Path, sha: str, path: str) -> bytes:
     return bytes(_run_git(root, "show", f"{sha}:{path}", text=False))
 
 
+def _source_commitments(
+    root: Path,
+    sha: str,
+    paths: Sequence[str],
+) -> list[dict[str, str]]:
+    """Bind every selected candidate path to its exact Git blob."""
+
+    return [
+        {"path": path, "sha256": sha256_bytes(_blob(root, sha, path))}
+        for path in sorted(set(paths))
+    ]
+
+
 def _changed_paths(root: Path, base_sha: str, candidate_sha: str) -> list[str]:
     output = str(
         _run_git(
@@ -359,10 +372,11 @@ def build_contract(
         raise ProductionParityError(
             "candidate parity source commitments are missing: " + ",".join(missing)
         )
-    source_commitments = [
-        {"path": path, "sha256": sha256_bytes(_blob(normalized_root, candidate, path))}
-        for path in sorted(commitment_paths)
-    ]
+    source_commitments = _source_commitments(
+        normalized_root,
+        candidate,
+        sorted(commitment_paths),
+    )
     oracle = validate_historical_oracle(
         json.loads(_blob(normalized_root, candidate, ORACLE_PATH).decode("utf-8"))
     )

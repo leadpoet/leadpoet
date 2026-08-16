@@ -16,19 +16,27 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import signal
 import subprocess
 import sys
+import threading
 from types import ModuleType, SimpleNamespace
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
+import uuid
 
 
 STATE_ENV = "REHEARSAL_DEV_SNAPSHOT_BOUNDARY_STATE"
 NEGATIVE_PROBE_ENV = "REHEARSAL_DEV_SNAPSHOT_NEGATIVE_PROBE"
+PRODUCTION_SPAWN_GATE_ARGUMENT = "--leadpoet-production-spawn-gate"
+PRODUCTION_SPAWN_GATE_SCHEMA = "leadpoet.rehearsal_dev_snapshot_spawn_gate.v1"
 _state_path_raw = str(os.getenv(STATE_ENV) or "").strip()
+_spawn_gate_invocation = (
+    len(sys.argv) >= 2 and sys.argv[1] == PRODUCTION_SPAWN_GATE_ARGUMENT
+)
 
 
-if _state_path_raw:
+if _state_path_raw and not _spawn_gate_invocation:
     _state_path = Path(_state_path_raw).expanduser().resolve()
     _state = json.loads(_state_path.read_text(encoding="utf-8"))
     if (
@@ -59,9 +67,20 @@ if _state_path_raw:
         _state.get("expected_docker_bootstrap_hashes") or {}
     )
     _adapter_root = Path(__file__).resolve().parent
+    _production_spawn_gate_path = Path(__file__).resolve()
     _real_subprocess_run = subprocess.run
+    _real_subprocess_popen = subprocess.Popen
     _observed_refresh_work_dir: Path | None = None
     _observed_production_command_phases: list[str] = []
+    _validated_real_run_state = threading.local()
+    _process_group_registry = _root / "active-process-groups"
+    _process_group_spawn_registry = _root / "process-group-spawns"
+    _process_group_registry_schema = (
+        "leadpoet.rehearsal_dev_snapshot_process_group.v1"
+    )
+    _process_group_spawn_schema = (
+        "leadpoet.rehearsal_dev_snapshot_process_group_spawn.v1"
+    )
 
     for _required_path in (_root, _source_root, _champion_root):
         if not _required_path.exists():
@@ -133,6 +152,68 @@ if _state_path_raw:
                 json.dumps(row, sort_keys=True, separators=(",", ":"))
                 + "\n"
             )
+
+    def _write_registry_row(path: Path, row: Mapping[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        staging = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        encoded = (
+            json.dumps(dict(row), sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        descriptor = os.open(
+            staging,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(staging, path)
+            directory_descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except BaseException:
+            try:
+                staging.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+    def _remove_registry_row(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+
+    def _registered_process_group_alive(process_group_id: int) -> bool:
+        try:
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def _run_validated_real_subprocess(*args: Any, **kwargs: Any) -> Any:
+        if getattr(_validated_real_run_state, "active", False):
+            raise RuntimeError("nested validated subprocess execution differs")
+        _validated_real_run_state.active = True
+        try:
+            return _real_subprocess_run(*args, **kwargs)
+        finally:
+            _validated_real_run_state.active = False
 
     def _load_rows(table: str) -> list[dict[str, Any]]:
         tables = _state.get("supabase_tables")
@@ -726,6 +807,8 @@ if _state_path_raw:
                 "<active-config-hash>",
                 "--private-model-manifest-hash",
                 "<active-manifest-hash>",
+                "--timeout-seconds",
+                "<snapshot-icp-timeout-seconds>",
                 "--record",
                 *provider_args,
             ],
@@ -803,8 +886,12 @@ if _state_path_raw:
             ]
         elif script_name == "record_research_lab_dev_snapshots.py":
             phase = "record"
-            if len(argv) < 15:
+            if len(argv) < 17:
                 raise RuntimeError("dev-snapshot recorder argv shape differs")
+            from scripts.record_research_lab_dev_snapshots import (
+                DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+            )
+
             source_icps = Path(str(argv[3])).resolve()
             work_dir = _bind_refresh_work_dir(source_icps.parents[1])
             provider_args: list[str] = []
@@ -825,6 +912,8 @@ if _state_path_raw:
                 str(_active_artifact["config_hash"]),
                 "--private-model-manifest-hash",
                 str(_active_artifact["manifest_hash"]),
+                "--timeout-seconds",
+                str(DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS),
                 "--record",
                 *provider_args,
             ]
@@ -1069,7 +1158,7 @@ if _state_path_raw:
             (str(_adapter_root), str(_source_root))
         )
         child_env[STATE_ENV] = str(_state_path)
-        completed = _real_subprocess_run(
+        completed = _run_validated_real_subprocess(
             [
                 sys.executable,
                 "-c",
@@ -1137,6 +1226,246 @@ if _state_path_raw:
             stdout="rehearsal Docker daemon ready\n",
             stderr="",
         )
+
+    class _ObservedProductionPopen:
+        def __init__(
+            self,
+            popenargs: tuple[Any, ...],
+            kwargs: Mapping[str, Any],
+            *,
+            argv: list[str],
+            phase: str,
+            argv_contract_hash: str,
+        ) -> None:
+            self._argv = list(argv)
+            self._phase = str(phase)
+            self._argv_contract_hash = str(argv_contract_hash)
+            self._recorded = False
+            self._process: Any = None
+            self._registry_path: Path | None = None
+            spawn_nonce = uuid.uuid4().hex
+            command_name = Path(self._argv[1]).name
+            identity = {
+                "owner_pid": os.getpid(),
+                "owner_pgid": os.getpgid(0),
+                "spawn_nonce": spawn_nonce,
+                "phase": self._phase,
+                "command_name": command_name,
+                "python_executable": self._argv[0],
+                "script_path": str(Path(self._argv[1]).resolve()),
+                "argv_contract_hash": self._argv_contract_hash,
+            }
+            spawn_path = _process_group_spawn_registry / (
+                f"{os.getpid()}-{self._phase}.json"
+            )
+            read_descriptor, write_descriptor = os.pipe()
+            try:
+                _write_registry_row(
+                    spawn_path,
+                    {
+                        "schema_version": _process_group_spawn_schema,
+                        "status": "spawning",
+                        "pid": None,
+                        "pgid": None,
+                        **identity,
+                    },
+                )
+                gate_options = dict(kwargs)
+                gate_options["pass_fds"] = (read_descriptor,)
+                self._process = _real_subprocess_popen(
+                    [
+                        sys.executable,
+                        "-S",
+                        str(_production_spawn_gate_path),
+                        PRODUCTION_SPAWN_GATE_ARGUMENT,
+                        str(read_descriptor),
+                        spawn_nonce,
+                    ],
+                    **gate_options,
+                )
+                os.close(read_descriptor)
+                read_descriptor = -1
+                process_id = int(self._process.pid)
+                if os.getpgid(process_id) != process_id:
+                    raise RuntimeError(
+                        "dev-snapshot production process group is not isolated"
+                    )
+                _write_registry_row(
+                    spawn_path,
+                    {
+                        "schema_version": _process_group_spawn_schema,
+                        "status": "spawned",
+                        "pid": process_id,
+                        "pgid": process_id,
+                        **identity,
+                    },
+                )
+                self._registry_path = (
+                    _process_group_registry / f"{process_id}.json"
+                )
+                _write_registry_row(
+                    self._registry_path,
+                    {
+                        "schema_version": _process_group_registry_schema,
+                        "status": "active",
+                        "pid": process_id,
+                        "pgid": process_id,
+                        **identity,
+                    },
+                )
+                _remove_registry_row(spawn_path)
+                payload = (
+                    json.dumps(
+                        {
+                            "schema_version": PRODUCTION_SPAWN_GATE_SCHEMA,
+                            "spawn_nonce": spawn_nonce,
+                            "argv": self._argv,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                if len(payload) > 65_536:
+                    raise RuntimeError(
+                        "dev-snapshot production spawn payload is too large"
+                    )
+                written = 0
+                while written < len(payload):
+                    written += os.write(write_descriptor, payload[written:])
+                os.close(write_descriptor)
+                write_descriptor = -1
+            except BaseException:
+                if read_descriptor >= 0:
+                    os.close(read_descriptor)
+                if write_descriptor >= 0:
+                    os.close(write_descriptor)
+                if self._process is not None:
+                    process_id = int(self._process.pid)
+                    try:
+                        os.killpg(process_id, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        self._process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process_id, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        self._process.wait()
+                if self._registry_path is not None:
+                    _remove_registry_row(self._registry_path)
+                _remove_registry_row(spawn_path)
+                raise
+
+        def _record_if_complete(self) -> None:
+            if self._recorded or self._process.returncode is None:
+                return
+            if _registered_process_group_alive(int(self._process.pid)):
+                return
+            _event(
+                "production_command",
+                Path(self._argv[1]).name,
+                phase=self._phase,
+                argv_contract_hash=self._argv_contract_hash,
+                argv_redacted=True,
+                argv_argument_count=len(self._argv),
+                process_group_isolated=True,
+                spawn_gate_registered_before_exec=True,
+                returncode=int(self._process.returncode),
+            )
+            if self._registry_path is not None:
+                _remove_registry_row(self._registry_path)
+            self._recorded = True
+
+        @property
+        def pid(self) -> int:
+            return int(self._process.pid)
+
+        @property
+        def returncode(self) -> int | None:
+            return self._process.returncode
+
+        def communicate(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return self._process.communicate(*args, **kwargs)
+            finally:
+                self._record_if_complete()
+
+        def poll(self) -> int | None:
+            result = self._process.poll()
+            self._record_if_complete()
+            return result
+
+        def wait(self, *args: Any, **kwargs: Any) -> int:
+            try:
+                return int(self._process.wait(*args, **kwargs))
+            finally:
+                self._record_if_complete()
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._process, name)
+
+    def _patched_popen(*popenargs: Any, **kwargs: Any) -> Any:
+        command = popenargs[0] if popenargs else kwargs.get("args")
+        if getattr(_validated_real_run_state, "active", False):
+            return _real_subprocess_popen(*popenargs, **kwargs)
+        if isinstance(command, (list, tuple)) and command:
+            argv = [str(value) for value in command]
+            if (
+                len(argv) >= 2
+                and Path(argv[1]).name in _PRODUCTION_SCRIPT_NAMES
+            ):
+                environment = kwargs.get("env")
+                if (
+                    len(popenargs) != 1
+                    or set(kwargs)
+                    != {
+                        "text",
+                        "stdout",
+                        "stderr",
+                        "start_new_session",
+                        "env",
+                    }
+                    or kwargs.get("start_new_session") is not True
+                    or kwargs.get("text") is not True
+                    or kwargs.get("stdout") is not subprocess.PIPE
+                    or kwargs.get("stderr") is not subprocess.PIPE
+                    or not isinstance(environment, Mapping)
+                    or dict(environment) != dict(os.environ)
+                ):
+                    raise RuntimeError(
+                        "dev-snapshot production process-group contract differs"
+                    )
+                phase, argv_contract_hash = _validate_production_command(argv)
+                return _ObservedProductionPopen(
+                    popenargs,
+                    kwargs,
+                    argv=argv,
+                    phase=phase,
+                    argv_contract_hash=argv_contract_hash,
+                )
+            executable = Path(argv[0]).name
+            _event(
+                "subprocess",
+                "rejected",
+                command_class=(
+                    "python" if executable.startswith("python") else "other"
+                ),
+                command_name=executable,
+                **_negative_probe_fields("popen"),
+            )
+            raise RuntimeError(
+                "dev-snapshot Popen operation is not allowlisted"
+            )
+        _event(
+            "subprocess",
+            "rejected",
+            command_class="non_argv",
+            **_negative_probe_fields("popen"),
+        )
+        raise RuntimeError("dev-snapshot Popen operation is not allowlisted")
 
     def _patched_run(*popenargs: Any, **kwargs: Any) -> Any:
         command = popenargs[0] if popenargs else kwargs.get("args")
@@ -1213,18 +1542,18 @@ if _state_path_raw:
                     )
                 return completed
             if len(argv) >= 2 and Path(argv[1]).name in _PRODUCTION_SCRIPT_NAMES:
-                phase, argv_contract_hash = _validate_production_command(argv)
-                completed = _real_subprocess_run(*popenargs, **kwargs)
+                _validate_production_command(argv)
                 _event(
-                    "production_command",
-                    Path(argv[1]).name,
-                    phase=phase,
-                    argv_contract_hash=argv_contract_hash,
-                    argv_redacted=True,
-                    argv_argument_count=len(argv),
-                    returncode=int(completed.returncode),
+                    "subprocess",
+                    "rejected",
+                    command_class="python",
+                    command_name=Path(argv[1]).name,
+                    **_negative_probe_fields("subprocess"),
                 )
-                return completed
+                raise RuntimeError(
+                    "dev-snapshot production commands require the private "
+                    "Popen contract"
+                )
             _event(
                 "subprocess",
                 "rejected",
@@ -1245,4 +1574,57 @@ if _state_path_raw:
         )
         raise RuntimeError("dev-snapshot subprocess operation is not allowlisted")
 
+    subprocess.Popen = _patched_popen
     subprocess.run = _patched_run
+
+
+def _run_production_spawn_gate() -> None:
+    """Stay inert until the supervising boundary durably records this PGID."""
+
+    if len(sys.argv) != 4 or not _spawn_gate_invocation:
+        raise RuntimeError("dev-snapshot production spawn gate invocation differs")
+    try:
+        descriptor = int(sys.argv[2])
+    except ValueError as exc:
+        raise RuntimeError(
+            "dev-snapshot production spawn gate descriptor differs"
+        ) from exc
+    spawn_nonce = str(sys.argv[3])
+    if re.fullmatch(r"[0-9a-f]{32}", spawn_nonce) is None:
+        raise RuntimeError("dev-snapshot production spawn gate nonce differs")
+    encoded = bytearray()
+    try:
+        while True:
+            chunk = os.read(descriptor, min(65_537 - len(encoded), 8_192))
+            if not chunk:
+                break
+            encoded.extend(chunk)
+            if len(encoded) > 65_536:
+                raise RuntimeError(
+                    "dev-snapshot production spawn gate payload is too large"
+                )
+    finally:
+        os.close(descriptor)
+    try:
+        payload = json.loads(bytes(encoded))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "dev-snapshot production spawn gate payload is invalid"
+        ) from exc
+    argv = payload.get("argv") if isinstance(payload, Mapping) else None
+    if (
+        not isinstance(payload, Mapping)
+        or set(payload) != {"schema_version", "spawn_nonce", "argv"}
+        or payload.get("schema_version") != PRODUCTION_SPAWN_GATE_SCHEMA
+        or payload.get("spawn_nonce") != spawn_nonce
+        or not isinstance(argv, list)
+        or len(argv) < 2
+        or any(not isinstance(value, str) for value in argv)
+        or argv[0] != sys.executable
+    ):
+        raise RuntimeError("dev-snapshot production spawn gate contract differs")
+    os.execve(argv[0], argv, dict(os.environ))
+
+
+if __name__ == "__main__":
+    _run_production_spawn_gate()

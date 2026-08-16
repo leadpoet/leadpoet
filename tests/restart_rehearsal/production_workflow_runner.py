@@ -15394,7 +15394,12 @@ def main() -> int:
             ).get(name)
             is True
             for name in (
+                "production_command_timeout_teardown_exact",
+                "production_command_cancellation_teardown_exact",
                 "production_commands_exact",
+                "production_command_process_groups_isolated",
+                "production_command_spawn_gates_exact",
+                "process_group_registry_cleanup_exact",
                 "configured_baseline_complete",
                 "supabase_export_exact",
                 "provider_record_replay_exact",

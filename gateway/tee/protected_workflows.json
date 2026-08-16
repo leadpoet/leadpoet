@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "7c9766b71d4c08b0059f6e3230dbe742b1d58e79",
+  "baseline_commit": "7a0f07f89791ed823a25e276848538120ec02445",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -562,6 +562,11 @@
       "symbol": "DockerReplayDevEvaluator._run_icp_in_docker_default"
     },
     {
+      "ast_sha256": "sha256:36186379ed189f413f3bf4fdab67dff8d776e6ddf5e3e92c23c46577fc160fe2",
+      "path": "gateway/research_lab/dev_eval_runner.py",
+      "symbol": "MAX_DEV_SNAPSHOT_BANK_ICP_COUNT"
+    },
+    {
       "ast_sha256": "sha256:4a20c974029ac8af0a9e91a4d46cc34c6a9e1955de925e159c42af5505837ab5",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "snapshot_readiness"
@@ -1052,7 +1057,87 @@
       "symbol": "_load_candidate_source_diff"
     },
     {
-      "ast_sha256": "sha256:38fd68087ca3707d6a5eec75fe1d399eb216818948a3e626ffcc9a96ee4c3a89",
+      "ast_sha256": "sha256:af5c682b4b61d330a7b85bfc39701b6b7c87642e85de61188bb008e8655d60c6",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "COMMAND_GROUP_EXIT_CONFIRMATION_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:e4fe585fd1cc5fc07b236c88f380dc498bbf7aa20eadd2b6b522ff2b6dca17c7",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "COMMAND_KILL_WAIT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:b282c890d8f443392ae7b750b19f4ee07bf594ca988be42d7a35395b6b78fa12",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "COMMAND_PIPE_DRAIN_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:54c0883a464cf39568e4b6ea8e79bc85525f1d627241edc0a48978dd01a423d4",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "COMMAND_POLL_INTERVAL_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:bf6e8ffc51ea48d206819c2d0aa185adadf9e6f7b7b67b83602ab0d3e5b4b206",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "COMMAND_TERMINATION_GRACE_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:13cda36c84e5333f56e02acc442074621644eb06ee1db0c50501078cb0cf8f69",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "COMMAND_TIMEOUT_ENV"
+    },
+    {
+      "ast_sha256": "sha256:14a7853095208f8ec7b4712836727633ea63b4038a6d54da9923ad53653353ac",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "DEFAULT_COMMAND_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:3df08b72e1bfa9b304ab9db9e522e8c774b65f3d474fc6aac8c8820e58afe631",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "MAX_COMMAND_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:1fce045133442f8333081ec1a196321f74d00d660f8d788cc38212f53d9c9e9e",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_CommandCancellationRequested"
+    },
+    {
+      "ast_sha256": "sha256:3be47e0f7016b65dc1ca26fcb8693c891e330bc3d2759e2773c81b0e8bcda077",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_await_command_completion"
+    },
+    {
+      "ast_sha256": "sha256:5b6cd3ed487e614d542dc768dfb084f2c594b5b6b7a43506870aacd0e5116a51",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_positive_env_int"
+    },
+    {
+      "ast_sha256": "sha256:40408c36da5f46d78b1de149742bdcf02e1d810f412fae6797ca8cbca8706d6b",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_process_group_alive"
+    },
+    {
+      "ast_sha256": "sha256:91b59ec448a6fe84bd5fb3da2ceaa6d881b91792859ec494f10ac5b1df77f201",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_run_command"
+    },
+    {
+      "ast_sha256": "sha256:c6b8f902405ff3b9ef10ad69e44b6483af479bfe2787a17a6d7e8aa6d5645a9a",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_signal_process_group"
+    },
+    {
+      "ast_sha256": "sha256:9a50ee6beb8314b1dc933c3cb1059638b2085c777049af327eae2526d69db235",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_terminate_process_group"
+    },
+    {
+      "ast_sha256": "sha256:d46f99e5b8eaad9618a5bad446e498296ca5d335f023d4698777b63bcdeb717e",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_wait_for_process_group_exit"
+    },
+    {
+      "ast_sha256": "sha256:8eadbf11cfb09ee73c9d7ee50b5ad04fa562eefd27366c91664c6b72c45aba12",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
     },
@@ -3912,9 +3997,129 @@
       "symbol": "verify_source_tree_contract"
     },
     {
-      "ast_sha256": "sha256:b06242a59a4651527b92835d362724527107d24a5b0aa97d5c16f75787987bcf",
+      "ast_sha256": "sha256:b8aace8c25dce9edee38cc55d9de58f5946b950fcf780181db578f033920e634",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:b880b19d0554eaf4c9f7e0f7f00eb8872d70648adf8891dbc9814437fd66ba53",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "MAX_SNAPSHOT_CLOSURE_ROUNDS"
+    },
+    {
+      "ast_sha256": "sha256:07b459b3d1b78108d6fb2d5396937a1837ecd08bc6340c57ce539a080ee12407",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "MAX_SNAPSHOT_RECORD_ATTEMPTS"
+    },
+    {
+      "ast_sha256": "sha256:0b64bd72ec47e8a059ff2f5c101d465fb51341a5ffa2d080f6b6911cb214343f",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:d3a909743663e78451e3ba0fc1f333e8c11c3adba9a9fa5202b4580d7afeee25",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:67a54caffcdcd183020a760fe8e30b96ff2fa2294265463e386dc535abd35cd3",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:0329e0add945524b4824fb66df3c37201f83bca5bbe7b34435f02588fdef3683",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_close_snapshot_request_set"
+    },
+    {
+      "ast_sha256": "sha256:a3390c4a230b91b5cf74bf7d51b77baed8cada50f717fd9e3201a5a6acc37cbb",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_load_json_file"
+    },
+    {
+      "ast_sha256": "sha256:e2bcdb16acbc6fad0bbecf643b6f66b5e78e8eb7423da55e19222f04b891a764",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_load_source_export"
+    },
+    {
+      "ast_sha256": "sha256:1a23d47077d1e0c3eff311a74953234f94f293e46ca5a740e2bd6a31b4a14ab3",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_provider_key_presence"
+    },
+    {
+      "ast_sha256": "sha256:72212eb0990057aecbf2673a543e38b00bd1feb7915132199ab5a8df022a20b4",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_record_icp_with_docker"
+    },
+    {
+      "ast_sha256": "sha256:20f39245ac4cfd31eb83ca0518a4d507d2b215d4a0527b894d09abe32b29ad1d",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_record_icp_with_retries"
+    },
+    {
+      "ast_sha256": "sha256:12efd6296e2aee84fe6b7e51db076654db12533b31f13746ccc11cf58545062f",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_recorded_provider_model_ids"
+    },
+    {
+      "ast_sha256": "sha256:461560a49ad96d01462f5469f48cc7ed4568feaa4dc0d439293213b6006ee8f1",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_recording_failure_summary"
+    },
+    {
+      "ast_sha256": "sha256:b24f973d1e311aa642b1a37e5a2523b9e639effc79c3797c17313ba3b4784336",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_recording_is_complete"
+    },
+    {
+      "ast_sha256": "sha256:f254845dd65ae5d738047256b8c9b184a97196b7ba0e7dc03581357b47667e50",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_replay_icp_with_docker"
+    },
+    {
+      "ast_sha256": "sha256:2a7ce2c0a4e4d953104f7a247949c8ca9baae26a066da50ed01734e283959002",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_resolve_provider_model_ids"
+    },
+    {
+      "ast_sha256": "sha256:bad8b86018b40f45a65d5d2c70c6fbe1363ccf0cdd97c955104622da45f735a0",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_resolve_snapshot_provider_model_ids"
+    },
+    {
+      "ast_sha256": "sha256:3f908577f23b109bdb86d7f8b38b4c68a5278f4626a8a3a53d76ff692eb18998",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "_run_named_docker"
+    },
+    {
+      "ast_sha256": "sha256:a55ef4840137fe76c3ba6f534c7c211a3f01b2aadb2aeedea36e5d8012f60228",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_snapshot_runtime_context"
+    },
+    {
+      "ast_sha256": "sha256:587bf73c4ee4480a448d644b7748eed810b9b81f5869bdbe6d55994972b969af",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_subprocess_env"
+    },
+    {
+      "ast_sha256": "sha256:9f529e0437a2d557bd05e7caf8b9c15f9cfb28221c07669e68aa977959bd7f5d",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_terminate_snapshot_recorder_on_signal"
+    },
+    {
+      "ast_sha256": "sha256:5e014cf35455fbd2113f6b5273bf3ce267a829b74311429a81ef691c19b83385",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "main"
+    },
+    {
+      "ast_sha256": "sha256:048b8a1028295b618869ccd120d907c7f7e1283f872e108f9aa68cbabed83bc7",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "snapshot_export_bank_size"
+    },
+    {
+      "ast_sha256": "sha256:10920ea19cbd79f3d7ea538ef3f82bcd9eb8aa0ca2f64dc5b5313086333d5deb",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "snapshot_record_workflow_timeout_seconds"
     },
     {
       "ast_sha256": "sha256:fe6e11699b3f43121cbf0153a9ccdecaad6e02f7320e9fbc700d1cd3f90cd7cd",
@@ -3937,7 +4142,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:9d391f707e7eb536046c89451df863777bb8a3b4c1faa71c66a26d6cc9b70338",
-  "protected_source_commit": "43ca10a708e5b9152fb847839c1682d0ed80b8e8",
+  "manifest_hash": "sha256:9800a6c47845f3250743f1f79de23f45e1122758e5e3158bace3cf39f2bb81e9",
+  "protected_source_commit": "7a0f07f89791ed823a25e276848538120ec02445",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

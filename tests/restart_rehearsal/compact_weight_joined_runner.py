@@ -33,6 +33,7 @@ from bittensor_wallet import Keypair
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 import httpx
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from Leadpoet.utils.subnet_epoch import SubnetEpochCutover, SubnetEpochSnapshot
@@ -589,6 +590,8 @@ class _StrictChainSource:
         self.broadcast_extrinsic_hex: str | None = None
         self.broadcast_extrinsic_hash: str | None = None
         self.finalization_calls = 0
+        self.finalization_scan_ids: list[str] = []
+        self.finalization_job_ids: list[str] = []
 
     @staticmethod
     def _attempt_and_artifacts(
@@ -777,7 +780,9 @@ class _StrictChainSource:
             int(epoch_id) != EPOCH_ID
             or len(expected_extrinsics) != 1
             or set(expected_extrinsics) != set(expected_commitments)
-            or not str(finalization_scan_id).startswith("sha256:")
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(finalization_scan_id).lower()
+            )
         ):
             raise RuntimeError("compact finalization scan identity differs")
         extrinsic_hash, extrinsic_hex = next(iter(expected_extrinsics.items()))
@@ -789,13 +794,20 @@ class _StrictChainSource:
         finalized_block = int(self.current_doc["current_block"]) + 1
         if not (int(minimum_block) <= finalized_block < int(maximum_block)):
             raise RuntimeError("compact finalized block is outside the mortal era")
+        scan_id = str(finalization_scan_id).lower()
+        job_id = "weight-finalization:%d:%s" % (
+            int(epoch_id),
+            scan_id[len("sha256:") :],
+        )
         attempt, artifacts = self._attempt_and_artifacts(
-            job_id=f"weight-finalization:{EPOCH_ID}",
+            job_id=job_id,
             purpose="validator.weights.finalized.v2",
             operation="finalized-inclusion",
             attempt_number=0,
         )
         self.finalization_calls += 1
+        self.finalization_scan_ids.append(scan_id)
+        self.finalization_job_ids.append(job_id)
         return {
             "extrinsic_hash": extrinsic_hash,
             "extrinsic_hex": extrinsic_hex,
@@ -810,7 +822,7 @@ class _StrictChainSource:
             ),
             "attempts": [attempt],
             "artifacts": artifacts,
-            "job_id": f"weight-finalization:{EPOCH_ID}",
+            "job_id": job_id,
         }
 
 
@@ -1907,6 +1919,7 @@ async def _run_joined(runtime: Mapping[str, Any]) -> dict[str, Any]:
         weights_api.persist_subnet_epoch_evidence_v1
     )
     epoch_evidence_acknowledgments: list[dict[str, Any]] = []
+    compact_finalization_submissions: list[dict[str, Any]] = []
     release_archive_calls: list[str] = []
 
     gateway_release, validator_release = _build_release_authorities(runtime)
@@ -2025,6 +2038,9 @@ async def _run_joined(runtime: Mapping[str, Any]) -> dict[str, Any]:
         if path.endswith("/weights/finalize/compact/v2"):
             model = weights_api.CompactWeightFinalizationV2.model_validate(payload)
             response = await weights_api.finalize_compact_weights_v2(model)
+            compact_finalization_submissions.append(
+                copy.deepcopy(model.model_dump(mode="python"))
+            )
             return response.model_dump(mode="json")
         raise RuntimeError("compact gateway adapter received another endpoint")
 
@@ -2254,6 +2270,15 @@ async def _run_joined(runtime: Mapping[str, Any]) -> dict[str, Any]:
             )
             if not isinstance(durable, Mapping) or durable.get("authority_stage") != "finalized":
                 raise RuntimeError("compact finalized authority is not durable")
+            if len(compact_finalization_submissions) != 1:
+                raise RuntimeError(
+                    "compact initial finalization submission count differs"
+                )
+            durable_tables_before_recovery = copy.deepcopy(memory.tables)
+            durable_insert_count_before_recovery = int(memory.insert_count)
+            checkpoint_writes_before_recovery = copy.deepcopy(
+                memory.checkpoint_rpc_writes
+            )
             response = await weights_api.get_compact_published_weights_v2(
                 NETUID,
                 EPOCH_ID,
@@ -2442,6 +2467,88 @@ async def _run_joined(runtime: Mapping[str, Any]) -> dict[str, Any]:
             )
             if recovered is not True or journal.load() is None:
                 raise RuntimeError("compact same-epoch journal recovery failed")
+            if len(compact_finalization_submissions) != 2:
+                raise RuntimeError(
+                    "compact fresh-scan recovery submission count differs"
+                )
+            initial_finalization, recovery_finalization = (
+                compact_finalization_submissions
+            )
+            if (
+                initial_finalization["finalization"]
+                != recovery_finalization["finalization"]
+                or initial_finalization["weight_submission_event_hash"]
+                != recovery_finalization["weight_submission_event_hash"]
+                or initial_finalization["ancestry_commitment"]
+                != recovery_finalization["ancestry_commitment"]
+                or initial_finalization["validator_receipt_delta"]
+                == recovery_finalization["validator_receipt_delta"]
+                or initial_finalization["validator_ancestry_proof"]
+                == recovery_finalization["validator_ancestry_proof"]
+                or initial_finalization["compact_finalization_hash"]
+                == recovery_finalization["compact_finalization_hash"]
+            ):
+                raise RuntimeError(
+                    "compact fresh-scan semantic/wrapper identity differs"
+                )
+            expected_finalization_job_ids = [
+                "weight-finalization:%d:%s"
+                % (EPOCH_ID, scan_id[len("sha256:") :])
+                for scan_id in chain_source.finalization_scan_ids
+            ]
+            if (
+                len(chain_source.finalization_scan_ids) < 2
+                or len(set(chain_source.finalization_scan_ids))
+                != len(chain_source.finalization_scan_ids)
+                or chain_source.finalization_job_ids
+                != expected_finalization_job_ids
+            ):
+                raise RuntimeError(
+                    "compact finalization job identity is not scan-derived"
+                )
+            if (
+                memory.insert_count != durable_insert_count_before_recovery
+                or memory.tables != durable_tables_before_recovery
+                or memory.checkpoint_rpc_writes
+                != checkpoint_writes_before_recovery
+            ):
+                raise RuntimeError(
+                    "compact fresh-scan recovery appended duplicate durable evidence"
+                )
+
+            mismatched_recovery = copy.deepcopy(recovery_finalization)
+            mismatched_recovery["finalization"]["state_transition_hash"] = (
+                sha256_json({"mismatch": "state-transition"})
+            )
+            mismatched_recovery["compact_finalization_hash"] = sha256_json(
+                {
+                    field: value
+                    for field, value in mismatched_recovery.items()
+                    if field != "compact_finalization_hash"
+                }
+            )
+            try:
+                await weights_api.finalize_compact_weights_v2(
+                    weights_api.CompactWeightFinalizationV2.model_validate(
+                        mismatched_recovery
+                    )
+                )
+            except HTTPException as exc:
+                if exc.status_code != 409:
+                    raise RuntimeError(
+                        "compact mismatched recovery did not remain a conflict"
+                    ) from exc
+            else:
+                raise RuntimeError("compact mismatched recovery was accepted")
+            if (
+                memory.insert_count != durable_insert_count_before_recovery
+                or memory.tables != durable_tables_before_recovery
+                or memory.checkpoint_rpc_writes
+                != checkpoint_writes_before_recovery
+            ):
+                raise RuntimeError(
+                    "compact mismatched recovery appended durable evidence"
+                )
             next_epoch = EPOCH_ID + 1
 
             async def next_state() -> Any:
@@ -2593,6 +2700,10 @@ async def _run_joined(runtime: Mapping[str, Any]) -> dict[str, Any]:
             "primary_auditor_vector_hash": vector_hash,
             "auditor_verified_cache_replay": True,
             "same_epoch_compact_journal_recovered": True,
+            "same_epoch_compact_fresh_scan_recovered": True,
+            "compact_finalization_job_ids_scan_derived": True,
+            "compact_fresh_scan_recovery_writes": 0,
+            "compact_mismatched_recovery_conflict": True,
             "next_epoch_compact_journal_retired": True,
             "bundle_hash": final_verified["bundle_hash"],
             "weights_hash": final_verified["weights_hash"],

@@ -79,9 +79,13 @@ def test_compact_weight_joined_path_uses_production_lifecycle_and_recovers(
         "auditor_last_update_advanced",
         "auditor_finalized_vector_readback_equal",
         "same_epoch_compact_journal_recovered",
+        "same_epoch_compact_fresh_scan_recovered",
+        "compact_finalization_job_ids_scan_derived",
+        "compact_mismatched_recovery_conflict",
         "next_epoch_compact_journal_retired",
     ):
         assert evidence[field] is True
+    assert evidence["compact_fresh_scan_recovery_writes"] == 0
     assert evidence["independent_auditor_count"] == 2
     assert evidence["independent_auditor_submission_count"] == 2
     assert len(evidence["auditor_submission_states"]) == 2

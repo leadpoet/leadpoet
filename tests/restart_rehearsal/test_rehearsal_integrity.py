@@ -4497,8 +4497,13 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "gateway/tee/provider_client_v2.py",
         "gateway/tee/provider_outcome_store_v2.py",
         "gateway/tee/rpc_authority.py",
-        "leadpoet_observability/sentry_operations.py",
     } <= set(behavior_contract["production_source_paths"])
+    assert "leadpoet_observability/sentry_operations.py" not in set(
+        behavior_contract["production_source_paths"]
+    )
+    assert production_workflow_runner.HOST_RESTART_SUMMARY_SOURCE_PATHS == (
+        "leadpoet_observability/sentry_operations.py",
+    )
     assert "proxy-authorization:" in tls_proxy_service
     assert "ssl.PROTOCOL_TLS_SERVER" in tls_proxy_service
     assert '"openrouter.ai:443"' in tls_proxy_service
@@ -4571,7 +4576,20 @@ def test_rebenchmark_provider_transport_action_requires_httpx_grant_evidence() -
 def test_restart_summary_deadline_action_is_exact_and_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", "a" * 40)
+    source_root = Path(__file__).resolve().parents[2]
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "SOURCE_ROOT",
+        source_root,
+    )
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
     evidence = (
         production_workflow_runner._exercise_restart_summary_deadline_classification()
     )
@@ -4590,6 +4608,29 @@ def test_restart_summary_deadline_action_is_exact_and_fail_closed(
             )
             is False
         )
+    identity = evidence["host_source_identities"][0]
+    for field, value in (
+        ("path", "leadpoet_observability/not-the-candidate.py"),
+        ("commit_sha", "0" * 40),
+        ("sha256", "c" * 64),
+    ):
+        assert (
+            production_workflow_runner._restart_summary_deadline_evidence_is_complete(
+                {
+                    **evidence,
+                    "host_source_identities": [
+                        {**identity, field: value},
+                    ],
+                }
+            )
+            is False
+        )
+    assert (
+        production_workflow_runner._restart_summary_deadline_evidence_is_complete(
+            {**evidence, "host_source_identities": []}
+        )
+        is False
+    )
     assert (
         production_workflow_runner._restart_summary_deadline_evidence_is_complete(
             {**evidence, "unexpected": True}

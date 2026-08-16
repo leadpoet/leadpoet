@@ -134,7 +134,6 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/tee/tee_service.py",
     "gateway/tee/topology.py",
     "gateway/utils/tee_egress_forwarder.py",
-    "leadpoet_observability/sentry_operations.py",
     "research_lab/eval/baseline_summary.py",
     "research_lab/eval/conditional_validation.py",
     "research_lab/eval/dev_eval.py",

@@ -98,6 +98,9 @@ PRIVATE_MODEL_BRANCH_POINTER_URI = (
 PRIVATE_MODEL_SIGNING_KEY_ID = (
     "alias/leadpoet-research-lab-artifact-signing"
 )
+HOST_RESTART_SUMMARY_SOURCE_PATHS = (
+    "leadpoet_observability/sentry_operations.py",
+)
 SIGNED_PRIVATE_MODEL_RELEASES = {
     "leadpoet-sourcing-wrapper-contract-v7": {
         "build_id": "30643934157-1",
@@ -12396,6 +12399,7 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
 
 _RESTART_SUMMARY_DEADLINE_EVIDENCE_FIELDS = (
     "active_timeout_terminal",
+    "host_module_source_exact",
     "later_failure_overrides_stale_completion",
     "passive_wait_does_not_relabel_failure",
     "restart_invocation_identity_exact",
@@ -12404,13 +12408,55 @@ _RESTART_SUMMARY_DEADLINE_EVIDENCE_FIELDS = (
 )
 
 
-def _restart_summary_deadline_evidence_is_complete(value: Any) -> bool:
+def _restart_summary_deadline_evidence_is_complete(
+    value: Any,
+    *,
+    candidate_sha: str | None = None,
+) -> bool:
+    normalized_sha = str(
+        candidate_sha
+        or os.environ.get("REHEARSAL_CANDIDATE_SHA")
+        or ""
+    ).strip().lower()
+    identities = (
+        value.get("host_source_identities")
+        if isinstance(value, Mapping)
+        else None
+    )
+    try:
+        expected_identities = [
+            _file_identity(path, normalized_sha)
+            for path in HOST_RESTART_SUMMARY_SOURCE_PATHS
+        ]
+    except Exception:
+        expected_identities = None
     return (
         isinstance(value, Mapping)
-        and set(value) == set(_RESTART_SUMMARY_DEADLINE_EVIDENCE_FIELDS)
+        and set(value)
+        == {
+            *_RESTART_SUMMARY_DEADLINE_EVIDENCE_FIELDS,
+            "host_source_identities",
+        }
         and all(
             value.get(field) is True
             for field in _RESTART_SUMMARY_DEADLINE_EVIDENCE_FIELDS
+        )
+        and re.fullmatch(r"[0-9a-f]{40}", normalized_sha) is not None
+        and isinstance(identities, list)
+        and len(identities) == len(HOST_RESTART_SUMMARY_SOURCE_PATHS)
+        and all(isinstance(item, Mapping) for item in identities)
+        and identities == expected_identities
+        and sorted(str(item.get("path") or "") for item in identities)
+        == sorted(HOST_RESTART_SUMMARY_SOURCE_PATHS)
+        and all(
+            isinstance(item, Mapping)
+            and item.get("commit_sha") == normalized_sha
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(item.get("sha256") or ""),
+            )
+            is not None
+            for item in identities
         )
     )
 
@@ -12418,13 +12464,23 @@ def _restart_summary_deadline_evidence_is_complete(value: Any) -> bool:
 def _exercise_restart_summary_deadline_classification() -> dict[str, Any]:
     """Replay exact candidate restart summaries without sleeping or Sentry I/O."""
 
-    from leadpoet_observability import sentry_operations
-
     candidate_sha = str(
         os.environ.get("REHEARSAL_CANDIDATE_SHA") or ""
     ).strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
         raise RuntimeError("restart summary rehearsal candidate SHA is invalid")
+    host_source_identities = [
+        _file_identity(path, candidate_sha)
+        for path in HOST_RESTART_SUMMARY_SOURCE_PATHS
+    ]
+
+    from leadpoet_observability import sentry_operations
+
+    expected_module_path = (
+        SOURCE_ROOT / HOST_RESTART_SUMMARY_SOURCE_PATHS[0]
+    ).resolve()
+    if Path(sentry_operations.__file__).resolve() != expected_module_path:
+        raise RuntimeError("restart summary host module source differs")
 
     breadcrumbs: list[dict[str, Any]] = []
     distributions: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -12652,13 +12708,18 @@ def _exercise_restart_summary_deadline_classification() -> dict[str, Any]:
 
     evidence = {
         "active_timeout_terminal": True,
+        "host_module_source_exact": True,
+        "host_source_identities": host_source_identities,
         "later_failure_overrides_stale_completion": True,
         "passive_wait_does_not_relabel_failure": True,
         "restart_invocation_identity_exact": True,
         "successful_slow_wait_nonterminal": True,
         "successful_duration_metrics_retained": True,
     }
-    if not _restart_summary_deadline_evidence_is_complete(evidence):
+    if not _restart_summary_deadline_evidence_is_complete(
+        evidence,
+        candidate_sha=candidate_sha,
+    ):
         raise RuntimeError("restart summary deadline evidence is incomplete")
     return evidence
 
@@ -13416,7 +13477,8 @@ def main() -> int:
                 behavior_evidence.get(
                     "restart-summary-deadline-classification",
                     {},
-                )
+                ),
+                candidate_sha=args.candidate_sha,
             )
         ),
         "full_rebenchmark_publication_path_verified": (
@@ -13856,6 +13918,26 @@ def main() -> int:
                 "compact-weight-joined-path",
                 {},
             ).get("same_epoch_compact_journal_recovered")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("same_epoch_compact_fresh_scan_recovered")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("compact_finalization_job_ids_scan_derived")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("compact_fresh_scan_recovery_writes")
+            == 0
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("compact_mismatched_recovery_conflict")
             is True
             and behavior_evidence.get(
                 "compact-weight-joined-path",

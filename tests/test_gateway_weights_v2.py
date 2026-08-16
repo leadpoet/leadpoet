@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import gzip
 import json
 from types import SimpleNamespace
@@ -1495,6 +1496,226 @@ async def test_compact_finalization_exact_replay_is_idempotent_without_writes(
     assert response.weight_finalization_event_hash == verified[
         "weight_finalization_event_hash"
     ]
+
+
+def _compact_finalization_recovery_documents():
+    finalization = {
+        "schema_version": "leadpoet.weight_finalization.v2",
+        "validator_hotkey": VALIDATOR_HOTKEY,
+        "netuid": 71,
+        "epoch_id": 300,
+        "weights_hash": "5" * 64,
+        "weight_receipt_hash": WEIGHT_RECEIPT,
+        "weight_submission_event_hash": EVENT_HASH,
+        "extrinsic_authorization": {"authorization_hash": "sha256:" + "6" * 64},
+        "extrinsic_authorization_hash": "sha256:" + "6" * 64,
+        "extrinsic_signature": "7" * 128,
+        "extrinsic_receipt_hash": "sha256:" + "8" * 64,
+        "extrinsic_hash": "0x" + "a" * 64,
+        "finalized_block": 108355,
+        "finalized_block_hash": "b" * 64,
+        "state_transition_hash": "sha256:" + "c" * 64,
+    }
+    durable = {
+        "schema_version": "leadpoet.compact_weight_finalization_submission.v2",
+        "validator_hotkey": VALIDATOR_HOTKEY,
+        "weight_submission_event_hash": EVENT_HASH,
+        "finalization": finalization,
+        "ancestry_commitment": "sha256:" + "d" * 64,
+        "validator_receipt_delta": {
+            "root_receipt_hash": "sha256:" + "e" * 64,
+        },
+        "validator_ancestry_proof": {"proof": "durable"},
+        "compact_finalization_hash": "sha256:" + "0" * 64,
+    }
+    recovery = copy.deepcopy(durable)
+    recovery["validator_receipt_delta"]["root_receipt_hash"] = (
+        "sha256:" + "1" * 64
+    )
+    recovery["validator_ancestry_proof"] = {"proof": "fresh-scan"}
+    recovery["compact_finalization_hash"] = "sha256:" + "2" * 64
+    return durable, recovery
+
+
+def _patch_compact_finalization_recovery_endpoint(
+    monkeypatch,
+    *,
+    durable,
+    recovery,
+    reject_recovery_proof=False,
+):
+    from gateway.research_lab import attested_v2_store
+    from gateway.utils import epoch as gateway_epoch
+
+    authority = {
+        "authority_stage": "finalized",
+        "compact_submission": {"published": "compact-submission"},
+        "publication": {"published": "publication"},
+        "finalization": {"compact_submission": durable},
+    }
+    verified = {
+        "validator_hotkey": VALIDATOR_HOTKEY,
+        "netuid": 71,
+        "epoch_id": 300,
+        "weights_hash": "5" * 64,
+        "bundle_hash": BUNDLE_HASH,
+        "extrinsic_hash": durable["finalization"]["extrinsic_hash"],
+        "finalized_block": durable["finalization"]["finalized_block"],
+        "finalized_block_hash": durable["finalization"][
+            "finalized_block_hash"
+        ],
+        "state_transition_hash": durable["finalization"][
+            "state_transition_hash"
+        ],
+        "weight_submission_event_hash": EVENT_HASH,
+        "weight_finalization_event_hash": "sha256:" + "3" * 64,
+    }
+    cutover = SimpleNamespace(
+        mapping_hash="sha256:" + "4" * 64,
+        network_genesis_hash="0x" + "5" * 64,
+        netuid=71,
+    )
+    verification_calls = []
+    recovery_authorities = []
+
+    async def load_authority(**_kwargs):
+        return authority
+
+    async def no_write(*_args, **_kwargs):
+        raise AssertionError("finalized recovery must not append durable evidence")
+
+    def verify_authority(value, **_kwargs):
+        verification_calls.append(value)
+        if len(verification_calls) == 2 and reject_recovery_proof:
+            raise ValueError("alternate recovery ancestry differs")
+        return verified
+
+    def build_recovery_authority(**kwargs):
+        recovery_authorities.append(copy.deepcopy(kwargs))
+        return {"recovery_authority": copy.deepcopy(kwargs)}
+
+    monkeypatch.setattr(
+        weights_api,
+        "validate_compact_weight_finalization_shape_v2",
+        lambda _payload: recovery,
+    )
+    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(weights_api, "load_subnet_epoch_cutover", lambda: cutover)
+    monkeypatch.setattr(
+        gateway_epoch,
+        "validate_stateful_cutover_authority_async",
+        lambda _cutover: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "validate_cutover_anchor_from_archive",
+        lambda _cutover: None,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "derive_ancestry_lineage_id_v2",
+        lambda **_kwargs: LINEAGE_ID,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "verify_compact_published_weight_authority_v2",
+        verify_authority,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "build_compact_published_weight_authority_v2",
+        build_recovery_authority,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_compact_weight_authority_for_identity_v2",
+        load_authority,
+    )
+    monkeypatch.setattr(attested_v2_store, "persist_receipt_graph_v2", no_write)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_ancestry_checkpoint_v2",
+        no_write,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_compact_weight_authority_v2",
+        no_write,
+    )
+    submission = SimpleNamespace(
+        model_dump=lambda **_kwargs: recovery,
+        validator_hotkey=VALIDATOR_HOTKEY,
+    )
+    return submission, verified, verification_calls, recovery_authorities
+
+
+@pytest.mark.asyncio
+async def test_compact_finalization_fresh_scan_recovery_returns_durable_ack_without_writes(
+    monkeypatch,
+):
+    durable, recovery = _compact_finalization_recovery_documents()
+    submission, verified, verification_calls, recovery_authorities = (
+        _patch_compact_finalization_recovery_endpoint(
+            monkeypatch,
+            durable=durable,
+            recovery=recovery,
+        )
+    )
+
+    response = await weights_api.finalize_compact_weights_v2(submission)
+
+    assert response.success is True
+    assert "already" in response.message
+    assert response.weight_finalization_event_hash == verified[
+        "weight_finalization_event_hash"
+    ]
+    assert len(verification_calls) == 2
+    assert len(recovery_authorities) == 1
+    assert recovery_authorities[0]["finalization"]["compact_submission"] is not durable
+    assert recovery_authorities[0]["finalization"]["compact_submission"] == recovery
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mismatch",
+    (
+        "extrinsic_hash",
+        "finalized_block",
+        "finalized_block_hash",
+        "state_transition_hash",
+        "weight_submission_event_hash",
+        "ancestry_commitment",
+        "invalid_recovery_proof",
+    ),
+)
+async def test_compact_finalization_fresh_scan_recovery_mismatch_is_conflict(
+    monkeypatch,
+    mismatch,
+):
+    durable, recovery = _compact_finalization_recovery_documents()
+    reject_recovery_proof = mismatch == "invalid_recovery_proof"
+    if mismatch == "weight_submission_event_hash":
+        recovery[mismatch] = "sha256:" + "9" * 64
+    elif mismatch == "ancestry_commitment":
+        recovery[mismatch] = "sha256:" + "9" * 64
+    elif mismatch == "finalized_block":
+        recovery["finalization"][mismatch] += 1
+    elif not reject_recovery_proof:
+        recovery["finalization"][mismatch] = "sha256:" + "9" * 64
+    submission, _verified, _verification_calls, _recovery_authorities = (
+        _patch_compact_finalization_recovery_endpoint(
+            monkeypatch,
+            durable=durable,
+            recovery=recovery,
+            reject_recovery_proof=reject_recovery_proof,
+        )
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.finalize_compact_weights_v2(submission)
+
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio

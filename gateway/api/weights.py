@@ -3221,7 +3221,10 @@ async def finalize_compact_weights_v2(
         if published_verified["weight_submission_event_hash"] != normalized[
             "weight_submission_event_hash"
         ]:
-            raise RuntimeError("compact finalization publication event differs")
+            raise HTTPException(
+                status_code=409,
+                detail="Compact finalization publication event differs",
+            )
         _finish_weight_stage(
             current_stage,
             started,
@@ -3234,10 +3237,113 @@ async def finalize_compact_weights_v2(
 
         if published_authority["authority_stage"] == "finalized":
             durable_finalization = published_authority["finalization"]
-            if durable_finalization.get("compact_submission") != normalized:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Different compact finalization already exists",
+            durable_compact = durable_finalization.get("compact_submission")
+            if durable_compact != normalized:
+                if (
+                    not isinstance(durable_compact, Mapping)
+                    or durable_compact.get("weight_submission_event_hash")
+                    != normalized["weight_submission_event_hash"]
+                    or durable_compact.get("ancestry_commitment")
+                    != normalized["ancestry_commitment"]
+                    or durable_compact.get("finalization")
+                    != normalized["finalization"]
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Different compact finalization already exists",
+                    )
+
+                # Recovery after a validator restart performs a new finalized-
+                # chain scan.  That scan has a new receipt, transport evidence,
+                # ancestry certificate, and compact hash even though it proves
+                # the exact same semantic finalization.  Verify the complete
+                # alternate authority before returning the already-durable ack;
+                # the recovery path deliberately performs no persistence.
+                current_stage = "compact_finalization_recovery_verification"
+                started = _begin_weight_stage(current_stage, telemetry)
+                recovery_receipt_hash = str(
+                    normalized["validator_receipt_delta"]["root_receipt_hash"]
+                )
+                recovery_event_hash = sha256_json(
+                    {
+                        "weight_submission_event_hash": published_verified[
+                            "weight_submission_event_hash"
+                        ],
+                        "bundle_hash": published_verified["bundle_hash"],
+                        "finalization_receipt_hash": recovery_receipt_hash,
+                        "extrinsic_authorization_hash": finalization[
+                            "extrinsic_authorization_hash"
+                        ],
+                        "extrinsic_hash": finalization["extrinsic_hash"],
+                        "finalized_block": finalization["finalized_block"],
+                        "finalized_block_hash": finalization[
+                            "finalized_block_hash"
+                        ],
+                        "state_transition_hash": finalization[
+                            "state_transition_hash"
+                        ],
+                    }
+                )
+                recovery_authority = build_compact_published_weight_authority_v2(
+                    authority_stage="finalized",
+                    lineage_id=lineage_id,
+                    bundle_hash=published_verified["bundle_hash"],
+                    compact_submission=published_authority[
+                        "compact_submission"
+                    ],
+                    publication=published_authority["publication"],
+                    finalization={
+                        "weight_finalization_event_hash": recovery_event_hash,
+                        "compact_submission": normalized,
+                    },
+                )
+                try:
+                    recovery_verified = await asyncio.to_thread(
+                        verify_compact_published_weight_authority_v2,
+                        recovery_authority,
+                        identity_cache=None,
+                        chain_signing_profile=None,
+                        expected_lineage_id=lineage_id,
+                        expected_chain=EXPECTED_CHAIN,
+                        boot_verifier=_verify_authoritative_v2_boot,
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Alternate compact finalization recovery proof "
+                            "differs from durable authority"
+                        ),
+                    ) from exc
+                recovery_identity_fields = (
+                    "validator_hotkey",
+                    "netuid",
+                    "epoch_id",
+                    "weights_hash",
+                    "bundle_hash",
+                    "extrinsic_hash",
+                    "finalized_block",
+                    "finalized_block_hash",
+                    "state_transition_hash",
+                )
+                if any(
+                    recovery_verified.get(field)
+                    != published_verified.get(field)
+                    for field in recovery_identity_fields
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Alternate compact finalization recovery state "
+                            "differs from durable authority"
+                        ),
+                    )
+                _finish_weight_stage(
+                    current_stage,
+                    started,
+                    telemetry,
+                    root_receipt_hash=recovery_receipt_hash,
+                    weight_finalization_event_hash=recovery_event_hash,
                 )
             record_stage(
                 component="gateway",

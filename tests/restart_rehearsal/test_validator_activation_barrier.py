@@ -11,6 +11,7 @@ from gateway.tee.rehearsal_behavior_contract_v2 import (
 )
 from tests.restart_rehearsal.verify_evidence import (
     VALIDATOR_GATEWAY_ACTIVATION_INVARIANT,
+    VALIDATOR_ROLE_RELEASE_INVARIANT,
     verify_validator_gateway_activation_barrier,
 )
 
@@ -299,9 +300,12 @@ def test_candidate_contract_declares_activation_sources_and_invariant() -> None:
         epoch_count=1,
     )
 
-    assert contract["required_restart_invariant_ids"] == [
-        VALIDATOR_GATEWAY_ACTIVATION_INVARIANT
-    ]
+    required = contract["required_restart_invariant_ids"]
+    assert {
+        VALIDATOR_GATEWAY_ACTIVATION_INVARIANT,
+        VALIDATOR_ROLE_RELEASE_INVARIANT,
+    } <= set(required)
+    assert len(required) == len(set(required))
     assert {
         "scripts/restart_attested_release_local.sh",
         "validator_models/containerizing/deploy_dynamic.sh",

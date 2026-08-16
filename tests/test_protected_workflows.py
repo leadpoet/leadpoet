@@ -144,6 +144,44 @@ def test_model_sandbox_launcher_boundaries_are_protected():
 
 def test_artifact_egress_transport_boundaries_are_protected():
     assert {
+        "_OBSERVED_EMPLOYEE_COUNT_INTERVALS",
+        "normalize_observed_employee_count_bucket",
+    } <= set(PROTECTED_SYMBOLS["research_lab/employee_buckets.py"])
+    assert {
+        "_decision_from_observed_employee_size",
+        "_reverify_decision",
+        "_llm_reverify_company",
+    } <= set(PROTECTED_SYMBOLS["qualification/scoring/lead_scorer.py"])
+    assert {
+        "PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION",
+        "EGRESS_POLICY_DIRECT_ONLY",
+        "_PROVIDER_TERMINAL_STATUSES",
+        "_CHAIN_WEIGHT_OBSERVATION_PURPOSE",
+        "_local_resource_failure",
+        "_failure_code",
+        "_force_close_response_network_stream",
+        "_close_client_transports",
+        "ProviderTransportCleanupError",
+        "ProviderRouteV2",
+        "HTTPXProviderTransport",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/provider_broker_v2.py"])
+    assert {
+        "_SEMANTICS_HEALTH_STAGES",
+        "ProviderSemanticsAuthorityV2",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/provider_semantics_v2.py"])
+    assert {
+        "PROVIDER_IDLE_MIN_SECONDS",
+        "PROVIDER_MIN_NOFILE_HEADROOM",
+        "PROVIDER_MIN_EPHEMERAL_PORT_HEADROOM",
+        "_provider_health_snapshot",
+        "_require_provider_resource_headroom",
+        "_pause_staging_provider_work",
+        "_wait_for_provider_idle_window",
+        "_wait_for_post_idle_provider_proof",
+        "_validate_post_idle_cleanup_and_resources",
+        "run",
+    } <= set(PROTECTED_SYMBOLS["scripts/run_physical_v2_staging.py"])
+    assert {
         "TUNNEL_FRAMING_HEADER",
         "TUNNEL_FRAMING_MODE",
         "send_tunnel_frame",
@@ -155,7 +193,12 @@ def test_artifact_egress_transport_boundaries_are_protected():
         "destination_policy_hash",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/egress_policy.py"])
     assert {
+        "MAX_PROC_TCP_HEALTH_BYTES",
+        "MAX_PROC_TCP_HEALTH_ROWS",
         "_parse_proxy_request",
+        "_proc_tcp_address_is_loopback",
+        "_loopback_tcp_state_counts",
+        "_process_transport_resource_health",
         "_FramedParentBridge",
         "_ManagedProxyStream",
         "EnclaveEgressProxy",

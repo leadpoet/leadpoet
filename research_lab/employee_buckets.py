@@ -38,6 +38,17 @@ LEGACY_EMPLOYEE_BUCKET_MAP = {
     "10001+": "10,001+",
 }
 
+_OBSERVED_EMPLOYEE_COUNT_INTERVALS = (
+    (1, "0-1"),
+    (10, "2-10"),
+    (50, "11-50"),
+    (200, "51-200"),
+    (500, "201-500"),
+    (1_000, "501-1,000"),
+    (5_000, "1,001-5,000"),
+    (10_000, "5,001-10,000"),
+)
+
 
 def normalize_employee_count_bucket(value: Any, *, default: str | None = DEFAULT_EMPLOYEE_BUCKET) -> str:
     """Normalize a value to an exact LinkedIn employee bucket."""
@@ -68,6 +79,39 @@ def normalize_employee_count_bucket(value: Any, *, default: str | None = DEFAULT
     if normalized:
         return normalized
     return str(default or "")
+
+
+def normalize_observed_employee_count_bucket(
+    value: Any,
+    *,
+    default: str | None = None,
+) -> str:
+    """Project one exact observed integer count into a LinkedIn bucket.
+
+    This deliberately accepts only a JSON integer or its canonical decimal
+    string representation. Approximate, qualified, ranged, negative, and
+    decimal values remain unverified instead of being guessed into a bucket.
+    """
+
+    if isinstance(value, bool):
+        return str(default or "")
+    if isinstance(value, int):
+        count = value
+    elif isinstance(value, str):
+        raw = value
+        if not re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
+            return str(default or "")
+        if len(raw) > 5:
+            return "10,001+"
+        count = int(raw)
+    else:
+        return str(default or "")
+    if count < 0:
+        return str(default or "")
+    for maximum, bucket in _OBSERVED_EMPLOYEE_COUNT_INTERVALS:
+        if count <= maximum:
+            return bucket
+    return "10,001+"
 
 
 def expand_employee_count_buckets(

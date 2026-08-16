@@ -48,13 +48,18 @@ def test_coordinator_provider_broker_serializes_request_scoped_direct_transport(
         def __init__(self, **kwargs):
             captured["broker"] = dict(kwargs)
 
+    class Proxy:
+        @staticmethod
+        def ensure_running():
+            return {"status": "running"}
+
     monkeypatch.setattr(tee_service, "v2_provider_broker", None)
     monkeypatch.setattr(
         tee_service,
         "get_v2_runtime_identity",
         lambda: RuntimeIdentity(),
     )
-    monkeypatch.setattr(tee_service, "get_provider_egress_proxy", lambda: object())
+    monkeypatch.setattr(tee_service, "get_provider_egress_proxy", lambda: Proxy())
     monkeypatch.setattr(tee_service, "get_v2_artifact_vault", lambda: ArtifactVault())
     monkeypatch.setattr(rpc_authority, "active_enclave_role", lambda: "gateway_coordinator")
     monkeypatch.setattr(provider_broker_v2, "HTTPXProviderTransport", Transport)
@@ -63,10 +68,14 @@ def test_coordinator_provider_broker_serializes_request_scoped_direct_transport(
     broker = tee_service.get_v2_provider_broker()
 
     assert isinstance(broker, Broker)
-    assert captured["transport"] == {
+    transport_options = dict(captured["transport"])
+    ensure_egress_ready = transport_options.pop("ensure_egress_ready")
+    assert callable(ensure_egress_ready)
+    assert ensure_egress_ready() == {"status": "running"}
+    assert transport_options == {
         "allow_authenticated_complete_body_eof": True,
         "reuse_direct_connections": False,
-        "reuse_upstream_proxy_connections": True,
+        "reuse_upstream_proxy_connections": False,
     }
     assert captured["broker"]["transport"].__class__ is Transport
     assert captured["broker"]["routes"]["supabase"].hosts == (

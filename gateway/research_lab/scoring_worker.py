@@ -758,6 +758,8 @@ def _baseline_scoring_contract_hash() -> str:
     """Hash score-producing code without binding checkpoints to a release SHA."""
 
     import research_lab.eval as evaluation_package
+    from qualification.scoring import lead_scorer as lead_scorer_module
+    from research_lab import employee_buckets as employee_buckets_module
     from gateway.tee.model_sandbox_v2 import (
         model_source_import_bootstrap,
         trusted_model_sandbox_import_bootstrap,
@@ -783,6 +785,13 @@ def _baseline_scoring_contract_hash() -> str:
         _cached_terminal,
         _snapshot_terminal,
         execute_sandbox_provider_request,
+        lead_scorer_module._decision_from_observed_employee_size,
+        lead_scorer_module._reverify_decision,
+        lead_scorer_module._llm_reverify_company,
+        lead_scorer_module._normalize_linkedin_employee_bucket,
+        lead_scorer_module._normalize_icp_employee_buckets,
+        employee_buckets_module.normalize_employee_count_bucket,
+        employee_buckets_module.normalize_observed_employee_count_bucket,
     ]
     if worker_type is not None:
         callables.extend(
@@ -805,8 +814,25 @@ def _baseline_scoring_contract_hash() -> str:
         ) from exc
     return sha256_json(
         {
-            "schema_version": "research_lab_baseline_scoring_contract.v2",
+            "schema_version": "research_lab_baseline_scoring_contract.v3",
             "lazy_import_contract": evaluation_package.lazy_import_contract(),
+            "employee_bucket_contract": {
+                "linkedin_buckets": list(
+                    employee_buckets_module.LINKEDIN_EMPLOYEE_BUCKETS
+                ),
+                "legacy_bucket_map": [
+                    [str(name), str(bucket)]
+                    for name, bucket in sorted(
+                        employee_buckets_module.LEGACY_EMPLOYEE_BUCKET_MAP.items()
+                    )
+                ],
+                "observed_count_intervals": [
+                    [int(maximum), str(bucket)]
+                    for maximum, bucket in (
+                        employee_buckets_module._OBSERVED_EMPLOYEE_COUNT_INTERVALS
+                    )
+                ],
+            },
             "sources": sources,
         }
     )

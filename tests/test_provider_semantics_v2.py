@@ -28,6 +28,7 @@ from gateway.tee.provider_broker_v2 import (
     ProviderBrokerV2,
     _provider_rpc_response_body_limit,
     credential_reference_hash,
+    credential_value_hash,
     expected_provider_credential_slots,
 )
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
@@ -718,6 +719,201 @@ def test_infrastructure_routes_bypass_paid_provider_cache_and_outcomes():
     assert "supabase" not in authority.provider_outcome_snapshot()[
         "provider_outcome_digest"
     ]["providers"]
+
+
+def test_assigned_provider_keeps_nested_supabase_cache_and_outcome_direct():
+    proxy_url = "https://worker:test-secret@proxy.example.com:443"
+    job_id = "nested-provider-job"
+    purpose = "research_lab.company_score.v2"
+
+    class RecordingTransport:
+        def __init__(self, *, fail_supabase_call=0):
+            self.calls = []
+            self.supabase_calls = 0
+            self.fail_supabase_call = fail_supabase_call
+
+        def __call__(self, **request):
+            self.calls.append(dict(request))
+            is_supabase = ".supabase.co/" in str(request["url"])
+            if is_supabase:
+                self.supabase_calls += 1
+                if self.supabase_calls == self.fail_supabase_call:
+                    raise ConnectionRefusedError(111, "test-only direct outage")
+                body = b'{"ok":true}'
+            else:
+                body = b'{"costDollars":0.005,"results":[]}'
+            return {
+                "http_status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": body,
+                "tls_peer_chain_hash": _hash("4"),
+                "tls_protocol": "TLSv1.3",
+            }
+
+    def make_authority(*, fail_supabase_call=0):
+        transport = RecordingTransport(
+            fail_supabase_call=fail_supabase_call,
+        )
+        credentials = {
+            "openrouter": "openrouter-secret",
+            "exa": "exa-secret",
+            "scrapingdog": "scrapingdog-secret",
+            "deepline": "deepline-secret",
+            "supabase_service_role": "supabase-secret",
+            "truelist": "truelist-secret",
+        }
+        retry_hashes = {
+            provider: sha256_json({"retry": provider})
+            for provider in BUILTIN_PROVIDER_ROUTES
+        }
+        broker = ProviderBrokerV2(
+            credential_ref_hashes={
+                name: credential_reference_hash(value)
+                for name, value in credentials.items()
+            },
+            retry_policy_hashes=retry_hashes,
+            transport=transport,
+            artifact_sink=lambda body, **_: {
+                "artifact_id": sha256_bytes(b"nested:" + body),
+                "plaintext_hash": sha256_bytes(body),
+            },
+            clock=lambda: "2026-07-10T00:00:00Z",
+        )
+        broker.provision_credentials(credentials)
+        broker.provision_job_credential(
+            job_id=job_id,
+            slot="egress_proxy",
+            credential=proxy_url,
+            credential_value_hash_expected=credential_value_hash(proxy_url),
+        )
+        operation_index = 0
+
+        def direct_supabase(*, stage, operation_job_id, operation_purpose):
+            nonlocal operation_index
+            operation_index += 1
+            result = broker.execute(
+                {
+                    "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
+                    "logical_operation_id": (
+                        f"{operation_job_id}:nested-supabase:{stage}:"
+                        f"{operation_index}"
+                    ),
+                    "job_id": operation_job_id,
+                    "purpose": operation_purpose,
+                    "provider_id": "supabase",
+                    "attempt_number": 0,
+                    "method": "POST",
+                    "url": (
+                        "https://qplwoislplkcegvdmbim.supabase.co/"
+                        "rest/v1/rpc/nested_provider_test"
+                    ),
+                    "headers": {"content-type": "application/json"},
+                    "body_b64": base64.b64encode(b"{}").decode("ascii"),
+                    "timeout_ms": 30_000,
+                    "retry_policy_hash": retry_hashes["supabase"],
+                }
+            )
+            if result.get("terminal_status") != "authenticated_response":
+                raise RuntimeError("nested Supabase operation failed closed")
+
+        class NestedCache(_CacheStore):
+            def load(self, *, job_id, purpose, **kwargs):
+                direct_supabase(
+                    stage="cache-lookup",
+                    operation_job_id=job_id,
+                    operation_purpose=purpose,
+                )
+                return super().load(job_id=job_id, purpose=purpose, **kwargs)
+
+            def persist_recorded(self, terminal, *, job_id, purpose, **kwargs):
+                direct_supabase(
+                    stage="cache-write",
+                    operation_job_id=job_id,
+                    operation_purpose=purpose,
+                )
+                return super().persist_recorded(
+                    terminal,
+                    job_id=job_id,
+                    purpose=purpose,
+                    **kwargs,
+                )
+
+        class NestedOutcome(_OutcomeStore):
+            def persist(self, document, *, job_id, purpose, **kwargs):
+                direct_supabase(
+                    stage="outcome-append",
+                    operation_job_id=job_id,
+                    operation_purpose=purpose,
+                )
+                return super().persist(
+                    document,
+                    job_id=job_id,
+                    purpose=purpose,
+                    **kwargs,
+                )
+
+        authority, _, _, _ = _authority(
+            broker=broker,
+            cache=NestedCache(),
+            outcome_store=NestedOutcome(),
+        )
+        return authority, broker, transport
+
+    authority, broker, transport = make_authority()
+    result = authority.execute(
+        _request(job_id=job_id, purpose=purpose)
+    )
+
+    assert result["terminal_status"] == "authenticated_response"
+    assert [".supabase.co/" in call["url"] for call in transport.calls] == [
+        True,
+        False,
+        True,
+        True,
+    ]
+    assert transport.calls[1]["upstream_proxy_url"] == proxy_url
+    assert transport.calls[1]["connection_scope"].startswith("sha256:")
+    for call in (transport.calls[0], transport.calls[2], transport.calls[3]):
+        assert "upstream_proxy_url" not in call
+        assert "connection_scope" not in call
+    health = authority.health()
+    assert health["stage_counters"]["provider_transport"] == {
+        "started": 1,
+        "succeeded": 1,
+        "failed": 0,
+    }
+    assert health["stage_counters"]["provider_cache_lookup"]["succeeded"] == 1
+    assert health["stage_counters"]["provider_cache_write"]["succeeded"] == 1
+    assert health["stage_counters"]["provider_outcome_append"]["succeeded"] == 1
+    assert broker.release_job_credentials(job_id)["released_slot_count"] == 1
+
+    failed_authority, failed_broker, failed_transport = make_authority(
+        fail_supabase_call=3,
+    )
+    failed = failed_authority.execute(
+        _request(job_id=job_id, purpose=purpose)
+    )
+
+    assert failed["terminal_status"] == "transport_failure"
+    assert failed["failure_stage"] == "provider_semantics"
+    assert [".supabase.co/" in call["url"] for call in failed_transport.calls] == [
+        True,
+        False,
+        True,
+        True,
+    ]
+    assert failed_transport.calls[1]["upstream_proxy_url"] == proxy_url
+    assert "upstream_proxy_url" not in failed_transport.calls[-1]
+    failed_health = failed_authority.health()
+    assert failed_health["last_stage_failure"]["stage"] == (
+        "provider_outcome_append"
+    )
+    assert failed_health["stage_counters"]["provider_outcome_append"] == {
+        "started": 1,
+        "succeeded": 0,
+        "failed": 1,
+    }
+    assert failed_broker.release_job_credentials(job_id)["released_slot_count"] == 1
 
 
 def test_cross_worker_cache_hit_uses_current_job_transport_profile():

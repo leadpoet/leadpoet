@@ -6,6 +6,7 @@ import base64
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
@@ -43,6 +44,7 @@ from gateway.tee.source_add_runtime_v2 import (
 
 
 PROVIDER_BROKER_SCHEMA_VERSION = "leadpoet.provider_broker.v2"
+PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION = "leadpoet.provider_transport_health.v2"
 MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 PROVIDER_RPC_RESPONSE_RESERVE_BYTES = 8 * 1024 * 1024
 
@@ -72,6 +74,11 @@ DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS = min(
     DEFAULT_IDLE_TIMEOUT_SECONDS / 2.0,
 )
 EGRESS_PROXY_CREDENTIAL_SLOT = "egress_proxy"
+EGRESS_POLICY_JOB_PROXY_ALLOWED = "job_proxy_allowed"
+EGRESS_POLICY_DIRECT_ONLY = "direct_only"
+_EGRESS_POLICIES = frozenset(
+    {EGRESS_POLICY_JOB_PROXY_ALLOWED, EGRESS_POLICY_DIRECT_ONLY}
+)
 MEASURED_TRANSPORT_REQUEST_HEADERS = (("Accept-Encoding", "identity"),)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SECRET_QUERY_NAMES = frozenset(
@@ -88,10 +95,79 @@ _SECRET_HEADER_NAMES = frozenset(
         "x-auth-token",
     }
 )
+_LOCAL_RESOURCE_FAILURES = (
+    (
+        getattr(errno, "EADDRNOTAVAIL", 99),
+        "cannot assign requested address",
+        "ephemeral_port_exhausted",
+    ),
+    (
+        getattr(errno, "EADDRINUSE", 98),
+        "address already in use",
+        "local_address_in_use",
+    ),
+    (
+        getattr(errno, "ENFILE", 23),
+        "too many open files in system",
+        "system_file_descriptor_exhausted",
+    ),
+    (
+        getattr(errno, "EMFILE", 24),
+        "too many open files",
+        "process_file_descriptor_exhausted",
+    ),
+    (
+        getattr(errno, "ENOBUFS", 105),
+        "no buffer space available",
+        "socket_buffer_exhausted",
+    ),
+    (
+        getattr(errno, "ENOMEM", 12),
+        "cannot allocate memory",
+        "memory_exhausted",
+    ),
+)
+_LOCAL_RESOURCE_ERRNO_KINDS = {
+    int(error_number): kind
+    for error_number, _token, kind in _LOCAL_RESOURCE_FAILURES
+}
+_SAFE_ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_TRANSPORT_ROUTES = ("direct", "assigned_proxy")
+_PROVIDER_TERMINAL_STATUSES = (
+    "authenticated_response",
+    "transport_failure",
+)
+_CHAIN_WEIGHT_OBSERVATION_PURPOSE = (
+    "research_lab.chain_weight_observation.v1"
+)
+_EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE = "_leadpoet_explicit_http_transport"
 
 
 class ProviderBrokerV2Error(RuntimeError):
     """A request violates the measured provider route or terminal ledger."""
+
+
+class ProviderTransportCleanupError(ProviderBrokerV2Error):
+    """A request-owned response stream or explicit pool did not close."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        primary_error: Optional[BaseException],
+        cleanup_error: BaseException,
+    ) -> None:
+        super().__init__("provider request-scoped transport cleanup failed")
+        self.failure_stage = str(stage)
+        self.primary_error_type = (
+            _safe_error_type(primary_error) if primary_error is not None else ""
+        )
+        self.cleanup_error_type = _safe_error_type(cleanup_error)
+        self.cleanup_errno, self.cleanup_resource_kind = (
+            _local_resource_failure(cleanup_error)
+        )
+        if not self.cleanup_errno:
+            self.cleanup_errno = _exception_errno(cleanup_error)
 
 
 _EGRESS_PROXY_SLOT_REF_HASH = sha256_json(
@@ -128,6 +204,7 @@ class ProviderRouteV2:
     allowed_route_pairs: Tuple[Tuple[str, str], ...] = ()
     job_scoped_only: bool = False
     allow_http2: bool = True
+    egress_policy: str = EGRESS_POLICY_JOB_PROXY_ALLOWED
 
 
 BUILTIN_PROVIDER_ROUTES = {
@@ -190,6 +267,10 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_name="Authorization",
         credential_prefix="Bearer ",
         credential_header_aliases=(("apikey", ""),),
+        # Control, cache, outcome, and weight persistence are global V2
+        # authorities. Their authenticated Supabase transport must never
+        # inherit the paid provider profile assigned to a scoring job.
+        egress_policy=EGRESS_POLICY_DIRECT_ONLY,
         # Retain the global identity profile used by the known-good measured
         # PostgREST path. The bounded JSON document provides the objective
         # completeness boundary if a raw HTTP/2 relay loses only END_STREAM.
@@ -306,6 +387,10 @@ def provider_registry_document(
         else provider_routes_for_execution_config(execution_config)
     )
     def route_document(route: ProviderRouteV2) -> Dict[str, Any]:
+        if route.egress_policy not in _EGRESS_POLICIES:
+            raise ProviderBrokerV2Error(
+                "provider route egress policy is invalid"
+            )
         document = {
             "hosts": list(route.hosts),
             "path_prefixes": list(route.path_prefixes),
@@ -317,6 +402,7 @@ def provider_registry_document(
                 {"name": name, "prefix": prefix}
                 for name, prefix in route.credential_header_aliases
             ],
+            "egress_policy": route.egress_policy,
         }
         if route.allowed_methods:
             document["allowed_methods"] = list(route.allowed_methods)
@@ -487,7 +573,59 @@ def _sanitized_path(parsed: Any) -> str:
     return urlunsplit(("", "", parsed.path or "/", urlencode(query), ""))
 
 
+def _exception_chain(exc: BaseException) -> Tuple[BaseException, ...]:
+    chain = []
+    seen = set()
+    current = exc  # type: Optional[BaseException]
+    while current is not None and len(chain) < 8 and id(current) not in seen:
+        chain.append(current)
+        seen.add(id(current))
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        current = (
+            cause
+            if isinstance(cause, BaseException)
+            else context if isinstance(context, BaseException) else None
+        )
+    return tuple(chain)
+
+
+def _local_resource_failure(exc: BaseException) -> Tuple[int, str]:
+    chain = _exception_chain(exc)
+    for current in chain:
+        error_number = getattr(current, "errno", None)
+        if (
+            isinstance(error_number, int)
+            and not isinstance(error_number, bool)
+            and error_number in _LOCAL_RESOURCE_ERRNO_KINDS
+        ):
+            return int(error_number), _LOCAL_RESOURCE_ERRNO_KINDS[error_number]
+    for current in chain:
+        text = str(current).lower()
+        for error_number, token, kind in _LOCAL_RESOURCE_FAILURES:
+            if token in text:
+                return int(error_number), kind
+    return 0, ""
+
+
+def _exception_errno(exc: BaseException) -> int:
+    for current in _exception_chain(exc):
+        error_number = getattr(current, "errno", None)
+        if isinstance(error_number, int) and not isinstance(error_number, bool):
+            return int(error_number)
+    return 0
+
+
+def _safe_error_type(exc: BaseException) -> str:
+    name = str(type(exc).__name__ or "")
+    return name if _SAFE_ERROR_TYPE_RE.fullmatch(name) else "Exception"
+
+
 def _failure_code(exc: BaseException) -> str:
+    if isinstance(exc, ProviderTransportCleanupError):
+        return "proxy_failure"
+    if _local_resource_failure(exc)[1]:
+        return "proxy_failure"
     name = type(exc).__name__.lower()
     text = str(exc).lower()
     if "response exceeds size limit" in text:
@@ -522,8 +660,12 @@ def _extract_tls_metadata(response: Any) -> Tuple[str, str]:
     return sha256_bytes(bytes(certificate)), str(protocol)
 
 
-def _force_close_response_network_stream(response: Any) -> None:
-    """Best-effort teardown after a response-stream cleanup failure."""
+def _force_close_response_network_stream(
+    response: Any,
+    *,
+    required: bool = False,
+) -> None:
+    """Close the one request-owned network stream before its client pool."""
 
     extensions = getattr(response, "extensions", None)
     network_stream = (
@@ -532,26 +674,38 @@ def _force_close_response_network_stream(response: Any) -> None:
         else None
     )
     if network_stream is None:
+        if required:
+            raise ProviderBrokerV2Error(
+                "provider response network stream is unavailable"
+            )
         return
+    close_error = None  # type: Optional[BaseException]
     try:
         network_stream.close()
         return
-    except Exception:
-        pass
+    except Exception as exc:
+        close_error = exc
     try:
         raw_socket = network_stream.get_extra_info("socket")
-    except Exception:
+    except Exception as exc:
+        if close_error is None:
+            close_error = exc
         raw_socket = None
     if raw_socket is None:
-        return
+        raise ProviderBrokerV2Error(
+            "provider response network stream cleanup failed"
+        ) from close_error
     try:
         raw_socket.shutdown(socket.SHUT_RDWR)
     except Exception:
         pass
     try:
         raw_socket.close()
-    except Exception:
-        pass
+        return
+    except Exception as exc:
+        raise ProviderBrokerV2Error(
+            "provider response network stream cleanup failed"
+        ) from (close_error or exc)
 
 
 def _make_response_cleanup_nonfatal(response: Any) -> None:
@@ -574,17 +728,49 @@ def _make_response_cleanup_nonfatal(response: Any) -> None:
                 # A cleanup EOF is not response evidence, but swallowing it
                 # without closing the underlying relay socket leaks one
                 # request-scoped assigned-proxy tunnel per failed cleanup.
-                _force_close_response_network_stream(response)
+                try:
+                    _force_close_response_network_stream(
+                        response,
+                        required=True,
+                    )
+                except Exception:
+                    # Request-scoped execution repeats this as a required
+                    # close in its outer finally, where failure is attributed
+                    # without replacing an in-flight body exception here.
+                    pass
 
     response.stream = CleanupSafeStream()
 
 
-def _close_client_nonfatal(client: Any) -> None:
-    """Do not let connection cleanup replace authenticated request evidence."""
+def _close_client_transports(
+    client: Any,
+) -> Tuple[bool, bool, Optional[BaseException]]:
+    """Close the client and its one explicit transport independently."""
+
+    client_error = None  # type: Optional[BaseException]
     try:
         client.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        client_error = exc
+    explicit_transport = getattr(
+        client,
+        _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE,
+        None,
+    )
+    if explicit_transport is None:
+        return client_error is None, False, client_error
+    try:
+        explicit_transport.close()
+        return client_error is None, True, client_error
+    except Exception as exc:
+        return client_error is None, False, exc
+
+
+def _close_client_nonfatal(client: Any) -> bool:
+    """Close all known client transports and report, never hide, failure."""
+
+    client_closed, transport_closed, _error = _close_client_transports(client)
+    return client_closed and transport_closed
 
 
 def _authenticated_body_is_complete_after_stream_error(
@@ -768,6 +954,7 @@ class HTTPXProviderTransport:
         upstream_parent_tunnel_framing: Optional[str] = None,
         reuse_direct_connections: bool = False,
         reuse_upstream_proxy_connections: bool = False,
+        ensure_egress_ready: Optional[Callable[[], Any]] = None,
     ) -> None:
         if (
             isinstance(response_body_ceiling_bytes, bool)
@@ -802,6 +989,10 @@ class HTTPXProviderTransport:
             raise ProviderBrokerV2Error(
                 "provider transport upstream proxy reuse policy is invalid"
             )
+        if ensure_egress_ready is not None and not callable(ensure_egress_ready):
+            raise ProviderBrokerV2Error(
+                "provider transport egress readiness callback is invalid"
+            )
         self.proxy_url = proxy_url
         self.ca_bundle = ca_bundle
         self.response_body_ceiling_bytes = response_body_ceiling_bytes
@@ -818,6 +1009,7 @@ class HTTPXProviderTransport:
         self.reuse_upstream_proxy_connections = (
             reuse_upstream_proxy_connections
         )
+        self._ensure_egress_ready = ensure_egress_ready
         # Weight reconstruction fans out several independent direct Supabase
         # jobs at once. Admit only one direct TLS exchange at a time whether
         # the caller retains or isolates its raw relay generation, preventing
@@ -834,14 +1026,35 @@ class HTTPXProviderTransport:
         self._proxy_client_generation = 0
         self._proxy_client_leases: Dict[int, int] = {}
         self._retired_proxy_clients: Dict[int, Any] = {}
+        self._transport_health_lock = threading.Lock()
+        self._transport_attempt_counts = {
+            route: {"started": 0, "succeeded": 0, "failed": 0}
+            for route in _TRANSPORT_ROUTES
+        }
+        self._transport_cleanup_counts = {
+            route: {
+                "attempted": 0,
+                "succeeded": 0,
+                "client_close_failed": 0,
+                "transport_close_failed": 0,
+            }
+            for route in _TRANSPORT_ROUTES
+        }
+        self._last_transport_failure = None  # type: Optional[Dict[str, Any]]
 
     def _new_client(
         self,
         *,
         proxy_headers: Optional[Mapping[str, str]] = None,
         allow_http2: bool = True,
+        retain_direct_connections: bool = False,
         retain_assigned_proxy_connections: bool = False,
     ) -> Any:
+        if self._ensure_egress_ready is not None:
+            # The proxy's listener is process-lifetime authority, but its
+            # accept thread can stop after a local resource fault. Re-establish
+            # the exact loopback listener before opening a request-owned pool.
+            self._ensure_egress_ready()
         import certifi
         import httpx
         from http.cookiejar import CookieJar, DefaultCookiePolicy
@@ -853,6 +1066,21 @@ class HTTPXProviderTransport:
         verify_path = self.ca_bundle or certifi.where()
         normalized_proxy_headers = dict(proxy_headers or {})
         assigned_proxy = bool(normalized_proxy_headers)
+        if not isinstance(retain_direct_connections, bool) or not isinstance(
+            retain_assigned_proxy_connections,
+            bool,
+        ):
+            raise ProviderBrokerV2Error(
+                "provider transport retention policy is invalid"
+            )
+        if retain_direct_connections and assigned_proxy:
+            raise ProviderBrokerV2Error(
+                "direct retention cannot apply to an assigned proxy"
+            )
+        if retain_assigned_proxy_connections and not assigned_proxy:
+            raise ProviderBrokerV2Error(
+                "assigned proxy retention requires proxy metadata"
+            )
         # Direct provider and assigned-proxy tunnels have independent terminal
         # behavior. Keep their framing policies separate while TLS and proxy
         # credentials continue to terminate inside the enclave.
@@ -863,7 +1091,23 @@ class HTTPXProviderTransport:
         )
         if tunnel_framing:
             normalized_proxy_headers[TUNNEL_FRAMING_HEADER] = tunnel_framing
-        return httpx.Client(
+        limits = httpx.Limits(
+            max_connections=64,
+            # An ordinary request-scoped client retains no idle tunnel. The
+            # dormant retained modes must opt in explicitly and remain bound
+            # to their measured direct or immutable job scope.
+            max_keepalive_connections=(
+                32
+                if (
+                    retain_assigned_proxy_connections
+                    if assigned_proxy
+                    else retain_direct_connections
+                )
+                else 0
+            ),
+            keepalive_expiry=DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
+        )
+        explicit_transport = httpx.HTTPTransport(
             proxy=httpx.Proxy(
                 self.proxy_url,
                 headers=normalized_proxy_headers or None,
@@ -872,27 +1116,28 @@ class HTTPXProviderTransport:
             trust_env=False,
             http1=True,
             http2=allow_http2,
-            limits=httpx.Limits(
-                max_connections=64,
-                # An assigned-proxy client may retain connections only when the
-                # measured broker has supplied its immutable job/credential
-                # scope. Request-scoped fallback clients still retain none.
-                max_keepalive_connections=(
-                    32
-                    if not assigned_proxy or retain_assigned_proxy_connections
-                    else 0
-                ),
-                keepalive_expiry=DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
-            ),
+            limits=limits,
+        )
+        client = httpx.Client(
+            transport=explicit_transport,
+            trust_env=False,
             cookies=CookieJar(policy=RejectAllCookies()),
             follow_redirects=False,
         )
+        setattr(
+            client,
+            _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE,
+            explicit_transport,
+        )
+        return client
 
     @contextmanager
     def _lease_direct_client(self):
         with self._direct_client_lock:
             if self._direct_client is None:
-                self._direct_client = self._new_client()
+                self._direct_client = self._new_client(
+                    retain_direct_connections=True,
+                )
                 self._direct_client_generation += 1
             client = self._direct_client
             generation = self._direct_client_generation
@@ -1025,6 +1270,138 @@ class HTTPXProviderTransport:
         if close_client is not None:
             _close_client_nonfatal(close_client)
 
+    @contextmanager
+    def _track_transport_attempt(self, route: str):
+        if route not in _TRANSPORT_ROUTES:
+            raise ProviderBrokerV2Error("provider transport route is invalid")
+        with self._transport_health_lock:
+            self._transport_attempt_counts[route]["started"] += 1
+        try:
+            yield
+        except BaseException as exc:
+            resource_errno, resource_kind = _local_resource_failure(exc)
+            resource_errno = int(
+                getattr(exc, "cleanup_errno", 0) or resource_errno or 0
+            )
+            resource_kind = str(
+                getattr(exc, "cleanup_resource_kind", "")
+                or resource_kind
+                or ""
+            )
+            failure = {
+                "route": route,
+                "stage": str(
+                    getattr(exc, "failure_stage", "provider_request")
+                ),
+                "failure_code": _failure_code(exc),
+                "error_type": _safe_error_type(exc),
+                "errno": resource_errno or _exception_errno(exc),
+            }
+            primary_error_type = str(
+                getattr(exc, "primary_error_type", "") or ""
+            )
+            cleanup_error_type = str(
+                getattr(exc, "cleanup_error_type", "") or ""
+            )
+            if _SAFE_ERROR_TYPE_RE.fullmatch(primary_error_type):
+                failure["primary_error_type"] = primary_error_type
+            if _SAFE_ERROR_TYPE_RE.fullmatch(cleanup_error_type):
+                failure["cleanup_error_type"] = cleanup_error_type
+            if resource_kind:
+                failure["local_resource_kind"] = resource_kind
+            with self._transport_health_lock:
+                self._transport_attempt_counts[route]["failed"] += 1
+                self._last_transport_failure = failure
+            raise
+        else:
+            with self._transport_health_lock:
+                self._transport_attempt_counts[route]["succeeded"] += 1
+
+    def _record_transport_cleanup(
+        self,
+        route: str,
+        *,
+        client_closed: bool,
+        transport_closed: bool,
+    ) -> None:
+        if route not in _TRANSPORT_ROUTES:
+            raise ProviderBrokerV2Error("provider transport route is invalid")
+        with self._transport_health_lock:
+            counters = self._transport_cleanup_counts[route]
+            counters["attempted"] += 1
+            if not client_closed:
+                counters["client_close_failed"] += 1
+            if not transport_closed:
+                counters["transport_close_failed"] += 1
+            if transport_closed:
+                # The client owns exactly the explicit transport recorded by
+                # _new_client. Closing it independently proves the only pool
+                # has been torn down even when client.close() itself raises.
+                counters["succeeded"] += 1
+
+    def health(self) -> Dict[str, Any]:
+        with self._direct_client_lock:
+            retired_direct_generations = set(self._retired_direct_clients)
+            direct_active_scope_count = int(self._direct_client is not None)
+            direct_retired_scope_count = len(self._retired_direct_clients)
+            direct_active_lease_count = sum(
+                count
+                for generation, count in self._direct_client_leases.items()
+                if generation not in retired_direct_generations
+            )
+            direct_retired_lease_count = sum(
+                count
+                for generation, count in self._direct_client_leases.items()
+                if generation in retired_direct_generations
+            )
+        with self._proxy_client_lock:
+            retired_proxy_generations = set(self._retired_proxy_clients)
+            assigned_active_scope_count = len(self._proxy_clients)
+            assigned_retired_scope_count = len(self._retired_proxy_clients)
+            assigned_active_lease_count = sum(
+                count
+                for generation, count in self._proxy_client_leases.items()
+                if generation not in retired_proxy_generations
+            )
+            assigned_retired_lease_count = sum(
+                count
+                for generation, count in self._proxy_client_leases.items()
+                if generation in retired_proxy_generations
+            )
+        with self._transport_health_lock:
+            counters = {
+                route: dict(self._transport_attempt_counts[route])
+                for route in _TRANSPORT_ROUTES
+            }
+            cleanup_counters = {
+                route: dict(self._transport_cleanup_counts[route])
+                for route in _TRANSPORT_ROUTES
+            }
+            last_failure = dict(self._last_transport_failure or {})
+        result = {
+            "schema_version": PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION,
+            "reuse_direct_connections": self.reuse_direct_connections,
+            "reuse_assigned_proxy_connections": (
+                self.reuse_upstream_proxy_connections
+            ),
+            "direct_request_slot_active_count": int(
+                self._direct_request_slot.locked()
+            ),
+            "direct_active_scope_count": direct_active_scope_count,
+            "direct_retired_scope_count": direct_retired_scope_count,
+            "direct_active_lease_count": direct_active_lease_count,
+            "direct_retired_lease_count": direct_retired_lease_count,
+            "assigned_active_scope_count": assigned_active_scope_count,
+            "assigned_retired_scope_count": assigned_retired_scope_count,
+            "assigned_active_lease_count": assigned_active_lease_count,
+            "assigned_retired_lease_count": assigned_retired_lease_count,
+            "request_counters": counters,
+            "cleanup_counters": cleanup_counters,
+        }
+        if last_failure:
+            result["last_failure"] = last_failure
+        return result
+
     def close(self) -> None:
         with self._direct_client_lock:
             clients = list(self._retired_direct_clients.values())
@@ -1055,6 +1432,7 @@ class HTTPXProviderTransport:
         timeout_seconds: float,
         max_response_bytes: int,
         allow_authenticated_complete_body_eof: bool = False,
+        force_close_network_stream: bool = False,
     ) -> Dict[str, Any]:
         with client.stream(
             method,
@@ -1064,90 +1442,111 @@ class HTTPXProviderTransport:
             timeout=timeout_seconds,
         ) as response:
             _make_response_cleanup_nonfatal(response)
-            # TLS is authenticated before response headers are available.
-            # Capture its evidence now because a peer may close the stream
-            # immediately after sending a complete bounded response body.
-            tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
-            chunks = []
-            byte_count = 0
-            content_encoding = str(
-                response.headers.get("content-encoding") or ""
-            ).strip().lower()
-            if content_encoding == "gzip":
-                decoder = zlib.decompressobj(zlib.MAX_WBITS | 16)
-                try:
-                    for chunk in response.iter_raw():
-                        byte_count = _append_bounded_gzip_bytes(
-                            decoder=decoder,
-                            compressed=chunk,
-                            chunks=chunks,
-                            byte_count=byte_count,
-                            max_response_bytes=max_response_bytes,
-                        )
-                except Exception:
-                    response_body = b"".join(chunks)
-                    if not (
-                        allow_authenticated_complete_body_eof
-                        and _authenticated_gzip_body_is_complete_after_stream_error(
-                            method=method,
-                            response=response,
-                            byte_count=byte_count,
-                            body=response_body,
-                            decoder=decoder,
-                        )
-                    ):
-                        raise
-                else:
-                    remaining = max_response_bytes - byte_count
-                    decoded_tail = decoder.flush(remaining + 1)
-                    if len(decoded_tail) > remaining:
-                        raise ProviderBrokerV2Error(
-                            "provider response exceeds size limit"
-                        )
-                    if decoded_tail:
-                        chunks.append(decoded_tail)
-                        byte_count += len(decoded_tail)
-                    if (
-                        not decoder.eof
-                        or decoder.unused_data
-                        or decoder.unconsumed_tail
-                    ):
-                        raise ProviderBrokerV2Error(
-                            "provider gzip response is incomplete"
-                        )
-                    response_body = b"".join(chunks)
-            else:
-                try:
-                    for chunk in response.iter_bytes():
-                        byte_count += len(chunk)
-                        if byte_count > max_response_bytes:
+            primary_error = None  # type: Optional[BaseException]
+            try:
+                # TLS is authenticated before response headers are available.
+                # Capture its evidence now because a peer may close the stream
+                # immediately after sending a complete bounded response body.
+                tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
+                chunks = []
+                byte_count = 0
+                content_encoding = str(
+                    response.headers.get("content-encoding") or ""
+                ).strip().lower()
+                if content_encoding == "gzip":
+                    decoder = zlib.decompressobj(zlib.MAX_WBITS | 16)
+                    try:
+                        for chunk in response.iter_raw():
+                            byte_count = _append_bounded_gzip_bytes(
+                                decoder=decoder,
+                                compressed=chunk,
+                                chunks=chunks,
+                                byte_count=byte_count,
+                                max_response_bytes=max_response_bytes,
+                            )
+                    except Exception:
+                        response_body = b"".join(chunks)
+                        if not (
+                            allow_authenticated_complete_body_eof
+                            and _authenticated_gzip_body_is_complete_after_stream_error(
+                                method=method,
+                                response=response,
+                                byte_count=byte_count,
+                                body=response_body,
+                                decoder=decoder,
+                            )
+                        ):
+                            raise
+                    else:
+                        remaining = max_response_bytes - byte_count
+                        decoded_tail = decoder.flush(remaining + 1)
+                        if len(decoded_tail) > remaining:
                             raise ProviderBrokerV2Error(
                                 "provider response exceeds size limit"
                             )
-                        chunks.append(chunk)
-                except Exception as exc:
-                    response_body = b"".join(chunks)
-                    if not (
-                        allow_authenticated_complete_body_eof
-                        and byte_count <= max_response_bytes
-                        and _authenticated_body_is_complete_after_stream_error(
-                            method=method,
-                            response=response,
-                            byte_count=byte_count,
-                            body=response_body,
-                            error=exc,
-                        )
-                    ):
-                        raise
+                        if decoded_tail:
+                            chunks.append(decoded_tail)
+                            byte_count += len(decoded_tail)
+                        if (
+                            not decoder.eof
+                            or decoder.unused_data
+                            or decoder.unconsumed_tail
+                        ):
+                            raise ProviderBrokerV2Error(
+                                "provider gzip response is incomplete"
+                            )
+                        response_body = b"".join(chunks)
                 else:
-                    response_body = b"".join(chunks)
-            return {
-                "http_status": int(response.status_code),
-                "headers": _decoded_response_headers(response.headers),
-                "body": response_body,
-                "tls_peer_chain_hash": tls_peer_chain_hash,
-                "tls_protocol": tls_protocol,
-            }
+                    try:
+                        for chunk in response.iter_bytes():
+                            byte_count += len(chunk)
+                            if byte_count > max_response_bytes:
+                                raise ProviderBrokerV2Error(
+                                    "provider response exceeds size limit"
+                                )
+                            chunks.append(chunk)
+                    except Exception as exc:
+                        response_body = b"".join(chunks)
+                        if not (
+                            allow_authenticated_complete_body_eof
+                            and byte_count <= max_response_bytes
+                            and _authenticated_body_is_complete_after_stream_error(
+                                method=method,
+                                response=response,
+                                byte_count=byte_count,
+                                body=response_body,
+                                error=exc,
+                            )
+                        ):
+                            raise
+                    else:
+                        response_body = b"".join(chunks)
+                return {
+                    "http_status": int(response.status_code),
+                    "headers": _decoded_response_headers(response.headers),
+                    "body": response_body,
+                    "tls_peer_chain_hash": tls_peer_chain_hash,
+                    "tls_protocol": tls_protocol,
+                }
+            except BaseException as exc:
+                primary_error = exc
+                raise
+            finally:
+                if force_close_network_stream:
+                    # This executes before Response.__exit__ and before the
+                    # request-scoped client/pool close. It is the hard lifetime
+                    # boundary for both successful and failed body reads.
+                    try:
+                        _force_close_response_network_stream(
+                            response,
+                            required=True,
+                        )
+                    except BaseException as cleanup_error:
+                        raise ProviderTransportCleanupError(
+                            stage="response_stream_cleanup",
+                            primary_error=primary_error,
+                            cleanup_error=cleanup_error,
+                        ) from (primary_error or cleanup_error)
 
     def __call__(
         self,
@@ -1194,53 +1593,55 @@ class HTTPXProviderTransport:
                     "provider upstream proxy connection scope is required"
                 )
             if allow_http2:
-                with self._lease_proxy_client(
-                    connection_scope=normalized_connection_scope,
-                    proxy_headers=proxy_headers,
-                    allow_http2=True,
-                ) as (client, generation):
-                    try:
-                        return self._execute_with_client(
-                            client,
-                            method=method,
-                            url=url,
-                            headers=headers,
-                            body=body,
-                            timeout_seconds=timeout_seconds,
-                            max_response_bytes=max_response_bytes,
-                            allow_authenticated_complete_body_eof=(
-                                self.allow_authenticated_complete_body_eof
-                            ),
-                        )
-                    except BaseException:
-                        self._retire_proxy_client(
-                            connection_scope=normalized_connection_scope,
-                            client=client,
-                            generation=generation,
-                        )
-                        raise
+                with self._track_transport_attempt("assigned_proxy"):
+                    with self._lease_proxy_client(
+                        connection_scope=normalized_connection_scope,
+                        proxy_headers=proxy_headers,
+                        allow_http2=True,
+                    ) as (client, generation):
+                        try:
+                            return self._execute_with_client(
+                                client,
+                                method=method,
+                                url=url,
+                                headers=headers,
+                                body=body,
+                                timeout_seconds=timeout_seconds,
+                                max_response_bytes=max_response_bytes,
+                                allow_authenticated_complete_body_eof=(
+                                    self.allow_authenticated_complete_body_eof
+                                ),
+                            )
+                        except BaseException:
+                            self._retire_proxy_client(
+                                connection_scope=normalized_connection_scope,
+                                client=client,
+                                generation=generation,
+                            )
+                            raise
         if proxy_headers is None and self.reuse_direct_connections and allow_http2:
-            with self._lease_direct_request_slot(timeout_seconds) as remaining:
-                with self._lease_direct_client() as (client, generation):
-                    try:
-                        return self._execute_with_client(
-                            client,
-                            method=method,
-                            url=url,
-                            headers=headers,
-                            body=body,
-                            timeout_seconds=remaining,
-                            max_response_bytes=max_response_bytes,
-                            allow_authenticated_complete_body_eof=(
-                                self.allow_authenticated_complete_body_eof
-                            ),
-                        )
-                    except BaseException:
-                        # The measured caller owns retry accounting. Retire
-                        # this serialized generation so the next attempt opens
-                        # one fresh tunnel before admitting another request.
-                        self._retire_direct_client(client, generation)
-                        raise
+            with self._track_transport_attempt("direct"):
+                with self._lease_direct_request_slot(timeout_seconds) as remaining:
+                    with self._lease_direct_client() as (client, generation):
+                        try:
+                            return self._execute_with_client(
+                                client,
+                                method=method,
+                                url=url,
+                                headers=headers,
+                                body=body,
+                                timeout_seconds=remaining,
+                                max_response_bytes=max_response_bytes,
+                                allow_authenticated_complete_body_eof=(
+                                    self.allow_authenticated_complete_body_eof
+                                ),
+                            )
+                        except BaseException:
+                            # The measured caller owns retry accounting. Retire
+                            # this serialized generation so the next attempt opens
+                            # one fresh tunnel before admitting another request.
+                            self._retire_direct_client(client, generation)
+                            raise
 
         # Direct coordinator requests are request-scoped by default. A relay
         # tunnel can expire between otherwise independent jobs or epochs; one
@@ -1248,12 +1649,15 @@ class HTTPXProviderTransport:
         # failure fate. Framed artifact-only callers may explicitly opt into
         # reuse after proving their terminal handshake contract.
         def execute_request_scoped(
-            *, request_timeout_seconds: float = timeout_seconds
+            *,
+            route: str,
+            request_timeout_seconds: float = timeout_seconds,
         ) -> Dict[str, Any]:
             client = self._new_client(
                 proxy_headers=proxy_headers,
                 allow_http2=allow_http2,
             )
+            primary_error = None  # type: Optional[BaseException]
             try:
                 return self._execute_with_client(
                     client,
@@ -1266,16 +1670,39 @@ class HTTPXProviderTransport:
                     allow_authenticated_complete_body_eof=(
                         self.allow_authenticated_complete_body_eof
                     ),
+                    force_close_network_stream=True,
                 )
+            except BaseException as exc:
+                primary_error = exc
+                raise
             finally:
-                _close_client_nonfatal(client)
+                client_closed, transport_closed, cleanup_error = (
+                    _close_client_transports(client)
+                )
+                self._record_transport_cleanup(
+                    route,
+                    client_closed=client_closed,
+                    transport_closed=transport_closed,
+                )
+                if not transport_closed:
+                    normalized_cleanup_error = cleanup_error or ProviderBrokerV2Error(
+                        "explicit provider transport cleanup failed"
+                    )
+                    raise ProviderTransportCleanupError(
+                        stage="client_transport_cleanup",
+                        primary_error=primary_error,
+                        cleanup_error=normalized_cleanup_error,
+                    ) from (primary_error or normalized_cleanup_error)
 
         if proxy_headers is None:
-            with self._lease_direct_request_slot(timeout_seconds) as remaining:
-                return execute_request_scoped(
-                    request_timeout_seconds=remaining
-                )
-        return execute_request_scoped()
+            with self._track_transport_attempt("direct"):
+                with self._lease_direct_request_slot(timeout_seconds) as remaining:
+                    return execute_request_scoped(
+                        route="direct",
+                        request_timeout_seconds=remaining
+                    )
+        with self._track_transport_attempt("assigned_proxy"):
+            return execute_request_scoped(route="assigned_proxy")
 
 
 class ProviderBrokerV2:
@@ -1337,8 +1764,58 @@ class ProviderBrokerV2:
         self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event, object]]
         self._released_terminal_count = 0
         self._expired_terminal_count = 0
+        self._provider_terminal_counts = {
+            provider_id: {
+                route: {
+                    terminal_status: 0
+                    for terminal_status in _PROVIDER_TERMINAL_STATUSES
+                }
+                for route in _TRANSPORT_ROUTES
+            }
+            for provider_id in sorted(BUILTIN_PROVIDER_ROUTES)
+        }
+        self._provider_2xx_success_counts = {
+            provider_id: {route: 0 for route in _TRANSPORT_ROUTES}
+            for provider_id in sorted(BUILTIN_PROVIDER_ROUTES)
+        }
+        self._chain_weight_observation_success_count = 0
         self._lock = threading.Lock()
         self._transaction_state = threading.local()
+
+    def _record_committed_terminal_health_locked(
+        self,
+        record: Mapping[str, Any],
+    ) -> None:
+        provider_id = str(record.get("provider_id") or "")
+        route = str(record.get("egress_route") or "")
+        terminal_status = str(record.get("terminal_status") or "")
+        purpose = str(record.get("purpose") or "")
+        http_status = int(record.get("http_status") or 0)
+        if provider_id not in self._provider_terminal_counts:
+            # Dynamic SOURCE_ADD identities are intentionally excluded from
+            # this fixed-shape, non-secret production health projection.
+            return
+        if (
+            route not in _TRANSPORT_ROUTES
+            or terminal_status not in _PROVIDER_TERMINAL_STATUSES
+        ):
+            raise ProviderBrokerV2Error(
+                "committed provider terminal health identity is invalid"
+            )
+        self._provider_terminal_counts[provider_id][route][terminal_status] += 1
+        healthy_success = (
+            terminal_status == "authenticated_response"
+            and 200 <= http_status < 300
+        )
+        if healthy_success:
+            self._provider_2xx_success_counts[provider_id][route] += 1
+        if (
+            provider_id == "supabase"
+            and route == "direct"
+            and healthy_success
+            and purpose == _CHAIN_WEIGHT_OBSERVATION_PURPOSE
+        ):
+            self._chain_weight_observation_success_count += 1
 
     @contextmanager
     def transient_terminal_transaction(self):
@@ -1375,6 +1852,7 @@ class ProviderBrokerV2:
                         if not state["failed"]:
                             record = dict(pending["record"])
                             self._records[key] = record
+                            self._record_committed_terminal_health_locked(record)
                             self._record_keys_by_job.setdefault(
                                 str(record["job_id"]),
                                 set(),
@@ -1417,8 +1895,22 @@ class ProviderBrokerV2:
             job_lease_count = len(self._job_credentials)
             released_terminal_count = self._released_terminal_count
             expired_terminal_count = self._expired_terminal_count
+            provider_terminal_counts = {
+                provider_id: {
+                    route: dict(statuses)
+                    for route, statuses in routes.items()
+                }
+                for provider_id, routes in self._provider_terminal_counts.items()
+            }
+            provider_2xx_success_counts = {
+                provider_id: dict(routes)
+                for provider_id, routes in self._provider_2xx_success_counts.items()
+            }
+            chain_weight_observation_success_count = (
+                self._chain_weight_observation_success_count
+            )
         missing = sorted(expected_slots - configured_slots)
-        return {
+        result = {
             "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
             "status": "ready" if not missing else "provisioning",
             "credential_slots": sorted(configured_slots),
@@ -1432,7 +1924,16 @@ class ProviderBrokerV2:
             "job_credential_slot_ref_hashes": dict(
                 sorted(self.job_credential_slot_ref_hashes.items())
             ),
+            "provider_terminal_counts": provider_terminal_counts,
+            "provider_2xx_success_counts": provider_2xx_success_counts,
+            "chain_weight_observation_success_count": (
+                chain_weight_observation_success_count
+            ),
         }
+        transport_health = getattr(self._transport, "health", None)
+        if callable(transport_health):
+            result["transport"] = dict(transport_health())
+        return result
 
     def _abandon_inflight(
         self,
@@ -1659,8 +2160,12 @@ class ProviderBrokerV2:
                     credential_ref_hash = self.credential_ref_hashes[
                         route.credential_slot
                     ]
-            proxy_lease = self._job_credentials.get(
-                (job_id, EGRESS_PROXY_CREDENTIAL_SLOT)
+            proxy_lease = (
+                self._job_credentials.get(
+                    (job_id, EGRESS_PROXY_CREDENTIAL_SLOT)
+                )
+                if route.egress_policy == EGRESS_POLICY_JOB_PROXY_ALLOWED
+                else None
             )
             egress_proxy_ref_hash = (
                 str(proxy_lease["credential_ref_hash"])
@@ -1756,6 +2261,10 @@ class ProviderBrokerV2:
             route = self.routes.get(provider_id)
             if route is None:
                 raise ProviderBrokerV2Error("provider route is not measured")
+        if route.egress_policy not in _EGRESS_POLICIES:
+            raise ProviderBrokerV2Error(
+                "provider route egress policy is invalid"
+            )
         host, port = normalize_destination(parsed.hostname, parsed.port or 443)
         if parsed.scheme != "https" or port != 443:
             raise ProviderBrokerV2Error("provider transport requires HTTPS port 443")
@@ -2044,8 +2553,15 @@ class ProviderBrokerV2:
         egress_proxy_url = None
         egress_proxy_ref_hash = DIRECT_EGRESS_REF_HASH
         with self._lock:
-            proxy_lease = self._job_credentials.get(
-                (str(request["job_id"] or ""), EGRESS_PROXY_CREDENTIAL_SLOT)
+            proxy_lease = (
+                self._job_credentials.get(
+                    (
+                        str(request["job_id"] or ""),
+                        EGRESS_PROXY_CREDENTIAL_SLOT,
+                    )
+                )
+                if route.egress_policy == EGRESS_POLICY_JOB_PROXY_ALLOWED
+                else None
             )
         if proxy_lease is not None:
             egress_proxy_url = _validated_tls_proxy_url(proxy_lease["credential"])
@@ -2263,6 +2779,15 @@ class ProviderBrokerV2:
                 return dict(existing["result"])
             record = {
                 "job_id": str(request["job_id"] or ""),
+                "provider_id": provider_id,
+                "purpose": str(request["purpose"] or ""),
+                "egress_route": (
+                    "assigned_proxy"
+                    if egress_proxy_url is not None
+                    else "direct"
+                ),
+                "terminal_status": str(result["terminal_status"]),
+                "http_status": int(result.get("http_status") or 0),
                 "request_fingerprint": request_fingerprint,
                 "result": dict(result),
                 "completed_monotonic": self._monotonic_clock(),
@@ -2277,6 +2802,7 @@ class ProviderBrokerV2:
                 transaction["created"].add(deduplication_key)
             else:
                 self._records[deduplication_key] = record
+                self._record_committed_terminal_health_locked(record)
                 self._record_keys_by_job.setdefault(
                     str(request["job_id"] or ""),
                     set(),

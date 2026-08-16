@@ -97,6 +97,153 @@ def _write_config(tmp_path: Path, value: dict) -> Path:
     return path
 
 
+def _provider_snapshot(
+    *,
+    direct_requests: int = 0,
+    assigned_requests: int = 0,
+    exa_assigned_success: int = 0,
+    scrapingdog_assigned_success: int = 0,
+    supabase_direct_success: int = 0,
+    chain_weight_success: int = 0,
+    cache_lookup_success: int = 0,
+    cache_write_success: int = 0,
+    outcome_append_success: int = 0,
+    provider_transport_success: int = 0,
+    request_failures: int = 0,
+    accepted_tunnels: int = 0,
+    completed_tunnels: int = 0,
+    open_fds: int = 20,
+    tcp_time_wait: int = 0,
+) -> dict:
+    routes = ("direct", "assigned_proxy")
+    providers = ("exa", "scrapingdog", "supabase")
+    request_counts = {
+        "direct": {
+            "started": direct_requests + request_failures,
+            "succeeded": direct_requests,
+            "failed": request_failures,
+        },
+        "assigned_proxy": {
+            "started": assigned_requests,
+            "succeeded": assigned_requests,
+            "failed": 0,
+        },
+    }
+    cleanup_counts = {
+        route: {
+            "attempted": values["started"],
+            "succeeded": values["started"],
+            "client_close_failed": 0,
+            "transport_close_failed": 0,
+        }
+        for route, values in request_counts.items()
+    }
+    terminals = {
+        provider: {
+            route: {
+                "authenticated_response": 0,
+                "transport_failure": 0,
+            }
+            for route in routes
+        }
+        for provider in providers
+    }
+    terminals["exa"]["assigned_proxy"]["authenticated_response"] = (
+        exa_assigned_success
+    )
+    terminals["scrapingdog"]["assigned_proxy"][
+        "authenticated_response"
+    ] = scrapingdog_assigned_success
+    terminals["supabase"]["direct"]["authenticated_response"] = (
+        supabase_direct_success
+    )
+    terminals["supabase"]["direct"]["transport_failure"] = request_failures
+    success_2xx = {
+        provider: {route: 0 for route in routes}
+        for provider in providers
+    }
+    success_2xx["exa"]["assigned_proxy"] = exa_assigned_success
+    success_2xx["scrapingdog"]["assigned_proxy"] = (
+        scrapingdog_assigned_success
+    )
+    success_2xx["supabase"]["direct"] = supabase_direct_success
+    stages = {
+        stage: {"started": 0, "succeeded": 0, "failed": 0}
+        for stage in (
+            "provider_transport",
+            "provider_cache_lookup",
+            "provider_cache_write",
+            "provider_outcome_restore",
+            "provider_outcome_append",
+        )
+    }
+    for stage, succeeded in {
+        "provider_transport": provider_transport_success,
+        "provider_cache_lookup": cache_lookup_success,
+        "provider_cache_write": cache_write_success,
+        "provider_outcome_append": outcome_append_success,
+    }.items():
+        stages[stage]["started"] = succeeded
+        stages[stage]["succeeded"] = succeeded
+    tcp_states = {
+        state: 0
+        for state in (
+            "established",
+            "syn_sent",
+            "syn_received",
+            "fin_wait_1",
+            "fin_wait_2",
+            "time_wait",
+            "close",
+            "close_wait",
+            "last_ack",
+            "listen",
+            "closing",
+            "new_syn_received",
+            "other",
+        )
+    }
+    tcp_states["time_wait"] = tcp_time_wait
+    return {
+        "request_counters": request_counts,
+        "cleanup_counters": cleanup_counts,
+        "provider_terminal_counts": terminals,
+        "provider_2xx_success_counts": success_2xx,
+        "chain_weight_observation_success_count": chain_weight_success,
+        "semantics_stage_counters": stages,
+        "scope_counts": {
+            "direct_request_slot_active_count": 0,
+            "direct_active_scope_count": 0,
+            "direct_retired_scope_count": 0,
+            "direct_active_lease_count": 0,
+            "direct_retired_lease_count": 0,
+            "assigned_active_scope_count": 0,
+            "assigned_retired_scope_count": 0,
+            "assigned_active_lease_count": 0,
+            "assigned_retired_lease_count": 0,
+        },
+        "egress_counters": {
+            "accepted_tunnel_count": accepted_tunnels,
+            "active_tunnel_count": 0,
+            "completed_tunnel_count": completed_tunnels,
+            "failed_tunnel_count": 0,
+            "socket_cleanup_failure_count": 0,
+        },
+        "resources": {
+            "process_open_fd_count": open_fds,
+            "process_nofile_soft_limit": 1024,
+            "process_nofile_hard_limit": 4096,
+            "ip_local_port_range_lower": 32768,
+            "ip_local_port_range_upper": 60999,
+            "ip_local_port_range_size": 28232,
+            "loopback_tcp_total_count": tcp_time_wait,
+            "loopback_tcp_scanned_row_count": tcp_time_wait + 1,
+            "loopback_tcp_scan_truncated": 0,
+            "loopback_tcp_state_counts": tcp_states,
+        },
+    }
+
+
 def test_physical_staging_config_requires_disposable_real_boundaries(
     tmp_path: Path,
 ) -> None:
@@ -181,6 +328,250 @@ def test_physical_staging_config_rejects_parity_shortcuts(
 
     with pytest.raises(module.PhysicalStagingError, match=message):
         module.load_config(_write_config(tmp_path, value))
+
+
+def test_provider_idle_window_requires_901_continuous_counter_stable_seconds(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    config = module.load_config(_write_config(tmp_path, _config(tmp_path)))
+    now = [0.0]
+    calls = [0]
+    initial = _provider_snapshot()
+    after_prewarm = _provider_snapshot(
+        direct_requests=1,
+        accepted_tunnels=1,
+        completed_tunnels=1,
+    )
+
+    def snapshotter():
+        calls[0] += 1
+        return initial if calls[0] == 1 else after_prewarm
+
+    def sleeper(seconds):
+        now[0] += float(seconds)
+
+    baseline, evidence = module._wait_for_provider_idle_window(
+        config,
+        snapshotter=snapshotter,
+        monotonic=lambda: now[0],
+        sleeper=sleeper,
+        idle_seconds=901.0,
+        timeout_seconds=1000.0,
+    )
+
+    assert baseline == after_prewarm
+    assert evidence["idle_seconds"] >= 901.0
+    assert evidence["idle_reset_count"] == 1
+    assert evidence["baseline_hash"] == evidence["final_hash"]
+    with pytest.raises(module.PhysicalStagingError, match="shorter than 901"):
+        module._wait_for_provider_idle_window(
+            config,
+            snapshotter=lambda: initial,
+            monotonic=lambda: now[0],
+            sleeper=sleeper,
+            idle_seconds=900.0,
+        )
+
+
+def test_provider_idle_window_fails_when_activity_never_quiesces(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    config_doc = _config(tmp_path)
+    config_doc["poll_seconds"] = 60
+    config = module.load_config(_write_config(tmp_path, config_doc))
+    now = [0.0]
+    counter = [0]
+
+    def snapshotter():
+        counter[0] += 1
+        return _provider_snapshot(
+            direct_requests=counter[0],
+            accepted_tunnels=counter[0],
+            completed_tunnels=counter[0],
+        )
+
+    def sleeper(seconds):
+        now[0] += float(seconds)
+
+    with pytest.raises(module.PhysicalStagingError, match="never reached"):
+        module._wait_for_provider_idle_window(
+            config,
+            snapshotter=snapshotter,
+            monotonic=lambda: now[0],
+            sleeper=sleeper,
+            idle_seconds=901.0,
+            timeout_seconds=902.0,
+        )
+
+
+def test_provider_idle_window_rejects_low_fd_or_ephemeral_headroom(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    config = module.load_config(_write_config(tmp_path, _config(tmp_path)))
+    low_fd = _provider_snapshot(open_fds=800)
+    with pytest.raises(module.PhysicalStagingError, match="NOFILE headroom"):
+        module._wait_for_provider_idle_window(
+            config,
+            snapshotter=lambda: low_fd,
+            monotonic=lambda: 0.0,
+            sleeper=lambda _seconds: None,
+            idle_seconds=901.0,
+            timeout_seconds=902.0,
+        )
+
+    low_ports = _provider_snapshot(tcp_time_wait=27_000)
+    with pytest.raises(module.PhysicalStagingError, match="ephemeral-port"):
+        module._wait_for_provider_idle_window(
+            config,
+            snapshotter=lambda: low_ports,
+            monotonic=lambda: 0.0,
+            sleeper=lambda _seconds: None,
+            idle_seconds=901.0,
+            timeout_seconds=902.0,
+        )
+
+
+def test_provider_idle_window_rechecks_counters_at_threshold(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    config_doc = _config(tmp_path)
+    config_doc["poll_seconds"] = 60
+    config = module.load_config(_write_config(tmp_path, config_doc))
+    now = [0.0]
+    threshold_reads = [0]
+    initial = _provider_snapshot()
+    changed = _provider_snapshot(
+        direct_requests=1,
+        accepted_tunnels=1,
+        completed_tunnels=1,
+    )
+
+    def snapshotter():
+        if now[0] >= 901.0:
+            threshold_reads[0] += 1
+            if threshold_reads[0] >= 2:
+                return changed
+        return initial
+
+    def sleeper(seconds):
+        now[0] += float(seconds)
+
+    baseline, evidence = module._wait_for_provider_idle_window(
+        config,
+        snapshotter=snapshotter,
+        monotonic=lambda: now[0],
+        sleeper=sleeper,
+        idle_seconds=901.0,
+        timeout_seconds=1900.0,
+    )
+
+    assert baseline == changed
+    assert evidence["idle_reset_count"] == 1
+    assert now[0] >= 1802.0
+
+
+def test_post_idle_provider_proof_joins_real_routes_cleanup_and_resources(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    config = module.load_config(_write_config(tmp_path, _config(tmp_path)))
+    baseline = _provider_snapshot()
+    current = _provider_snapshot(
+        direct_requests=4,
+        assigned_requests=2,
+        exa_assigned_success=1,
+        scrapingdog_assigned_success=1,
+        supabase_direct_success=4,
+        chain_weight_success=1,
+        provider_transport_success=2,
+        cache_lookup_success=1,
+        cache_write_success=1,
+        outcome_append_success=1,
+        accepted_tunnels=6,
+        completed_tunnels=6,
+        open_fds=21,
+        tcp_time_wait=6,
+    )
+
+    evidence = module._wait_for_post_idle_provider_proof(
+        config,
+        baseline=baseline,
+        snapshotter=lambda: current,
+        monotonic=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        timeout_seconds=1.0,
+    )
+
+    assert evidence["provider_2xx_success_deltas"]["exa"][
+        "assigned_proxy"
+    ] == 1
+    assert evidence["provider_2xx_success_deltas"]["scrapingdog"][
+        "assigned_proxy"
+    ] == 1
+    assert evidence["chain_weight_observation_success_delta"] == 1
+    assert evidence["cleanup_deltas"]["direct"]["attempted"] == 4
+    assert evidence["egress_accepted_delta"] == 6
+    assert evidence["open_fd_delta"] == 1
+
+    failed = _provider_snapshot(
+        direct_requests=4,
+        assigned_requests=2,
+        exa_assigned_success=1,
+        scrapingdog_assigned_success=1,
+        supabase_direct_success=4,
+        chain_weight_success=1,
+        provider_transport_success=2,
+        cache_lookup_success=1,
+        cache_write_success=1,
+        outcome_append_success=1,
+        request_failures=1,
+        accepted_tunnels=7,
+        completed_tunnels=7,
+    )
+    with pytest.raises(module.PhysicalStagingError, match="request failed"):
+        module._wait_for_post_idle_provider_proof(
+            config,
+            baseline=baseline,
+            snapshotter=lambda: failed,
+            monotonic=lambda: 0.0,
+            sleeper=lambda _seconds: None,
+            timeout_seconds=1.0,
+        )
+
+    authenticated_non_2xx = _provider_snapshot(
+        direct_requests=4,
+        assigned_requests=2,
+        supabase_direct_success=4,
+        chain_weight_success=1,
+        provider_transport_success=2,
+        cache_lookup_success=1,
+        cache_write_success=1,
+        outcome_append_success=1,
+        accepted_tunnels=6,
+        completed_tunnels=6,
+    )
+    authenticated_non_2xx["provider_terminal_counts"]["exa"][
+        "assigned_proxy"
+    ]["authenticated_response"] = 1
+    authenticated_non_2xx["provider_terminal_counts"]["scrapingdog"][
+        "assigned_proxy"
+    ]["authenticated_response"] = 1
+    clock = [0.0]
+    with pytest.raises(module.PhysicalStagingError, match="timed out"):
+        module._wait_for_post_idle_provider_proof(
+            config,
+            baseline=baseline,
+            snapshotter=lambda: authenticated_non_2xx,
+            monotonic=lambda: clock[0],
+            sleeper=lambda seconds: clock.__setitem__(
+                0, clock[0] + float(seconds)
+            ),
+            timeout_seconds=1.0,
+        )
 
 
 def test_full_lane_rejects_snapshot_from_another_database_host(
@@ -625,10 +1016,13 @@ def test_independent_weight_acceptance_survives_rebenchmark_failure(
             "current_day_benchmark_bundle_count": 0,
         },
     }
+    provider_control_order: list[str] = []
     monkeypatch.setattr(module, "verify_contract_checkout", lambda root, value: contract)
     monkeypatch.setattr(module, "validate_snapshot_manifest", lambda value: snapshot)
     monkeypatch.setattr(
-        module, "_restart_exact_release", lambda *args, **kwargs: None
+        module,
+        "_restart_exact_release",
+        lambda *args, **kwargs: provider_control_order.append("restart"),
     )
     monkeypatch.setattr(module, "_restart_auditor", lambda *args: None)
     monkeypatch.setattr(
@@ -636,7 +1030,30 @@ def test_independent_weight_acceptance_survives_rebenchmark_failure(
         "_dashboard_release_evidence",
         lambda config: {"source_sha": "e" * 40, "status": "active"},
     )
-    monkeypatch.setattr(module, "_configure_staging_controls", lambda config: {"ok": True})
+    monkeypatch.setattr(
+        module,
+        "_pause_staging_provider_work",
+        lambda config: provider_control_order.append("pause")
+        or {"autoresearch_paused": True, "scoring_paused": True},
+    )
+    monkeypatch.setattr(
+        module,
+        "_wait_for_provider_idle_window",
+        lambda config: provider_control_order.append("idle")
+        or ({}, {"idle_seconds": 901.0}),
+    )
+    monkeypatch.setattr(
+        module,
+        "_configure_staging_controls",
+        lambda config: provider_control_order.append("resume")
+        or {"ok": True},
+    )
+    monkeypatch.setattr(
+        module,
+        "_wait_for_post_idle_provider_proof",
+        lambda config, *, baseline: provider_control_order.append("proof")
+        or {"proof_seconds": 1.0},
+    )
     monkeypatch.setattr(
         module,
         "_gateway_json",
@@ -649,7 +1066,8 @@ def test_independent_weight_acceptance_survives_rebenchmark_failure(
     monkeypatch.setattr(
         module,
         "_wait_for_rebenchmark_acceptance",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
+        lambda *args, **kwargs: provider_control_order.append("rebenchmark")
+        or (_ for _ in ()).throw(
             module.PhysicalStagingError("rebenchmark failed independently")
         ),
     )
@@ -666,7 +1084,10 @@ def test_independent_weight_acceptance_survives_rebenchmark_failure(
         for epoch in (40, 41, 42)
     ]
     monkeypatch.setattr(
-        module, "_wait_for_canonical_acceptance", lambda *args, **kwargs: weights
+        module,
+        "_wait_for_canonical_acceptance",
+        lambda *args, **kwargs: provider_control_order.append("weights")
+        or weights,
     )
 
     def fake_run(command, **kwargs):
@@ -690,6 +1111,24 @@ def test_independent_weight_acceptance_survives_rebenchmark_failure(
     assert stages["primary-finalization"]["status"] == "passed"
     assert stages["audit-finalization"]["status"] == "passed"
     assert stages["candidate-not-superseded"]["status"] == "passed"
+    assert provider_control_order[:5] == [
+        "restart",
+        "pause",
+        "idle",
+        "resume",
+        "proof",
+    ]
+    assert set(provider_control_order[5:]) == {"rebenchmark", "weights"}
+    ledger_stage_order = [item["stage_id"] for item in ledger["stages"]]
+    assert ledger_stage_order.index("exact-paired-restart") < (
+        ledger_stage_order.index("staging-control-boundary")
+    )
+    assert ledger_stage_order.index("staging-control-boundary") < (
+        ledger_stage_order.index("provider-transport-post-idle")
+    )
+    assert ledger_stage_order.index("provider-transport-post-idle") < (
+        ledger_stage_order.index("full-rebenchmark-and-assignment")
+    )
 
 
 def test_physical_staging_workflow_is_attestation_and_cleanup_bound() -> None:

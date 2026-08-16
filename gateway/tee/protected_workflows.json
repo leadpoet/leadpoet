@@ -932,6 +932,11 @@
       "symbol": "_baseline_runner_for_attempt"
     },
     {
+      "ast_sha256": "sha256:26bb32acdc4967ba6185863a4e730f51183fa4d85ca14f088bca69f9314ee20c",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_baseline_scoring_contract_hash"
+    },
+    {
       "ast_sha256": "sha256:e37d0b5c790750466ca3b487e220667bfc7d70b1d1db5a2fa175e4a0f11219ca",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "_baseline_worker_index_for_attempt"
@@ -1312,9 +1317,19 @@
       "symbol": "policy_document"
     },
     {
-      "ast_sha256": "sha256:f0694a151dc7e54318dd770c04ac9baeb32d680eb2573d0d0a7b46208c29ceb8",
+      "ast_sha256": "sha256:e0193911195ebee56f68c31e907c748a0857c9a9516e9c6ae7603fde4d653642",
       "path": "gateway/tee/egress_proxy.py",
       "symbol": "EnclaveEgressProxy"
+    },
+    {
+      "ast_sha256": "sha256:376ed4dca6a7b2be55ef347818725b5c5875f8a14cf4e19f2873fba94a82ba0a",
+      "path": "gateway/tee/egress_proxy.py",
+      "symbol": "MAX_PROC_TCP_HEALTH_BYTES"
+    },
+    {
+      "ast_sha256": "sha256:43ef4fadd08b4f395f550af8fc3feb8fb70ca2a2e737c4ebcf458c1043cb31d3",
+      "path": "gateway/tee/egress_proxy.py",
+      "symbol": "MAX_PROC_TCP_HEALTH_ROWS"
     },
     {
       "ast_sha256": "sha256:cbc7eebb8e84a0468433384457fa8126ed17c59e1f7279c0c606da697acf85f4",
@@ -1327,9 +1342,24 @@
       "symbol": "_ManagedProxyStream"
     },
     {
+      "ast_sha256": "sha256:c8e54f94c78e243a0fd5e8b3bad7b00ebd16fdaba4e9958fd3a1c59289c5176b",
+      "path": "gateway/tee/egress_proxy.py",
+      "symbol": "_loopback_tcp_state_counts"
+    },
+    {
       "ast_sha256": "sha256:23c9fa7bc01a510a8f12667db1479f2b6d2b92e4dd74ee8278301c8b8e63baf7",
       "path": "gateway/tee/egress_proxy.py",
       "symbol": "_parse_proxy_request"
+    },
+    {
+      "ast_sha256": "sha256:b9b4925583008968e7159901580638c5b581fab9ac805f4c110421910c5c5383",
+      "path": "gateway/tee/egress_proxy.py",
+      "symbol": "_proc_tcp_address_is_loopback"
+    },
+    {
+      "ast_sha256": "sha256:b8e688959ed337e105986ea538f40ee3618c0a0813b7041fb1c31f5d4bacd5e3",
+      "path": "gateway/tee/egress_proxy.py",
+      "symbol": "_process_transport_resource_health"
     },
     {
       "ast_sha256": "sha256:4e67bf654cb46e0ff990514f49a0ee38b568b30c0d4bd37e525ff78af1ae2ec0",
@@ -1512,7 +1542,12 @@
       "symbol": "write_identity_to_tmpfs"
     },
     {
-      "ast_sha256": "sha256:78e6c01c126ee7db29e3151b0a6708ecae98d41c1f62495f9fdbdc1f1abe1d46",
+      "ast_sha256": "sha256:3ce329e1947d9ae7f5ac32af3873e53d28e76da899813c8663216e92b376f49c",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "EGRESS_POLICY_DIRECT_ONLY"
+    },
+    {
+      "ast_sha256": "sha256:fcc84584eec7296604ff475adf408c6989d915077be47f144794d948f09d4539",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -1522,9 +1557,44 @@
       "symbol": "MEASURED_TRANSPORT_REQUEST_HEADERS"
     },
     {
-      "ast_sha256": "sha256:8f0e4956a891b05d7528e5380322faaa8699d504f42e5f078802b74c822c2fb9",
+      "ast_sha256": "sha256:209b2f3ec650861966fa8dbceefa273fa95a7c39b2f698a904832c276cf6de54",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:b899908032a62218905685155f92a1d94176a6f87b974fdf98ad9244be9f00fe",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
+    },
+    {
+      "ast_sha256": "sha256:d7ff9c143afea0b3fb8644016f3d2d56917463ddc018915da0181eb2b7ff4cac",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "ProviderRouteV2"
+    },
+    {
+      "ast_sha256": "sha256:ba9693517b9d08a0f93645313539fc246ab0937334acdf7cec9311312f93711f",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "ProviderTransportCleanupError"
+    },
+    {
+      "ast_sha256": "sha256:cc684bd8cb929057ba8877d710642745014ffadda68b611ab233a068a1b734d5",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_CHAIN_WEIGHT_OBSERVATION_PURPOSE"
+    },
+    {
+      "ast_sha256": "sha256:88f8a83547560abc4a7d406a2c952d7358f03055150a01f4fe184cbce861a7c1",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_EGRESS_POLICIES"
+    },
+    {
+      "ast_sha256": "sha256:b979fc9dd64c0b101b84ee7b3952419c33a5656b5fccb6ea876757ad7d0a86d0",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_PROVIDER_TERMINAL_STATUSES"
+    },
+    {
+      "ast_sha256": "sha256:e88af4e361d9513a49048f702d1635cb65b97264af187c8319ff342960106d98",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_close_client_transports"
     },
     {
       "ast_sha256": "sha256:18d7994b07a1fc948e9fa6fb47cdafc8f54a8caf7aa55c8ef8e25b11a7d1903c",
@@ -1532,14 +1602,34 @@
       "symbol": "_extract_tls_metadata"
     },
     {
-      "ast_sha256": "sha256:cdb3830013e84db22244d26cfd203a2c606ad563bf97a0b294d6aef4a52adfa4",
+      "ast_sha256": "sha256:0f90f8774c94e9c7c522168b98e0419c08e6621a1521dd15087e0a2810009bbb",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_failure_code"
+    },
+    {
+      "ast_sha256": "sha256:b5b6ce117998c87cd4bf223df900ac6350f2b6ce79552f72ba9b34fd62341f80",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_force_close_response_network_stream"
+    },
+    {
+      "ast_sha256": "sha256:f293ffc079023aa6889a3d934f2bc7ae3dfe65709101b30e9aa9323126d14d89",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_local_resource_failure"
+    },
+    {
+      "ast_sha256": "sha256:9dcb51d5dbb1b6b54441cdda13c372de254ab9ffd18f37f9d40f0dceac350116",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "provider_registry_document"
     },
     {
-      "ast_sha256": "sha256:174f76fd2668ea5fc6b9198e9c28d890d9f82edccb91c29504b3ac94b177c917",
+      "ast_sha256": "sha256:b7b10b48e5c319fb4b6a40427bcf20dc4baa45d51061ce6668ab939ee7a7e62a",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
+    },
+    {
+      "ast_sha256": "sha256:7124e792ab042e68c18d5299231378f3964a8033a841b8ce0792d7f36b6ccfac",
+      "path": "gateway/tee/provider_semantics_v2.py",
+      "symbol": "_SEMANTICS_HEALTH_STAGES"
     },
     {
       "ast_sha256": "sha256:97770470bc9f561338bbb5447de4b465a6d490f240110a4e7a188d9a223d8ad1",
@@ -1802,7 +1892,7 @@
       "symbol": "get_v2_inter_enclave_client"
     },
     {
-      "ast_sha256": "sha256:d7d97a77aab8b51a7c8351a7a2dc8ed95cf15bd3c2445f66fc916e8e1a66ab8a",
+      "ast_sha256": "sha256:df51cb9445c558a569bc1ad0090f4e58be2cea6167cbef758c8f5277632ce7e5",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_provider_broker"
     },
@@ -2577,6 +2667,21 @@
       "symbol": "compute_reimbursement_award"
     },
     {
+      "ast_sha256": "sha256:fcfd56dbbeff73a8b7419abd0eefaed09b8056fc649add3925fbefe0171b46ba",
+      "path": "qualification/scoring/lead_scorer.py",
+      "symbol": "_decision_from_observed_employee_size"
+    },
+    {
+      "ast_sha256": "sha256:a88e438034590f851a20cd19028a561fdcbdc774baf49c758dc4ec998fafb563",
+      "path": "qualification/scoring/lead_scorer.py",
+      "symbol": "_llm_reverify_company"
+    },
+    {
+      "ast_sha256": "sha256:b7bc0dbb9ea4ea0cad88c246cb88e6b9f0819cd92d157298c7b9f44b91a13b4e",
+      "path": "qualification/scoring/lead_scorer.py",
+      "symbol": "_reverify_decision"
+    },
+    {
       "ast_sha256": "sha256:b0460f368c49f12a2a4689d8bdc3ad2b3a1de85c63a349671cd4f41b47c6baf0",
       "path": "research_lab/code_editing.py",
       "symbol": "_GIT_STRUCTURAL_DIFF_PREFIXES"
@@ -2655,6 +2760,26 @@
       "ast_sha256": "sha256:e6174d0072e186d9be77b8d4e8ca33019d8460a23af8bc245be0977d194c0e19",
       "path": "research_lab/code_editing.py",
       "symbol": "validate_code_edit_draft"
+    },
+    {
+      "ast_sha256": "sha256:fe8f080d5ba3fbaa33517de4eb0142928e21bb860fc1750c531196718df1521e",
+      "path": "research_lab/employee_buckets.py",
+      "symbol": "LINKEDIN_EMPLOYEE_BUCKETS"
+    },
+    {
+      "ast_sha256": "sha256:65cd34e355cbce129389284ae1c709e16e6976b57bffcfc6a1b8e92d4077eda1",
+      "path": "research_lab/employee_buckets.py",
+      "symbol": "_OBSERVED_EMPLOYEE_COUNT_INTERVALS"
+    },
+    {
+      "ast_sha256": "sha256:a45026c1b70055cfe73b1ef9273c5755561487b6041a0728f5c7c6ec50ada5d5",
+      "path": "research_lab/employee_buckets.py",
+      "symbol": "normalize_employee_count_bucket"
+    },
+    {
+      "ast_sha256": "sha256:68099689f38d6dbdc968144e45644a1a65fb1be238489863cd0bbcf7142c8300",
+      "path": "research_lab/employee_buckets.py",
+      "symbol": "normalize_observed_employee_count_bucket"
     },
     {
       "ast_sha256": "sha256:851bb3534f9b20beba3021a005dae0b630ef2af482b1b7a0f02d6886adb60e74",
@@ -2955,9 +3080,59 @@
       "ast_sha256": "sha256:e45535d006aa839564ca448535fad6245a1eb521e37ca83e5a59212db5e1d45a",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "verify_source_tree_contract"
+    },
+    {
+      "ast_sha256": "sha256:3cff0c67d584eabbb3802108b074b2a75e1a2ed70dd5ab0ada1f5d57e73709cb",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "PROVIDER_IDLE_MIN_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:08ce21d63d21623a3e2edc10fda7c50083a2eaead35489a030cb1607182fc854",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "PROVIDER_MIN_EPHEMERAL_PORT_HEADROOM"
+    },
+    {
+      "ast_sha256": "sha256:8917eda87d587c0865fff2ad12797397b6ba867a1e01d112bb4d1e4ba7d2ca35",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "PROVIDER_MIN_NOFILE_HEADROOM"
+    },
+    {
+      "ast_sha256": "sha256:e591f77592e0ca662f1571bbe83a899aac98c71604030f310d2e1d8642b279d2",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "_pause_staging_provider_work"
+    },
+    {
+      "ast_sha256": "sha256:6368b3429641a726df593736fef9ec5d340b53cabc131164de3ba7cbcfc3bdf4",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "_provider_health_snapshot"
+    },
+    {
+      "ast_sha256": "sha256:cde5e218e1a901a4447b7c8e70f151f2566035ea082102bb48c4df0daa547d30",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "_require_provider_resource_headroom"
+    },
+    {
+      "ast_sha256": "sha256:821bd2a03c1b1c6963c266d42deb5d6d7b7dadd43ee9429cf9442e7f6e51a050",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "_validate_post_idle_cleanup_and_resources"
+    },
+    {
+      "ast_sha256": "sha256:1853717cb8426243fc95b47f93163b4af2a3d6acabfea35573285f8c1293417e",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "_wait_for_post_idle_provider_proof"
+    },
+    {
+      "ast_sha256": "sha256:dd9977c6450c1c237d38c06fb680b41e53dbc53862a1aba2e91fd53d08783968",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "_wait_for_provider_idle_window"
+    },
+    {
+      "ast_sha256": "sha256:6dfb49333de95ab887d3eab678c90dac55106f4bda10b80088a174666cbb50b4",
+      "path": "scripts/run_physical_v2_staging.py",
+      "symbol": "run"
     }
   ],
-  "manifest_hash": "sha256:031e6d136f4d4bb87466129baeb3370ff96de5b710cc1289a4f60754834c4a78",
-  "protected_source_commit": "79c8be65b7767429afa29582c53494aaba6d8693",
+  "manifest_hash": "sha256:b15180577b0403b293be68137db72afc8267e2c8817fb51a391aeb72f0130bb8",
+  "protected_source_commit": "193309967ce8de9f8ca325fa0f81cd69a268678e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

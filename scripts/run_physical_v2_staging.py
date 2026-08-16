@@ -22,7 +22,7 @@ import shlex
 import subprocess
 import sys
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
@@ -56,6 +56,7 @@ FULL_CRITICAL_STAGES = (
     "candidate-and-snapshot-identity",
     "exact-paired-restart",
     "staging-control-boundary",
+    "provider-transport-post-idle",
     "full-rebenchmark-and-assignment",
     "dashboard-score-readback",
     "canonical-weight-bundles",
@@ -63,6 +64,76 @@ FULL_CRITICAL_STAGES = (
     "audit-finalization",
     "consecutive-epoch-readback",
     "candidate-not-superseded",
+)
+# The shortest retained direct collapse followed 13m50s of quiet. Fifteen
+# minutes plus one second covers that observed boundary as well as the earlier
+# assigned-proxy relapse without rounding the physical wall-time proof down.
+PROVIDER_IDLE_MIN_SECONDS = 901.0
+PROVIDER_POST_IDLE_FD_SLACK = 8
+PROVIDER_MIN_NOFILE_HEADROOM = 256
+PROVIDER_MIN_EPHEMERAL_PORT_HEADROOM = 2048
+_PROVIDER_TRANSPORT_ROUTES = ("direct", "assigned_proxy")
+_PROVIDER_COUNTER_FIELDS = ("started", "succeeded", "failed")
+_PROVIDER_CLEANUP_COUNTER_FIELDS = (
+    "attempted",
+    "succeeded",
+    "client_close_failed",
+    "transport_close_failed",
+)
+_PROVIDER_TERMINAL_STATUSES = (
+    "authenticated_response",
+    "transport_failure",
+)
+_PHYSICAL_PROVIDER_IDS = ("exa", "scrapingdog", "supabase")
+_SEMANTICS_STAGE_FIELDS = (
+    "provider_transport",
+    "provider_cache_lookup",
+    "provider_cache_write",
+    "provider_outcome_restore",
+    "provider_outcome_append",
+)
+_PROVIDER_SCOPE_FIELDS = (
+    "direct_request_slot_active_count",
+    "direct_active_scope_count",
+    "direct_retired_scope_count",
+    "direct_active_lease_count",
+    "direct_retired_lease_count",
+    "assigned_active_scope_count",
+    "assigned_retired_scope_count",
+    "assigned_active_lease_count",
+    "assigned_retired_lease_count",
+)
+_EGRESS_COUNTER_FIELDS = (
+    "accepted_tunnel_count",
+    "active_tunnel_count",
+    "completed_tunnel_count",
+    "failed_tunnel_count",
+)
+_RESOURCE_SCALAR_FIELDS = (
+    "process_open_fd_count",
+    "process_nofile_soft_limit",
+    "process_nofile_hard_limit",
+    "ip_local_port_range_lower",
+    "ip_local_port_range_upper",
+    "ip_local_port_range_size",
+    "loopback_tcp_total_count",
+    "loopback_tcp_scanned_row_count",
+    "loopback_tcp_scan_truncated",
+)
+_TCP_STATE_FIELDS = (
+    "established",
+    "syn_sent",
+    "syn_received",
+    "fin_wait_1",
+    "fin_wait_2",
+    "time_wait",
+    "close",
+    "close_wait",
+    "last_ack",
+    "listen",
+    "closing",
+    "new_syn_received",
+    "other",
 )
 
 
@@ -520,6 +591,778 @@ print(json.dumps({{"status": status, "payload": payload}}, sort_keys=True))
     if not isinstance(value, dict):
         raise PhysicalStagingError("gateway probe payload is not an object")
     return value
+
+
+def _nonnegative_int(value: Any, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PhysicalStagingError(f"{field} is not a non-negative integer")
+    return value
+
+
+def _provider_health_snapshot(
+    config: PhysicalStagingConfig,
+) -> dict[str, Any]:
+    """Read only the coordinator's bounded, non-secret health documents."""
+
+    probe = """
+import asyncio
+import json
+
+from gateway.tee.topology import ROLE_SPECS
+from gateway.utils.tee_client import TEEClient
+
+async def main():
+    client = TEEClient(cid=int(ROLE_SPECS["gateway_coordinator"]["cid"]))
+    broker = await client.v2_provider_broker_health()
+    semantics = await client.v2_provider_semantics_health()
+    print(json.dumps({"broker": broker, "semantics": semantics}, sort_keys=True))
+
+asyncio.run(main())
+"""
+    encoded = base64.b64encode(probe.encode("utf-8")).decode("ascii")
+    gateway = config.gateway
+    command = (
+        f"cd {shlex.quote(gateway.repo_root)} && "
+        f"{shlex.quote(gateway.python_bin)} -c "
+        f"\"import base64;exec(base64.b64decode('{encoded}'))\""
+    )
+    output = _ssh(
+        gateway.ssh_host,
+        gateway.ssh_key,
+        command,
+        timeout=90,
+    )
+    try:
+        raw = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise PhysicalStagingError(
+            "provider transport health probe did not return JSON"
+        ) from exc
+    document = _require_mapping(raw, field="provider transport health")
+    broker = _require_mapping(document.get("broker"), field="broker health")
+    semantics = _require_mapping(
+        document.get("semantics"), field="provider semantics health"
+    )
+    transport = _require_mapping(
+        broker.get("transport"), field="provider transport health"
+    )
+    egress = _require_mapping(
+        broker.get("egress_proxy"), field="provider egress health"
+    )
+    if (
+        broker.get("status") != "ready"
+        or semantics.get("status") != "ready"
+        or egress.get("status") != "running"
+        or transport.get("reuse_direct_connections") is not False
+        or transport.get("reuse_assigned_proxy_connections") is not False
+    ):
+        raise PhysicalStagingError(
+            "provider transport is not ready in request-scoped mode"
+        )
+
+    request_counters = _require_mapping(
+        transport.get("request_counters"), field="provider request counters"
+    )
+    cleanup_counters = _require_mapping(
+        transport.get("cleanup_counters"), field="provider cleanup counters"
+    )
+    projected_requests: dict[str, dict[str, int]] = {}
+    projected_cleanup: dict[str, dict[str, int]] = {}
+    for route in _PROVIDER_TRANSPORT_ROUTES:
+        route_requests = _require_mapping(
+            request_counters.get(route),
+            field=f"provider request counters {route}",
+        )
+        route_cleanup = _require_mapping(
+            cleanup_counters.get(route),
+            field=f"provider cleanup counters {route}",
+        )
+        projected_requests[route] = {
+            field: _nonnegative_int(
+                route_requests.get(field),
+                field=f"provider request {route}.{field}",
+            )
+            for field in _PROVIDER_COUNTER_FIELDS
+        }
+        projected_cleanup[route] = {
+            field: _nonnegative_int(
+                route_cleanup.get(field),
+                field=f"provider cleanup {route}.{field}",
+            )
+            for field in _PROVIDER_CLEANUP_COUNTER_FIELDS
+        }
+
+    raw_terminal_counts = _require_mapping(
+        broker.get("provider_terminal_counts"),
+        field="provider terminal counters",
+    )
+    terminal_counts: dict[str, dict[str, dict[str, int]]] = {}
+    for provider_id in _PHYSICAL_PROVIDER_IDS:
+        provider_counts = _require_mapping(
+            raw_terminal_counts.get(provider_id),
+            field=f"provider terminal counters {provider_id}",
+        )
+        terminal_counts[provider_id] = {}
+        for route in _PROVIDER_TRANSPORT_ROUTES:
+            route_counts = _require_mapping(
+                provider_counts.get(route),
+                field=f"provider terminal counters {provider_id}.{route}",
+            )
+            terminal_counts[provider_id][route] = {
+                status: _nonnegative_int(
+                    route_counts.get(status),
+                    field=(
+                        "provider terminal counters "
+                        f"{provider_id}.{route}.{status}"
+                    ),
+                )
+                for status in _PROVIDER_TERMINAL_STATUSES
+            }
+    raw_2xx_counts = _require_mapping(
+        broker.get("provider_2xx_success_counts"),
+        field="provider 2xx success counters",
+    )
+    success_2xx_counts: dict[str, dict[str, int]] = {}
+    for provider_id in _PHYSICAL_PROVIDER_IDS:
+        provider_counts = _require_mapping(
+            raw_2xx_counts.get(provider_id),
+            field=f"provider 2xx success counters {provider_id}",
+        )
+        success_2xx_counts[provider_id] = {
+            route: _nonnegative_int(
+                provider_counts.get(route),
+                field=f"provider 2xx success counters {provider_id}.{route}",
+            )
+            for route in _PROVIDER_TRANSPORT_ROUTES
+        }
+
+    raw_stage_counters = _require_mapping(
+        semantics.get("stage_counters"), field="provider semantics counters"
+    )
+    stage_counters: dict[str, dict[str, int]] = {}
+    for stage in _SEMANTICS_STAGE_FIELDS:
+        values = _require_mapping(
+            raw_stage_counters.get(stage),
+            field=f"provider semantics counter {stage}",
+        )
+        stage_counters[stage] = {
+            field: _nonnegative_int(
+                values.get(field),
+                field=f"provider semantics counter {stage}.{field}",
+            )
+            for field in _PROVIDER_COUNTER_FIELDS
+        }
+
+    scopes = {
+        field: _nonnegative_int(
+            transport.get(field), field=f"provider transport {field}"
+        )
+        for field in _PROVIDER_SCOPE_FIELDS
+    }
+    egress_counters = {
+        field: _nonnegative_int(
+            egress.get(field), field=f"provider egress {field}"
+        )
+        for field in _EGRESS_COUNTER_FIELDS
+    }
+    egress_counters["socket_cleanup_failure_count"] = _nonnegative_int(
+        egress.get("socket_cleanup_failure_count"),
+        field="provider egress socket_cleanup_failure_count",
+    )
+    resources = {
+        field: _nonnegative_int(
+            egress.get(field), field=f"provider resource {field}"
+        )
+        for field in _RESOURCE_SCALAR_FIELDS
+    }
+    raw_tcp = _require_mapping(
+        egress.get("loopback_tcp_state_counts"),
+        field="provider loopback TCP states",
+    )
+    resources["loopback_tcp_state_counts"] = {
+        field: _nonnegative_int(
+            raw_tcp.get(field), field=f"provider loopback TCP state {field}"
+        )
+        for field in _TCP_STATE_FIELDS
+    }
+    return {
+        "request_counters": projected_requests,
+        "cleanup_counters": projected_cleanup,
+        "provider_terminal_counts": terminal_counts,
+        "provider_2xx_success_counts": success_2xx_counts,
+        "chain_weight_observation_success_count": _nonnegative_int(
+            broker.get("chain_weight_observation_success_count"),
+            field="chain weight observation success counter",
+        ),
+        "semantics_stage_counters": stage_counters,
+        "scope_counts": scopes,
+        "egress_counters": egress_counters,
+        "resources": resources,
+    }
+
+
+def _provider_activity_projection(
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    egress = dict(snapshot["egress_counters"])
+    egress.pop("active_tunnel_count", None)
+    return {
+        "request_counters": snapshot["request_counters"],
+        "cleanup_counters": snapshot["cleanup_counters"],
+        "provider_terminal_counts": snapshot["provider_terminal_counts"],
+        "provider_2xx_success_counts": snapshot["provider_2xx_success_counts"],
+        "chain_weight_observation_success_count": snapshot[
+            "chain_weight_observation_success_count"
+        ],
+        "semantics_stage_counters": snapshot["semantics_stage_counters"],
+        "egress_counters": egress,
+    }
+
+
+def _require_provider_idle(snapshot: Mapping[str, Any]) -> None:
+    if any(int(value) != 0 for value in snapshot["scope_counts"].values()):
+        raise PhysicalStagingError(
+            "provider transport retained a scope or lease at the idle boundary"
+        )
+    if int(snapshot["egress_counters"]["active_tunnel_count"]) != 0:
+        raise PhysicalStagingError(
+            "provider egress retained an active tunnel at the idle boundary"
+        )
+    if int(snapshot["resources"]["loopback_tcp_scan_truncated"]) != 0:
+        raise PhysicalStagingError(
+            "provider loopback TCP resource scan was truncated"
+        )
+
+
+def _require_provider_resource_headroom(
+    snapshot: Mapping[str, Any],
+) -> None:
+    resources = _require_mapping(
+        snapshot.get("resources"), field="provider resources"
+    )
+    open_fds = _nonnegative_int(
+        resources.get("process_open_fd_count"),
+        field="provider open file descriptors",
+    )
+    nofile_soft = _nonnegative_int(
+        resources.get("process_nofile_soft_limit"),
+        field="provider soft NOFILE limit",
+    )
+    nofile_hard = _nonnegative_int(
+        resources.get("process_nofile_hard_limit"),
+        field="provider hard NOFILE limit",
+    )
+    ephemeral_size = _nonnegative_int(
+        resources.get("ip_local_port_range_size"),
+        field="provider ephemeral port range",
+    )
+    loopback_tcp_total = _nonnegative_int(
+        resources.get("loopback_tcp_total_count"),
+        field="provider loopback TCP total",
+    )
+    if (
+        nofile_soft > nofile_hard
+        or nofile_soft - open_fds < PROVIDER_MIN_NOFILE_HEADROOM
+    ):
+        raise PhysicalStagingError(
+            "provider process lacks the required NOFILE headroom"
+        )
+    if (
+        ephemeral_size - loopback_tcp_total
+        < PROVIDER_MIN_EPHEMERAL_PORT_HEADROOM
+    ):
+        raise PhysicalStagingError(
+            "provider process lacks the required ephemeral-port headroom"
+        )
+
+
+def _pause_staging_provider_work(
+    config: PhysicalStagingConfig,
+) -> dict[str, Any]:
+    command = "\n".join(
+        [
+            "set -Eeuo pipefail",
+            "admin=/home/ec2-user/bin/research-lab-admin",
+            "test -x \"$admin\"",
+            (
+                "\"$admin\" pause-autoresearch "
+                "--reason production_parity_provider_idle "
+                "--actor-ref operator:production-parity-full"
+            ),
+            (
+                "\"$admin\" pause-scoring "
+                "--reason production_parity_provider_idle "
+                "--actor-ref operator:production-parity-full"
+            ),
+            "\"$admin\" status",
+        ]
+    )
+    output = _ssh(
+        config.gateway.ssh_host,
+        config.gateway.ssh_key,
+        command,
+        timeout=180,
+    )
+    documents = []
+    for line in output.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, Mapping):
+            documents.append(value)
+    if not documents:
+        raise PhysicalStagingError(
+            "staging provider-idle maintenance status is unavailable"
+        )
+    status = documents[-1]
+    autoresearch = status.get("state")
+    scoring = status.get("scoring_state")
+    if (
+        status.get("ok") is not True
+        or not isinstance(autoresearch, Mapping)
+        or autoresearch.get("paused") is not True
+        or not isinstance(scoring, Mapping)
+        or scoring.get("paused") is not True
+    ):
+        raise PhysicalStagingError(
+            "staging provider-idle maintenance controls differ"
+        )
+    return {
+        "autoresearch_paused": True,
+        "scoring_paused": True,
+    }
+
+
+def _wait_for_provider_idle_window(
+    config: PhysicalStagingConfig,
+    *,
+    snapshotter: Any = None,
+    monotonic: Any = time.monotonic,
+    sleeper: Any = time.sleep,
+    idle_seconds: float = PROVIDER_IDLE_MIN_SECONDS,
+    timeout_seconds: Optional[float] = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if idle_seconds < PROVIDER_IDLE_MIN_SECONDS:
+        raise PhysicalStagingError(
+            "physical provider idle duration is shorter than 901 seconds"
+        )
+    read_snapshot = snapshotter or (lambda: _provider_health_snapshot(config))
+    timeout = float(
+        max(float(config.timeout_seconds), idle_seconds + 300.0)
+        if timeout_seconds is None
+        else timeout_seconds
+    )
+    if timeout < idle_seconds:
+        raise PhysicalStagingError(
+            "physical provider idle timeout is shorter than the idle window"
+        )
+    baseline = dict(read_snapshot())
+    _require_provider_idle(baseline)
+    _require_provider_resource_headroom(baseline)
+    overall_started = float(monotonic())
+    idle_started = overall_started
+    reset_count = 0
+    final = baseline
+    while True:
+        now = float(monotonic())
+        continuous_idle = now - idle_started
+        if continuous_idle >= idle_seconds:
+            threshold_snapshot = dict(read_snapshot())
+            _require_provider_idle(threshold_snapshot)
+            _require_provider_resource_headroom(threshold_snapshot)
+            if _provider_activity_projection(baseline) == (
+                _provider_activity_projection(threshold_snapshot)
+            ):
+                final = threshold_snapshot
+                break
+            baseline = threshold_snapshot
+            idle_started = float(monotonic())
+            reset_count += 1
+            continue
+        if now - overall_started >= timeout:
+            raise PhysicalStagingError(
+                "provider transport never reached a continuous 901-second "
+                "idle window"
+            )
+        sleeper(
+            min(
+                float(config.poll_seconds),
+                idle_seconds - continuous_idle,
+                timeout - (now - overall_started),
+            )
+        )
+        final = dict(read_snapshot())
+        _require_provider_idle(final)
+        _require_provider_resource_headroom(final)
+        if _provider_activity_projection(baseline) != (
+            _provider_activity_projection(final)
+        ):
+            baseline = final
+            idle_started = float(monotonic())
+            reset_count += 1
+    elapsed = float(monotonic()) - idle_started
+    if elapsed < idle_seconds:
+        raise PhysicalStagingError(
+            "physical provider idle duration was not measured in wall time"
+        )
+    evidence = {
+        "idle_seconds": round(elapsed, 3),
+        "idle_reset_count": reset_count,
+        "baseline_hash": sha256_json(_provider_activity_projection(baseline)),
+        "final_hash": sha256_json(_provider_activity_projection(final)),
+    }
+    return final, evidence
+
+
+def _counter_delta(
+    current: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    *path: str,
+) -> int:
+    current_value: Any = current
+    baseline_value: Any = baseline
+    for key in path:
+        current_value = _require_mapping(
+            current_value, field="current provider counter"
+        ).get(key)
+        baseline_value = _require_mapping(
+            baseline_value, field="baseline provider counter"
+        ).get(key)
+    current_count = _nonnegative_int(
+        current_value, field="current provider counter value"
+    )
+    baseline_count = _nonnegative_int(
+        baseline_value, field="baseline provider counter value"
+    )
+    if current_count < baseline_count:
+        raise PhysicalStagingError("provider health counter regressed")
+    return current_count - baseline_count
+
+
+def _assert_post_idle_failures_unchanged(
+    baseline: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> None:
+    for route in _PROVIDER_TRANSPORT_ROUTES:
+        if _counter_delta(
+            current,
+            baseline,
+            "request_counters",
+            route,
+            "failed",
+        ):
+            raise PhysicalStagingError(
+                f"post-idle {route} provider request failed"
+            )
+        for field in (
+            "client_close_failed",
+            "transport_close_failed",
+        ):
+            if _counter_delta(
+                current,
+                baseline,
+                "cleanup_counters",
+                route,
+                field,
+            ):
+                raise PhysicalStagingError(
+                    f"post-idle {route} provider cleanup failed"
+                )
+    for provider_id in _PHYSICAL_PROVIDER_IDS:
+        for route in _PROVIDER_TRANSPORT_ROUTES:
+            if _counter_delta(
+                current,
+                baseline,
+                "provider_terminal_counts",
+                provider_id,
+                route,
+                "transport_failure",
+            ):
+                raise PhysicalStagingError(
+                    f"post-idle {provider_id} {route} terminal failed"
+                )
+    for stage in _SEMANTICS_STAGE_FIELDS:
+        if _counter_delta(
+            current,
+            baseline,
+            "semantics_stage_counters",
+            stage,
+            "failed",
+        ):
+            raise PhysicalStagingError(
+                f"post-idle provider semantics stage failed: {stage}"
+            )
+    for field in ("failed_tunnel_count", "socket_cleanup_failure_count"):
+        if _counter_delta(
+            current,
+            baseline,
+            "egress_counters",
+            field,
+        ):
+            raise PhysicalStagingError(
+                f"post-idle provider egress counter increased: {field}"
+            )
+
+
+def _post_idle_provider_success_ready(
+    baseline: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> bool:
+    return (
+        _counter_delta(
+            current,
+            baseline,
+            "provider_2xx_success_counts",
+            "exa",
+            "assigned_proxy",
+        )
+        >= 1
+        and _counter_delta(
+            current,
+            baseline,
+            "provider_2xx_success_counts",
+            "scrapingdog",
+            "assigned_proxy",
+        )
+        >= 1
+        and _counter_delta(
+            current,
+            baseline,
+            "provider_2xx_success_counts",
+            "supabase",
+            "direct",
+        )
+        >= 4
+        and (
+            int(current["chain_weight_observation_success_count"])
+            - int(baseline["chain_weight_observation_success_count"])
+        )
+        >= 1
+        and _counter_delta(
+            current,
+            baseline,
+            "semantics_stage_counters",
+            "provider_transport",
+            "succeeded",
+        )
+        >= 2
+        and _counter_delta(
+            current,
+            baseline,
+            "semantics_stage_counters",
+            "provider_cache_lookup",
+            "succeeded",
+        )
+        >= 1
+        and _counter_delta(
+            current,
+            baseline,
+            "semantics_stage_counters",
+            "provider_cache_write",
+            "succeeded",
+        )
+        >= 1
+        and _counter_delta(
+            current,
+            baseline,
+            "semantics_stage_counters",
+            "provider_outcome_append",
+            "succeeded",
+        )
+        >= 1
+    )
+
+
+def _validate_post_idle_cleanup_and_resources(
+    baseline: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> dict[str, Any]:
+    _require_provider_idle(current)
+    _require_provider_resource_headroom(baseline)
+    _require_provider_resource_headroom(current)
+    request_deltas: dict[str, dict[str, int]] = {}
+    cleanup_deltas: dict[str, dict[str, int]] = {}
+    total_started = 0
+    for route in _PROVIDER_TRANSPORT_ROUTES:
+        request_deltas[route] = {
+            field: _counter_delta(
+                current,
+                baseline,
+                "request_counters",
+                route,
+                field,
+            )
+            for field in _PROVIDER_COUNTER_FIELDS
+        }
+        cleanup_deltas[route] = {
+            field: _counter_delta(
+                current,
+                baseline,
+                "cleanup_counters",
+                route,
+                field,
+            )
+            for field in _PROVIDER_CLEANUP_COUNTER_FIELDS
+        }
+        requests = request_deltas[route]
+        cleanup = cleanup_deltas[route]
+        if (
+            requests["started"] <= 0
+            or requests["started"]
+            != requests["succeeded"] + requests["failed"]
+            or cleanup["attempted"] != requests["started"]
+            or cleanup["succeeded"] != cleanup["attempted"]
+            or cleanup["client_close_failed"] != 0
+            or cleanup["transport_close_failed"] != 0
+        ):
+            raise PhysicalStagingError(
+                f"post-idle {route} request cleanup was not exact"
+            )
+        total_started += requests["started"]
+
+    accepted = _counter_delta(
+        current,
+        baseline,
+        "egress_counters",
+        "accepted_tunnel_count",
+    )
+    completed = _counter_delta(
+        current,
+        baseline,
+        "egress_counters",
+        "completed_tunnel_count",
+    )
+    if accepted < total_started or completed != accepted:
+        raise PhysicalStagingError(
+            "post-idle provider egress tunnel cleanup was not exact"
+        )
+
+    baseline_resources = baseline["resources"]
+    current_resources = current["resources"]
+    for field in (
+        "process_nofile_soft_limit",
+        "process_nofile_hard_limit",
+        "ip_local_port_range_lower",
+        "ip_local_port_range_upper",
+        "ip_local_port_range_size",
+    ):
+        if int(current_resources[field]) != int(baseline_resources[field]):
+            raise PhysicalStagingError(
+                f"post-idle provider resource boundary changed: {field}"
+            )
+    if (
+        int(current_resources["process_open_fd_count"])
+        > int(baseline_resources["process_open_fd_count"])
+        + PROVIDER_POST_IDLE_FD_SLACK
+    ):
+        raise PhysicalStagingError("post-idle provider file descriptors grew")
+
+    baseline_tcp = baseline_resources["loopback_tcp_state_counts"]
+    current_tcp = current_resources["loopback_tcp_state_counts"]
+    for state in (
+        "established",
+        "syn_sent",
+        "syn_received",
+        "fin_wait_1",
+        "fin_wait_2",
+        "close_wait",
+        "last_ack",
+        "closing",
+        "new_syn_received",
+        "other",
+    ):
+        if int(current_tcp[state]) > int(baseline_tcp[state]) + (
+            PROVIDER_POST_IDLE_FD_SLACK
+        ):
+            raise PhysicalStagingError(
+                f"post-idle provider loopback TCP state grew: {state}"
+            )
+    tcp_growth_bound = accepted + PROVIDER_POST_IDLE_FD_SLACK
+    if int(current_resources["loopback_tcp_total_count"]) > (
+        int(baseline_resources["loopback_tcp_total_count"])
+        + tcp_growth_bound
+    ):
+        raise PhysicalStagingError(
+            "post-idle provider loopback TCP total exceeded the work bound"
+        )
+    return {
+        "request_deltas": request_deltas,
+        "cleanup_deltas": cleanup_deltas,
+        "egress_accepted_delta": accepted,
+        "egress_completed_delta": completed,
+        "open_fd_delta": (
+            int(current_resources["process_open_fd_count"])
+            - int(baseline_resources["process_open_fd_count"])
+        ),
+        "loopback_tcp_total_delta": (
+            int(current_resources["loopback_tcp_total_count"])
+            - int(baseline_resources["loopback_tcp_total_count"])
+        ),
+    }
+
+
+def _wait_for_post_idle_provider_proof(
+    config: PhysicalStagingConfig,
+    *,
+    baseline: Mapping[str, Any],
+    snapshotter: Any = None,
+    monotonic: Any = time.monotonic,
+    sleeper: Any = time.sleep,
+    timeout_seconds: Optional[float] = None,
+) -> dict[str, Any]:
+    read_snapshot = snapshotter or (lambda: _provider_health_snapshot(config))
+    timeout = float(
+        config.rebenchmark_timeout_seconds
+        if timeout_seconds is None
+        else timeout_seconds
+    )
+    started = float(monotonic())
+    while float(monotonic()) - started < timeout:
+        current = dict(read_snapshot())
+        _assert_post_idle_failures_unchanged(baseline, current)
+        if _post_idle_provider_success_ready(baseline, current):
+            cleanup = _validate_post_idle_cleanup_and_resources(
+                baseline,
+                current,
+            )
+            success_2xx_deltas = {
+                provider_id: {
+                    route: _counter_delta(
+                        current,
+                        baseline,
+                        "provider_2xx_success_counts",
+                        provider_id,
+                        route,
+                    )
+                    for route in _PROVIDER_TRANSPORT_ROUTES
+                }
+                for provider_id in _PHYSICAL_PROVIDER_IDS
+            }
+            semantics_successes = {
+                stage: _counter_delta(
+                    current,
+                    baseline,
+                    "semantics_stage_counters",
+                    stage,
+                    "succeeded",
+                )
+                for stage in _SEMANTICS_STAGE_FIELDS
+            }
+            return {
+                "proof_seconds": round(float(monotonic()) - started, 3),
+                "provider_2xx_success_deltas": success_2xx_deltas,
+                "chain_weight_observation_success_delta": (
+                    int(current["chain_weight_observation_success_count"])
+                    - int(baseline["chain_weight_observation_success_count"])
+                ),
+                "semantics_success_deltas": semantics_successes,
+                **cleanup,
+            }
+        sleeper(float(config.poll_seconds))
+    raise PhysicalStagingError(
+        "post-idle provider direct/assigned workflow proof timed out"
+    )
 
 
 def _restart_exact_release(
@@ -1702,16 +2545,33 @@ def run(
         },
     )
 
+    provider_idle_started = time.monotonic()
+    idle_controls = _pause_staging_provider_work(config)
+    provider_baseline, idle_evidence = _wait_for_provider_idle_window(config)
     controls_started = time.monotonic()
-    controls = _configure_staging_controls(config)
     validation_started_at = int(time.time())
+    controls = _configure_staging_controls(config)
+    controls_duration = time.monotonic() - controls_started
     ledger.record(
         "staging-control-boundary",
         status="passed",
-        duration_seconds=time.monotonic() - controls_started,
+        duration_seconds=controls_duration,
         evidence=controls,
     )
-
+    provider_proof = _wait_for_post_idle_provider_proof(
+        config,
+        baseline=provider_baseline,
+    )
+    ledger.record(
+        "provider-transport-post-idle",
+        status="passed",
+        duration_seconds=time.monotonic() - provider_idle_started,
+        evidence={
+            "idle_controls": idle_controls,
+            **idle_evidence,
+            **provider_proof,
+        },
+    )
     policy = normalized_contract["policy_commitments"]["conditional_icp"]
     parallel_started = {
         "rebenchmark": time.monotonic(),

@@ -1124,6 +1124,7 @@ def get_provider_egress_proxy():
     global provider_egress_proxy
     with provider_egress_proxy_lock:
         if provider_egress_proxy is not None:
+            provider_egress_proxy.ensure_running()
             return provider_egress_proxy
         from gateway.tee.egress_proxy import EnclaveEgressProxy, configured_proxy_ports
 
@@ -1588,7 +1589,8 @@ def get_v2_provider_broker():
                 # the concurrency bound without carrying an idle raw relay
                 # generation across independent jobs or epochs.
                 reuse_direct_connections=False,
-                reuse_upstream_proxy_connections=True,
+                reuse_upstream_proxy_connections=False,
+                ensure_egress_ready=lambda: get_provider_egress_proxy().ensure_running(),
             ),
             job_credential_slot_ref_hashes=configuration.get(
                 "job_lease_slot_ref_hashes"

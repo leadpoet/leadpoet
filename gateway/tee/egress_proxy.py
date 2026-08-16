@@ -58,6 +58,31 @@ UPSTREAM_PROXY_HEADER = "x-leadpoet-upstream-proxy-b64"
 SIOCGIFFLAGS = 0x8913
 SIOCSIFFLAGS = 0x8914
 IFF_UP = 0x1
+MAX_PROC_TCP_HEALTH_BYTES = 4 * 1024 * 1024
+MAX_PROC_TCP_HEALTH_ROWS = 65536
+_TCP_STATE_NAMES = {
+    "01": "established",
+    "02": "syn_sent",
+    "03": "syn_received",
+    "04": "fin_wait_1",
+    "05": "fin_wait_2",
+    "06": "time_wait",
+    "07": "close",
+    "08": "close_wait",
+    "09": "last_ack",
+    "0A": "listen",
+    "0B": "closing",
+    "0C": "new_syn_received",
+}
+_TRANSIENT_ACCEPT_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EINTR,
+        getattr(errno, "ECONNABORTED", None),
+        getattr(errno, "EPROTO", None),
+    )
+    if value is not None
+)
 
 _AIOHTTP_PATCH_LOCK = threading.Lock()
 _AIOHTTP_PROXY_URL = ""
@@ -66,6 +91,130 @@ _AIOHTTP_ORIGINAL_REQUEST = None
 
 class EnclaveEgressProxyError(RuntimeError):
     """The measured enclave proxy rejected or could not relay a request."""
+
+
+def _proc_tcp_address_is_loopback(value: str, *, ipv6: bool) -> bool:
+    normalized = str(value or "").strip().upper()
+    if ipv6:
+        return normalized == "00000000000000000000000001000000"
+    try:
+        encoded = bytes.fromhex(normalized)
+    except ValueError:
+        return False
+    return len(encoded) == 4 and encoded[-1] == 127
+
+
+def _loopback_tcp_state_counts() -> Optional[Tuple[Dict[str, int], int, int]]:
+    counts = {name: 0 for name in _TCP_STATE_NAMES.values()}
+    counts["other"] = 0
+    available = False
+    scanned_rows = 0
+    scanned_bytes = 0
+    truncated = 0
+    for path, ipv6 in (("/proc/net/tcp", False), ("/proc/net/tcp6", True)):
+        try:
+            with open(path, "r", encoding="ascii") as handle:
+                header = handle.readline(4096)
+                if header and not header.endswith("\n"):
+                    truncated = 1
+                    break
+                scanned_bytes += len(header.encode("ascii"))
+                while True:
+                    if (
+                        scanned_rows >= MAX_PROC_TCP_HEALTH_ROWS
+                        or scanned_bytes >= MAX_PROC_TCP_HEALTH_BYTES
+                    ):
+                        if handle.read(1):
+                            truncated = 1
+                        break
+                    remaining = MAX_PROC_TCP_HEALTH_BYTES - scanned_bytes
+                    line = handle.readline(min(4096, remaining + 1))
+                    if not line:
+                        break
+                    encoded_bytes = len(line.encode("ascii"))
+                    if encoded_bytes > remaining or not line.endswith("\n"):
+                        truncated = 1
+                        break
+                    scanned_bytes += encoded_bytes
+                    scanned_rows += 1
+                    fields = line.split()
+                    if len(fields) < 4:
+                        continue
+                    local_address = fields[1].rsplit(":", 1)[0]
+                    remote_address = fields[2].rsplit(":", 1)[0]
+                    if not (
+                        _proc_tcp_address_is_loopback(local_address, ipv6=ipv6)
+                        or _proc_tcp_address_is_loopback(remote_address, ipv6=ipv6)
+                    ):
+                        continue
+                    state = _TCP_STATE_NAMES.get(fields[3].upper(), "other")
+                    counts[state] += 1
+        except (OSError, UnicodeError):
+            continue
+        available = True
+        if truncated:
+            break
+    return (counts, scanned_rows, truncated) if available else None
+
+
+def _process_transport_resource_health() -> Dict[str, Any]:
+    result = {}  # type: Dict[str, Any]
+    try:
+        result["process_open_fd_count"] = sum(
+            str(name).isdigit() for name in os.listdir("/proc/self/fd")
+        )
+    except OSError:
+        pass
+    try:
+        import resource
+
+        soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if isinstance(soft_limit, int) and isinstance(hard_limit, int):
+            result["process_nofile_soft_limit"] = int(soft_limit)
+            result["process_nofile_hard_limit"] = int(hard_limit)
+    except (AttributeError, ImportError, OSError, ValueError):
+        pass
+    try:
+        with open(
+            "/proc/sys/net/ipv4/ip_local_port_range",
+            "r",
+            encoding="ascii",
+        ) as handle:
+            values = handle.read(128).split()
+        if len(values) == 2:
+            lower, upper = (int(value) for value in values)
+            if 0 < lower <= upper <= 65535:
+                result["ip_local_port_range_lower"] = lower
+                result["ip_local_port_range_upper"] = upper
+                result["ip_local_port_range_size"] = upper - lower + 1
+    except (OSError, UnicodeError, ValueError):
+        pass
+    tcp_health = _loopback_tcp_state_counts()
+    if tcp_health is not None:
+        tcp_counts, scanned_rows, truncated = tcp_health
+        result["loopback_tcp_state_counts"] = tcp_counts
+        result["loopback_tcp_total_count"] = sum(tcp_counts.values())
+        result["loopback_tcp_scanned_row_count"] = scanned_rows
+        result["loopback_tcp_scan_truncated"] = truncated
+    return result
+
+
+def _shutdown_and_close_socket(candidate: Any) -> bool:
+    """Best-effort full-duplex shutdown followed by a required close."""
+
+    if candidate is None:
+        return True
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        # A peer may already have half-closed. close() below is the resource
+        # release boundary; shutdown failure alone is not a leaked descriptor.
+        pass
+    try:
+        candidate.close()
+        return True
+    except Exception:
+        return False
 
 
 def _install_aiohttp_proxy(proxy_url: str) -> None:
@@ -448,18 +597,62 @@ class EnclaveEgressProxy:
         self._listener = None
         self._thread = None
         self._stop = threading.Event()
+        self._lifecycle_lock = threading.RLock()
         self._loopback_verified = False
         self._status_lock = threading.Lock()
         self._last_failure = None  # type: Optional[Dict[str, Any]]
         self._last_tunnel = None  # type: Optional[Dict[str, Any]]
+        self._accepted_tunnel_count = 0
+        self._active_tunnel_count = 0
+        self._completed_tunnel_count = 0
+        self._failed_tunnel_count = 0
+        self._socket_cleanup_failure_count = 0
 
     @property
     def running(self) -> bool:
         return bool(self._thread and self._thread.is_alive() and self._listener is not None)
 
     def start(self) -> Dict[str, Any]:
+        self.ensure_running()
+        return self.status()
+
+    def ensure_running(self) -> Dict[str, Any]:
+        """Recover a stopped accept loop before admitting another request."""
+
+        with self._lifecycle_lock:
+            if self.running:
+                # This is called on every ordinary provider request. Keep the
+                # readiness guard constant-time; the explicit health RPC owns
+                # bounded /proc resource enumeration.
+                return {
+                    "status": "running",
+                    "local_port": self.local_port,
+                    "loopback_listener_verified": self._loopback_verified,
+                }
+            prior_thread = self._thread
+            prior_listener = self._listener
+            self._stop.set()
+            if prior_listener is not None:
+                _shutdown_and_close_socket(prior_listener)
+            if prior_thread is not None and prior_thread is not threading.current_thread():
+                prior_thread.join(timeout=2.0)
+                if prior_thread.is_alive():
+                    raise EnclaveEgressProxyError(
+                        "stopped enclave egress accept loop did not terminate"
+                    )
+            self._listener = None
+            self._thread = None
+            self._stop = threading.Event()
+            self._start_locked()
+            return {
+                "status": "running",
+                "local_port": self.local_port,
+                "loopback_listener_verified": self._loopback_verified,
+            }
+
+    def _start_locked(self) -> None:
         if self.running:
-            return self.status()
+            return
         listener = None
         self._loopback_initializer()
         try:
@@ -481,19 +674,29 @@ class EnclaveEgressProxy:
             raise
         self._listener = listener
         self._loopback_verified = True
+        stop_event = self._stop
         self._thread = threading.Thread(
             target=self._accept_loop,
+            args=(listener, stop_event),
             name="gateway-enclave-egress-proxy",
             daemon=True,
         )
         self._thread.start()
         self._configure_environment()
-        return self.status()
 
     def status(self) -> Dict[str, Any]:
         with self._status_lock:
             last_failure = dict(self._last_failure or {})
             last_tunnel = dict(self._last_tunnel or {})
+            counters = {
+                "accepted_tunnel_count": self._accepted_tunnel_count,
+                "active_tunnel_count": self._active_tunnel_count,
+                "completed_tunnel_count": self._completed_tunnel_count,
+                "failed_tunnel_count": self._failed_tunnel_count,
+                "socket_cleanup_failure_count": (
+                    self._socket_cleanup_failure_count
+                ),
+            }
         result = {
             "status": "running" if self.running else "stopped",
             "local_port": self.local_port,
@@ -504,6 +707,8 @@ class EnclaveEgressProxy:
             "loopback_http_allowed": True,
             "loopback_listener_verified": self._loopback_verified,
             "tls_upstream_proxy_supported": True,
+            **counters,
+            **_process_transport_resource_health(),
         }
         if last_failure:
             result["last_failure"] = last_failure
@@ -512,14 +717,16 @@ class EnclaveEgressProxy:
         return result
 
     def stop(self) -> None:
-        self._stop.set()
-        if self._listener is not None:
-            try:
-                self._listener.close()
-            except Exception:
-                pass
-        self._listener = None
-        self._loopback_verified = False
+        with self._lifecycle_lock:
+            self._stop.set()
+            listener = self._listener
+            thread = self._thread
+            self._listener = None
+            self._loopback_verified = False
+            if listener is not None:
+                _shutdown_and_close_socket(listener)
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2.0)
 
     def _configure_environment(self) -> None:
         proxy_url = "http://127.0.0.1:%s" % self.local_port
@@ -531,20 +738,49 @@ class EnclaveEgressProxy:
         os.environ["no_proxy"] = "127.0.0.1,localhost"
         _install_aiohttp_proxy(proxy_url)
 
-    def _accept_loop(self) -> None:
-        while not self._stop.is_set():
+    def _accept_loop(self, listener: Any, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
             try:
-                connection, _address = self._listener.accept()
-            except Exception:
-                if not self._stop.is_set():
+                connection, _address = listener.accept()
+            except Exception as exc:
+                if stop_event.is_set():
+                    return
+                if int(getattr(exc, "errno", 0) or 0) in _TRANSIENT_ACCEPT_ERRNOS:
+                    # A signal or aborted pending connection does not invalidate
+                    # the measured listener; retry without rebuilding it.
+                    continue
+                if not stop_event.is_set():
+                    with self._status_lock:
+                        self._failed_tunnel_count += 1
+                        self._last_failure = {
+                            "stage": "accept_loop",
+                            "error_type": type(exc).__name__,
+                            "errno": int(getattr(exc, "errno", 0) or 0),
+                            "destination_ref": "unknown",
+                        }
                     print("[TEE] Egress proxy accept failed", flush=True)
                 return
-            threading.Thread(
-                target=self._handle_client,
-                args=(connection,),
-                name="gateway-enclave-egress-tunnel",
-                daemon=True,
-            ).start()
+            with self._status_lock:
+                self._accepted_tunnel_count += 1
+            try:
+                threading.Thread(
+                    target=self._handle_client,
+                    args=(connection,),
+                    name="gateway-enclave-egress-tunnel",
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                if not _shutdown_and_close_socket(connection):
+                    with self._status_lock:
+                        self._socket_cleanup_failure_count += 1
+                with self._status_lock:
+                    self._failed_tunnel_count += 1
+                    self._last_failure = {
+                        "stage": "start_handler",
+                        "error_type": type(exc).__name__,
+                        "errno": int(getattr(exc, "errno", 0) or 0),
+                        "destination_ref": "unknown",
+                    }
 
     def _open_parent_tunnel(
         self,
@@ -721,6 +957,9 @@ class EnclaveEgressProxy:
         destination_ref = "unknown"
         failure_stage = "read_client_headers"
         connect_response_started = False
+        failed = False
+        with self._status_lock:
+            self._active_tunnel_count += 1
         try:
             headers, remainder = _read_headers(client)
             failure_stage = "parse_connect_request"
@@ -789,6 +1028,7 @@ class EnclaveEgressProxy:
                     **relay,
                 }
         except Exception as exc:
+            failed = True
             with self._status_lock:
                 self._last_failure = {
                     "stage": failure_stage,
@@ -810,11 +1050,18 @@ class EnclaveEgressProxy:
             )
         finally:
             for candidate in (parent, client):
-                if candidate is not None:
-                    try:
-                        candidate.close()
-                    except Exception:
-                        pass
+                if not _shutdown_and_close_socket(candidate):
+                    with self._status_lock:
+                        self._socket_cleanup_failure_count += 1
+            with self._status_lock:
+                self._active_tunnel_count = max(
+                    0,
+                    self._active_tunnel_count - 1,
+                )
+                if failed:
+                    self._failed_tunnel_count += 1
+                else:
+                    self._completed_tunnel_count += 1
 
 
 def configured_proxy_ports() -> Tuple[int, int]:

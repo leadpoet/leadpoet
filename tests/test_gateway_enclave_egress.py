@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import errno
 import gzip
 import http.client
+import io
 import json
 from pathlib import Path
 import socket
@@ -2022,8 +2023,29 @@ def test_measured_assigned_proxy_raw_transport_scenario(monkeypatch):
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
         "production_http_connect_proxy_verified": True,
-        "job_scoped_proxy_generation_reuse_verified": True,
+        "request_scoped_connection_cleanup_verified": True,
+        "one_connect_per_request_verified": True,
+        "failure_recovery_on_fresh_tunnel_verified": True,
+        "classified_failure_health_verified": True,
+        "stable_process_resource_count_verified": True,
         "repeated_request_count": 8,
+        "attempt_count": 9,
+    }
+
+
+def test_company_fit_numeric_observation_rehearsal_scenario(monkeypatch):
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).parent / "restart_rehearsal")
+    )
+    from production_workflow_runner import (
+        _exercise_company_fit_numeric_observation_projection,
+    )
+
+    assert _exercise_company_fit_numeric_observation_projection() == {
+        "numeric_observation_with_web_evidence_matched": True,
+        "raw_observation_committed": True,
+        "explicit_false_remained_mismatch": True,
+        "malformed_range_decimal_negative_failed_closed": True,
     }
 
 
@@ -2044,8 +2066,13 @@ def test_measured_coordinator_raw_transport_scenario(monkeypatch):
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
         "production_http_connect_proxy_verified": True,
-        "job_scoped_proxy_generation_reuse_verified": True,
+        "request_scoped_connection_cleanup_verified": True,
+        "one_connect_per_request_verified": True,
+        "failure_recovery_on_fresh_tunnel_verified": True,
+        "classified_failure_health_verified": True,
+        "stable_process_resource_count_verified": True,
         "repeated_request_count": 8,
+        "attempt_count": 9,
         "raw_parent_tunnel_verified": True,
     }
 
@@ -2264,6 +2291,122 @@ def test_enclave_proxy_start_proves_loopback_listener_before_ready(monkeypatch):
         proxy.stop()
 
 
+def test_enclave_proxy_ensure_running_is_lightweight_and_restartable(monkeypatch):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        local_port = int(reservation.getsockname()[1])
+
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        local_port=local_port,
+        loopback_initializer=lambda: None,
+    )
+    monkeypatch.setattr(proxy, "_configure_environment", lambda: None)
+    proxy.start()
+    monkeypatch.setattr(
+        egress_proxy,
+        "_process_transport_resource_health",
+        lambda: (_ for _ in ()).throw(AssertionError("hot-path /proc scan")),
+    )
+    try:
+        assert proxy.ensure_running() == {
+            "status": "running",
+            "local_port": local_port,
+            "loopback_listener_verified": True,
+        }
+        proxy.stop()
+        assert proxy.running is False
+        # start() must replace the set stop event and re-prove the listener.
+        monkeypatch.setattr(
+            egress_proxy,
+            "_process_transport_resource_health",
+            lambda: {},
+        )
+        restarted = proxy.start()
+        assert restarted["status"] == "running"
+        assert proxy._stop.is_set() is False
+    finally:
+        proxy.stop()
+
+
+def test_enclave_proxy_accept_loop_retries_transient_error(monkeypatch):
+    stop_event = threading.Event()
+    client, accepted = socket.socketpair()
+    calls = []
+
+    class Listener:
+        def accept(self):
+            calls.append(True)
+            if len(calls) == 1:
+                raise OSError(errno.EINTR, "redacted")
+            stop_event.set()
+            return accepted, ("127.0.0.1", 1)
+
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+    handled = threading.Event()
+
+    def handle(connection):
+        connection.close()
+        handled.set()
+
+    monkeypatch.setattr(proxy, "_handle_client", handle)
+    proxy._accept_loop(Listener(), stop_event)
+    assert handled.wait(timeout=1)
+    status = proxy.status()
+    assert len(calls) == 2
+    assert status["accepted_tunnel_count"] == 1
+    assert status["failed_tunnel_count"] == 0
+    client.close()
+
+
+def test_enclave_proxy_handler_records_socket_cleanup_failures(monkeypatch):
+    class ClosingSocket:
+        def sendall(self, _payload):
+            pass
+
+        def shutdown(self, _how):
+            pass
+
+        def close(self):
+            raise OSError(errno.EBADF, "redacted")
+
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+    client = ClosingSocket()
+    parent = ClosingSocket()
+    monkeypatch.setattr(
+        egress_proxy,
+        "_read_headers",
+        lambda _connection: (b"headers", b""),
+    )
+    monkeypatch.setattr(
+        egress_proxy,
+        "_parse_proxy_request",
+        lambda _headers: {
+            "method": "CONNECT",
+            "host": "qplwoislplkcegvdmbim.supabase.co",
+            "port": 443,
+        },
+    )
+    monkeypatch.setattr(proxy, "_open_parent_tunnel", lambda *_args: parent)
+    monkeypatch.setattr(
+        egress_proxy,
+        "_relay_bidirectional",
+        lambda *_args, **_kwargs: {
+            "client_to_parent_bytes": 0,
+            "parent_to_client_bytes": 0,
+            "first_closed": "client",
+        },
+    )
+
+    proxy._handle_client(client)
+
+    status = proxy.status()
+    assert status["active_tunnel_count"] == 0
+    assert status["completed_tunnel_count"] == 1
+    assert status["failed_tunnel_count"] == 0
+    assert status["socket_cleanup_failure_count"] == 2
+
+
 def test_enclave_proxy_start_fails_closed_when_loopback_initialization_fails():
     def fail_loopback():
         raise EnclaveEgressProxyError("loopback unavailable")
@@ -2465,7 +2608,88 @@ def test_enclave_proxy_health_exposes_bounded_last_failure_stage():
         "destination_ref": "4877532cd3300944",
     }
     assert "supabase" not in str(status)
+    assert status["accepted_tunnel_count"] == 0
+    assert status["active_tunnel_count"] == 0
+    assert status["completed_tunnel_count"] == 0
+    assert status["failed_tunnel_count"] == 1
     client.close()
+
+
+def test_enclave_proxy_resource_health_exposes_only_bounded_integers(
+    monkeypatch,
+):
+    documents = {
+        "/proc/net/tcp": (
+            "sl local_address rem_address st\n"
+            "0: 0100007F:C350 0100007F:01BB 06\n"
+            "1: 0100000A:C351 0200000A:01BB 01\n"
+        ),
+        "/proc/net/tcp6": (
+            "sl local_address rem_address st\n"
+            "0: 00000000000000000000000001000000:C352 "
+            "00000000000000000000000001000000:01BB 01\n"
+        ),
+        "/proc/sys/net/ipv4/ip_local_port_range": "32768 60999\n",
+    }
+
+    def fake_open(path, *_args, **_kwargs):
+        if path not in documents:
+            raise OSError("unsupported test path")
+        return io.StringIO(documents[path])
+
+    monkeypatch.setattr(egress_proxy, "open", fake_open, raising=False)
+    monkeypatch.setattr(
+        egress_proxy.os,
+        "listdir",
+        lambda path: ["0", "1", "nondigit"] if path == "/proc/self/fd" else [],
+    )
+
+    health = egress_proxy._process_transport_resource_health()
+
+    assert health["process_open_fd_count"] == 2
+    assert health["ip_local_port_range_lower"] == 32768
+    assert health["ip_local_port_range_upper"] == 60999
+    assert health["ip_local_port_range_size"] == 28232
+    assert health["loopback_tcp_state_counts"]["time_wait"] == 1
+    assert health["loopback_tcp_state_counts"]["established"] == 1
+    assert health["loopback_tcp_total_count"] == 2
+    assert health["loopback_tcp_scanned_row_count"] == 3
+    assert health["loopback_tcp_scan_truncated"] == 0
+    scalar_values = [
+        value
+        for value in health.values()
+        if not isinstance(value, dict)
+    ]
+    assert all(isinstance(value, int) and not isinstance(value, bool) for value in scalar_values)
+    assert all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in health["loopback_tcp_state_counts"].values()
+    )
+    assert "0100007F" not in str(health)
+
+
+def test_enclave_proxy_tcp_health_scan_is_bounded_and_marks_truncation(
+    monkeypatch,
+):
+    document = (
+        "sl local_address rem_address st\n"
+        "0: 0100007F:C350 0100007F:01BB 06\n"
+        "1: 0100007F:C351 0100007F:01BB 06\n"
+    )
+
+    def fake_open(path, *_args, **_kwargs):
+        if path == "/proc/net/tcp":
+            return io.StringIO(document)
+        raise OSError("unsupported test path")
+
+    monkeypatch.setattr(egress_proxy, "open", fake_open, raising=False)
+    monkeypatch.setattr(egress_proxy, "MAX_PROC_TCP_HEALTH_ROWS", 1)
+
+    counts, scanned_rows, truncated = egress_proxy._loopback_tcp_state_counts()
+
+    assert counts["time_wait"] == 1
+    assert scanned_rows == 1
+    assert truncated == 1
 
 
 def test_enclave_proxy_does_not_inject_http_error_after_connect(monkeypatch):

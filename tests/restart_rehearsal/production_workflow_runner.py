@@ -8456,6 +8456,7 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     """Exercise the exact artifact transport across both production relays."""
 
     from datetime import timedelta
+    import errno
     import socket
     import ssl
 
@@ -8995,10 +8996,23 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
             return "TLSv1.3"
 
     class OrdinaryNetworkStream:
+        def __init__(self) -> None:
+            self.closed = False
+
         def get_extra_info(self, name: str) -> Any:
             if name != "ssl_object":
                 raise RuntimeError("unexpected network metadata request")
             return OrdinaryTLS()
+
+        def close(self) -> None:
+            self.closed = True
+
+    class OrdinaryExplicitTransport:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
 
     class OrdinaryResponseContext:
         def __init__(self, *, fail: bool) -> None:
@@ -9021,6 +9035,9 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
         def __init__(self) -> None:
             self.index = len(ordinary_clients)
             self.closed = False
+            self._leadpoet_explicit_http_transport = (
+                OrdinaryExplicitTransport()
+            )
             ordinary_clients.append(self)
 
         def stream(self, *_args: Any, **_kwargs: Any) -> OrdinaryResponseContext:
@@ -9125,11 +9142,111 @@ def _exercise_artifact_egress_sustained_readback() -> dict[str, Any]:
     }
 
 
-def _exercise_measured_upstream_proxy_transport(
+def _exercise_company_fit_numeric_observation_projection() -> dict[str, Any]:
+    from gateway.qualification.models import CompanyOutput, ICPPrompt
+    from qualification.scoring.company_fit_decision import (
+        COMPANY_FIT_MATCH,
+        COMPANY_FIT_MISMATCH,
+        COMPANY_FIT_UNAVAILABLE,
+    )
+    from qualification.scoring.lead_scorer import (
+        _decision_from_observed_employee_size,
+        _reverify_decision,
+    )
+
+    company = CompanyOutput(
+        company_name="Example Inc",
+        company_website="https://example.com",
+        company_linkedin="https://www.linkedin.com/company/example-inc",
+        industry="Software",
+        employee_count="11-50",
+        country="United States",
+        intent_signals=[
+            {
+                "description": "Example announced an active evaluation.",
+                "source": "news",
+                "url": "https://example.com/news/evaluation",
+                "date": "2026-08-15",
+                "snippet": "Example is evaluating the relevant product.",
+            }
+        ],
+    )
+    icp = ICPPrompt(
+        icp_id="rehearsal-numeric-employee-observation",
+        prompt="test",
+        industry="Software",
+        sub_industry="SaaS",
+        employee_count="11-50",
+        company_stage="",
+        geography="United States",
+        product_service="test",
+    )
+    verdict = {
+        "observed_company_name": "Example Inc",
+        "observed_company_website": "https://example.com",
+        "observed_company_linkedin": (
+            "https://www.linkedin.com/company/example-inc"
+        ),
+        "observed_employee_count": "50",
+        "employee_size_matches": True,
+        "employee_size_evidence_url": "https://example.com/about",
+        "employee_size_evidence_quote": "Example has fifty employees.",
+        "observed_industry": "Software",
+        "observed_subindustry": "SaaS",
+        "industry_matches": True,
+        "industry_evidence_url": "https://example.com/about",
+        "industry_evidence_quote": "Example builds software.",
+        "observed_hq_country": "United States",
+        "observed_hq_state": "",
+        "geography_matches": True,
+        "geography_evidence_url": "https://example.com/about",
+        "geography_evidence_quote": "Example is based in the United States.",
+        "reason": "verified production-shaped company fit",
+    }
+    matched = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=icp,
+        company=company,
+    )
+    provider_observations = dict(
+        (matched.details or {}).get("provider_observations") or {}
+    )
+    contradicted = dict(verdict)
+    contradicted["employee_size_matches"] = False
+    malformed = ("50.0", "1-10", -1)
+    if (
+        matched.decision != COMPANY_FIT_MATCH
+        or provider_observations.get("observed_employee_count") != "50"
+        or _decision_from_observed_employee_size(contradicted, icp)
+        != COMPANY_FIT_MISMATCH
+        or any(
+            _decision_from_observed_employee_size(
+                {
+                    "observed_employee_count": value,
+                    "employee_size_matches": True,
+                },
+                icp,
+            )
+            != COMPANY_FIT_UNAVAILABLE
+            for value in malformed
+        )
+    ):
+        raise RuntimeError("numeric employee observation contract failed")
+    return {
+        "numeric_observation_with_web_evidence_matched": True,
+        "raw_observation_committed": True,
+        "explicit_false_remained_mismatch": True,
+        "malformed_range_decimal_negative_failed_closed": True,
+    }
+
+
+def _exercise_measured_raw_provider_transport(
     *,
-    upstream_parent_tunnel_framing: str,
+    assigned_proxy: bool,
 ) -> dict[str, Any]:
-    """Exercise repeated production-shaped HTTP CONNECT proxy requests."""
+    """Exercise fresh direct or assigned raw tunnels through production seams."""
 
     from datetime import timedelta
     import socket
@@ -9152,7 +9269,19 @@ def _exercise_measured_upstream_proxy_transport(
     parent_destinations: list[tuple[str, int]] = []
     parent_threads: list[threading.Thread] = []
     request_count = 8
+    failed_attempt_ordinal = 4
+    attempt_count = request_count + 1
     upstream_proxy_port = 18080
+
+    def process_fd_count() -> int | None:
+        for path in ("/proc/self/fd", "/dev/fd"):
+            try:
+                return sum(name.isdigit() for name in os.listdir(path))
+            except OSError:
+                continue
+        return None
+
+    fd_count_before = process_fd_count()
 
     with tempfile.TemporaryDirectory(prefix="leadpoet-upstream-proxy-") as root:
         root_path = Path(root)
@@ -9204,12 +9333,12 @@ def _exercise_measured_upstream_proxy_transport(
         def serve_provider() -> None:
             try:
                 requests = observed.setdefault("provider_requests", [])
-                connection, _address = provider_listener.accept()
-                protected = provider_tls.wrap_socket(
-                    connection, server_side=True
-                )
-                try:
-                    for ordinal in range(request_count):
+                for _ordinal in range(request_count):
+                    connection, _address = provider_listener.accept()
+                    protected = provider_tls.wrap_socket(
+                        connection, server_side=True
+                    )
+                    try:
                         request = bytearray()
                         while b"\r\n\r\n" not in request:
                             chunk = protected.recv(4096)
@@ -9217,59 +9346,56 @@ def _exercise_measured_upstream_proxy_transport(
                                 raise RuntimeError("provider request ended early")
                             request.extend(chunk)
                         requests.append(bytes(request))
-                        connection_header = (
-                            b"close"
-                            if ordinal + 1 == request_count
-                            else b"keep-alive"
-                        )
                         protected.sendall(
                             b"HTTP/1.1 200 OK\r\n"
                             b"Content-Type: application/json\r\n"
                             b"Content-Length: 11\r\n"
-                            b"Connection: "
-                            + connection_header
-                            + b"\r\n\r\n"
+                            b"Connection: close\r\n\r\n"
                             b'{"ok":true}'
                         )
-                finally:
-                    protected.close()
+                    finally:
+                        protected.close()
             except Exception as exc:
                 errors.append(type(exc).__name__ + ":" + str(exc))
             finally:
                 provider_listener.close()
 
         def serve_upstream_proxy() -> None:
+            if not assigned_proxy:
+                upstream_listener.close()
+                return
             try:
                 proxy_requests = observed.setdefault("proxy_headers", [])
-                connection = None
-                provider = None
-                try:
-                    connection, _address = upstream_listener.accept()
-                    headers = bytearray()
-                    while b"\r\n\r\n" not in headers:
-                        chunk = connection.recv(4096)
-                        if not chunk:
-                            raise RuntimeError("proxy CONNECT ended early")
-                        headers.extend(chunk)
-                    proxy_requests.append(bytes(headers))
-                    connection.sendall(
-                        b"HTTP/1.1 200 Connection Established\r\n\r\n"
-                    )
-                    provider = socket.create_connection(
-                        provider_address, timeout=2
-                    )
-                    _relay_bidirectional(
-                        connection,
-                        provider,
-                        idle_timeout_seconds=5,
-                    )
-                finally:
-                    for candidate in (connection, provider):
-                        if candidate is not None:
-                            try:
-                                candidate.close()
-                            except Exception:
-                                pass
+                for _ordinal in range(request_count):
+                    connection = None
+                    provider = None
+                    try:
+                        connection, _address = upstream_listener.accept()
+                        headers = bytearray()
+                        while b"\r\n\r\n" not in headers:
+                            chunk = connection.recv(4096)
+                            if not chunk:
+                                raise RuntimeError("proxy CONNECT ended early")
+                            headers.extend(chunk)
+                        proxy_requests.append(bytes(headers))
+                        connection.sendall(
+                            b"HTTP/1.1 200 Connection Established\r\n\r\n"
+                        )
+                        provider = socket.create_connection(
+                            provider_address, timeout=2
+                        )
+                        _relay_bidirectional(
+                            connection,
+                            provider,
+                            idle_timeout_seconds=5,
+                        )
+                    finally:
+                        for candidate in (connection, provider):
+                            if candidate is not None:
+                                try:
+                                    candidate.close()
+                                except Exception:
+                                    pass
             except Exception as exc:
                 errors.append(type(exc).__name__ + ":" + str(exc))
             finally:
@@ -9315,7 +9441,10 @@ def _exercise_measured_upstream_proxy_transport(
 
         def connect_upstream(host: str, port: int) -> socket.socket:
             parent_destinations.append((host, port))
-            return socket.create_connection(upstream_address, timeout=2)
+            if len(parent_destinations) - 1 == failed_attempt_ordinal:
+                raise OSError(errno.EADDRNOTAVAIL, "local endpoint exhausted")
+            destination = upstream_address if assigned_proxy else provider_address
+            return socket.create_connection(destination, timeout=2)
 
         def socket_factory(
             family: int,
@@ -9358,9 +9487,9 @@ def _exercise_measured_upstream_proxy_transport(
             ca_bundle=str(certificate_path),
             allow_authenticated_complete_body_eof=True,
             parent_tunnel_framing="",
-            upstream_parent_tunnel_framing=upstream_parent_tunnel_framing,
+            upstream_parent_tunnel_framing="",
             reuse_direct_connections=False,
-            reuse_upstream_proxy_connections=True,
+            reuse_upstream_proxy_connections=False,
         )
         connection_scope = sha256_json(
             {
@@ -9379,30 +9508,51 @@ def _exercise_measured_upstream_proxy_transport(
             certifi.where = lambda: str(certificate_path)  # type: ignore[assignment]
             enclave_proxy.start()
             results = []
-            for ordinal in range(request_count):
-                results.append(
-                    transport(
-                        method="GET",
-                        url=f"https://example.com/search/{ordinal}",
-                        headers={"accept": "application/json"},
-                        body=b"",
-                        timeout_ms=5_000,
-                        upstream_proxy_url=(
-                            "http://rehearsal-worker:rehearsal-secret@"
-                            f"example.com:{upstream_proxy_port}"
-                        ),
-                        connection_scope=connection_scope,
+            successful_ordinals = []
+            expected_failures = []
+            midflight_health = None
+            for ordinal in range(attempt_count):
+                request_kwargs = {
+                    "method": "GET",
+                    "url": f"https://example.com/search/{ordinal}",
+                    "headers": {"accept": "application/json"},
+                    "body": b"",
+                    "timeout_ms": 5_000,
+                }
+                if assigned_proxy:
+                    request_kwargs.update(
+                        {
+                            "upstream_proxy_url": (
+                                "http://rehearsal-worker:rehearsal-secret@"
+                                f"example.com:{upstream_proxy_port}"
+                            ),
+                            "connection_scope": connection_scope,
+                        }
                     )
-                )
+                try:
+                    results.append(transport(**request_kwargs))
+                    successful_ordinals.append(ordinal)
+                except Exception as exc:
+                    if ordinal != failed_attempt_ordinal:
+                        raise
+                    expected_failures.append(type(exc).__name__)
+                if ordinal == failed_attempt_ordinal:
+                    midflight_health = transport.health()
         finally:
             certifi.where = original_certifi_where  # type: ignore[assignment]
             transport.close()
-            proxy_status = enclave_proxy.status()
+            for _index in range(100):
+                proxy_status = enclave_proxy.status()
+                if proxy_status.get("active_tunnel_count") == 0:
+                    break
+                time.sleep(0.01)
             enclave_proxy.stop()
             provider_thread.join(timeout=5)
             upstream_thread.join(timeout=5)
             for thread in parent_threads:
                 thread.join(timeout=5)
+
+    fd_count_after = process_fd_count()
 
     proxy_headers = [
         bytes(value) for value in (observed.get("proxy_headers") or [])
@@ -9413,32 +9563,61 @@ def _exercise_measured_upstream_proxy_transport(
     if (
         errors
         or len(results) != request_count
+        or len(expected_failures) != 1
         or any(result.get("http_status") != 200 for result in results)
         or any(result.get("body") != b'{"ok":true}' for result in results)
         or any(
             not str(result.get("tls_protocol") or "").startswith("TLSv1.")
             for result in results
         )
-        or parent_destinations != [("example.com", upstream_proxy_port)]
-        or len(proxy_headers) != 1
+        or parent_destinations
+        != [
+            (
+                "example.com",
+                upstream_proxy_port if assigned_proxy else 443,
+            )
+        ]
+        * attempt_count
+        or len(proxy_headers) != (request_count if assigned_proxy else 0)
         or any(
             not headers.startswith(b"CONNECT example.com:443 HTTP/1.1")
             for headers in proxy_headers
         )
-        or any(b"Proxy-Authorization: Basic " not in headers for headers in proxy_headers)
+        or any(
+            b"Proxy-Authorization: Basic " not in headers
+            for headers in proxy_headers
+        )
         or len(provider_requests) != request_count
         or any(
-            not request.startswith(f"GET /search/{ordinal} HTTP/".encode("ascii"))
-            for ordinal, request in enumerate(provider_requests)
+            not request.startswith(
+                f"GET /search/{ordinal} HTTP/".encode("ascii")
+            )
+            for ordinal, request in zip(successful_ordinals, provider_requests)
         )
-        or not transport.reuse_upstream_proxy_connections
-        or proxy_status.get("last_failure")
+        or transport.reuse_direct_connections
+        or transport.reuse_upstream_proxy_connections
+        or not isinstance(midflight_health, dict)
+        or midflight_health.get("direct_active_scope_count") != 0
+        or midflight_health.get("assigned_active_scope_count") != 0
+        or midflight_health.get("last_failure", {}).get("route")
+        != ("assigned_proxy" if assigned_proxy else "direct")
+        or midflight_health.get("last_failure", {}).get("failure_code")
+        != "proxy_failure"
+        or proxy_status.get("accepted_tunnel_count") != attempt_count
+        or proxy_status.get("active_tunnel_count") != 0
+        or proxy_status.get("completed_tunnel_count") != request_count
+        or proxy_status.get("failed_tunnel_count") != 1
+        or (
+            fd_count_before is not None
+            and fd_count_after is not None
+            and fd_count_after > fd_count_before + 1
+        )
         or provider_thread.is_alive()
         or upstream_thread.is_alive()
         or any(thread.is_alive() for thread in parent_threads)
     ):
         raise RuntimeError(
-            "measured upstream proxy transport contract failed: "
+            "measured raw provider transport contract failed: "
             + json.dumps(
                 {
                     "errors": errors,
@@ -9471,16 +9650,19 @@ def _exercise_measured_upstream_proxy_transport(
         "provider_first_close_verified": True,
         "bounded_cleanup_verified": True,
         "production_http_connect_proxy_verified": True,
-        "job_scoped_proxy_generation_reuse_verified": (
-            transport.reuse_upstream_proxy_connections
-        ),
+        "request_scoped_connection_cleanup_verified": True,
+        "one_connect_per_request_verified": True,
+        "failure_recovery_on_fresh_tunnel_verified": True,
+        "classified_failure_health_verified": True,
+        "stable_process_resource_count_verified": True,
         "repeated_request_count": request_count,
+        "attempt_count": attempt_count,
     }
 
 
 def _exercise_measured_assigned_proxy_raw_transport() -> dict[str, Any]:
-    evidence = _exercise_measured_upstream_proxy_transport(
-        upstream_parent_tunnel_framing="",
+    evidence = _exercise_measured_raw_provider_transport(
+        assigned_proxy=True,
     )
     if evidence.pop("parent_tunnel_framing"):
         raise RuntimeError("direct coordinator transport was not raw")
@@ -9491,8 +9673,8 @@ def _exercise_measured_assigned_proxy_raw_transport() -> dict[str, Any]:
 
 
 def _exercise_measured_coordinator_raw_transport() -> dict[str, Any]:
-    evidence = _exercise_measured_upstream_proxy_transport(
-        upstream_parent_tunnel_framing="",
+    evidence = _exercise_measured_raw_provider_transport(
+        assigned_proxy=False,
     )
     if evidence.pop("parent_tunnel_framing"):
         raise RuntimeError("measured coordinator raw transport was not exercised")
@@ -9514,6 +9696,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "rebenchmark-sandbox-retry": _exercise_rebenchmark_sandbox_retry_contract,
     "rebenchmark-provider-transport-evidence": (
         _exercise_rebenchmark_provider_transport_evidence
+    ),
+    "company-fit-numeric-observation-projection": (
+        _exercise_company_fit_numeric_observation_projection
     ),
     "measured-assigned-proxy-raw-transport": (
         _exercise_measured_assigned_proxy_raw_transport
@@ -10198,6 +10383,28 @@ def main() -> int:
             ).get("baseline_pause_checkpoint_resume_complete")
             is True
         ),
+        "company_fit_numeric_observation_projection_verified": (
+            behavior_evidence.get(
+                "company-fit-numeric-observation-projection",
+                {},
+            ).get("numeric_observation_with_web_evidence_matched")
+            is True
+            and behavior_evidence.get(
+                "company-fit-numeric-observation-projection",
+                {},
+            ).get("raw_observation_committed")
+            is True
+            and behavior_evidence.get(
+                "company-fit-numeric-observation-projection",
+                {},
+            ).get("explicit_false_remained_mismatch")
+            is True
+            and behavior_evidence.get(
+                "company-fit-numeric-observation-projection",
+                {},
+            ).get("malformed_range_decimal_negative_failed_closed")
+            is True
+        ),
         "measured_assigned_proxy_raw_transport_verified": (
             behavior_evidence.get(
                 "measured-assigned-proxy-raw-transport",
@@ -10237,13 +10444,38 @@ def main() -> int:
             and behavior_evidence.get(
                 "measured-assigned-proxy-raw-transport",
                 {},
-            ).get("job_scoped_proxy_generation_reuse_verified")
+            ).get("request_scoped_connection_cleanup_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-assigned-proxy-raw-transport",
+                {},
+            ).get("one_connect_per_request_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-assigned-proxy-raw-transport",
+                {},
+            ).get("failure_recovery_on_fresh_tunnel_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-assigned-proxy-raw-transport",
+                {},
+            ).get("classified_failure_health_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-assigned-proxy-raw-transport",
+                {},
+            ).get("stable_process_resource_count_verified")
             is True
             and behavior_evidence.get(
                 "measured-assigned-proxy-raw-transport",
                 {},
             ).get("repeated_request_count")
             == 8
+            and behavior_evidence.get(
+                "measured-assigned-proxy-raw-transport",
+                {},
+            ).get("attempt_count")
+            == 9
         ),
         "measured_coordinator_raw_transport_verified": (
             behavior_evidence.get(
@@ -10276,6 +10508,41 @@ def main() -> int:
                 {},
             ).get("bounded_cleanup_verified")
             is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("request_scoped_connection_cleanup_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("one_connect_per_request_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("failure_recovery_on_fresh_tunnel_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("classified_failure_health_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("stable_process_resource_count_verified")
+            is True
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("repeated_request_count")
+            == 8
+            and behavior_evidence.get(
+                "measured-coordinator-raw-transport",
+                {},
+            ).get("attempt_count")
+            == 9
         ),
         "artifact_egress_sustained_readback_verified": (
             behavior_evidence.get(

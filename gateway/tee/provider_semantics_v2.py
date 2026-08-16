@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -29,7 +29,11 @@ from gateway.research_lab.provider_evidence_proxy import (
 from gateway.tee.provider_broker_v2 import (
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
+    _exception_errno,
+    _failure_code,
+    _local_resource_failure,
     _nonsecret_headers,
+    _safe_error_type,
     _sanitized_path,
 )
 from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
@@ -87,6 +91,13 @@ _OUTCOME_APPEND_CONFLICT_ATTEMPTS = 64
 _OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS = 0.01
 _OUTCOME_CONFLICT_BACKOFF_MAX_SECONDS = 0.25
 _OUTCOME_CHECKPOINT_BATCH_MAX = 32
+_SEMANTICS_HEALTH_STAGES = (
+    "provider_transport",
+    "provider_cache_lookup",
+    "provider_cache_write",
+    "provider_outcome_restore",
+    "provider_outcome_append",
+)
 TREE_PROVIDER_CALL_CAP_HEADER = "X-Research-Lab-Tree-Provider-Call-Cap"
 _LEGACY_PROVIDER_IDS = {
     "openrouter": "or",
@@ -209,15 +220,22 @@ class ProviderSemanticsAuthorityV2:
         self._outcome_checkpoint_hash = ""
         self._outcome_checkpoint_day = ""
         self._outcome_restore_artifacts: set[str] = set()
+        self._stage_health_lock = threading.RLock()
+        self._stage_counts = {
+            stage: {"started": 0, "succeeded": 0, "failed": 0}
+            for stage in _SEMANTICS_HEALTH_STAGES
+        }
+        self._last_stage_failure = None  # type: Optional[Dict[str, Any]]
         if outcome_ledger is not None:
             self._outcome_ledger = outcome_ledger
         elif outcome_store is not None:
             utc_day = str(clock() or "")[:10]
-            restored = outcome_store.load_latest(
-                utc_day=utc_day,
-                job_id="provider-outcome-restore-%s" % utc_day,
-                purpose="research_lab.provider_outcome_state.v2",
-            )
+            with self._track_stage("provider_outcome_restore"):
+                restored = outcome_store.load_latest(
+                    utc_day=utc_day,
+                    job_id="provider-outcome-restore-%s" % utc_day,
+                    purpose="research_lab.provider_outcome_state.v2",
+                )
             self._outcome_restore_artifacts = set(
                 str(item) for item in restored.get("evidence_artifact_hashes") or ()
             )
@@ -241,10 +259,44 @@ class ProviderSemanticsAuthorityV2:
         self._lock = threading.RLock()
         self._semantic_owner_state = threading.local()
 
+    @contextmanager
+    def _track_stage(self, stage: str):
+        if stage not in _SEMANTICS_HEALTH_STAGES:
+            raise ProviderSemanticsV2Error(
+                "provider semantics health stage is invalid"
+            )
+        with self._stage_health_lock:
+            self._stage_counts[stage]["started"] += 1
+        try:
+            yield
+        except BaseException as exc:
+            resource_errno, resource_kind = _local_resource_failure(exc)
+            failure = {
+                "stage": stage,
+                "failure_code": _failure_code(exc),
+                "error_type": _safe_error_type(exc),
+                "errno": resource_errno or _exception_errno(exc),
+            }
+            if resource_kind:
+                failure["local_resource_kind"] = resource_kind
+            with self._stage_health_lock:
+                self._stage_counts[stage]["failed"] += 1
+                self._last_stage_failure = failure
+            raise
+        else:
+            with self._stage_health_lock:
+                self._stage_counts[stage]["succeeded"] += 1
+
     def health(self) -> Dict[str, Any]:
         broker = self._broker.health()
+        with self._stage_health_lock:
+            stage_counts = {
+                stage: dict(self._stage_counts[stage])
+                for stage in _SEMANTICS_HEALTH_STAGES
+            }
+            last_stage_failure = dict(self._last_stage_failure or {})
         with self._lock:
-            return {
+            result = {
                 "schema_version": "leadpoet.provider_semantics.v2",
                 "status": "ready" if broker.get("status") == "ready" else "provisioning",
                 "broker_registry_hash": broker.get("registry_hash"),
@@ -252,7 +304,11 @@ class ProviderSemanticsAuthorityV2:
                 "memory_cache_entry_count": len(self._cache),
                 "inflight_count": len(self._inflight),
                 "cost_scope_count": len(self._cost_ledgers),
+                "stage_counters": stage_counts,
             }
+        if last_stage_failure:
+            result["last_stage_failure"] = last_stage_failure
+        return result
 
     def execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
         try:
@@ -484,7 +540,7 @@ class ProviderSemanticsAuthorityV2:
                     "evidence_artifact_hashes": [],
                 }
                 if bypass_cache
-                else self._cache_store.load(
+                else self._load_provider_cache(
                     utc_day=day,
                     request_fingerprint=fingerprint,
                     job_id=normalized["job_id"],
@@ -663,6 +719,10 @@ class ProviderSemanticsAuthorityV2:
         finally:
             del self._semantic_owner_state.owner
 
+    def _load_provider_cache(self, **kwargs: Any) -> Mapping[str, Any]:
+        with self._track_stage("provider_cache_lookup"):
+            return self._cache_store.load(**kwargs)
+
     def provider_outcome_snapshot(self) -> Dict[str, Any]:
         return self._outcome_ledger.snapshot()
 
@@ -821,7 +881,8 @@ class ProviderSemanticsAuthorityV2:
                         remaining.append(item)
                 self._outcome_pending = remaining
             try:
-                result = self._persist_provider_outcome_batch(batch)
+                with self._track_stage("provider_outcome_append"):
+                    result = self._persist_provider_outcome_batch(batch)
             except BaseException as exc:
                 # One exhausted measured persistence attempt is systemic for
                 # the shared daily lineage. Fail every queued caller together
@@ -1025,7 +1086,8 @@ class ProviderSemanticsAuthorityV2:
                     for name, value in request["headers"].items()
                     if name.lower() not in {"content-length", "transfer-encoding"}
                 }
-        result = dict(self._broker.execute(request))
+        with self._track_stage("provider_transport"):
+            result = dict(self._broker.execute(request))
         broker_artifacts = list(result.get("evidence_artifact_hashes") or [])
         additional_attempts = list(lookup_attempts)
         evidence_artifacts = set(lookup_artifacts) | set(broker_artifacts)
@@ -1090,12 +1152,13 @@ class ProviderSemanticsAuthorityV2:
                     result=result,
                     source_artifacts=sorted(evidence_artifacts),
                 )
-                persisted = self._cache_store.persist_recorded(
-                    terminal,
-                    utc_day=day,
-                    job_id=normalized["job_id"],
-                    purpose=normalized["purpose"],
-                )
+                with self._track_stage("provider_cache_write"):
+                    persisted = self._cache_store.persist_recorded(
+                        terminal,
+                        utc_day=day,
+                        job_id=normalized["job_id"],
+                        purpose=normalized["purpose"],
+                    )
                 additional_attempts.extend(persisted["transport_attempts"])
                 evidence_artifacts.update(persisted["evidence_artifact_hashes"])
                 with self._lock:
@@ -1397,8 +1460,9 @@ class ProviderSemanticsAuthorityV2:
                     retry_ordinal * len(credential_routes) + credential_ordinal
                 )
                 try:
-                    result = dict(
-                        self._broker.execute(
+                    with self._track_stage("provider_transport"):
+                        result = dict(
+                            self._broker.execute(
                             {
                                 "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
                                 "logical_operation_id": "%s:cost-reconcile:%s"
@@ -1422,8 +1486,8 @@ class ProviderSemanticsAuthorityV2:
                                     route
                                 ],
                             }
+                            )
                         )
-                    )
                 except Exception as exc:
                     logger.warning(
                         "provider_semantics_openrouter_reconcile_attempt_failed "

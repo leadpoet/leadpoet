@@ -31,6 +31,10 @@ MODEL_MANIFEST_HASH = "sha256:" + "9" * 64
 OTHER_MODEL_MANIFEST_HASH = "sha256:" + "a" * 64
 
 
+def _changed_employee_size_decision_source(*_args, **_kwargs):
+    return "mismatch"
+
+
 def _s3_stub(doc):
     body = mock.Mock()
     body.read.return_value = json.dumps(doc).encode()
@@ -152,6 +156,44 @@ def test_scoring_contract_hash_tracks_model_sandbox_import_contract(monkeypatch)
     sw._baseline_scoring_contract_hash.cache_clear()
     changed = sw._baseline_scoring_contract_hash()
     sw._baseline_scoring_contract_hash.cache_clear()
+
+    assert changed != original
+
+
+def test_scoring_contract_hash_tracks_employee_scorer_source(monkeypatch):
+    from qualification.scoring import lead_scorer
+
+    sw._baseline_scoring_contract_hash.cache_clear()
+    original = sw._baseline_scoring_contract_hash()
+    monkeypatch.setattr(
+        lead_scorer,
+        "_decision_from_observed_employee_size",
+        _changed_employee_size_decision_source,
+    )
+    sw._baseline_scoring_contract_hash.cache_clear()
+    try:
+        changed = sw._baseline_scoring_contract_hash()
+    finally:
+        sw._baseline_scoring_contract_hash.cache_clear()
+
+    assert changed != original
+
+
+def test_scoring_contract_hash_tracks_employee_bucket_values(monkeypatch):
+    from research_lab import employee_buckets
+
+    sw._baseline_scoring_contract_hash.cache_clear()
+    original = sw._baseline_scoring_contract_hash()
+    monkeypatch.setattr(
+        employee_buckets,
+        "_OBSERVED_EMPLOYEE_COUNT_INTERVALS",
+        (*employee_buckets._OBSERVED_EMPLOYEE_COUNT_INTERVALS[:-1], (9999, "5,001-10,000")),
+    )
+    sw._baseline_scoring_contract_hash.cache_clear()
+    try:
+        changed = sw._baseline_scoring_contract_hash()
+    finally:
+        sw._baseline_scoring_contract_hash.cache_clear()
 
     assert changed != original
 
@@ -502,6 +544,16 @@ def test_active_checkpoint_round_trip_preserves_runtime_provenance():
     assert len(attempts) == 1
     assert cross_release_loaded == loaded
     assert changed_contract_loaded == []
+    prior_contract_doc = {
+        **doc,
+        "scoring_contract_hash": "sha256:" + "e" * 64,
+    }
+    assert _load(
+        prior_contract_doc,
+        gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+        repo_git_sha=MODEL_REPO_SHA,
+        manifest_hash=MODEL_MANIFEST_HASH,
+    ) == []
 
 
 def test_unresolved_attempt_ledger_round_trips_across_release():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import gzip
 import socket
 import ssl
@@ -26,10 +27,14 @@ from gateway.tee.provider_broker_v2 import (
     MEASURED_TRANSPORT_REQUEST_HEADERS,
     PROVIDER_RPC_RESPONSE_RESERVE_BYTES,
     PROVIDER_BROKER_SCHEMA_VERSION,
+    PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION,
     ProviderBrokerV2,
     ProviderBrokerV2Error,
+    ProviderTransportCleanupError,
     _authenticated_body_is_complete_after_stream_error,
     _extract_tls_metadata,
+    _failure_code,
+    _local_resource_failure,
     _provider_rpc_response_body_limit,
     credential_reference_hash,
     credential_value_hash,
@@ -90,6 +95,7 @@ def test_tls_metadata_supports_python39_positional_only_peer_certificate():
 
 def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch):
     client_options = []
+    transport_options = []
 
     class TLS:
         def getpeercert(self, binary_form=False, /):
@@ -102,10 +108,14 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
     class Stream:
         def __init__(self):
             self.ssl_object = TLS()
+            self.closed = False
 
         def get_extra_info(self, name):
             assert name == "ssl_object"
             return self.ssl_object
+
+        def close(self):
+            self.closed = True
 
     class Response:
         def __init__(self):
@@ -148,11 +158,21 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         def stream(self, *_args, **_kwargs):
             return ResponseContext()
 
+    class HTTPTransport:
+        def __init__(self, **kwargs):
+            self.options = dict(kwargs)
+            self.closed = False
+            transport_options.append(self.options)
+
+        def close(self):
+            self.closed = True
+
     monkeypatch.setitem(
         sys.modules,
         "httpx",
         SimpleNamespace(
             Client=Client,
+            HTTPTransport=HTTPTransport,
             Limits=lambda **kwargs: kwargs,
             Proxy=lambda *_args, **_kwargs: object(),
         ),
@@ -178,11 +198,17 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         "tls_peer_chain_hash": sha256_bytes(b"peer-certificate"),
         "tls_protocol": "TLSv1.3",
     }
-    assert client_options[-1]["http2"] is True
-    assert client_options[-1]["http1"] is True
-    assert client_options[-1]["limits"] == {
+    assert set(client_options[-1]) == {
+        "transport",
+        "trust_env",
+        "cookies",
+        "follow_redirects",
+    }
+    assert transport_options[-1]["http2"] is True
+    assert transport_options[-1]["http1"] is True
+    assert transport_options[-1]["limits"] == {
         "max_connections": 64,
-        "max_keepalive_connections": 32,
+        "max_keepalive_connections": 0,
         "keepalive_expiry": DIRECT_PROVIDER_KEEPALIVE_EXPIRY_SECONDS,
     }
 
@@ -210,8 +236,8 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         allow_http2=False,
     )
     assert http1_result["body"] == b'{"ok":true}'
-    assert client_options[-1]["http1"] is True
-    assert client_options[-1]["http2"] is False
+    assert transport_options[-1]["http1"] is True
+    assert transport_options[-1]["http2"] is False
 
     with pytest.raises(ProviderBrokerV2Error, match="response limit"):
         HTTPXProviderTransport()(
@@ -238,9 +264,15 @@ def test_httpx_transport_preserves_complete_response_when_stream_cleanup_fails()
             return "TLSv1.3"
 
     class NetworkStream:
+        def __init__(self):
+            self.closed = False
+
         def get_extra_info(self, name):
             assert name == "ssl_object"
             return TLS()
+
+        def close(self):
+            self.closed = True
 
     class CloseFailsAfterCompleteBody(httpx.SyncByteStream):
         def __iter__(self):
@@ -249,11 +281,12 @@ def test_httpx_transport_preserves_complete_response_when_stream_cleanup_fails()
         def close(self):
             raise EOFError("TLS close_notify was not available")
 
+    network_stream = NetworkStream()
     response = httpx.Response(
         200,
         headers={"content-type": "application/json"},
         stream=CloseFailsAfterCompleteBody(),
-        extensions={"network_stream": NetworkStream()},
+        extensions={"network_stream": network_stream},
         request=httpx.Request("GET", "https://example.com/artifact"),
     )
 
@@ -281,6 +314,7 @@ def test_httpx_transport_preserves_complete_response_when_stream_cleanup_fails()
     assert result["http_status"] == 200
     assert result["body"] == b'{"ok":true}'
     assert result["tls_peer_chain_hash"] == sha256_bytes(b"peer-certificate")
+    assert network_stream.closed is True
     assert result["tls_protocol"] == "TLSv1.3"
 
 
@@ -344,10 +378,213 @@ def test_response_cleanup_failure_force_closes_underlying_socket():
                 max_response_bytes=1024,
             )
             assert result["body"] == b'{"ok":true}'
+            peer_socket.settimeout(0.2)
+            assert peer_socket.recv(1) == b""
             assert local_socket.fileno() == -1
         finally:
             local_socket.close()
             peer_socket.close()
+
+
+def test_request_scoped_direct_repeated_cleanup_failures_release_network(
+    monkeypatch,
+):
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    transport = HTTPXProviderTransport()
+    client_options = []
+    client_close_checks = []
+    local_sockets = []
+    peer_sockets = []
+
+    class Client:
+        def __init__(self, **options):
+            client_options.append(dict(options))
+            self.local_socket, peer_socket = socket.socketpair()
+            local_sockets.append(self.local_socket)
+            peer_sockets.append(peer_socket)
+
+            class NetworkStream:
+                def get_extra_info(inner_self, name):
+                    if name == "ssl_object":
+                        return TLS()
+                    if name == "socket":
+                        return self.local_socket
+                    return None
+
+                def close(inner_self):
+                    raise EOFError("relay close acknowledgement was lost")
+
+            class CloseFailsAfterCompleteBody(httpx.SyncByteStream):
+                def __iter__(inner_self):
+                    yield b'{"ok":true}'
+
+                def close(inner_self):
+                    raise EOFError("TLS close_notify was not available")
+
+            self.response = httpx.Response(
+                200,
+                headers={"content-length": "11"},
+                stream=CloseFailsAfterCompleteBody(),
+                extensions={"network_stream": NetworkStream()},
+                request=httpx.Request("GET", "https://example.com/data"),
+            )
+
+        def stream(self, *_args, **_kwargs):
+            response = self.response
+
+            class ResponseContext:
+                def __enter__(inner_self):
+                    return response
+
+                def __exit__(inner_self, *_args):
+                    response.close()
+
+            return ResponseContext()
+
+        def close(self):
+            # The response wrapper must force-close the only request-scoped
+            # network stream before the pool/client cleanup boundary runs.
+            assert self.local_socket.fileno() == -1
+            client_close_checks.append(True)
+            raise EOFError("client cleanup also lost close_notify")
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    try:
+        for _ in range(8):
+            result = transport(
+                method="GET",
+                url="https://example.com/data",
+                headers={},
+                body=b"",
+                timeout_ms=1000,
+            )
+            assert result["body"] == b'{"ok":true}'
+            peer_sockets[-1].settimeout(0.2)
+            assert peer_sockets[-1].recv(1) == b""
+    finally:
+        for local_socket in local_sockets:
+            local_socket.close()
+        for peer_socket in peer_sockets:
+            peer_socket.close()
+
+    assert len(client_options) == 8
+    assert all(
+        options["transport"]._pool._max_keepalive_connections == 0
+        for options in client_options
+    )
+    assert transport.health()["request_counters"]["direct"] == {
+        "started": 8,
+        "succeeded": 8,
+        "failed": 0,
+    }
+    assert client_close_checks == [True] * 8
+    assert transport.health()["cleanup_counters"]["direct"] == {
+        "attempted": 8,
+        "succeeded": 8,
+        "client_close_failed": 8,
+        "transport_close_failed": 0,
+    }
+
+
+def test_request_scoped_cleanup_failure_preserves_primary_body_error(monkeypatch):
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class NetworkStream:
+        def __init__(self):
+            self.closed = False
+
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+        def close(self):
+            self.closed = True
+
+    network_stream = NetworkStream()
+
+    class Response:
+        status_code = 200
+        headers = {"content-length": "12"}
+        extensions = {"network_stream": network_stream}
+
+        def iter_bytes(self):
+            yield b"partial"
+            raise RuntimeError("sensitive primary body failure")
+
+    class ResponseContext:
+        def __enter__(self):
+            return Response()
+
+        def __exit__(self, *_args):
+            return False
+
+    class ExplicitTransport:
+        def close(self):
+            raise OSError(errno.ENOBUFS, "sensitive explicit-pool failure")
+
+    class Client:
+        def __init__(self):
+            self._leadpoet_explicit_http_transport = ExplicitTransport()
+
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+        def close(self):
+            raise EOFError("sensitive client-close failure")
+
+    transport = HTTPXProviderTransport()
+    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: Client())
+
+    with pytest.raises(ProviderTransportCleanupError) as captured:
+        transport(
+            method="GET",
+            url="https://example.com/data",
+            headers={},
+            body=b"",
+            timeout_ms=1000,
+        )
+
+    error = captured.value
+    assert error.failure_stage == "client_transport_cleanup"
+    assert error.primary_error_type == "RuntimeError"
+    assert error.cleanup_error_type == "OSError"
+    assert isinstance(error.__cause__, RuntimeError)
+    assert network_stream.closed is True
+    health = transport.health()
+    assert health["direct_active_scope_count"] == 0
+    assert health["direct_retired_scope_count"] == 0
+    assert health["direct_active_lease_count"] == 0
+    assert health["direct_retired_lease_count"] == 0
+    assert health["cleanup_counters"]["direct"] == {
+        "attempted": 1,
+        "succeeded": 0,
+        "client_close_failed": 1,
+        "transport_close_failed": 1,
+    }
+    assert health["last_failure"] == {
+        "route": "direct",
+        "stage": "client_transport_cleanup",
+        "failure_code": "proxy_failure",
+        "error_type": "ProviderTransportCleanupError",
+        "errno": errno.ENOBUFS,
+        "local_resource_kind": "socket_buffer_exhausted",
+        "primary_error_type": "RuntimeError",
+        "cleanup_error_type": "OSError",
+    }
+    assert "sensitive" not in str(health)
 
 
 def test_httpx_transport_does_not_hide_incomplete_response_body():
@@ -360,9 +597,15 @@ def test_httpx_transport_does_not_hide_incomplete_response_body():
             return "TLSv1.3"
 
     class NetworkStream:
+        def __init__(self):
+            self.closed = False
+
         def get_extra_info(self, name):
             assert name == "ssl_object"
             return TLS()
+
+        def close(self):
+            self.closed = True
 
     class BodyReadFails(httpx.SyncByteStream):
         def __iter__(self):
@@ -1063,6 +1306,9 @@ def test_httpx_transport_enforces_artifact_specific_large_response_ceiling(
             assert name == "ssl_object"
             return TLS()
 
+        def close(self):
+            pass
+
     chunk = b"x" * (1024 * 1024)
     chunk_count = (MAX_RESPONSE_BODY_BYTES // len(chunk)) + 1
 
@@ -1098,11 +1344,19 @@ def test_httpx_transport_enforces_artifact_specific_large_response_ceiling(
         def stream(self, *_args, **_kwargs):
             return ResponseContext()
 
+    class HTTPTransport:
+        def __init__(self, **_kwargs):
+            pass
+
+        def close(self):
+            pass
+
     monkeypatch.setitem(
         sys.modules,
         "httpx",
         SimpleNamespace(
             Client=Client,
+            HTTPTransport=HTTPTransport,
             Limits=lambda **kwargs: kwargs,
             Proxy=lambda *_args, **_kwargs: object(),
         ),
@@ -1156,6 +1410,9 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
             assert name == "ssl_object"
             return TLS()
 
+        def close(self):
+            pass
+
     class Response:
         status_code = 200
         headers = {"content-type": "application/json"}
@@ -1185,6 +1442,14 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
         def close(self):
             self.closed = True
 
+    class HTTPTransport:
+        def __init__(self, **options):
+            self.options = dict(options)
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
     def proxy(url, **options):
         value = {"url": url, **options}
         proxies.append(value)
@@ -1195,6 +1460,7 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
         "httpx",
         SimpleNamespace(
             Client=Client,
+            HTTPTransport=HTTPTransport,
             Limits=lambda **kwargs: kwargs,
             Proxy=proxy,
         ),
@@ -1251,9 +1517,24 @@ def test_httpx_transport_reuses_only_credential_free_direct_client(monkeypatch):
     assert len(clients) == 3
     assert clients[1].closed is True
     assert clients[2].closed is True
-    assert clients[0].options["limits"]["max_keepalive_connections"] == 32
-    assert clients[1].options["limits"]["max_keepalive_connections"] == 0
-    assert clients[2].options["limits"]["max_keepalive_connections"] == 0
+    assert (
+        clients[0].options["transport"].options["limits"][
+            "max_keepalive_connections"
+        ]
+        == 32
+    )
+    assert (
+        clients[1].options["transport"].options["limits"][
+            "max_keepalive_connections"
+        ]
+        == 0
+    )
+    assert (
+        clients[2].options["transport"].options["limits"][
+            "max_keepalive_connections"
+        ]
+        == 0
+    )
     expected_proxy_header = base64.b64encode(upstream_proxy.encode("utf-8")).decode(
         "ascii"
     )
@@ -1379,11 +1660,19 @@ def test_httpx_transport_retires_failed_assigned_proxy_generation(monkeypatch):
 def test_httpx_transport_can_frame_upstream_without_framing_direct(monkeypatch):
     proxies = []
 
+    class Client:
+        def __init__(self, **options):
+            self.options = dict(options)
+
+        def __getitem__(self, name):
+            return self.options[name]
+
     monkeypatch.setitem(
         sys.modules,
         "httpx",
         SimpleNamespace(
-            Client=lambda **options: options,
+            Client=Client,
+            HTTPTransport=lambda **options: options,
             Limits=lambda **options: options,
             Proxy=lambda url, **options: proxies.append(
                 {"url": url, **options}
@@ -1402,6 +1691,9 @@ def test_httpx_transport_can_frame_upstream_without_framing_direct(monkeypatch):
     )
 
     direct_client = transport._new_client()
+    retained_direct_client = transport._new_client(
+        retain_direct_connections=True,
+    )
     request_scoped_proxy_client = transport._new_client(
         proxy_headers={"X-Leadpoet-Upstream-Proxy-B64": "opaque"}
     )
@@ -1411,6 +1703,7 @@ def test_httpx_transport_can_frame_upstream_without_framing_direct(monkeypatch):
     )
 
     assert proxies == [
+        {"url": "http://127.0.0.1:18080", "headers": None},
         {"url": "http://127.0.0.1:18080", "headers": None},
         {
             "url": "http://127.0.0.1:18080",
@@ -1427,12 +1720,143 @@ def test_httpx_transport_can_frame_upstream_without_framing_direct(monkeypatch):
             },
         },
     ]
-    assert direct_client["limits"]["max_keepalive_connections"] == 32
     assert (
-        request_scoped_proxy_client["limits"]["max_keepalive_connections"]
+        direct_client["transport"]["limits"]["max_keepalive_connections"]
         == 0
     )
-    assert retained_proxy_client["limits"]["max_keepalive_connections"] == 32
+    assert (
+        retained_direct_client["transport"]["limits"][
+            "max_keepalive_connections"
+        ]
+        == 32
+    )
+    assert (
+        request_scoped_proxy_client["transport"]["limits"][
+            "max_keepalive_connections"
+        ]
+        == 0
+    )
+    assert (
+        retained_proxy_client["transport"]["limits"][
+            "max_keepalive_connections"
+        ]
+        == 32
+    )
+
+
+@pytest.mark.parametrize(
+    ("error_number", "message", "expected_kind"),
+    (
+        (errno.EADDRNOTAVAIL, "redacted", "ephemeral_port_exhausted"),
+        (errno.EMFILE, "redacted", "process_file_descriptor_exhausted"),
+        (errno.ENOBUFS, "redacted", "socket_buffer_exhausted"),
+        (errno.ENOMEM, "redacted", "memory_exhausted"),
+    ),
+)
+def test_httpx_transport_classifies_chained_local_resource_failures(
+    error_number,
+    message,
+    expected_kind,
+):
+    underlying = OSError(error_number, message)
+    try:
+        raise underlying
+    except OSError as exc:
+        wrapped = httpx.ConnectError("provider request failed")
+        wrapped.__cause__ = exc
+
+    assert _failure_code(wrapped) == "proxy_failure"
+    assert _local_resource_failure(wrapped) == (error_number, expected_kind)
+
+
+def test_httpx_transport_health_is_bounded_and_route_specific(monkeypatch):
+    class ExplicitTransport:
+        def close(self):
+            return None
+
+    class Client:
+        def __init__(self):
+            self._leadpoet_explicit_http_transport = ExplicitTransport()
+
+        def close(self):
+            return None
+
+    transport = HTTPXProviderTransport()
+    monkeypatch.setattr(transport, "_new_client", lambda **_kwargs: Client())
+    calls = []
+
+    def execute(_client, **_kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            underlying = OSError(
+                errno.EADDRNOTAVAIL,
+                "sensitive upstream text",
+            )
+            raise httpx.ConnectError("sensitive proxy text") from underlying
+        return {
+            "http_status": 200,
+            "headers": {},
+            "body": b"ok",
+            "tls_peer_chain_hash": "sha256:" + "b" * 64,
+            "tls_protocol": "TLSv1.3",
+        }
+
+    monkeypatch.setattr(transport, "_execute_with_client", execute)
+    request = {
+        "method": "GET",
+        "url": "https://example.com/data",
+        "headers": {},
+        "body": b"",
+        "timeout_ms": 1000,
+    }
+
+    assert transport(**request)["body"] == b"ok"
+    with pytest.raises(httpx.ConnectError):
+        transport(
+            **request,
+            upstream_proxy_url="https://worker:secret@proxy.example.com:443",
+        )
+
+    health = transport.health()
+    assert health["schema_version"] == PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION
+    assert health["reuse_direct_connections"] is False
+    assert health["reuse_assigned_proxy_connections"] is False
+    assert health["direct_active_scope_count"] == 0
+    assert health["direct_retired_scope_count"] == 0
+    assert health["direct_active_lease_count"] == 0
+    assert health["direct_retired_lease_count"] == 0
+    assert health["assigned_active_scope_count"] == 0
+    assert health["assigned_retired_scope_count"] == 0
+    assert health["assigned_active_lease_count"] == 0
+    assert health["assigned_retired_lease_count"] == 0
+    assert health["request_counters"] == {
+        "direct": {"started": 1, "succeeded": 1, "failed": 0},
+        "assigned_proxy": {"started": 1, "succeeded": 0, "failed": 1},
+    }
+    assert health["cleanup_counters"] == {
+        "direct": {
+            "attempted": 1,
+            "succeeded": 1,
+            "client_close_failed": 0,
+            "transport_close_failed": 0,
+        },
+        "assigned_proxy": {
+            "attempted": 1,
+            "succeeded": 1,
+            "client_close_failed": 0,
+            "transport_close_failed": 0,
+        },
+    }
+    assert health["last_failure"] == {
+        "route": "assigned_proxy",
+        "stage": "provider_request",
+        "failure_code": "proxy_failure",
+        "error_type": "ConnectError",
+        "errno": errno.EADDRNOTAVAIL,
+        "local_resource_kind": "ephemeral_port_exhausted",
+    }
+    assert "sensitive" not in str(health)
+    assert "secret" not in str(health)
 
 
 def test_httpx_transport_serializes_request_scoped_direct_failure_isolation(
@@ -1456,6 +1880,9 @@ def test_httpx_transport_serializes_request_scoped_direct_failure_isolation(
         def get_extra_info(self, name):
             assert name == "ssl_object"
             return TLS()
+
+        def close(self):
+            pass
 
     class Response:
         status_code = 200
@@ -1505,12 +1932,20 @@ def test_httpx_transport_serializes_request_scoped_direct_failure_isolation(
         def close(self):
             self.closed = True
 
+    class HTTPTransport:
+        def __init__(self, **_options):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
     monkeypatch.setitem(
         sys.modules,
         "httpx",
-        SimpleNamespace(
-            Client=Client,
-            Limits=lambda **kwargs: kwargs,
+            SimpleNamespace(
+                Client=Client,
+                HTTPTransport=HTTPTransport,
+                Limits=lambda **kwargs: kwargs,
             Proxy=lambda *_args, **_kwargs: object(),
         ),
     )
@@ -1583,6 +2018,13 @@ def test_job_scoped_client_cleanup_cannot_replace_request_result(monkeypatch):
             assert name == "ssl_object"
             return TLS()
 
+        def close(self):
+            pass
+
+    class ExplicitTransport:
+        def close(self):
+            pass
+
     class Response:
         status_code = 200
         headers = {"content-type": "application/json"}
@@ -1599,6 +2041,9 @@ def test_job_scoped_client_cleanup_cannot_replace_request_result(monkeypatch):
             return False
 
     class Client:
+        def __init__(self):
+            self._leadpoet_explicit_http_transport = ExplicitTransport()
+
         def stream(self, *_args, **_kwargs):
             return ResponseContext()
 
@@ -1619,10 +2064,23 @@ def test_job_scoped_client_cleanup_cannot_replace_request_result(monkeypatch):
 
     assert result["http_status"] == 200
     assert result["body"] == b'{"ok":true}'
+    assert transport.health()["cleanup_counters"]["assigned_proxy"] == {
+        "attempted": 1,
+        "succeeded": 1,
+        "client_close_failed": 1,
+        "transport_close_failed": 0,
+    }
 
 
 def test_job_scoped_client_cleanup_preserves_request_failure(monkeypatch):
+    class ExplicitTransport:
+        def close(self):
+            pass
+
     class Client:
+        def __init__(self):
+            self._leadpoet_explicit_http_transport = ExplicitTransport()
+
         def stream(self, *_args, **_kwargs):
             raise RuntimeError("provider request failed")
 
@@ -1646,6 +2104,10 @@ def test_job_scoped_client_cleanup_preserves_request_failure(monkeypatch):
 def test_httpx_transport_retry_uses_fresh_client_after_direct_failure(monkeypatch):
     clients = []
 
+    class ExplicitTransport:
+        def close(self):
+            pass
+
     class TLS:
         def getpeercert(self, binary_form=False, /):
             assert binary_form is True
@@ -1658,6 +2120,9 @@ def test_httpx_transport_retry_uses_fresh_client_after_direct_failure(monkeypatc
         def get_extra_info(self, name):
             assert name == "ssl_object"
             return TLS()
+
+        def close(self):
+            pass
 
     class Response:
         status_code = 200
@@ -1683,6 +2148,7 @@ def test_httpx_transport_retry_uses_fresh_client_after_direct_failure(monkeypatc
         def __init__(self, error=None):
             self.error = error
             self.closed = False
+            self._leadpoet_explicit_http_transport = ExplicitTransport()
             clients.append(self)
 
         def stream(self, *_args, **_kwargs):
@@ -1842,8 +2308,15 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_name": "",
         "credential_prefix": "",
         "credential_header_aliases": [],
+        "egress_policy": "job_proxy_allowed",
         "allowed_methods": ["POST"],
     }
+    assert document["routes"]["supabase"]["egress_policy"] == "direct_only"
+    assert all(
+        route["egress_policy"] == "job_proxy_allowed"
+        for provider_id, route in document["routes"].items()
+        if provider_id != "supabase"
+    )
     assert document["routes"]["arweave"] == {
         "hosts": ["arweave.net"],
         "path_prefixes": ["/"],
@@ -1852,6 +2325,7 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_name": "",
         "credential_prefix": "",
         "credential_header_aliases": [],
+        "egress_policy": "job_proxy_allowed",
         "allowed_methods": ["GET"],
     }
     assert document["routes"]["exa"]["request_headers"] == [
@@ -1865,6 +2339,7 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "credential_name": "Authorization",
         "credential_prefix": "Bearer ",
         "credential_header_aliases": [{"name": "apikey", "prefix": ""}],
+        "egress_policy": "direct_only",
     }
     assert MEASURED_TRANSPORT_REQUEST_HEADERS == (("Accept-Encoding", "identity"),)
     assert provider_registry_hash().startswith("sha256:")
@@ -2502,13 +2977,76 @@ def test_failed_artifact_transaction_removes_terminal_record_before_retry():
             broker.execute(request)
             raise RuntimeError("checkpoint failed")
 
-    assert broker.health()["terminal_count"] == 0
+    rolled_back_health = broker.health()
+    assert rolled_back_health["terminal_count"] == 0
+    assert rolled_back_health["provider_terminal_counts"]["openrouter"][
+        "direct"
+    ] == {"authenticated_response": 0, "transport_failure": 0}
+    assert rolled_back_health["provider_2xx_success_counts"]["openrouter"] == {
+        "direct": 0,
+        "assigned_proxy": 0,
+    }
 
     result = broker.execute(request)
 
     assert result["terminal_status"] == "authenticated_response"
     assert len(transport.calls) == 2
-    assert broker.health()["terminal_count"] == 1
+    committed_health = broker.health()
+    assert committed_health["terminal_count"] == 1
+    assert committed_health["provider_terminal_counts"]["openrouter"][
+        "direct"
+    ] == {"authenticated_response": 1, "transport_failure": 0}
+    # FakeTransport returns an authenticated 503, which must never count as a
+    # healthy physical post-idle provider success.
+    assert committed_health["provider_2xx_success_counts"]["openrouter"] == {
+        "direct": 0,
+        "assigned_proxy": 0,
+    }
+
+
+def test_chain_weight_health_counts_only_committed_direct_2xx_supabase():
+    class HealthyTransport(FakeTransport):
+        def __call__(self, **request):
+            self.calls.append(request)
+            return {
+                "http_status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": b'{"rows":[]}',
+                "tls_peer_chain_hash": "sha256:" + "b" * 64,
+                "tls_protocol": "TLSv1.3",
+            }
+
+    transport = HealthyTransport()
+    broker = _broker(transport)
+    proxy_url = "https://worker:test-secret@proxy.example.com:443"
+    broker.provision_job_credential(
+        job_id="job-1",
+        slot="egress_proxy",
+        credential=proxy_url,
+        credential_value_hash_expected=credential_value_hash(proxy_url),
+    )
+    request = _request(
+        provider_id="supabase",
+        method="GET",
+        url=(
+            "https://qplwoislplkcegvdmbim.supabase.co/"
+            "rest/v1/research_lab_chain_weight_observations"
+        ),
+        purpose="research_lab.chain_weight_observation.v1",
+        body_b64=base64.b64encode(b"").decode("ascii"),
+    )
+
+    with broker.transient_terminal_transaction():
+        result = broker.execute(request)
+
+    assert result["terminal_status"] == "authenticated_response"
+    assert "upstream_proxy_url" not in transport.calls[0]
+    health = broker.health()
+    assert health["provider_2xx_success_counts"]["supabase"] == {
+        "direct": 1,
+        "assigned_proxy": 0,
+    }
+    assert health["chain_weight_observation_success_count"] == 1
 
 
 @pytest.mark.parametrize("commit", [False, True])

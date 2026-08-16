@@ -349,11 +349,28 @@ _SCORER_REVERIFY_TIMEOUT_S = 45.0
 
 
 def _decision_from_observed_employee_size(verdict: dict, icp: ICPPrompt) -> str:
-    observed = str(verdict.get("observed_employee_count") or "").strip()
+    observed_value = verdict.get("observed_employee_count")
+    observed = "" if observed_value is None else str(observed_value).strip()
     flag = strict_company_fit_boolean(verdict.get("employee_size_matches"))
     if not observed:
         return COMPANY_FIT_UNAVAILABLE
-    bucket = _normalize_linkedin_employee_bucket(observed)
+    from research_lab.employee_buckets import (
+        LINKEDIN_EMPLOYEE_BUCKETS,
+        normalize_observed_employee_count_bucket,
+    )
+
+    # Preserve the exact canonical bucket contract while accepting the
+    # provider's production-observed strict integer as a deterministic
+    # projection. Legacy/custom/approximate ranges never enter either path.
+    bucket = (
+        observed
+        if isinstance(observed_value, str)
+        and observed_value in LINKEDIN_EMPLOYEE_BUCKETS
+        else normalize_observed_employee_count_bucket(
+            observed_value,
+            default=None,
+        )
+    )
     targets, targets_verified = _normalize_icp_employee_buckets(icp.employee_count)
     if not bucket or not targets_verified:
         return COMPANY_FIT_UNAVAILABLE
@@ -754,7 +771,12 @@ async def _llm_reverify_company(
         checks.extend([
             (
                 "employee_size_matches: independently find the company's current "
-                f"employee-count band and test it against {icp.employee_count!r}."
+                f"employee-count band and test it against {icp.employee_count!r}. "
+                "Return observed_employee_count as exactly one of: 0-1, 2-10, "
+                "11-50, 51-200, 201-500, 501-1,000, 1,001-5,000, "
+                "5,001-10,000, 10,001+. If the source exposes only one exact "
+                "current headcount, return that as a JSON integer. Never return "
+                "an approximate, qualified, decimal, or custom range."
             ),
             (
                 "industry_matches: independently find the company's industry and "
@@ -786,7 +808,7 @@ async def _llm_reverify_company(
           'contradicting quote. Do not copy submitted identity values unless the '
           'source proves them. Return STRICT JSON only with these keys: '
           '{"observed_company_name":"", "observed_company_website":"", '
-          '"observed_company_linkedin":"", "observed_employee_count":"", '
+          '"observed_company_linkedin":"", "observed_employee_count":null, '
           '"employee_size_matches":true/false/null, '
           '"employee_size_evidence_url":"", "employee_size_evidence_quote":"", '
           '"observed_industry":"", "observed_subindustry":"", '

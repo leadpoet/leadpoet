@@ -61,7 +61,9 @@ def _rebenchmark_now() -> datetime:
         configured_rebenchmark_now_v2,
     )
 
-    return configured_rebenchmark_now_v2()
+    return configured_rebenchmark_now_v2(
+        now=datetime.now(timezone.utc)
+    )
 
 # =============================================================================
 # OpenRouter Configuration for LLM-Based ICP Generation

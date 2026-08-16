@@ -1079,7 +1079,7 @@ def _run_workflow(
     candidate_sha: str,
     profile: str,
     docker_platform: str,
-    production_allocation: Path | None,
+    production_allocation: Path | None = None,
 ) -> None:
     limits = PROFILE_LIMITS[profile]
     command = [

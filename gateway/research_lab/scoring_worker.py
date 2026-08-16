@@ -1386,8 +1386,8 @@ async def _enforce_baseline_wave_maintenance_boundary(
             configured_rebenchmark_now_v2,
         )
 
-        current_date = (now or configured_rebenchmark_now_v2()).astimezone(
-            timezone.utc
+        current_date = configured_rebenchmark_now_v2(
+            now=now or datetime.now(timezone.utc)
         ).date().isoformat()
         if current_date != benchmark_date:
             raise BaselineUtcDayRollover(
@@ -12403,7 +12403,9 @@ class ResearchLabGatewayScoringWorker:
             configured_rebenchmark_now_v2,
         )
 
-        now = configured_rebenchmark_now_v2()
+        now = configured_rebenchmark_now_v2(
+            now=datetime.now(timezone.utc)
+        )
         today = now.date().isoformat()
         baseline_start_offset = int(
             getattr(

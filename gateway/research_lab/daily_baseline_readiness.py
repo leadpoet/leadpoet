@@ -298,8 +298,8 @@ async def autoresearch_daily_baseline_readiness(
     if not config.private_baseline_rebenchmark_enabled:
         return {"available": True, "reason": "daily_baseline_disabled"}
 
-    benchmark_date = (now or configured_rebenchmark_now_v2()).astimezone(
-        timezone.utc
+    benchmark_date = configured_rebenchmark_now_v2(
+        now=now or datetime.now(timezone.utc)
     ).date().isoformat()
     try:
         active = await load_active_private_model(config, register_bootstrap=False)

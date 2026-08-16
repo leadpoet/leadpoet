@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
@@ -518,13 +520,76 @@ def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_p
     )
     assert result["status"] == "failed"
     assert "active private model changed" in result["last_error"]
-    assert len(commands) == 3
-    assert "--skip-current-pointer" in commands[-1]
+    assert len(commands) == 2
     assert not any(
         command[1].endswith("publish_research_lab_dev_snapshot.py")
         and "--skip-current-pointer" not in command
         for command in commands
     )
+
+
+def test_active_model_guard_cancels_stale_recording_before_publish(
+    monkeypatch,
+    tmp_path,
+):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "ACTIVE_MODEL_GUARD_INTERVAL_SECONDS",
+        0.01,
+    )
+    commands: list[list[str]] = []
+    recorder_observed_cancel = threading.Event()
+    active_calls = 0
+    model_b = _active(
+        image=IMAGE[:-1] + "e",
+        commit="e" * 40,
+        config_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        nonlocal active_calls
+        active_calls += 1
+        return _active() if active_calls <= 2 else model_b
+
+    def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
+        commands.append(list(command))
+        if not command[1].endswith("record_research_lab_dev_snapshots.py"):
+            return "ok"
+        cancel_file = Path(command[command.index("--cancel-file") + 1])
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if cancel_file.is_file():
+                recorder_observed_cancel.set()
+                raise RuntimeError("recorder stopped at ICP boundary")
+            time.sleep(0.005)
+        raise AssertionError("active-model guard did not signal the recorder")
+
+    result = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: _ready(
+                ready=False,
+                reason="active_model_mismatch",
+            ),
+            active_loader=active_loader,
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert "active private model changed during snapshot recording" in result["last_error"]
+    assert recorder_observed_cancel.is_set()
+    assert len(commands) == 2
+    assert not any(
+        command[1].endswith("publish_research_lab_dev_snapshot.py")
+        for command in commands
+    )
+    assert not any((tmp_path / "work").glob("refresh-*"))
 
 
 def test_utc_rollover_never_promotes_stale_snapshot_pointer(monkeypatch, tmp_path):

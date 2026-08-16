@@ -279,6 +279,84 @@ def test_snapshot_record_retry_remains_bounded_and_fail_closed(
     assert delays == [5.0, 15.0]
 
 
+def test_snapshot_record_retry_stops_at_boundary_when_superseded(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    cancel_file = tmp_path / "cancel-recording"
+    calls = []
+    delays = []
+
+    def fail_after_model_change(**kwargs):
+        calls.append(dict(kwargs))
+        cancel_file.write_text("active_private_model_changed\n", encoding="utf-8")
+        raise RuntimeError("transient provider failure")
+
+    monkeypatch.setattr(
+        recorder,
+        "_record_icp_with_docker",
+        fail_after_model_change,
+    )
+    monkeypatch.setattr(recorder.time, "sleep", delays.append)
+
+    with pytest.raises(
+        recorder.SnapshotRecordingCancelled,
+        match="active_private_model_changed",
+    ):
+        recorder._record_icp_with_retries(
+            image_digest="example.invalid/model@sha256:" + "1" * 64,
+            module_name="research_lab_adapter",
+            callable_name="run_icp",
+            icp={"industry": "Software"},
+            icp_ref="icp-a",
+            snapshot_dir="/tmp/snapshot-test",
+            timeout_seconds=300,
+            reuse_existing=False,
+            item_index=1,
+            item_count=5,
+            cancel_file=cancel_file,
+        )
+
+    assert len(calls) == 1
+    assert delays == []
+
+
+def test_snapshot_closure_stops_before_next_icp_when_superseded(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    cancel_file = tmp_path / "cancel-recording"
+    calls = []
+
+    class Store:
+        def snapshot_count(self):
+            return 10
+
+    def record(**kwargs):
+        calls.append(kwargs["icp_ref"])
+        cancel_file.write_text("active_private_model_changed\n", encoding="utf-8")
+        return []
+
+    monkeypatch.setattr(recorder, "_record_icp_with_docker", record)
+
+    with pytest.raises(recorder.SnapshotRecordingCancelled):
+        recorder._close_snapshot_request_set(
+            items=[
+                {"icp_ref": "icp-a", "icp": {"industry": "Software"}},
+                {"icp_ref": "icp-b", "icp": {"industry": "Healthcare"}},
+            ],
+            store=Store(),
+            image_digest="example.invalid/model@sha256:" + "1" * 64,
+            module_name="research_lab_adapter",
+            callable_name="run_icp",
+            snapshot_dir="/tmp/snapshot-test",
+            timeout_seconds=300,
+            cancel_file=cancel_file,
+        )
+
+    assert calls == ["icp-a"]
+
+
 def test_snapshot_closure_replays_only_icps_that_expose_new_requests(monkeypatch):
     class Store:
         count = 10

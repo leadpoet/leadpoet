@@ -80,12 +80,22 @@ MAX_SNAPSHOT_CLOSURE_ROUNDS = 8
 SNAPSHOT_EXECUTION_CONTEXT_MARKER = "dev_snapshot_recording"
 MAX_SNAPSHOT_RECORD_ATTEMPTS = 3
 SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS = (5.0, 15.0)
+SNAPSHOT_RECORD_CANCELLED_EXIT_CODE = 75
 
 PROVIDER_KEY_GROUPS = (
     ("EXA_API_KEY",),
     ("SCRAPINGDOG_API_KEY", "QUALIFICATION_SCRAPINGDOG_API_KEY"),
     ("OPENROUTER_API_KEY", "QUALIFICATION_OPENROUTER_API_KEY", "OPENROUTER_KEY"),
 )
+
+
+class SnapshotRecordingCancelled(RuntimeError):
+    """Raised only at an ICP boundary when the controller supersedes a run."""
+
+
+def _raise_if_snapshot_record_cancelled(cancel_file: Path | None) -> None:
+    if cancel_file is not None and cancel_file.is_file():
+        raise SnapshotRecordingCancelled("active_private_model_changed")
 
 
 def _load_json_file(path: str) -> Any:
@@ -393,12 +403,14 @@ def _record_icp_with_retries(
     item_index: int,
     item_count: int,
     max_attempts: int = MAX_SNAPSHOT_RECORD_ATTEMPTS,
+    cancel_file: Path | None = None,
 ) -> list[Mapping[str, Any]]:
     """Retry one model run without repeating already recorded requests."""
 
     if max_attempts < 1:
         raise ValueError("snapshot record attempts must be positive")
     for attempt in range(1, max_attempts + 1):
+        _raise_if_snapshot_record_cancelled(cancel_file)
         try:
             return _record_icp_with_docker(
                 image_digest=image_digest,
@@ -413,6 +425,7 @@ def _record_icp_with_retries(
         except Exception:  # noqa: BLE001 - bounded retry remains fail closed
             if attempt >= max_attempts:
                 raise
+            _raise_if_snapshot_record_cancelled(cancel_file)
             delay = SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS[
                 min(attempt - 1, len(SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS) - 1)
             ]
@@ -435,6 +448,7 @@ def _close_snapshot_request_set(
     snapshot_dir: str,
     timeout_seconds: int,
     max_rounds: int = MAX_SNAPSHOT_CLOSURE_ROUNDS,
+    cancel_file: Path | None = None,
 ) -> dict[str, Any]:
     """Record newly exposed request identities until every ICP is stable."""
 
@@ -461,7 +475,10 @@ def _close_snapshot_request_set(
                     reuse_existing=True,
                     item_index=item_index,
                     item_count=len(items),
+                    cancel_file=cancel_file,
                 )
+            except SnapshotRecordingCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001 - collect every failed ICP
                 runner_failure_refs.append(ref)
                 print(
@@ -762,6 +779,14 @@ def main() -> int:
     parser.add_argument("--module-name", default="research_lab_adapter")
     parser.add_argument("--callable-name", default="run_icp")
     parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument(
+        "--cancel-file",
+        default="",
+        help=(
+            "Controller-owned cancellation marker checked only between ICP "
+            "operations; an in-flight provider call is never interrupted"
+        ),
+    )
     parser.add_argument("--record", action="store_true", help=f"Actually run the champion with live providers (also requires {RECORD_ENABLED_ENV}=true)")
     args = parser.parse_args()
 
@@ -889,6 +914,9 @@ def main() -> int:
         return 1
 
     target = Path(snapshot_dir).expanduser().resolve()
+    cancel_file = (
+        Path(args.cancel_file).expanduser().resolve() if args.cancel_file else None
+    )
     staging = target.with_name(f".{target.name}.recording.{os.getpid()}.{uuid.uuid4().hex}")
     if target.exists():
         print(f"ERROR: immutable snapshot destination already exists: {target}")
@@ -912,11 +940,14 @@ def main() -> int:
                     reuse_existing=False,
                     item_index=item_index,
                     item_count=len(dev_set.items),
+                    cancel_file=cancel_file,
                 )
                 print(
                     f"recorded daily ICP {item_index}/{len(dev_set.items)}: "
                     f"{len(companies)} companies, snapshots={store.snapshot_count()}"
                 )
+            except SnapshotRecordingCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001 - collect every failed ICP
                 runner_failure_refs.append(str(ref))
                 print(
@@ -944,6 +975,7 @@ def main() -> int:
                 callable_name=args.callable_name,
                 snapshot_dir=str(staging),
                 timeout_seconds=args.timeout_seconds,
+                cancel_file=cancel_file,
             )
             runner_failure_refs.extend(closure_result["runner_failure_refs"])
 
@@ -986,6 +1018,7 @@ def main() -> int:
         store.write_dev_icp_items(dev_set.items)
         if recording_complete:
             for item in dev_set.items:
+                _raise_if_snapshot_record_cancelled(cancel_file)
                 outputs = _replay_icp_with_docker(
                     image_digest=args.champion_image,
                     module_name=args.module_name,
@@ -1047,9 +1080,13 @@ def main() -> int:
             or not recording_complete
         ):
             return 1
+        _raise_if_snapshot_record_cancelled(cancel_file)
         os.replace(staging, target)
         print(f"snapshot_ready={target}")
         return 0
+    except SnapshotRecordingCancelled as exc:
+        print(f"snapshot_record_cancelled={exc}")
+        return SNAPSHOT_RECORD_CANCELLED_EXIT_CODE
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)

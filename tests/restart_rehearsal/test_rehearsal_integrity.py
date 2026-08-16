@@ -3898,6 +3898,20 @@ def test_rehearsal_build_binds_the_platform_specific_base(
     ]
 
 
+def test_rehearsal_candidate_identity_does_not_invalidate_stable_dependencies():
+    dockerfile = (
+        Path(__file__).resolve().parent / "Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    candidate_arg = dockerfile.index("ARG REHEARSAL_HARNESS_SHA")
+    assert dockerfile.index("RUN dnf install") < candidate_arg
+    assert dockerfile.index("COPY requirements.txt") < candidate_arg
+    assert dockerfile.index("COPY scoring-locks/") < candidate_arg
+    assert candidate_arg < dockerfile.index(
+        'scoring-wheelhouses/${REHEARSAL_HARNESS_SHA}'
+    )
+
+
 def test_rehearsal_build_stages_compact_weight_readiness_dependency(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

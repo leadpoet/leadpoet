@@ -1,6 +1,5 @@
 ARG REHEARSAL_BASE_IMAGE=public.ecr.aws/amazonlinux/amazonlinux@sha256:7dfb72e165c7b2f5fd2ee050c202160ee0cced24991f14736b831221f2004eee
 FROM ${REHEARSAL_BASE_IMAGE}
-ARG REHEARSAL_HARNESS_SHA
 
 RUN dnf install -y \
       diffutils \
@@ -36,6 +35,7 @@ RUN python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
       awscli
 
 COPY scoring-locks/ /opt/leadpoet/scoring-locks/
+ARG REHEARSAL_HARNESS_SHA
 RUN mkdir -p /opt/leadpoet/scoring-wheelhouses \
     && for lock in /opt/leadpoet/scoring-locks/*.lock; do \
       commit="$(basename "${lock}" .lock)"; \

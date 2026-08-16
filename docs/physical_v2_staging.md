@@ -108,7 +108,7 @@ Run:
 
 ```bash
 python3 scripts/setup_production_parity_staging.py apply \
-  --production-gateway-url https://subnet71.com \
+  --production-gateway-url https://gateway.subnet71.com \
   --enable
 ```
 

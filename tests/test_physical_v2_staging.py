@@ -344,6 +344,26 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert "environment:" not in source
 
 
+def test_parity_workflows_reject_non_main_code_before_aws_credentials():
+    for relative_path in (
+        ".github/workflows/production-parity-fast.yml",
+        ".github/workflows/physical-v2-staging.yml",
+    ):
+        source = (ROOT / relative_path).read_text(encoding="utf-8")
+        main_gate = source.index(
+            "name: Require exact current main candidate before credentials"
+        )
+        local_action = source.index(
+            "uses: ./.github/actions/setup-production-parity-controller"
+        )
+        aws_credentials = source.index(
+            "uses: aws-actions/configure-aws-credentials@v4"
+        )
+
+        assert 'git rev-parse origin/main' in source
+        assert main_gate < local_action < aws_credentials
+
+
 def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
     source = (ROOT / "scripts/run_production_parity_full_host.py").read_text()
     required = (

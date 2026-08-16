@@ -48,6 +48,14 @@ jobs:
           ref: ${{ env.CANDIDATE_SHA }}
           fetch-depth: 0
 
+      - name: Require exact current main candidate before credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+
       - name: Set up exact candidate controller
         uses: ./.github/actions/setup-production-parity-controller
 

@@ -28,6 +28,8 @@ PROTECTED_SYMBOLS = {
         "attest_subnet_epoch_cutover_v2",
     ),
     "gateway/tee/execution_job_manager_v2.py": (
+        "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
+        "ExecutionContextV2.record_transport",
         "ExecutionJobManagerV2",
     ),
     "leadpoet_canonical/ancestry_checkpoint_v2.py": (

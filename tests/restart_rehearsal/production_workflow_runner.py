@@ -6545,6 +6545,9 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         provider: sha256_json({"credential": provider})
         for provider in ("exa", "supabase")
     }
+    assigned_proxy_hash = sha256_json(
+        {"credential": "provider-evidence-assigned-proxy"}
+    )
 
     class StrictBoundary:
         def __init__(self) -> None:
@@ -6578,7 +6581,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             provider = str(request["provider_id"])
             return {
                 "credential_ref_hash": credential_hashes[provider],
-                "egress_proxy_ref_hash": DIRECT_EGRESS_REF_HASH,
+                "egress_proxy_ref_hash": (
+                    DIRECT_EGRESS_REF_HASH
+                    if provider == "supabase"
+                    else assigned_proxy_hash
+                ),
             }
 
         def execute(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -6738,7 +6745,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                     base64.b64decode(str(request["body_b64"]), validate=True)
                 ),
                 credential_ref_hash=credential_hashes[provider],
-                egress_proxy_ref_hash=DIRECT_EGRESS_REF_HASH,
+                egress_proxy_ref_hash=(
+                    DIRECT_EGRESS_REF_HASH
+                    if provider == "supabase"
+                    else assigned_proxy_hash
+                ),
                 retry_policy_hash=str(request["retry_policy_hash"]),
                 timeout_ms=int(request["timeout_ms"]),
                 started_at=NOW,
@@ -6857,7 +6868,11 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         job_id="rehearsal:rebenchmark-provider-poll",
         purpose="research_lab.private_model_run.v2",
         epoch_id=1,
-        provider_credential_ref_hashes=credential_hashes,
+        provider_credential_ref_hashes={
+            "exa": credential_hashes["exa"],
+            "egress_proxy": assigned_proxy_hash,
+        },
+        provider_credential_profile="benchmark_model",
     )
     request = {
         "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
@@ -6956,6 +6971,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         job_id=context.job_id,
         purpose=context.purpose,
     )
+    for attempt in outcome["transport_attempts"]:
+        context.record_transport(attempt)
     persist_outcome_calls = boundary.calls[outcome_call_start:]
     if [item["method"] for item in persist_outcome_calls] != [
         "POST"
@@ -6993,6 +7010,16 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         or restored_outcome.get("state_document") != outcome_document
     ):
         raise RuntimeError("provider outcome transient recovery differed")
+    if any(
+        item["egress_proxy_ref_hash"] != DIRECT_EGRESS_REF_HASH
+        for item in context.transport_attempts
+        if item["provider_id"] == "supabase"
+    ) or any(
+        item["egress_proxy_ref_hash"] != assigned_proxy_hash
+        for item in context.transport_attempts
+        if item["provider_id"] != "supabase"
+    ):
+        raise RuntimeError("provider sidecar transport profile differed")
 
     batch_documents = []
     for provider_id in ("exa", "scrapingdog", "exa"):
@@ -8423,6 +8450,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "execution_receipt_transport_unique": True,
         "transient_cache_transport_recovered": True,
         "transient_outcome_checkpoint_recovered": True,
+        "assigned_provider_direct_supabase_sidecars_bound": True,
         "atomic_provider_cache_put_replayed": True,
         "atomic_provider_outcome_batch_persisted": True,
         "measured_concurrent_artifact_wave_bound": True,
@@ -12451,6 +12479,11 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("transient_outcome_checkpoint_recovered")
+            is True
+            and behavior_evidence.get(
+                "rebenchmark-provider-transport-evidence",
+                {},
+            ).get("assigned_provider_direct_supabase_sidecars_bound")
             is True
             and behavior_evidence.get(
                 "rebenchmark-provider-transport-evidence",

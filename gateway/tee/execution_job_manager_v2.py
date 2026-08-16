@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    DIRECT_EGRESS_REF_HASH,
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
@@ -94,6 +95,14 @@ _ALLOCATION_ANCESTRY_JOB_SCOPES = frozenset(
     }
 )
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
+
+# Coordinator-owned persistence is intentionally direct-only even while the
+# measured provider request uses the scoring worker's assigned proxy.  Bind
+# that exception to the exact internal Supabase sidecar namespaces: an
+# ordinary scoring request to Supabase must not acquire the service-role route.
+_DIRECT_SUPABASE_SIDECAR_NAMESPACES = frozenset(
+    {"provider-outcome", "provider-evidence-cache"}
+)
 MAX_CHUNK_BYTES = 1024 * 1024
 MAX_RESULT_CHUNK_BYTES = 4 * 1024 * 1024
 DEFAULT_RESULT_CHUNK_BYTES = 512 * 1024
@@ -237,9 +246,8 @@ class ExecutionContextV2:
         validate_transport_attempt(attempt)
         if attempt["job_id"] != self.job_id or attempt["purpose"] != self.purpose:
             raise ExecutionJobV2Error("transport attempt differs from execution scope")
-        expected_credential = self.provider_credential_ref_hashes.get(
-            str(attempt.get("provider_id") or "")
-        )
+        provider_id = str(attempt.get("provider_id") or "")
+        expected_credential = self.provider_credential_ref_hashes.get(provider_id)
         if (
             expected_credential is not None
             and attempt.get("credential_ref_hash") != expected_credential
@@ -254,15 +262,28 @@ class ExecutionContextV2:
                 )
             )
         expected_proxy = self.provider_credential_ref_hashes.get("egress_proxy")
+        logical_operation_id = str(attempt.get("logical_operation_id") or "")
+        direct_supabase_sidecar = (
+            provider_id == "supabase"
+            and any(
+                logical_operation_id.startswith(
+                    "%s:%s:" % (self.job_id, namespace)
+                )
+                for namespace in _DIRECT_SUPABASE_SIDECAR_NAMESPACES
+            )
+        )
+        expected_transport_proxy = (
+            DIRECT_EGRESS_REF_HASH if direct_supabase_sidecar else expected_proxy
+        )
         if (
-            expected_proxy is not None
-            and attempt.get("egress_proxy_ref_hash") != expected_proxy
+            expected_transport_proxy is not None
+            and attempt.get("egress_proxy_ref_hash") != expected_transport_proxy
         ):
             raise ExecutionJobV2Error(
                 "transport proxy differs from the attested job profile "
                 "(expected=%s observed=%s)"
                 % (
-                    str(expected_proxy)[:15],
+                    str(expected_transport_proxy)[:15],
                     str(attempt.get("egress_proxy_ref_hash") or "")[:15],
                 )
             )

@@ -25,6 +25,7 @@ from gateway.tee import execution_job_manager_v2 as job_manager_v2
 from gateway.tee.host_operation_channel_v2 import HostOperationChannelV2
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    DIRECT_EGRESS_REF_HASH,
     build_boot_identity_body,
     build_checkpointed_receipt_graph,
     build_execution_receipt_body,
@@ -389,6 +390,173 @@ def test_transport_profile_mismatch_identifies_provider_and_hash_prefixes():
         ),
     ):
         context.record_transport(attempt)
+
+
+def _profile_transport_attempt(
+    context,
+    *,
+    provider_id,
+    logical_operation_id,
+    egress_proxy_ref_hash,
+    credential_ref_hash=HASH,
+    job_id=None,
+    purpose=None,
+):
+    return build_transport_attempt(
+        request_id="2" * 32,
+        logical_operation_id=logical_operation_id,
+        job_id=job_id or context.job_id,
+        purpose=purpose or context.purpose,
+        provider_id=provider_id,
+        attempt_number=0,
+        method="POST",
+        destination_host="qplwoislplkcegvdmbim.supabase.co",
+        destination_port=443,
+        path_hash=HASH,
+        nonsecret_headers_hash=HASH,
+        body_hash=HASH_B,
+        credential_ref_hash=credential_ref_hash,
+        retry_policy_hash=HASH_B,
+        timeout_ms=30_000,
+        started_at=NOW,
+        terminal_status="authenticated_response",
+        http_status=200,
+        response_hash=HASH,
+        request_artifact_hash=HASH,
+        response_artifact_hash=HASH_B,
+        tls_peer_chain_hash=HASH,
+        tls_protocol="TLSv1.3",
+        failure_code=None,
+        completed_at=NOW,
+        egress_proxy_ref_hash=egress_proxy_ref_hash,
+    )
+
+
+@pytest.mark.parametrize(
+    "namespace",
+    ("provider-outcome", "provider-evidence-cache"),
+)
+def test_transport_profile_accepts_only_job_bound_direct_supabase_sidecars(
+    namespace,
+):
+    context = ExecutionContextV2(
+        job_id="score-job-sidecars",
+        purpose="research_lab.provider_preflight.v2",
+        epoch_id=24_000,
+        provider_credential_profile="provider_preflight",
+        provider_credential_ref_hashes={
+            "exa": HASH,
+            "scrapingdog": HASH_B,
+            "egress_proxy": HASH,
+        },
+    )
+    context.record_transport(
+        _profile_transport_attempt(
+            context,
+            provider_id="supabase",
+            logical_operation_id=(
+                "%s:%s:1:append" % (context.job_id, namespace)
+            ),
+            egress_proxy_ref_hash=DIRECT_EGRESS_REF_HASH,
+            credential_ref_hash=HASH_B,
+        )
+    )
+
+    assert context.transport_attempts[0]["provider_id"] == "supabase"
+    assert (
+        context.transport_attempts[0]["egress_proxy_ref_hash"]
+        == DIRECT_EGRESS_REF_HASH
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "logical_operation_id", "egress_proxy_ref_hash"),
+    (
+        ("supabase", "score-job-sidecars:request-fingerprint", DIRECT_EGRESS_REF_HASH),
+        ("supabase", "other-job:provider-outcome:1:append", DIRECT_EGRESS_REF_HASH),
+        ("supabase", "score-job-sidecars:provider-outcome:1:append", HASH),
+        ("exa", "score-job-sidecars:provider-outcome:1:append", DIRECT_EGRESS_REF_HASH),
+    ),
+)
+def test_transport_profile_rejects_noncanonical_direct_sidecars(
+    provider_id,
+    logical_operation_id,
+    egress_proxy_ref_hash,
+):
+    context = ExecutionContextV2(
+        job_id="score-job-sidecars",
+        purpose="research_lab.provider_preflight.v2",
+        epoch_id=24_000,
+        provider_credential_profile="provider_preflight",
+        provider_credential_ref_hashes={
+            "exa": HASH,
+            "scrapingdog": HASH_B,
+            "egress_proxy": HASH,
+        },
+    )
+    with pytest.raises(ExecutionJobV2Error, match="transport proxy differs"):
+        context.record_transport(
+            _profile_transport_attempt(
+                context,
+                provider_id=provider_id,
+                logical_operation_id=logical_operation_id,
+                egress_proxy_ref_hash=egress_proxy_ref_hash,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("job_id", "purpose"),
+    (
+        ("different-job", None),
+        (None, "research_lab.company_score.v2"),
+    ),
+)
+def test_direct_supabase_sidecar_cannot_cross_execution_scope(job_id, purpose):
+    context = ExecutionContextV2(
+        job_id="score-job-sidecars",
+        purpose="research_lab.provider_preflight.v2",
+        epoch_id=24_000,
+        provider_credential_profile="provider_preflight",
+        provider_credential_ref_hashes={
+            "exa": HASH,
+            "egress_proxy": HASH,
+        },
+    )
+    with pytest.raises(ExecutionJobV2Error, match="differs from execution scope"):
+        context.record_transport(
+            _profile_transport_attempt(
+                context,
+                provider_id="supabase",
+                logical_operation_id=(
+                    "%s:provider-outcome:1:append" % context.job_id
+                ),
+                egress_proxy_ref_hash=DIRECT_EGRESS_REF_HASH,
+                job_id=job_id,
+                purpose=purpose,
+            )
+        )
+
+
+def test_direct_supabase_sidecar_requires_direct_route_without_worker_proxy():
+    context = ExecutionContextV2(
+        job_id="score-job-sidecars",
+        purpose="research_lab.provider_preflight.v2",
+        epoch_id=24_000,
+        provider_credential_profile="provider_preflight",
+        provider_credential_ref_hashes={"exa": HASH},
+    )
+    with pytest.raises(ExecutionJobV2Error, match="transport proxy differs"):
+        context.record_transport(
+            _profile_transport_attempt(
+                context,
+                provider_id="supabase",
+                logical_operation_id=(
+                    "%s:provider-outcome:1:append" % context.job_id
+                ),
+                egress_proxy_ref_hash=HASH,
+            )
+        )
 
 
 def _manifest(payload, **overrides):

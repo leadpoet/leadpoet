@@ -31,6 +31,7 @@ from gateway.tee.research_lab_runtime_config_v2 import (
 from gateway.tee.source_bundle_v2 import build_source_bundle_v2
 from gateway.tee.source_add_runtime_v2 import build_source_add_runtime_catalog_v2
 from leadpoet_canonical.attested_v2 import (
+    DIRECT_EGRESS_REF_HASH,
     build_transport_attempt,
     canonical_json,
     sha256_bytes,
@@ -403,6 +404,37 @@ async def test_v2_preflight_authenticates_both_providers_and_worker_proxy():
             failure_code=None,
             completed_at="2026-07-10T20:00:00Z",
         )
+        outcome_attempt = build_transport_attempt(
+            request_id=("%032x" % (100 + len(observed))),
+            logical_operation_id=(
+                "%s:provider-outcome:%d:append"
+                % (request["job_id"], len(observed))
+            ),
+            job_id=request["job_id"],
+            purpose=request["purpose"],
+            provider_id="supabase",
+            attempt_number=0,
+            method="POST",
+            destination_host="qplwoislplkcegvdmbim.supabase.co",
+            destination_port=443,
+            path_hash=HASH,
+            nonsecret_headers_hash=HASH,
+            body_hash=HASH,
+            credential_ref_hash="sha256:" + "e" * 64,
+            egress_proxy_ref_hash=DIRECT_EGRESS_REF_HASH,
+            retry_policy_hash=HASH,
+            timeout_ms=request["timeout_ms"],
+            started_at="2026-07-10T20:00:00Z",
+            terminal_status="authenticated_response",
+            http_status=200,
+            response_hash=HASH,
+            request_artifact_hash=HASH,
+            response_artifact_hash=HASH,
+            tls_peer_chain_hash=HASH,
+            tls_protocol="TLSv1.3",
+            failure_code=None,
+            completed_at="2026-07-10T20:00:00Z",
+        )
         return {
             "terminal_status": "authenticated_response",
             "http_status": 200,
@@ -411,6 +443,7 @@ async def test_v2_preflight_authenticates_both_providers_and_worker_proxy():
             "encrypted_request_artifact_id": HASH,
             "encrypted_artifact_id": HASH,
             "transport_attempt": attempt,
+            "additional_transport_attempts": [outcome_attempt],
         }
 
     executor = ScoringExecutorV2(
@@ -454,10 +487,18 @@ async def test_v2_preflight_authenticates_both_providers_and_worker_proxy():
     assert {item["provider_id"] for item in context.transport_attempts} == {
         "exa",
         "scrapingdog",
+        "supabase",
     }
+    assert len(context.transport_attempts) == 4
     assert all(
         item["egress_proxy_ref_hash"] == provider_refs["egress_proxy"]
         for item in context.transport_attempts
+        if item["provider_id"] != "supabase"
+    )
+    assert all(
+        item["egress_proxy_ref_hash"] == DIRECT_EGRESS_REF_HASH
+        for item in context.transport_attempts
+        if item["provider_id"] == "supabase"
     )
 
 

@@ -71,7 +71,9 @@ def _verify_readonly_dsn(dsn: str) -> None:
 SELECT json_build_object(
   'read_only', current_setting('transaction_read_only') = 'on',
   'superuser', rolsuper,
+  'bypass_rls', rolbypassrls,
   'replication', rolreplication,
+  'connection_limit', rolconnlimit,
   'table_write_capable', EXISTS (
     SELECT 1
     FROM pg_class c
@@ -138,12 +140,14 @@ WHERE rolname = current_user;
     if (
         value.get("read_only") is not True
         or value.get("superuser") is not False
+        or value.get("bypass_rls") is not True
         or value.get("replication") is not False
+        or not 0 < int(value.get("connection_limit") or 0) <= 2
         or value.get("table_write_capable") is not False
         or int(value.get("public_relation_count") or 0) <= 0
     ):
         raise SetupError(
-            "the PostgreSQL credential is not a dedicated read-only production role"
+            "the PostgreSQL credential is not the bounded read-only parity role"
         )
 
 

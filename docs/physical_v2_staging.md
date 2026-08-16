@@ -104,6 +104,46 @@ verifies that role and creates only:
 - repository variables for existing production resources and immutable
   PostgreSQL/PostgREST image digests.
 
+Generate a unique hexadecimal password locally, replace the placeholder below,
+and run the SQL once in the production project's Supabase SQL editor:
+
+```sql
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'leadpoet_parity_reader'
+  ) THEN
+    CREATE ROLE leadpoet_parity_reader LOGIN;
+  END IF;
+END
+$$;
+
+ALTER ROLE leadpoet_parity_reader WITH
+  LOGIN
+  PASSWORD 'REPLACE_WITH_UNIQUE_HEX_PASSWORD'
+  BYPASSRLS
+  NOSUPERUSER
+  NOCREATEDB
+  NOCREATEROLE
+  NOREPLICATION
+  CONNECTION LIMIT 2;
+ALTER ROLE leadpoet_parity_reader SET default_transaction_read_only = on;
+ALTER ROLE leadpoet_parity_reader SET idle_in_transaction_session_timeout = '5min';
+
+GRANT CONNECT ON DATABASE postgres TO leadpoet_parity_reader;
+GRANT USAGE ON SCHEMA public TO leadpoet_parity_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO leadpoet_parity_reader;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO leadpoet_parity_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  GRANT SELECT ON TABLES TO leadpoet_parity_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  GRANT SELECT ON SEQUENCES TO leadpoet_parity_reader;
+```
+
+Use the Supabase session-pooler URI for that role with `sslmode=require`. Do
+not paste the URI into a terminal command: the helper reads it through a
+hidden prompt and stores it directly in Secrets Manager.
+
 Run:
 
 ```bash

@@ -69,7 +69,9 @@ def test_setup_keeps_readonly_database_password_out_of_process_arguments(
                 {
                     "read_only": True,
                     "superuser": False,
+                    "bypass_rls": True,
                     "replication": False,
+                    "connection_limit": 2,
                     "table_write_capable": False,
                     "public_relation_count": 1,
                 }

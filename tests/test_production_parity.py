@@ -37,6 +37,7 @@ from scripts.setup_production_parity_staging import (
     DEFAULT_REPOSITORY,
     _controller_policy,
     _runner_policy,
+    _verify_readonly_dsn,
 )
 from scripts.resolve_production_parity_controller_requirements import (
     resolve_controller_requirements,
@@ -51,6 +52,43 @@ ORIGIN = "https://d111111abcdef8.cloudfront.net"
 
 def test_setup_targets_the_authoritative_github_repository():
     assert DEFAULT_REPOSITORY == "leadpoet/leadpoet"
+
+
+def test_setup_keeps_readonly_database_password_out_of_process_arguments(
+    monkeypatch,
+):
+    observed = {}
+
+    def fake_run(argv, **kwargs):
+        observed["argv"] = argv
+        observed["env"] = kwargs["env"]
+        return SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout=json.dumps(
+                {
+                    "read_only": True,
+                    "superuser": False,
+                    "replication": False,
+                    "table_write_capable": False,
+                    "public_relation_count": 1,
+                }
+            ),
+        )
+
+    monkeypatch.setattr(
+        "scripts.setup_production_parity_staging.subprocess.run",
+        fake_run,
+    )
+    _verify_readonly_dsn(
+        "postgresql://parity:secret%2Bvalue@db.example:5432/postgres"
+        "?sslmode=require&connect_timeout=20"
+    )
+
+    assert all("secret" not in item for item in observed["argv"])
+    assert observed["env"]["PGPASSWORD"] == "secret+value"
+    assert observed["env"]["PGSSLMODE"] == "require"
+    assert observed["env"]["PGCONNECT_TIMEOUT"] == "20"
 
 
 def _snapshot(*, bypass_rls: bool = True, capture_mode: str = "full") -> dict:

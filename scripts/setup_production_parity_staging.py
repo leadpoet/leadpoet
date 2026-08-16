@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, Mapping, Sequence
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 import boto3
@@ -94,8 +94,32 @@ WHERE rolname = current_user;
 """
     env = os.environ.copy()
     env["PGOPTIONS"] = "-c default_transaction_read_only=on -c statement_timeout=60000"
+    parsed = urlparse(dsn)
+    query_options = parse_qs(parsed.query, keep_blank_values=True)
+    supported_query = {"sslmode", "connect_timeout"}
+    unsupported_query = sorted(set(query_options) - supported_query)
+    if unsupported_query:
+        raise SetupError(
+            "the read-only PostgreSQL DSN contains unsupported options: "
+            + ", ".join(unsupported_query)
+        )
+    env.update(
+        {
+            "PGHOST": str(parsed.hostname or ""),
+            "PGPORT": str(parsed.port or 5432),
+            "PGUSER": unquote(str(parsed.username or "")),
+            "PGPASSWORD": unquote(str(parsed.password or "")),
+            "PGDATABASE": unquote(parsed.path.lstrip("/")),
+            "PGSSLMODE": str(
+                query_options.get("sslmode", ["require"])[-1]
+            ),
+            "PGCONNECT_TIMEOUT": str(
+                query_options.get("connect_timeout", ["15"])[-1]
+            ),
+        }
+    )
     result = subprocess.run(
-        ["psql", dsn, "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
+        ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
         env=env,
         text=True,
         capture_output=True,

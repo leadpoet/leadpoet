@@ -2277,7 +2277,12 @@
       "symbol": "_REQUIRED_TRANSPORT_HEALTH_SCHEMAS_BY_ROLE"
     },
     {
-      "ast_sha256": "sha256:0c84fd54b7cb5a02d6745ad7144efb2b064ebabd156392bd37076e53b768aae3",
+      "ast_sha256": "sha256:c49e0217098b5c9186ed2814593aa78fcbac10e74adc0189a28ac194c690103c",
+      "path": "gateway/tee/verify_topology.py",
+      "symbol": "_V2_RUNTIME_CONFIG_SCHEMA"
+    },
+    {
+      "ast_sha256": "sha256:138f6b59ed74d189f213f9ecac74ec81877707f1b31fec5f8b0b583fabb62e63",
       "path": "gateway/tee/verify_topology.py",
       "symbol": "verify_roles"
     },
@@ -3447,7 +3452,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:c066d63731d1cb3673218433f1abc719fae794f4e283ac5ffe7befccc644988a",
-  "protected_source_commit": "687db6d1a98eb5ebd8aca8054903bdf56b163c5a",
+  "manifest_hash": "sha256:283ccd1f7b26326ce3614c5d7e295db32ffa714f616519b429a1732061f301ec",
+  "protected_source_commit": "2e0ba0da919179c3e925b91c5289219042be2bb5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -126,6 +126,9 @@ def test_inter_enclave_replay_and_identity_boundaries_are_protected():
     assert {"TopologyHealthError", "verify_roles"} <= set(
         PROTECTED_SYMBOLS["gateway/tee/verify_topology.py"]
     )
+    assert "_V2_RUNTIME_CONFIG_SCHEMA" in PROTECTED_SYMBOLS[
+        "gateway/tee/verify_topology.py"
+    ]
 
 
 def test_git_tree_source_authority_boundaries_are_protected():

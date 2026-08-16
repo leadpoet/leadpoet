@@ -864,6 +864,7 @@ PROTECTED_SYMBOLS = {
     "gateway/tee/verify_topology.py": (
         "_REQUIRED_TRANSPORT_HEALTH_SCHEMAS_BY_ROLE",
         "_INTER_ENCLAVE_CHILD_TRANSPORT_HEALTH_SCHEMA",
+        "_V2_RUNTIME_CONFIG_SCHEMA",
         "TopologyHealthError",
         "verify_roles",
     ),

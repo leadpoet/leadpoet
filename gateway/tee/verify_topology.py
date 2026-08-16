@@ -31,12 +31,14 @@ _REQUIRED_TRANSPORT_HEALTH_SCHEMAS_BY_ROLE = {
 _INTER_ENCLAVE_CHILD_TRANSPORT_HEALTH_SCHEMA = (
     "leadpoet.inter_enclave_transport_health.v2"
 )
+_V2_RUNTIME_CONFIG_SCHEMA = "leadpoet.enclave_runtime_config.v2"
 
 
 async def verify_roles(
     roles: Sequence[str],
     *,
     release_manifest: Optional[dict] = None,
+    prebootstrap_launch_readiness: bool = False,
 ) -> list[dict]:
     release = (
         validate_release_manifest(release_manifest)
@@ -58,10 +60,41 @@ async def verify_roles(
         health = await TEEClient(cid=int(spec["cid"])).role_health()
         if not isinstance(health, dict) or health.get("status") != "healthy":
             raise TopologyHealthError("%s role health failed" % role)
+        if prebootstrap_launch_readiness:
+            expected_runtime = {
+                "schema_version": _V2_RUNTIME_CONFIG_SCHEMA,
+                "status": "not_configured",
+                "physical_role": role,
+                "service_role": spec["service_role"],
+            }
+            if health.get("v2_runtime") != expected_runtime:
+                raise TopologyHealthError(
+                    "%s pre-bootstrap V2 runtime state is not pristine" % role
+                )
         for transport_name, expected_schema in (
             required_transport_health.items()
         ):
             transport_health = health.get(transport_name)
+            if (
+                prebootstrap_launch_readiness
+                and transport_name == "inter_enclave_transport"
+            ):
+                # Before the parent relay and V2 bootstrap exist, the enclave
+                # projects the two absent TLS endpoints through the aggregate
+                # error status.  Accept only that exact pristine shape: any
+                # initialized, failed, or retained-cleanup state remains fatal.
+                expected_transport = {
+                    "schema_version": expected_schema,
+                    "status": "error",
+                    "server": {"status": "unavailable"},
+                    "client": {"status": "unavailable"},
+                }
+                if transport_health != expected_transport:
+                    raise TopologyHealthError(
+                        "%s pre-bootstrap inter_enclave_transport state is not pristine"
+                        % role
+                    )
+                continue
             if (
                 not isinstance(transport_health, dict)
                 or transport_health.get("schema_version") != expected_schema
@@ -128,6 +161,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("roles", nargs="*")
     parser.add_argument("--release-manifest", type=Path)
+    parser.add_argument(
+        "--prebootstrap-launch-readiness",
+        action="store_true",
+        help=(
+            "verify measured role identity before the V2 runtime and "
+            "inter-enclave transport are configured"
+        ),
+    )
     args = parser.parse_args(argv)
     roles = args.roles or list(ROLE_SPECS)
     release = None
@@ -140,7 +181,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ) from exc
     print(
         json.dumps(
-            asyncio.run(verify_roles(roles, release_manifest=release)),
+            asyncio.run(
+                verify_roles(
+                    roles,
+                    release_manifest=release,
+                    prebootstrap_launch_readiness=(
+                        args.prebootstrap_launch_readiness
+                    ),
+                )
+            ),
             sort_keys=True,
             indent=2,
         )

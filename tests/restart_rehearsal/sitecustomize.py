@@ -2269,7 +2269,26 @@ def _handle_gateway_enclave_rpc(
             "topology_hash": topology_hash(),
             "public_key": _local_signing_public_key(role),
             "pcr0": release_role["pcr0"],
-            "v2_runtime": {"status": "not_configured"},
+            "v2_runtime": {
+                "schema_version": "leadpoet.enclave_runtime_config.v2",
+                "status": "not_configured",
+                "physical_role": role,
+                "service_role": ROLE_SPECS[role]["service_role"],
+            },
+            "parent_rpc_transport": {
+                "schema_version": (
+                    "leadpoet.gateway_vsock_rpc_transport_health.v2"
+                ),
+                "status": "healthy",
+            },
+            "inter_enclave_transport": {
+                "schema_version": (
+                    "leadpoet.inter_enclave_role_transport_health.v2"
+                ),
+                "status": "error",
+                "server": {"status": "unavailable"},
+                "client": {"status": "unavailable"},
+            },
         }
     if method == "get_attestation":
         if role != "gateway_coordinator" or not empty_params:

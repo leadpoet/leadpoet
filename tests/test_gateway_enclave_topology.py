@@ -1,5 +1,6 @@
 import json
 import asyncio
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -125,6 +126,173 @@ def _healthy_inter_enclave_transport():
         "status": "healthy",
         "server": dict(child),
         "client": dict(child),
+    }
+
+
+def _prebootstrap_role_health(*, role, release):
+    expected = release["roles"][role]
+    return {
+        "status": "healthy",
+        "role": role,
+        "service_role": ROLE_SPECS[role]["service_role"],
+        "topology_hash": manifest_document()["topology_hash"],
+        "commit_sha": expected["commit_sha"],
+        "pcr0": expected["pcr0"],
+        "build_identity_hash": expected["build_identity_hash"],
+        "v2_runtime": {
+            "schema_version": "leadpoet.enclave_runtime_config.v2",
+            "status": "not_configured",
+            "physical_role": role,
+            "service_role": ROLE_SPECS[role]["service_role"],
+        },
+        "parent_rpc_transport": {
+            "schema_version": (
+                "leadpoet.gateway_vsock_rpc_transport_health.v2"
+            ),
+            "status": "healthy",
+        },
+        "inter_enclave_transport": {
+            "schema_version": (
+                "leadpoet.inter_enclave_role_transport_health.v2"
+            ),
+            "status": "error",
+            "server": {"status": "unavailable"},
+            "client": {"status": "unavailable"},
+        },
+    }
+
+
+def test_topology_prebootstrap_readiness_accepts_only_pristine_launch_state(
+    monkeypatch,
+):
+    release = _release()
+    by_cid = {spec["cid"]: role for role, spec in ROLE_SPECS.items()}
+
+    class Client:
+        def __init__(self, cid):
+            self.role = by_cid[cid]
+
+        async def role_health(self):
+            return _prebootstrap_role_health(
+                role=self.role,
+                release=release,
+            )
+
+    monkeypatch.setattr(verify_topology, "TEEClient", Client)
+    result = asyncio.run(
+        verify_topology.verify_roles(
+            list(ROLE_SPECS),
+            release_manifest=release,
+            prebootstrap_launch_readiness=True,
+        )
+    )
+    assert {item["role"] for item in result} == set(ROLE_SPECS)
+
+
+def test_strict_topology_readiness_rejects_prebootstrap_transport_state(
+    monkeypatch,
+):
+    release = _release()
+    role = COORDINATOR_ROLE
+
+    class Client:
+        def __init__(self, cid):
+            assert cid == ROLE_SPECS[role]["cid"]
+
+        async def role_health(self):
+            return _prebootstrap_role_health(role=role, release=release)
+
+    monkeypatch.setattr(verify_topology, "TEEClient", Client)
+    with pytest.raises(
+        verify_topology.TopologyHealthError,
+        match="inter_enclave_transport health failed",
+    ):
+        asyncio.run(
+            verify_topology.verify_roles([role], release_manifest=release)
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    (
+        (("v2_runtime", "status"), "error"),
+        (("v2_runtime", "schema_version"), "unknown"),
+        (("v2_runtime", "error_type"), "RetainedBootstrapError"),
+        (("parent_rpc_transport", "status"), "error"),
+        (("inter_enclave_transport", "status"), "healthy"),
+        (("inter_enclave_transport", "server", "status"), "error"),
+        (
+            (
+                "inter_enclave_transport",
+                "server",
+                "retained_cleanup_failures",
+            ),
+            1,
+        ),
+        (("inter_enclave_transport", "client", "status"), "healthy"),
+    ),
+)
+def test_topology_prebootstrap_readiness_rejects_non_pristine_state(
+    monkeypatch,
+    path,
+    replacement,
+):
+    release = _release()
+    role = COORDINATOR_ROLE
+    health = _prebootstrap_role_health(role=role, release=release)
+    target = health
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = replacement
+
+    class Client:
+        def __init__(self, cid):
+            assert cid == ROLE_SPECS[role]["cid"]
+
+        async def role_health(self):
+            return deepcopy(health)
+
+    monkeypatch.setattr(verify_topology, "TEEClient", Client)
+    with pytest.raises(
+        verify_topology.TopologyHealthError,
+        match="pre-bootstrap|parent_rpc_transport health failed",
+    ):
+        asyncio.run(
+            verify_topology.verify_roles(
+                [role],
+                release_manifest=release,
+                prebootstrap_launch_readiness=True,
+            )
+        )
+
+
+def test_topology_cli_selects_prebootstrap_launch_readiness(monkeypatch):
+    observed = {}
+
+    async def fake_verify_roles(
+        roles,
+        *,
+        release_manifest=None,
+        prebootstrap_launch_readiness=False,
+    ):
+        observed.update(
+            roles=list(roles),
+            release_manifest=release_manifest,
+            prebootstrap_launch_readiness=prebootstrap_launch_readiness,
+        )
+        return []
+
+    monkeypatch.setattr(verify_topology, "verify_roles", fake_verify_roles)
+    assert (
+        verify_topology.main(
+            ["--prebootstrap-launch-readiness", COORDINATOR_ROLE]
+        )
+        == 0
+    )
+    assert observed == {
+        "roles": [COORDINATOR_ROLE],
+        "release_manifest": None,
+        "prebootstrap_launch_readiness": True,
     }
 
 
@@ -381,6 +549,7 @@ def test_startup_retries_strict_role_health_during_enclave_cold_start():
         in script
     )
     assert 'if output="$(verify_roles "$@" 2>&1)"; then' in script
+    assert 'local verify_args=(--prebootstrap-launch-readiness)' in script
     assert 'if [ "$SECONDS" -ge "$deadline" ]; then' in script
     assert "sudo nitro-cli describe-enclaves >&2 || true" in script
     assert "sleep 15" not in script

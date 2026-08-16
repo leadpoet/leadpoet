@@ -102,7 +102,7 @@ PY
 }
 
 verify_roles() {
-  local verify_args=()
+  local verify_args=(--prebootstrap-launch-readiness)
   if [ "$TOPOLOGY_MODE" = "full" ] || [ -s "$RELEASE_MANIFEST" ]; then
     test -s "$RELEASE_MANIFEST" || {
       echo "ERROR: approved gateway V2 release manifest is unavailable" >&2
@@ -150,4 +150,4 @@ fi
 
 sudo nitro-cli describe-enclaves
 
-echo "Gateway enclave topology is healthy"
+echo "Gateway enclave topology is ready for V2 bootstrap"

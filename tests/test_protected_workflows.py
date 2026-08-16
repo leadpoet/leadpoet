@@ -189,6 +189,13 @@ def test_artifact_egress_transport_boundaries_are_protected():
         "_PROVIDER_TRANSPORT_FAILURE_STAGES",
         "_CLEANUP_RESOURCE_KIND_BY_STAGE",
         "_MAX_DIAGNOSTIC_ERRNO",
+        "_EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE",
+        "_BROKER_OWNED_HTTPX_CLIENTS_LOCK",
+        "_BROKER_OWNED_HTTPX_CLIENTS",
+        "_BROKER_OWNED_HTTPX_SEND_GRANT",
+        "_register_broker_owned_httpx_client",
+        "is_broker_owned_httpx_client",
+        "_broker_owned_httpx_send_scope",
         "_local_resource_failure",
         "_safe_error_type",
         "_failure_code",
@@ -201,6 +208,9 @@ def test_artifact_egress_transport_boundaries_are_protected():
         "HTTPXProviderTransport",
         "ProviderBrokerV2.reseal_transport_failure_diagnostic",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/provider_broker_v2.py"])
+    assert "BrokeredProviderTransportV2.install" in PROTECTED_SYMBOLS[
+        "gateway/tee/provider_client_v2.py"
+    ]
     assert {
         "_FAIL_CLOSED_REQUEST_SCHEMA_VERSION",
         "_SEMANTICS_HEALTH_STAGES",

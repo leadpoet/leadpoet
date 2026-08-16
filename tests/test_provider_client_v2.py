@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import urllib.error
 import urllib.request
@@ -12,7 +13,10 @@ import requests
 
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
+    HTTPXProviderTransport,
+    PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
+    _close_client_transports,
     credential_reference_hash,
 )
 from gateway.tee.provider_client_v2 import (
@@ -23,7 +27,7 @@ from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
     source_add_dynamic_retry_policy_hash,
 )
-from leadpoet_canonical.attested_v2 import sha256_bytes
+from leadpoet_canonical.attested_v2 import DIRECT_EGRESS_REF_HASH, sha256_bytes
 from leadpoet_verifier.semantic_gates import (
     EvidenceSource,
     SemanticGateEvaluator,
@@ -32,6 +36,36 @@ from qualification.scoring.company_verification import verify_company_exists
 
 
 HASH = "sha256:" + "a" * 64
+
+
+class _AuthenticatedNetworkStream:
+    class _TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    def get_extra_info(self, name):
+        assert name == "ssl_object"
+        return self._TLS()
+
+    def close(self):
+        return None
+
+
+def _raw_httpx_response(request, body=b'{"ok":true}'):
+    return httpx.Response(
+        200,
+        headers={
+            "content-length": str(len(body)),
+            "content-type": "application/json",
+        },
+        content=body,
+        extensions={"network_stream": _AuthenticatedNetworkStream()},
+        request=request,
+    )
 
 
 class Transport:
@@ -612,6 +646,179 @@ def test_runner_has_no_external_network_fallback_outside_scope():
             requests.get("https://api.exa.ai/search")
     finally:
         router.restore()
+
+
+def test_raw_broker_httpx_uses_captured_send_outside_scope_and_keeps_direct_receipt(
+    monkeypatch,
+):
+    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_coordinator")
+    raw_requests = []
+
+    def raw_send(_client, request, *args, **kwargs):
+        raw_requests.append(request)
+        return _raw_httpx_response(request, b'[{"sequence":17738}]')
+
+    monkeypatch.setattr(httpx.Client, "send", raw_send)
+    credentials = {
+        "openrouter": "openrouter-secret",
+        "exa": "exa-secret",
+        "scrapingdog": "scrapingdog-secret",
+        "deepline": "deepline-secret",
+        "supabase_service_role": "supabase-secret",
+        "truelist": "truelist-secret",
+    }
+    physical_transport = HTTPXProviderTransport()
+    broker = ProviderBrokerV2(
+        credential_ref_hashes={
+            slot: credential_reference_hash(value)
+            for slot, value in credentials.items()
+        },
+        retry_policy_hashes={provider: HASH for provider in BUILTIN_PROVIDER_ROUTES},
+        transport=physical_transport,
+        artifact_sink=lambda body, **_: {
+            "artifact_id": sha256_bytes(b"artifact:" + body),
+            "plaintext_hash": sha256_bytes(body),
+        },
+        clock=lambda: "2026-07-10T20:00:00Z",
+    )
+    broker.provision_credentials(credentials)
+    router = BrokeredProviderTransportV2(
+        lambda _request: pytest.fail("raw broker request was recursively intercepted")
+    )
+    router.install()
+    try:
+        result = broker.execute(
+            {
+                "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
+                "logical_operation_id": "supabase-preflight-outcome",
+                "job_id": "preflight-job-1",
+                "purpose": "research_lab.provider_preflight.v2",
+                "provider_id": "supabase",
+                "attempt_number": 0,
+                "method": "GET",
+                "url": (
+                    "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/"
+                    "research_lab_rebenchmark_controls?select=sequence"
+                ),
+                "headers": {},
+                "body_b64": base64.b64encode(b"").decode("ascii"),
+                "timeout_ms": 30000,
+                "retry_policy_hash": HASH,
+            }
+        )
+    finally:
+        router.restore()
+        physical_transport.close()
+
+    assert len(raw_requests) == 1
+    assert result["terminal_status"] == "authenticated_response"
+    assert (
+        result["transport_attempt"]["egress_proxy_ref_hash"]
+        == DIRECT_EGRESS_REF_HASH
+    )
+
+
+@pytest.mark.parametrize("spoof_explicit_transport_marker", (False, True))
+def test_unowned_httpx_client_cannot_bypass_hooks_even_with_spoofed_marker(
+    spoof_explicit_transport_marker,
+    monkeypatch,
+):
+    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_coordinator")
+    underlying_requests = []
+
+    def underlying(request):
+        underlying_requests.append(request)
+        return _raw_httpx_response(request)
+
+    router, observed = _router(Transport())
+    client = httpx.Client(transport=httpx.MockTransport(underlying))
+    if spoof_explicit_transport_marker:
+        setattr(
+            client,
+            "_leadpoet_explicit_http_transport",
+            client._transport,
+        )
+    router.install()
+    try:
+        with pytest.raises(ProviderClientV2Error, match="outside"):
+            client.get("https://openrouter.ai/api/v1/models")
+        with _scope(router):
+            response = client.get("https://openrouter.ai/api/v1/models")
+    finally:
+        client.close()
+        router.restore()
+
+    assert response.status_code == 200
+    assert len(observed) == 1
+    assert underlying_requests == []
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("none", "transport", "mount", "role"),
+)
+def test_registered_httpx_client_is_fail_closed_without_exact_send_grant_and_shape(
+    monkeypatch,
+    tamper,
+):
+    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_coordinator")
+    raw_requests = []
+
+    def raw_send(_client, request, *args, **kwargs):
+        raw_requests.append(request)
+        return _raw_httpx_response(request)
+
+    monkeypatch.setattr(httpx.Client, "send", raw_send)
+    physical_transport = HTTPXProviderTransport()
+    client = physical_transport._new_client()
+    if tamper == "transport":
+        client._transport = httpx.MockTransport(raw_send)
+    elif tamper == "mount":
+        client._mounts = {object(): httpx.MockTransport(raw_send)}
+    elif tamper == "role":
+        monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_scoring")
+    router = BrokeredProviderTransportV2(
+        lambda _request: pytest.fail("out-of-scope HTTPX reached the broker")
+    )
+    router.install()
+    try:
+        with pytest.raises(ProviderClientV2Error, match="outside"):
+            client.get("https://openrouter.ai/api/v1/models")
+    finally:
+        router.restore()
+        _close_client_transports(client)
+        physical_transport.close()
+
+    assert raw_requests == []
+
+
+@pytest.mark.asyncio
+async def test_async_httpx_client_cannot_spoof_broker_owned_marker(monkeypatch):
+    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_coordinator")
+    underlying_requests = []
+
+    async def underlying(request):
+        underlying_requests.append(request)
+        return _raw_httpx_response(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(underlying))
+    setattr(
+        client,
+        "_leadpoet_explicit_http_transport",
+        client._transport,
+    )
+    router = BrokeredProviderTransportV2(
+        lambda _request: pytest.fail("out-of-scope HTTPX reached the broker")
+    )
+    router.install()
+    try:
+        with pytest.raises(ProviderClientV2Error, match="outside"):
+            await client.get("https://openrouter.ai/api/v1/models")
+    finally:
+        await client.aclose()
+        router.restore()
+
+    assert underlying_requests == []
 
 
 def test_custom_urllib_proxy_opener_cannot_bypass_attested_transport():

@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "aad5d0b554d9105c602b98421fe3fa1e623b21a5",
+  "baseline_commit": "7c9766b71d4c08b0059f6e3230dbe742b1d58e79",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1607,7 +1607,7 @@
       "symbol": "EGRESS_POLICY_DIRECT_ONLY"
     },
     {
-      "ast_sha256": "sha256:fcc84584eec7296604ff475adf408c6989d915077be47f144794d948f09d4539",
+      "ast_sha256": "sha256:898f54457d1820479470dcc70563f6077df24214c881df33f44c64ff72b09c69",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -1647,6 +1647,21 @@
       "symbol": "ProviderTransportCleanupError"
     },
     {
+      "ast_sha256": "sha256:021180acbc3843c86fd85c8ea519de97029175e055f2b7fa8b37d4295a8200df",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_BROKER_OWNED_HTTPX_CLIENTS"
+    },
+    {
+      "ast_sha256": "sha256:25ae6b36d01c4edc92c525741fae95ae840120c73ac142bcb41cb1a576c6a12d",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_BROKER_OWNED_HTTPX_CLIENTS_LOCK"
+    },
+    {
+      "ast_sha256": "sha256:a3df5be3333520611f7a34439d411e77d743b4582e6cd76d2d923a8f7f8dbe81",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_BROKER_OWNED_HTTPX_SEND_GRANT"
+    },
+    {
       "ast_sha256": "sha256:cc684bd8cb929057ba8877d710642745014ffadda68b611ab233a068a1b734d5",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "_CHAIN_WEIGHT_OBSERVATION_PURPOSE"
@@ -1660,6 +1675,11 @@
       "ast_sha256": "sha256:88f8a83547560abc4a7d406a2c952d7358f03055150a01f4fe184cbce861a7c1",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "_EGRESS_POLICIES"
+    },
+    {
+      "ast_sha256": "sha256:2a4cf72df3a62fe30bbcd675178c815434f76395d057a5d070366a1d5285fe5f",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE"
     },
     {
       "ast_sha256": "sha256:d141dfe9c61a35d20ec7eec09dd52f03fe495230eee8e24c291ae75f819cfaad",
@@ -1697,6 +1717,11 @@
       "symbol": "_SAFE_ERROR_TYPE_RE"
     },
     {
+      "ast_sha256": "sha256:e4312f9fc3942ad51baaeccc77d5bcfbe813e3208f4632e5b0b734a90471e4a7",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_broker_owned_httpx_send_scope"
+    },
+    {
       "ast_sha256": "sha256:aed306270bbda123578c04d57c748194593cf6369825f4c36f5fcfc0ca6c4fe4",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "_close_client_transports"
@@ -1727,9 +1752,19 @@
       "symbol": "_provider_transport_failure_diagnostic"
     },
     {
+      "ast_sha256": "sha256:bd16a598c29861e30e1c6d5afcc48e848201038b9134eefe4b71a9bc8900cc40",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_register_broker_owned_httpx_client"
+    },
+    {
       "ast_sha256": "sha256:80c182a555e50e88cfd6161fbb54fe92bc13232bfbf0a5fba6e27f9f8c2275f4",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "_safe_error_type"
+    },
+    {
+      "ast_sha256": "sha256:eafa1491629f860518117f7e2543bd6b0bbe61c65d17808d3b670701b243f3fd",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "is_broker_owned_httpx_client"
     },
     {
       "ast_sha256": "sha256:9dcb51d5dbb1b6b54441cdda13c372de254ab9ffd18f37f9d40f0dceac350116",
@@ -1740,6 +1775,11 @@
       "ast_sha256": "sha256:7a71fd55a9ff304611ff6911456320024106c6943f85152a80f652a4d0bce6ab",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "validate_provider_transport_failure_diagnostic"
+    },
+    {
+      "ast_sha256": "sha256:488e3ef96cc595b849218b2fd98e8847146a878bd675ad07878501168158ffdc",
+      "path": "gateway/tee/provider_client_v2.py",
+      "symbol": "BrokeredProviderTransportV2.install"
     },
     {
       "ast_sha256": "sha256:8f7e5fbf4eb6c44a2feba641a2c79c11be5fbfce454ae75a878bdd9460f16e45",
@@ -3462,7 +3502,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:5bb0cfd3c9ae987dfdb9629940a246afb6866e0762fe4cc52ce24482e4d68478",
-  "protected_source_commit": "2541f2e435c6c3d8d1089207ff1bfca9cc3371cc",
+  "manifest_hash": "sha256:184a4f6148e0692ad18acb8772710981ab490b99e7e6852f529b21a606252bf6",
+  "protected_source_commit": "8e8d467c99e235b0deb1649321fba47c414e0abf",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -26,9 +26,12 @@ from scripts.materialize_production_parity_secrets import (
 )
 from scripts.run_production_parity_full_host import (
     FullParityError,
+    _builtwith_key_from_secret,
     _current_epoch_from_readiness,
     _dsn_from_secret,
     _parse_gateway_environment_file,
+    _required_secret_from_environment,
+    _verify_builtwith_credential_live,
 )
 from scripts.run_production_parity_fast import (
     _ProductionReadOnlySupabaseProvider,
@@ -417,6 +420,7 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["RESEARCH_LAB_HOSTED_WORKER_ENABLED"] == "true"
     assert environment["RESEARCH_LAB_HOSTED_WORKER_DRY_RUN"] == "true"
     assert environment["RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS"] == "0"
+    assert environment["RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_AUTO_PROMOTION_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_AUTO_COMMIT_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED"] == "false"
@@ -446,6 +450,59 @@ def test_full_runner_accepts_json_secret_and_strict_env_file(tmp_path: Path):
         _parse_gateway_environment_file(env_file)
 
 
+def test_miner_intake_secret_resolution_is_strict_and_value_opaque():
+    assert _builtwith_key_from_secret(
+        json.dumps({"builtwith_api_key": "provider-value-for-test"})
+    ) == "provider-value-for-test"
+    with pytest.raises(FullParityError, match="miner-intake secret is invalid"):
+        _builtwith_key_from_secret(json.dumps({"builtwith_api_key": "bad value"}))
+    assert _required_secret_from_environment(
+        {"FIRST": "", "SECOND": "credential-value"},
+        ("FIRST", "SECOND"),
+        field="credential",
+    ) == "credential-value"
+    with pytest.raises(FullParityError, match="credential is unavailable"):
+        _required_secret_from_environment({}, ("FIRST",), field="credential")
+
+
+def test_builtwith_live_probe_keeps_credential_out_of_url(monkeypatch):
+    observed = {}
+    payload = b'{"Results":[{"Lookup":"builtwith.com"}]}'
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return payload
+
+    def fake_urlopen(request, *, timeout):
+        observed["url"] = request.full_url
+        observed["authorization"] = request.get_header("Authorization")
+        observed["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(
+        "scripts.run_production_parity_full_host.urlopen", fake_urlopen
+    )
+    credential = "provider-credential-for-test"
+    assert _verify_builtwith_credential_live(credential) == {
+        "http_status": 200,
+        "json_verified": True,
+        "response_bytes": len(payload),
+    }
+    assert credential not in observed["url"]
+    assert "LOOKUP=builtwith.com" in observed["url"]
+    assert "NOPII=yes" in observed["url"]
+    assert observed["authorization"] == f"API {credential}"
+    assert observed["timeout"] == 45
+
+
 def test_weight_readiness_epoch_parser_uses_real_reported_epoch():
     output = 'noise\n{"status":"ready","effective_epoch":24561}\n'
     assert _current_epoch_from_readiness(output) == 24561
@@ -466,16 +523,32 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
         region="us-east-1",
         production_secret_id="leadpoet/prod/gateway/env",
         readonly_secret_id="leadpoet/staging/production-parity/readonly-dsn",
+        miner_intake_secret_id=(
+            "leadpoet/staging/production-parity-miner-intake"
+        ),
     )
     encoded = json.dumps({"controller": controller, "runner": runner})
     assert "iam:PassRole" in encoded
     assert "leadpoet-parity-493765492819-*" in encoded
+    assert "leadpoet/staging/production-parity-miner-intake" in encoded
     assert "ssm:DescribeInstanceInformation" in encoded
     assert "secretsmanager:ListSecrets" in encoded
     assert "s3:PutObjectLockConfiguration" in encoded
     assert '"Effect": "Deny"' in encoded
     assert "kms:ScheduleKeyDeletion" in encoded
     assert "testnet" not in encoded
+    write_statement = next(
+        statement
+        for statement in runner["Statement"]
+        if "secretsmanager:PutSecretValue"
+        in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    )
+    assert write_statement["Resource"].endswith("production-parity/*")
+    assert "production-parity-miner-intake" not in write_statement["Resource"]
 
 
 def test_agent_guides_are_identical_and_require_both_parity_lanes():

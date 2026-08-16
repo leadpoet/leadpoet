@@ -1,9 +1,10 @@
 # Production-parity validation
 
-This system validates only the two workflows that need production-scale
-evidence: the complete daily rebenchmark and canonical primary/audit weight
-handling. It does not create staging miners, wallets, authorities, dashboards,
-or a permanent staging fleet.
+This system validates the workflows that need production-scale evidence: the
+complete daily rebenchmark, canonical primary/audit weight handling, and the
+two bounded miner-intake admissions required for release confidence. It does
+not create persistent staging miners, wallets, authorities, dashboards, or a
+permanent staging fleet.
 
 ## What remains identical
 
@@ -50,6 +51,14 @@ attestation and targets 5-10 minutes. It:
 7. validates canonical-bundle equality, signing, finalization, readback,
    Git-tree, ICP, settlement, retry, and cleanup contracts.
 
+The candidate contract's independent source commitments include the exact
+miner signing helpers, intake models and routes, OpenRouter recipient/privacy
+verifier, and SOURCE_ADD miner helper. Both lanes verify those commitments
+against the candidate Git blobs and checkout. This prevents stale evidence
+without changing measured runtime identity or PCR0. Real credential admission
+remains in the authoritative full lane because it requires the candidate's
+attested Nitro recipient and measured provider path.
+
 No production rows are copied in the fast lane, and no database dump is
 uploaded as an artifact. The schema archive is destroyed on every exit path;
 only redacted hashes, counts, sizes, and stage evidence are retained. The
@@ -82,7 +91,42 @@ release succeeds. It dynamically:
 11. hash-binds that verified allocation document into the exact candidate
     primary/audit signing and submission path, then requires both validators
     to consume the same canonical vector through the strict non-forwarding
-    chain boundary.
+    chain boundary; and
+12. creates one in-memory ephemeral miner identity and exercises the exact
+    candidate OpenRouter and SOURCE_ADD HTTP request models, signatures,
+    routes, measured credential verification, PostgREST/RPC calls, and durable
+    writes against the clone.
+
+The OpenRouter intake uses the authorized production runtime and management
+credentials in memory. It verifies the exact coordinator release evidence,
+encrypts both credentials with the same miner-side implementation, submits
+the sealed pair to the real route, and requires the key reference plus both
+encrypted envelopes to exist in the clone with no plaintext in responses,
+rows, logs, or retained evidence.
+
+The production verifier deliberately performs one idempotent management API
+write that forces OpenRouter workspace logging off and then reads it back. The
+parity lane preserves that exact security behavior; it does not create, rotate,
+or delete provider keys. Production Supabase and the chain remain read-only.
+
+SOURCE_ADD intentionally has a different production contract: miners submit
+credential-free source proposals, while an operator adds any provider
+credential later through the measured administration path. The lane first
+makes one bounded read-only request to BuiltWith's official Domain API, using
+its documented `Authorization: API ...` header so the key never enters a URL,
+to prove the configured credential. It then submits the BuiltWith metadata
+through the exact credential-free miner route. It requires `provenance_queued` plus one
+unclaimed queue item, proves no downstream SOURCE_ADD work ran, and verifies
+that both the retired public credential-recipient route and direct credential
+injection still fail closed. Accepting the BuiltWith key in a miner request
+would be staging-only behavior and is deliberately forbidden.
+
+The ephemeral hotkey has no chain identity. The only isolated intake adapter
+therefore replaces the external registration lookup for that one exact
+in-memory hotkey; all signatures, ban checks, request validation, enclave
+attestation, provider authentication, persistence, and fail-closed behavior
+remain production code. It rejects every other hotkey and never reaches a
+chain write.
 
 The workflow immediately deletes its instance, volume, security group,
 CloudFront distribution, run secret, and local database dump. The transient
@@ -99,6 +143,7 @@ dedicated read-only PostgreSQL role in Supabase. One idempotent helper then
 verifies that role and creates only:
 
 - one Secrets Manager record containing that DSN;
+- one separate read-only-to-the-runner secret containing the BuiltWith key;
 - a GitHub OIDC controller role;
 - one restricted EC2 runner role and instance profile; and
 - repository variables for existing production resources and immutable
@@ -152,10 +197,13 @@ python3 scripts/setup_production_parity_staging.py apply \
   --enable
 ```
 
-The helper prompts for the DSN without echoing it, verifies the role and live
-gateway, resolves immutable container digests, creates or updates the IAM
-objects idempotently, and configures repository variables with `gh`. Secret
-values are never printed or stored in GitHub.
+The helper prompts first for the DSN and then for the BuiltWith key without
+echoing either value. It verifies the role and live gateway, resolves immutable
+container digests, creates or updates the IAM objects idempotently, and
+configures repository variables with `gh`. Secret values are never printed or
+stored in GitHub. The production OpenRouter pair is read directly from the
+already-authorized production gateway secret only inside the transient runner;
+no additional copy is created.
 
 ## Safety contract
 
@@ -165,8 +213,11 @@ values are never printed or stored in GitHub.
   so the read-only snapshot includes the complete production data shape.
 - The candidate date is a future unconsumed UTC date inside the clone, avoiding
   deletion or rewriting of copied production daily state.
-- Candidate claims, miner submissions, Git/model mutation, promotion,
-  fulfillment, telemetry, and management credentials remain disabled.
+- The externally reachable candidate gateway keeps miner submissions disabled.
+  Only the bounded in-process intake phase enables the production routes, only
+  after rebenchmark and weight evidence is complete, and only against the
+  disposable clone. SOURCE_ADD dispatch, paid loops, Git/model mutation,
+  promotion, fulfillment, and telemetry remain disabled.
 - Production Finney is read-only. The adapter cannot forward the final chain
   RPC and cannot fabricate receipts or success.
 - Every identity, source archive, release artifact, allocation, and evidence

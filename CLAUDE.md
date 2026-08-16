@@ -278,6 +278,10 @@ measured-source reads against real production data through a strict GET-only,
 no-body, no-redirect adapter. It also runs the candidate-derived restart,
 rebenchmark-contract, canonical-bundle, primary/audit signing, finalization,
 readback, and cleanup checks. Fast validation never copies production rows.
+Its independent source commitments also hash-bind the exact miner signer,
+intake models and routes, OpenRouter recipient/privacy verifier, and SOURCE_ADD
+miner helper against the candidate Git blobs and checkout. This prevents stale
+fast-lane evidence without changing measured runtime identity or PCR0.
 
 `Production Parity Full` is the authoritative lane for rebenchmark or weight
 changes. After exact-SHA attestation it creates one encrypted transient Nitro
@@ -287,13 +291,19 @@ every candidate-configured ICP and assignment, verifies the real allocation
 handoff, hash-binds that allocation into one canonical candidate-derived
 vector, and exercises exact primary/audit SDK submission through the strict non-forwarding chain boundary. It proves the application path but does not
 claim external chain inclusion. Testnet is required only when inclusion itself
-is explicitly in scope.
+is explicitly in scope. The full lane also uses one ephemeral in-memory miner
+to exercise the exact OpenRouter sealed-credential admission and credential-
+free SOURCE_ADD admission against the clone. Real provider credentials remain
+in memory, retained evidence is redacted, and the only intake adapter is the
+external registration lookup for that one ephemeral hotkey.
 
 Neither lane may duplicate ICP counts, scoring, settlement, allocation,
 signing, or weight policy. Production Supabase is read-only and never a runtime
-write target; mutable state lives only in the clone. Miner submissions,
-autoresearch claims, promotion, fulfillment, Git/model mutation, and credential
-management stay disabled. No permanent staging fleet, staging wallet,
+write target; mutable state lives only in the clone. The externally reachable
+gateway keeps miner submissions disabled; the isolated intake phase runs only
+after rebenchmark/weight proof and cannot dispatch SOURCE_ADD or paid loops.
+Autoresearch claims, promotion, fulfillment, and Git/model mutation stay
+disabled. No permanent staging fleet, persistent staging wallet,
 testnet authority, or GitHub Environment is permitted. Missing cleanup or any
 failed/unexercised critical stage fails the lane. See
 `docs/physical_v2_staging.md`.

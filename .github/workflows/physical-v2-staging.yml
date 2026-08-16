@@ -36,6 +36,7 @@ jobs:
       PRODUCTION_GATEWAY_URL: ${{ vars.LEADPOET_PARITY_PRODUCTION_GATEWAY_URL }}
       PRODUCTION_GATEWAY_SECRET_ID: ${{ vars.LEADPOET_PARITY_PRODUCTION_GATEWAY_SECRET_ID }}
       READONLY_DSN_SECRET_ID: ${{ vars.LEADPOET_PARITY_READONLY_DSN_SECRET_ID }}
+      MINER_INTAKE_SECRET_ID: ${{ vars.LEADPOET_PARITY_MINER_INTAKE_SECRET_ID }}
       RUNNER_INSTANCE_PROFILE: ${{ vars.LEADPOET_PARITY_RUNNER_INSTANCE_PROFILE }}
       POSTGRES_IMAGE: ${{ vars.LEADPOET_PARITY_POSTGRES_IMAGE }}
       POSTGREST_IMAGE: ${{ vars.LEADPOET_PARITY_POSTGREST_IMAGE }}
@@ -76,6 +77,7 @@ jobs:
           test "$(git rev-parse origin/main)" = "$CANDIDATE_SHA"
           for name in AWS_REGION PRODUCTION_GATEWAY_IP PRODUCTION_GATEWAY_URL \
             PRODUCTION_GATEWAY_SECRET_ID READONLY_DSN_SECRET_ID \
+            MINER_INTAKE_SECRET_ID \
             RUNNER_INSTANCE_PROFILE POSTGRES_IMAGE \
             POSTGREST_IMAGE; do
             test -n "$(printenv "$name")"
@@ -150,6 +152,7 @@ jobs:
           required = {name: os.environ[name] for name in (
               "AWS_REGION", "CANDIDATE_SHA", "PRODUCTION_GATEWAY_SECRET_ID",
               "READONLY_DSN_SECRET_ID",
+              "MINER_INTAKE_SECRET_ID",
               "POSTGRES_IMAGE", "POSTGREST_IMAGE",
           )}
           run_id = "${{ steps.inputs.outputs.run_id }}"
@@ -177,6 +180,7 @@ jobs:
             --candidate-sha {q(required['CANDIDATE_SHA'])} \
             --production-gateway-secret-id {q(required['PRODUCTION_GATEWAY_SECRET_ID'])} \
             --readonly-dsn-secret-id {q(required['READONLY_DSN_SECRET_ID'])} \
+            --miner-intake-secret-id {q(required['MINER_INTAKE_SECRET_ID'])} \
             --supabase-origin {q(origin)} \
             --artifact-bucket {q(artifact_bucket)} \
             --postgres-image {q(required['POSTGRES_IMAGE'])} \
@@ -235,7 +239,7 @@ jobs:
           import sys
           value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           if (
-              value.get("schema_version") != "leadpoet.production_parity_full.v2"
+              value.get("schema_version") != "leadpoet.production_parity_full.v3"
               or value.get("status") != "passed"
               or value.get("candidate_sha") != sys.argv[2]
               or value.get("gateway", {}).get("commit_sha") != sys.argv[2]
@@ -252,6 +256,31 @@ jobs:
               ) != value.get("allocation_handoff", {}).get("allocation_hash")
               or value.get("weight_path", {}).get("chain_boundary")
                   != "strict-non-forwarding"
+              or value.get("miner_intake", {}).get("status") != "passed"
+              or value.get("miner_intake", {}).get("provider_security_write")
+                  != "exact-idempotent-logging-disable"
+              or value.get("miner_intake", {}).get(
+                  "chain_registration_boundary"
+              ) != "strict-ephemeral-hotkey"
+              or value.get("miner_intake", {}).get("openrouter", {}).get(
+                  "real_production_credentials"
+              ) is not True
+              or value.get("miner_intake", {}).get("openrouter", {}).get(
+                  "admitted"
+              ) is not True
+              or value.get("miner_intake", {}).get("source_add", {}).get(
+                  "live_provider_credential_verified"
+              ) is not True
+              or value.get("miner_intake", {}).get("source_add", {}).get(
+                  "admitted"
+              ) is not True
+              or value.get("miner_intake", {}).get("source_add", {}).get(
+                  "downstream_executed"
+              ) is not False
+              or value.get("miner_intake", {}).get("production_database_mutated")
+                  is not False
+              or value.get("miner_intake", {}).get("production_chain_mutated")
+                  is not False
           ):
               raise SystemExit("full production-parity evidence is incomplete")
           PY

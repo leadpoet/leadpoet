@@ -30,6 +30,9 @@ RUNNER_ROLE = "leadpoet-production-parity-runner"
 RUNNER_PROFILE = "leadpoet-production-parity-runner"
 OIDC_URL = "https://token.actions.githubusercontent.com"
 DEFAULT_REPOSITORY = "leadpoet/leadpoet"
+DEFAULT_MINER_INTAKE_SECRET_ID = (
+    "leadpoet/staging/production-parity-miner-intake"
+)
 
 
 class SetupError(RuntimeError):
@@ -382,6 +385,7 @@ def _runner_policy(
     region: str,
     production_secret_id: str,
     readonly_secret_id: str,
+    miner_intake_secret_id: str,
 ) -> dict[str, Any]:
     run_secret = (
         f"arn:aws:secretsmanager:{region}:{account_id}:secret:"
@@ -451,6 +455,7 @@ def _runner_policy(
                 "Resource": [
                     f"arn:aws:secretsmanager:{region}:{account_id}:secret:{production_secret_id}*",
                     f"arn:aws:secretsmanager:{region}:{account_id}:secret:{readonly_secret_id}*",
+                    f"arn:aws:secretsmanager:{region}:{account_id}:secret:{miner_intake_secret_id}*",
                     run_secret,
                 ],
             },
@@ -548,6 +553,7 @@ def _validate_inputs(args: argparse.Namespace) -> None:
         or IP_RE.fullmatch(args.production_gateway_ip) is None
         or SECRET_RE.fullmatch(args.production_gateway_secret_id) is None
         or SECRET_RE.fullmatch(args.readonly_dsn_secret_id) is None
+        or SECRET_RE.fullmatch(args.miner_intake_secret_id) is None
     ):
         raise SetupError("setup inputs are invalid")
     parsed = urlparse(args.production_gateway_url)
@@ -600,6 +606,59 @@ def setup(args: argparse.Namespace) -> dict[str, Any]:
             SecretString=_json({"readonly_dsn": dsn}),
         )
 
+    try:
+        current_intake_secret = secrets.get_secret_value(
+            SecretId=args.miner_intake_secret_id
+        ).get("SecretString")
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+            raise
+        current_intake_secret = None
+    if current_intake_secret is None or args.replace_miner_intake_secret:
+        builtwith_key = getpass.getpass(
+            "Paste the BuiltWith API key for the isolated miner-intake check, "
+            "then press Return: "
+        ).strip()
+        if (
+            not 8 <= len(builtwith_key) <= 512
+            or any(character.isspace() for character in builtwith_key)
+            or "\x00" in builtwith_key
+        ):
+            raise SetupError("the BuiltWith API key is invalid")
+        intake_document = _json({"builtwith_api_key": builtwith_key})
+    else:
+        try:
+            intake_value = json.loads(str(current_intake_secret))
+        except ValueError as exc:
+            raise SetupError("the miner-intake secret is invalid") from exc
+        if (
+            not isinstance(intake_value, Mapping)
+            or not isinstance(intake_value.get("builtwith_api_key"), str)
+            or not 8 <= len(intake_value["builtwith_api_key"].strip()) <= 512
+            or any(
+                character.isspace()
+                for character in intake_value["builtwith_api_key"].strip()
+            )
+            or "\x00" in intake_value["builtwith_api_key"]
+        ):
+            raise SetupError("the miner-intake secret is invalid")
+        intake_document = ""
+
+    if current_intake_secret is None:
+        secrets.create_secret(
+            Name=args.miner_intake_secret_id,
+            Description=(
+                "Leadpoet production-parity miner-intake provider credential"
+            ),
+            SecretString=intake_document,
+            Tags=[{"Key": "leadpoet:purpose", "Value": "production-parity-intake"}],
+        )
+    elif args.replace_miner_intake_secret:
+        secrets.put_secret_value(
+            SecretId=args.miner_intake_secret_id,
+            SecretString=intake_document,
+        )
+
     oidc_arn = _ensure_oidc_provider(iam, account_id)
     runner_trust = {
         "Version": "2012-10-17",
@@ -619,6 +678,7 @@ def setup(args: argparse.Namespace) -> dict[str, Any]:
             region=args.region,
             production_secret_id=args.production_gateway_secret_id,
             readonly_secret_id=args.readonly_dsn_secret_id,
+            miner_intake_secret_id=args.miner_intake_secret_id,
         ),
     )
     iam.attach_role_policy(
@@ -682,6 +742,7 @@ def setup(args: argparse.Namespace) -> dict[str, Any]:
         "LEADPOET_PARITY_PRODUCTION_GATEWAY_URL": args.production_gateway_url.rstrip("/"),
         "LEADPOET_PARITY_PRODUCTION_GATEWAY_SECRET_ID": args.production_gateway_secret_id,
         "LEADPOET_PARITY_READONLY_DSN_SECRET_ID": args.readonly_dsn_secret_id,
+        "LEADPOET_PARITY_MINER_INTAKE_SECRET_ID": args.miner_intake_secret_id,
         "LEADPOET_PARITY_RUNNER_INSTANCE_PROFILE": RUNNER_PROFILE,
         "LEADPOET_PARITY_POSTGRES_IMAGE": postgres,
         "LEADPOET_PARITY_POSTGREST_IMAGE": postgrest,
@@ -697,6 +758,7 @@ def setup(args: argparse.Namespace) -> dict[str, Any]:
         "runner_role_arn": runner_arn,
         "runner_instance_profile": RUNNER_PROFILE,
         "readonly_secret_id": args.readonly_dsn_secret_id,
+        "miner_intake_secret_id": args.miner_intake_secret_id,
         "enabled": args.enable,
         "secret_values_printed": False,
     }
@@ -716,10 +778,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--readonly-dsn-secret-id",
         default="leadpoet/staging/production-parity/readonly-dsn",
     )
+    parser.add_argument(
+        "--miner-intake-secret-id",
+        default=DEFAULT_MINER_INTAKE_SECRET_ID,
+    )
     parser.add_argument("--postgres-image")
     parser.add_argument("--postgrest-image")
     parser.add_argument("--volume-gib", type=int, default=200)
     parser.add_argument("--replace-readonly-dsn", action="store_true")
+    parser.add_argument("--replace-miner-intake-secret", action="store_true")
     parser.add_argument("--enable", action="store_true")
     args = parser.parse_args(argv)
     try:

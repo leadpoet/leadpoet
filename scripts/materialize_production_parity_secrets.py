@@ -88,6 +88,7 @@ _FORCED_KEYS = {
     "RESEARCH_LAB_HOSTED_WORKER_ENABLED",
     "RESEARCH_LAB_HOSTED_WORKER_DRY_RUN",
     "RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS",
+    "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED",
 }
 
 
@@ -272,6 +273,9 @@ def build_gateway_environment(
         "RESEARCH_LAB_HOSTED_WORKER_ENABLED": "true",
         "RESEARCH_LAB_HOSTED_WORKER_DRY_RUN": "true",
         "RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS": "0",
+        # Intake is exercised explicitly after the rebenchmark and weight
+        # proofs. Nothing may claim its queued provenance work in this run.
+        "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false",
         "RESEARCH_LAB_AUTO_PROMOTION_ENABLED": "false",
         "RESEARCH_LAB_AUTO_COMMIT_ENABLED": "false",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",

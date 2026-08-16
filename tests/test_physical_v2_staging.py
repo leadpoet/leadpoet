@@ -342,6 +342,8 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert "testnet" not in source.lower()
     assert "funded" not in source.lower()
     assert "environment:" not in source
+    assert "LEADPOET_PARITY_MINER_INTAKE_SECRET_ID" in source
+    assert "leadpoet.production_parity_full.v3" in source
 
 
 def test_parity_workflows_reject_non_main_code_before_aws_credentials():
@@ -375,10 +377,43 @@ def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
         "--production-allocation",
         "primary/audit workflow did not consume the clone allocation",
         '"chain_boundary": "strict-non-forwarding"',
+        "_run_miner_intake_path(",
+        "/research-lab/openrouter-keys/credential-recipient",
+        "/research-lab/openrouter-keys",
+        "/research-lab/source-adapters",
+        '"chain_registration_boundary": "strict-ephemeral-hotkey"',
+        '"production_database_mutated": False',
+        '"production_chain_mutated": False',
     )
     assert all(item in source for item in required)
     forbidden = ("chain.submit_extrinsic(", "subtensor.set_weights(", "testnet")
     assert all(item not in source for item in forbidden)
+
+
+def test_full_miner_intake_keeps_public_source_credentials_forbidden():
+    source = (ROOT / "scripts/run_production_parity_full_host.py").read_text()
+    assert '"RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false"' in source
+    assert 'retired_response.status_code != 410' in source
+    assert 'forbidden_response.status_code != 422' in source
+    assert '"credential_transport": "operator-managed-production-contract"' in source
+    assert "builtwith_credential in source_persistence" in source
+    assert '"Authorization": f"API {credential}"' in source
+    assert "KEY=" not in source
+
+
+def test_fast_contract_binds_every_exact_miner_intake_source():
+    source = (
+        ROOT / "scripts/build_production_parity_contract.py"
+    ).read_text()
+    for path in (
+        "gateway/research_lab/api.py",
+        "gateway/research_lab/models.py",
+        "gateway/research_lab/key_vault.py",
+        "leadpoet_canonical/credential_recipient_v2.py",
+        "neurons/miner.py",
+        "research_lab/source_add_miner.py",
+    ):
+        assert f'"{path}"' in source
 
 
 def test_rehearsal_override_is_hash_bound_and_read_only():

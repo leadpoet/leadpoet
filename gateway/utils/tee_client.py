@@ -29,6 +29,13 @@ PARENT_CID = 3
 RPC_PORT = 5000
 MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_RPC_RESPONSE_BYTES = 256 * 1024 * 1024
+TEE_RPC_TRANSPORT_HEALTH_SCHEMA_VERSION = "leadpoet.tee_rpc_transport_health.v2"
+TEE_RPC_CLEANUP_ATTEMPTS_PER_RECOVERY_CYCLE = 1
+MAX_TEE_RPC_CLEANUP_ATTEMPT_COUNT = (1 << 63) - 1
+_TEE_RPC_TRANSPORT_LOCK = threading.Lock()
+_TEE_RPC_RECOVERY_LOCK = threading.Lock()
+_tee_rpc_pending_cleanup_failures: List[Any] = []
+_tee_rpc_cleanup_recovery_count = 0
 
 
 class TEEEnclaveRPCError(RuntimeError):
@@ -52,8 +59,13 @@ class TEETransportCleanupError(RuntimeError):
         super().__init__("enclave RPC transport cleanup failed")
         self.primary_error_type = type(primary_error).__name__
         self.cleanup_error_type = type(cleanup_error).__name__
+        self._cleanup_attempt_count = 1
         # Keep the still-owned descriptor reachable without serializing it.
         self._resource = resource
+
+
+class TEETransportUnavailableError(RuntimeError):
+    """The host process retained an unresolved one-shot RPC transport."""
 
 
 class _ExplicitCloseFailure(RuntimeError):
@@ -75,6 +87,77 @@ def _close_rpc_socket_required(candidate: Any) -> Optional[BaseException]:
     except BaseException as exc:
         return exc
     return None
+
+
+def _retain_tee_rpc_cleanup_failure(
+    failure: TEETransportCleanupError,
+) -> None:
+    with _TEE_RPC_TRANSPORT_LOCK:
+        _tee_rpc_pending_cleanup_failures.append(failure)
+
+
+def _recover_tee_rpc_cleanup_failures() -> None:
+    global _tee_rpc_cleanup_recovery_count
+    with _TEE_RPC_RECOVERY_LOCK:
+        with _TEE_RPC_TRANSPORT_LOCK:
+            snapshot = tuple(_tee_rpc_pending_cleanup_failures)
+        resolved = []
+        for failure in snapshot:
+            cleanup_error = None  # type: Optional[BaseException]
+            for _attempt in range(
+                TEE_RPC_CLEANUP_ATTEMPTS_PER_RECOVERY_CYCLE
+            ):
+                failure._cleanup_attempt_count = min(
+                    MAX_TEE_RPC_CLEANUP_ATTEMPT_COUNT,
+                    failure._cleanup_attempt_count + 1,
+                )
+                cleanup_error = _close_rpc_socket_required(failure._resource)
+                if cleanup_error is None:
+                    resolved.append(failure)
+                    break
+                failure.cleanup_error_type = type(cleanup_error).__name__
+        with _TEE_RPC_TRANSPORT_LOCK:
+            resolved_ids = {id(failure) for failure in resolved}
+            _tee_rpc_pending_cleanup_failures[:] = [
+                failure
+                for failure in _tee_rpc_pending_cleanup_failures
+                if id(failure) not in resolved_ids
+            ]
+            _tee_rpc_cleanup_recovery_count += len(resolved)
+            failure = (
+                _tee_rpc_pending_cleanup_failures[0]
+                if _tee_rpc_pending_cleanup_failures
+                else None
+            )
+    if failure is not None:
+        raise TEETransportUnavailableError(
+            "enclave RPC transport cleanup retry failed"
+        ) from failure
+
+
+def tee_rpc_transport_health() -> Dict[str, Any]:
+    """Return the process-wide, text-free one-shot RPC cleanup latch."""
+
+    with _TEE_RPC_TRANSPORT_LOCK:
+        failures = tuple(_tee_rpc_pending_cleanup_failures)
+        failure = failures[0] if failures else None
+        return {
+            "schema_version": TEE_RPC_TRANSPORT_HEALTH_SCHEMA_VERSION,
+            "status": "error" if failure is not None else "healthy",
+            "terminal_failure_latched": failure is not None,
+            "retained_resource_count": len(failures),
+            "cleanup_recovery_count": _tee_rpc_cleanup_recovery_count,
+            "last_primary_error_type": (
+                failure.primary_error_type if failure is not None else ""
+            ),
+            "last_cleanup_error_type": (
+                failure.cleanup_error_type if failure is not None else ""
+            ),
+        }
+
+
+def _require_tee_rpc_transport_healthy() -> None:
+    _recover_tee_rpc_cleanup_failures()
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -172,6 +255,7 @@ class TEEClient:
     ) -> Dict:
         """Perform one complete RPC on one socket owned by this call."""
 
+        _require_tee_rpc_transport_healthy()
         rpc_socket: Optional[socket.socket] = None
         missing_result = object()
         result: Any = missing_result
@@ -216,11 +300,13 @@ class TEEClient:
             cleanup_error = _close_rpc_socket_required(rpc_socket)
             if cleanup_error is not None:
                 cleanup_primary = primary_error or cleanup_error
-                raise TEETransportCleanupError(
+                failure = TEETransportCleanupError(
                     primary_error=cleanup_primary,
                     cleanup_error=cleanup_error,
                     resource=rpc_socket,
-                ) from cleanup_primary
+                )
+                _retain_tee_rpc_cleanup_failure(failure)
+                raise failure from cleanup_primary
         if primary_error is not None:
             if isinstance(primary_error, RuntimeError):
                 raise primary_error

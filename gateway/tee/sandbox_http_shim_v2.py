@@ -52,6 +52,80 @@ class SandboxHTTPShimV2Error(RuntimeError):
     """The sandbox could not obtain an authenticated provider terminal."""
 
 
+class SandboxHTTPShimTransportCleanupError(SandboxHTTPShimV2Error):
+    """The sandbox provider transport could not prove required cleanup."""
+
+    def __init__(
+        self,
+        *,
+        primary_error: BaseException,
+        resource: Any,
+        result: Optional[Dict[str, Any]],
+    ) -> None:
+        super().__init__("sandbox provider transport cleanup failed")
+        self.primary_error = primary_error
+        self._resource = resource
+        self._result = result
+
+
+_RETIRED_CLEANUP_LOCK = threading.RLock()
+_RETIRED_CLEANUP_RECOVERY_LOCK = threading.Lock()
+_RETIRED_CLEANUP_RESOURCES: Dict[
+    int,
+    tuple[Any, BaseException, Optional[Dict[str, Any]]],
+] = {}
+
+
+def _shutdown_and_close_socket(candidate: Any) -> bool:
+    if candidate is None:
+        return True
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        return candidate.close() is not False
+    except Exception:
+        return False
+
+
+def _retain_cleanup_failure(
+    resource: Any,
+    *,
+    primary_error: BaseException,
+    result: Optional[Dict[str, Any]],
+) -> None:
+    with _RETIRED_CLEANUP_LOCK:
+        _RETIRED_CLEANUP_RESOURCES[id(resource)] = (
+            resource,
+            primary_error,
+            result,
+        )
+
+
+def _require_retired_cleanup() -> None:
+    with _RETIRED_CLEANUP_RECOVERY_LOCK:
+        with _RETIRED_CLEANUP_LOCK:
+            snapshot = tuple(_RETIRED_CLEANUP_RESOURCES.items())
+        resolved = []
+        for resource_id, (resource, _primary_error, _result) in snapshot:
+            if _shutdown_and_close_socket(resource):
+                resolved.append((resource_id, resource))
+        with _RETIRED_CLEANUP_LOCK:
+            for resource_id, resource in resolved:
+                current = _RETIRED_CLEANUP_RESOURCES.get(resource_id)
+                if current is not None and current[0] is resource:
+                    _RETIRED_CLEANUP_RESOURCES.pop(resource_id, None)
+            failed = next(iter(_RETIRED_CLEANUP_RESOURCES.values()), None)
+    if failed is not None:
+        resource, primary_error, result = failed
+        raise SandboxHTTPShimTransportCleanupError(
+            primary_error=primary_error,
+            resource=resource,
+            result=result,
+        ) from primary_error
+
+
 def _evidence_mode() -> str:
     mode = str(os.getenv(EVIDENCE_MODE_ENV) or "live").strip().lower()
     if mode not in {"live", "cache_live", "record", "frozen"}:
@@ -163,6 +237,56 @@ def _headers(headers: Mapping[str, Any]) -> Dict[str, str]:
     }
 
 
+def _execute_broker_request(*, socket_path: str, encoded: bytes) -> Dict[str, Any]:
+    _require_retired_cleanup()
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    response = None
+    result = None
+    primary_error = None
+    try:
+        # The response includes coordinator-side encrypted cache/checkpoint
+        # persistence. Keep the provider's own timeout in the request, while
+        # allowing that measured operation to reach its signed terminal.
+        connection.settimeout(REPLAY_WAIT_SECONDS)
+        connection.connect(socket_path)
+        connection.sendall(len(encoded).to_bytes(4, "big") + encoded)
+        size = int.from_bytes(_recv_exact(connection, 4), "big")
+        if size < 2 or size > MAX_SANDBOX_PROVIDER_FRAME_BYTES:
+            raise SandboxHTTPShimV2Error("provider socket response exceeds limit")
+        response = json.loads(_recv_exact(connection, size).decode("utf-8"))
+        result = response.get("result") if isinstance(response, dict) else None
+        if not isinstance(result, dict):
+            raise SandboxHTTPShimV2Error(
+                "provider socket failed: %s"
+                % (
+                    response.get("error_code")
+                    if isinstance(response, dict)
+                    else "invalid"
+                )
+            )
+    except Exception as exc:
+        primary_error = exc
+        raise
+    finally:
+        if not _shutdown_and_close_socket(connection):
+            cleanup_primary = primary_error or SandboxHTTPShimV2Error(
+                "provider socket cleanup failed"
+            )
+            _retain_cleanup_failure(
+                connection,
+                primary_error=cleanup_primary,
+                result=result,
+            )
+            raise SandboxHTTPShimTransportCleanupError(
+                primary_error=cleanup_primary,
+                resource=connection,
+                result=result,
+            ) from cleanup_primary
+    if result is None:
+        raise SandboxHTTPShimV2Error("provider socket result is unavailable")
+    return result
+
+
 def execute(
     *,
     method: str,
@@ -171,6 +295,7 @@ def execute(
     body: bytes,
     timeout_ms: int,
 ) -> Dict[str, Any]:
+    _require_retired_cleanup()
     mode = _evidence_mode()
     snapshot = _snapshot_terminal(
         method=str(method).upper(),
@@ -228,27 +353,7 @@ def execute(
     encoded = canonical_json(request).encode("utf-8")
     if len(encoded) > MAX_SANDBOX_PROVIDER_FRAME_BYTES:
         raise SandboxHTTPShimV2Error("provider socket request exceeds limit")
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        # The response includes coordinator-side encrypted cache/checkpoint
-        # persistence.  Keep the provider's own timeout in the request, while
-        # allowing that measured operation to reach its signed terminal.
-        connection.settimeout(REPLAY_WAIT_SECONDS)
-        connection.connect(socket_path)
-        connection.sendall(len(encoded).to_bytes(4, "big") + encoded)
-        size = int.from_bytes(_recv_exact(connection, 4), "big")
-        if size < 2 or size > MAX_SANDBOX_PROVIDER_FRAME_BYTES:
-            raise SandboxHTTPShimV2Error("provider socket response exceeds limit")
-        response = json.loads(_recv_exact(connection, size).decode("utf-8"))
-    finally:
-        connection.close()
-    result = response.get("result") if isinstance(response, dict) else None
-    if not isinstance(result, dict):
-        raise SandboxHTTPShimV2Error(
-            "provider socket failed: %s"
-            % (response.get("error_code") if isinstance(response, dict) else "invalid")
-        )
-    return result
+    return _execute_broker_request(socket_path=socket_path, encoded=encoded)
 
 
 def _timeout_ms(value: Any) -> int:

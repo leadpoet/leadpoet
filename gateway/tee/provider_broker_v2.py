@@ -766,12 +766,13 @@ def _provider_transport_failure_diagnostic(
     attempt_number: int,
     exc: BaseException,
 ) -> Dict[str, Any]:
-    failure_stage = (
-        str(getattr(exc, "failure_stage", "") or "")
-        if isinstance(exc, ProviderTransportCleanupError)
-        else "provider_request"
-    )
-    if failure_stage not in _CLEANUP_RESOURCE_KIND_BY_STAGE:
+    if isinstance(exc, ProviderTransportCleanupError):
+        failure_stage = str(getattr(exc, "failure_stage", "") or "")
+        if failure_stage not in _CLEANUP_RESOURCE_KIND_BY_STAGE:
+            raise ProviderBrokerV2Error(
+                "provider transport cleanup failure stage is invalid"
+            )
+    else:
         failure_stage = "provider_request"
     if failure_stage == "provider_request":
         primary_error_type = _safe_error_type(exc)
@@ -853,6 +854,10 @@ def _extract_tls_metadata(response: Any) -> Tuple[str, str]:
     return sha256_bytes(bytes(certificate)), str(protocol)
 
 
+class _ExplicitProviderTransportCloseFailure(ProviderBrokerV2Error):
+    """A provider transport adapter explicitly retained its resource."""
+
+
 def _force_close_response_network_stream(
     response: Any,
     *,
@@ -874,8 +879,11 @@ def _force_close_response_network_stream(
         return
     close_error = None  # type: Optional[BaseException]
     try:
-        network_stream.close()
-        return
+        if network_stream.close() is not False:
+            return
+        close_error = _ExplicitProviderTransportCloseFailure(
+            "provider response network stream close was not confirmed"
+        )
     except Exception as exc:
         close_error = exc
     try:
@@ -893,8 +901,11 @@ def _force_close_response_network_stream(
     except Exception:
         pass
     try:
-        raw_socket.close()
-        return
+        if raw_socket.close() is not False:
+            return
+        raise _ExplicitProviderTransportCloseFailure(
+            "provider response raw socket close was not confirmed"
+        )
     except Exception as exc:
         raise ProviderBrokerV2Error(
             "provider response network stream cleanup failed"
@@ -942,7 +953,10 @@ def _close_client_transports(
 
     client_error = None  # type: Optional[BaseException]
     try:
-        client.close()
+        if client.close() is False:
+            client_error = _ExplicitProviderTransportCloseFailure(
+                "provider client close was not confirmed"
+            )
     except Exception as exc:
         client_error = exc
     explicit_transport = getattr(
@@ -953,7 +967,15 @@ def _close_client_transports(
     if explicit_transport is None:
         return client_error is None, False, client_error
     try:
-        explicit_transport.close()
+        if explicit_transport.close() is False:
+            transport_error = _ExplicitProviderTransportCloseFailure(
+                "provider explicit transport close was not confirmed"
+            )
+            return (
+                client_error is None,
+                False,
+                client_error or transport_error,
+            )
         return client_error is None, True, client_error
     except Exception as exc:
         return client_error is None, False, exc
@@ -3091,7 +3113,7 @@ class ProviderBrokerV2:
                 "terminal_status": "transport_failure",
                 "failure_code": terminal_kwargs["failure_code"],
                 "failure_stage": failure_stage,
-                "failure_error_type": type(exc).__name__,
+                "failure_error_type": _safe_error_type(exc),
                 "encrypted_request_artifact_id": request_artifact_id,
             }
         attempt = build_transport_attempt(
@@ -3117,54 +3139,61 @@ class ProviderBrokerV2:
             **terminal_kwargs,
         )
         if transport_failure_error is not None:
-            transport_failure_diagnostic = (
-                _provider_transport_failure_diagnostic(
-                    provider=provider_id,
-                    request_hash=str(attempt["request_hash"]),
-                    attempt_number=attempt_number,
-                    exc=transport_failure_error,
+            try:
+                transport_failure_diagnostic = (
+                    _provider_transport_failure_diagnostic(
+                        provider=provider_id,
+                        request_hash=str(attempt["request_hash"]),
+                        attempt_number=attempt_number,
+                        exc=transport_failure_error,
+                    )
                 )
-            )
-            diagnostic_bytes = canonical_json(
-                transport_failure_diagnostic
-            ).encode("utf-8")
-            diagnostic_artifact = dict(
-                self._artifact_sink(
-                    diagnostic_bytes,
-                    job_id=str(request["job_id"] or ""),
-                    purpose=str(request["purpose"] or ""),
-                    artifact_kind="provider_transport_failure_diagnostic",
+                diagnostic_bytes = canonical_json(
+                    transport_failure_diagnostic
+                ).encode("utf-8")
+                diagnostic_artifact = dict(
+                    self._artifact_sink(
+                        diagnostic_bytes,
+                        job_id=str(request["job_id"] or ""),
+                        purpose=str(request["purpose"] or ""),
+                        artifact_kind="provider_transport_failure_diagnostic",
+                    )
                 )
-            )
-            if diagnostic_artifact.get("plaintext_hash") != sha256_bytes(
-                diagnostic_bytes
-            ):
-                raise ProviderBrokerV2Error(
-                    "provider transport failure diagnostic plaintext differs"
+                if diagnostic_artifact.get("plaintext_hash") != sha256_bytes(
+                    diagnostic_bytes
+                ):
+                    raise ProviderBrokerV2Error(
+                        "provider transport failure diagnostic plaintext differs"
+                    )
+                diagnostic_hashes = {
+                    str(diagnostic_artifact.get(field) or "")
+                    for field in (
+                        "artifact_id",
+                        "plaintext_hash",
+                        "ciphertext_hash",
+                        "encryption_context_hash",
+                    )
+                    if diagnostic_artifact.get(field)
+                }
+                if (
+                    not _HASH_RE.fullmatch(
+                        str(diagnostic_artifact.get("artifact_id") or "")
+                    )
+                    or any(
+                        not _HASH_RE.fullmatch(item)
+                        for item in diagnostic_hashes
+                    )
+                ):
+                    raise ProviderBrokerV2Error(
+                        "provider transport failure diagnostic descriptor is invalid"
+                    )
+                evidence_artifact_hashes.update(diagnostic_hashes)
+            except Exception:
+                self._abandon_inflight(
+                    deduplication_key,
+                    request_fingerprint,
                 )
-            diagnostic_hashes = {
-                str(diagnostic_artifact.get(field) or "")
-                for field in (
-                    "artifact_id",
-                    "plaintext_hash",
-                    "ciphertext_hash",
-                    "encryption_context_hash",
-                )
-                if diagnostic_artifact.get(field)
-            }
-            if (
-                not _HASH_RE.fullmatch(
-                    str(diagnostic_artifact.get("artifact_id") or "")
-                )
-                or any(
-                    not _HASH_RE.fullmatch(item)
-                    for item in diagnostic_hashes
-                )
-            ):
-                raise ProviderBrokerV2Error(
-                    "provider transport failure diagnostic descriptor is invalid"
-                )
-            evidence_artifact_hashes.update(diagnostic_hashes)
+                raise
         result = {
             **response_payload,
             "transport_attempt": attempt,

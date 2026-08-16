@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import threading
 
 import pytest
 
@@ -23,6 +24,7 @@ from validator_tee.enclave.chain_source_v2 import (
     FINALIZATION_RPC_PACING_SECONDS,
     ValidatorChainSourceV2,
     ValidatorChainSourceV2Error,
+    ValidatorChainTransportCleanupError,
 )
 
 
@@ -1196,6 +1198,171 @@ def test_transport_retries_malformed_authenticated_reply_without_duplicate_termi
         attempt["terminal_status"] == "authenticated_response"
         for attempt in result["attempts"]
     )
+
+
+def test_chain_parent_timeout_cleanup_retains_socket_and_primary_error():
+    primary = ValueError("timeout setup failed")
+
+    class Parent:
+        def __init__(self):
+            self.allow_close = False
+
+        def settimeout(self, _timeout):
+            raise primary
+
+        def close(self):
+            return self.allow_close
+
+    parent = Parent()
+    transport = EnclaveChainRpcTransportV2(
+        socket_factory=lambda *_args: parent,
+    )
+
+    with pytest.raises(ValidatorChainTransportCleanupError) as raised:
+        transport._tls_socket()
+
+    assert raised.value.stage == "parent_transport_cleanup"
+    assert raised.value.primary_error is primary
+    assert raised.value.__cause__ is primary
+    assert raised.value._resources == (parent,)
+    assert transport._retired_cleanup_resources[id(parent)][1] is parent
+    parent.allow_close = True
+    assert transport._retry_retired_cleanup() is True
+
+
+def test_chain_http_cleanup_retains_response_and_tls_transport(monkeypatch):
+    class TLSSocket:
+        def __init__(self):
+            self.allow_close = False
+
+        def sendall(self, _payload):
+            pass
+
+        def getpeercert(self, *, binary_form):
+            assert binary_form is True
+            return b"certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+        def close(self):
+            return self.allow_close
+
+    class Response:
+        status = 200
+
+        def __init__(self, tls_socket, *, allow_close):
+            self.tls_socket = tls_socket
+            self.allow_close = allow_close
+
+        def begin(self):
+            pass
+
+        def read(self, _size):
+            return b'{"jsonrpc":"2.0","id":1,"result":"0x01"}'
+
+        def close(self):
+            return self.allow_close
+
+    tls_socket = TLSSocket()
+    recovered_tls_socket = TLSSocket()
+    recovered_tls_socket.allow_close = True
+    tls_sockets = iter((tls_socket, recovered_tls_socket))
+    responses = []
+
+    def response_factory(candidate):
+        response = Response(candidate, allow_close=bool(responses))
+        responses.append(response)
+        return response
+
+    transport = EnclaveChainRpcTransportV2()
+
+    def tls_socket_factory():
+        transport._require_retired_cleanup()
+        return next(tls_sockets)
+
+    transport._tls_socket = tls_socket_factory
+    monkeypatch.setattr(chain_source_v2.http.client, "HTTPResponse", response_factory)
+
+    with pytest.raises(ValidatorChainTransportCleanupError) as raised:
+        transport._http_post(b"{}")
+
+    response = responses[0]
+    assert raised.value.stage == "http_response_transport_cleanup"
+    assert raised.value._resources == (response, tls_socket)
+    assert transport._retired_cleanup_resources[id(response)][1] is response
+    assert transport._retired_cleanup_resources[id(tls_socket)][1] is tls_socket
+    response.allow_close = True
+    tls_socket.allow_close = True
+    recovered = transport._http_post(b"{}")
+    assert recovered["status"] == 200
+    assert recovered["tls_protocol"] == "TLSv1.3"
+    assert transport._retired_cleanup_resources == {}
+
+
+def test_chain_cleanup_retry_cannot_drop_concurrent_retained_owner():
+    close_started = threading.Event()
+    release_close = threading.Event()
+    retain_done = threading.Event()
+
+    class Resource:
+        def __init__(self, *, blocking):
+            self.blocking = blocking
+            self.allow_close = False
+
+        def close(self):
+            if self.blocking:
+                close_started.set()
+                assert release_close.wait(timeout=2)
+            return self.allow_close
+
+    transport = EnclaveChainRpcTransportV2()
+    primary = OSError("cleanup failed")
+    first = Resource(blocking=True)
+    concurrent = Resource(blocking=False)
+    first.allow_close = True
+    transport._retain_cleanup_resource(
+        first,
+        kind="response",
+        primary_error=primary,
+    )
+    retry_errors = []
+
+    def retry_cleanup():
+        try:
+            transport._require_retired_cleanup()
+        except ValidatorChainTransportCleanupError as exc:
+            retry_errors.append(exc)
+
+    def retain_concurrent():
+        transport._retain_cleanup_resource(
+            concurrent,
+            kind="response",
+            primary_error=primary,
+        )
+        retain_done.set()
+
+    retry = threading.Thread(target=retry_cleanup)
+    retain = threading.Thread(target=retain_concurrent)
+
+    retry.start()
+    assert close_started.wait(timeout=2)
+    retain.start()
+    assert retain_done.wait(timeout=1)
+    with transport._cleanup_lock:
+        assert len(transport._retired_cleanup_resources) == 2
+    release_close.set()
+    retry.join(timeout=2)
+    retain.join(timeout=2)
+
+    assert not retry.is_alive()
+    assert not retain.is_alive()
+    assert len(retry_errors) == 1
+    assert retry_errors[0]._resources == (concurrent,)
+    assert id(first) not in transport._retired_cleanup_resources
+    assert transport._retired_cleanup_resources[id(concurrent)][1] is concurrent
+    concurrent.allow_close = True
+    transport._require_retired_cleanup()
 
 
 def test_archive_transport_records_only_the_exact_archive_destination():

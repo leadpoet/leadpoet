@@ -49,11 +49,35 @@ def test_committed_validator_protected_manifest_matches_source():
         in PROTECTED_SYMBOLS["neurons/validator.py"]
     )
     assert {
+        "ValidatorChainRelayCleanupError",
         "_shutdown_and_close_socket",
+        "_connect_chain",
         "handle_chain_relay_connection",
         "ValidatorChainRelayV2",
         "main",
     } <= set(PROTECTED_SYMBOLS["validator_tee/host/chain_relay_v2.py"])
+    assert {
+        "_TRANSIENT_ACCEPT_ERRNOS",
+        "ValidatorVSOCKRPCCleanupError",
+        "_close_vsock_rpc_required",
+        "_handle_vsock_client",
+        "run_vsock_server",
+    } <= set(PROTECTED_SYMBOLS["validator_tee/enclave/tee_service.py"])
+    assert {
+        "ValidatorChainTransportCleanupError",
+        "_shutdown_and_close_socket",
+        "EnclaveChainRpcTransportV2",
+    } <= set(PROTECTED_SYMBOLS["validator_tee/enclave/chain_source_v2.py"])
+    assert {
+        "ValidatorEnclaveTransportCleanupError",
+        "_shutdown_and_close_socket",
+        "_RETIRED_CLEANUP_LOCK",
+        "_RETIRED_CLEANUP_RECOVERY_LOCK",
+        "_RETIRED_CLEANUP",
+        "ValidatorEnclaveClient._retain_cleanup_failure",
+        "ValidatorEnclaveClient._require_retired_cleanup",
+        "ValidatorEnclaveClient._send_request",
+    } <= set(PROTECTED_SYMBOLS["validator_tee/host/vsock_client.py"])
 
 
 def test_validator_protected_manifest_detects_weight_logic_change(tmp_path: Path):

@@ -6,12 +6,14 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
 
 from gateway.tee import proxy_transport_preflight_v2 as module
 from gateway.tee.proxy_transport_preflight_v2 import (
+    WorkerProxyTransportCleanupV2Error,
     WorkerProxyTransportPreflightV2Error,
     verify_tls_proxy_connect_v2,
     verify_worker_proxy_fleets_v2,
@@ -37,6 +39,9 @@ def test_tls_connect_probe_uses_measured_handshake_and_closes_tunnel(monkeypatch
         def _open_upstream_proxy_tunnel(self, **kwargs):
             observed.append(("connect", kwargs))
             return tunnel
+
+        def _retry_retired_cleanup(self):
+            return True
 
     monkeypatch.setattr(module, "_HostProxyProbe", Probe)
     connector = object()
@@ -76,6 +81,9 @@ def test_tls_connect_probe_retries_then_succeeds_without_exposing_url(monkeypatc
                 raise OSError("connection reset")
             return _Tunnel()
 
+        def _retry_retired_cleanup(self):
+            return True
+
     monkeypatch.setattr(module, "_HostProxyProbe", Probe)
     verify_tls_proxy_connect_v2(
         "https://worker:secret@proxy.example.com",
@@ -99,6 +107,9 @@ def test_connect_probe_accepts_authenticated_http_connect_proxy(monkeypatch):
             observed.append(kwargs)
             return _Tunnel()
 
+        def _retry_retired_cleanup(self):
+            return True
+
     monkeypatch.setattr(module, "_HostProxyProbe", Probe)
     verify_tls_proxy_connect_v2(
         "http://worker:secret@proxy.example.com:6162",
@@ -112,6 +123,179 @@ def test_connect_probe_accepts_authenticated_http_connect_proxy(monkeypatch):
             "destination_port": 443,
         }
     ]
+
+
+def test_connect_probe_fails_closed_and_retains_unclosed_tunnel(monkeypatch):
+    class Tunnel(_Tunnel):
+        def __init__(self):
+            super().__init__()
+            self.allow_close = False
+
+        def close(self):
+            self.closed = self.allow_close
+            return self.allow_close
+
+    tunnel = Tunnel()
+
+    class Probe:
+        def __init__(self, **_kwargs):
+            pass
+
+        def _open_upstream_proxy_tunnel(self, **_kwargs):
+            return tunnel
+
+        def _retry_retired_cleanup(self):
+            return True
+
+    monkeypatch.setattr(module, "_HostProxyProbe", Probe)
+    with pytest.raises(
+        WorkerProxyTransportCleanupV2Error,
+        match="transport cleanup failed",
+    ) as raised:
+        verify_tls_proxy_connect_v2(
+            "https://worker:secret@proxy.example.com",
+            destination_host="openrouter.ai",
+            attempts=2,
+        )
+
+    assert raised.value.stage == "connect_transport_cleanup"
+    assert module._RETIRED_CLEANUP_RESOURCES[id(tunnel)][1] is tunnel
+    tunnel.allow_close = True
+    verify_tls_proxy_connect_v2(
+        "https://worker:secret@proxy.example.com",
+        destination_host="openrouter.ai",
+        attempts=1,
+    )
+    assert module._RETIRED_CLEANUP_RESOURCES == {}
+
+
+def test_retired_preflight_cleanup_allows_concurrent_owner_transfer(
+    monkeypatch,
+):
+    close_started = threading.Event()
+    release_close = threading.Event()
+
+    class BlockingTunnel:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            close_started.set()
+            assert release_close.wait(timeout=1)
+            return None
+
+    class ConcurrentTunnel:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return None
+
+    first = BlockingTunnel()
+    concurrent = ConcurrentTunnel()
+    concurrent_primary = OSError("concurrent cleanup")
+    monkeypatch.setattr(module, "_RETIRED_CLEANUP_RESOURCES", {})
+    module._retain_cleanup_resource(
+        first,
+        kind="transport",
+        primary_error=OSError("first cleanup"),
+    )
+    recovery_results = []
+    recovery = threading.Thread(
+        target=lambda: recovery_results.append(module._retry_retired_cleanup())
+    )
+    recovery.start()
+    assert close_started.wait(timeout=1)
+    retained = threading.Event()
+
+    def retain():
+        module._retain_cleanup_resource(
+            concurrent,
+            kind="transport",
+            primary_error=concurrent_primary,
+        )
+        retained.set()
+
+    retention = threading.Thread(target=retain)
+    retention.start()
+    assert retained.wait(timeout=1)
+    assert module._RETIRED_CLEANUP_RESOURCES[id(concurrent)][1] is concurrent
+    release_close.set()
+    recovery.join(timeout=1)
+    retention.join(timeout=1)
+
+    assert recovery_results == [("transport", concurrent_primary)]
+    assert list(module._RETIRED_CLEANUP_RESOURCES.values())[0][1] is concurrent
+    assert module._retry_retired_cleanup() is None
+    assert module._RETIRED_CLEANUP_RESOURCES == {}
+
+
+def test_parent_timeout_failure_preserves_primary_when_close_is_unproven():
+    primary = ValueError("timeout setup failed")
+
+    class Connection:
+        def __init__(self):
+            self.allow_close = False
+
+        def settimeout(self, _timeout):
+            raise primary
+
+        def close(self):
+            return self.allow_close
+
+    connection = Connection()
+    probe = module._HostProxyProbe(
+        connector=lambda _host, _port: connection,
+        timeout_seconds=1,
+    )
+    with pytest.raises(module.EnclaveEgressProxyCleanupError) as raised:
+        probe._open_parent_tunnel("proxy.example.com", 443, purpose="upstream_proxy")
+
+    assert raised.value.primary_error is primary
+    assert raised.value.__cause__ is primary
+    assert raised.value._resources == (connection,)
+    connection.allow_close = True
+    assert probe._retry_retired_cleanup() is True
+
+
+def test_default_connector_cleanup_failure_transfers_candidate_ownership():
+    primary = OSError("connect failed")
+
+    class Candidate:
+        def __init__(self):
+            self.allow_close = False
+
+        def close(self):
+            return self.allow_close
+
+    candidate = Candidate()
+
+    def connector(_host, _port):
+        raise module.TEEEgressForwarderCleanupError(
+            primary_error=primary,
+            resource=candidate,
+        ) from primary
+
+    with pytest.raises(WorkerProxyTransportCleanupV2Error) as raised:
+        verify_tls_proxy_connect_v2(
+            "https://worker:secret@proxy.example.com",
+            destination_host="openrouter.ai",
+            attempts=1,
+            connector=connector,
+        )
+
+    assert raised.value.primary_error.__cause__ is primary
+    retained_probes = [
+        resource
+        for kind, resource, _primary_error in (
+            module._RETIRED_CLEANUP_RESOURCES.values()
+        )
+        if kind == "probe"
+    ]
+    assert len(retained_probes) == 1
+    assert retained_probes[0]._retired_cleanup_resources[id(candidate)][1] is candidate
+    candidate.allow_close = True
+    assert module._retry_retired_cleanup() is None
 
 
 def test_fleet_probe_quarantines_failed_profile_after_all_destination_checks():

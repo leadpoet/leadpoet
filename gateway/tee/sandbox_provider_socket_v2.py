@@ -132,6 +132,8 @@ class SandboxProviderSocketServerV2:
         self._stop = threading.Event()
         self._lifecycle_lock = threading.RLock()
         self._status_lock = threading.Lock()
+        self._pending_endpoint_cleanup_lock = threading.RLock()
+        self._pending_endpoint_cleanup_recovery_lock = threading.Lock()
         self._last_failure = None  # type: Optional[Dict[str, Any]]
         self._socket_cleanup_failure_count = 0
         self._pending_endpoint_cleanup = []  # type: List[Any]
@@ -184,34 +186,52 @@ class SandboxProviderSocketServerV2:
         endpoint: str,
         primary_error: Optional[Exception],
     ) -> None:
-        with self._status_lock:
-            if not any(
-                pending is candidate for pending in self._pending_endpoint_cleanup
-            ):
-                self._pending_endpoint_cleanup.append(candidate)
-            self._socket_cleanup_failure_count += 1
-            self._last_failure = {
-                "stage": "handler_endpoint_cleanup",
-                "error_type": "SandboxProviderSocketV2Error",
-                "errno": 0,
-                "endpoint": str(endpoint),
-                "primary_error_type": (
-                    type(primary_error).__name__
-                    if primary_error is not None
-                    else "none"
-                ),
-            }
+        with self._pending_endpoint_cleanup_lock:
+            with self._status_lock:
+                if not any(
+                    pending is candidate
+                    for pending in self._pending_endpoint_cleanup
+                ):
+                    self._pending_endpoint_cleanup.append(candidate)
+                self._socket_cleanup_failure_count += 1
+                self._last_failure = {
+                    "stage": "handler_endpoint_cleanup",
+                    "error_type": "SandboxProviderSocketV2Error",
+                    "errno": 0,
+                    "endpoint": str(endpoint),
+                    "primary_error_type": (
+                        type(primary_error).__name__
+                        if primary_error is not None
+                        else "none"
+                    ),
+                }
 
     def _retry_pending_endpoint_cleanup_locked(self) -> bool:
-        with self._status_lock:
-            pending = list(self._pending_endpoint_cleanup)
-        remaining = []
-        for candidate in pending:
-            if not _shutdown_and_close_socket(candidate):
-                remaining.append(candidate)
-        with self._status_lock:
-            self._pending_endpoint_cleanup = remaining
-        return not remaining
+        with self._pending_endpoint_cleanup_recovery_lock:
+            with self._pending_endpoint_cleanup_lock:
+                with self._status_lock:
+                    pending = tuple(self._pending_endpoint_cleanup)
+            resolved_ids = {
+                id(candidate)
+                for candidate in pending
+                if _shutdown_and_close_socket(candidate)
+            }
+            with self._pending_endpoint_cleanup_lock:
+                with self._status_lock:
+                    self._pending_endpoint_cleanup = [
+                        candidate
+                        for candidate in self._pending_endpoint_cleanup
+                        if id(candidate) not in resolved_ids
+                    ]
+                    return not self._pending_endpoint_cleanup
+
+    @staticmethod
+    def _join_thread_bounded(thread: Any, *, timeout: float) -> bool:
+        try:
+            thread.join(timeout=timeout)
+        except RuntimeError:
+            pass
+        return not thread.is_alive()
 
     def status(self) -> Dict[str, Any]:
         with self._status_lock:
@@ -293,27 +313,47 @@ class SandboxProviderSocketServerV2:
                     ) from exc
                 self.socket_path.unlink(missing_ok=True)
                 raise
-            self._listener = listener
-            thread = threading.Thread(
-                target=self._accept_loop,
-                args=(listener, stop_event),
-                name="leadpoet-sandbox-provider-v2",
-                daemon=True,
-            )
-            self._thread = thread
+            thread = None
             try:
+                thread = threading.Thread(
+                    target=self._accept_loop,
+                    args=(listener, stop_event),
+                    name="leadpoet-sandbox-provider-v2",
+                    daemon=True,
+                )
+                self._listener = listener
+                self._thread = thread
                 thread.start()
             except Exception as exc:
                 stop_event.set()
-                if not _shutdown_and_close_socket(listener):
+                listener_clean = _shutdown_and_close_socket(listener)
+                thread_clean = bool(
+                    thread is None
+                    or self._join_thread_bounded(
+                        thread,
+                        timeout=min(
+                            1.0,
+                            max(0.3, self._drain_timeout_seconds),
+                        ),
+                    )
+                )
+                if not listener_clean or not thread_clean:
+                    self._listener = listener
+                    self._thread = thread
                     self._record_failure(
-                        "listener_start_cleanup",
+                        (
+                            "listener_start_cleanup"
+                            if not listener_clean
+                            else "accept_loop_start_cleanup"
+                        ),
                         endpoint="listener",
                         primary_error=exc,
                         cleanup_failure=True,
                     )
                     raise SandboxProviderSocketV2Error(
                         "sandbox provider listener cleanup failed after startup"
+                        if not listener_clean
+                        else "sandbox provider accept loop cleanup failed after startup"
                     ) from exc
                 self._listener = None
                 self._thread = None
@@ -345,13 +385,10 @@ class SandboxProviderSocketServerV2:
             # The listener uses a 250ms timeout so platforms where close()
             # does not immediately interrupt accept() still get one bounded
             # wakeup before liveness is judged.
-            accept_thread.join(
-                timeout=min(
-                    1.0,
-                    max(0.3, self._drain_timeout_seconds),
-                )
+            thread_clean = self._join_thread_bounded(
+                accept_thread,
+                timeout=min(1.0, max(0.3, self._drain_timeout_seconds)),
             )
-            thread_clean = not accept_thread.is_alive()
             if not thread_clean:
                 self._record_failure(
                     "accept_loop_cleanup",
@@ -424,20 +461,22 @@ class SandboxProviderSocketServerV2:
                         None,
                     )
                 return
-            handler = threading.Thread(
-                target=self._handle_registered,
-                args=(connection,),
-                name="leadpoet-sandbox-provider-request-v2",
-                daemon=True,
-            )
-            with self._handler_condition:
-                self._handlers.add(handler)
+            handler = None
             try:
+                handler = threading.Thread(
+                    target=self._handle_registered,
+                    args=(connection,),
+                    name="leadpoet-sandbox-provider-request-v2",
+                    daemon=True,
+                )
+                with self._handler_condition:
+                    self._handlers.add(handler)
                 handler.start()
             except Exception as exc:
-                with self._handler_condition:
-                    self._handlers.discard(handler)
-                    self._handler_condition.notify_all()
+                if handler is not None:
+                    with self._handler_condition:
+                        self._handlers.discard(handler)
+                        self._handler_condition.notify_all()
                 if not _shutdown_and_close_socket(connection):
                     self._retain_endpoint_cleanup_failure(
                         connection,

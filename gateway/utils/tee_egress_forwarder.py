@@ -66,6 +66,15 @@ class TEEEgressForwarderError(RuntimeError):
     """The parent could not safely establish or relay an enclave tunnel."""
 
 
+class TEEEgressForwarderCleanupError(TEEEgressForwarderError):
+    """A destination candidate still has locally owned transport state."""
+
+    def __init__(self, *, primary_error: Exception, resource: Any) -> None:
+        super().__init__("egress destination socket cleanup failed")
+        self.primary_error = primary_error
+        self._resources = (resource,)
+
+
 def _shutdown_and_close_socket(candidate: Any) -> bool:
     """Attempt full-duplex shutdown and require descriptor release."""
 
@@ -161,8 +170,9 @@ def _connect_public_destination(
         except Exception as exc:
             last_error = exc
             if not _shutdown_and_close_socket(candidate):
-                raise TEEEgressForwarderError(
-                    "egress destination socket cleanup failed"
+                raise TEEEgressForwarderCleanupError(
+                    primary_error=exc,
+                    resource=candidate,
                 ) from exc
     raise TEEEgressForwarderError("egress destination connection failed") from last_error
 
@@ -339,6 +349,16 @@ def _handle_connection(
         )
     except Exception as exc:
         primary_error = exc
+        if (
+            isinstance(exc, TEEEgressForwarderCleanupError)
+            and cleanup_failure_callback is not None
+        ):
+            for resource in exc._resources:
+                cleanup_failure_callback(
+                    resource,
+                    "upstream",
+                    exc.primary_error,
+                )
         if not connected:
             try:
                 _send_response(
@@ -401,6 +421,8 @@ class TEEEgressForwarder:
         self._stop = threading.Event()
         self._lifecycle_lock = threading.RLock()
         self._status_lock = threading.Lock()
+        self._pending_endpoint_cleanup_lock = threading.RLock()
+        self._pending_endpoint_cleanup_recovery_lock = threading.Lock()
         self._last_failure = None  # type: Optional[Dict[str, Any]]
         self._socket_cleanup_failure_count = 0
         self._pending_endpoint_cleanup = []  # type: List[Any]
@@ -451,34 +473,55 @@ class TEEEgressForwarder:
         endpoint: str,
         primary_error: Optional[Exception],
     ) -> None:
-        with self._status_lock:
-            if not any(
-                pending is candidate for pending in self._pending_endpoint_cleanup
-            ):
-                self._pending_endpoint_cleanup.append(candidate)
-            self._socket_cleanup_failure_count += 1
-            self._last_failure = {
-                "stage": "handler_endpoint_cleanup",
-                "error_type": "TEEEgressForwarderError",
-                "errno": 0,
-                "endpoint": str(endpoint),
-                "primary_error_type": (
-                    type(primary_error).__name__
-                    if primary_error is not None
-                    else "none"
-                ),
-            }
+        with self._pending_endpoint_cleanup_lock:
+            with self._status_lock:
+                if not any(
+                    pending is candidate
+                    for pending in self._pending_endpoint_cleanup
+                ):
+                    self._pending_endpoint_cleanup.append(candidate)
+                self._socket_cleanup_failure_count += 1
+                self._last_failure = {
+                    "stage": "handler_endpoint_cleanup",
+                    "error_type": "TEEEgressForwarderError",
+                    "errno": 0,
+                    "endpoint": str(endpoint),
+                    "primary_error_type": (
+                        type(primary_error).__name__
+                        if primary_error is not None
+                        else "none"
+                    ),
+                }
 
     def _retry_pending_endpoint_cleanup_locked(self) -> bool:
-        with self._status_lock:
-            pending = list(self._pending_endpoint_cleanup)
-        remaining = []
-        for candidate in pending:
-            if not _shutdown_and_close_socket(candidate):
-                remaining.append(candidate)
-        with self._status_lock:
-            self._pending_endpoint_cleanup = remaining
-        return not remaining
+        with self._pending_endpoint_cleanup_recovery_lock:
+            with self._pending_endpoint_cleanup_lock:
+                with self._status_lock:
+                    pending = tuple(self._pending_endpoint_cleanup)
+            resolved_ids = {
+                id(candidate)
+                for candidate in pending
+                if _shutdown_and_close_socket(candidate)
+            }
+            with self._pending_endpoint_cleanup_lock:
+                with self._status_lock:
+                    self._pending_endpoint_cleanup = [
+                        candidate
+                        for candidate in self._pending_endpoint_cleanup
+                        if id(candidate) not in resolved_ids
+                    ]
+                    return not self._pending_endpoint_cleanup
+
+    @staticmethod
+    def _join_thread_bounded(thread: Any, *, timeout: float) -> bool:
+        try:
+            thread.join(timeout=timeout)
+        except RuntimeError:
+            # threading.Thread.join() raises before start(). A failed start
+            # owns no running thread, but the object remains tracked until the
+            # listener cleanup boundary is also proven.
+            pass
+        return not thread.is_alive()
 
     def _cleanup_lifecycle_locked(self) -> None:
         self._stop.set()
@@ -495,8 +538,7 @@ class TEEEgressForwarder:
                 )
         thread_clean = True
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
-            thread_clean = not thread.is_alive()
+            thread_clean = self._join_thread_bounded(thread, timeout=2.0)
             if not thread_clean:
                 self._record_failure(
                     "accept_loop_cleanup",
@@ -552,27 +594,41 @@ class TEEEgressForwarder:
                         "gateway TEE egress listener cleanup failed after startup"
                     ) from exc
                 raise
-            self._listener = listener
-            thread = threading.Thread(
-                target=self._accept_loop,
-                args=(listener, stop_event),
-                name="gateway-tee-egress-forwarder",
-                daemon=True,
-            )
-            self._thread = thread
+            thread = None
             try:
+                thread = threading.Thread(
+                    target=self._accept_loop,
+                    args=(listener, stop_event),
+                    name="gateway-tee-egress-forwarder",
+                    daemon=True,
+                )
+                self._listener = listener
+                self._thread = thread
                 thread.start()
             except Exception as exc:
                 stop_event.set()
-                if not _shutdown_and_close_socket(listener):
+                listener_clean = _shutdown_and_close_socket(listener)
+                thread_clean = bool(
+                    thread is None
+                    or self._join_thread_bounded(thread, timeout=2.0)
+                )
+                if not listener_clean or not thread_clean:
+                    self._listener = listener
+                    self._thread = thread
                     self._record_failure(
-                        "listener_start_cleanup",
+                        (
+                            "listener_start_cleanup"
+                            if not listener_clean
+                            else "accept_loop_start_cleanup"
+                        ),
                         endpoint="listener",
                         primary_error=exc,
                         cleanup_failure=True,
                     )
                     raise TEEEgressForwarderError(
                         "gateway TEE egress listener cleanup failed after startup"
+                        if not listener_clean
+                        else "gateway TEE egress accept loop cleanup failed after startup"
                     ) from exc
                 self._listener = None
                 self._thread = None
@@ -639,21 +695,44 @@ class TEEEgressForwarder:
                 if not stop_event.is_set():
                     logger.exception("gateway_tee_egress_forwarder_accept_failed")
                 return
-            try:
-                threading.Thread(
-                    target=self._serve_connection,
-                    args=(connection,),
-                    name="gateway-tee-egress-tunnel",
-                    daemon=True,
-                ).start()
-            except Exception as exc:
+            admission_blocked = False
+            handler_start_error = None  # type: Optional[Exception]
+            with self._pending_endpoint_cleanup_lock:
+                with self._status_lock:
+                    admission_blocked = bool(
+                        self._pending_endpoint_cleanup
+                    )
+                if not admission_blocked:
+                    try:
+                        threading.Thread(
+                            target=self._serve_connection,
+                            args=(connection,),
+                            name="gateway-tee-egress-tunnel",
+                            daemon=True,
+                        ).start()
+                    except Exception as exc:
+                        handler_start_error = exc
+            if admission_blocked:
                 if not _shutdown_and_close_socket(connection):
                     self._retain_endpoint_cleanup_failure(
                         connection,
                         "enclave",
-                        exc,
+                        TEEEgressForwarderError(
+                            "gateway TEE egress admission is cleanup-blocked"
+                        ),
                     )
-                self._record_failure("start_handler", error=exc)
+                continue
+            if handler_start_error is not None:
+                if not _shutdown_and_close_socket(connection):
+                    self._retain_endpoint_cleanup_failure(
+                        connection,
+                        "enclave",
+                        handler_start_error,
+                    )
+                self._record_failure(
+                    "start_handler",
+                    error=handler_start_error,
+                )
 
     def _serve_connection(self, connection: Any) -> None:
         _handle_connection(
@@ -666,6 +745,7 @@ class TEEEgressForwarder:
     def wait_for_accept_loop(self, *, poll_seconds: float = 1.0) -> int:
         """Wait for the listener thread and distinguish expected shutdown."""
 
+        poll_interval = max(0.01, float(poll_seconds))
         while True:
             with self._lifecycle_lock:
                 thread = self._thread
@@ -675,10 +755,12 @@ class TEEEgressForwarder:
                     self._pending_endpoint_cleanup
                 )
             if endpoint_cleanup_pending:
-                return 1
+                if not self._retry_pending_endpoint_cleanup_locked():
+                    time.sleep(poll_interval)
+                continue
             if thread is None:
                 return 0 if stop_event.is_set() else 1
-            thread.join(timeout=max(0.01, float(poll_seconds)))
+            thread.join(timeout=poll_interval)
             if not thread.is_alive():
                 return 0 if stop_event.is_set() else 1
 

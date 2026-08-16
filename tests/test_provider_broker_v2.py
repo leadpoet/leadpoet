@@ -36,7 +36,10 @@ from gateway.tee.provider_broker_v2 import (
     _authenticated_body_is_complete_after_stream_error,
     _extract_tls_metadata,
     _failure_code,
+    _close_client_transports,
+    _force_close_response_network_stream,
     _local_resource_failure,
+    _provider_transport_failure_diagnostic,
     _provider_rpc_response_body_limit,
     credential_reference_hash,
     credential_value_hash,
@@ -96,6 +99,71 @@ def test_tls_metadata_supports_python39_positional_only_peer_certificate():
         sha256_bytes(b"peer-certificate"),
         "TLSv1.3",
     )
+
+
+def test_response_stream_false_close_falls_back_to_confirmed_raw_socket():
+    class RawSocket:
+        def shutdown(self, _direction):
+            return None
+
+        def close(self):
+            return None
+
+    class NetworkStream:
+        def close(self):
+            return False
+
+        def get_extra_info(self, name):
+            assert name == "socket"
+            return RawSocket()
+
+    response = SimpleNamespace(extensions={"network_stream": NetworkStream()})
+    _force_close_response_network_stream(response, required=True)
+
+
+def test_response_stream_and_raw_socket_false_close_fail_closed():
+    class RawSocket:
+        def shutdown(self, _direction):
+            return None
+
+        def close(self):
+            return False
+
+    class NetworkStream:
+        def close(self):
+            return False
+
+        def get_extra_info(self, name):
+            assert name == "socket"
+            return RawSocket()
+
+    response = SimpleNamespace(extensions={"network_stream": NetworkStream()})
+    with pytest.raises(ProviderBrokerV2Error, match="cleanup failed"):
+        _force_close_response_network_stream(response, required=True)
+
+
+@pytest.mark.parametrize(
+    ("client_result", "transport_result", "expected_closed"),
+    (
+        (False, None, (False, True)),
+        (None, False, (True, False)),
+    ),
+)
+def test_client_or_explicit_transport_false_close_is_unconfirmed(
+    client_result,
+    transport_result,
+    expected_closed,
+):
+    transport = SimpleNamespace(close=lambda: transport_result)
+    client = SimpleNamespace(close=lambda: client_result)
+    setattr(client, "_leadpoet_explicit_http_transport", transport)
+
+    client_closed, transport_closed, cleanup_error = _close_client_transports(
+        client
+    )
+
+    assert (client_closed, transport_closed) == expected_closed
+    assert cleanup_error is not None
 
 
 def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch):
@@ -2659,6 +2727,62 @@ def test_oversized_response_is_a_canonical_terminal_and_releases_inflight():
     assert result["transport_attempt"]["failure_code"] == "response_too_large"
     validate_transport_attempt(result["transport_attempt"])
     assert broker.health()["inflight_count"] == 0
+
+
+def test_transport_failure_uses_only_safe_error_type_projection():
+    class UnsafeTypeNameError(RuntimeError):
+        pass
+
+    UnsafeTypeNameError.__name__ = "unsafe-type-name"
+    broker = _broker(FakeTransport(error=UnsafeTypeNameError("secret")))
+
+    result = broker.execute(_request())
+
+    assert result["failure_error_type"] == "Exception"
+
+
+def test_transport_cleanup_diagnostic_rejects_invalid_internal_stage():
+    cleanup_error = ProviderTransportCleanupError(
+        stage="untrusted_cleanup_stage",
+        primary_error=ValueError("secret primary"),
+        cleanup_error=OSError(errno.EIO, "secret cleanup"),
+    )
+
+    with pytest.raises(ProviderBrokerV2Error, match="stage is invalid"):
+        _provider_transport_failure_diagnostic(
+            provider="openrouter",
+            request_hash=HASH,
+            attempt_number=0,
+            exc=cleanup_error,
+        )
+
+
+def test_diagnostic_artifact_failure_releases_owner_and_allows_retry():
+    transport = FakeTransport(error=RuntimeError("provider transport failed"))
+    broker = _broker(transport)
+    artifact_sink = broker._artifact_sink
+
+    def fail_diagnostic(body, **kwargs):
+        if kwargs.get("artifact_kind") == (
+            "provider_transport_failure_diagnostic"
+        ):
+            raise OSError("diagnostic vault unavailable")
+        return artifact_sink(body, **kwargs)
+
+    broker._artifact_sink = fail_diagnostic
+    with pytest.raises(OSError, match="diagnostic vault unavailable"):
+        broker.execute(_request())
+
+    assert broker.health()["inflight_count"] == 0
+    assert broker.health()["terminal_count"] == 0
+    assert broker._inflight == {}
+
+    broker._artifact_sink = artifact_sink
+    result = broker.execute(_request())
+    assert result["terminal_status"] == "transport_failure"
+    assert broker.health()["inflight_count"] == 0
+    assert broker.health()["terminal_count"] == 1
+    assert len(transport.calls) == 2
 
 
 def test_request_artifact_failure_does_not_poison_logical_attempt_retry():

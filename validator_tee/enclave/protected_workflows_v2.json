@@ -712,9 +712,9 @@
       "symbol": "_validator_weight_protocol"
     },
     {
-      "ast_sha256": "sha256:8378dda2394a9a15c8fd059dc20e1b74da7d599d8344396c1409568c0d90c3f5",
+      "ast_sha256": "sha256:4cd33892727b379e7205b5129ad63582d0f0670d57642ae390d334172c552a70",
       "path": "validator_tee/enclave/chain_source_v2.py",
-      "symbol": "EnclaveChainRpcTransportV2.call"
+      "symbol": "EnclaveChainRpcTransportV2"
     },
     {
       "ast_sha256": "sha256:45c4fce1895b622169ea35455c7ada9af6f63bdd7035fe99fa16fde8dca0a8a3",
@@ -730,6 +730,16 @@
       "ast_sha256": "sha256:0a8835b8ff9e6064e1dcb5636d505094b93b43b05f3786c67d0dd93209efb25d",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.read_finalized_snapshot"
+    },
+    {
+      "ast_sha256": "sha256:d7c499226dab46ff41d1a48ca47d1efc4ef193f71c0573cfba99ed925cedfb5b",
+      "path": "validator_tee/enclave/chain_source_v2.py",
+      "symbol": "ValidatorChainTransportCleanupError"
+    },
+    {
+      "ast_sha256": "sha256:4332a15377be3a658cef20b5e5e3b5b38232a0d7c214ecc48f1549ad19361af1",
+      "path": "validator_tee/enclave/chain_source_v2.py",
+      "symbol": "_shutdown_and_close_socket"
     },
     {
       "ast_sha256": "sha256:29a87f1cb6101fa79140373a4ec5c3298e54b19cc1bcb53938c4024f53c01a7e",
@@ -792,6 +802,41 @@
       "symbol": "load_chain_signing_profile"
     },
     {
+      "ast_sha256": "sha256:a5932ae321cae6794021185bfa9d3b199a73277ac2f8b8aab5c4f913a1e50bd5",
+      "path": "validator_tee/enclave/tee_service.py",
+      "symbol": "MAX_VSOCK_RPC_CLEANUP_ATTEMPTS"
+    },
+    {
+      "ast_sha256": "sha256:f6da6f693653c5eecd58cce561f95df3be535de5122561864153af2dd1d1c189",
+      "path": "validator_tee/enclave/tee_service.py",
+      "symbol": "ValidatorVSOCKRPCCleanupError"
+    },
+    {
+      "ast_sha256": "sha256:708b5029c412468f10e3da27cccc999bd38ffa3ee26140ed6a7adad5683a2819",
+      "path": "validator_tee/enclave/tee_service.py",
+      "symbol": "_ExplicitVSOCKCloseFailure"
+    },
+    {
+      "ast_sha256": "sha256:e4b4f3cc3d0f3629447813c0ebefc1f0b3c8a8439590ccec2741d38b73b409f1",
+      "path": "validator_tee/enclave/tee_service.py",
+      "symbol": "_TRANSIENT_ACCEPT_ERRNOS"
+    },
+    {
+      "ast_sha256": "sha256:baefe73d25b1422871d84329f12b717804e7ffa69dd83e478e3cc76a3e861790",
+      "path": "validator_tee/enclave/tee_service.py",
+      "symbol": "_close_vsock_rpc_required"
+    },
+    {
+      "ast_sha256": "sha256:50593a9b3f5e7617681fd6ed2caa53082159a45a74f415ae3d81c99ebadeb7a5",
+      "path": "validator_tee/enclave/tee_service.py",
+      "symbol": "_handle_vsock_client"
+    },
+    {
+      "ast_sha256": "sha256:19b825bac78ff67e7ca0eb107f0dfecb6e6eb1e8c6178872b6b06b9c3237c5aa",
+      "path": "validator_tee/enclave/tee_service.py",
+      "symbol": "run_vsock_server"
+    },
+    {
       "ast_sha256": "sha256:80f4383607986fea55d3787505ce0eaa05b8a55e7d307d3f32be23ef8b3b04b8",
       "path": "validator_tee/enclave/weight_authority_v2.py",
       "symbol": "ValidatorWeightAuthorityV2._validator_input_receipts"
@@ -837,9 +882,19 @@
       "symbol": "resume_prepared_weight_publication_v2"
     },
     {
-      "ast_sha256": "sha256:9cc8921132f95d5f031830ce7d00cb98bf9bde3ddb71209d6e2092e4255616c4",
+      "ast_sha256": "sha256:bd038c706b92b9874e477537a97361e28942cacf492ba9e70e6ca86634f2d2cd",
+      "path": "validator_tee/host/chain_relay_v2.py",
+      "symbol": "ValidatorChainRelayCleanupError"
+    },
+    {
+      "ast_sha256": "sha256:e9f2e23b873a82c5bb0a85404f602f6dfb3401bee816163624ecad1cf9123c1a",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "ValidatorChainRelayV2"
+    },
+    {
+      "ast_sha256": "sha256:9bcba02966cb19fabcb252884abdebbc859d89b7c8ec78313ee1355f15da2a43",
+      "path": "validator_tee/host/chain_relay_v2.py",
+      "symbol": "_connect_chain"
     },
     {
       "ast_sha256": "sha256:4332a15377be3a658cef20b5e5e3b5b38232a0d7c214ecc48f1549ad19361af1",
@@ -847,7 +902,7 @@
       "symbol": "_shutdown_and_close_socket"
     },
     {
-      "ast_sha256": "sha256:cc3133c23f4dec56b9342e01e6eb650d00344a8dd2a42a538b1e911a18e16549",
+      "ast_sha256": "sha256:76d986743f586a34df8821565b4d4a4169e9ffb709e50f2c75f12df013cbd994",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "handle_chain_relay_connection"
     },
@@ -882,6 +937,46 @@
       "symbol": "validate_publication_journal_v2"
     },
     {
+      "ast_sha256": "sha256:80ebbef93933843d671ec63f47d250d1cd91b53dd8fc7cf0ec64d6d1b00cab85",
+      "path": "validator_tee/host/vsock_client.py",
+      "symbol": "ValidatorEnclaveClient._require_retired_cleanup"
+    },
+    {
+      "ast_sha256": "sha256:a6909e61b35993b88ad3a568fd6c0c739b0f5ed21f99e90e7e05cb2b20e13eb8",
+      "path": "validator_tee/host/vsock_client.py",
+      "symbol": "ValidatorEnclaveClient._retain_cleanup_failure"
+    },
+    {
+      "ast_sha256": "sha256:ea339da9d0fc0ef2c9da5b2a7e32f020fe6f23e00ff742e36def76e16eb1b9ea",
+      "path": "validator_tee/host/vsock_client.py",
+      "symbol": "ValidatorEnclaveClient._send_request"
+    },
+    {
+      "ast_sha256": "sha256:9871a0d173cfd94aadf28aa0fb67a835d028182859982ec0619d2c38860cd81e",
+      "path": "validator_tee/host/vsock_client.py",
+      "symbol": "ValidatorEnclaveTransportCleanupError"
+    },
+    {
+      "ast_sha256": "sha256:b1399700dfed8eb45830a76b5d8982c2df99ad035b3ca96a246e49593b35d079",
+      "path": "validator_tee/host/vsock_client.py",
+      "symbol": "_RETIRED_CLEANUP"
+    },
+    {
+      "ast_sha256": "sha256:496e746db27f0af7865ae3c983aaf6ef51756c1c7c62dd1429f0486838110368",
+      "path": "validator_tee/host/vsock_client.py",
+      "symbol": "_RETIRED_CLEANUP_LOCK"
+    },
+    {
+      "ast_sha256": "sha256:8ed326070f26b7334e73565f492fb378d52b24bb647f60f6cab85e1eebd43e47",
+      "path": "validator_tee/host/vsock_client.py",
+      "symbol": "_RETIRED_CLEANUP_RECOVERY_LOCK"
+    },
+    {
+      "ast_sha256": "sha256:4332a15377be3a658cef20b5e5e3b5b38232a0d7c214ecc48f1549ad19361af1",
+      "path": "validator_tee/host/vsock_client.py",
+      "symbol": "_shutdown_and_close_socket"
+    },
+    {
       "ast_sha256": "sha256:fab5a8564d4c5021f9520185e90f59d7047ad682d879fd2307aab6110cc95343",
       "path": "validator_tee/host/weight_authority_v2.py",
       "symbol": "build_authoritative_weight_bundle_v2"
@@ -907,7 +1002,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:6caea9233f8a79e68538170a8e4589461bf5806dad409fb2a783397f562e5e79",
-  "protected_source_commit": "4a742ea440e94b615c7bc407195bae98df4500d4",
+  "manifest_hash": "sha256:de82f7e22671b7cad5bb2726135950c622395555f83457ecb623c46b2943cfd2",
+  "protected_source_commit": "687db6d1a98eb5ebd8aca8054903bdf56b163c5a",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

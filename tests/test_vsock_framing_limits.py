@@ -219,6 +219,158 @@ def test_validator_client_closes_socket_when_timeout_setup_fails(monkeypatch):
     assert rpc_socket.closed is True
 
 
+def test_validator_client_retains_valid_response_until_close_succeeds(monkeypatch):
+    response = json.dumps({"status": "ok", "accepted": True}).encode()
+
+    class CloseFailureSocket(_RPCSocket):
+        def __init__(self, data):
+            super().__init__(data)
+            self.allow_close = False
+
+        def close(self):
+            self.closed = self.allow_close
+            return self.allow_close
+
+    rpc_socket = CloseFailureSocket(len(response).to_bytes(4, "big") + response)
+    recovered_socket = _RPCSocket(
+        len(response).to_bytes(4, "big") + response
+    )
+    sockets = iter((rpc_socket, recovered_socket))
+    monkeypatch.setattr(
+        validator_client.socket,
+        "socket",
+        lambda *_args, **_kwargs: next(sockets),
+    )
+    client = validator_client.ValidatorEnclaveClient(enclave_cid=16)
+
+    with pytest.raises(
+        validator_client.ValidatorEnclaveTransportCleanupError
+    ) as raised:
+        client._send_request({"command": "health"})
+
+    assert raised.value._resource is rpc_socket
+    assert raised.value._response == {"status": "ok", "accepted": True}
+    assert raised.value.primary_error is raised.value.__cause__
+    assert validator_client._RETIRED_CLEANUP[id(rpc_socket)][0] is rpc_socket
+    rpc_socket.allow_close = True
+    observed = validator_client.ValidatorEnclaveClient(
+        enclave_cid=16
+    )._send_request({"command": "health"})
+    assert observed == {"status": "ok", "accepted": True}
+    assert recovered_socket.closed is True
+    assert validator_client._RETIRED_CLEANUP == {}
+
+
+def test_validator_client_cleanup_preserves_original_rpc_error(monkeypatch):
+    primary = ValueError("invalid timeout")
+
+    class TimeoutAndCloseFailureSocket(_RPCSocket):
+        def __init__(self):
+            super().__init__(b"")
+            self.allow_close = False
+
+        def settimeout(self, _timeout):
+            raise primary
+
+        def close(self):
+            self.closed = self.allow_close
+            return self.allow_close
+
+    rpc_socket = TimeoutAndCloseFailureSocket()
+    monkeypatch.setattr(
+        validator_client.socket,
+        "socket",
+        lambda *_args, **_kwargs: rpc_socket,
+    )
+    client = validator_client.ValidatorEnclaveClient(enclave_cid=16)
+
+    with pytest.raises(
+        validator_client.ValidatorEnclaveTransportCleanupError
+    ) as raised:
+        client._send_request({"command": "health"})
+
+    assert raised.value.primary_error is primary
+    assert raised.value.__cause__ is primary
+    assert raised.value._response is None
+    rpc_socket.allow_close = True
+    validator_client.ValidatorEnclaveClient(
+        enclave_cid=16
+    )._require_retired_cleanup()
+
+
+def test_validator_client_cleanup_retry_preserves_concurrent_owner(monkeypatch):
+    close_started = threading.Event()
+    release_close = threading.Event()
+    retain_done = threading.Event()
+
+    class Resource:
+        def __init__(self, *, blocking, allow_close):
+            self.blocking = blocking
+            self.allow_close = allow_close
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            if self.blocking:
+                close_started.set()
+                assert release_close.wait(timeout=2)
+            return self.allow_close
+
+    monkeypatch.setattr(validator_client, "_RETIRED_CLEANUP", {})
+    monkeypatch.setattr(
+        validator_client,
+        "_RETIRED_CLEANUP_RECOVERY_LOCK",
+        threading.Lock(),
+    )
+    client = validator_client.ValidatorEnclaveClient(enclave_cid=16)
+    first = Resource(blocking=True, allow_close=True)
+    concurrent = Resource(blocking=False, allow_close=False)
+    primary = OSError("cleanup failed")
+    client._retain_cleanup_failure(
+        first,
+        primary_error=primary,
+        response={"status": "first"},
+    )
+    recovery_errors = []
+
+    def recover():
+        try:
+            client._require_retired_cleanup()
+        except validator_client.ValidatorEnclaveTransportCleanupError as exc:
+            recovery_errors.append(exc)
+
+    def retain():
+        client._retain_cleanup_failure(
+            concurrent,
+            primary_error=primary,
+            response={"status": "concurrent"},
+        )
+        retain_done.set()
+
+    recovery = threading.Thread(target=recover)
+    recovery.start()
+    assert close_started.wait(timeout=2)
+    retention = threading.Thread(target=retain)
+    retention.start()
+    assert retain_done.wait(timeout=1)
+    with validator_client._RETIRED_CLEANUP_LOCK:
+        assert len(validator_client._RETIRED_CLEANUP) == 2
+    release_close.set()
+    recovery.join(timeout=2)
+    retention.join(timeout=2)
+
+    assert not recovery.is_alive()
+    assert not retention.is_alive()
+    assert len(recovery_errors) == 1
+    assert recovery_errors[0]._resource is concurrent
+    assert id(first) not in validator_client._RETIRED_CLEANUP
+    assert validator_client._RETIRED_CLEANUP[id(concurrent)][0] is concurrent
+    concurrent.allow_close = True
+    client._require_retired_cleanup()
+    assert validator_client._RETIRED_CLEANUP == {}
+
+
 def test_validator_rejects_incompressible_frame_above_wire_limit():
     payload = os.urandom(validator_client.MAX_RPC_REQUEST_FRAME_BYTES + 1)
     with pytest.raises(RuntimeError, match="compressed frame exceeds"):

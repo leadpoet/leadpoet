@@ -13,6 +13,7 @@ import socket
 import json
 import os
 import subprocess
+import threading
 import time
 import zlib
 from typing import Dict, Any, Optional
@@ -36,6 +37,40 @@ MAX_RPC_REQUEST_BYTES = 128 * 1024 * 1024
 MAX_RPC_RESPONSE_BYTES = 128 * 1024 * 1024
 _COMPRESSED_FRAME_MAGIC = b"LPZ2"
 _COMPRESSED_FRAME_HEADER_BYTES = 8
+
+
+class ValidatorEnclaveTransportCleanupError(RuntimeError):
+    """A validator host RPC could not prove required socket cleanup."""
+
+    def __init__(
+        self,
+        *,
+        primary_error: BaseException,
+        resource: Any,
+        response: Optional[Dict[str, Any]],
+    ) -> None:
+        super().__init__("validator enclave RPC transport cleanup failed")
+        self.primary_error = primary_error
+        self._resource = resource
+        self._response = response
+
+
+def _shutdown_and_close_socket(candidate: Any) -> bool:
+    if candidate is None:
+        return True
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        return candidate.close() is not False
+    except Exception:
+        return False
+
+
+_RETIRED_CLEANUP_LOCK = threading.RLock()
+_RETIRED_CLEANUP_RECOVERY_LOCK = threading.Lock()
+_RETIRED_CLEANUP = {}
 
 
 def _encode_rpc_payload(
@@ -164,6 +199,43 @@ class ValidatorEnclaveClient:
         self.enclave_cid = enclave_cid
         self._cached_pubkey: Optional[str] = None
         self._cached_code_hash: Optional[str] = None
+
+    def _retain_cleanup_failure(
+        self,
+        resource: Any,
+        *,
+        primary_error: BaseException,
+        response: Optional[Dict[str, Any]],
+    ) -> None:
+        with _RETIRED_CLEANUP_LOCK:
+            _RETIRED_CLEANUP[id(resource)] = (
+                resource,
+                primary_error,
+                response,
+            )
+
+    def _require_retired_cleanup(self) -> None:
+        with _RETIRED_CLEANUP_RECOVERY_LOCK:
+            with _RETIRED_CLEANUP_LOCK:
+                snapshot = tuple(_RETIRED_CLEANUP.items())
+            resolved_entries = []
+            for resource_id, entry in snapshot:
+                resource, _primary_error, _response = entry
+                if _shutdown_and_close_socket(resource):
+                    resolved_entries.append((resource_id, entry))
+            with _RETIRED_CLEANUP_LOCK:
+                for resource_id, entry in resolved_entries:
+                    if _RETIRED_CLEANUP.get(resource_id) is entry:
+                        _RETIRED_CLEANUP.pop(resource_id, None)
+                pending = tuple(_RETIRED_CLEANUP.values())
+        if not pending:
+            return
+        resource, primary_error, response = pending[0]
+        raise ValidatorEnclaveTransportCleanupError(
+            primary_error=primary_error,
+            resource=resource,
+            response=response,
+        ) from primary_error
     
     def _get_cid(self) -> int:
         """Get enclave CID, auto-detecting if needed."""
@@ -192,12 +264,17 @@ class ValidatorEnclaveClient:
         Returns:
             Response dict from enclave
         """
+        self._require_retired_cleanup()
         cid = self._get_cid()
-        
+
         # Create vsock socket
         sock = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
         started_at = time.monotonic()
         command = str(request.get("command") or "unknown")[:100]
+        request_data = b""
+        response_data = b""
+        response = None
+        primary_error = None
         try:
             sock.settimeout(timeout_seconds)
 
@@ -238,23 +315,8 @@ class ValidatorEnclaveClient:
             if response.get("status") == "error":
                 raise RuntimeError(f"Enclave error: {response.get('error')}")
             
-            record_stage(
-                component="validator",
-                stage="enclave_rpc",
-                status="passed",
-                duration_seconds=time.monotonic() - started_at,
-                operation=command,
-                logical_bytes=len(request_data) + len(response_data),
-                frame_limit_bytes=MAX_RPC_RESPONSE_FRAME_BYTES,
-                runtime_sha=(
-                    os.environ.get("GITHUB_SHA")
-                    or os.environ.get("GIT_COMMIT")
-                    or ""
-                ),
-            )
-            return response
-
         except Exception as exc:
+            primary_error = exc
             code = failure_code_for_exception(
                 exc,
                 default="runtime.enclave_relay_unavailable",
@@ -299,7 +361,37 @@ class ValidatorEnclaveClient:
             raise
 
         finally:
-            sock.close()
+            if not _shutdown_and_close_socket(sock):
+                cleanup_primary = primary_error or RuntimeError(
+                    "validator enclave RPC socket cleanup failed"
+                )
+                self._retain_cleanup_failure(
+                    sock,
+                    primary_error=cleanup_primary,
+                    response=response,
+                )
+                raise ValidatorEnclaveTransportCleanupError(
+                    primary_error=cleanup_primary,
+                    resource=sock,
+                    response=response,
+                ) from cleanup_primary
+        if not isinstance(response, dict):
+            raise RuntimeError("Enclave response is invalid")
+        record_stage(
+            component="validator",
+            stage="enclave_rpc",
+            status="passed",
+            duration_seconds=time.monotonic() - started_at,
+            operation=command,
+            logical_bytes=len(request_data) + len(response_data),
+            frame_limit_bytes=MAX_RPC_RESPONSE_FRAME_BYTES,
+            runtime_sha=(
+                os.environ.get("GITHUB_SHA")
+                or os.environ.get("GIT_COMMIT")
+                or ""
+            ),
+        )
+        return response
     
     def health_check(self) -> Dict[str, Any]:
         """

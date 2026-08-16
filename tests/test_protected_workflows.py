@@ -85,7 +85,20 @@ def test_inter_enclave_replay_and_identity_boundaries_are_protected():
         "create_mutual_tls_context",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/mtls_identity.py"])
     assert {
+        "SandboxHTTPShimTransportCleanupError",
+        "_RETIRED_CLEANUP_LOCK",
+        "_RETIRED_CLEANUP_RESOURCES",
+        "_shutdown_and_close_socket",
+        "_retain_cleanup_failure",
+        "_require_retired_cleanup",
+        "_execute_broker_request",
+        "execute",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/sandbox_http_shim_v2.py"])
+    assert {
         "REPLAY_WAIT_SECONDS",
+        "TRANSPORT_HEALTH_SCHEMA_VERSION",
+        "InterEnclaveTransportCleanupError",
+        "_close_transport_required",
         "_RetryableInterEnclaveTransportError",
         "_recv_exact",
         "_send_frame",
@@ -103,7 +116,16 @@ def test_inter_enclave_replay_and_identity_boundaries_are_protected():
         "execute_v2_provider_request",
         "handle_inter_enclave_rpc",
         "start_v2_tls_service",
+        "VSOCKRPCCleanupError",
+        "_close_vsock_rpc_required",
+        "_recover_vsock_rpc_cleanup_failures",
+        "vsock_rpc_transport_health",
+        "_handle_vsock_connection",
+        "_serve_vsock_connections",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/tee_service.py"])
+    assert {"TopologyHealthError", "verify_roles"} <= set(
+        PROTECTED_SYMBOLS["gateway/tee/verify_topology.py"]
+    )
 
 
 def test_git_tree_source_authority_boundaries_are_protected():
@@ -216,7 +238,9 @@ def test_artifact_egress_transport_boundaries_are_protected():
         "ArtifactPersistenceVerifierV2",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/artifact_persistence_v2.py"])
     assert {
+        "TEEEgressForwarderCleanupError",
         "_handle_connection",
+        "_connect_public_destination",
         "_shutdown_and_close_socket",
         "TEEEgressForwarder",
         "main",
@@ -225,6 +249,22 @@ def test_artifact_egress_transport_boundaries_are_protected():
         "_shutdown_and_close_socket",
         "SandboxProviderSocketServerV2",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/sandbox_provider_socket_v2.py"])
+    assert {
+        "vsock_rpc_transport_health_lock",
+        "vsock_rpc_pending_cleanup_failures",
+        "vsock_rpc_terminal_failure_event",
+        "vsock_rpc_cleanup_recovery_lock",
+        "_recover_vsock_rpc_cleanup_failures",
+        "_serve_vsock_connections",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/tee_service.py"])
+    assert {
+        "_RETIRED_CLEANUP_LOCK",
+        "_RETIRED_CLEANUP_RECOVERY_LOCK",
+        "_RETIRED_CLEANUP_RESOURCES",
+        "_retry_retired_cleanup",
+    } <= set(
+        PROTECTED_SYMBOLS["gateway/tee/proxy_transport_preflight_v2.py"]
+    )
 
 
 def test_protected_manifest_detects_logic_change(tmp_path: Path):

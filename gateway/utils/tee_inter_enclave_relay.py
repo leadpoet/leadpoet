@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import re
 import select
@@ -22,11 +23,23 @@ MAX_CONTROL_BYTES = 16 * 1024
 MAX_CHANNEL_BYTES_PER_DIRECTION = 512 * 1024 * 1024
 RELAY_CHUNK_BYTES = 64 * 1024
 IDLE_TIMEOUT_SECONDS = 1800.0
+RELAY_SUPERVISOR_POLL_SECONDS = 0.25
 RELAY_TRANSPORT_HEALTH_SCHEMA_VERSION = (
     "leadpoet.inter_enclave_relay_transport_health.v2"
 )
 MAX_RELAY_CLEANUP_EVENT_COUNT = (1 << 63) - 1
+RELAY_CLEANUP_ATTEMPTS_PER_RECOVERY_CYCLE = 1
+MAX_RELAY_CLEANUP_ATTEMPT_COUNT = (1 << 63) - 1
 _CHANNEL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_TRANSIENT_ACCEPT_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EINTR,
+        errno.ECONNABORTED,
+        getattr(errno, "EPROTO", None),
+    )
+    if value is not None
+)
 
 _CID_BY_ROLE = {role: int(spec["cid"]) for role, spec in ROLE_SPECS.items()}
 _COORDINATOR_CID = _CID_BY_ROLE["gateway_coordinator"]
@@ -43,6 +56,10 @@ _relay_cleanup_attempt_count = 0
 _relay_cleanup_failure_count = 0
 _relay_last_primary_error_type = ""
 _relay_last_cleanup_error_type = ""
+_RELAY_TERMINAL_FAILURE_EVENT = threading.Event()
+_RELAY_RECOVERY_LOCK = threading.Lock()
+_relay_pending_cleanup_failures = []
+_relay_cleanup_recovery_count = 0
 
 
 class InterEnclaveRelayError(RuntimeError):
@@ -65,6 +82,7 @@ class InterEnclaveRelayCleanupError(InterEnclaveRelayError):
         # Keep ownership reachable until the process supervisor observes the
         # terminal cleanup failure. These resources are never serialized.
         self._resources = tuple(resources)
+        self._cleanup_attempt_counts = tuple(1 for _resource in self._resources)
 
 
 class _ExplicitCloseFailure(RuntimeError):
@@ -115,17 +133,97 @@ def _record_relay_transport_cleanup(
             _relay_last_cleanup_error_type = type(cleanup_error).__name__
 
 
+def _retain_relay_cleanup_failure(
+    failure: InterEnclaveRelayCleanupError,
+) -> None:
+    """Transfer failed descriptor ownership to the listener supervisor."""
+
+    with _RELAY_TRANSPORT_HEALTH_LOCK:
+        _relay_pending_cleanup_failures.append(failure)
+        _RELAY_TERMINAL_FAILURE_EVENT.set()
+
+
+def _recover_relay_cleanup_failures() -> bool:
+    global _relay_cleanup_recovery_count
+    with _RELAY_RECOVERY_LOCK:
+        with _RELAY_TRANSPORT_HEALTH_LOCK:
+            snapshot = tuple(
+                (failure, failure._resources, failure._cleanup_attempt_counts)
+                for failure in _relay_pending_cleanup_failures
+            )
+        outcomes = []
+        for failure, resources, attempt_counts in snapshot:
+            unresolved_resources = []
+            unresolved_counts = []
+            recovered_count = 0
+            for resource, attempt_count in zip(resources, attempt_counts):
+                cleanup_error = None  # type: Optional[BaseException]
+                for _attempt in range(
+                    RELAY_CLEANUP_ATTEMPTS_PER_RECOVERY_CYCLE
+                ):
+                    attempt_count = min(
+                        MAX_RELAY_CLEANUP_ATTEMPT_COUNT,
+                        attempt_count + 1,
+                    )
+                    cleanup_error = _close_transport_required(resource)
+                    if cleanup_error is None:
+                        recovered_count += 1
+                        break
+                    failure.cleanup_error_type = type(cleanup_error).__name__
+                if cleanup_error is not None:
+                    unresolved_resources.append(resource)
+                    unresolved_counts.append(attempt_count)
+            outcomes.append(
+                (
+                    failure,
+                    tuple(unresolved_resources),
+                    tuple(unresolved_counts),
+                    recovered_count,
+                )
+            )
+        with _RELAY_TRANSPORT_HEALTH_LOCK:
+            outcome_by_id = {id(item[0]): item for item in outcomes}
+            retained = []
+            recovered_total = 0
+            for failure in _relay_pending_cleanup_failures:
+                outcome = outcome_by_id.get(id(failure))
+                if outcome is None:
+                    retained.append(failure)
+                    continue
+                _failure, resources, counts, recovered_count = outcome
+                recovered_total += recovered_count
+                if resources:
+                    failure._resources = resources
+                    failure._cleanup_attempt_counts = counts
+                    retained.append(failure)
+            _relay_pending_cleanup_failures[:] = retained
+            _relay_cleanup_recovery_count += recovered_total
+            if retained:
+                _RELAY_TERMINAL_FAILURE_EVENT.set()
+            else:
+                _RELAY_TERMINAL_FAILURE_EVENT.clear()
+            return not retained
+
+
 def relay_transport_health() -> dict[str, Any]:
     """Return a bounded, text-free projection of relay cleanup health."""
 
     with _RELAY_TRANSPORT_HEALTH_LOCK:
+        failures = tuple(_relay_pending_cleanup_failures)
         return {
             "schema_version": RELAY_TRANSPORT_HEALTH_SCHEMA_VERSION,
-            "status": "error" if _relay_cleanup_failure_count else "healthy",
+            "status": "error" if failures else "healthy",
             "cleanup_attempt_count": _relay_cleanup_attempt_count,
             "cleanup_failure_count": _relay_cleanup_failure_count,
             "last_primary_error_type": _relay_last_primary_error_type,
             "last_cleanup_error_type": _relay_last_cleanup_error_type,
+            "terminal_failure_latched": (
+                bool(failures)
+            ),
+            "retained_resource_count": (
+                sum(len(failure._resources) for failure in failures)
+            ),
+            "cleanup_recovery_count": _relay_cleanup_recovery_count,
         }
 
 
@@ -223,7 +321,17 @@ def _relay_opaque(left: Any, right: Any, *, idle_timeout: float) -> None:
 
 def _connect_target(target_cid: int, target_port: int) -> Any:
     connection = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
-    connection.connect((target_cid, target_port))
+    try:
+        connection.connect((target_cid, target_port))
+    except BaseException as exc:
+        cleanup_error = _close_transport_required(connection)
+        if cleanup_error is not None:
+            raise InterEnclaveRelayCleanupError(
+                primary_error=exc,
+                cleanup_error=cleanup_error,
+                resources=(connection,),
+            ) from exc
+        raise
     return connection
 
 
@@ -233,6 +341,9 @@ def _handle_connection(
     source_cid: int,
     connector: Callable[[int, int], Any] = _connect_target,
     idle_timeout: float = IDLE_TIMEOUT_SECONDS,
+    cleanup_failure_callback: Optional[
+        Callable[[InterEnclaveRelayCleanupError], None]
+    ] = None,
 ) -> None:
     target = None
     primary_error = None  # type: Optional[BaseException]
@@ -275,31 +386,150 @@ def _handle_connection(
             cleanup_failures.append((candidate, cleanup_error))
     _record_relay_transport_cleanup(
         primary_error=primary_error,
-        cleanup_error=(cleanup_failures[0][1] if cleanup_failures else None),
+        cleanup_error=(
+            cleanup_failures[0][1]
+            if cleanup_failures
+            else primary_error
+            if isinstance(primary_error, InterEnclaveRelayCleanupError)
+            else None
+        ),
+    )
+    failure = (
+        primary_error
+        if isinstance(primary_error, InterEnclaveRelayCleanupError)
+        else None
     )
     if cleanup_failures:
         cleanup_error = cleanup_failures[0][1]
         cleanup_primary = primary_error or cleanup_error
-        raise InterEnclaveRelayCleanupError(
+        resources = []
+        attempt_counts = []
+        seen_resource_ids = set()
+        if isinstance(primary_error, InterEnclaveRelayCleanupError):
+            for resource, attempt_count in zip(
+                primary_error._resources,
+                primary_error._cleanup_attempt_counts,
+            ):
+                resource_id = id(resource)
+                if resource_id in seen_resource_ids:
+                    continue
+                seen_resource_ids.add(resource_id)
+                resources.append(resource)
+                attempt_counts.append(attempt_count)
+        for candidate, _error in cleanup_failures:
+            resource_id = id(candidate)
+            if resource_id in seen_resource_ids:
+                continue
+            seen_resource_ids.add(resource_id)
+            resources.append(candidate)
+            attempt_counts.append(1)
+        failure = InterEnclaveRelayCleanupError(
             primary_error=cleanup_primary,
             cleanup_error=cleanup_error,
-            resources=tuple(candidate for candidate, _error in cleanup_failures),
-        ) from cleanup_primary
+            resources=tuple(resources),
+        )
+        failure._cleanup_attempt_counts = tuple(attempt_counts)
+    if failure is not None:
+        if cleanup_failure_callback is not None:
+            try:
+                cleanup_failure_callback(failure)
+            except BaseException:
+                raise InterEnclaveRelayError(
+                    "relay cleanup ownership transfer failed"
+                ) from failure
+        if cleanup_failures:
+            raise failure from cleanup_primary
+        raise failure
 
 
 def serve_forever(*, port: int = DEFAULT_RELAY_PORT) -> None:
-    listener = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
-    listener.bind((VMADDR_CID_ANY, int(port)))
-    listener.listen(64)
-    while True:
-        connection, address = listener.accept()
-        source_cid = int(address[0])
-        threading.Thread(
-            target=_handle_connection,
-            kwargs={"connection": connection, "source_cid": source_cid},
-            name="gateway-inter-enclave-relay",
-            daemon=True,
-        ).start()
+    listener = None
+    primary_error = None  # type: Optional[BaseException]
+    try:
+        listener = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+        listener.bind((VMADDR_CID_ANY, int(port)))
+        listener.listen(64)
+        listener.settimeout(RELAY_SUPERVISOR_POLL_SECONDS)
+        while True:
+            if _RELAY_TERMINAL_FAILURE_EVENT.is_set():
+                if not _recover_relay_cleanup_failures():
+                    time.sleep(RELAY_SUPERVISOR_POLL_SECONDS)
+                continue
+            try:
+                connection, address = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                if exc.errno in _TRANSIENT_ACCEPT_ERRNOS:
+                    continue
+                raise
+            if _RELAY_TERMINAL_FAILURE_EVENT.is_set():
+                cleanup_error = _close_transport_required(connection)
+                _record_relay_transport_cleanup(
+                    primary_error=None,
+                    cleanup_error=cleanup_error,
+                )
+                if cleanup_error is not None:
+                    _retain_relay_cleanup_failure(
+                        InterEnclaveRelayCleanupError(
+                            primary_error=cleanup_error,
+                            cleanup_error=cleanup_error,
+                            resources=(connection,),
+                        )
+                    )
+                if not _recover_relay_cleanup_failures():
+                    time.sleep(RELAY_SUPERVISOR_POLL_SECONDS)
+                continue
+            try:
+                source_cid = int(address[0])
+                worker = threading.Thread(
+                    target=_handle_connection,
+                    kwargs={
+                        "connection": connection,
+                        "source_cid": source_cid,
+                        "cleanup_failure_callback": (
+                            _retain_relay_cleanup_failure
+                        ),
+                    },
+                    name="gateway-inter-enclave-relay",
+                    daemon=True,
+                )
+                worker.start()
+            except BaseException as exc:
+                cleanup_error = _close_transport_required(connection)
+                if cleanup_error is not None:
+                    failure = InterEnclaveRelayCleanupError(
+                        primary_error=exc,
+                        cleanup_error=cleanup_error,
+                        resources=(connection,),
+                    )
+                    _record_relay_transport_cleanup(
+                        primary_error=exc,
+                        cleanup_error=cleanup_error,
+                    )
+                    _retain_relay_cleanup_failure(failure)
+                    _recover_relay_cleanup_failures()
+                raise
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        if listener is not None:
+            cleanup_error = _close_transport_required(listener)
+            if cleanup_error is not None:
+                cleanup_primary = primary_error or cleanup_error
+                failure = InterEnclaveRelayCleanupError(
+                    primary_error=cleanup_primary,
+                    cleanup_error=cleanup_error,
+                    resources=(listener,),
+                )
+                _record_relay_transport_cleanup(
+                    primary_error=primary_error,
+                    cleanup_error=cleanup_error,
+                )
+                _retain_relay_cleanup_failure(failure)
+                if not _recover_relay_cleanup_failures():
+                    raise failure from cleanup_primary
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

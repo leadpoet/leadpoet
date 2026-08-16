@@ -10,8 +10,9 @@ import os
 import re
 import socket
 import ssl
+import threading
 import time
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from leadpoet_canonical.attested_v2 import (
     build_transport_attempt,
@@ -61,6 +62,35 @@ FINALIZATION_RPC_PACING_SECONDS = 1.05
 
 class ValidatorChainSourceV2Error(RuntimeError):
     """The validator enclave could not authenticate a complete chain snapshot."""
+
+
+class ValidatorChainTransportCleanupError(ValidatorChainSourceV2Error):
+    """The chain transport could not prove required local cleanup."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        primary_error: BaseException,
+        resources: Sequence[Any],
+    ) -> None:
+        super().__init__("validator chain transport cleanup failed")
+        self.stage = str(stage)
+        self.primary_error = primary_error
+        self._resources = tuple(resources)
+
+
+def _shutdown_and_close_socket(candidate: Any) -> bool:
+    if candidate is None:
+        return True
+    try:
+        candidate.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        return candidate.close() is not False
+    except Exception:
+        return False
 
 
 def _timestamp(clock: Callable[[], datetime]) -> str:
@@ -146,6 +176,67 @@ class EnclaveChainRpcTransportV2:
             )
         self._provider_id = resolved_provider
         self._destination_host = str(destination_host)
+        self._operation_lock = threading.RLock()
+        self._cleanup_lock = threading.RLock()
+        self._cleanup_recovery_lock = threading.Lock()
+        self._retired_cleanup_resources = (
+            {}
+        )  # type: Dict[int, Tuple[str, Any, BaseException]]
+
+    def _retain_cleanup_resource(
+        self,
+        resource: Any,
+        *,
+        kind: str,
+        primary_error: BaseException,
+    ) -> None:
+        with self._cleanup_lock:
+            self._retired_cleanup_resources[id(resource)] = (
+                str(kind),
+                resource,
+                primary_error,
+            )
+
+    @staticmethod
+    def _close_cleanup_resource(kind: str, resource: Any) -> bool:
+        if kind == "socket":
+            return _shutdown_and_close_socket(resource)
+        try:
+            return resource.close() is not False
+        except Exception:
+            return False
+
+    def _retry_retired_cleanup(self) -> bool:
+        with self._cleanup_recovery_lock:
+            with self._cleanup_lock:
+                snapshot = tuple(self._retired_cleanup_resources.items())
+            resolved_entries = []
+            for resource_id, entry in snapshot:
+                kind, resource, _primary_error = entry
+                if self._close_cleanup_resource(kind, resource):
+                    resolved_entries.append((resource_id, entry))
+            with self._cleanup_lock:
+                for resource_id, entry in resolved_entries:
+                    if self._retired_cleanup_resources.get(resource_id) is entry:
+                        self._retired_cleanup_resources.pop(resource_id, None)
+                return not self._retired_cleanup_resources
+
+    def _require_retired_cleanup(self) -> None:
+        if self._retry_retired_cleanup():
+            return
+        with self._cleanup_lock:
+            pending = tuple(self._retired_cleanup_resources.values())
+            if not pending:
+                return
+            primary_error = pending[0][2]
+            resources = tuple(
+                resource for _kind, resource, _primary_error in pending
+            )
+            raise ValidatorChainTransportCleanupError(
+                stage="retired_transport_cleanup",
+                primary_error=primary_error,
+                resources=resources,
+            ) from primary_error
 
     def _default_context(self) -> Any:
         if not os.path.isfile(self._ca_bundle_path):
@@ -156,9 +247,11 @@ class EnclaveChainRpcTransportV2:
         return context
 
     def _tls_socket(self) -> Any:
-        parent = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
-        parent.settimeout(CHAIN_RPC_TIMEOUT_MS / 1000.0)
+        self._require_retired_cleanup()
+        parent = None
         try:
+            parent = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
+            parent.settimeout(CHAIN_RPC_TIMEOUT_MS / 1000.0)
             parent.connect((PARENT_CID, CHAIN_RELAY_VSOCK_PORT))
             request = canonical_json(
                 {
@@ -186,12 +279,29 @@ class EnclaveChainRpcTransportV2:
                 parent,
                 server_hostname=self._destination_host,
             )
-        except Exception:
-            parent.close()
+        except Exception as primary_error:
+            if parent is not None and not _shutdown_and_close_socket(parent):
+                self._retain_cleanup_resource(
+                    parent,
+                    kind="socket",
+                    primary_error=primary_error,
+                )
+                raise ValidatorChainTransportCleanupError(
+                    stage="parent_transport_cleanup",
+                    primary_error=primary_error,
+                    resources=(parent,),
+                ) from primary_error
             raise
 
     def _http_post(self, body: bytes) -> Dict[str, Any]:
+        with self._operation_lock:
+            return self._http_post_locked(body)
+
+    def _http_post_locked(self, body: bytes) -> Dict[str, Any]:
         tls_socket = self._tls_socket()
+        response = None
+        result = None
+        primary_error = None
         try:
             request = b"".join(
                 (
@@ -214,7 +324,7 @@ class EnclaveChainRpcTransportV2:
             peer_certificate = tls_socket.getpeercert(binary_form=True)
             if not peer_certificate:
                 raise ValidatorChainSourceV2Error("chain TLS peer certificate is absent")
-            return {
+            result = {
                 "status": int(response.status),
                 "body": response_body,
                 "tls_peer_chain_hash": sha256_json(
@@ -222,8 +332,50 @@ class EnclaveChainRpcTransportV2:
                 ),
                 "tls_protocol": str(tls_socket.version() or "unknown"),
             }
+        except Exception as exc:
+            primary_error = exc
+            raise
         finally:
-            tls_socket.close()
+            failed_resources = []
+            if response is not None:
+                try:
+                    response_closed = response.close() is not False
+                except Exception:
+                    response_closed = False
+                if not response_closed:
+                    failed_resources.append(response)
+                    self._retain_cleanup_resource(
+                        response,
+                        kind="response",
+                        primary_error=primary_error
+                        or ValidatorChainSourceV2Error(
+                            "chain HTTP response cleanup failed"
+                        ),
+                    )
+            if not _shutdown_and_close_socket(tls_socket):
+                failed_resources.append(tls_socket)
+                self._retain_cleanup_resource(
+                    tls_socket,
+                    kind="socket",
+                    primary_error=primary_error
+                    or ValidatorChainSourceV2Error(
+                        "chain TLS transport cleanup failed"
+                    ),
+                )
+            if failed_resources:
+                cleanup_primary = primary_error or (
+                    ValidatorChainSourceV2Error(
+                        "chain response transport cleanup failed"
+                    )
+                )
+                raise ValidatorChainTransportCleanupError(
+                    stage="http_response_transport_cleanup",
+                    primary_error=cleanup_primary,
+                    resources=tuple(failed_resources),
+                ) from cleanup_primary
+        if result is None:
+            raise ValidatorChainSourceV2Error("chain RPC result is unavailable")
+        return result
 
     def call(
         self,

@@ -115,6 +115,19 @@ def _release():
     )
 
 
+def _healthy_inter_enclave_transport():
+    child = {
+        "schema_version": "leadpoet.inter_enclave_transport_health.v2",
+        "status": "healthy",
+    }
+    return {
+        "schema_version": "leadpoet.inter_enclave_role_transport_health.v2",
+        "status": "healthy",
+        "server": dict(child),
+        "client": dict(child),
+    }
+
+
 def test_topology_health_matches_exact_approved_role_release(monkeypatch):
     release = _release()
     by_cid = {spec["cid"]: role for role, spec in ROLE_SPECS.items()}
@@ -133,6 +146,13 @@ def test_topology_health_matches_exact_approved_role_release(monkeypatch):
                 "commit_sha": expected["commit_sha"],
                 "pcr0": expected["pcr0"],
                 "build_identity_hash": expected["build_identity_hash"],
+                "parent_rpc_transport": {
+                    "schema_version": (
+                        "leadpoet.gateway_vsock_rpc_transport_health.v2"
+                    ),
+                    "status": "healthy",
+                },
+                "inter_enclave_transport": _healthy_inter_enclave_transport(),
             }
 
     monkeypatch.setattr(verify_topology, "TEEClient", Client)
@@ -143,6 +163,146 @@ def test_topology_health_matches_exact_approved_role_release(monkeypatch):
         )
     )
     assert {item["role"] for item in result} == set(ROLE_SPECS)
+
+
+def test_topology_health_rejects_latched_rpc_transport_failure(monkeypatch):
+    release = _release()
+    role = COORDINATOR_ROLE
+
+    class Client:
+        def __init__(self, cid):
+            assert cid == ROLE_SPECS[role]["cid"]
+
+        async def role_health(self):
+            expected = release["roles"][role]
+            return {
+                "status": "healthy",
+                "role": role,
+                "service_role": ROLE_SPECS[role]["service_role"],
+                "topology_hash": manifest_document()["topology_hash"],
+                "commit_sha": expected["commit_sha"],
+                "pcr0": expected["pcr0"],
+                "build_identity_hash": expected["build_identity_hash"],
+                "parent_rpc_transport": {
+                    "schema_version": (
+                        "leadpoet.gateway_vsock_rpc_transport_health.v2"
+                    ),
+                    "status": "error",
+                },
+                "inter_enclave_transport": _healthy_inter_enclave_transport(),
+            }
+
+    monkeypatch.setattr(verify_topology, "TEEClient", Client)
+    with pytest.raises(
+        verify_topology.TopologyHealthError,
+        match="parent_rpc_transport health failed",
+    ):
+        asyncio.run(
+            verify_topology.verify_roles([role], release_manifest=release)
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_transport_health",
+    (
+        None,
+        "healthy",
+        {"schema_version": "unknown", "status": "healthy"},
+        {
+            "schema_version": (
+                "leadpoet.gateway_vsock_rpc_transport_health.v2"
+            ),
+            "status": "unknown",
+        },
+    ),
+)
+def test_topology_health_rejects_missing_or_unknown_transport_projection(
+    monkeypatch,
+    invalid_transport_health,
+):
+    release = _release()
+    role = COORDINATOR_ROLE
+
+    class Client:
+        def __init__(self, cid):
+            assert cid == ROLE_SPECS[role]["cid"]
+
+        async def role_health(self):
+            expected = release["roles"][role]
+            return {
+                "status": "healthy",
+                "role": role,
+                "service_role": ROLE_SPECS[role]["service_role"],
+                "topology_hash": manifest_document()["topology_hash"],
+                "commit_sha": expected["commit_sha"],
+                "pcr0": expected["pcr0"],
+                "build_identity_hash": expected["build_identity_hash"],
+                "parent_rpc_transport": invalid_transport_health,
+                "inter_enclave_transport": _healthy_inter_enclave_transport(),
+            }
+
+    monkeypatch.setattr(verify_topology, "TEEClient", Client)
+    with pytest.raises(
+        verify_topology.TopologyHealthError,
+        match="parent_rpc_transport health failed",
+    ):
+        asyncio.run(
+            verify_topology.verify_roles([role], release_manifest=release)
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_child_health",
+    (
+        None,
+        "healthy",
+        {"schema_version": "unknown", "status": "healthy"},
+        {
+            "schema_version": "leadpoet.inter_enclave_transport_health.v2",
+            "status": "unknown",
+        },
+    ),
+)
+def test_topology_health_rejects_invalid_inter_enclave_child(
+    monkeypatch,
+    invalid_child_health,
+):
+    release = _release()
+    role = COORDINATOR_ROLE
+
+    class Client:
+        def __init__(self, cid):
+            assert cid == ROLE_SPECS[role]["cid"]
+
+        async def role_health(self):
+            expected = release["roles"][role]
+            transport = _healthy_inter_enclave_transport()
+            transport["client"] = invalid_child_health
+            return {
+                "status": "healthy",
+                "role": role,
+                "service_role": ROLE_SPECS[role]["service_role"],
+                "topology_hash": manifest_document()["topology_hash"],
+                "commit_sha": expected["commit_sha"],
+                "pcr0": expected["pcr0"],
+                "build_identity_hash": expected["build_identity_hash"],
+                "parent_rpc_transport": {
+                    "schema_version": (
+                        "leadpoet.gateway_vsock_rpc_transport_health.v2"
+                    ),
+                    "status": "healthy",
+                },
+                "inter_enclave_transport": transport,
+            }
+
+    monkeypatch.setattr(verify_topology, "TEEClient", Client)
+    with pytest.raises(
+        verify_topology.TopologyHealthError,
+        match="inter_enclave_transport client health failed",
+    ):
+        asyncio.run(
+            verify_topology.verify_roles([role], release_manifest=release)
+        )
 
 
 def test_topology_health_rejects_running_pcr_not_in_release(monkeypatch):
@@ -163,6 +323,13 @@ def test_topology_health_rejects_running_pcr_not_in_release(monkeypatch):
                 "commit_sha": expected["commit_sha"],
                 "pcr0": "f" * 96,
                 "build_identity_hash": expected["build_identity_hash"],
+                "parent_rpc_transport": {
+                    "schema_version": (
+                        "leadpoet.gateway_vsock_rpc_transport_health.v2"
+                    ),
+                    "status": "healthy",
+                },
+                "inter_enclave_transport": _healthy_inter_enclave_transport(),
             }
 
     monkeypatch.setattr(verify_topology, "TEEClient", Client)

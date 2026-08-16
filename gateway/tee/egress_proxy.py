@@ -782,21 +782,23 @@ class EnclaveEgressProxy:
     def _retry_retired_cleanup(self) -> bool:
         with self._retired_cleanup_attempt_lock:
             with self._retired_cleanup_lock:
-                retired = list(self._retired_cleanup_resources.items())
-            failed = False
+                retired = tuple(self._retired_cleanup_resources.items())
+            resolved = []
             for resource_id, (kind, resource) in retired:
                 if not self._close_cleanup_resource(kind, resource):
-                    failed = True
                     continue
-                with self._retired_cleanup_lock:
+                resolved.append((resource_id, resource))
+            with self._retired_cleanup_lock:
+                for resource_id, resource in resolved:
                     current = self._retired_cleanup_resources.get(resource_id)
                     if current is not None and current[1] is resource:
                         self._retired_cleanup_resources.pop(resource_id, None)
-            if failed:
+                pending = bool(self._retired_cleanup_resources)
+            if pending:
                 self._record_listener_cleanup_failure(
                     "retired_transport_cleanup"
                 )
-            return not failed
+            return not pending
 
     def ensure_running(self) -> Dict[str, Any]:
         """Recover a stopped accept loop before admitting another request."""

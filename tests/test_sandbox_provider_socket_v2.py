@@ -310,6 +310,148 @@ def test_sandbox_handler_cleanup_retains_primary_diagnostic(
     transport.restore()
 
 
+def test_sandbox_pending_cleanup_retry_preserves_concurrent_owner(tmp_path):
+    close_started = threading.Event()
+    release_close = threading.Event()
+
+    class Candidate:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            close_started.set()
+            assert release_close.wait(timeout=1)
+
+    first = Candidate()
+    concurrent = object()
+    server, transport = _bare_server(tmp_path)
+    server._retain_endpoint_cleanup_failure(first, "sandbox", None)
+    retry = threading.Thread(target=server._retry_pending_endpoint_cleanup_locked)
+    retain = threading.Thread(
+        target=server._retain_endpoint_cleanup_failure,
+        args=(concurrent, "sandbox", None),
+    )
+    retry.start()
+    assert close_started.wait(timeout=1)
+    retain.start()
+    retain.join(timeout=1)
+    assert not retain.is_alive()
+    assert server.status()["pending_endpoint_cleanup_count"] == 2
+    release_close.set()
+    retry.join(timeout=2)
+
+    assert not retry.is_alive()
+    assert server._pending_endpoint_cleanup == [concurrent]
+    transport.restore()
+
+
+@pytest.mark.parametrize("failure_mode", ("construct", "start"))
+def test_sandbox_accept_thread_start_cleanup_is_recoverable(
+    tmp_path,
+    monkeypatch,
+    failure_mode,
+):
+    class Listener:
+        def __init__(self):
+            self.close_result = False
+
+        def bind(self, address):
+            Path(address).touch()
+
+        def listen(self, _backlog):
+            return None
+
+        def settimeout(self, _timeout):
+            return None
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return self.close_result
+
+    class UnstartedThread:
+        def start(self):
+            raise RuntimeError("redacted thread start failure")
+
+        def join(self, timeout=None):
+            del timeout
+            raise RuntimeError("cannot join thread before it is started")
+
+        def is_alive(self):
+            return False
+
+    listener = Listener()
+
+    def thread_factory(**_kwargs):
+        if failure_mode == "construct":
+            raise RuntimeError("redacted thread construction failure")
+        return UnstartedThread()
+
+    monkeypatch.setattr(sandbox_provider_socket_v2.socket, "socket", lambda *_args: listener)
+    monkeypatch.setattr(
+        sandbox_provider_socket_v2.threading,
+        "Thread",
+        thread_factory,
+    )
+    server, transport = _bare_server(tmp_path)
+
+    with pytest.raises(
+        SandboxProviderSocketV2Error,
+        match="listener cleanup failed after startup",
+    ):
+        server.start()
+
+    assert server._listener is listener
+    assert server.status()["status"] == "cleanup_failed"
+    listener.close_result = None
+    server.close()
+    assert server._listener is None
+    assert server._thread is None
+    transport.restore()
+
+
+def test_sandbox_handler_thread_construction_failure_retains_connection(
+    tmp_path,
+    monkeypatch,
+):
+    stop_event = threading.Event()
+
+    class Connection:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return False
+
+    class Listener:
+        def __init__(self):
+            self.calls = 0
+
+        def accept(self):
+            self.calls += 1
+            if self.calls == 1:
+                return connection, None
+            stop_event.set()
+            raise OSError("redacted stop")
+
+    connection = Connection()
+    server, transport = _bare_server(tmp_path)
+    monkeypatch.setattr(
+        sandbox_provider_socket_v2.threading,
+        "Thread",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("redacted thread construction failure")
+        ),
+    )
+
+    server._accept_loop(Listener(), stop_event)
+
+    assert server._pending_endpoint_cleanup == [connection]
+    assert server.status()["last_failure"]["stage"] == "start_handler"
+    transport.restore()
+
+
 def _blocking_handler_server(tmp_path, *, drain_timeout_seconds):
     transport = BrokeredProviderTransportV2(lambda _request: {})
     scope = transport.create_scope(

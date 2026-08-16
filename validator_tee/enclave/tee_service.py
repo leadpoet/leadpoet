@@ -31,6 +31,7 @@ import socket
 import json
 import sys
 import os
+import errno
 import hashlib
 import zlib
 from datetime import datetime
@@ -74,6 +75,16 @@ MAX_RPC_REQUEST_BYTES = 128 * 1024 * 1024
 MAX_RPC_RESPONSE_BYTES = 128 * 1024 * 1024
 _COMPRESSED_FRAME_MAGIC = b"LPZ2"
 _COMPRESSED_FRAME_HEADER_BYTES = 8
+MAX_VSOCK_RPC_CLEANUP_ATTEMPTS = 4
+_TRANSIENT_ACCEPT_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EINTR,
+        errno.ECONNABORTED,
+        getattr(errno, "EPROTO", None),
+    )
+    if value is not None
+)
 
 
 def _encode_rpc_payload(
@@ -841,14 +852,19 @@ def _close_vsock_rpc_required(candidate: Any) -> Optional[BaseException]:
         # A peer may have closed immediately after reading the response.
         # close() remains the accepted descriptor's ownership boundary.
         pass
-    try:
-        if candidate.close() is False:
-            return _ExplicitVSOCKCloseFailure(
-                "validator vsock RPC close was not confirmed"
-            )
-    except BaseException as exc:
-        return exc
-    return None
+    last_error = None  # type: Optional[BaseException]
+    for _attempt in range(MAX_VSOCK_RPC_CLEANUP_ATTEMPTS):
+        try:
+            if candidate.close() is False:
+                last_error = _ExplicitVSOCKCloseFailure(
+                    "validator vsock RPC close was not confirmed"
+                )
+                continue
+        except BaseException as exc:
+            last_error = exc
+            continue
+        return None
+    return last_error
 
 
 def _recv_exact(client: Any, size: int) -> bytes:
@@ -962,12 +978,15 @@ def run_vsock_server():
     while True:
         try:
             client, addr = server.accept()
-        except Exception as exc:
-            print(f"[TEE] ❌ Server accept error: {exc}", flush=True)
-            import traceback
-
-            traceback.print_exc()
-            continue
+        except OSError as exc:
+            if exc.errno in _TRANSIENT_ACCEPT_ERRNOS:
+                print(
+                    "[TEE] transient accept error type=%s"
+                    % type(exc).__name__,
+                    flush=True,
+                )
+                continue
+            raise
         _handle_vsock_client(client, addr)
 
 

@@ -94,7 +94,13 @@ ALWAYS_COMMITTED_PATHS = (
     "gateway/tee/provider_evidence_cache_store_v2.py",
     "gateway/tee/runtime_identity_v2.py",
     "gateway/tee/tee_service.py",
+    "gateway/tee/proxy_transport_preflight_v2.py",
+    "gateway/utils/tee_client.py",
+    "gateway/utils/tee_egress_forwarder.py",
+    "gateway/utils/tee_inter_enclave_relay.py",
     "gateway/utils/tee_v2_bootstrap.py",
+    "validator_tee/host/chain_relay_v2.py",
+    "validator_tee/host/vsock_client.py",
     ORACLE_PATH,
 )
 LOW_RISK_PREFIXES = ("docs/", "tests/")

@@ -52,9 +52,12 @@ from gateway.tee.egress_proxy import (
     _relay_bidirectional as _relay_enclave_bidirectional,
 )
 from gateway.utils.tee_client import _recv_exact
+from gateway.utils import tee_egress_forwarder
 from gateway.utils.tee_egress_forwarder import (
     TEEEgressForwarder,
+    TEEEgressForwarderCleanupError,
     TEEEgressForwarderError,
+    _connect_public_destination,
     _global_address_infos,
     _handle_connection,
     _relay_bidirectional,
@@ -515,6 +518,227 @@ def test_parent_forwarder_handler_cleanup_is_retained_with_primary_failure():
     connection.close_result = None
     forwarder.stop()
     assert forwarder.status()["pending_endpoint_cleanup_count"] == 0
+
+
+def test_parent_forwarder_retains_failed_destination_candidate():
+    primary = ConnectionError("redacted destination failure")
+
+    class Candidate:
+        def settimeout(self, _timeout):
+            return None
+
+        def connect(self, _address):
+            raise primary
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return False
+
+    candidate = Candidate()
+    resolver = lambda *_args, **_kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))
+    ]
+    with pytest.raises(TEEEgressForwarderCleanupError) as captured:
+        _connect_public_destination(
+            "example.com",
+            443,
+            resolver=resolver,
+            socket_factory=lambda *_args: candidate,
+        )
+    assert captured.value.__cause__ is primary
+    assert captured.value._resources == (candidate,)
+
+    client, parent = socket.socketpair()
+    forwarder = TEEEgressForwarder(
+        connector=lambda *_args: (_ for _ in ()).throw(captured.value)
+    )
+    thread = threading.Thread(target=forwarder._serve_connection, args=(parent,))
+    thread.start()
+    client.sendall(
+        _frame(
+            {
+                "method": "connect",
+                "params": {
+                    "host": "api.openrouter.ai",
+                    "port": 443,
+                    "policy_hash": destination_policy_hash(),
+                },
+            }
+        )
+    )
+    _read_frame(client)
+    thread.join(timeout=2)
+    client.close()
+
+    assert not thread.is_alive()
+    assert forwarder._pending_endpoint_cleanup == [candidate]
+
+
+def test_parent_forwarder_pending_cleanup_retry_cannot_drop_concurrent_owner():
+    close_started = threading.Event()
+    release_close = threading.Event()
+
+    class Candidate:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            close_started.set()
+            assert release_close.wait(timeout=1)
+
+    first = Candidate()
+    concurrent = object()
+    forwarder = TEEEgressForwarder()
+    forwarder._retain_endpoint_cleanup_failure(first, "upstream", None)
+    retry = threading.Thread(
+        target=forwarder._retry_pending_endpoint_cleanup_locked
+    )
+    retain = threading.Thread(
+        target=forwarder._retain_endpoint_cleanup_failure,
+        args=(concurrent, "enclave", None),
+    )
+    retry.start()
+    assert close_started.wait(timeout=1)
+    retain.start()
+    retain.join(timeout=1)
+    assert not retain.is_alive()
+    assert forwarder.status()["pending_endpoint_cleanup_count"] == 2
+    release_close.set()
+    retry.join(timeout=2)
+
+    assert not retry.is_alive()
+    assert forwarder._pending_endpoint_cleanup == [concurrent]
+
+
+def test_parent_forwarder_wait_recovers_cleanup_without_process_exit():
+    class Candidate:
+        def __init__(self):
+            self.close_calls = 0
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            self.close_calls += 1
+            return False if self.close_calls == 1 else None
+
+    stop_event = threading.Event()
+
+    class AcceptThread:
+        def __init__(self):
+            self.alive = True
+
+        def join(self, timeout=None):
+            del timeout
+            stop_event.set()
+            self.alive = False
+
+        def is_alive(self):
+            return self.alive
+
+    candidate = Candidate()
+    forwarder = TEEEgressForwarder()
+    forwarder._stop = stop_event
+    forwarder._thread = AcceptThread()
+    forwarder._retain_endpoint_cleanup_failure(
+        candidate,
+        "upstream",
+        None,
+    )
+
+    assert forwarder.wait_for_accept_loop(poll_seconds=0.001) == 0
+    assert candidate.close_calls == 2
+    assert forwarder._pending_endpoint_cleanup == []
+
+
+def test_parent_forwarder_cleanup_pending_blocks_new_handler_admission():
+    class Candidate:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return False
+
+    stop_event = threading.Event()
+    accepted = Candidate()
+
+    class Listener:
+        def accept(self):
+            stop_event.set()
+            return accepted, (3, 5001)
+
+    forwarder = TEEEgressForwarder()
+    forwarder._retain_endpoint_cleanup_failure(
+        Candidate(),
+        "upstream",
+        None,
+    )
+    served = []
+    forwarder._serve_connection = lambda connection: served.append(connection)
+
+    forwarder._accept_loop(Listener(), stop_event)
+
+    assert served == []
+    assert accepted in forwarder._pending_endpoint_cleanup
+    assert len(forwarder._pending_endpoint_cleanup) == 2
+
+
+@pytest.mark.parametrize("failure_mode", ("construct", "start"))
+def test_parent_forwarder_thread_start_cleanup_is_recoverable(
+    monkeypatch,
+    failure_mode,
+):
+    class Listener:
+        def __init__(self):
+            self.close_result = False
+
+        def bind(self, _address):
+            return None
+
+        def listen(self, _backlog):
+            return None
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return self.close_result
+
+    class UnstartedThread:
+        def start(self):
+            raise RuntimeError("redacted thread start failure")
+
+        def join(self, timeout=None):
+            del timeout
+            raise RuntimeError("cannot join thread before it is started")
+
+        def is_alive(self):
+            return False
+
+    listener = Listener()
+
+    def thread_factory(**_kwargs):
+        if failure_mode == "construct":
+            raise RuntimeError("redacted thread construction failure")
+        return UnstartedThread()
+
+    monkeypatch.setattr(tee_egress_forwarder.threading, "Thread", thread_factory)
+    forwarder = TEEEgressForwarder(socket_factory=lambda *_args: listener)
+
+    with pytest.raises(
+        TEEEgressForwarderError,
+        match="listener cleanup failed after startup",
+    ):
+        forwarder.start()
+
+    assert forwarder._listener is listener
+    assert forwarder.status()["status"] == "cleanup_failed"
+    listener.close_result = None
+    forwarder.stop()
+    assert forwarder._listener is None
+    assert forwarder._thread is None
 
 
 @pytest.mark.parametrize(
@@ -2706,6 +2930,57 @@ def test_retired_cleanup_retries_are_serialized_across_requests():
     assert results == [True, True]
     assert resource.close_calls == 1
     assert resource.maximum_active == 1
+    assert proxy._retired_cleanup_resources == {}
+
+
+def test_retired_cleanup_rejects_concurrently_retained_owner():
+    release_close = threading.Event()
+    close_started = threading.Event()
+    retain_done = threading.Event()
+
+    class BlockingResource:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            close_started.set()
+            assert release_close.wait(timeout=1)
+            return None
+
+    class ConcurrentResource:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return None
+
+    first = BlockingResource()
+    concurrent = ConcurrentResource()
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+    proxy._retain_cleanup_resource(first, stage="first_cleanup")
+    recovery_results = []
+    recovery = threading.Thread(
+        target=lambda: recovery_results.append(proxy._retry_retired_cleanup())
+    )
+    recovery.start()
+    assert close_started.wait(timeout=1)
+
+    def retain():
+        proxy._retain_cleanup_resource(concurrent, stage="concurrent_cleanup")
+        retain_done.set()
+
+    retention = threading.Thread(target=retain)
+    retention.start()
+    assert retain_done.wait(timeout=1)
+    release_close.set()
+    recovery.join(timeout=1)
+    retention.join(timeout=1)
+
+    assert recovery_results == [False]
+    assert proxy._retired_cleanup_resources == {
+        id(concurrent): ("socket", concurrent)
+    }
+    assert proxy._retry_retired_cleanup() is True
     assert proxy._retired_cleanup_resources == {}
 
 

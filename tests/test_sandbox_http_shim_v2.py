@@ -7,6 +7,9 @@ from pathlib import Path
 import subprocess
 import sys
 import textwrap
+import threading
+
+import pytest
 
 from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
 from leadpoet_canonical.attested_v2 import canonical_json
@@ -57,6 +60,209 @@ def test_live_socket_waits_for_measured_operation_completion(monkeypatch) -> Non
     assert observed["timeout"] == REPLAY_WAIT_SECONDS
     assert observed["path"] == "/tmp/provider.sock"
     assert observed["closed"] is True
+
+
+def test_broker_request_retains_valid_result_until_required_close_succeeds(
+    monkeypatch,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    terminal = {"terminal_status": "transport_failure", "failure_code": "timeout"}
+    response = canonical_json({"result": terminal}).encode("utf-8")
+
+    class Connection:
+        def __init__(self, *, allow_close):
+            self.allow_close = allow_close
+            self.chunks = [len(response).to_bytes(4, "big"), response]
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _path):
+            pass
+
+        def sendall(self, _payload):
+            pass
+
+        def recv(self, size):
+            chunk = self.chunks.pop(0)
+            assert len(chunk) == size
+            return chunk
+
+        def close(self):
+            return self.allow_close
+
+    connection = Connection(allow_close=False)
+    recovered_connection = Connection(allow_close=True)
+    connections = iter((connection, recovered_connection))
+    monkeypatch.setenv(shim.SOCKET_ENV, "/tmp/provider.sock")
+    monkeypatch.setattr(shim.socket, "socket", lambda *_args: next(connections))
+
+    with pytest.raises(shim.SandboxHTTPShimTransportCleanupError) as raised:
+        shim.execute(
+            method="GET",
+            url="https://api.exa.ai/search",
+            headers={},
+            body=b"",
+            timeout_ms=1,
+        )
+
+    assert raised.value._resource is connection
+    assert raised.value._result == terminal
+    assert raised.value.primary_error is raised.value.__cause__
+    assert shim._RETIRED_CLEANUP_RESOURCES[id(connection)][0] is connection
+    connection.allow_close = True
+    assert shim.execute(
+        method="GET",
+        url="https://api.exa.ai/search",
+        headers={},
+        body=b"",
+        timeout_ms=1,
+    ) == terminal
+    assert shim._RETIRED_CLEANUP_RESOURCES == {}
+
+
+def test_broker_request_cleanup_preserves_original_request_error(monkeypatch) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    primary = OSError("connect failed")
+
+    class Connection:
+        def __init__(self):
+            self.allow_close = False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _path):
+            raise primary
+
+        def close(self):
+            return self.allow_close
+
+    connection = Connection()
+    monkeypatch.setenv(shim.SOCKET_ENV, "/tmp/provider.sock")
+    monkeypatch.setattr(shim.socket, "socket", lambda *_args: connection)
+
+    with pytest.raises(shim.SandboxHTTPShimTransportCleanupError) as raised:
+        shim.execute(
+            method="GET",
+            url="https://api.exa.ai/search",
+            headers={},
+            body=b"",
+            timeout_ms=1,
+        )
+
+    assert raised.value.primary_error is primary
+    assert raised.value.__cause__ is primary
+    assert raised.value._result is None
+    connection.allow_close = True
+    shim._require_retired_cleanup()
+
+
+def test_cached_terminal_still_retires_prior_live_socket(monkeypatch) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    class RetiredConnection:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    retired = RetiredConnection()
+    terminal = {
+        "terminal_status": "attested_local_response",
+        "http_status": 200,
+        "headers": {},
+        "body_b64": "",
+        "failure_code": None,
+    }
+    shim._retain_cleanup_failure(
+        retired,
+        primary_error=OSError("prior cleanup failed"),
+        result=None,
+    )
+    monkeypatch.setattr(
+        shim,
+        "_snapshot_terminal",
+        lambda **_kwargs: dict(terminal),
+    )
+
+    assert shim.execute(
+        method="GET",
+        url="https://api.exa.ai/search",
+        headers={},
+        body=b"",
+        timeout_ms=1,
+    ) == terminal
+    assert retired.closed is True
+    assert shim._RETIRED_CLEANUP_RESOURCES == {}
+
+
+def test_retired_cleanup_allows_concurrent_owner_transfer(monkeypatch) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    close_started = threading.Event()
+    release_close = threading.Event()
+
+    class BlockingConnection:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            close_started.set()
+            assert release_close.wait(timeout=1)
+            return None
+
+    class ConcurrentConnection:
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return None
+
+    first = BlockingConnection()
+    concurrent = ConcurrentConnection()
+    monkeypatch.setattr(shim, "_RETIRED_CLEANUP_RESOURCES", {})
+    shim._retain_cleanup_failure(
+        first,
+        primary_error=OSError("first cleanup"),
+        result=None,
+    )
+    recovery_errors = []
+
+    def recover():
+        try:
+            shim._require_retired_cleanup()
+        except Exception as exc:
+            recovery_errors.append(exc)
+
+    recovery = threading.Thread(target=recover)
+    recovery.start()
+    assert close_started.wait(timeout=1)
+    retained = threading.Event()
+
+    def retain():
+        shim._retain_cleanup_failure(
+            concurrent,
+            primary_error=OSError("concurrent cleanup"),
+            result=None,
+        )
+        retained.set()
+
+    retention = threading.Thread(target=retain)
+    retention.start()
+    assert retained.wait(timeout=1)
+    assert shim._RETIRED_CLEANUP_RESOURCES[id(concurrent)][0] is concurrent
+    release_close.set()
+    recovery.join(timeout=1)
+    retention.join(timeout=1)
+
+    assert len(recovery_errors) == 1
+    assert list(shim._RETIRED_CLEANUP_RESOURCES.values())[0][0] is concurrent
+    shim._require_retired_cleanup()
+    assert shim._RETIRED_CLEANUP_RESOURCES == {}
 
 
 def test_all_supported_http_clients_use_the_same_frozen_evidence(

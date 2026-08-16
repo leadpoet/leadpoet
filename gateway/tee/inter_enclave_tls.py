@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from collections import OrderedDict
+import errno
 import hashlib
 import json
 import math
@@ -46,8 +47,20 @@ RPC_DELIVERY_ATTEMPT_TIMEOUT_SECONDS = 300.0
 SCHEMA_VERSION = "leadpoet.inter_enclave_rpc.v2"
 TRANSPORT_HEALTH_SCHEMA_VERSION = "leadpoet.inter_enclave_transport_health.v2"
 MAX_TRANSPORT_CLEANUP_EVENT_COUNT = (1 << 63) - 1
+TRANSPORT_SUPERVISOR_POLL_SECONDS = 0.25
+TRANSPORT_CLEANUP_ATTEMPTS_PER_RECOVERY_CYCLE = 1
+MAX_TRANSPORT_CLEANUP_ATTEMPT_COUNT = (1 << 63) - 1
 _CHANNEL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_TRANSIENT_ACCEPT_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EINTR,
+        errno.ECONNABORTED,
+        getattr(errno, "EPROTO", None),
+    )
+    if value is not None
+)
 
 
 class InterEnclaveTLSError(RuntimeError):
@@ -73,6 +86,7 @@ class InterEnclaveTransportCleanupError(InterEnclaveTLSError):
         self.stage = str(stage)
         self.primary_error_type = type(primary_error).__name__
         self.cleanup_error_type = type(cleanup_error).__name__
+        self._cleanup_attempt_count = 1
         # The resource is private and never crosses an RPC or health boundary.
         # Retaining it avoids declaring ownership released without proof.
         self._resource = resource
@@ -362,6 +376,77 @@ class AttestedTLSRPCClient:
             raise InterEnclaveTLSError(
                 "inter-enclave delivery attempt timeout is invalid"
             )
+        self._transport_health_lock = threading.Lock()
+        self._transport_recovery_lock = threading.Lock()
+        self._pending_cleanup_failures = []
+        self._cleanup_recovery_count = 0
+
+    def _retain_transport_cleanup_failure(
+        self,
+        failure: InterEnclaveTransportCleanupError,
+    ) -> None:
+        with self._transport_health_lock:
+            self._pending_cleanup_failures.append(failure)
+
+    def _recover_transport_cleanup_failures(self) -> None:
+        with self._transport_recovery_lock:
+            with self._transport_health_lock:
+                snapshot = tuple(self._pending_cleanup_failures)
+            resolved = []
+            for failure in snapshot:
+                cleanup_error = None  # type: Optional[BaseException]
+                for _attempt in range(
+                    TRANSPORT_CLEANUP_ATTEMPTS_PER_RECOVERY_CYCLE
+                ):
+                    failure._cleanup_attempt_count = min(
+                        MAX_TRANSPORT_CLEANUP_ATTEMPT_COUNT,
+                        failure._cleanup_attempt_count + 1,
+                    )
+                    cleanup_error = _close_transport_required(
+                        failure._resource
+                    )
+                    if cleanup_error is None:
+                        resolved.append(failure)
+                        break
+                    failure.cleanup_error_type = type(cleanup_error).__name__
+            with self._transport_health_lock:
+                resolved_ids = {id(failure) for failure in resolved}
+                self._pending_cleanup_failures[:] = [
+                    failure
+                    for failure in self._pending_cleanup_failures
+                    if id(failure) not in resolved_ids
+                ]
+                self._cleanup_recovery_count += len(resolved)
+                failure = (
+                    self._pending_cleanup_failures[0]
+                    if self._pending_cleanup_failures
+                    else None
+                )
+        if failure is not None:
+            raise InterEnclaveTLSError(
+                "inter-enclave client transport cleanup retry failed"
+            ) from failure
+
+    def transport_health(self) -> Dict[str, Any]:
+        with self._transport_health_lock:
+            failures = tuple(self._pending_cleanup_failures)
+            failure = failures[0] if failures else None
+            return {
+                "schema_version": TRANSPORT_HEALTH_SCHEMA_VERSION,
+                "status": "error" if failure is not None else "healthy",
+                "terminal_failure_latched": failure is not None,
+                "retained_resource_count": len(failures),
+                "cleanup_recovery_count": self._cleanup_recovery_count,
+                "last_primary_error_type": (
+                    failure.primary_error_type if failure is not None else ""
+                ),
+                "last_cleanup_error_type": (
+                    failure.cleanup_error_type if failure is not None else ""
+                ),
+            }
+
+    def _require_transport_healthy(self) -> None:
+        self._recover_transport_cleanup_failures()
 
     def _bound_delivery_attempt(self, connection: Any) -> Any:
         try:
@@ -369,12 +454,14 @@ class AttestedTLSRPCClient:
         except (AttributeError, OSError) as exc:
             cleanup_error = _close_transport_required(connection)
             if cleanup_error is not None:
-                raise InterEnclaveTransportCleanupError(
+                failure = InterEnclaveTransportCleanupError(
                     stage="client_timeout_setup_cleanup",
                     primary_error=exc,
                     cleanup_error=cleanup_error,
                     resource=connection,
-                ) from exc
+                )
+                self._retain_transport_cleanup_failure(failure)
+                raise failure from exc
             raise _RetryableInterEnclaveTransportError(
                 "inter-enclave delivery timeout could not be applied"
             ) from exc
@@ -390,12 +477,14 @@ class AttestedTLSRPCClient:
         except OSError as exc:
             cleanup_error = _close_transport_required(connection)
             if cleanup_error is not None:
-                raise InterEnclaveTransportCleanupError(
+                failure = InterEnclaveTransportCleanupError(
                     stage="client_connect_cleanup",
                     primary_error=exc,
                     cleanup_error=cleanup_error,
                     resource=connection,
-                ) from exc
+                )
+                self._retain_transport_cleanup_failure(failure)
+                raise failure from exc
             raise _RetryableInterEnclaveTransportError(
                 "inter-enclave parent relay connection failed"
             ) from exc
@@ -440,6 +529,7 @@ class AttestedTLSRPCClient:
         params: Mapping[str, Any],
         channel_id: str,
     ) -> Dict[str, Any]:
+        self._require_transport_healthy()
         peer = self.peer_registry.peer(target_physical_role)
         target_spec = role_spec(target_physical_role)
         connection = self._connect_relay()
@@ -521,12 +611,14 @@ class AttestedTLSRPCClient:
         cleanup_error = _close_transport_required(owned_transport)
         if cleanup_error is not None:
             cleanup_primary = primary_error or cleanup_error
-            raise InterEnclaveTransportCleanupError(
+            failure = InterEnclaveTransportCleanupError(
                 stage="client_rpc_cleanup",
                 primary_error=cleanup_primary,
                 cleanup_error=cleanup_error,
                 resource=owned_transport,
-            ) from cleanup_primary
+            )
+            self._retain_transport_cleanup_failure(failure)
+            raise failure from cleanup_primary
         if primary_error is not None:
             raise primary_error
         if result is None:
@@ -558,10 +650,58 @@ class AttestedTLSRPCServer:
         self._replay_inflight = {}
         self._replay_lock = threading.Lock()
         self._transport_health_lock = threading.Lock()
+        self._transport_recovery_lock = threading.Lock()
         self._transport_cleanup_attempt_count = 0
         self._transport_cleanup_failure_count = 0
         self._last_cleanup_primary_error_type = ""
         self._last_cleanup_error_type = ""
+        self._pending_cleanup_failures = []
+        self._cleanup_recovery_count = 0
+        self._terminal_cleanup_failure_event = threading.Event()
+
+    def _retain_transport_cleanup_failure(
+        self,
+        failure: InterEnclaveTransportCleanupError,
+    ) -> None:
+        with self._transport_health_lock:
+            self._pending_cleanup_failures.append(failure)
+            self._terminal_cleanup_failure_event.set()
+
+    def _recover_transport_cleanup_failures(self) -> bool:
+        with self._transport_recovery_lock:
+            with self._transport_health_lock:
+                snapshot = tuple(self._pending_cleanup_failures)
+            resolved = []
+            for failure in snapshot:
+                cleanup_error = None  # type: Optional[BaseException]
+                for _attempt in range(
+                    TRANSPORT_CLEANUP_ATTEMPTS_PER_RECOVERY_CYCLE
+                ):
+                    failure._cleanup_attempt_count = min(
+                        MAX_TRANSPORT_CLEANUP_ATTEMPT_COUNT,
+                        failure._cleanup_attempt_count + 1,
+                    )
+                    cleanup_error = _close_transport_required(
+                        failure._resource
+                    )
+                    if cleanup_error is None:
+                        resolved.append(failure)
+                        break
+                    failure.cleanup_error_type = type(cleanup_error).__name__
+            with self._transport_health_lock:
+                resolved_ids = {id(failure) for failure in resolved}
+                self._pending_cleanup_failures[:] = [
+                    failure
+                    for failure in self._pending_cleanup_failures
+                    if id(failure) not in resolved_ids
+                ]
+                self._cleanup_recovery_count += len(resolved)
+                pending = bool(self._pending_cleanup_failures)
+                if pending:
+                    self._terminal_cleanup_failure_event.set()
+                else:
+                    self._terminal_cleanup_failure_event.clear()
+                return not pending
 
     def _record_transport_cleanup(
         self,
@@ -590,17 +730,23 @@ class AttestedTLSRPCServer:
         """Return a bounded, text-free projection of accepted-RPC cleanup."""
 
         with self._transport_health_lock:
+            failures = tuple(self._pending_cleanup_failures)
             return {
                 "schema_version": TRANSPORT_HEALTH_SCHEMA_VERSION,
                 "status": (
                     "error"
-                    if self._transport_cleanup_failure_count
+                    if failures
                     else "healthy"
                 ),
                 "cleanup_attempt_count": self._transport_cleanup_attempt_count,
                 "cleanup_failure_count": self._transport_cleanup_failure_count,
                 "last_primary_error_type": self._last_cleanup_primary_error_type,
                 "last_cleanup_error_type": self._last_cleanup_error_type,
+                "terminal_failure_latched": (
+                    bool(failures)
+                ),
+                "retained_resource_count": len(failures),
+                "cleanup_recovery_count": self._cleanup_recovery_count,
             }
 
     @staticmethod
@@ -768,25 +914,106 @@ class AttestedTLSRPCServer:
         )
         if cleanup_error is not None:
             cleanup_primary = primary_error or cleanup_error
-            raise InterEnclaveTransportCleanupError(
+            failure = InterEnclaveTransportCleanupError(
                 stage="server_rpc_cleanup",
                 primary_error=cleanup_primary,
                 cleanup_error=cleanup_error,
                 resource=owned_transport,
-            ) from cleanup_primary
+            )
+            self._retain_transport_cleanup_failure(failure)
+            raise failure from cleanup_primary
         if primary_error is not None:
             raise primary_error
 
     def serve_forever(self, *, listener: Optional[Any] = None) -> None:
-        if listener is None:
-            listener = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
-            listener.bind((0xFFFFFFFF, TLS_SERVICE_PORT))
-            listener.listen(64)
-        while True:
-            connection, _ = listener.accept()
-            threading.Thread(
-                target=self.handle_connection,
-                args=(connection,),
-                name="attested-inter-enclave-tls",
-                daemon=True,
-            ).start()
+        owns_listener = listener is None
+        primary_error = None  # type: Optional[BaseException]
+        try:
+            if listener is None:
+                listener = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+                listener.bind((0xFFFFFFFF, TLS_SERVICE_PORT))
+                listener.listen(64)
+            listener.settimeout(TRANSPORT_SUPERVISOR_POLL_SECONDS)
+            while True:
+                if self._terminal_cleanup_failure_event.is_set():
+                    if not self._recover_transport_cleanup_failures():
+                        time.sleep(TRANSPORT_SUPERVISOR_POLL_SECONDS)
+                    continue
+                try:
+                    connection, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    if exc.errno in _TRANSIENT_ACCEPT_ERRNOS:
+                        continue
+                    raise
+                if self._terminal_cleanup_failure_event.is_set():
+                    cleanup_error = _close_transport_required(connection)
+                    self._record_transport_cleanup(
+                        primary_error=None,
+                        cleanup_error=cleanup_error,
+                    )
+                    if cleanup_error is not None:
+                        self._retain_transport_cleanup_failure(
+                            InterEnclaveTransportCleanupError(
+                                stage="server_admission_cleanup",
+                                primary_error=cleanup_error,
+                                cleanup_error=cleanup_error,
+                                resource=connection,
+                            )
+                        )
+                    if not self._recover_transport_cleanup_failures():
+                        time.sleep(TRANSPORT_SUPERVISOR_POLL_SECONDS)
+                    continue
+
+                def _handle_owned_connection(
+                    owned_connection: Any = connection,
+                ) -> None:
+                    try:
+                        self.handle_connection(owned_connection)
+                    except InterEnclaveTransportCleanupError:
+                        # handle_connection retained the failed owner and set
+                        # the process-fatal supervisor latch.
+                        return
+
+                try:
+                    worker = threading.Thread(
+                        target=_handle_owned_connection,
+                        name="attested-inter-enclave-tls",
+                        daemon=True,
+                    )
+                    worker.start()
+                except BaseException as exc:
+                    cleanup_error = _close_transport_required(connection)
+                    if cleanup_error is not None:
+                        failure = InterEnclaveTransportCleanupError(
+                            stage="server_thread_start_cleanup",
+                            primary_error=exc,
+                            cleanup_error=cleanup_error,
+                            resource=connection,
+                        )
+                        self._record_transport_cleanup(
+                            primary_error=exc,
+                            cleanup_error=cleanup_error,
+                        )
+                        self._retain_transport_cleanup_failure(failure)
+                        if not self._recover_transport_cleanup_failures():
+                            raise failure from exc
+                    raise
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            if owns_listener and listener is not None:
+                cleanup_error = _close_transport_required(listener)
+                if cleanup_error is not None:
+                    cleanup_primary = primary_error or cleanup_error
+                    failure = InterEnclaveTransportCleanupError(
+                        stage="server_listener_cleanup",
+                        primary_error=cleanup_primary,
+                        cleanup_error=cleanup_error,
+                        resource=listener,
+                    )
+                    self._retain_transport_cleanup_failure(failure)
+                    if not self._recover_transport_cleanup_failures():
+                        raise failure from cleanup_primary

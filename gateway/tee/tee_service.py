@@ -29,13 +29,16 @@ import socket
 import json
 import sys
 import os
+import errno
+import threading
+import time
 import hashlib
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Mapping, Optional
 from threading import BoundedSemaphore, Lock
 print("🐛 DEBUG: Standard library imports OK", flush=True)
 
@@ -82,7 +85,25 @@ VSOCK_RPC_CONNECTION_TIMEOUT_SECONDS = 30.0
 VSOCK_RPC_TRANSPORT_HEALTH_SCHEMA_VERSION = (
     "leadpoet.gateway_vsock_rpc_transport_health.v2"
 )
+INTER_ENCLAVE_ROLE_TRANSPORT_HEALTH_SCHEMA_VERSION = (
+    "leadpoet.inter_enclave_role_transport_health.v2"
+)
+INTER_ENCLAVE_RPC_TRANSPORT_HEALTH_SCHEMA_VERSION = (
+    "leadpoet.inter_enclave_transport_health.v2"
+)
 MAX_VSOCK_RPC_CLEANUP_EVENT_COUNT = (1 << 63) - 1
+VSOCK_RPC_SUPERVISOR_POLL_SECONDS = 0.25
+VSOCK_RPC_CLEANUP_ATTEMPTS_PER_RECOVERY_CYCLE = 1
+MAX_VSOCK_RPC_CLEANUP_ATTEMPT_COUNT = (1 << 63) - 1
+_VSOCK_RPC_TRANSIENT_ACCEPT_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EINTR,
+        errno.ECONNABORTED,
+        getattr(errno, "EPROTO", None),
+    )
+    if value is not None
+)
 
 # Note: The enclave's actual CID (e.g., 16, 26, 27) is assigned by AWS
 # and visible to the parent EC2, but the enclave binds to VMADDR_CID_ANY
@@ -147,6 +168,10 @@ vsock_rpc_cleanup_attempt_count = 0
 vsock_rpc_cleanup_failure_count = 0
 vsock_rpc_last_primary_error_type = ""
 vsock_rpc_last_cleanup_error_type = ""
+vsock_rpc_pending_cleanup_failures = []
+vsock_rpc_cleanup_recovery_count = 0
+vsock_rpc_terminal_failure_event = threading.Event()
+vsock_rpc_cleanup_recovery_lock = Lock()
 v2_provider_semantics_authority_lock = Lock()
 v2_provider_evidence_authority = None
 v2_provider_evidence_authority_lock = Lock()
@@ -2453,13 +2478,18 @@ def handle_inter_enclave_rpc(
     from gateway.tee.rpc_authority import active_enclave_role
 
     if method == "channel_health":
+        transport_health = _inter_enclave_transport_health()
         return {
-            "status": "healthy",
+            "status": (
+                "healthy"
+                if transport_health.get("status") == "healthy"
+                else "error"
+            ),
             "local_role": active_enclave_role(),
             "peer_role": peer["physical_role"],
             "local_boot_identity_hash": get_v2_runtime_identity()
             .boot_identity()["boot_identity_hash"],
-            "transport": _inter_enclave_transport_health(),
+            "transport": transport_health,
         }
     if method == "provider_execute":
         if active_enclave_role() != "gateway_coordinator":
@@ -2499,10 +2529,22 @@ def start_v2_tls_service() -> Dict[str, Any]:
     global v2_tls_server, v2_tls_server_thread
     with v2_tls_server_lock:
         if v2_tls_server_thread is not None and v2_tls_server_thread.is_alive():
+            get_v2_inter_enclave_client()
+            transport_health = _inter_enclave_transport_health()
+            if transport_health.get("status") == "error":
+                raise RuntimeError("V2 TLS transport health failed")
             return {
                 "status": "running",
                 "registered_roles": list(get_v2_peer_registry().registered_roles()),
+                "transport": transport_health,
             }
+        if v2_tls_server is not None:
+            if not v2_tls_server._recover_transport_cleanup_failures():
+                raise RuntimeError(
+                    "prior V2 TLS service retains unresolved transport cleanup"
+                )
+            if v2_tls_server.transport_health().get("status") != "healthy":
+                raise RuntimeError("prior V2 TLS transport health failed")
         from gateway.tee.inter_enclave_tls import AttestedTLSRPCServer
         from gateway.tee.rpc_authority import active_enclave_role
 
@@ -2511,6 +2553,7 @@ def start_v2_tls_service() -> Dict[str, Any]:
         expected_roles = manager.expected_peer_roles()
         if tuple(registry.registered_roles()) != expected_roles:
             raise RuntimeError("V2 TLS service requires every configured attested peer")
+        get_v2_inter_enclave_client()
         v2_tls_server = AttestedTLSRPCServer(
             local_physical_role=active_enclave_role(),
             local_boot_identity=manager.boot_identity(),
@@ -2529,14 +2572,45 @@ def start_v2_tls_service() -> Dict[str, Any]:
         return {
             "status": "running",
             "registered_roles": list(registry.registered_roles()),
+            "transport": _inter_enclave_transport_health(),
         }
 
 
 def _inter_enclave_transport_health() -> Dict[str, Any]:
     server = v2_tls_server
-    if server is None:
-        return {"status": "unavailable"}
-    return server.transport_health()
+    client = v2_inter_enclave_client
+    observed_server_health = (
+        server.transport_health()
+        if server is not None
+        else {"status": "unavailable"}
+    )
+    observed_client_health = (
+        client.transport_health()
+        if client is not None
+        else {"status": "unavailable"}
+    )
+    server_health = (
+        dict(observed_server_health)
+        if isinstance(observed_server_health, Mapping)
+        else {"status": "invalid"}
+    )
+    client_health = (
+        dict(observed_client_health)
+        if isinstance(observed_client_health, Mapping)
+        else {"status": "invalid"}
+    )
+    children_healthy = all(
+        health.get("schema_version")
+        == INTER_ENCLAVE_RPC_TRANSPORT_HEALTH_SCHEMA_VERSION
+        and health.get("status") == "healthy"
+        for health in (server_health, client_health)
+    )
+    return {
+        "schema_version": INTER_ENCLAVE_ROLE_TRANSPORT_HEALTH_SCHEMA_VERSION,
+        "status": "healthy" if children_healthy else "error",
+        "server": server_health,
+        "client": client_health,
+    }
 
 
 def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -2716,6 +2790,7 @@ class VSOCKRPCCleanupError(RuntimeError):
         super().__init__("gateway vsock RPC transport cleanup failed")
         self.primary_error_type = type(primary_error).__name__
         self.cleanup_error_type = type(cleanup_error).__name__
+        self._cleanup_attempt_count = 1
         # Never serialized. Preserve ownership until the worker failure has
         # been observed by the bounded transport-health latch.
         self._resource = resource
@@ -2771,19 +2846,69 @@ def _record_vsock_rpc_cleanup(
             vsock_rpc_last_cleanup_error_type = type(cleanup_error).__name__
 
 
+def _retain_vsock_rpc_cleanup_failure(
+    failure: VSOCKRPCCleanupError,
+) -> None:
+    with vsock_rpc_transport_health_lock:
+        vsock_rpc_pending_cleanup_failures.append(failure)
+        vsock_rpc_terminal_failure_event.set()
+
+
+def _recover_vsock_rpc_cleanup_failures() -> bool:
+    global vsock_rpc_cleanup_recovery_count
+    with vsock_rpc_cleanup_recovery_lock:
+        with vsock_rpc_transport_health_lock:
+            snapshot = tuple(vsock_rpc_pending_cleanup_failures)
+        resolved = []
+        for failure in snapshot:
+            cleanup_error = None  # type: Optional[BaseException]
+            for _attempt in range(
+                VSOCK_RPC_CLEANUP_ATTEMPTS_PER_RECOVERY_CYCLE
+            ):
+                failure._cleanup_attempt_count = min(
+                    MAX_VSOCK_RPC_CLEANUP_ATTEMPT_COUNT,
+                    failure._cleanup_attempt_count + 1,
+                )
+                cleanup_error = _close_vsock_rpc_required(failure._resource)
+                if cleanup_error is None:
+                    resolved.append(failure)
+                    break
+                failure.cleanup_error_type = type(cleanup_error).__name__
+        with vsock_rpc_transport_health_lock:
+            resolved_ids = {id(failure) for failure in resolved}
+            vsock_rpc_pending_cleanup_failures[:] = [
+                failure
+                for failure in vsock_rpc_pending_cleanup_failures
+                if id(failure) not in resolved_ids
+            ]
+            vsock_rpc_cleanup_recovery_count += len(resolved)
+            pending = bool(vsock_rpc_pending_cleanup_failures)
+            if pending:
+                vsock_rpc_terminal_failure_event.set()
+            else:
+                vsock_rpc_terminal_failure_event.clear()
+            return not pending
+
+
 def vsock_rpc_transport_health() -> Dict[str, Any]:
     """Return bounded, text-free accepted-RPC cleanup health."""
 
     with vsock_rpc_transport_health_lock:
+        failures = tuple(vsock_rpc_pending_cleanup_failures)
         return {
             "schema_version": VSOCK_RPC_TRANSPORT_HEALTH_SCHEMA_VERSION,
             "status": (
-                "error" if vsock_rpc_cleanup_failure_count else "healthy"
+                "error" if failures else "healthy"
             ),
             "cleanup_attempt_count": vsock_rpc_cleanup_attempt_count,
             "cleanup_failure_count": vsock_rpc_cleanup_failure_count,
             "last_primary_error_type": vsock_rpc_last_primary_error_type,
             "last_cleanup_error_type": vsock_rpc_last_cleanup_error_type,
+            "terminal_failure_latched": (
+                bool(failures)
+            ),
+            "retained_resource_count": len(failures),
+            "cleanup_recovery_count": vsock_rpc_cleanup_recovery_count,
         }
 
 
@@ -2860,11 +2985,13 @@ def _handle_vsock_connection(conn: Any, addr: Any) -> None:
         )
         if cleanup_error is not None:
             cleanup_primary = primary_error or cleanup_error
-            raise VSOCKRPCCleanupError(
+            failure = VSOCKRPCCleanupError(
                 primary_error=cleanup_primary,
                 cleanup_error=cleanup_error,
                 resource=conn,
-            ) from cleanup_primary
+            )
+            _retain_vsock_rpc_cleanup_failure(failure)
+            raise failure from cleanup_primary
 
 
 def _serve_vsock_connections(
@@ -2881,21 +3008,52 @@ def _serve_vsock_connections(
         thread_name_prefix="gateway-vsock-rpc",
     )
     try:
+        sock.settimeout(VSOCK_RPC_SUPERVISOR_POLL_SECONDS)
         while stop_event is None or not stop_event.is_set():
             connection_slots.acquire()
+            if vsock_rpc_terminal_failure_event.is_set():
+                connection_slots.release()
+                if not _recover_vsock_rpc_cleanup_failures():
+                    time.sleep(VSOCK_RPC_SUPERVISOR_POLL_SECONDS)
+                continue
             try:
                 conn, addr = sock.accept()
             except socket.timeout:
                 connection_slots.release()
                 continue
+            except OSError as exc:
+                connection_slots.release()
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if exc.errno in _VSOCK_RPC_TRANSIENT_ACCEPT_ERRNOS:
+                    continue
+                raise
             except Exception:
                 connection_slots.release()
                 if stop_event is not None and stop_event.is_set():
                     break
                 raise
+            if vsock_rpc_terminal_failure_event.is_set():
+                connection_slots.release()
+                cleanup_error = _close_vsock_rpc_required(conn)
+                _record_vsock_rpc_cleanup(
+                    primary_error=None,
+                    cleanup_error=cleanup_error,
+                )
+                if cleanup_error is not None:
+                    _retain_vsock_rpc_cleanup_failure(
+                        VSOCKRPCCleanupError(
+                            primary_error=cleanup_error,
+                            cleanup_error=cleanup_error,
+                            resource=conn,
+                        )
+                    )
+                if not _recover_vsock_rpc_cleanup_failures():
+                    time.sleep(VSOCK_RPC_SUPERVISOR_POLL_SECONDS)
+                continue
             try:
                 future = executor.submit(_handle_vsock_connection, conn, addr)
-            except Exception as exc:
+            except BaseException as exc:
                 connection_slots.release()
                 cleanup_error = _close_vsock_rpc_required(conn)
                 _record_vsock_rpc_cleanup(
@@ -2903,11 +3061,13 @@ def _serve_vsock_connections(
                     cleanup_error=cleanup_error,
                 )
                 if cleanup_error is not None:
-                    raise VSOCKRPCCleanupError(
+                    failure = VSOCKRPCCleanupError(
                         primary_error=exc,
                         cleanup_error=cleanup_error,
                         resource=conn,
-                    ) from exc
+                    )
+                    _retain_vsock_rpc_cleanup_failure(failure)
+                    _recover_vsock_rpc_cleanup_failures()
                 raise
 
             def _release_connection_slot(completed_future: Any) -> None:

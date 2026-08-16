@@ -17,6 +17,22 @@ class TopologyHealthError(RuntimeError):
     """A role is unavailable or reports an unexpected measured identity."""
 
 
+_REQUIRED_TRANSPORT_HEALTH_SCHEMAS_BY_ROLE = {
+    role: {
+        "parent_rpc_transport": (
+            "leadpoet.gateway_vsock_rpc_transport_health.v2"
+        ),
+        "inter_enclave_transport": (
+            "leadpoet.inter_enclave_role_transport_health.v2"
+        ),
+    }
+    for role in ROLE_SPECS
+}
+_INTER_ENCLAVE_CHILD_TRANSPORT_HEALTH_SCHEMA = (
+    "leadpoet.inter_enclave_transport_health.v2"
+)
+
+
 async def verify_roles(
     roles: Sequence[str],
     *,
@@ -32,9 +48,41 @@ async def verify_roles(
         if role not in ROLE_SPECS:
             raise TopologyHealthError("unknown topology role %s" % role)
         spec = ROLE_SPECS[role]
+        required_transport_health = (
+            _REQUIRED_TRANSPORT_HEALTH_SCHEMAS_BY_ROLE.get(role)
+        )
+        if not required_transport_health:
+            raise TopologyHealthError(
+                "%s transport health applicability is undefined" % role
+            )
         health = await TEEClient(cid=int(spec["cid"])).role_health()
         if not isinstance(health, dict) or health.get("status") != "healthy":
             raise TopologyHealthError("%s role health failed" % role)
+        for transport_name, expected_schema in (
+            required_transport_health.items()
+        ):
+            transport_health = health.get(transport_name)
+            if (
+                not isinstance(transport_health, dict)
+                or transport_health.get("schema_version") != expected_schema
+                or transport_health.get("status") != "healthy"
+            ):
+                raise TopologyHealthError(
+                    "%s %s health failed" % (role, transport_name)
+                )
+            if transport_name == "inter_enclave_transport":
+                for child_name in ("server", "client"):
+                    child_health = transport_health.get(child_name)
+                    if (
+                        not isinstance(child_health, dict)
+                        or child_health.get("schema_version")
+                        != _INTER_ENCLAVE_CHILD_TRANSPORT_HEALTH_SCHEMA
+                        or child_health.get("status") != "healthy"
+                    ):
+                        raise TopologyHealthError(
+                            "%s inter_enclave_transport %s health failed"
+                            % (role, child_name)
+                        )
         if health.get("role") != role:
             raise TopologyHealthError("%s reported role %s" % (role, health.get("role")))
         if health.get("service_role") != spec["service_role"]:

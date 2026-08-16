@@ -2832,12 +2832,7 @@
       "symbol": "PRODUCTION_CHAIN_HOST"
     },
     {
-      "ast_sha256": "sha256:866c5e96cd6bba9d173f7f49ae956f456184913538b0f5e79304d700ff14497a",
-      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
-      "symbol": "PRODUCTION_PARITY_CHAIN_HOST"
-    },
-    {
-      "ast_sha256": "sha256:d940bc0bac77f99d548206e8b8b518fbb5b4fa9990bee14b0647b56a21bd443a",
+      "ast_sha256": "sha256:6291ccca516f77b84619738ce78fe0c080c4418e70ab5e1d619922d4a60a0c3e",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "PRODUCTION_PARITY_ENV_NAMES"
     },
@@ -2847,19 +2842,29 @@
       "symbol": "PRODUCTION_SUPABASE_ORIGIN"
     },
     {
-      "ast_sha256": "sha256:8e2caae484657222b37f8518487e1424bc93f3503946464cf2c52aa8278d757d",
+      "ast_sha256": "sha256:c886684a21cb73da9e4d3bc0fe7e8226ad026503f20bec3ff500cb2d0f9250a4",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "_parity_configuration"
+    },
+    {
+      "ast_sha256": "sha256:fd7b7fadf5d66b83a2c3660c5a7ca78c0a57a78c3fcc67453e264f538bfcb045",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "configured_boundary_document_v2"
     },
     {
-      "ast_sha256": "sha256:1b43bd7ea9732080d6048e6bbec87dcf31e9c762db7a5bd3b64bded610979745",
+      "ast_sha256": "sha256:9cb01db13f49d2bd31692d41bfc33918cab869a16e5ca9c555bc8e9c52a439da",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "configured_chain_signing_profile_path_v2"
     },
     {
-      "ast_sha256": "sha256:bc01821c5de51e80b7bd27918a8207f6aac53b57b28c21c68dd2fcabd833747a",
+      "ast_sha256": "sha256:3eff1435470bc5963f3eb80e9357f3add646716d766e3e03a83401a2c7b4b226",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "configured_chain_source_boundary_v2"
+    },
+    {
+      "ast_sha256": "sha256:764812aeb8b283bf2b63445100214a91ec5bfe62ebe3a09a91638d1445e0c794",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "configured_rebenchmark_now_v2"
     },
     {
       "ast_sha256": "sha256:713109ab0de46b9e1cdb859f010f3bfa794589e592be08d3c972d21dded19c35",
@@ -2867,7 +2872,12 @@
       "symbol": "configured_supabase_origin_v2"
     },
     {
-      "ast_sha256": "sha256:f8d8bed1703f70b92de7a190cf95086a7c8a2bc79dab3ad9b63d647d6467e87e",
+      "ast_sha256": "sha256:349632184bb5d200fb11b720995a183d667efd6d0cdd7b9cf1dff8481afa9221",
+      "path": "leadpoet_canonical/production_parity_boundary_v2.py",
+      "symbol": "production_parity_enabled_v2"
+    },
+    {
+      "ast_sha256": "sha256:f69b052b4675b2e36ea55447d3d124a7ef69f6472f2a529d19e0a583025027a3",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "validate_production_parity_boundary_document_v2"
     },
@@ -3452,7 +3462,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:283ccd1f7b26326ce3614c5d7e295db32ffa714f616519b429a1732061f301ec",
-  "protected_source_commit": "2e0ba0da919179c3e925b91c5289219042be2bb5",
+  "manifest_hash": "sha256:196bd86d9029b768e3487eea016e85028e224be610ed814f0258199a45bc5a8e",
+  "protected_source_commit": "0d0d7095fb1c64c4a22a588f5a56a65ec0a7b435",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

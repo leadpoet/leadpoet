@@ -4900,6 +4900,7 @@ def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
     assert evidence["production_icp_window_loader_exact"] is True
     assert evidence["provider_preflight_production_facade_exact"] is True
     assert evidence["maintenance_boundary_production_exact"] is True
+    assert evidence["production_host_memory_boundary_adapted"] is True
     assert evidence["provider_preflight_boundary_adapted"] is True
     assert evidence["checkpoint_boundary_adapted"] is True
     assert evidence["checkpoint_write_count"] >= evidence["configured_icp_count"]

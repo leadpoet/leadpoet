@@ -9866,7 +9866,11 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
         build_release_manifest,
         role_expectation,
     )
-    from gateway.tee.topology import ROLE_SPECS, topology_hash
+    from gateway.tee.topology import (
+        HOST_RESERVED_MEMORY_MIB,
+        ROLE_SPECS,
+        topology_hash,
+    )
     from leadpoet_canonical.attested_v2 import (
         EMPTY_HOST_OPERATION_ROOT,
         EMPTY_TRANSPORT_ROOT,
@@ -11440,6 +11444,11 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
         ),
         patch.object(scoring_worker_module, "legacy_v1_enabled", lambda: False),
         patch.object(scoring_worker_module, "scoring_telemetry_enabled", lambda _config: False),
+        patch.object(
+            scoring_worker_module,
+            "_read_mem_available_mb",
+            return_value=HOST_RESERVED_MEMORY_MIB,
+        ),
         patch.dict(
             os.environ,
             {
@@ -11911,6 +11920,7 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                 "production_icp_window_loader_exact": True,
                 "provider_preflight_production_facade_exact": True,
                 "maintenance_boundary_production_exact": True,
+                "production_host_memory_boundary_adapted": True,
                 "provider_preflight_boundary_adapted": True,
                 "checkpoint_boundary_adapted": True,
                 "checkpoint_write_count": len(checkpoint_s3.put_documents),
@@ -12824,6 +12834,7 @@ def main() -> int:
                     "production_icp_window_loader_exact",
                     "provider_preflight_production_facade_exact",
                     "maintenance_boundary_production_exact",
+                    "production_host_memory_boundary_adapted",
                     "actual_audit_publication_verified",
                     "production_artifact_link_hash_exact",
                     "artifact_link_conflict_rejected",

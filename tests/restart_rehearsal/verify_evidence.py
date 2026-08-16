@@ -50,6 +50,7 @@ TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
 VALIDATOR_GATEWAY_ACTIVATION_INVARIANT = (
     "validator_activation_requires_exact_gateway_release"
 )
+VALIDATOR_ROLE_RELEASE_INVARIANT = "validator_role_release_identity_exact"
 EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
     "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "leadpoet-lab",
     "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
@@ -226,6 +227,191 @@ def selected_validator_late_activation_capability(
         "candidate validator deployment source is unavailable for "
         "activation-barrier capability proof"
     )
+
+
+def selected_validator_worker_ids(
+    candidate_roots: tuple[Path, ...],
+    *,
+    section_start: str,
+    section_end: str,
+    role: str,
+) -> tuple[int, ...]:
+    """Derive every selected worker for one frozen-candidate role."""
+
+    relative = Path("validator_models/containerizing/deploy_dynamic.sh")
+    for root in candidate_roots:
+        source = root / relative
+        if not source.is_file():
+            continue
+        deploy = source.read_text(encoding="utf-8")
+        try:
+            section = deploy[
+                deploy.index(section_start) : deploy.index(section_end)
+            ]
+        except ValueError as exc:
+            raise SystemExit(
+                f"candidate {role} worker deployment section is unavailable"
+            ) from exc
+        worker_range = re.search(
+            r"for\s+i\s+in\s+\{([1-9][0-9]*)\.\.([1-9][0-9]*)\};\s*do",
+            section,
+        )
+        if worker_range is None:
+            raise SystemExit(
+                f"candidate {role} worker selection range is unavailable"
+            )
+        first, last = (int(value) for value in worker_range.groups())
+        if first > last:
+            raise SystemExit(
+                f"candidate {role} worker selection range is invalid"
+            )
+        return tuple(range(first, last + 1))
+    raise SystemExit(
+        "candidate validator deployment source is unavailable for fulfillment "
+        "worker identity proof"
+    )
+
+
+def selected_validator_qualification_worker_ids(
+    candidate_roots: tuple[Path, ...],
+) -> tuple[int, ...]:
+    return selected_validator_worker_ids(
+        candidate_roots,
+        section_start="# Auto-detect QUALIFICATION proxies",
+        section_end="# Get enclave CID for TEE signing",
+        role="qualification",
+    )
+
+
+def selected_validator_fulfillment_worker_ids(
+    candidate_roots: tuple[Path, ...],
+) -> tuple[int, ...]:
+    return selected_validator_worker_ids(
+        candidate_roots,
+        section_start="# Auto-detect FULFILLMENT proxies",
+        section_end="# Wait for containers to start",
+        role="fulfillment",
+    )
+
+
+def verify_validator_role_release_identity(
+    state: dict,
+    *,
+    candidate_sha: str,
+    candidate_roots: tuple[Path, ...],
+) -> None:
+    """Prove every candidate-selected validator role uses one exact release."""
+
+    image = state.get("images", {}).get("leadpoet-validator:latest")
+    if not isinstance(image, dict):
+        raise SystemExit("candidate validator application image is unavailable")
+    image_id = str(image.get("id") or "")
+    if (
+        image.get("commit") != candidate_sha
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
+    ):
+        raise SystemExit("candidate validator application image identity is invalid")
+
+    worker_ids = selected_validator_fulfillment_worker_ids(candidate_roots)
+    expected_fulfillment = {
+        f"leadpoet-ff-worker-{worker_id}" for worker_id in worker_ids
+    }
+    qualification_ids = selected_validator_qualification_worker_ids(
+        candidate_roots
+    )
+    expected_qualification = {
+        f"leadpoet-qual-worker-{worker_id}"
+        for worker_id in qualification_ids
+    }
+    containers = state.get("containers", {})
+    if not isinstance(containers, dict):
+        raise SystemExit("validator container evidence is unavailable")
+    actual_fulfillment = {
+        name
+        for name in containers
+        if re.fullmatch(r"leadpoet-ff-worker-[1-9][0-9]*", name)
+    }
+    actual_qualification = {
+        name
+        for name in containers
+        if re.fullmatch(r"leadpoet-qual-worker-[1-9][0-9]*", name)
+    }
+    if (
+        actual_fulfillment != expected_fulfillment
+        or actual_qualification != expected_qualification
+    ):
+        raise SystemExit(
+            "candidate-derived validator worker fleet differs from the "
+            "exercised validator fleet"
+        )
+
+    role_names = {
+        name
+        for name in containers
+        if name == "leadpoet-validator-main"
+        or re.fullmatch(
+            r"leadpoet-(?:validator|qual|ff)-worker-[1-9][0-9]*", name
+        )
+    }
+    if "leadpoet-validator-main" not in role_names:
+        raise SystemExit("validator coordinator container evidence is unavailable")
+
+    for name in sorted(role_names):
+        row = containers.get(name)
+        if not isinstance(row, dict):
+            raise SystemExit(f"validator role evidence is invalid: {name}")
+        log_path = Path(str(row.get("log_path") or ""))
+        if (
+            row.get("running") is not True
+            or row.get("restart_count") != 0
+            or not isinstance(row.get("pid"), int)
+            or int(row["pid"]) <= 0
+            or not log_path.is_file()
+            or row.get("image_id") != image_id
+            or row.get("image_revision") != candidate_sha
+        ):
+            raise SystemExit(
+                f"validator role final release state is invalid: {name}"
+            )
+        environment = row.get("environment")
+        if not isinstance(environment, list):
+            raise SystemExit(
+                f"validator role environment evidence is invalid: {name}"
+            )
+        for variable in (
+            "LEADPOET_SENTRY_RELEASE",
+            "VALIDATOR_V2_DEPLOY_COMMIT",
+            "GITHUB_SHA",
+            "GIT_COMMIT",
+        ):
+            matches = [
+                line for line in environment if line.startswith(f"{variable}=")
+            ]
+            if matches != [f"{variable}={candidate_sha}"]:
+                raise SystemExit(
+                    f"validator role exact release environment is invalid: "
+                    f"{name} {variable}"
+                )
+
+        if name == "leadpoet-validator-main":
+            expected_role = "validator.coordinator"
+            expected_worker_id = ""
+        else:
+            worker_match = re.fullmatch(
+                r"leadpoet-(validator|qual|ff)-worker-([1-9][0-9]*)", name
+            )
+            assert worker_match is not None
+            worker_kind, expected_worker_id = worker_match.groups()
+            expected_role = {
+                "validator": "validator.sourcing_worker",
+                "qual": "validator.qualification_worker",
+                "ff": "validator.fulfillment_worker",
+            }[worker_kind]
+        if (
+            row.get("role") != expected_role
+            or str(row.get("worker_id") or "") != expected_worker_id
+        ):
+            raise SystemExit(f"validator role attribution is invalid: {name}")
 
 
 def verify_validator_gateway_activation_barrier(
@@ -1883,6 +2069,15 @@ def main() -> int:
             or not validator_log.is_file()
         ):
             raise SystemExit("validator final container state is invalid")
+        verify_validator_role_release_identity(
+            state,
+            candidate_sha=candidate_sha,
+            candidate_roots=(
+                Path("/home/ec2-user/leadpoet_repo"),
+                Path("/home/ec2-user/leadpoet/leadpoet"),
+            ),
+        )
+        restart_invariants[VALIDATOR_ROLE_RELEASE_INVARIANT] = True
 
     pcr0_values = {
         str((enclave.get("Measurements") or {}).get("PCR0") or "")

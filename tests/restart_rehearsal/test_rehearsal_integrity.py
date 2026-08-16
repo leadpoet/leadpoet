@@ -101,6 +101,7 @@ from tests.restart_rehearsal.verify_evidence import (
     verify_restart_epoch_transient_recovery,
 )
 from gateway.tee.rehearsal_behavior_contract_v2 import (
+    RESTART_INVARIANTS,
     build_rehearsal_behavior_contract_v2,
 )
 from gateway.research_lab.git_tree_models import (
@@ -4485,6 +4486,16 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "restart_summary_deadline_classification_exact" in set(
         behavior_contract["required_invariant_ids"]
     )
+    assert "gateway-startup-transition-safety" in set(
+        behavior_contract["behavior_scenarios"]
+    )
+    assert "validator_role_release_identity_exact" in set(
+        behavior_contract["required_restart_invariant_ids"]
+    )
+    assert {
+        "gateway_restart_invocation_timing_ledger_exact",
+        "gateway_worker_supervisor_start_event_loop_safe",
+    } <= set(behavior_contract["required_invariant_ids"])
     assert "compact-weight-joined-path" in set(
         behavior_contract["behavior_scenarios"]
     )
@@ -4497,6 +4508,8 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "gateway/tee/provider_client_v2.py",
         "gateway/tee/provider_outcome_store_v2.py",
         "gateway/tee/rpc_authority.py",
+        "gateway/main.py",
+        "gateway/research_lab/worker_autostart.py",
     } <= set(behavior_contract["production_source_paths"])
     assert "leadpoet_observability/sentry_operations.py" not in set(
         behavior_contract["production_source_paths"]
@@ -4634,6 +4647,56 @@ def test_restart_summary_deadline_action_is_exact_and_fail_closed(
     assert (
         production_workflow_runner._restart_summary_deadline_evidence_is_complete(
             {**evidence, "unexpected": True}
+        )
+        is False
+    )
+
+
+def test_gateway_startup_transition_action_is_dynamic_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.setattr(production_workflow_runner, "SOURCE_ROOT", source_root)
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
+
+    evidence = (
+        production_workflow_runner._exercise_gateway_startup_transition_safety()
+    )
+    assert (
+        production_workflow_runner._gateway_startup_transition_evidence_is_complete(
+            evidence,
+            candidate_sha=candidate_sha,
+        )
+        is True
+    )
+    for field in (
+        production_workflow_runner._GATEWAY_STARTUP_TRANSITION_EVIDENCE_FIELDS
+    ):
+        assert (
+            production_workflow_runner._gateway_startup_transition_evidence_is_complete(
+                {**evidence, field: False},
+                candidate_sha=candidate_sha,
+            )
+            is False
+        )
+    assert (
+        production_workflow_runner._gateway_startup_transition_evidence_is_complete(
+            {**evidence, "source_identities": []},
+            candidate_sha=candidate_sha,
+        )
+        is False
+    )
+    assert (
+        production_workflow_runner._gateway_startup_transition_evidence_is_complete(
+            {**evidence, "unexpected": True},
+            candidate_sha=candidate_sha,
         )
         is False
     )
@@ -4958,11 +5021,7 @@ def test_joined_manifest_requires_every_authority_field(
                         "end_state_hash": end_hash,
                     },
                     "restart_invariants": (
-                        {
-                            "validator_activation_requires_exact_gateway_release": (
-                                True
-                            )
-                        }
+                        {invariant: True for invariant in RESTART_INVARIANTS}
                         if component == "validator"
                         else {}
                     ),
@@ -5092,7 +5151,7 @@ def test_joined_manifest_requires_every_authority_field(
             ]
         )
     validator_launcher["restart_invariants"] = {
-        "validator_activation_requires_exact_gateway_release": True
+        invariant: True for invariant in RESTART_INVARIANTS
     }
     validator_launcher_path.write_text(
         json.dumps(validator_launcher),

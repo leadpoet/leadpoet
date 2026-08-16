@@ -10,8 +10,9 @@ Endpoints:
 - GET /health: Kubernetes health check
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from datetime import datetime
 from contextlib import asynccontextmanager
 import sys
@@ -302,6 +303,7 @@ async def lifespan(app: FastAPI):
     icp_task = None
     fulfillment_task_handle = None
     research_lab_worker_supervisor = None
+    research_lab_worker_startup_task = None
     source_add_dispatcher_task = None
     hotkey_bucket_cleanup_task = None
 
@@ -454,37 +456,57 @@ async def lifespan(app: FastAPI):
         # Start gateway-owned Research Lab worker fleets. This mirrors the
         # validator dynamic worker model: one auto-research/scoring worker per
         # configured gateway proxy, supervised by the gateway process.
-        from gateway.research_lab.worker_autostart import ResearchLabWorkerSupervisor
-
-        research_lab_worker_supervisor = ResearchLabWorkerSupervisor()
-        research_lab_worker_supervisor.start()
-        research_lab_worker_health = research_lab_worker_supervisor.health()
-        app.state.research_lab_worker_supervisor = research_lab_worker_supervisor
-        app.state.research_lab_worker_health = research_lab_worker_health
-        app.state.event_signing_identity = dict(event_signing_identity)
-        print(
-            "✅ Research Lab authoritative workers ready: "
-            f"hosted={research_lab_worker_health['hosted_running']} "
-            f"scoring={research_lab_worker_health['scoring_running']} "
-            "deferred_roles="
-            f"{research_lab_worker_health['deferred_worker_fleet_roles']}"
+        from gateway.research_lab.worker_autostart import (
+            ResearchLabWorkerSupervisor,
+            start_worker_supervisor_without_blocking_event_loop,
         )
 
-        from gateway.research_lab.config import ResearchLabGatewayConfig
+        research_lab_worker_supervisor = ResearchLabWorkerSupervisor()
+        app.state.research_lab_worker_supervisor = research_lab_worker_supervisor
+        app.state.research_lab_worker_health = None
 
-        source_add_config = ResearchLabGatewayConfig.from_env()
-        if (
-            source_add_config.source_add_enabled
-            and source_add_config.source_add_dispatcher_enabled
-        ):
-            from gateway.research_lab.source_add_workflow import run_source_add_dispatcher
-
-            source_add_dispatcher_task = asyncio.create_task(
-                run_source_add_dispatcher()
+        async def _start_research_lab_worker_services() -> dict[str, object]:
+            nonlocal source_add_dispatcher_task
+            research_lab_worker_health = (
+                await start_worker_supervisor_without_blocking_event_loop(
+                    research_lab_worker_supervisor
+                )
             )
-            print("✅ SOURCE_ADD dispatcher started (one leased queue consumer)")
-        else:
-            print("ℹ️  SOURCE_ADD dispatcher disabled")
+            app.state.research_lab_worker_health = research_lab_worker_health
+            print(
+                "✅ Research Lab authoritative workers ready: "
+                f"hosted={research_lab_worker_health['hosted_running']} "
+                f"scoring={research_lab_worker_health['scoring_running']} "
+                "deferred_roles="
+                f"{research_lab_worker_health['deferred_worker_fleet_roles']}"
+            )
+
+            from gateway.research_lab.config import ResearchLabGatewayConfig
+
+            source_add_config = ResearchLabGatewayConfig.from_env()
+            if (
+                source_add_config.source_add_enabled
+                and source_add_config.source_add_dispatcher_enabled
+            ):
+                from gateway.research_lab.source_add_workflow import (
+                    run_source_add_dispatcher,
+                )
+
+                source_add_dispatcher_task = asyncio.create_task(
+                    run_source_add_dispatcher()
+                )
+                print("✅ SOURCE_ADD dispatcher started (one leased queue consumer)")
+            else:
+                print("ℹ️  SOURCE_ADD dispatcher disabled")
+            return research_lab_worker_health
+
+        research_lab_worker_startup_task = asyncio.create_task(
+            _start_research_lab_worker_services()
+        )
+        app.state.research_lab_worker_startup_task = (
+            research_lab_worker_startup_task
+        )
+        app.state.event_signing_identity = dict(event_signing_identity)
         
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
@@ -508,12 +530,6 @@ async def lifespan(app: FastAPI):
         
         # Cancel all background tasks
         print("   🛑 Cancelling background tasks...")
-        if research_lab_worker_supervisor is not None:
-            try:
-                research_lab_worker_supervisor.stop()
-            except Exception as e:
-                print(f"   ⚠️  Error stopping Research Lab worker fleets: {e}")
-
         tasks = [
             epoch_monitor_task,
             reveal_task,
@@ -524,6 +540,7 @@ async def lifespan(app: FastAPI):
             hotkey_bucket_cleanup_task,
             icp_task,
             fulfillment_task_handle,
+            research_lab_worker_startup_task,
             source_add_dispatcher_task,
         ]
         
@@ -545,6 +562,12 @@ async def lifespan(app: FastAPI):
         for i, result in enumerate(results):
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 print(f"   ⚠️  Task {i} error during shutdown: {result}")
+
+        if research_lab_worker_supervisor is not None:
+            try:
+                research_lab_worker_supervisor.stop()
+            except Exception as e:
+                print(f"   ⚠️  Error stopping Research Lab worker fleets: {e}")
         
         print("   ✅ All background tasks stopped")
         print("")
@@ -573,6 +596,42 @@ app = FastAPI(
     lifespan=lifespan,  # Use lifespan context manager
     redirect_slashes=False,  # Prevent 307 redirects from consuming semaphore slots
 )
+
+_WORKER_STARTUP_DIAGNOSTIC_PATHS = frozenset(
+    {"/", "/build-info", "/health", "/health/v2-authority"}
+)
+
+
+def _gateway_worker_startup_ready(application: FastAPI) -> bool:
+    startup_task = getattr(
+        application.state,
+        "research_lab_worker_startup_task",
+        None,
+    )
+    return bool(
+        startup_task is not None
+        and startup_task.done()
+        and not startup_task.cancelled()
+        and startup_task.exception() is None
+    )
+
+
+@app.middleware("http")
+async def require_worker_authority_after_liveness(
+    request: Request,
+    call_next,
+):
+    """Expose diagnostics while keeping authoritative routes fail closed."""
+
+    if (
+        not _gateway_worker_startup_ready(request.app)
+        and request.url.path not in _WORKER_STARTUP_DIAGNOSTIC_PATHS
+    ):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "gateway worker authority is not ready"},
+        )
+    return await call_next(request)
 
 # ============================================================
 # CORS Middleware
@@ -711,6 +770,8 @@ async def health():
 async def v2_authority_health():
     """Fail-closed readiness for the live V2 enclave and worker authority."""
     try:
+        if not _gateway_worker_startup_ready(app):
+            raise RuntimeError("gateway worker authority startup is incomplete")
         supervisor = app.state.research_lab_worker_supervisor
         worker_health = supervisor.health()
 

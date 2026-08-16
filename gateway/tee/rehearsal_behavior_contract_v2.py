@@ -34,6 +34,7 @@ BEHAVIOR_SCENARIOS = (
     "rebenchmark-sandbox-retry",
     "rebenchmark-provider-transport-evidence",
     "restart-summary-deadline-classification",
+    "gateway-startup-transition-safety",
     "full-rebenchmark-publication-path",
     "dev-snapshot-downstream-publication",
     "compact-weight-joined-path",
@@ -75,6 +76,8 @@ BEHAVIORAL_INVARIANTS = (
     "rebenchmark_provider_transport_evidence_unique",
     "coordinator_broker_owned_sync_httpx_grant_exact",
     "restart_summary_deadline_classification_exact",
+    "gateway_restart_invocation_timing_ledger_exact",
+    "gateway_worker_supervisor_start_event_loop_safe",
     "full_rebenchmark_publication_path_verified",
     "dev_snapshot_downstream_publication_verified",
     "compact_weight_joined_path_verified",
@@ -110,12 +113,14 @@ BEHAVIORAL_INVARIANTS = (
 
 RESTART_INVARIANTS = (
     "validator_activation_requires_exact_gateway_release",
+    "validator_role_release_identity_exact",
 )
 
 EXACT_PRODUCTION_ENTRYPOINTS = (
     "gw_restart.sh",
     "validator_restart.sh",
     "scripts/restart_attested_release_local.sh",
+    "gateway/main.py",
     "gateway/tee/rehearsal_behavior_contract_v2.py",
     "gateway/tee/verify_weight_submission_ready_v2.py",
     "gateway/tee/artifact_persistence_v2.py",
@@ -167,6 +172,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/research_lab/code_loop_engine.py",
     "gateway/research_lab/git_tree_repository.py",
     "gateway/research_lab/git_tree_store.py",
+    "gateway/research_lab/worker_autostart.py",
     "scripts/95-research-lab-git-tree-autoresearch.sql",
     "scripts/115-research-lab-git-tree-root-replacement.sql",
     "gateway/api/weights.py",

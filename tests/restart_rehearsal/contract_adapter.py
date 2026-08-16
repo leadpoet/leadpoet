@@ -56,6 +56,11 @@ PCR0 = artifact_pcr0(_PCR0_CANDIDATE.decode("ascii"))
 HASH64 = hashlib.sha256(b"leadpoet-local-restart-rehearsal").hexdigest()
 ACCOUNT = "493765492819"
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
+PCR0_CACHE_PROVENANCE = "validator_pcr0_cache_v1"
+_PCR0_CACHE_RAW_TAG = re.compile(r"validator-enclave-build-[1-9][0-9]*\Z")
+_PCR0_CACHE_NORMALIZED_TAG = re.compile(
+    r"validator-enclave-build-[1-9][0-9]*-normalized:latest\Z"
+)
 EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
     "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "leadpoet-lab",
     "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
@@ -145,6 +150,14 @@ def _arg_value(argv: list[str], name: str, default: str = "") -> str:
         return argv[argv.index(name) + 1]
     except (ValueError, IndexError):
         return default
+
+
+def _arg_values(argv: list[str], name: str) -> tuple[str, ...]:
+    return tuple(
+        argv[index + 1]
+        for index, value in enumerate(argv[:-1])
+        if value == name
+    )
 
 
 def _candidate_sha() -> str:
@@ -480,9 +493,70 @@ def _gateway_secret() -> dict[str, str]:
     return values
 
 
+def _candidate_worker_ids(
+    *,
+    section_start: str,
+    section_end: str,
+    role: str,
+) -> tuple[int, ...]:
+    """Derive one exercised validator worker fleet from the frozen deployer."""
+
+    source = (
+        _candidate_root()
+        / "validator_models"
+        / "containerizing"
+        / "deploy_dynamic.sh"
+    )
+    try:
+        deploy = source.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            f"candidate {role} worker deployment source is unavailable"
+        ) from exc
+    try:
+        section = deploy[
+            deploy.index(section_start) : deploy.index(section_end)
+        ]
+    except ValueError as exc:
+        raise RuntimeError(
+            f"candidate {role} worker deployment section is unavailable"
+        ) from exc
+    worker_range = re.search(
+        r"for\s+i\s+in\s+\{([1-9][0-9]*)\.\.([1-9][0-9]*)\};\s*do",
+        section,
+    )
+    if worker_range is None:
+        raise RuntimeError(
+            f"candidate {role} worker selection range is unavailable"
+        )
+    first, last = (int(value) for value in worker_range.groups())
+    if first > last:
+        raise RuntimeError(
+            f"candidate {role} worker selection range is invalid"
+        )
+    return tuple(range(first, last + 1))
+
+
+def _candidate_qualification_worker_ids() -> tuple[int, ...]:
+    return _candidate_worker_ids(
+        section_start="# Auto-detect QUALIFICATION proxies",
+        section_end="# Get enclave CID for TEE signing",
+        role="qualification",
+    )
+
+
+def _candidate_fulfillment_worker_ids() -> tuple[int, ...]:
+    return _candidate_worker_ids(
+        section_start="# Auto-detect FULFILLMENT proxies",
+        section_end="# Wait for containers to start",
+        role="fulfillment",
+    )
+
+
 def _validator_secret() -> dict[str, str]:
     values = {
         "ENABLE_FULFILLMENT": "true",
+        "ENABLE_QUALIFICATION_WORKERS": "true",
         "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED": "false",
         "ENABLE_QUALIFICATION_EVALUATION": "true",
         "LEADPOET_WRAPPER_ACTIVE": "1",
@@ -511,11 +585,19 @@ def _validator_secret() -> dict[str, str]:
         "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID": "rehearsal-kms",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED": "true",
-        "QUALIFICATION_WEBSHARE_PROXY_1": "http://proxy.invalid",
+        "LEADPOET_SENTRY_RELEASE": "stale-n-minus-one-release",
         "EXPECTED_CHAIN": "wss://entrypoint-finney.opentensor.ai:443",
         "NO_PROXY": "127.0.0.1,localhost",
         "VALIDATOR_WEIGHT_PROTOCOL": "authoritative_v2",
     }
+    for worker_id in _candidate_qualification_worker_ids():
+        values[f"QUALIFICATION_WEBSHARE_PROXY_{worker_id}"] = (
+            f"http://rehearsal-qual-{worker_id}.invalid:8080"
+        )
+    for worker_id in _candidate_fulfillment_worker_ids():
+        values[f"FULFILLMENT_WEBSHARE_PROXY_{worker_id}"] = (
+            f"http://rehearsal-ff-{worker_id}.invalid:8080"
+        )
     return values
 
 
@@ -597,21 +679,127 @@ def _external_build_role(argv: list[str], tag: str) -> str:
     return ""
 
 
+def _pcr0_cache_build_record(
+    argv: list[str],
+    tag: str,
+) -> dict[str, str] | None:
+    """Bind the production PCR0 cache build to its checked-out Git commit."""
+
+    if _PCR0_CACHE_RAW_TAG.fullmatch(tag) is None:
+        return None
+    expected = [
+        "build",
+        "--no-cache",
+        "-f",
+        "validator_tee/Dockerfile.enclave",
+        "-t",
+        tag,
+        ".",
+    ]
+    if argv != expected:
+        raise ValueError("validator PCR0 cache build command differs")
+
+    configured_root = Path(
+        os.environ.get("PCR0_BUILD_DIR", "/tmp/pcr0_builder")
+    )
+    if not configured_root.is_absolute():
+        raise ValueError("PCR0_BUILD_DIR must be absolute")
+    try:
+        build_root = configured_root.resolve(strict=True)
+        current_root = Path.cwd().resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("validator PCR0 cache build directory is unavailable") from exc
+    if current_root != build_root:
+        raise ValueError("validator PCR0 cache build used the wrong directory")
+
+    commit = _pcr0_cache_git_identity(build_root)
+    return {
+        "commit": commit,
+        "role": VALIDATOR_ROLE,
+        "provenance": PCR0_CACHE_PROVENANCE,
+        "source_tag": tag,
+        "build_root": str(build_root),
+    }
+
+
+def _pcr0_cache_git_identity(build_root: Path) -> str:
+    try:
+        top_level = subprocess.run(
+            ["/usr/bin/git", "-C", str(build_root), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        commit = subprocess.run(
+            [
+                "/usr/bin/git",
+                "-C",
+                str(build_root),
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("validator PCR0 cache Git identity is unavailable") from exc
+    if Path(top_level).resolve() != build_root:
+        raise ValueError("validator PCR0 cache build is outside its Git root")
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ValueError("validator PCR0 cache Git commit is invalid")
+    return commit
+
+
 def _docker_save(
     path: Path,
     *,
     source_tag: str,
     record: dict[str, Any],
+    normalizations: dict[str, Any],
 ) -> None:
     commit = str(record.get("commit") or "")
     role = str(record.get("role") or "")
     if role not in ALL_ROLES:
         raise ValueError("only commit-bound enclave images may be normalized")
+    archive_bytes = docker_save_archive(commit, role, source_tag)
+    cache_normalization: tuple[str, dict[str, str]] | None = None
+    if str(record.get("provenance") or "") == PCR0_CACHE_PROVENANCE:
+        build_root = Path(str(record.get("build_root") or ""))
+        if (
+            _PCR0_CACHE_RAW_TAG.fullmatch(source_tag) is None
+            or str(record.get("source_tag") or "") != source_tag
+            or not build_root.is_absolute()
+            or _pcr0_cache_git_identity(build_root) != commit
+        ):
+            raise ValueError("validator PCR0 cache source provenance differs")
+        normalized_tag = source_tag + "-normalized:latest"
+        cache_normalization = (
+            normalized_tag,
+            {
+                "commit": commit,
+                "role": role,
+                "provenance": PCR0_CACHE_PROVENANCE,
+                "source_tag": source_tag,
+                "normalized_image_id": normalized_image_id(commit, role),
+                "build_root": str(build_root),
+            },
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(docker_save_archive(commit, role, source_tag))
+    path.write_bytes(archive_bytes)
+    if cache_normalization is not None:
+        normalized_tag, provenance = cache_normalization
+        normalizations[normalized_tag] = provenance
 
 
-def _docker_load(path: Path, images: dict[str, Any]) -> list[str]:
+def _docker_load(
+    path: Path,
+    images: dict[str, Any],
+    normalizations: dict[str, Any],
+) -> list[str]:
     try:
         with tarfile.open(path, "r:*") as archive:
             manifest_member = archive.getmember("manifest.json")
@@ -653,9 +841,84 @@ def _docker_load(path: Path, images: dict[str, Any]) -> list[str]:
     ):
         raise ValueError("Docker load image identity differs from build contract")
     record = {"id": image_id, "commit": commit, "role": role}
+    cache_tags = [
+        tag for tag in tags if _PCR0_CACHE_NORMALIZED_TAG.fullmatch(tag)
+    ]
+    if cache_tags:
+        if len(tags) != 1 or len(cache_tags) != 1:
+            raise ValueError("validator PCR0 cache load tag set differs")
+        cache_tag = cache_tags[0]
+        provenance = normalizations.get(cache_tag)
+        source_tag = cache_tag.removesuffix("-normalized:latest")
+        if not isinstance(provenance, dict) or provenance != {
+            "commit": commit,
+            "role": role,
+            "provenance": PCR0_CACHE_PROVENANCE,
+            "source_tag": source_tag,
+            "normalized_image_id": image_id,
+            "build_root": str(provenance.get("build_root") or ""),
+        }:
+            raise ValueError("validator PCR0 cache load provenance differs")
+        record.update(
+            {
+                "provenance": PCR0_CACHE_PROVENANCE,
+                "source_tag": source_tag,
+                "build_root": str(provenance["build_root"]),
+            }
+        )
     for tag in tags:
         images[tag] = dict(record)
     return list(tags)
+
+
+def _pcr0_cache_image_is_bound(
+    *,
+    image: str,
+    record: dict[str, Any],
+    normalizations: dict[str, Any],
+) -> bool:
+    if _PCR0_CACHE_NORMALIZED_TAG.fullmatch(image) is None:
+        return False
+    source_tag = image.removesuffix("-normalized:latest")
+    commit = str(record.get("commit") or "")
+    role = str(record.get("role") or "")
+    image_id = _image_record_id(record)
+    build_root = Path(str(record.get("build_root") or ""))
+    expected = {
+        "commit": commit,
+        "role": role,
+        "provenance": PCR0_CACHE_PROVENANCE,
+        "source_tag": source_tag,
+        "normalized_image_id": image_id,
+        "build_root": str(record.get("build_root") or ""),
+    }
+    try:
+        configured_root = Path(
+            os.environ.get("PCR0_BUILD_DIR", "/tmp/pcr0_builder")
+        ).resolve(strict=True)
+        resolved_build_root = build_root.resolve(strict=True)
+        observed_commit = _pcr0_cache_git_identity(resolved_build_root)
+    except (OSError, ValueError):
+        return False
+    return (
+        re.fullmatch(r"[0-9a-f]{40}", commit) is not None
+        and role == VALIDATOR_ROLE
+        and str(record.get("provenance") or "") == PCR0_CACHE_PROVENANCE
+        and str(record.get("source_tag") or "") == source_tag
+        and build_root.is_absolute()
+        and resolved_build_root == configured_root
+        and observed_commit == commit
+        and image_id == normalized_image_id(commit, role)
+        and normalizations.get(image) == expected
+    )
+
+
+def _official_normalized_image_tag(role: str) -> str:
+    if role == VALIDATOR_ROLE:
+        return "validator-tee-enclave:latest"
+    if role in GATEWAY_ROLES:
+        return f"tee-enclave:{role}"
+    return ""
 
 
 def _docker_run_contract(
@@ -825,6 +1088,7 @@ def command_docker(argv: list[str]) -> int:
     handle, state = _locked_state()
     images = state.setdefault("images", {})
     containers = state.setdefault("containers", {})
+    normalizations = state.setdefault("pcr0_cache_normalizations", {})
     operation = "state"
     status = 0
     output = ""
@@ -887,6 +1151,10 @@ def command_docker(argv: list[str]) -> int:
                 output = "true" if row.get("running") else "false"
             elif ".RestartCount" in template:
                 output = str(row.get("restart_count", 0))
+            elif template == "{{.Image}}":
+                output = str(row.get("image_id") or "")
+            elif "org.opencontainers.image.revision" in template:
+                output = str(row.get("image_revision") or "")
             elif ".Config.Env" in template:
                 output = "\n".join(row.get("environment") or [])
             else:
@@ -897,13 +1165,32 @@ def command_docker(argv: list[str]) -> int:
             if not tag:
                 return _fail("docker", argv, "Docker build omitted -t")
             try:
-                role = _external_build_role(argv, tag)
+                cache_record = _pcr0_cache_build_record(argv, tag)
+                role = (
+                    str(cache_record["role"])
+                    if cache_record is not None
+                    else _external_build_role(argv, tag)
+                )
             except ValueError as exc:
                 return _fail("docker", argv, str(exc))
-            commit = _candidate_sha()
-            images[tag] = {
+            commit = (
+                str(cache_record["commit"])
+                if cache_record is not None
+                else _candidate_sha()
+            )
+            record = {
                 "id": (
-                    _image_id(f"raw:{commit}:{role}")
+                    _image_id(
+                        "raw:"
+                        + commit
+                        + ":"
+                        + role
+                        + (
+                            ":" + str(cache_record["provenance"])
+                            if cache_record is not None
+                            else ""
+                        )
+                    )
                     if role
                     else _image_id(
                         "build:"
@@ -915,6 +1202,9 @@ def command_docker(argv: list[str]) -> int:
                 "commit": commit,
                 "role": role,
             }
+            if cache_record is not None:
+                record.update(cache_record)
+            images[tag] = record
         elif argv[0] in {"rmi", "rm", "stop"}:
             operation = "stop" if argv[0] == "stop" else "remove"
             for item in argv[1:]:
@@ -945,9 +1235,18 @@ def command_docker(argv: list[str]) -> int:
         elif argv[0] == "ps":
             operation = "state"
             names = []
+            name_filters = tuple(
+                value.removeprefix("name=")
+                for value in _arg_values(argv, "--filter")
+                if value.startswith("name=")
+            )
             for name, row in sorted(containers.items()):
                 if row.get("running") and not _process_is_alive(row.get("pid")):
                     row["running"] = False
+                if name_filters and not any(
+                    value in name for value in name_filters
+                ):
+                    continue
                 if argv[1:2] == ["-aq"] or "-a" in argv:
                     names.append(name)
                 elif row.get("running"):
@@ -977,6 +1276,7 @@ def command_docker(argv: list[str]) -> int:
                     Path(destination),
                     source_tag=source_tag,
                     record=record,
+                    normalizations=normalizations,
                 )
             except ValueError as exc:
                 return _fail("docker", argv, str(exc))
@@ -986,7 +1286,7 @@ def command_docker(argv: list[str]) -> int:
             if not source:
                 return _fail("docker", argv, "Docker load omitted -i")
             try:
-                tags = _docker_load(Path(source), images)
+                tags = _docker_load(Path(source), images, normalizations)
             except ValueError as exc:
                 return _fail("docker", argv, str(exc))
             output = "\n".join(f"Loaded image: {tag}" for tag in tags)
@@ -994,12 +1294,32 @@ def command_docker(argv: list[str]) -> int:
             operation = "tag"
             if len(argv) < 3:
                 return _fail("docker", argv, "Docker tag is incomplete")
-            source = images.get(argv[1])
-            if not isinstance(source, dict) and argv[1].startswith("sha256:"):
-                source = _image_record_by_id(images, argv[1])
+            target = argv[2]
+            if _PCR0_CACHE_NORMALIZED_TAG.fullmatch(target) is not None:
+                source = images.get(target)
+                provenance = normalizations.get(target)
+                if (
+                    not isinstance(source, dict)
+                    or not isinstance(provenance, dict)
+                    or argv[1] != str(provenance.get("normalized_image_id") or "")
+                    or not _pcr0_cache_image_is_bound(
+                        image=target,
+                        record=source,
+                        normalizations=normalizations,
+                    )
+                ):
+                    return _fail(
+                        "docker",
+                        argv,
+                        "validator PCR0 cache image tag provenance differs",
+                    )
+            else:
+                source = images.get(argv[1])
+                if not isinstance(source, dict) and argv[1].startswith("sha256:"):
+                    source = _image_record_by_id(images, argv[1])
             if not isinstance(source, dict):
                 return _fail("docker", argv, "Docker tag source is unavailable")
-            images[argv[2]] = dict(source)
+            images[target] = dict(source)
         elif argv[0] == "run":
             operation = "run"
             try:
@@ -1061,40 +1381,109 @@ def command_docker(argv: list[str]) -> int:
                         "unknown validator enclave metadata command",
                     )
             elif image == "leadpoet-validator:latest":
+                image_record = images.get(image)
+                candidate_sha = _candidate_sha()
+                image_id = _image_record_id(image_record)
                 if (
-                    not name
-                    or name != "leadpoet-validator-main"
+                    not isinstance(image_record, dict)
+                    or str(image_record.get("commit") or "") != candidate_sha
+                    or not image_id
+                    or not name
                     or "-d" not in argv
                     or _arg_value(argv, "--network") != "host"
                     or _arg_value(argv, "--restart") != "unless-stopped"
                     or environment.get("LEADPOET_CONTAINER_MODE") != "1"
                     or environment.get("LEADPOET_WRAPPER_ACTIVE") != "1"
-                    or environment.get("VALIDATOR_WEIGHT_PROTOCOL")
-                    != "authoritative_v2"
-                    or environment.get(
-                        "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED"
+                    or environment.get("VALIDATOR_RUNTIME_GENERATION", "")
+                    == ""
+                    or environment.get("LEADPOET_SUBNET_EPOCH_CUTOVER_JSON", "")
+                    == ""
+                    or any(
+                        environment.get(variable) != candidate_sha
+                        for variable in (
+                            "LEADPOET_SENTRY_RELEASE",
+                            "VALIDATOR_V2_DEPLOY_COMMIT",
+                            "GITHUB_SHA",
+                            "GIT_COMMIT",
+                        )
                     )
-                    != "false"
                 ):
                     return _fail(
                         "docker",
                         argv,
-                        "validator coordinator Docker run contract differs",
+                        "validator role Docker release contract differs",
                     )
+                worker_id = ""
+                if name == "leadpoet-validator-main":
+                    role = "validator.coordinator"
+                    if (
+                        _arg_value(tail, "--mode") != "coordinator"
+                        or _arg_value(tail, "--container-id") != "0"
+                        or environment.get("VALIDATOR_WEIGHT_PROTOCOL")
+                        != "authoritative_v2"
+                        or environment.get(
+                            "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED"
+                        )
+                        != "false"
+                    ):
+                        return _fail(
+                            "docker",
+                            argv,
+                            "validator coordinator Docker run contract differs",
+                        )
+                else:
+                    worker_match = re.fullmatch(
+                        r"leadpoet-(validator|qual|ff)-worker-([1-9][0-9]*)",
+                        name,
+                    )
+                    if not worker_match:
+                        return _fail(
+                            "docker", argv, "validator role name is invalid"
+                        )
+                    worker_kind, worker_id = worker_match.groups()
+                    expected_mode = {
+                        "validator": "worker",
+                        "qual": "qualification_worker",
+                        "ff": "fulfillment_worker",
+                    }[worker_kind]
+                    role = {
+                        "validator": "validator.sourcing_worker",
+                        "qual": "validator.qualification_worker",
+                        "ff": "validator.fulfillment_worker",
+                    }[worker_kind]
+                    if (
+                        _arg_value(tail, "--mode") != expected_mode
+                        or _arg_value(tail, "--container-id") != worker_id
+                        or (
+                            worker_kind == "ff"
+                            and environment.get("ENABLE_FULFILLMENT") != "true"
+                        )
+                    ):
+                        return _fail(
+                            "docker",
+                            argv,
+                            f"{role} Docker run contract differs",
+                        )
                 source = Path(
                     "/home/ec2-user/leadpoet/leadpoet/neurons/validator.py"
                 )
                 if not source.is_file():
                     return _fail(
-                        "docker", argv, "validator coordinator source is absent"
+                        "docker", argv, "validator role source is absent"
                     )
-                log_path = Path("/evidence") / (
-                    "validator-main-"
-                    + os.environ.get("REHEARSAL_RUN_ORDINAL", "1")
-                    + "-"
-                    + os.environ.get("REHEARSAL_TRANSITION", "forward")
-                    + ".log"
+                run_ordinal = os.environ.get("REHEARSAL_RUN_ORDINAL", "1")
+                transition = os.environ.get(
+                    "REHEARSAL_TRANSITION", "forward"
                 )
+                if role == "validator.coordinator":
+                    log_name = (
+                        f"validator-main-{run_ordinal}-{transition}.log"
+                    )
+                else:
+                    log_name = (
+                        f"{name}-{run_ordinal}-{transition}.log"
+                    )
+                log_path = Path("/evidence") / log_name
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path.unlink(missing_ok=True)
                 child_environment = os.environ.copy()
@@ -1128,6 +1517,11 @@ def command_docker(argv: list[str]) -> int:
                         f"{key}={value}"
                         for key, value in sorted(environment.items())
                     ],
+                    "image_id": image_id,
+                    "image_revision": candidate_sha,
+                    "mounts": mounts,
+                    "role": role,
+                    "worker_id": worker_id,
                     "argv": [str(source), *tail],
                     "log_path": str(log_path),
                 }
@@ -1135,8 +1529,21 @@ def command_docker(argv: list[str]) -> int:
                     "validator-process",
                     [str(source), *tail],
                     status="started",
-                    process="validator.coordinator",
+                    process=role,
                     pid=child.pid,
+                    container_name=name,
+                    image_id=image_id,
+                    image_revision=candidate_sha,
+                    release_environment={
+                        variable: environment[variable]
+                        for variable in (
+                            "LEADPOET_SENTRY_RELEASE",
+                            "VALIDATOR_V2_DEPLOY_COMMIT",
+                            "GITHUB_SHA",
+                            "GIT_COMMIT",
+                        )
+                    },
+                    worker_id=worker_id,
                     implementation="production_script",
                     scope=_rehearsal_scope(),
                     **_source_identity(source),
@@ -1146,6 +1553,7 @@ def command_docker(argv: list[str]) -> int:
                 return _fail("docker", argv, "unknown Docker run image")
         elif argv[0] == "exec":
             operation = "run"
+            interactive = "-i" in argv[1:]
             filtered = [item for item in argv[1:] if item != "-i"]
             if len(filtered) < 2:
                 return _fail("docker", argv, "Docker exec is incomplete")
@@ -1155,12 +1563,57 @@ def command_docker(argv: list[str]) -> int:
                 return _fail(
                     "docker", argv, "Docker exec target is not running"
                 )
-            if command[:2] == ["sh", "-c"] and "proc/1/cmdline" in command[2]:
+            if (
+                len(command) >= 3
+                and command[:2] == ["sh", "-c"]
+                and "proc/1/cmdline" in command[2]
+            ):
                 if "validator.py" not in " ".join(row.get("argv") or []):
+                    status = 1
+            elif (
+                command[:2] == ["sh", "-c"]
+                and len(command) == 3
+                and command[2]
+                == 'test -n "${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}"'
+            ):
+                environment = dict(
+                    line.split("=", 1)
+                    for line in row.get("environment") or []
+                    if "=" in line
+                )
+                if not environment.get("LEADPOET_SUBNET_EPOCH_CUTOVER_JSON"):
+                    status = 1
+            elif (
+                command
+                == [
+                    "sh",
+                    "-c",
+                    "test -s /app/validator_weights/current_block.json",
+                ]
+            ):
+                weight_mounts = [
+                    value
+                    for value in row.get("mounts") or []
+                    if value.split(":", 1)[-1]
+                    == "/app/validator_weights"
+                ]
+                if len(weight_mounts) != 1 or not (
+                    Path(weight_mounts[0].split(":", 1)[0])
+                    / "current_block.json"
+                ).is_file():
                     status = 1
             elif command == ["curl", "-s", "--max-time", "10", "https://api.ipify.org"]:
                 output = "203.0.113.10"
-            elif command == ["python3", "-"]:
+            elif command in (
+                ["python3", "-"],
+                ["sh", "-c", "cd /app && python3 -"],
+            ):
+                if not interactive:
+                    return _fail(
+                        "docker",
+                        argv,
+                        "Docker exec stdin script requires -i",
+                    )
                 child_environment = os.environ.copy()
                 child_environment.update(
                     line.split("=", 1)
@@ -1210,6 +1663,7 @@ def command_nitro(argv: list[str]) -> int:
     handle, state = _locked_state()
     enclaves = state.setdefault("enclaves", [])
     images = state.setdefault("images", {})
+    normalizations = state.setdefault("pcr0_cache_normalizations", {})
     try:
         if argv[:2] == ["terminate-enclave", "--all"]:
             enclaves.clear()
@@ -1226,16 +1680,25 @@ def command_nitro(argv: list[str]) -> int:
             if not output or not image:
                 return _fail("nitro", argv, "build-enclave arguments are incomplete")
             record = images.get(image)
-            if (
-                not isinstance(record, dict)
-                or str(record.get("commit") or "") != _candidate_sha()
-                or str(record.get("role") or "") not in ALL_ROLES
-                or _image_record_id(record)
-                != normalized_image_id(
-                    str(record["commit"]),
-                    str(record["role"]),
+            candidate_bound = False
+            cache_bound = False
+            if isinstance(record, dict):
+                commit = str(record.get("commit") or "")
+                role = str(record.get("role") or "")
+                candidate_bound = (
+                    commit == _candidate_sha()
+                    and role in ALL_ROLES
+                    and image == _official_normalized_image_tag(role)
+                    and not str(record.get("provenance") or "")
+                    and _image_record_id(record)
+                    == normalized_image_id(commit, role)
                 )
-            ):
+                cache_bound = _pcr0_cache_image_is_bound(
+                    image=image,
+                    record=record,
+                    normalizations=normalizations,
+                )
+            if not candidate_bound and not cache_bound:
                 return _fail(
                     "nitro",
                     argv,
@@ -1252,7 +1715,7 @@ def command_nitro(argv: list[str]) -> int:
                 )
             destination = Path(output)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            if str(record["role"]) == VALIDATOR_ROLE:
+            if candidate_bound and str(record["role"]) == VALIDATOR_ROLE:
                 validator_app = STATE_ROOT / "validator-app"
                 if not validator_app.is_dir():
                     return _fail(
@@ -1276,7 +1739,7 @@ def command_nitro(argv: list[str]) -> int:
                 json.dumps(
                     {
                         "Measurements": {
-                            "PCR0": PCR0,
+                            "PCR0": artifact_pcr0(str(record["commit"])),
                             "PCR1": hashlib.sha384(b"pcr1").hexdigest(),
                             "PCR2": hashlib.sha384(b"pcr2").hexdigest(),
                         }

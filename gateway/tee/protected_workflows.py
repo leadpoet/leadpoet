@@ -21,6 +21,15 @@ SCHEMA_VERSION = "leadpoet.protected_workflows.v2"
 DEFAULT_MANIFEST = Path(__file__).with_name("protected_workflows.json")
 
 PROTECTED_SYMBOLS = {
+    "gateway/main.py": (
+        "lifespan",
+        "_WORKER_STARTUP_DIAGNOSTIC_PATHS",
+        "_gateway_worker_startup_ready",
+        "require_worker_authority_after_liveness",
+    ),
+    "gateway/research_lab/worker_autostart.py": (
+        "start_worker_supervisor_without_blocking_event_loop",
+    ),
     "leadpoet_canonical/kms_recipient.py": (
         "decrypt_kms_recipient_ciphertext",
     ),

@@ -12724,6 +12724,636 @@ def _exercise_restart_summary_deadline_classification() -> dict[str, Any]:
     return evidence
 
 
+_GATEWAY_STARTUP_TRANSITION_EVIDENCE_FIELDS = (
+    "gateway_authoritative_routes_fail_closed_during_worker_startup",
+    "gateway_authoritative_routes_fail_closed_after_worker_failure",
+    "gateway_health_available_during_worker_startup",
+    "gateway_lifespan_schedules_offloaded_supervisor",
+    "gateway_restart_v2_authority_exhaustion_fail_closed",
+    "gateway_restart_v2_authority_process_exit_fail_closed",
+    "gateway_restart_v2_authority_retries_after_liveness",
+    "gateway_restart_v2_authority_seconds_deadline_fail_closed",
+    "gateway_worker_health_read_off_event_loop",
+    "gateway_worker_supervisor_cancellation_serialized",
+    "gateway_worker_supervisor_start_event_loop_safe",
+    "restart_invocation_epoch_mismatch_rejected",
+    "restart_invocation_empty_ledger_rejected",
+    "restart_invocation_invalid_ledger_rejected",
+    "restart_invocation_ledger_basename_exact",
+    "restart_invocation_missing_ledger_rejected",
+    "restart_invocation_overrides_stale_n_minus_one",
+    "restart_invocation_outside_directory_rejected",
+    "restart_invocation_pid_mismatch_rejected",
+    "restart_invocation_symlink_rejected",
+)
+_GATEWAY_STARTUP_TRANSITION_SOURCE_PATHS = (
+    "gw_restart.sh",
+    "gateway/main.py",
+    "gateway/research_lab/worker_autostart.py",
+)
+
+
+def _gateway_startup_transition_evidence_is_complete(
+    value: Any,
+    *,
+    candidate_sha: str | None = None,
+) -> bool:
+    normalized_sha = str(
+        candidate_sha
+        or os.environ.get("REHEARSAL_CANDIDATE_SHA")
+        or ""
+    ).strip().lower()
+    identities = (
+        value.get("source_identities")
+        if isinstance(value, Mapping)
+        else None
+    )
+    try:
+        expected_identities = [
+            _file_identity(path, normalized_sha)
+            for path in _GATEWAY_STARTUP_TRANSITION_SOURCE_PATHS
+        ]
+    except Exception:
+        expected_identities = None
+    return (
+        isinstance(value, Mapping)
+        and set(value)
+        == {
+            *_GATEWAY_STARTUP_TRANSITION_EVIDENCE_FIELDS,
+            "source_identities",
+        }
+        and all(
+            value.get(field) is True
+            for field in _GATEWAY_STARTUP_TRANSITION_EVIDENCE_FIELDS
+        )
+        and re.fullmatch(r"[0-9a-f]{40}", normalized_sha) is not None
+        and identities == expected_identities
+    )
+
+
+def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
+    """Exercise the candidate's N-1 handoff and blocking startup boundary."""
+
+    import ast
+    import copy
+    import subprocess
+    from contextlib import asynccontextmanager
+
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import JSONResponse
+    from fastapi.testclient import TestClient
+
+    from gateway.research_lab.worker_autostart import (
+        start_worker_supervisor_without_blocking_event_loop,
+    )
+
+    candidate_sha = str(
+        os.environ.get("REHEARSAL_CANDIDATE_SHA") or ""
+    ).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+        raise RuntimeError("gateway startup rehearsal candidate SHA is invalid")
+    source_identities = [
+        _file_identity(path, candidate_sha)
+        for path in _GATEWAY_STARTUP_TRANSITION_SOURCE_PATHS
+    ]
+
+    main_tree = ast.parse((SOURCE_ROOT / "gateway/main.py").read_text())
+    lifespan = next(
+        (
+            node
+            for node in main_tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "lifespan"
+        ),
+        None,
+    )
+    if lifespan is None:
+        raise RuntimeError("candidate gateway lifespan is absent")
+    offloaded_starts = [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id
+        == "start_worker_supervisor_without_blocking_event_loop"
+    ]
+    direct_starts = [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "start"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "research_lab_worker_supervisor"
+    ]
+    background_starts = [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "asyncio"
+        and node.func.attr == "create_task"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Call)
+        and isinstance(node.args[0].func, ast.Name)
+        and node.args[0].func.id == "_start_research_lab_worker_services"
+    ]
+    lifespan_yields = [
+        node for node in ast.walk(lifespan) if isinstance(node, ast.Yield)
+    ]
+    yield_lineno = lifespan_yields[0].lineno if len(lifespan_yields) == 1 else -1
+    main_function_names = {
+        node.name
+        for node in main_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    cleanup_gathers = [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Await)
+        and node.lineno > yield_lineno
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "asyncio"
+        and node.value.func.attr == "gather"
+    ]
+    supervisor_stops = [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call)
+        and node.lineno > yield_lineno
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "research_lab_worker_supervisor"
+        and node.func.attr == "stop"
+    ]
+    if (
+        len(offloaded_starts) != 1
+        or len(background_starts) != 1
+        or len(lifespan_yields) != 1
+        or background_starts[0].lineno >= lifespan_yields[0].lineno
+        or direct_starts
+        or "_gateway_worker_startup_ready" not in main_function_names
+        or "require_worker_authority_after_liveness" not in main_function_names
+        or len(cleanup_gathers) != 1
+        or len(supervisor_stops) != 1
+        or cleanup_gathers[0].lineno >= supervisor_stops[0].lineno
+    ):
+        raise RuntimeError("candidate gateway worker startup is event-loop blocking")
+
+    diagnostic_assignment = next(
+        (
+            node
+            for node in main_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "_WORKER_STARTUP_DIAGNOSTIC_PATHS"
+                for target in node.targets
+            )
+        ),
+        None,
+    )
+    ready_definition = next(
+        (
+            node
+            for node in main_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_gateway_worker_startup_ready"
+        ),
+        None,
+    )
+    gate_definition = next(
+        (
+            node
+            for node in main_tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "require_worker_authority_after_liveness"
+        ),
+        None,
+    )
+    if (
+        diagnostic_assignment is None
+        or ready_definition is None
+        or gate_definition is None
+    ):
+        raise RuntimeError("candidate gateway worker authority gate is incomplete")
+    extracted_gate = copy.deepcopy(gate_definition)
+    extracted_gate.decorator_list = []
+    extracted_module = ast.fix_missing_locations(
+        ast.Module(
+            body=[
+                copy.deepcopy(diagnostic_assignment),
+                copy.deepcopy(ready_definition),
+                extracted_gate,
+            ],
+            type_ignores=[],
+        )
+    )
+    gate_namespace: dict[str, Any] = {
+        "FastAPI": FastAPI,
+        "Request": Request,
+        "JSONResponse": JSONResponse,
+    }
+    exec(
+        compile(extracted_module, str(SOURCE_ROOT / "gateway/main.py"), "exec"),
+        gate_namespace,
+    )
+    candidate_startup_ready = gate_namespace["_gateway_worker_startup_ready"]
+    candidate_authority_gate = gate_namespace[
+        "require_worker_authority_after_liveness"
+    ]
+
+    class BlockingSupervisor:
+        def __init__(self, *, fail: bool = False) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.finished = threading.Event()
+            self.stop_raced_start = False
+            self.worker_threads: list[int] = []
+            self.fail = fail
+
+        def start(self) -> None:
+            self.worker_threads.append(threading.get_ident())
+            self.started.set()
+            if not self.release.wait(timeout=3):
+                raise RuntimeError("worker supervisor release timed out")
+            self.finished.set()
+            if self.fail:
+                raise RuntimeError("synthetic worker startup failure")
+
+        def health(self) -> dict[str, bool]:
+            self.worker_threads.append(threading.get_ident())
+            return {"ready": True}
+
+        def stop(self) -> None:
+            self.stop_raced_start = not self.finished.is_set()
+
+    def build_asgi_probe(
+        *,
+        fail: bool = False,
+    ) -> tuple[FastAPI, BlockingSupervisor]:
+        supervisor = BlockingSupervisor(fail=fail)
+
+        @asynccontextmanager
+        async def probe_lifespan(application: FastAPI):
+            startup_task = asyncio.create_task(
+                start_worker_supervisor_without_blocking_event_loop(
+                    supervisor  # type: ignore[arg-type]
+                )
+            )
+            application.state.research_lab_worker_startup_task = startup_task
+            try:
+                yield
+            finally:
+                startup_task.cancel()
+                await asyncio.gather(startup_task, return_exceptions=True)
+                supervisor.stop()
+
+        probe_app = FastAPI(lifespan=probe_lifespan)
+
+        probe_app.middleware("http")(candidate_authority_gate)
+
+        @probe_app.get("/health")
+        async def probe_health() -> dict[str, bool]:
+            return {"alive": True}
+
+        @probe_app.get("/authority")
+        async def probe_authority() -> dict[str, bool]:
+            if not candidate_startup_ready(probe_app):
+                raise HTTPException(status_code=503)
+            return {"ready": True}
+
+        return probe_app, supervisor
+
+    caller_thread = threading.get_ident()
+    probe_app, supervisor = build_asgi_probe()
+    with TestClient(probe_app, raise_server_exceptions=False) as client:
+        if not supervisor.started.wait(timeout=1):
+            raise RuntimeError("ASGI worker startup did not begin")
+        if client.get("/health").status_code != 200:
+            raise RuntimeError("ASGI liveness was unavailable during worker startup")
+        if client.get("/authority").status_code != 503:
+            raise RuntimeError("ASGI authority did not fail closed during startup")
+        supervisor.release.set()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if client.get("/authority").status_code == 200:
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError("ASGI authority did not recover after worker startup")
+    if (
+        supervisor.stop_raced_start
+        or not supervisor.finished.is_set()
+        or len(supervisor.worker_threads) != 2
+        or supervisor.worker_threads[0] != supervisor.worker_threads[1]
+        or supervisor.worker_threads[0] == caller_thread
+    ):
+        raise RuntimeError("ASGI worker startup lifecycle differs")
+
+    failed_app, failed_supervisor = build_asgi_probe(fail=True)
+    with TestClient(failed_app, raise_server_exceptions=False) as client:
+        if not failed_supervisor.started.wait(timeout=1):
+            raise RuntimeError("failed ASGI worker startup did not begin")
+        failed_supervisor.release.set()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            startup_task = failed_app.state.research_lab_worker_startup_task
+            if startup_task.done():
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError("failed ASGI worker startup did not terminate")
+        if client.get("/health").status_code != 200:
+            raise RuntimeError("ASGI liveness failed after worker startup error")
+        if client.get("/authority").status_code != 503:
+            raise RuntimeError("ASGI authority opened after worker startup error")
+
+    cancel_app, cancel_supervisor = build_asgi_probe()
+    release_timer: threading.Timer | None = None
+    with TestClient(cancel_app, raise_server_exceptions=False) as client:
+        if not cancel_supervisor.started.wait(timeout=1):
+            raise RuntimeError("cancellation worker startup did not begin")
+        if client.get("/health").status_code != 200:
+            raise RuntimeError("cancellation probe liveness is unavailable")
+        release_timer = threading.Timer(0.05, cancel_supervisor.release.set)
+        release_timer.start()
+    if release_timer is not None:
+        release_timer.join(timeout=1)
+    if (
+        cancel_supervisor.stop_raced_start
+        or not cancel_supervisor.finished.is_set()
+    ):
+        raise RuntimeError("worker startup cancellation raced supervisor stop")
+
+    restart_source = (SOURCE_ROOT / "gw_restart.sh").read_text()
+    restart_lines = restart_source.splitlines()
+
+    def shell_function_source(name: str) -> str:
+        try:
+            start = restart_lines.index(f"{name}() {{")
+        except ValueError as exc:
+            raise RuntimeError(
+                f"candidate gateway restart function is absent: {name}"
+            ) from exc
+        for end in range(start + 1, len(restart_lines)):
+            if restart_lines[end] == "}":
+                return "\n".join(restart_lines[start : end + 1])
+        raise RuntimeError(
+            f"candidate gateway restart function is unterminated: {name}"
+        )
+
+    v2_wait_function = shell_function_source(
+        "wait_for_gateway_v2_authority"
+    )
+
+    def v2_authority_probe(mode: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory(
+            prefix="gateway-v2-health-rehearsal-"
+        ) as raw:
+            probe = r'''
+mode="$2"
+counter="$1/v2-attempts"
+log="$1/gateway.log"
+printf '0\n' > "$counter"
+printf 'startup\n' > "$log"
+pgrep() {
+  if [ "$mode" = process_exit ]; then
+    return 1
+  fi
+  printf '12345\n'
+}
+tail() { :; }
+sleep() { :; }
+timeout() { shift; "$@"; }
+curl() {
+  case "$*" in
+    *health/v2-authority*)
+      count="$(cat "$counter")"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$counter"
+      if [ "$mode" = deadline ]; then
+        SECONDS=61
+        return 22
+      fi
+      if [ "$mode" = success ] && [ "$count" -ge 3 ]; then
+        return 0
+      fi
+      return 22
+      ;;
+    *health*) return 0 ;;
+    *) return 22 ;;
+  esac
+}
+GATEWAY_PYTHON_BIN=/candidate/python3
+GATEWAY_LOG_FILE="$log"
+GATEWAY_V2_HEALTH_MAX_ATTEMPTS=3
+GATEWAY_V2_HEALTH_RETRY_SECONDS=0
+GATEWAY_V2_HEALTH_DEADLINE_SECONDS=60
+if ! timeout 5 curl -fsS http://localhost:8000/health >/dev/null; then
+  exit 90
+fi
+wait_for_gateway_v2_authority
+result=$?
+printf 'v2_attempts=%s\n' "$(cat "$counter")"
+exit "$result"
+'''
+            return subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    v2_wait_function + "\n" + probe,
+                    "gateway-v2-health-probe",
+                    raw,
+                    mode,
+                ],
+                cwd=SOURCE_ROOT,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+    v2_recovered = v2_authority_probe("success")
+    if (
+        v2_recovered.returncode != 0
+        or "v2_attempts=3" not in v2_recovered.stdout
+        or "ready after attempt 3" not in v2_recovered.stdout
+    ):
+        raise RuntimeError(
+            "candidate restart did not retry V2 authority after liveness: "
+            + str(v2_recovered.stderr or "")[-500:]
+        )
+    v2_exhausted = v2_authority_probe("exhaust")
+    if (
+        v2_exhausted.returncode == 0
+        or "v2_attempts=3" not in v2_exhausted.stdout
+        or "did not become ready before the bounded deadline"
+        not in v2_exhausted.stderr
+    ):
+        raise RuntimeError("candidate restart accepted exhausted V2 authority")
+    v2_deadline = v2_authority_probe("deadline")
+    if (
+        v2_deadline.returncode == 0
+        or "v2_attempts=1" not in v2_deadline.stdout
+        or "did not become ready before the bounded deadline"
+        not in v2_deadline.stderr
+    ):
+        raise RuntimeError("candidate restart ignored V2 readiness deadline")
+    v2_process_exit = v2_authority_probe("process_exit")
+    if (
+        v2_process_exit.returncode == 0
+        or "gateway exited while authoritative V2 readiness was pending"
+        not in v2_process_exit.stderr
+    ):
+        raise RuntimeError(
+            "candidate restart ignored gateway exit during V2 readiness"
+        )
+
+    bootstrap_marker = '\nwhile [ "$#" -gt 0 ]; do\n'
+    if bootstrap_marker not in restart_source:
+        raise RuntimeError("candidate gateway restart bootstrap marker differs")
+    bootstrap = restart_source.split(bootstrap_marker, 1)[0]
+
+    def restart_probe(mode: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory(
+            prefix="gateway-restart-identity-rehearsal-"
+        ) as raw:
+            probe = r'''
+GATEWAY_RESTART_TIMING_DIR="$1/timings"
+GATEWAY_RESTART_STARTED_EPOCH=1700000000
+GATEWAY_RESTART_TIMING_INITIALIZED=1
+GATEWAY_RESTART_INVOCATION_ID=gateway-stale-n-minus-one
+LEADPOET_RESTART_INVOCATION_ID=gateway-stale-n-minus-one
+mkdir -p "$GATEWAY_RESTART_TIMING_DIR"
+ledger="$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl"
+case "$2" in
+  exact)
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  invalid_name)
+    ledger="$GATEWAY_RESTART_TIMING_DIR/gateway.jsonl"
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  wrong_epoch)
+    ledger="$GATEWAY_RESTART_TIMING_DIR/gateway-1700000001-$$.jsonl"
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  wrong_pid)
+    ledger="$GATEWAY_RESTART_TIMING_DIR/gateway-1700000000-$(( $$ + 1 )).jsonl"
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  empty)
+    : > "$ledger"
+    ;;
+  symlink)
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$1/target.jsonl"
+    ln -s "$1/target.jsonl" "$ledger"
+    ;;
+  outside)
+    mkdir -p "$1/outside"
+    ledger="$1/outside/gateway-1700000000-$$.jsonl"
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  missing)
+    ;;
+  *)
+    exit 97
+    ;;
+esac
+GATEWAY_RESTART_TIMING_FILE="$ledger"
+'''
+            return subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    probe
+                    + bootstrap
+                    + "\nprintf '%s\\n%s\\n%s\\n' "
+                    + '"$GATEWAY_RESTART_INVOCATION_ID" '
+                    + '"$LEADPOET_RESTART_INVOCATION_ID" '
+                    + '"gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$"\n',
+                    "gateway-restart-ledger-probe",
+                    raw,
+                    mode,
+                ],
+                cwd=SOURCE_ROOT,
+                env={**os.environ, "GATEWAY_RESTART_PHASE": "post_activate"},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+    exact = restart_probe("exact")
+    exact_lines = exact.stdout.splitlines()
+    if (
+        exact.returncode != 0
+        or len(exact_lines) != 3
+        or exact_lines[0] != exact_lines[1]
+        or exact_lines[1] != exact_lines[2]
+        or re.fullmatch(r"gateway-1700000000-[1-9][0-9]*", exact_lines[0])
+        is None
+    ):
+        raise RuntimeError(
+            "candidate gateway restart did not replace stale N-1 identity: "
+            + str(exact.stderr or "")[-500:]
+        )
+    rejected_modes = (
+        "invalid_name",
+        "wrong_epoch",
+        "wrong_pid",
+        "empty",
+        "symlink",
+        "outside",
+        "missing",
+    )
+    for mode in rejected_modes:
+        completed = restart_probe(mode)
+        if (
+            completed.returncode == 0
+            or "ERROR: gateway restart timing ledger" not in completed.stderr
+        ):
+            raise RuntimeError(
+                "candidate gateway restart accepted invalid ledger identity: "
+                + mode
+            )
+
+    evidence = {
+        "gateway_authoritative_routes_fail_closed_during_worker_startup": True,
+        "gateway_authoritative_routes_fail_closed_after_worker_failure": True,
+        "gateway_health_available_during_worker_startup": True,
+        "gateway_lifespan_schedules_offloaded_supervisor": True,
+        "gateway_restart_v2_authority_exhaustion_fail_closed": True,
+        "gateway_restart_v2_authority_process_exit_fail_closed": True,
+        "gateway_restart_v2_authority_retries_after_liveness": True,
+        "gateway_restart_v2_authority_seconds_deadline_fail_closed": True,
+        "gateway_worker_health_read_off_event_loop": True,
+        "gateway_worker_supervisor_cancellation_serialized": True,
+        "gateway_worker_supervisor_start_event_loop_safe": True,
+        "restart_invocation_epoch_mismatch_rejected": True,
+        "restart_invocation_empty_ledger_rejected": True,
+        "restart_invocation_invalid_ledger_rejected": True,
+        "restart_invocation_ledger_basename_exact": True,
+        "restart_invocation_missing_ledger_rejected": True,
+        "restart_invocation_overrides_stale_n_minus_one": True,
+        "restart_invocation_outside_directory_rejected": True,
+        "restart_invocation_pid_mismatch_rejected": True,
+        "restart_invocation_symlink_rejected": True,
+        "source_identities": source_identities,
+    }
+    if not _gateway_startup_transition_evidence_is_complete(
+        evidence,
+        candidate_sha=candidate_sha,
+    ):
+        raise RuntimeError("gateway startup transition evidence is incomplete")
+    return evidence
+
+
 def _exercise_compact_weight_joined_path() -> dict[str, Any]:
     from compact_weight_joined_runner import exercise_compact_weight_joined_path
 
@@ -12751,6 +13381,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     ),
     "restart-summary-deadline-classification": (
         _exercise_restart_summary_deadline_classification
+    ),
+    "gateway-startup-transition-safety": (
+        _exercise_gateway_startup_transition_safety
     ),
     "full-rebenchmark-publication-path": (
         _exercise_full_rebenchmark_publication_path
@@ -13480,6 +14113,34 @@ def main() -> int:
                 ),
                 candidate_sha=args.candidate_sha,
             )
+        ),
+        "gateway_restart_invocation_timing_ledger_exact": (
+            _gateway_startup_transition_evidence_is_complete(
+                behavior_evidence.get(
+                    "gateway-startup-transition-safety",
+                    {},
+                ),
+                candidate_sha=args.candidate_sha,
+            )
+            and behavior_evidence.get(
+                "gateway-startup-transition-safety",
+                {},
+            ).get("restart_invocation_overrides_stale_n_minus_one")
+            is True
+        ),
+        "gateway_worker_supervisor_start_event_loop_safe": (
+            _gateway_startup_transition_evidence_is_complete(
+                behavior_evidence.get(
+                    "gateway-startup-transition-safety",
+                    {},
+                ),
+                candidate_sha=args.candidate_sha,
+            )
+            and behavior_evidence.get(
+                "gateway-startup-transition-safety",
+                {},
+            ).get("gateway_worker_supervisor_start_event_loop_safe")
+            is True
         ),
         "full_rebenchmark_publication_path_verified": (
             behavior_evidence.get(

@@ -35,6 +35,9 @@ GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120
 GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS=360
 GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS="${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS:-3}"
 GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS="${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS:-5}"
+GATEWAY_V2_HEALTH_MAX_ATTEMPTS="${GATEWAY_V2_HEALTH_MAX_ATTEMPTS:-120}"
+GATEWAY_V2_HEALTH_RETRY_SECONDS="${GATEWAY_V2_HEALTH_RETRY_SECONDS:-5}"
+GATEWAY_V2_HEALTH_DEADLINE_SECONDS="${GATEWAY_V2_HEALTH_DEADLINE_SECONDS:-600}"
 GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="${GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT:-}"
 GATEWAY_RESTART_STARTED_EPOCH="${GATEWAY_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
 GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$}"
@@ -42,6 +45,103 @@ GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl}"
 GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
+
+gateway_restart_invocation_id_from_timing_file() {
+  local ledger_name ledger_epoch ledger_pid expected_ledger
+  if [ -L "$GATEWAY_RESTART_TIMING_FILE" ]; then
+    echo "ERROR: gateway restart timing ledger must not be a symlink" >&2
+    return 1
+  fi
+  if [ ! -f "$GATEWAY_RESTART_TIMING_FILE" ]; then
+    echo "ERROR: gateway restart timing ledger is unavailable" >&2
+    return 1
+  fi
+  if [ ! -s "$GATEWAY_RESTART_TIMING_FILE" ]; then
+    echo "ERROR: gateway restart timing ledger is empty" >&2
+    return 1
+  fi
+  ledger_name="${GATEWAY_RESTART_TIMING_FILE##*/}"
+  if ! [[ "$ledger_name" =~ ^gateway-([0-9]+)-([0-9]+)\.jsonl$ ]]; then
+    echo "ERROR: gateway restart timing ledger name is invalid" >&2
+    return 1
+  fi
+  ledger_epoch="${BASH_REMATCH[1]}"
+  ledger_pid="${BASH_REMATCH[2]}"
+  if [ "$ledger_epoch" != "$GATEWAY_RESTART_STARTED_EPOCH" ]; then
+    echo "ERROR: gateway restart timing ledger epoch differs from active restart" >&2
+    return 1
+  fi
+  if [ "$ledger_pid" != "$$" ]; then
+    echo "ERROR: gateway restart timing ledger PID differs from active restart" >&2
+    return 1
+  fi
+  expected_ledger="${GATEWAY_RESTART_TIMING_DIR%/}/$ledger_name"
+  if [ "$GATEWAY_RESTART_TIMING_FILE" != "$expected_ledger" ]; then
+    echo "ERROR: gateway restart timing ledger is outside the canonical directory" >&2
+    return 1
+  fi
+  printf 'gateway-%s-%s\n' "$ledger_epoch" "$ledger_pid"
+}
+
+bind_gateway_restart_invocation_to_timing_file() {
+  local authoritative_invocation_id
+  if [ "$GATEWAY_RESTART_TIMING_INITIALIZED" != "1" ]; then
+    return 0
+  fi
+  if ! authoritative_invocation_id="$(
+      gateway_restart_invocation_id_from_timing_file
+    )"; then
+    return 1
+  fi
+  GATEWAY_RESTART_INVOCATION_ID="$authoritative_invocation_id"
+  LEADPOET_RESTART_INVOCATION_ID="$authoritative_invocation_id"
+  export GATEWAY_RESTART_INVOCATION_ID
+  export LEADPOET_RESTART_INVOCATION_ID
+}
+
+wait_for_gateway_v2_authority() {
+  local attempt deadline
+  if ! [[ "$GATEWAY_V2_HEALTH_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: GATEWAY_V2_HEALTH_MAX_ATTEMPTS must be a positive integer" >&2
+    return 1
+  fi
+  if ! [[ "$GATEWAY_V2_HEALTH_RETRY_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: GATEWAY_V2_HEALTH_RETRY_SECONDS must be a non-negative integer" >&2
+    return 1
+  fi
+  if ! [[ "$GATEWAY_V2_HEALTH_DEADLINE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: GATEWAY_V2_HEALTH_DEADLINE_SECONDS must be a positive integer" >&2
+    return 1
+  fi
+  deadline=$((SECONDS + GATEWAY_V2_HEALTH_DEADLINE_SECONDS))
+  for attempt in $(seq 1 "$GATEWAY_V2_HEALTH_MAX_ATTEMPTS"); do
+    GATEWAY_PID="$(
+      pgrep -f "^$GATEWAY_PYTHON_BIN -u -m gateway[.]main$" | head -1 || true
+    )"
+    if [ -z "$GATEWAY_PID" ]; then
+      tail -160 "$GATEWAY_LOG_FILE"
+      echo "ERROR: gateway exited while authoritative V2 readiness was pending" >&2
+      return 1
+    fi
+    if timeout 5 curl -fsS http://localhost:8000/health/v2-authority >/dev/null 2>&1; then
+      echo "Gateway authoritative V2 health ready after attempt $attempt"
+      return 0
+    fi
+    if [ "$attempt" -ge "$GATEWAY_V2_HEALTH_MAX_ATTEMPTS" ] \
+        || [ "$SECONDS" -ge "$deadline" ]; then
+      break
+    fi
+    sleep "$GATEWAY_V2_HEALTH_RETRY_SECONDS"
+  done
+  tail -160 "$GATEWAY_LOG_FILE"
+  echo "ERROR: authoritative V2 enclave/worker readiness did not become ready before the bounded deadline" >&2
+  return 1
+}
+
+# The N-1 controller can carry a stale process environment across the exact
+# candidate exec.  Once a timing ledger exists, its validated basename is the
+# per-invocation authority shared by both controller generations.
+bind_gateway_restart_invocation_to_timing_file
 GATEWAY_RELEASE_FOLLOW_ROOT="${GATEWAY_RELEASE_FOLLOW_ROOT:-}"
 GATEWAY_RELEASE_SUPERSESSION_COUNT="${GATEWAY_RELEASE_SUPERSESSION_COUNT:-0}"
 GATEWAY_RELEASE_SUPERSESSION_MAX="${GATEWAY_RELEASE_SUPERSESSION_MAX:-20}"
@@ -2917,9 +3017,7 @@ if [ "$GATEWAY_HEALTH_READY" != "1" ]; then
   exit 1
 fi
 record_gateway_restart_timing "gateway_base_health_ready"
-if ! timeout 60 curl -fsS http://localhost:8000/health/v2-authority >/dev/null; then
-  tail -160 "$GATEWAY_LOG_FILE"
-  echo "ERROR: authoritative V2 enclave/worker readiness failed" >&2
+if ! wait_for_gateway_v2_authority; then
   exit 1
 fi
 record_gateway_restart_timing "gateway_v2_health_ready"

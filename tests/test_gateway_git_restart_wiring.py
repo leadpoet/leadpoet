@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -181,7 +182,7 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main',
             'for attempt in $(seq 1 120)',
             'curl -fsS http://localhost:8000/health',
-            'curl -fsS http://localhost:8000/health/v2-authority',
+            'if ! wait_for_gateway_v2_authority; then',
             'GATEWAY_DEPLOY_STAGE="host_restart_script_install"',
             'finalize_deployment_record succeeded',
         ),
@@ -222,10 +223,91 @@ def test_gateway_restart_revalidates_release_lineage_after_n_minus_one_activatio
 def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert "http://localhost:8000/health/v2-authority >/dev/null" in script
+    assert "wait_for_gateway_v2_authority" in script
     assert "http://localhost:8000/research-lab/status >/dev/null" in script
     assert "http://localhost:8000/attest >/dev/null" in script
     assert "http://localhost:8000/research-lab/status || true" not in script
     assert "http://localhost:8000/attest || true" not in script
+
+
+def test_gateway_restart_retries_v2_authority_after_base_health(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper = _shell_function_source(script, "wait_for_gateway_v2_authority")
+    counter = tmp_path / "v2-attempts"
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text("startup\n", encoding="utf-8")
+    probe = f'''{helper}
+mode="$1"
+counter={shlex.quote(str(counter))}
+printf '0\n' > "$counter"
+pgrep() {{ printf '12345\n'; }}
+tail() {{ :; }}
+sleep() {{ :; }}
+timeout() {{ shift; "$@"; }}
+curl() {{
+  case "$*" in
+    *health/v2-authority*)
+      count="$(cat "$counter")"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$counter"
+      if [ "$mode" = deadline ]; then
+        SECONDS=61
+        return 22
+      fi
+      if [ "$mode" = success ] && [ "$count" -ge 3 ]; then
+        return 0
+      fi
+      return 22
+      ;;
+    *health*) return 0 ;;
+    *) return 22 ;;
+  esac
+}}
+GATEWAY_PYTHON_BIN=/candidate/python3
+GATEWAY_LOG_FILE={shlex.quote(str(log_path))}
+GATEWAY_V2_HEALTH_MAX_ATTEMPTS=3
+GATEWAY_V2_HEALTH_RETRY_SECONDS=0
+GATEWAY_V2_HEALTH_DEADLINE_SECONDS=60
+if ! timeout 5 curl -fsS http://localhost:8000/health >/dev/null; then
+  exit 90
+fi
+wait_for_gateway_v2_authority
+'''
+
+    recovered = subprocess.run(
+        ["bash", "-c", probe, "gateway-v2-health-probe", "success"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert recovered.returncode == 0, recovered.stderr
+    assert counter.read_text(encoding="utf-8").strip() == "3"
+    assert "ready after attempt 3" in recovered.stdout
+
+    exhausted = subprocess.run(
+        ["bash", "-c", probe, "gateway-v2-health-probe", "exhaust"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert exhausted.returncode != 0
+    assert counter.read_text(encoding="utf-8").strip() == "3"
+    assert "did not become ready before the bounded deadline" in exhausted.stderr
+
+    deadline = subprocess.run(
+        ["bash", "-c", probe, "gateway-v2-health-probe", "deadline"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert deadline.returncode != 0
+    assert counter.read_text(encoding="utf-8").strip() == "1"
+    assert "did not become ready before the bounded deadline" in deadline.stderr
 
 
 def test_gateway_restart_forces_instance_role_for_runtime_aws_calls() -> None:
@@ -1612,9 +1694,121 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
     assert preserved.stdout.splitlines() == [active_invocation, active_invocation]
 
 
+def test_gateway_candidate_reexec_rebinds_restart_identity_before_telemetry() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    timing_file = script.index('GATEWAY_RESTART_TIMING_FILE="')
+    binding = script.index("bind_gateway_restart_invocation_to_timing_file")
+    first_timing = script.index('record_gateway_restart_timing "')
+    assert timing_file < binding < first_timing
+    assert 'GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED"' in script
+    assert 'GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE"' in script
+    assert '[ ! -f "$GATEWAY_RESTART_TIMING_FILE" ]' in script
+    assert "^gateway-([0-9]+)-([0-9]+)\\.jsonl$" in script
+    assert '[ -L "$GATEWAY_RESTART_TIMING_FILE" ]' in script
+    assert '[ ! -s "$GATEWAY_RESTART_TIMING_FILE" ]' in script
+    assert '[ "$ledger_pid" != "$$" ]' in script
+    assert (
+        'expected_ledger="${GATEWAY_RESTART_TIMING_DIR%/}/$ledger_name"'
+        in script
+    )
+
+
+def test_gateway_candidate_reexec_uses_only_current_canonical_ledger(
+    tmp_path: Path,
+) -> None:
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    bootstrap = restart.split('\nwhile [ "$#" -gt 0 ]; do\n', 1)[0]
+
+    def run_probe(mode: str) -> subprocess.CompletedProcess[str]:
+        probe = r'''
+GATEWAY_RESTART_TIMING_DIR="$1/timings"
+GATEWAY_RESTART_STARTED_EPOCH=1700000000
+GATEWAY_RESTART_TIMING_INITIALIZED=1
+GATEWAY_RESTART_INVOCATION_ID=gateway-stale-n-minus-one
+LEADPOET_RESTART_INVOCATION_ID=gateway-stale-n-minus-one
+mkdir -p "$GATEWAY_RESTART_TIMING_DIR"
+ledger="$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl"
+case "$2" in
+  exact)
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  invalid_name)
+    ledger="$GATEWAY_RESTART_TIMING_DIR/gateway.jsonl"
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  wrong_epoch)
+    ledger="$GATEWAY_RESTART_TIMING_DIR/gateway-1700000001-$$.jsonl"
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  wrong_pid)
+    ledger="$GATEWAY_RESTART_TIMING_DIR/gateway-1700000000-$(( $$ + 1 )).jsonl"
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  empty)
+    : > "$ledger"
+    ;;
+  symlink)
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$1/target.jsonl"
+    ln -s "$1/target.jsonl" "$ledger"
+    ;;
+  outside)
+    mkdir -p "$1/outside"
+    ledger="$1/outside/gateway-1700000000-$$.jsonl"
+    printf '%s\n' '{"stage":"invoked","status":"reached"}' > "$ledger"
+    ;;
+  missing)
+    ;;
+  *)
+    exit 97
+    ;;
+esac
+GATEWAY_RESTART_TIMING_FILE="$ledger"
+'''
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                probe
+                + bootstrap
+                + "\nprintf '%s\\n%s\\n%s\\n' "
+                + '"$GATEWAY_RESTART_INVOCATION_ID" '
+                + '"$LEADPOET_RESTART_INVOCATION_ID" '
+                + '"gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$"\n',
+                "gateway-restart-ledger-probe",
+                str(tmp_path / mode),
+                mode,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    exact = run_probe("exact")
+    assert exact.returncode == 0, exact.stderr
+    exact_lines = exact.stdout.splitlines()
+    assert len(exact_lines) == 3
+    assert exact_lines[0] == exact_lines[1] == exact_lines[2]
+    assert re.fullmatch(r"gateway-1700000000-[1-9][0-9]*", exact_lines[0])
+
+    for mode in (
+        "invalid_name",
+        "wrong_epoch",
+        "wrong_pid",
+        "empty",
+        "symlink",
+        "outside",
+        "missing",
+    ):
+        rejected = run_probe(mode)
+        assert rejected.returncode != 0, mode
+        assert "ERROR: gateway restart timing ledger" in rejected.stderr, mode
+
+
 def test_gateway_restart_preserves_operator_maintenance_after_readiness() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    v2_health = 'curl -fsS http://localhost:8000/health/v2-authority'
+    v2_health = "if ! wait_for_gateway_v2_authority; then"
     handoff = "-m gateway.tee.verify_weight_submission_ready_v2"
     resume = (
         "-m gateway.research_lab.admin resume-restart-maintenance \\\n"

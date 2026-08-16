@@ -10,6 +10,7 @@ host-side byte budget on decoded in-container trace entries.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -35,6 +36,7 @@ from gateway.research_lab.worker_autostart import (
     _child_rss_mb,
     _hard_rss_limit_mb,
     _vmrss_mb,
+    start_worker_supervisor_without_blocking_event_loop,
 )
 from gateway.research_lab.worker import HostedWorkerOutcome, ResearchLabHostedWorker
 from research_lab.eval.private_runtime import (
@@ -66,6 +68,83 @@ def test_vmrss_missing_file_and_malformed_are_none(tmp_path):
     no_field = tmp_path / "nofield"
     no_field.write_text("Name:\tpython3\n", encoding="utf-8")
     assert _vmrss_mb(str(no_field)) is None
+
+
+@pytest.mark.asyncio
+async def test_worker_supervisor_startup_does_not_block_gateway_event_loop():
+    main_thread = threading.get_ident()
+    started = threading.Event()
+    release = threading.Event()
+    worker_threads: list[int] = []
+
+    class BlockingSupervisor:
+        def start(self) -> None:
+            worker_threads.append(threading.get_ident())
+            started.set()
+            if not release.wait(timeout=2):
+                raise AssertionError("worker supervisor test release timed out")
+
+        def health(self) -> dict[str, bool]:
+            worker_threads.append(threading.get_ident())
+            return {"ready": True}
+
+    startup = asyncio.create_task(
+        start_worker_supervisor_without_blocking_event_loop(
+            BlockingSupervisor()  # type: ignore[arg-type]
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+
+    loop_tick = asyncio.Event()
+    asyncio.get_running_loop().call_soon(loop_tick.set)
+    await asyncio.wait_for(loop_tick.wait(), timeout=0.2)
+    assert not startup.done()
+
+    release.set()
+    assert await asyncio.wait_for(startup, timeout=1) == {"ready": True}
+    assert len(worker_threads) == 2
+    assert worker_threads[0] == worker_threads[1]
+    assert worker_threads[0] != main_thread
+
+
+@pytest.mark.asyncio
+async def test_worker_supervisor_cancellation_waits_before_stop() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    stop_raced_start = False
+
+    class BlockingSupervisor:
+        def start(self) -> None:
+            started.set()
+            if not release.wait(timeout=2):
+                raise AssertionError("worker supervisor test release timed out")
+            finished.set()
+
+        def health(self) -> dict[str, bool]:
+            return {"ready": True}
+
+        def stop(self) -> None:
+            nonlocal stop_raced_start
+            stop_raced_start = not finished.is_set()
+
+    supervisor = BlockingSupervisor()
+    startup = asyncio.create_task(
+        start_worker_supervisor_without_blocking_event_loop(
+            supervisor  # type: ignore[arg-type]
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    startup.cancel()
+    await asyncio.sleep(0)
+    assert not startup.done()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(startup, timeout=1)
+    supervisor.stop()
+    assert finished.is_set()
+    assert stop_raced_start is False
 
 
 def test_child_rss_for_bogus_pid_is_none():

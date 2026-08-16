@@ -271,6 +271,147 @@ echo UNEXPECTED_RETURN
     assert "UNEXPECTED_RETURN" not in completed.stdout
 
 
+def test_gateway_candidate_reexec_binds_invocation_to_active_timing_ledger(
+    tmp_path: Path,
+) -> None:
+    derive = _extract_shell_function(
+        ROOT / "gw_restart.sh",
+        "gateway_restart_invocation_id_from_timing_file",
+    )
+    bind = _extract_shell_function(
+        ROOT / "gw_restart.sh",
+        "bind_gateway_restart_invocation_to_timing_file",
+    )
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(
+                (
+                    "set -euo pipefail",
+                    derive,
+                    bind,
+                    'GATEWAY_RESTART_TIMING_DIR="$1"',
+                    "GATEWAY_RESTART_STARTED_EPOCH=1700000000",
+                    'GATEWAY_RESTART_TIMING_FILE="$1/gateway-1700000000-$$.jsonl"',
+                    "printf '%s\\n' '{\"stage\":\"invoked\",\"status\":\"reached\"}' > \"$GATEWAY_RESTART_TIMING_FILE\"",
+                    "GATEWAY_RESTART_TIMING_INITIALIZED=1",
+                    "GATEWAY_RESTART_INVOCATION_ID=gateway-stale-parent",
+                    "LEADPOET_RESTART_INVOCATION_ID=gateway-stale-parent",
+                    "bind_gateway_restart_invocation_to_timing_file",
+                    "printf '%s\\n%s\\n%s\\n' \"$GATEWAY_RESTART_INVOCATION_ID\" "
+                    '"$LEADPOET_RESTART_INVOCATION_ID" "gateway-1700000000-$$"',
+                )
+            ),
+            "gateway-timing-binding-test",
+            str(tmp_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    lines = completed.stdout.splitlines()
+    assert len(lines) == 3
+    assert lines[0] == lines[1] == lines[2]
+
+
+@pytest.mark.parametrize(
+    "mode",
+    (
+        "invalid_name",
+        "wrong_epoch",
+    ),
+)
+def test_gateway_candidate_reexec_rejects_invalid_timing_ledger_identity(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    derive = _extract_shell_function(
+        ROOT / "gw_restart.sh",
+        "gateway_restart_invocation_id_from_timing_file",
+    )
+    bind = _extract_shell_function(
+        ROOT / "gw_restart.sh",
+        "bind_gateway_restart_invocation_to_timing_file",
+    )
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(
+                (
+                    "set -euo pipefail",
+                    derive,
+                    bind,
+                    'GATEWAY_RESTART_TIMING_DIR="$1"',
+                    "GATEWAY_RESTART_STARTED_EPOCH=1700000000",
+                    'if [ "$2" = invalid_name ]; then',
+                    '  GATEWAY_RESTART_TIMING_FILE="$1/gateway.jsonl"',
+                    "else",
+                    '  GATEWAY_RESTART_TIMING_FILE="$1/gateway-1700000001-$$.jsonl"',
+                    "fi",
+                    "printf '%s\\n' '{\"stage\":\"invoked\",\"status\":\"reached\"}' > \"$GATEWAY_RESTART_TIMING_FILE\"",
+                    "GATEWAY_RESTART_TIMING_INITIALIZED=1",
+                    "GATEWAY_RESTART_INVOCATION_ID=gateway-stale-parent",
+                    "bind_gateway_restart_invocation_to_timing_file",
+                )
+            ),
+            "gateway-timing-rejection-test",
+            str(tmp_path),
+            mode,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "ERROR: gateway restart timing ledger" in completed.stderr
+
+
+def test_gateway_candidate_reexec_rejects_missing_timing_ledger(
+    tmp_path: Path,
+) -> None:
+    derive = _extract_shell_function(
+        ROOT / "gw_restart.sh",
+        "gateway_restart_invocation_id_from_timing_file",
+    )
+    bind = _extract_shell_function(
+        ROOT / "gw_restart.sh",
+        "bind_gateway_restart_invocation_to_timing_file",
+    )
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(
+                (
+                    "set -euo pipefail",
+                    derive,
+                    bind,
+                    'GATEWAY_RESTART_TIMING_DIR="$1"',
+                    "GATEWAY_RESTART_STARTED_EPOCH=1700000000",
+                    'GATEWAY_RESTART_TIMING_FILE="$1/gateway-1700000000-$$.jsonl"',
+                    "GATEWAY_RESTART_TIMING_INITIALIZED=1",
+                    "bind_gateway_restart_invocation_to_timing_file",
+                )
+            ),
+            "gateway-timing-missing-test",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "ERROR: gateway restart timing ledger is unavailable"
+        in completed.stderr
+    )
+
+
 def test_validator_release_follow_executes_new_candidate_before_shutdown(
     tmp_path: Path,
 ) -> None:

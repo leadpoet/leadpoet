@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import hashlib
 import os
@@ -46,6 +47,31 @@ class ResearchLabWorkerStartupError(RuntimeError):
 
 class DeferredWorkerFleetConfigurationError(ValueError):
     """The explicit one-restart worker deferral setting is invalid."""
+
+
+async def start_worker_supervisor_without_blocking_event_loop(
+    supervisor: "ResearchLabWorkerSupervisor",
+) -> dict[str, object]:
+    """Start and inspect worker fleets without freezing gateway HTTP I/O."""
+
+    def _start_and_read_health() -> dict[str, object]:
+        supervisor.start()
+        return dict(supervisor.health())
+
+    startup_task = asyncio.create_task(asyncio.to_thread(_start_and_read_health))
+    try:
+        return await asyncio.shield(startup_task)
+    except asyncio.CancelledError:
+        # asyncio cannot stop a running worker thread.  Serialize cancellation
+        # behind startup so lifespan cleanup never calls stop() concurrently
+        # with the still-mutating supervisor start path.
+        while not startup_task.done():
+            try:
+                await asyncio.shield(startup_task)
+            except asyncio.CancelledError:
+                continue
+        startup_task.result()
+        raise
 
 
 def deferred_worker_fleet_roles(

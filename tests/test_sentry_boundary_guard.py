@@ -178,7 +178,6 @@ def test_validator_containers_receive_only_namespaced_sentry_settings() -> None:
         "LEADPOET_SENTRY_ENABLED",
         "LEADPOET_SENTRY_DSN",
         "LEADPOET_SENTRY_ENVIRONMENT",
-        "LEADPOET_SENTRY_RELEASE",
         "LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES",
         "LEADPOET_SENTRY_MESSAGE_MODE",
         "LEADPOET_SENTRY_TRACES_SAMPLE_RATE",
@@ -186,6 +185,11 @@ def test_validator_containers_receive_only_namespaced_sentry_settings() -> None:
     ):
         assert f"-e {name}" in source
         assert f"-e {name}=" not in source
+    exact_release = (
+        '-e LEADPOET_SENTRY_RELEASE="$VALIDATOR_V2_DEPLOY_COMMIT"'
+    )
+    assert source.count(exact_release) == source.count("docker run -d")
+    assert "    -e LEADPOET_SENTRY_RELEASE\n" not in source
 
 
 def test_bootstrap_fails_closed_and_swallows_wiring_failures() -> None:

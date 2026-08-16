@@ -225,6 +225,15 @@ def test_artifact_egress_transport_boundaries_are_protected():
     assert "BrokeredProviderTransportV2.install" in PROTECTED_SYMBOLS[
         "gateway/tee/provider_client_v2.py"
     ]
+    assert "start_worker_supervisor_without_blocking_event_loop" in (
+        PROTECTED_SYMBOLS["gateway/research_lab/worker_autostart.py"]
+    )
+    assert {
+        "lifespan",
+        "_WORKER_STARTUP_DIAGNOSTIC_PATHS",
+        "_gateway_worker_startup_ready",
+        "require_worker_authority_after_liveness",
+    } <= set(PROTECTED_SYMBOLS["gateway/main.py"])
     assert {
         "_TRANSIENT_ERROR_SIGNATURES",
         "_TRANSIENT_ERROR_TYPE_SIGNATURES",

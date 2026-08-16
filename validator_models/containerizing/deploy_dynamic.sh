@@ -194,7 +194,6 @@ LEADPOET_SENTRY_ENV_ARGS=(
     -e LEADPOET_SENTRY_ENABLED
     -e LEADPOET_SENTRY_DSN
     -e LEADPOET_SENTRY_ENVIRONMENT
-    -e LEADPOET_SENTRY_RELEASE
     -e LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES
     -e LEADPOET_SENTRY_MESSAGE_MODE
     -e LEADPOET_SENTRY_TRACES_SAMPLE_RATE
@@ -478,6 +477,7 @@ start_container() {
       -e LEADPOET_CONTAINER_MODE=1 \
       -e LEADPOET_WRAPPER_ACTIVE=1 \
       -e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION" \
+      -e LEADPOET_SENTRY_RELEASE="$VALIDATOR_V2_DEPLOY_COMMIT" \
       -e VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
       -e VALIDATOR_EXACT_RELEASE_PINNED="${VALIDATOR_EXACT_RELEASE_PINNED:-0}" \
       -e GITHUB_SHA="$VALIDATOR_V2_DEPLOY_COMMIT" \
@@ -633,6 +633,10 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
           -e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION" \
+          -e LEADPOET_SENTRY_RELEASE="$VALIDATOR_V2_DEPLOY_COMMIT" \
+          -e VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
+          -e GITHUB_SHA="$VALIDATOR_V2_DEPLOY_COMMIT" \
+          -e GIT_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
           -e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON="${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" \
           -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
       -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
@@ -731,6 +735,10 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
           -e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION" \
+          -e LEADPOET_SENTRY_RELEASE="$VALIDATOR_V2_DEPLOY_COMMIT" \
+          -e VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
+          -e GITHUB_SHA="$VALIDATOR_V2_DEPLOY_COMMIT" \
+          -e GIT_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
           -e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON="${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" \
           -e ENABLE_FULFILLMENT=true \
           -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
@@ -802,6 +810,55 @@ echo "⏳ Waiting 30 seconds for validators to fully initialize..."
 sleep 30
 
 echo "🔐 Verifying authoritative validator coordinator runtime..."
+validate_container_release_identity() {
+    local container_name="$1"
+    local container_environment
+
+    if [ "$(docker inspect -f '{{.Image}}' "$container_name")" != "$PREPARED_IMAGE_ID" ]; then
+        echo "❌ ERROR: $container_name image differs from the prepared candidate image" >&2
+        return 1
+    fi
+    if [ "$(
+        docker inspect -f \
+            '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$container_name"
+    )" != "$VALIDATOR_V2_DEPLOY_COMMIT" ]; then
+        echo "❌ ERROR: $container_name image revision differs from the approved commit" >&2
+        return 1
+    fi
+    container_environment="$(
+        docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+            "$container_name"
+    )"
+    for release_variable in \
+        LEADPOET_SENTRY_RELEASE \
+        VALIDATOR_V2_DEPLOY_COMMIT \
+        GITHUB_SHA \
+        GIT_COMMIT; do
+        if [ "$(
+            printf '%s\n' "$container_environment" \
+                | sed -n "s/^${release_variable}=//p"
+        )" != "$VALIDATOR_V2_DEPLOY_COMMIT" ]; then
+            echo "❌ ERROR: $container_name $release_variable differs from the approved commit" >&2
+            return 1
+        fi
+    done
+    if ! docker exec -i "$container_name" python3 - <<'PY'
+import os
+
+from leadpoet_observability.sentry_bootstrap import _release_identity
+
+expected = os.environ.get("VALIDATOR_V2_DEPLOY_COMMIT", "")
+if not expected or _release_identity() != expected:
+    raise SystemExit("validator Sentry release differs from approved commit")
+PY
+    then
+        echo "❌ ERROR: $container_name Sentry release differs from the approved commit" >&2
+        return 1
+    fi
+}
+
+validate_container_release_identity "leadpoet-validator-main"
 if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "true" ]; then
     echo "❌ ERROR: validator coordinator is not running" >&2
     docker logs --tail 160 leadpoet-validator-main >&2 || true
@@ -985,6 +1042,7 @@ validate_worker_epoch_authority() {
         echo "❌ ERROR: $container_name restarted during startup" >&2
         return 1
     fi
+    validate_container_release_identity "$container_name"
     if ! docker exec "$container_name" sh -c \
         'test -n "${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}"'; then
         echo "❌ ERROR: $container_name is missing the official epoch cutover manifest" >&2

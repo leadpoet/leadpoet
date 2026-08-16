@@ -47,6 +47,26 @@
       "symbol": "submit_weights_v2"
     },
     {
+      "ast_sha256": "sha256:f07022b98e772f46e1c094f93fc59a17cce587f3bb4309676bba1a0f254ad9b3",
+      "path": "gateway/main.py",
+      "symbol": "_WORKER_STARTUP_DIAGNOSTIC_PATHS"
+    },
+    {
+      "ast_sha256": "sha256:86ce62913ea6c372c6fff9667fc420f55aec41115559c4d64eb636a70344cbcf",
+      "path": "gateway/main.py",
+      "symbol": "_gateway_worker_startup_ready"
+    },
+    {
+      "ast_sha256": "sha256:c7af905de6136be18e703291bfbade37153f945273cc7922ad310ee45b6d6e7d",
+      "path": "gateway/main.py",
+      "symbol": "lifespan"
+    },
+    {
+      "ast_sha256": "sha256:13985d6c8884f95305cb7072fe18bddf88a33396cf09a2f46fe603565687ea9e",
+      "path": "gateway/main.py",
+      "symbol": "require_worker_authority_after_liveness"
+    },
+    {
       "ast_sha256": "sha256:3e76ff2fb413d0a9779cf9bf56777908084eca03de44587fd09baa46ac7f6147",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_build_allocation_v2_singleflight"
@@ -1105,6 +1125,11 @@
       "ast_sha256": "sha256:08da5c2bce0a0a2481299ff01d87466c0e351d7ca435f374244f73b853e49a58",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "settle_chain_realized_epoch_v1"
+    },
+    {
+      "ast_sha256": "sha256:80cabcc90a12846d2a41c883b82483110e5ec7442b08f49e892f32ef724b86b5",
+      "path": "gateway/research_lab/worker_autostart.py",
+      "symbol": "start_worker_supervisor_without_blocking_event_loop"
     },
     {
       "ast_sha256": "sha256:0e258fd7f27ee8b7717f739a82c17dd4bdceab5da63323bc33bbe645d4026c29",
@@ -3547,7 +3572,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:76396b000faa3ec4943eb8db24f7aa10a5aff0c606d142e538d85e135caa9077",
-  "protected_source_commit": "4813462ff899b39c7c69304f9b31679b65786f81",
+  "manifest_hash": "sha256:e26ce7c3b09d2dd6151e0bff961a652bc45629061852ec2f363255a6e6909dbe",
+  "protected_source_commit": "86bb729cda7a0904b7151c5c2cc4b6d7dd364248",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

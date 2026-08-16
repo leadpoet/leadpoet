@@ -9851,7 +9851,7 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
         validate_receipt_graphs,
     )
     from research_lab.eval.private_runtime import compute_private_source_tree_hash
-    from scripts.run_physical_v2_staging import (
+    from scripts.run_production_parity_full_host import (
         _contains_dashboard_identity,
         _rebenchmark_identity,
     )

@@ -184,7 +184,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "scripts/export_research_lab_dev_icp_inputs.py",
     "scripts/publish_research_lab_dev_snapshot.py",
     "scripts/record_research_lab_dev_snapshots.py",
-    "scripts/run_physical_v2_staging.py",
+    "scripts/run_production_parity_full_host.py",
     "tests/restart_rehearsal/boundary_contract.json",
     "tests/restart_rehearsal/dev_snapshot_boundary/sitecustomize.py",
     "tests/restart_rehearsal/dev_snapshot_workflow.py",

@@ -59,6 +59,7 @@ from scripts.run_production_parity_fast import _DockerDatabase  # noqa: E402
 
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RUN_RE = re.compile(r"^[a-z0-9-]{6,40}$")
 PINNED_IMAGE_RE = re.compile(r"^[A-Za-z0-9._/:@-]+@sha256:[0-9a-f]{64}$")
 SCHEMA_VERSION = "leadpoet.production_parity_full.v2"
@@ -206,6 +207,156 @@ def _gateway_json(path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise FullParityError(f"gateway response is invalid: {path}")
     return value
+
+
+def _report_document(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    report = value.get("report_doc")
+    return report if isinstance(report, Mapping) else value
+
+
+def _rebenchmark_identity(
+    value: Mapping[str, Any],
+    *,
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate and identify one published result using candidate policy."""
+
+    report = _report_document(value)
+    expected_counts = {
+        "public": int(policy.get("public_total_icps") or 0),
+        "private": int(policy.get("private_total_icps") or 0),
+        "conditional": int(policy.get("conditional_total_icps") or 0),
+    }
+    expected_total = sum(expected_counts.values())
+    public_weak = int(policy.get("public_weak_total") or 0)
+    private_weak = int(policy.get("private_weak_total") or 0)
+    if (
+        any(count <= 0 for count in expected_counts.values())
+        or public_weak < 0
+        or public_weak > expected_counts["public"]
+        or private_weak < 0
+        or private_weak > expected_counts["private"]
+    ):
+        raise FullParityError("candidate ICP policy is invalid")
+    split = report.get("visibility_split")
+    if not isinstance(split, Mapping):
+        raise FullParityError("published rebenchmark assignment is missing")
+    observed_counts = {
+        "public": int(split.get("public_count") or 0),
+        "private": int(split.get("private_count") or 0),
+        "conditional": int(split.get("conditional_count") or 0),
+    }
+    try:
+        aggregate_score = float(
+            value.get("aggregate_score")
+            if value.get("aggregate_score") is not None
+            else report.get("aggregate_score")
+        )
+    except (TypeError, ValueError) as exc:
+        raise FullParityError("published rebenchmark score is invalid") from exc
+    public_strength = split.get("public_strength_counts")
+    private_strength = split.get("private_strength_counts")
+    expected_public_strength = {
+        "strong": expected_counts["public"] - public_weak,
+        "weak": public_weak,
+    }
+    expected_private_strength = {
+        "strong": expected_counts["private"] - private_weak,
+        "weak": private_weak,
+    }
+    expected_public_strength = {
+        key: count
+        for key, count in expected_public_strength.items()
+        if count > 0
+    }
+    expected_private_strength = {
+        key: count
+        for key, count in expected_private_strength.items()
+        if count > 0
+    }
+    report_hash = str(report.get("report_public_hash") or "")
+    report_without_hash = {
+        key: item for key, item in report.items() if key != "report_public_hash"
+    }
+    if (
+        value.get("current_report_status") != "published"
+        or value.get("benchmark_quality") != "passed"
+        or report.get("report_type") != "research_lab_public_daily_benchmark"
+        or int(report.get("item_count") or 0) != expected_total
+        or observed_counts != expected_counts
+        or dict(public_strength or {}) != expected_public_strength
+        or dict(private_strength or {}) != expected_private_strength
+        or str(split.get("split_policy") or "")
+        != str(policy.get("selection_policy") or "")
+        or str(split.get("rolling_window_hash") or "")
+        != str(report.get("rolling_window_hash") or "")
+        or not 0.0 <= aggregate_score <= 100.0
+        or not HASH_RE.fullmatch(report_hash)
+        or report_hash != sha256_json(report_without_hash)
+    ):
+        raise FullParityError(
+            "published rebenchmark score or assignment differs from candidate policy"
+        )
+    identity = {
+        "report_id": str(value.get("report_id") or ""),
+        "benchmark_bundle_id": str(value.get("benchmark_bundle_id") or ""),
+        "benchmark_date": str(value.get("benchmark_date") or ""),
+        "rolling_window_hash": str(value.get("rolling_window_hash") or ""),
+        "private_model_artifact_hash": str(
+            value.get("private_model_artifact_hash") or ""
+        ),
+        "private_model_manifest_hash": str(
+            value.get("private_model_manifest_hash") or ""
+        ),
+        "aggregate_score": aggregate_score,
+        "item_count": expected_total,
+        "report_public_hash": report_hash,
+        "category_counts": observed_counts,
+        "public_strength_counts": dict(public_strength or {}),
+        "private_strength_counts": dict(private_strength or {}),
+    }
+    if (
+        not identity["report_id"]
+        or not identity["benchmark_bundle_id"]
+        or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", identity["benchmark_date"])
+        or not HASH_RE.fullmatch(identity["rolling_window_hash"])
+        or not HASH_RE.fullmatch(identity["private_model_artifact_hash"])
+        or not HASH_RE.fullmatch(identity["private_model_manifest_hash"])
+    ):
+        raise FullParityError("published rebenchmark identity is incomplete")
+    return identity
+
+
+def _contains_dashboard_identity(
+    value: Any,
+    identity: Mapping[str, Any],
+) -> bool:
+    """Match the public subnet-dashboard projection to a durable result."""
+
+    if not isinstance(value, Mapping) or value.get("success") is not True:
+        return False
+    data = value.get("data")
+    benchmark = data.get("benchmark") if isinstance(data, Mapping) else None
+    if not isinstance(benchmark, Mapping):
+        return False
+    try:
+        score_matches = float(benchmark.get("aggregateScore")) == float(
+            identity["aggregate_score"]
+        )
+        count_matches = int(benchmark.get("itemCount")) == int(
+            identity["item_count"]
+        )
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(benchmark.get("reportId") or "") == identity["report_id"]
+        and str(benchmark.get("benchmarkDate") or "")
+        == identity["benchmark_date"]
+        and str(benchmark.get("rollingWindowHash") or "")
+        == identity["rolling_window_hash"]
+        and score_matches
+        and count_matches
+    )
 
 
 def _parse_gateway_environment_file(path: Path) -> dict[str, str]:

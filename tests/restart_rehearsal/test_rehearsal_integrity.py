@@ -2808,7 +2808,7 @@ def test_sitecustomize_installs_vsock_adapter_under_production_safe_path(
     assert "Error in sitecustomize" not in observed_stderr
 
 
-def test_sitecustomize_derives_exact_meminfo_reads_from_candidate_topology(
+def test_sitecustomize_bootstraps_exact_meminfo_without_candidate_pythonpath(
     tmp_path,
 ) -> None:
     harness_root = Path(__file__).resolve().parent
@@ -2818,28 +2818,37 @@ def test_sitecustomize_derives_exact_meminfo_reads_from_candidate_topology(
     ordinary_path.write_text("ordinary-boundary", encoding="utf-8")
     environment = {
         **os.environ,
-        "PYTHONPATH": f"{harness_root}:{repository_root}",
+        "PYTHONPATH": str(harness_root),
+        "PYTHONSAFEPATH": "1",
         "REHEARSAL_CANDIDATE_SHA": COMMIT,
         "REHEARSAL_SCOPE": "exact",
         "REHEARSAL_SOURCE_ROOT": str(repository_root),
         "REHEARSAL_STATE_ROOT": str(state_root),
         "AWS_EC2_METADATA_DISABLED": "true",
     }
+    safe_path_flag = ["-P"] if sys.version_info >= (3, 11) else []
     stderr_path = tmp_path / "meminfo.stderr"
     with stderr_path.open("w", encoding="utf-8") as stderr:
         result = subprocess.run(
             [
                 sys.executable,
+                *safe_path_flag,
                 "-c",
                 "\n".join(
                     (
                     "import builtins",
                     "import json",
                     "import os",
+                    "import sitecustomize",
+                    "import sys",
                     "from pathlib import Path",
+                    f"source_root = Path({str(repository_root)!r})",
+                    "assert str(source_root) not in sys.path",
+                    "assert 'gateway' not in sys.modules",
+                    "assert Path(sitecustomize._rehearsal_topology_module.__file__).resolve() == (source_root / 'gateway/tee/topology.py').resolve()",
+                    "sys.path.insert(0, str(source_root))",
                     "from gateway.research_lab.scoring_worker import _read_mem_available_mb",
                     "from gateway.tee.topology import validate_manifest",
-                    f"source_root = Path({str(repository_root)!r})",
                     f"ordinary_path = Path({str(ordinary_path)!r})",
                     f"state_root = Path({str(state_root)!r})",
                     "topology = validate_manifest(json.loads((source_root / 'gateway/tee/topology.json').read_text(encoding='utf-8')))",
@@ -2878,6 +2887,55 @@ def test_sitecustomize_derives_exact_meminfo_reads_from_candidate_topology(
     observed_stderr = stderr_path.read_text(encoding="utf-8")
     assert result.returncode == 0, observed_stderr
     assert "Error in sitecustomize" not in observed_stderr
+
+
+def test_sitecustomize_fails_closed_when_candidate_topology_is_unavailable(
+    tmp_path,
+) -> None:
+    harness_root = Path(__file__).resolve().parent
+    source_root = tmp_path / "missing-candidate-topology"
+    source_root.mkdir()
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(harness_root),
+        "PYTHONSAFEPATH": "1",
+        "REHEARSAL_CANDIDATE_SHA": COMMIT,
+        "REHEARSAL_SCOPE": "exact",
+        "REHEARSAL_SOURCE_ROOT": str(source_root),
+        "REHEARSAL_STATE_ROOT": str(tmp_path / "state"),
+        "AWS_EC2_METADATA_DISABLED": "true",
+    }
+    safe_path_flag = ["-P"] if sys.version_info >= (3, 11) else []
+
+    stdout_path = tmp_path / "missing-topology.stdout"
+    stderr_path = tmp_path / "missing-topology.stderr"
+    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
+        "w", encoding="utf-8"
+    ) as stderr:
+        result = subprocess.run(
+            [
+                sys.executable,
+                *safe_path_flag,
+                "-c",
+                "print('candidate-main-reached')",
+            ],
+            cwd=tmp_path,
+            env=environment,
+            text=True,
+            stdout=stdout,
+            stderr=stderr,
+            check=False,
+            timeout=30,
+        )
+
+    observed_stdout = stdout_path.read_text(encoding="utf-8")
+    observed_stderr = stderr_path.read_text(encoding="utf-8")
+    assert result.returncode != 0
+    assert "candidate-main-reached" not in observed_stdout
+    assert (
+        "SystemExit: exact rehearsal candidate topology bootstrap failed"
+        in observed_stderr
+    )
 
 
 def test_local_kms_recipient_uses_boot_authorized_references() -> None:

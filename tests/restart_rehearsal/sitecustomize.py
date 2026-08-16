@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import fcntl
 import hashlib
 import importlib
+import importlib.util
 import io
 import json
 import os
@@ -3888,11 +3889,61 @@ def _local_urlopen(
 
 
 if os.environ.get("REHEARSAL_SCOPE") == "exact":
+    _real_open = builtins.open
+    _real_path_read_text = Path.read_text
+    try:
+        _rehearsal_topology_module_path = (
+            SOURCE_ROOT / "gateway/tee/topology.py"
+        )
+        if not _rehearsal_topology_module_path.is_file():
+            raise FileNotFoundError("candidate topology module is unavailable")
+        _rehearsal_topology_spec = importlib.util.spec_from_file_location(
+            "_leadpoet_rehearsal_candidate_topology",
+            _rehearsal_topology_module_path,
+        )
+        if (
+            _rehearsal_topology_spec is None
+            or _rehearsal_topology_spec.loader is None
+        ):
+            raise RuntimeError("candidate topology module cannot be loaded")
+        _rehearsal_topology_module = importlib.util.module_from_spec(
+            _rehearsal_topology_spec
+        )
+        _rehearsal_topology_spec.loader.exec_module(
+            _rehearsal_topology_module
+        )
+        _validate_topology_manifest = getattr(
+            _rehearsal_topology_module,
+            "validate_manifest",
+            None,
+        )
+        if not callable(_validate_topology_manifest):
+            raise RuntimeError("candidate topology validator is unavailable")
+        _rehearsal_topology_path = SOURCE_ROOT / "gateway/tee/topology.json"
+        _rehearsal_topology = _validate_topology_manifest(
+            json.loads(
+                _real_path_read_text(
+                    _rehearsal_topology_path,
+                    encoding="utf-8",
+                )
+            )
+        )
+        _rehearsal_host_reserved_memory_mib = int(
+            _rehearsal_topology["host_reserved_memory_mib"]
+        )
+        if _rehearsal_host_reserved_memory_mib <= 0:
+            raise ValueError(
+                "candidate topology host memory reservation is invalid"
+            )
+    except Exception as exc:
+        raise SystemExit(
+            "exact rehearsal candidate topology bootstrap failed"
+        ) from exc
+
     import boto3
     import bittensor
     import urllib.request
     from bittensor.core import subtensor as bittensor_subtensor
-    from gateway.tee.topology import validate_manifest as _validate_topology_manifest
 
     _REAL_SUBTENSOR_CLASS = bittensor.Subtensor
     bittensor.Subtensor = _LocalSubtensor
@@ -3900,8 +3951,6 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     bittensor.Metagraph = _LocalMetagraph
     bittensor_subtensor.Subtensor = _LocalSubtensor
     _real_boto3_client = boto3.client
-    _real_open = builtins.open
-    _real_path_read_text = Path.read_text
     _real_socket = _ORIGINAL_SOCKET
     _real_getaddrinfo = _ORIGINAL_GETADDRINFO
     _real_sysconf = os.sysconf
@@ -3912,20 +3961,6 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     }
     _rehearsal_proxy_address = "93.184.216.34"
     _rehearsal_proxy_port = 18443
-    _rehearsal_topology_path = SOURCE_ROOT / "gateway/tee/topology.json"
-    _rehearsal_topology = _validate_topology_manifest(
-        json.loads(
-            _real_path_read_text(
-                _rehearsal_topology_path,
-                encoding="utf-8",
-            )
-        )
-    )
-    _rehearsal_host_reserved_memory_mib = int(
-        _rehearsal_topology["host_reserved_memory_mib"]
-    )
-    if _rehearsal_host_reserved_memory_mib <= 0:
-        raise ValueError("candidate topology host memory reservation is invalid")
 
     def _local_boto3_client(service_name: str, *args: Any, **kwargs: Any) -> Any:
         if service_name == "s3":

@@ -1297,7 +1297,7 @@
       "symbol": "settle_chain_realized_epoch_v1"
     },
     {
-      "ast_sha256": "sha256:80cabcc90a12846d2a41c883b82483110e5ec7442b08f49e892f32ef724b86b5",
+      "ast_sha256": "sha256:453299cb646931fde0ddc85b51e77a8eacaccac9170e10198d4f3ed32ca83663",
       "path": "gateway/research_lab/worker_autostart.py",
       "symbol": "start_worker_supervisor_without_blocking_event_loop"
     },
@@ -4112,7 +4112,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:cd1f51aa52eb46ebb9da5149e1f2cc8aa025fc3bdd921ce97d307ed6d4b7c950",
-  "protected_source_commit": "a62910f4767d19f717feb2ec8cd1e980cb43dcea",
+  "manifest_hash": "sha256:d4a2e5f2757ed7e83297a38d3ae4e443f6da695b5a2eaaadb46049816d8da1b4",
+  "protected_source_commit": "1c7ae0a70a49a993a99f66cb1678d540515966c0",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

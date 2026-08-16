@@ -29,6 +29,7 @@ CONTROLLER_ROLE = "leadpoet-production-parity-controller"
 RUNNER_ROLE = "leadpoet-production-parity-runner"
 RUNNER_PROFILE = "leadpoet-production-parity-runner"
 OIDC_URL = "https://token.actions.githubusercontent.com"
+DEFAULT_REPOSITORY = "leadpoet/leadpoet"
 
 
 class SetupError(RuntimeError):
@@ -676,7 +677,7 @@ def setup(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("apply",))
-    parser.add_argument("--repository", default="leadpoet/Bittensor-subnet")
+    parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--production-gateway-ip", default="52.91.135.79")
     parser.add_argument("--production-gateway-url", required=True)

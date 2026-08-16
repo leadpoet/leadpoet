@@ -34,6 +34,7 @@ from scripts.run_production_parity_fast import (
     _ProductionReadOnlySupabaseProvider,
 )
 from scripts.setup_production_parity_staging import (
+    DEFAULT_REPOSITORY,
     _controller_policy,
     _runner_policy,
 )
@@ -46,6 +47,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 40
 HASH = "sha256:" + "b" * 64
 ORIGIN = "https://d111111abcdef8.cloudfront.net"
+
+
+def test_setup_targets_the_authoritative_github_repository():
+    assert DEFAULT_REPOSITORY == "leadpoet/leadpoet"
 
 
 def _snapshot(*, bypass_rls: bool = True, capture_mode: str = "full") -> dict:

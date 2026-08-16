@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -5507,11 +5508,13 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     )
     from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
     from gateway.tee.model_sandbox_v2 import (
+        MODEL_SANDBOX_TIMEOUT_GRACE_SECONDS,
         ModelSandboxV2Error,
         _model_sandbox_process_timeout_seconds,
     )
     from research_lab.eval.private_runtime import (
         PrivateModelRuntimeError,
+        SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS,
         context_with_runtime_options,
     )
     from research_lab.eval import evaluator
@@ -5571,8 +5574,27 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
             },
         )
 
+    from dynamic_rebenchmark_workflow import (
+        patched_rebenchmark_launch_environment,
+        rebenchmark_launch_environment,
+    )
+
+    launch_environment = rebenchmark_launch_environment()
+    with patched_rebenchmark_launch_environment(launch_environment):
+        launch_config = ResearchLabGatewayConfig.from_env()
+    model_timeout_seconds = int(
+        launch_config.scoring_worker_model_timeout_seconds
+    )
+    configured_total_icps = int(
+        launch_config.conditional_validation_policy().total_icps
+    )
+    baseline_width = min(
+        configured_total_icps,
+        int(launch_config.private_baseline_concurrency),
+    )
+
     runner = object.__new__(AttestedPrivateModelRunnerV2)
-    runner.spec = SimpleNamespace(timeout_seconds=1800)
+    runner.spec = SimpleNamespace(timeout_seconds=model_timeout_seconds)
     runner._execute_operation = fail_measured_operation  # type: ignore[method-assign]
     for _expected_failure in range(3):
         try:
@@ -5613,35 +5635,38 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
     with _baseline_wave_watchdog(
         worker_ref="rehearsal-scoring-worker",
         phase="first_pass",
-        item_indexes=(37, 40),
+        item_indexes=tuple(
+            range(
+                configured_total_icps - baseline_width + 1,
+                configured_total_icps + 1,
+            )
+        ),
         timeout_seconds=0.01,
         on_timeout=lambda **_kwargs: watchdog_fired.set(),
     ):
         if not watchdog_fired.wait(1.0):
             raise RuntimeError("baseline wave watchdog did not fire")
 
+    runtime_options = context_with_runtime_options(
+        {},
+        outer_timeout_seconds=model_timeout_seconds,
+    )["runtime_options"]
+    runtime_cap = float(runtime_options["runtime_cap_seconds"])
     sandbox_timeout = _model_sandbox_process_timeout_seconds(
         {
             "operation": "run_icp",
-            "input": {
-                "context": {
-                    "runtime_options": {"runtime_cap_seconds": 1500.0},
-                }
-            },
+            "input": {"context": {"runtime_options": runtime_options}},
         }
     )
-    if sandbox_timeout != 1503:
+    if sandbox_timeout != math.ceil(runtime_cap) + int(
+        MODEL_SANDBOX_TIMEOUT_GRACE_SECONDS
+    ):
         raise RuntimeError("model sandbox ignored committed runtime allocation")
-    runtime_options = context_with_runtime_options(
-        {},
-        outer_timeout_seconds=1800,
-    )["runtime_options"]
-    runtime_cap = float(runtime_options["runtime_cap_seconds"])
     finalization_reserve = float(
         runtime_options["finalization_reserve_seconds"]
     )
     finalization_window = sandbox_timeout - (runtime_cap - finalization_reserve)
-    if finalization_reserve != 60.0 or finalization_window < 60.0:
+    if finalization_reserve <= 0.0 or finalization_window < finalization_reserve:
         raise RuntimeError(
             "model runtime lacks committed result-finalization headroom"
         )
@@ -5651,7 +5676,12 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
                 "operation": "run_icp",
                 "input": {
                     "context": {
-                        "runtime_options": {"runtime_cap_seconds": 1500.1},
+                        "runtime_options": {
+                            "runtime_cap_seconds": (
+                                SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS
+                                + max(1.0, runtime_cap / configured_total_icps)
+                            )
+                        },
                     }
                 },
             }
@@ -6773,6 +6803,9 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     from gateway.tee.provider_semantics_v2 import ProviderSemanticsAuthorityV2
     from gateway.tee.update_gateway_rebenchmark_retry_secret import (
         GatewayRebenchmarkRetryUpdateError,
+        _RETRY_CONCURRENCY_ENV,
+        _RETRY_ROUNDS_ENV,
+        _TARGET_VALUES,
         update_gateway_rebenchmark_retry_secret,
     )
     from leadpoet_canonical.attested_v2 import (
@@ -6781,6 +6814,22 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         canonical_json,
         sha256_bytes,
         sha256_json,
+    )
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+    from gateway.research_lab.provider_preflight import provider_preflight_settings
+    from dynamic_rebenchmark_workflow import (
+        patched_rebenchmark_launch_environment,
+        rebenchmark_launch_environment,
+    )
+
+    launch_environment = rebenchmark_launch_environment()
+    with patched_rebenchmark_launch_environment(launch_environment):
+        launch_config = ResearchLabGatewayConfig.from_env()
+        launch_preflight_ttl_seconds = float(
+            provider_preflight_settings()["ttl_seconds"]
+        )
+    configured_total_icps = int(
+        launch_config.conditional_validation_policy().total_icps
     )
 
     coordinator_httpx_grant = _exercise_coordinator_broker_owned_httpx_grant()
@@ -7890,12 +7939,24 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         raise RuntimeError("exhausted rebenchmark health gate was reopened unchanged")
 
     if not _private_baseline_uses_batch_execution(
-        SimpleNamespace(private_baseline_concurrency=1)
+        SimpleNamespace(
+            private_baseline_concurrency=(
+                launch_config.private_baseline_concurrency
+            )
+        )
     ):
         raise RuntimeError("async concurrency-one baseline used the serial runner")
-    _require_v2_baseline_receipt_capacity(40)
+    _require_v2_baseline_receipt_capacity(configured_total_icps)
+    receipts_per_icp = int(
+        scoring_worker_module._V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
+    )
+    first_oversized_bank = (
+        int(scoring_worker_module.MAX_EXTERNAL_RECEIPT_GRAPHS)
+        // receipts_per_icp
+        + 1
+    )
     try:
-        _require_v2_baseline_receipt_capacity(65)
+        _require_v2_baseline_receipt_capacity(first_oversized_bank)
     except RuntimeError:
         pass
     else:
@@ -7903,7 +7964,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
 
     exact_receipt_frontier: set[str] = set()
     superseded_receipt_hashes: set[str] = set()
-    for item_index in range(40):
+    for item_index in range(configured_total_icps):
         model_receipt_hash = f"sha256:{10_000 + item_index:064x}"
         scorer_receipt_hash = f"sha256:{20_000 + item_index:064x}"
         superseded_receipt_hashes.update(
@@ -7923,7 +7984,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             },
         )
     if (
-        len(exact_receipt_frontier) != 80
+        len(exact_receipt_frontier)
+        != configured_total_icps * receipts_per_icp
         or exact_receipt_frontier.intersection(superseded_receipt_hashes)
     ):
         raise RuntimeError("V2 rebenchmark causal receipt frontier differed")
@@ -8191,6 +8253,29 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         asyncio.run(exercise_pause_checkpoint_resume())
 
         async def exercise_partial_retry_round_resume() -> None:
+            current_retry_rounds = max(
+                1,
+                int(launch_config.private_baseline_provider_retry_rounds),
+            )
+            prior_retry_rounds = current_retry_rounds - 1
+            retry_item_count = min(
+                configured_total_icps,
+                int(launch_config.private_baseline_concurrency)
+                + int(launch_config.private_baseline_retry_concurrency),
+            )
+            if retry_item_count <= 1:
+                raise RuntimeError(
+                    "configured rebenchmark bank cannot exercise a partial retry wave"
+                )
+            worker_count = max(
+                1,
+                int(launch_config.scoring_worker_total_workers),
+            )
+            clock_step = max(
+                1.0,
+                launch_preflight_ttl_seconds / configured_total_icps,
+            )
+
             class RetryResumeWorker(ResearchLabGatewayScoringWorker):
                 async def _run_baseline_icp(
                     self,
@@ -8201,11 +8286,13 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                     **_kwargs: Any,
                 ) -> dict[str, Any]:
                     retry_calls.append((item_index, retry_round))
-                    if retry_round == 1:
-                        # The settled retry exceeds the 600s provider proof
-                        # TTL before the next wave is allocated.
-                        clock["value"] = 601.0
-                    retryable = retry_round < 2
+                    if retry_round == prior_retry_rounds:
+                        # The settled retry exceeds the launch-derived provider
+                        # proof TTL before the next wave is allocated.
+                        clock["value"] = (
+                            launch_preflight_ttl_seconds + clock_step
+                        )
+                    retryable = retry_round < current_retry_rounds
                     return attempt_row(
                         item_index,
                         retry_round=retry_round,
@@ -8243,10 +8330,14 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             retry_worker = object.__new__(RetryResumeWorker)
             retry_worker.worker_ref = "rehearsal-baseline-retry-worker"
             retry_worker.config = SimpleNamespace(
-                private_baseline_concurrency=3,
-                private_baseline_retry_concurrency=3,
-                private_baseline_provider_retry_rounds=2,
-                scoring_worker_total_workers=25,
+                private_baseline_concurrency=int(
+                    launch_config.private_baseline_concurrency
+                ),
+                private_baseline_retry_concurrency=int(
+                    launch_config.private_baseline_retry_concurrency
+                ),
+                private_baseline_provider_retry_rounds=current_retry_rounds,
+                scoring_worker_total_workers=worker_count,
                 scoring_worker_index=0,
                 private_baseline_rebenchmark_enabled=True,
             )
@@ -8257,36 +8348,40 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                         "icp_ref": f"retry-icp-{index}",
                         "icp_hash": f"retry-hash-{index}",
                     }
-                    for index in range(1, 4)
+                    for index in range(1, retry_item_count + 1)
                 ]
             )
             prior_runtime = "8" * 40
             current_runtime = "9" * 40
-            prior_values = {
-                name: None for name in SCORING_RUNTIME_ENV_NAMES
+            current_values = {
+                name: launch_environment.get(name)
+                for name in SCORING_RUNTIME_ENV_NAMES
             }
-            current_values = dict(prior_values)
             current_values[
                 "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"
-            ] = "2"
+            ] = str(current_retry_rounds)
+            prior_values = dict(current_values)
+            prior_values[
+                "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"
+            ] = str(prior_retry_rounds)
             prior_hash = scoring_configuration_hash(prior_values)
             current_hash = scoring_configuration_hash(current_values)
             resume_attempts = [
                 _baseline_attempt_ledger_entry(
-                    attempt_row(index, retry_round=0, retryable=True),
-                    retry_round=0,
+                    attempt_row(
+                        index,
+                        retry_round=retry_round,
+                        retryable=True,
+                    ),
+                    retry_round=retry_round,
                     gateway_runtime_commit_sha=prior_runtime,
                 )
-                for index in range(1, 4)
+                for index in range(1, retry_item_count + 1)
+                for retry_round in range(
+                    prior_retry_rounds
+                    + (1 if index < retry_item_count else 0)
+                )
             ]
-            resume_attempts.extend(
-                _baseline_attempt_ledger_entry(
-                    attempt_row(index, retry_round=1, retryable=True),
-                    retry_round=1,
-                    gateway_runtime_commit_sha=prior_runtime,
-                )
-                for index in range(1, 3)
-            )
             retry_checkpoint_key = "baseline/partial-retry-progress.json"
             _store_baseline_scoring_progress(
                 checkpoint_bucket,
@@ -8387,16 +8482,29 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                     checkpoint_objects[object_ref] = checkpoint_body
 
                 gap_doc = json.loads(checkpoint_body.decode("utf-8"))
+                gap_entries = [
+                    entry
+                    for entry in gap_doc["attempt_ledger"]["entries"]
+                    if not (
+                        entry["icp_ref"] == "retry-icp-1"
+                        and entry["retry_round"] == 0
+                    )
+                ]
+                if prior_retry_rounds == 0:
+                    gap_entries.append(
+                        _baseline_attempt_ledger_entry(
+                            attempt_row(
+                                1,
+                                retry_round=current_retry_rounds,
+                                retryable=True,
+                            ),
+                            retry_round=current_retry_rounds,
+                            gateway_runtime_commit_sha=prior_runtime,
+                        )
+                    )
                 gap_doc["attempt_ledger"] = (
                     scoring_worker_module._baseline_attempt_ledger_doc(
-                        [
-                            entry
-                            for entry in gap_doc["attempt_ledger"]["entries"]
-                            if not (
-                                entry["icp_ref"] == "retry-icp-1"
-                                and entry["retry_round"] == 0
-                            )
-                        ]
+                        gap_entries
                     )
                 )
                 checkpoint_objects[object_ref] = json.dumps(
@@ -8404,12 +8512,16 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 ).encode("utf-8")
                 gap_attempts: list[dict[str, Any]] = []
                 gap_extensions: list[dict[str, Any]] = []
-                load_extension(
-                    attempts_out=gap_attempts,
-                    extension_out=gap_extensions,
-                )
-                if gap_attempts or gap_extensions:
-                    raise RuntimeError("retry extension accepted a round gap")
+                try:
+                    load_extension(
+                        attempts_out=gap_attempts,
+                        extension_out=gap_extensions,
+                    )
+                except RuntimeError:
+                    pass
+                else:
+                    if gap_attempts or gap_extensions:
+                        raise RuntimeError("retry extension accepted a round gap")
                 checkpoint_objects[object_ref] = checkpoint_body
 
             mismatched_values = dict(current_values)
@@ -8429,11 +8541,15 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
 
             if (
                 restored_terminal_rows
-                or len(restored_attempts) != 5
+                or len(restored_attempts)
+                != retry_item_count * (prior_retry_rounds + 1) - 1
                 or len(extensions) != 1
-                or extensions[0]["prior_retry_rounds"] != 1
-                or extensions[0]["current_retry_rounds"] != 2
-                or extensions[0]["exhausted_retryable_icp_count"] != 2
+                or extensions[0]["prior_retry_rounds"]
+                != prior_retry_rounds
+                or extensions[0]["current_retry_rounds"]
+                != current_retry_rounds
+                or extensions[0]["exhausted_retryable_icp_count"]
+                != retry_item_count - 1
             ):
                 raise RuntimeError(
                     "retry extension did not restore the exhausted checkpoint"
@@ -8469,17 +8585,33 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 async def stop(self) -> None:
                     self.held = False
 
-            async def owned_full_fleet(**kwargs: Any) -> dict[str, Any]:
+            async def strict_full_fleet_preflight(
+                **kwargs: Any,
+            ) -> dict[str, Any]:
                 if kwargs.get("force_measurement") is not True:
                     raise RuntimeError("rehearsal full-fleet refresh was not forced")
                 healthy = bool(phase["full_fleet_healthy"])
                 full_fleet_phases.append(healthy)
-                if healthy:
-                    retry_worker._baseline_profile_preflight_monotonic_at = {
-                        worker_index: clock["value"]
-                        for worker_index in range(25)
-                    }
-                return {"proceed": healthy}
+                return {
+                    "proceed": healthy,
+                    "healthy": healthy,
+                    "pause_worthy": not healthy,
+                    "disabled": False,
+                    "measurement_cached": False,
+                    "verdicts": [
+                        {
+                            "provider": (
+                                "rehearsal_profile_"
+                                f"{int(kwargs['worker_index'])}"
+                            ),
+                            "healthy": healthy,
+                            "status": (
+                                "healthy" if healthy else "credit_or_auth"
+                            ),
+                            "http_status": 200 if healthy else 402,
+                        }
+                    ],
+                }
 
             async def maintenance_noop() -> None:
                 return None
@@ -8529,6 +8661,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
             original_preflight_clock = (
                 scoring_worker_module._baseline_preflight_monotonic
             )
+            original_preflight_gate = scoring_worker_module.preflight_gate
             scoring_worker_module.get_scoring_maintenance_state = unpaused
             scoring_worker_module._retry_runner_with_provider_cost_scope = (
                 lambda runner, **_kwargs: runner
@@ -8538,18 +8671,19 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 RehearsalLeaseHeartbeat
             )
             scoring_worker_module.provider_preflight_settings = lambda: {
-                "ttl_seconds": 600.0
+                "ttl_seconds": launch_preflight_ttl_seconds
             }
             scoring_worker_module._baseline_preflight_monotonic = lambda: (
                 clock["value"]
             )
-            retry_worker._run_owned_provider_preflight = owned_full_fleet
+            scoring_worker_module.preflight_gate = strict_full_fleet_preflight
             retry_worker._recover_stale_candidate_claims = maintenance_noop
             retry_worker._alert_stuck_candidates = maintenance_noop
             retry_worker._requeue_quarantined_candidates = maintenance_noop
             retry_worker._candidate_scoring_start_gate = baseline_not_ready
             retry_worker._baseline_profile_preflight_monotonic_at = {
-                worker_index: 0.0 for worker_index in range(25)
+                worker_index: 0.0
+                for worker_index in range(worker_count)
             }
             try:
                 try:
@@ -8574,16 +8708,22 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                         raise
                 else:
                     raise RuntimeError(
-                        "stale failed profile did not recycle before retry round 2"
+                        "stale failed profile did not recycle before its next retry round"
                     )
-                if retry_calls != [(3, 1)] or len(persisted_extension_attempts) != 1:
+                expected_partial_calls = [
+                    (retry_item_count, prior_retry_rounds)
+                ]
+                if (
+                    retry_calls != expected_partial_calls
+                    or len(persisted_extension_attempts) != 1
+                ):
                     raise RuntimeError(
-                        "preflight recycle did not preserve exactly retry round 1"
+                        "preflight recycle did not preserve the partial retry round"
                     )
 
                 phase["full_fleet_healthy"] = True
                 retry_worker._baseline_profile_preflight_monotonic_at = {}
-                clock["value"] = 602.0
+                clock["value"] = launch_preflight_ttl_seconds + clock_step
                 pending_owner = await (
                     retry_worker._run_lease_held_recovery_and_preflight(
                         {"paused": False}
@@ -8609,7 +8749,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                     or set(
                         retry_worker._baseline_profile_preflight_monotonic_at
                     )
-                    != set(range(25))
+                    != set(range(worker_count))
                 ):
                     raise RuntimeError(
                         "retry resume lacked forced full-fleet freshness"
@@ -8650,20 +8790,26 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 scoring_worker_module._baseline_preflight_monotonic = (
                     original_preflight_clock
                 )
-            if (
-                retry_calls != [(3, 1), (1, 2), (2, 2), (3, 2)]
-                or any(round_number == 0 for _, round_number in retry_calls)
-            ):
+                scoring_worker_module.preflight_gate = original_preflight_gate
+            expected_retry_calls = [
+                (retry_item_count, prior_retry_rounds),
+                *[
+                    (item_index, current_retry_rounds)
+                    for item_index in range(1, retry_item_count + 1)
+                ],
+            ]
+            if retry_calls != expected_retry_calls:
                 raise RuntimeError("partial retry round replayed settled attempts")
             if (
-                full_fleet_phases != [True]
+                len(full_fleet_phases) != worker_count
+                or not all(full_fleet_phases)
             ):
                 raise RuntimeError(
                     "stale-profile recycle did not bind forced fleet evidence"
                 )
-            if len(rows) != 3 or stats != {
-                "retried": 6,
-                "recovered": 3,
+            if len(rows) != retry_item_count or stats != {
+                "retried": retry_item_count * current_retry_rounds,
+                "recovered": retry_item_count,
                 "unresolved": 0,
             }:
                 raise RuntimeError("partial retry round did not resume exactly")
@@ -8756,14 +8902,19 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 backup_directory=backup_path,
             )
             persisted_secret = client.versions[client.current]
+            expected_retry_rounds_assignment = (
+                f"{_RETRY_ROUNDS_ENV}={_TARGET_VALUES[_RETRY_ROUNDS_ENV]}"
+            )
+            expected_retry_concurrency_assignment = (
+                f"{_RETRY_CONCURRENCY_ENV}="
+                f"{_TARGET_VALUES[_RETRY_CONCURRENCY_ENV]}"
+            )
             if (
                 updated["status"] != "updated"
                 or len(client.put_calls) != 1
                 or not persisted_secret.startswith(original_secret)
-                or "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2"
-                not in persisted_secret
-                or "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1"
-                not in persisted_secret
+                or expected_retry_rounds_assignment not in persisted_secret
+                or expected_retry_concurrency_assignment not in persisted_secret
                 or Path(updated["backup_path"]).read_text(encoding="utf-8")
                 != original_secret
             ):
@@ -10166,7 +10317,9 @@ def _exercise_measured_coordinator_raw_transport() -> dict[str, Any]:
     return evidence
 
 
-def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
+def _exercise_full_rebenchmark_publication_path(
+    recovery_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Run the configured daily baseline through its production orchestrator.
 
     Nitro execution, KMS, per-ICP checkpoint S3, PostgREST, and the external
@@ -10179,6 +10332,7 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
     """
 
     from collections import defaultdict
+    from dataclasses import replace
     from io import BytesIO
     from unittest.mock import patch
 
@@ -10253,6 +10407,10 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
     from scripts.run_production_parity_full_host import (
         _contains_dashboard_identity,
         _rebenchmark_identity,
+    )
+    from dynamic_rebenchmark_workflow import (
+        patched_rebenchmark_launch_environment,
+        rebenchmark_launch_environment,
     )
 
     fixed_now = datetime(2026, 7, 25, 0, 30, tzinfo=timezone.utc)
@@ -10511,7 +10669,11 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
             )
             return SimpleNamespace(data=copy.deepcopy(rows))
 
-    config = ResearchLabGatewayConfig(
+    launch_environment = rebenchmark_launch_environment()
+    with patched_rebenchmark_launch_environment(launch_environment):
+        launch_config = ResearchLabGatewayConfig.from_env()
+    config = replace(
+        launch_config,
         api_enabled=True,
         reports_enabled=True,
         baseline_start_utc_offset_seconds=0,
@@ -10848,6 +11010,67 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
         "created_at": fixed_now.isoformat().replace("+00:00", "Z"),
     }
     checkpoint_s3 = _StrictCheckpointS3Boundary()
+    recovered_transition: dict[str, Any] | None = None
+    recovered_graphs_by_root: dict[str, dict[str, Any]] = {}
+    if recovery_builder is not None:
+        recovered_transition = dict(
+            recovery_builder(
+                {
+                    "benchmark_items": [
+                        copy.deepcopy(dict(item))
+                        for item in window.benchmark_items
+                    ],
+                    "benchmark_date": fixed_now.date().isoformat(),
+                    "window_hash": window.window_hash,
+                    "model_artifact_hash": artifact.model_artifact_hash,
+                    "manifest_hash": artifact.manifest_hash,
+                    "repo_git_sha": artifact.git_commit_sha,
+                    "evaluation_epoch": 24_600,
+                    "issued_at": fixed_now.isoformat().replace("+00:00", "Z"),
+                    "checkpoint_bucket": checkpoint_location[0],
+                    "checkpoint_key": checkpoint_location[1],
+                }
+            )
+        )
+        checkpoint_document = recovered_transition.get("checkpoint_document")
+        recovered_graphs = recovered_transition.get("receipt_graphs")
+        if (
+            not isinstance(checkpoint_document, Mapping)
+            or not isinstance(recovered_graphs, list)
+            or int(recovered_transition.get("completed_icp_count") or 0)
+            != total_icps
+            or recovered_transition.get("rolling_window_hash")
+            != window.window_hash
+            or recovered_transition.get("model_artifact_hash")
+            != artifact.model_artifact_hash
+            or recovered_transition.get("manifest_hash")
+            != artifact.manifest_hash
+            or recovered_transition.get("repo_git_sha")
+            != artifact.git_commit_sha
+        ):
+            raise RuntimeError("recovered rebenchmark lineage differs from publication")
+        recovered_graphs_by_root = {
+            str(graph.get("root_receipt_hash") or ""): copy.deepcopy(dict(graph))
+            for graph in recovered_graphs
+            if isinstance(graph, Mapping)
+        }
+        recovered_roots = {
+            str(value)
+            for value in checkpoint_document.get(
+                "attested_parent_receipt_hashes", ()
+            )
+        }
+        if (
+            set(recovered_graphs_by_root) != recovered_roots
+            or sha256_json(dict(checkpoint_document))
+            != recovered_transition.get("checkpoint_document_hash")
+        ):
+            raise RuntimeError("recovered checkpoint receipt frontier differs")
+        checkpoint_s3.objects[checkpoint_location] = json.dumps(
+            dict(checkpoint_document),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     boundary = _MemoryPostgrestBoundary(
         {
             "qualification_private_icp_sets": private_set_rows,
@@ -11649,26 +11872,44 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
         observed_roots = tuple(
             sorted(str(graph.get("root_receipt_hash") or "") for graph in parent_graphs)
         )
-        expected_roots = tuple(
-            sorted(
-                {
-                    str(receipt.get("receipt_hash") or "")
-                    for runner_instance in model_instances
-                    for receipt in runner_instance.attested_receipts()
-                }
-                | {
-                    str(receipt.get("receipt_hash") or "")
-                    for scorer_instance in scorer_instances
-                    for receipt in scorer_instance.attested_receipts()
-                }
+        expected_roots = (
+            tuple(sorted(recovered_graphs_by_root))
+            if recovered_transition is not None
+            else tuple(
+                sorted(
+                    {
+                        str(receipt.get("receipt_hash") or "")
+                        for runner_instance in model_instances
+                        for receipt in runner_instance.attested_receipts()
+                    }
+                    | {
+                        str(receipt.get("receipt_hash") or "")
+                        for scorer_instance in scorer_instances
+                        for receipt in scorer_instance.attested_receipts()
+                    }
+                )
             )
         )
         if (
-            len(observed_roots) != total_icps * 2
-            or observed_roots != expected_roots
+            observed_roots != expected_roots
             or len(set(observed_roots)) != len(observed_roots)
         ):
             raise RuntimeError("production baseline lost exact model/scorer lineage")
+        if recovered_transition is not None:
+            producer_commits = {
+                str(receipt.get("commit_sha") or "")
+                for graph in parent_graphs
+                for receipt in graph.get("receipts") or ()
+                if receipt.get("receipt_hash")
+                == graph.get("root_receipt_hash")
+            }
+            if producer_commits != {
+                str(recovered_transition["from_sha"]),
+                str(recovered_transition["candidate_sha"]),
+            }:
+                raise RuntimeError(
+                    "recovered baseline receipt producer releases differ"
+                )
         summary_hash = sha256_json(dict(measured_result["score_summary_doc"]))
         observed_inputs = tuple(
             sorted({str(item) for item in kwargs.get("input_artifact_hashes") or ()})
@@ -11696,9 +11937,22 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
     original_compare_baseline_summary_v2 = v2_authority.compare_baseline_summary_v2
 
     async def _compare_baseline_summary_v2(**kwargs: Any) -> dict[str, Any]:
+        async def _load_recovered_graph(root: str) -> dict[str, Any]:
+            try:
+                return copy.deepcopy(recovered_graphs_by_root[str(root)])
+            except KeyError as exc:
+                raise RuntimeError(
+                    "recovered baseline graph root is unavailable"
+                ) from exc
+
         return await original_compare_baseline_summary_v2(
             **kwargs,
             execute=_strict_baseline_execute,
+            load_graph=(
+                _load_recovered_graph
+                if recovered_transition is not None
+                else None
+            ),
         )
 
     async def _resolve_epoch(_configured):
@@ -11735,6 +11989,7 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
             self.check_count += 1
 
     patchers = (
+        patch.dict(os.environ, launch_environment),
         patch.object(research_lab_store, "insert_row", boundary.insert_row),
         patch.object(research_lab_store, "select_one", boundary.select_one),
         patch.object(research_lab_store, "select_many", boundary.select_many),
@@ -11989,6 +12244,11 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
             checkpoint_doc = json.loads(
                 checkpoint_s3.objects[checkpoint_location].decode("utf-8")
             )
+            expected_checkpoint_attempts = (
+                int(recovered_transition["expected_attempt_count"])
+                if recovered_transition is not None
+                else total_icps
+            )
             if (
                 checkpoint_doc.get("checkpoint_status") != "active"
                 or int(checkpoint_doc.get("completed_icp_count") or 0)
@@ -11999,9 +12259,25 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                         "entries", ()
                     )
                 )
-                != total_icps
+                != expected_checkpoint_attempts
             ):
                 raise RuntimeError("full-bank baseline checkpoint is incomplete")
+            if recovered_transition is not None:
+                observed_terminal_rows_hash = sha256_json(
+                    sorted(
+                        checkpoint_doc["per_icp_results"],
+                        key=lambda row: str(row.get("icp_ref") or ""),
+                    )
+                )
+                if (
+                    observed_terminal_rows_hash
+                    != recovered_transition["terminal_rows_hash"]
+                    or sha256_json(checkpoint_doc["attempt_ledger"])
+                    != recovered_transition["attempt_ledger_hash"]
+                ):
+                    raise RuntimeError(
+                        "published baseline did not consume the recovered terminal bank"
+                    )
 
             recovery_boundary = _MemoryPostgrestBoundary(
                 {"qualification_private_icp_sets": private_set_rows}
@@ -12089,27 +12365,83 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
             summary_refs = {
                 str(row.get("icp_ref") or "") for row in summaries
             }
+            published_terminal_rows = [
+                {
+                    key: value
+                    for key, value in dict(summary).items()
+                    if key != "evaluation_context"
+                }
+                for summary in summaries
+            ]
+            published_terminal_rows_hash = sha256_json(
+                sorted(
+                    published_terminal_rows,
+                    key=lambda row: str(row.get("icp_ref") or ""),
+                )
+            )
+            if recovered_transition is not None:
+                serving_version = score_summary.get("serving_model_version") or {}
+                serving_version_hash = str(
+                    serving_version.get("version_stamp_hash") or ""
+                )
+                publication_contexts_exact = all(
+                    isinstance(summary.get("evaluation_context"), Mapping)
+                    and summary["evaluation_context"].get("result_row_hash")
+                    == sha256_json(result_row)
+                    and summary["evaluation_context"].get("input_window_hash")
+                    == recovered_transition["rolling_window_hash"]
+                    and summary["evaluation_context"].get(
+                        "serving_model_version_hash"
+                    )
+                    == serving_version_hash
+                    for summary, result_row in zip(
+                        summaries,
+                        published_terminal_rows,
+                        strict=True,
+                    )
+                )
+                if (
+                    published_terminal_rows_hash
+                    != recovered_transition["terminal_rows_hash"]
+                    or not publication_contexts_exact
+                ):
+                    raise RuntimeError(
+                        "aggregate changed or detached the recovered terminal result bank"
+                    )
             assignment = score_summary.get("category_assignment") or {}
             expected_counts = {
                 "public": policy.public_total_icps,
                 "private": policy.private_total_icps,
                 "conditional": policy.conditional_total_icps,
             }
-            if len(summaries) != total_icps or len(model_calls) != total_icps:
+            if len(summaries) != total_icps or (
+                recovered_transition is None
+                and len(model_calls) != total_icps
+            ):
                 raise RuntimeError("full rebenchmark did not execute every configured ICP")
             if (
                 len(expected_refs) != total_icps
-                or set(model_calls) != expected_refs
-                or len(set(model_calls)) != total_icps
-                or set(scorer_calls) != expected_refs
-                or len(set(scorer_calls)) != total_icps
                 or summary_refs != expected_refs
                 or len(summary_refs) != total_icps
+                or (
+                    recovered_transition is None
+                    and (
+                        set(model_calls) != expected_refs
+                        or len(set(model_calls)) != total_icps
+                        or set(scorer_calls) != expected_refs
+                        or len(set(scorer_calls)) != total_icps
+                    )
+                )
+                or (
+                    recovered_transition is not None
+                    and (model_calls or scorer_calls)
+                )
             ):
                 raise RuntimeError("full rebenchmark ICP identity coverage differs")
-            if len(scorer_calls) != total_icps or any(
-                float(row.get("score") or 0.0) <= 0.0 for row in summaries
-            ):
+            if (
+                recovered_transition is None
+                and len(scorer_calls) != total_icps
+            ) or any(float(row.get("score") or 0.0) <= 0.0 for row in summaries):
                 raise RuntimeError(
                     "full rebenchmark did not positively score every configured ICP"
                 )
@@ -12127,16 +12459,36 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                 int(scorer_instance.attested_outcome_count())
                 for scorer_instance in scorer_instances
             )
+            fresh_authority_coverage_differs = (
+                recovered_transition is None
+                and (
+                    len(model_receipt_hashes) != total_icps
+                    or len(scorer_receipt_hashes) != total_icps
+                    or scorer_attested_outcomes != total_icps
+                    or complete_company_fit_receipts != total_icps
+                    or len(model_input_artifact_sets) != total_icps
+                    or len(set(model_input_artifact_sets)) != 1
+                    or len(scorer_input_artifact_sets) != total_icps
+                    or any(scorer_input_artifact_sets)
+                    or len(baseline_parent_roots) != total_icps * 2
+                )
+            )
+            recovered_authority_coverage_differs = (
+                recovered_transition is not None
+                and (
+                    model_receipt_hashes
+                    or scorer_receipt_hashes
+                    or scorer_attested_outcomes
+                    or complete_company_fit_receipts
+                    or model_input_artifact_sets
+                    or scorer_input_artifact_sets
+                    or tuple(sorted(baseline_parent_roots))
+                    != tuple(sorted(recovered_graphs_by_root))
+                )
+            )
             if (
-                len(model_receipt_hashes) != total_icps
-                or len(scorer_receipt_hashes) != total_icps
-                or scorer_attested_outcomes != total_icps
-                or complete_company_fit_receipts != total_icps
-                or len(model_input_artifact_sets) != total_icps
-                or len(set(model_input_artifact_sets)) != 1
-                or len(scorer_input_artifact_sets) != total_icps
-                or any(scorer_input_artifact_sets)
-                or len(baseline_parent_roots) != total_icps * 2
+                fresh_authority_coverage_differs
+                or recovered_authority_coverage_differs
                 or len(baseline_input_artifacts) != 1
             ):
                 raise RuntimeError(
@@ -12279,12 +12631,22 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                 or not business_artifact_rows
             ):
                 raise RuntimeError("full rebenchmark downstream persistence is incomplete")
+            fresh_model_facades_exact = (
+                recovered_transition is None
+                and catalog_facade_call_count >= 1
+                and docker_source_extract_count == 1
+                and source_bundle_validation_count == 1
+            )
+            recovered_model_facades_exact = (
+                recovered_transition is not None
+                and catalog_facade_call_count == 0
+                and docker_source_extract_count == 0
+                and source_bundle_validation_count == 0
+            )
             if (
                 active_assertion_execution_count != 1
                 or active_assertion_nitro_verification_count < 1
-                or catalog_facade_call_count < 1
-                or docker_source_extract_count != 1
-                or source_bundle_validation_count != 1
+                or not (fresh_model_facades_exact or recovered_model_facades_exact)
                 or icp_postgrest.query_count < 3
                 or checkpoint_s3.manifest_read_count < 1
                 or checkpoint_s3.signature_verify_count < 1
@@ -12312,6 +12674,12 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                 raise RuntimeError("restart recovery repeated paid rebenchmark work")
             return {
                 "configured_icp_count": total_icps,
+                "baseline_concurrency": int(config.private_baseline_concurrency),
+                "retry_concurrency": int(config.private_baseline_retry_concurrency),
+                "retry_rounds": int(
+                    config.private_baseline_provider_retry_rounds
+                ),
+                "scoring_worker_count": int(config.scoring_worker_total_workers),
                 "model_invocation_count": model_call_count,
                 "scorer_invocation_count": scorer_call_count,
                 "aggregate_score": float(durable_bundle["aggregate_score"]),
@@ -12365,6 +12733,69 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                 "checkpoint_boundary_adapted": True,
                 "checkpoint_write_count": len(checkpoint_s3.put_documents),
                 "checkpoint_full_bank_persisted": True,
+                "checkpoint_seeded_from_exact_transition": (
+                    recovered_transition is not None
+                ),
+                "recovered_terminal_rows_hash": (
+                    str(recovered_transition["terminal_rows_hash"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "published_terminal_rows_hash": published_terminal_rows_hash,
+                "recovered_attempt_ledger_hash": (
+                    str(recovered_transition["attempt_ledger_hash"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "recovered_checkpoint_document_hash": (
+                    str(recovered_transition["checkpoint_document_hash"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "published_checkpoint_document_hash": sha256_json(
+                    checkpoint_doc
+                ),
+                "recovered_receipt_frontier_hash": (
+                    str(recovered_transition["receipt_frontier_hash"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "published_receipt_frontier_hash": sha256_json(
+                    sorted(baseline_parent_roots)
+                ),
+                "recovered_scoring_configuration_hash": (
+                    str(recovered_transition["scoring_configuration_hash"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "recovered_scoring_contract_hash": (
+                    str(recovered_transition["scoring_contract_hash"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "recovered_model_artifact_hash": (
+                    str(recovered_transition["model_artifact_hash"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "recovered_manifest_hash": (
+                    str(recovered_transition["manifest_hash"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "recovered_window_hash": (
+                    str(recovered_transition["rolling_window_hash"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "recovered_repo_git_sha": (
+                    str(recovered_transition["repo_git_sha"])
+                    if recovered_transition is not None
+                    else ""
+                ),
+                "recovered_publication_lineage_join_exact": (
+                    recovered_transition is not None
+                ),
                 "checkpoint_restart_status": str(
                     checkpoint_restart_result["status"]
                 ),
@@ -13366,6 +13797,394 @@ def _exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
     return exercise_dev_snapshot_downstream_publication()
 
 
+def _exercise_dynamic_rebenchmark_restart_recovery() -> dict[str, Any]:
+    from dynamic_rebenchmark_workflow import (
+        exercise_dynamic_rebenchmark_restart_recovery,
+    )
+
+    transition: dict[str, Any] = {}
+
+    def _recover(context: Mapping[str, Any]) -> Mapping[str, Any]:
+        measured = exercise_dynamic_rebenchmark_restart_recovery(
+            source_root=SOURCE_ROOT,
+            from_sha=str(os.environ.get("REHEARSAL_FROM_SHA") or ""),
+            candidate_sha=str(
+                os.environ.get("REHEARSAL_CANDIDATE_SHA") or ""
+            ),
+            publication_context=context,
+        )
+        transition.update(measured)
+        return measured
+
+    publication = _exercise_full_rebenchmark_publication_path(_recover)
+    if not transition:
+        raise RuntimeError("dynamic transition did not produce a checkpoint")
+    lineage_joined = bool(
+        publication.get("recovered_publication_lineage_join_exact") is True
+        and publication.get("recovered_terminal_rows_hash")
+        == publication.get("published_terminal_rows_hash")
+        == transition.get("terminal_rows_hash")
+        and publication.get("recovered_attempt_ledger_hash")
+        == transition.get("attempt_ledger_hash")
+        and publication.get("recovered_checkpoint_document_hash")
+        == publication.get("published_checkpoint_document_hash")
+        == transition.get("checkpoint_document_hash")
+        and publication.get("recovered_receipt_frontier_hash")
+        == publication.get("published_receipt_frontier_hash")
+        == transition.get("receipt_frontier_hash")
+    )
+    if not lineage_joined:
+        raise RuntimeError("dynamic publication detached recovered lineage")
+    return {
+        **transition,
+        "publication": publication,
+        "dynamic_recovered_bank_publication_join_exact": lineage_joined,
+    }
+
+
+def _dynamic_rebenchmark_evidence_is_complete(
+    recovery: Any,
+) -> bool:
+    if not isinstance(recovery, Mapping):
+        return False
+    publication = recovery.get("publication")
+    if not isinstance(publication, Mapping):
+        return False
+    required_recovery_flags = (
+        "dynamic_launch_config_candidate_n_minus_one_bound",
+        "dynamic_exact_n_minus_one_worker_executed",
+        "dynamic_n_minus_one_envelope_launcher_supervisor_exact",
+        "dynamic_skewed_retry_round_checkpointed",
+        "dynamic_all_retry_rounds_and_exhaustion_exact",
+        "dynamic_retry_concurrency_bounded",
+        "dynamic_preflight_actual_owned_matrix",
+        "dynamic_preflight_fresh_and_stale_admission",
+        "dynamic_full_fleet_lease_refresh_bound",
+        "dynamic_pressure_checkpoint_recycle_bound",
+        "dynamic_pressure_negative_boundaries_exact",
+        "dynamic_watchdog_supervised_resume_bound",
+        "dynamic_n_minus_one_candidate_resume_exact",
+        "dynamic_recovered_bank_publication_join_exact",
+    )
+    publication_flags = (
+        "checkpoint_full_bank_persisted",
+        "checkpoint_seeded_from_exact_transition",
+        "actual_audit_publication_verified",
+        "candidate_scoring_ready",
+        "external_dashboard_projection_adapter_verified",
+        "recovered_publication_lineage_join_exact",
+    )
+    config_fields = (
+        "baseline_concurrency",
+        "retry_concurrency",
+        "retry_rounds",
+        "scoring_worker_count",
+    )
+    try:
+        from dynamic_rebenchmark_workflow import TRANSITION_SOURCE_PATHS
+        from gateway.research_lab.scoring_worker import (
+            _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP,
+        )
+
+        configured = int(recovery.get("configured_icp_count") or 0)
+        first_pass_successes = int(recovery.get("first_pass_success_count") or 0)
+        first_pass_retryables = int(
+            recovery.get("first_pass_retryable_count") or 0
+        )
+        n_minus_baseline_width = int(
+            recovery.get("n_minus_one_baseline_concurrency") or 0
+        )
+        n_minus_retry_width = int(
+            recovery.get("n_minus_one_retry_concurrency") or 0
+        )
+        retry_width = int(recovery.get("retry_concurrency") or 0)
+        maximum_first_pass = int(recovery.get("maximum_first_pass_active") or 0)
+        maximum_n_minus_retry = int(
+            recovery.get("maximum_n_minus_retry_active") or 0
+        )
+        maximum_retry = int(recovery.get("maximum_retry_active") or 0)
+        scoring_memory_mib = int(recovery.get("topology_scoring_memory_mib") or 0)
+        from_sha = str(recovery.get("from_sha") or "")
+        candidate_sha = str(recovery.get("candidate_sha") or "")
+        source_identities = recovery.get("source_identities")
+        candidate_config = recovery.get("candidate_config")
+        n_minus_config = recovery.get("n_minus_one_config")
+        candidate_policy = (
+            candidate_config.get("policy")
+            if isinstance(candidate_config, Mapping)
+            else None
+        )
+        retry_rounds = int(recovery.get("retry_rounds") or 0)
+        worker_count = int(recovery.get("scoring_worker_count") or 0)
+        completed_receipts_per_attempt = int(
+            _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
+        )
+        retryable_receipts_per_attempt = completed_receipts_per_attempt - 1
+        expected_first_pass_successes = (
+            min(
+                configured - 1,
+                max(1, int(candidate_policy.get("public_strong_total") or 0)),
+            )
+            if isinstance(candidate_policy, Mapping) and configured > 1
+            else 0
+        )
+        expected_first_pass_retryables = configured - expected_first_pass_successes
+        expected_n_minus_completed = expected_first_pass_successes + (
+            retry_width if retry_rounds == 1 else 0
+        )
+        expected_n_minus_attempts = configured + retry_width
+        expected_n_minus_receipt_frontier = (
+            expected_first_pass_successes * completed_receipts_per_attempt
+            + expected_first_pass_retryables * retryable_receipts_per_attempt
+            + retry_width
+            * (
+                completed_receipts_per_attempt
+                if retry_rounds == 1
+                else retryable_receipts_per_attempt
+            )
+        )
+        expected_receipt_frontier = (
+            expected_first_pass_successes * completed_receipts_per_attempt
+            + expected_first_pass_retryables
+            * (
+                retry_rounds * retryable_receipts_per_attempt
+                + completed_receipts_per_attempt
+            )
+        )
+        expected_retry_attempt_counts = [
+            expected_first_pass_retryables for _round in range(retry_rounds)
+        ]
+        expected_retry_wave_counts = [
+            math.ceil(expected_first_pass_retryables / retry_width)
+            for _round in range(retry_rounds)
+        ] if retry_width > 0 else []
+        expected_pressure_settle_count = min(
+            expected_first_pass_retryables,
+            int(recovery.get("baseline_concurrency") or 0),
+        )
+        expected_category_counts = (
+            {
+                "public": int(candidate_policy["public_total_icps"]),
+                "private": int(candidate_policy["private_total_icps"]),
+                "conditional": int(
+                    candidate_policy["conditional_total_icps"]
+                ),
+            }
+            if isinstance(candidate_policy, Mapping)
+            else None
+        )
+        launch_config_fields = (
+            "private_baseline_concurrency",
+            "private_baseline_retry_concurrency",
+            "private_baseline_provider_retry_rounds",
+            "scoring_worker_total_workers",
+            "scoring_worker_model_timeout_seconds",
+            "scoring_worker_min_available_memory_mb",
+            "scoring_worker_max_load_per_cpu",
+        )
+        release_launch_configs_exact = bool(
+            isinstance(candidate_config, Mapping)
+            and isinstance(n_minus_config, Mapping)
+            and all(
+                candidate_config.get(field) == n_minus_config.get(field)
+                for field in launch_config_fields
+            )
+            and candidate_config.get("policy") == n_minus_config.get("policy")
+            and n_minus_config.get("scoring_configuration_hash")
+            == recovery.get("scoring_configuration_hash")
+            and float(
+                n_minus_config.get("provider_preflight_ttl_seconds") or 0.0
+            )
+            == float(recovery.get("provider_preflight_ttl_seconds") or 0.0)
+            and float(
+                n_minus_config.get("model_invocation_timeout_seconds") or 0.0
+            )
+            == float(recovery.get("model_invocation_timeout_seconds") or 0.0)
+            and float(n_minus_config.get("watchdog_timeout_seconds") or 0.0)
+            == float(recovery.get("watchdog_timeout_seconds") or 0.0)
+            and int(n_minus_config.get("worker_recycle_rss_mb") or 0)
+            == int(recovery.get("worker_recycle_rss_mb") or 0)
+        )
+        top_level_launch_config_exact = bool(
+            isinstance(candidate_config, Mapping)
+            and isinstance(n_minus_config, Mapping)
+            and isinstance(candidate_policy, Mapping)
+            and configured == int(candidate_policy.get("total_icps") or 0)
+            and int(recovery.get("baseline_concurrency") or 0)
+            == int(candidate_config.get("private_baseline_concurrency") or 0)
+            and retry_width
+            == int(
+                candidate_config.get("private_baseline_retry_concurrency") or 0
+            )
+            and retry_rounds
+            == int(
+                candidate_config.get("private_baseline_provider_retry_rounds") or 0
+            )
+            and worker_count
+            == int(candidate_config.get("scoring_worker_total_workers") or 0)
+            and n_minus_baseline_width
+            == int(n_minus_config.get("private_baseline_concurrency") or 0)
+            and n_minus_retry_width
+            == int(
+                n_minus_config.get("private_baseline_retry_concurrency") or 0
+            )
+        )
+        expected_source_pairs = {
+            (commit, path)
+            for commit in (from_sha, candidate_sha)
+            for path in TRANSITION_SOURCE_PATHS
+        }
+        observed_source_pairs = {
+            (str(row.get("commit_sha") or ""), str(row.get("path") or ""))
+            for row in source_identities or ()
+            if isinstance(row, Mapping)
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(row.get("sha256") or ""),
+            )
+        }
+        return bool(
+            configured > 0
+            and re.fullmatch(r"[0-9a-f]{40}", from_sha) is not None
+            and re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is not None
+            and isinstance(source_identities, list)
+            and len(source_identities) == len(expected_source_pairs)
+            and observed_source_pairs == expected_source_pairs
+            and release_launch_configs_exact
+            and top_level_launch_config_exact
+            and int(recovery.get("completed_icp_count") or 0) == configured
+            and int(publication.get("configured_icp_count") or 0) == configured
+            and first_pass_successes == expected_first_pass_successes > 0
+            and first_pass_retryables == expected_first_pass_retryables
+            and first_pass_retryables > retry_width > 0
+            and first_pass_successes + first_pass_retryables == configured
+            and int(recovery.get("checkpoint_write_count") or 0)
+            == int(recovery.get("expected_attempt_count") or 0)
+            == configured
+            + first_pass_retryables * retry_rounds
+            and int(
+                recovery.get("n_minus_one_checkpoint_completed_icp_count") or 0
+            )
+            == expected_n_minus_completed
+            and int(recovery.get("n_minus_one_checkpoint_attempt_count") or 0)
+            == expected_n_minus_attempts
+            and int(
+                recovery.get("n_minus_one_checkpoint_receipt_frontier_count") or 0
+            )
+            == expected_n_minus_receipt_frontier
+            and int(recovery.get("receipt_frontier_count") or 0)
+            == int(recovery.get("expected_receipt_frontier_count") or 0)
+            == expected_receipt_frontier
+            and expected_receipt_frontier
+            <= int(recovery.get("receipt_frontier_capacity") or 0)
+            and 0 < maximum_first_pass <= n_minus_baseline_width
+            and 0 < maximum_n_minus_retry <= n_minus_retry_width
+            and 0 < maximum_retry <= retry_width
+            and all(
+                recovery.get(field) is True
+                for field in required_recovery_flags
+            )
+            and all(publication.get(field) is True for field in publication_flags)
+            and all(
+                recovery.get(field) == publication.get(field)
+                for field in config_fields
+            )
+            and float(recovery.get("watchdog_timeout_seconds") or 0.0)
+            > float(recovery.get("model_invocation_timeout_seconds") or 0.0)
+            and int(recovery.get("topology_parent_memory_mib") or 0)
+            > int(recovery.get("topology_reserved_memory_mib") or 0)
+            and scoring_memory_mib > 0
+            and 0 < int(recovery.get("worker_recycle_rss_mb") or 0)
+            <= scoring_memory_mib
+            and 0 < int(recovery.get("host_memory_floor_mib") or 0)
+            <= scoring_memory_mib
+            and recovery.get("rss_below_threshold_no_recycle") is True
+            and recovery.get("memory_at_floor_no_recycle") is True
+            and int(recovery.get("rss_pressure_checkpoint_count") or 0)
+            == expected_pressure_settle_count
+            and int(recovery.get("host_pressure_checkpoint_count") or 0)
+            == expected_pressure_settle_count
+            and int(recovery.get("pressure_exercised_icp_count") or 0)
+            == first_pass_retryables
+            and int(recovery.get("rss_below_threshold_checkpoint_count") or 0)
+            == first_pass_retryables
+            and int(recovery.get("memory_at_floor_checkpoint_count") or 0)
+            == first_pass_retryables
+            and recovery.get("retry_rounds_exercised")
+            == list(range(retry_rounds + 1))
+            and recovery.get("retry_attempt_counts_by_round")
+            == expected_retry_attempt_counts
+            and recovery.get("retry_wave_counts_by_round")
+            == expected_retry_wave_counts
+            and all(wave_count > 1 for wave_count in expected_retry_wave_counts)
+            and recovery.get("retry_exhaustion_rounds_exercised")
+            == list(range(retry_rounds + 1))
+            and int(recovery.get("preflight_control_event_count") or 0) > 0
+            and 0
+            <= int(recovery.get("preflight_partial_measurement_count") or 0)
+            < worker_count
+            and "lease_non_owner_measurement_count" in recovery
+            and int(recovery.get("lease_non_owner_measurement_count") or 0) == 0
+            and int(recovery.get("lease_owner_forced_measurement_count") or 0)
+            == worker_count
+            and int(
+                recovery.get("n_minus_one_envelope_scoring_worker_count") or 0
+            )
+            == int(
+                recovery.get("n_minus_one_sealed_scoring_profile_count") or 0
+            )
+            == int(recovery.get("n_minus_one_fleet_launcher_worker_count") or 0)
+            == int(recovery.get("n_minus_one_supervisor_scoring_running") or 0)
+            == int(recovery.get("scoring_worker_count") or 0)
+            and int(recovery.get("n_minus_one_supervisor_respawn_count") or 0)
+            >= 1
+            and int(publication.get("model_invocation_count") or 0) == 0
+            and int(publication.get("scorer_invocation_count") or 0) == 0
+            and publication.get("recovered_terminal_rows_hash")
+            == publication.get("published_terminal_rows_hash")
+            == recovery.get("terminal_rows_hash")
+            and publication.get("recovered_attempt_ledger_hash")
+            == recovery.get("attempt_ledger_hash")
+            and publication.get("recovered_checkpoint_document_hash")
+            == publication.get("published_checkpoint_document_hash")
+            == recovery.get("checkpoint_document_hash")
+            and publication.get("recovered_receipt_frontier_hash")
+            == publication.get("published_receipt_frontier_hash")
+            == recovery.get("receipt_frontier_hash")
+            and publication.get("recovered_scoring_configuration_hash")
+            == recovery.get("scoring_configuration_hash")
+            and publication.get("recovered_scoring_contract_hash")
+            == recovery.get("scoring_contract_hash")
+            and publication.get("recovered_model_artifact_hash")
+            == recovery.get("model_artifact_hash")
+            and publication.get("recovered_manifest_hash")
+            == recovery.get("manifest_hash")
+            and publication.get("recovered_window_hash")
+            == recovery.get("rolling_window_hash")
+            and publication.get("recovered_repo_git_sha")
+            == recovery.get("repo_git_sha")
+            and publication.get("category_counts")
+            == expected_category_counts
+            and float(publication.get("aggregate_score") or 0.0) > 0.0
+            and bool(str(publication.get("public_report_id") or ""))
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(publication.get("public_report_hash") or ""),
+            )
+            is not None
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(publication.get("category_assignment_hash") or ""),
+            )
+            is not None
+            and int(publication.get("audit_bundle_count") or 0) > 0
+            and int(publication.get("audit_completed_dispatch_count") or 0)
+            > 0
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "signed-private-model-contract-transition": (
         _exercise_signed_private_model_contract_transition
@@ -13378,6 +14197,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "rebenchmark-sandbox-retry": _exercise_rebenchmark_sandbox_retry_contract,
     "rebenchmark-provider-transport-evidence": (
         _exercise_rebenchmark_provider_transport_evidence
+    ),
+    "dynamic-rebenchmark-restart-recovery": (
+        _exercise_dynamic_rebenchmark_restart_recovery
     ),
     "restart-summary-deadline-classification": (
         _exercise_restart_summary_deadline_classification
@@ -14096,6 +14918,14 @@ def main() -> int:
                 {},
             ).get("baseline_pause_checkpoint_resume_complete")
             is True
+        ),
+        "dynamic_rebenchmark_restart_recovery_verified": (
+            _dynamic_rebenchmark_evidence_is_complete(
+                behavior_evidence.get(
+                    "dynamic-rebenchmark-restart-recovery",
+                    {},
+                )
+            )
         ),
         "coordinator_broker_owned_sync_httpx_grant_exact": (
             _coordinator_broker_httpx_evidence_is_complete(

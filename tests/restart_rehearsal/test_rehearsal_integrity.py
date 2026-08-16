@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+import copy
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -4480,6 +4483,12 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "coordinator_broker_owned_sync_httpx_grant_exact" in set(
         behavior_contract["required_invariant_ids"]
     )
+    assert "dynamic-rebenchmark-restart-recovery" in set(
+        behavior_contract["behavior_scenarios"]
+    )
+    assert "dynamic_rebenchmark_restart_recovery_verified" in set(
+        behavior_contract["required_invariant_ids"]
+    )
     assert "restart-summary-deadline-classification" in set(
         behavior_contract["behavior_scenarios"]
     )
@@ -4510,6 +4519,14 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "gateway/tee/rpc_authority.py",
         "gateway/main.py",
         "gateway/research_lab/worker_autostart.py",
+        "gateway/research_lab/worker_process.py",
+        "gateway/tee/prepare_gateway_envelopes_v2.py",
+        "gateway/tee/topology.json",
+        "scripts/run_research_lab_scoring_worker.py",
+        "scripts/run_research_lab_scoring_worker_fleet.py",
+        "tests/restart_rehearsal/dynamic_rebenchmark_n_minus_one.py",
+        "tests/restart_rehearsal/dynamic_rebenchmark_workflow.py",
+        "tests/restart_rehearsal/dynamic_rebenchmark_workflow_v2.py",
     } <= set(behavior_contract["production_source_paths"])
     assert "leadpoet_observability/sentry_operations.py" not in set(
         behavior_contract["production_source_paths"]
@@ -4573,7 +4590,27 @@ def test_coordinator_broker_httpx_grant_evidence_is_exact_and_fail_closed() -> N
         )
 
 
-def test_rebenchmark_provider_transport_action_requires_httpx_grant_evidence() -> None:
+def test_rebenchmark_provider_transport_action_requires_httpx_grant_evidence(
+    monkeypatch,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    from_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD^"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.setenv("REHEARSAL_SOURCE_ROOT", str(source_root))
+    monkeypatch.setenv("REHEARSAL_FROM_SHA", from_sha)
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
     evidence = (
         production_workflow_runner._exercise_rebenchmark_provider_transport_evidence()
     )
@@ -5404,6 +5441,213 @@ def test_candidate_behavior_scenarios_follow_nondefault_policy(
     }
 
 
+def test_dynamic_rebenchmark_restart_recovery_follows_exact_launch(
+    monkeypatch,
+) -> None:
+    from gateway.research_lab import scoring_worker as scoring_worker_module
+
+    source_root = Path(__file__).resolve().parents[2]
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    from_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD^"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.setenv("REHEARSAL_SOURCE_ROOT", str(source_root))
+    monkeypatch.setenv("REHEARSAL_FROM_SHA", from_sha)
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
+    import contract_adapter as rehearsal_contract_adapter
+
+    original_gateway_secret = rehearsal_contract_adapter._gateway_secret
+    launch_overrides = {
+        "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS": "7",
+        "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL": "4",
+        "RESEARCH_LAB_PRIVATE_HOLDOUT_TOTAL_ICPS": "7",
+        "RESEARCH_LAB_PRIVATE_HOLDOUT_WEAK_TOTAL": "3",
+        "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS": "8",
+        "RESEARCH_LAB_CONDITIONAL_FRESH_ICP_COUNT": "8",
+        "RESEARCH_LAB_BENCHMARK_CONCURRENCY": "3",
+        "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY": "4",
+        "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS": "3",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "5",
+        "RESEARCH_LAB_PROVIDER_PREFLIGHT_TTL_SECONDS": "73",
+        "RESEARCH_LAB_SCORING_WORKER_MODEL_TIMEOUT_SECONDS": "43",
+        "RESEARCH_LAB_SCORING_WORKER_RECYCLE_RSS_MB": "2304",
+        "RESEARCH_LAB_SCORING_WORKER_MIN_AVAILABLE_MEMORY_MB": "3584",
+        "RESEARCH_LAB_SCORING_WORKER_MAX_LOAD_PER_CPU": "1.5",
+    }
+
+    def nondefault_gateway_secret():
+        return {**original_gateway_secret(), **launch_overrides}
+
+    monkeypatch.setattr(
+        rehearsal_contract_adapter,
+        "_gateway_secret",
+        nondefault_gateway_secret,
+    )
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "SOURCE_ROOT",
+        source_root,
+    )
+    evidence = (
+        production_workflow_runner
+        ._exercise_dynamic_rebenchmark_restart_recovery()
+    )
+
+    assert evidence["configured_icp_count"] == evidence["completed_icp_count"]
+    assert evidence["baseline_concurrency"] == int(
+        launch_overrides["RESEARCH_LAB_BENCHMARK_CONCURRENCY"]
+    )
+    assert evidence["retry_concurrency"] == int(
+        launch_overrides["RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY"]
+    )
+    assert evidence["retry_rounds"] == int(
+        launch_overrides["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"]
+    )
+    assert evidence["scoring_worker_count"] == int(
+        launch_overrides["RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"]
+    )
+    assert evidence["provider_preflight_ttl_seconds"] == float(
+        launch_overrides["RESEARCH_LAB_PROVIDER_PREFLIGHT_TTL_SECONDS"]
+    )
+    configured_icps = int(evidence["configured_icp_count"])
+    candidate_policy = evidence["candidate_config"]["policy"]
+    expected_first_pass_successes = min(
+        configured_icps - 1,
+        max(1, int(candidate_policy["public_strong_total"])),
+    )
+    expected_first_pass_retryables = configured_icps - expected_first_pass_successes
+    assert evidence["first_pass_success_count"] == expected_first_pass_successes
+    assert evidence["first_pass_retryable_count"] == expected_first_pass_retryables
+    assert expected_first_pass_retryables > evidence["retry_concurrency"]
+    assert evidence["retry_attempt_counts_by_round"] == [
+        expected_first_pass_retryables for _round in range(evidence["retry_rounds"])
+    ]
+    assert evidence["retry_wave_counts_by_round"] == [
+        math.ceil(expected_first_pass_retryables / evidence["retry_concurrency"])
+        for _round in range(evidence["retry_rounds"])
+    ]
+    assert all(count > 1 for count in evidence["retry_wave_counts_by_round"])
+    assert 0 < evidence["maximum_first_pass_active"] <= evidence[
+        "n_minus_one_baseline_concurrency"
+    ]
+    assert 0 < evidence["maximum_n_minus_retry_active"] <= evidence[
+        "n_minus_one_retry_concurrency"
+    ]
+    assert 0 < evidence["maximum_retry_active"] <= evidence[
+        "retry_concurrency"
+    ]
+    assert evidence["watchdog_timeout_seconds"] > evidence[
+        "model_invocation_timeout_seconds"
+    ]
+    assert evidence["topology_parent_memory_mib"] > evidence[
+        "topology_reserved_memory_mib"
+    ]
+    assert {row["commit_sha"] for row in evidence["source_identities"]} == {
+        from_sha,
+        candidate_sha,
+    }
+    assert all(
+        evidence[name] is True
+        for name in (
+            "dynamic_launch_config_candidate_n_minus_one_bound",
+            "dynamic_exact_n_minus_one_worker_executed",
+            "dynamic_n_minus_one_envelope_launcher_supervisor_exact",
+            "dynamic_skewed_retry_round_checkpointed",
+            "dynamic_all_retry_rounds_and_exhaustion_exact",
+            "dynamic_retry_concurrency_bounded",
+            "dynamic_preflight_actual_owned_matrix",
+            "dynamic_preflight_fresh_and_stale_admission",
+            "dynamic_full_fleet_lease_refresh_bound",
+            "dynamic_pressure_checkpoint_recycle_bound",
+            "dynamic_pressure_negative_boundaries_exact",
+            "dynamic_watchdog_supervised_resume_bound",
+            "dynamic_n_minus_one_candidate_resume_exact",
+            "dynamic_recovered_bank_publication_join_exact",
+        )
+    )
+    assert evidence["retry_rounds_exercised"] == list(
+        range(int(launch_overrides["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"]) + 1)
+    )
+    assert evidence["retry_exhaustion_rounds_exercised"] == evidence[
+        "retry_rounds_exercised"
+    ]
+    assert evidence["rss_below_threshold_no_recycle"] is True
+    assert evidence["memory_at_floor_no_recycle"] is True
+    assert evidence["rss_pressure_checkpoint_count"] > 0
+    assert evidence["host_pressure_checkpoint_count"] > 0
+    assert evidence["pressure_exercised_icp_count"] == expected_first_pass_retryables
+    assert evidence["rss_below_threshold_checkpoint_count"] == (
+        expected_first_pass_retryables
+    )
+    assert evidence["memory_at_floor_checkpoint_count"] == (
+        expected_first_pass_retryables
+    )
+    assert evidence["lease_non_owner_measurement_count"] == 0
+    assert evidence["lease_owner_forced_measurement_count"] == evidence[
+        "scoring_worker_count"
+    ]
+    assert evidence["receipt_frontier_count"] == evidence[
+        "expected_receipt_frontier_count"
+    ]
+    completed_receipts_per_attempt = int(
+        scoring_worker_module._V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
+    )
+    retryable_receipts_per_attempt = completed_receipts_per_attempt - 1
+    expected_receipt_frontier = (
+        expected_first_pass_successes * completed_receipts_per_attempt
+        + expected_first_pass_retryables
+        * (
+            evidence["retry_rounds"] * retryable_receipts_per_attempt
+            + completed_receipts_per_attempt
+        )
+    )
+    assert evidence["receipt_frontier_count"] == expected_receipt_frontier
+    assert evidence["receipt_frontier_count"] <= evidence[
+        "receipt_frontier_capacity"
+    ]
+    publication_evidence = evidence["publication"]
+    assert publication_evidence["model_invocation_count"] == 0
+    assert publication_evidence["scorer_invocation_count"] == 0
+    assert publication_evidence["recovered_terminal_rows_hash"] == evidence[
+        "terminal_rows_hash"
+    ]
+    assert publication_evidence["published_checkpoint_document_hash"] == evidence[
+        "checkpoint_document_hash"
+    ]
+    assert publication_evidence["published_receipt_frontier_hash"] == evidence[
+        "receipt_frontier_hash"
+    ]
+    assert production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
+        evidence
+    )
+    corrupted = copy.deepcopy(evidence)
+    corrupted["publication"]["recovered_terminal_rows_hash"] = "sha256:" + "0" * 64
+    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
+        corrupted
+    )
+    corrupted_skew = copy.deepcopy(evidence)
+    corrupted_skew["first_pass_success_count"] += 1
+    corrupted_skew["first_pass_retryable_count"] -= 1
+    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
+        corrupted_skew
+    )
+    corrupted_lease = copy.deepcopy(evidence)
+    corrupted_lease["lease_non_owner_measurement_count"] = 1
+    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
+        corrupted_lease
+    )
+
+
 def test_candidate_owned_guard_probe_does_not_mutate_rollback_transition_ledger(
 ) -> None:
     source = Path(production_workflow_runner.__file__).read_text(encoding="utf-8")
@@ -5418,6 +5662,10 @@ def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
     python39_import_event_loop,
 ) -> None:
     from gateway.research_lab.config import ResearchLabGatewayConfig
+    from tests.restart_rehearsal.dynamic_rebenchmark_workflow import (
+        patched_rebenchmark_launch_environment,
+        rebenchmark_launch_environment,
+    )
 
     source_root = Path(__file__).resolve().parents[2]
     monkeypatch.setattr(
@@ -5454,8 +5702,22 @@ def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
     ]
     assert evidence["baseline_input_artifact_count"] == 1
     assert evidence["independent_baseline_authority_exact"] is True
-    policy = ResearchLabGatewayConfig().conditional_validation_policy()
+    with patched_rebenchmark_launch_environment(rebenchmark_launch_environment()):
+        launch_config = ResearchLabGatewayConfig.from_env()
+    policy = launch_config.conditional_validation_policy()
     assert evidence["configured_icp_count"] == policy.total_icps
+    assert evidence["baseline_concurrency"] == (
+        launch_config.private_baseline_concurrency
+    )
+    assert evidence["retry_concurrency"] == (
+        launch_config.private_baseline_retry_concurrency
+    )
+    assert evidence["retry_rounds"] == (
+        launch_config.private_baseline_provider_retry_rounds
+    )
+    assert evidence["scoring_worker_count"] == (
+        launch_config.scoring_worker_total_workers
+    )
     assert evidence["category_counts"] == {
         "public": policy.public_total_icps,
         "private": policy.private_total_icps,
@@ -5509,7 +5771,14 @@ def test_full_rebenchmark_publication_derives_window_shape_from_candidate(
             **kwargs,
         )
 
-    _candidate_config.from_env = original_config.from_env
+    def _candidate_from_env():
+        return replace(
+            original_config.from_env(),
+            lab_champion_eval_days=7,
+            lab_champion_icps_per_day=3,
+        )
+
+    _candidate_config.from_env = _candidate_from_env
 
     def _candidate_selector(rows, **kwargs):
         observed.append(dict(kwargs))

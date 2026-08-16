@@ -15395,6 +15395,7 @@ def main() -> int:
                 "configured_baseline_complete",
                 "supabase_export_exact",
                 "provider_record_replay_exact",
+                "docker_daemon_readiness_exact",
                 "immutable_ready_before_pointer",
                 "signed_readiness_exact",
                 "active_identity_rechecked",

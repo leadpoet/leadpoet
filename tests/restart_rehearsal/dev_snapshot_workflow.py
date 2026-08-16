@@ -484,6 +484,9 @@ def _child_environment(
     candidate_sha: str,
 ) -> dict[str, str]:
     from gateway.research_lab.config import RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD
+    from research_lab.docker_operation_lock_v2 import (
+        DOCKER_OPERATION_LOCK_FILE_ENV,
+    )
     from research_lab.eval.private_runtime import private_model_env_passthrough
 
     boundary_root = Path(__file__).resolve().with_name("dev_snapshot_boundary")
@@ -518,6 +521,9 @@ def _child_environment(
             "RESEARCH_LAB_DEV_SNAPSHOT_CACHE_DIR": str(root / "cache"),
             "RESEARCH_LAB_DEV_SNAPSHOT_REFRESH_COMMAND_TIMEOUT_SECONDS": "300",
             "RESEARCH_LAB_DEV_SNAPSHOT_SELECTION_SEED": _SELECTION_SEED,
+            DOCKER_OPERATION_LOCK_FILE_ENV: str(
+                root / "locks" / "docker-operation-v2.lock"
+            ),
             "SUPABASE_URL": "https://rehearsal.supabase.invalid",
             "SUPABASE_SERVICE_ROLE_KEY": "rehearsal-service-role",
             "EXA_API_KEY": "rehearsal-exa-key",
@@ -565,6 +571,13 @@ def _run_negative_boundary_probes(env: Mapping[str, str]) -> None:
         "subprocess": (
             "import subprocess; subprocess.run(['/dev-snapshot-undeclared'])",
             "dev-snapshot subprocess operation is not allowlisted",
+        ),
+        "docker_argv": (
+            "import os, subprocess; "
+            "subprocess.run(['docker', 'info', '--format', 'bad'], "
+            "text=True, capture_output=True, timeout=1, env=dict(os.environ), "
+            "check=False)",
+            "dev-snapshot Docker info contract differs",
         ),
         "aws_service": (
             "import boto3; boto3.client('dynamodb')",
@@ -713,6 +726,7 @@ def _declared_boundary_operations_exact(
         ("provider_container", "record"): ("docker_daemon", "run"),
         ("provider_container", "replay"): ("docker_daemon", "run"),
         ("provider_container", "remove"): ("docker_daemon", "remove"),
+        ("docker_daemon", "state"): ("docker_daemon", "state"),
         ("http_seam", "rejected"): (
             "http_service",
             "provider_request",
@@ -932,6 +946,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             == total_icps
             and all(
                 event.get("argv_exact") is True
+                and event.get("timeout_bounded") is True
                 and event.get("network_disabled") is False
                 and event.get("bootstrap_hash")
                 == expected_bootstrap_hashes["record"]
@@ -939,6 +954,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             )
             and all(
                 event.get("argv_exact") is True
+                and event.get("timeout_bounded") is True
                 and event.get("network_disabled") is True
                 and event.get("reuse_existing") is False
                 and event.get("bootstrap_hash")
@@ -964,6 +980,22 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
                 for event in container_events
             )
             and docker_bootstrap_contracts_exact
+        )
+        docker_daemon_events = [
+            event
+            for event in events
+            if event.get("kind") == "docker_daemon"
+            and event.get("operation") == "state"
+        ]
+        docker_daemon_readiness_exact = (
+            len(docker_daemon_events) == total_icps * 3
+            and all(
+                int(event.get("returncode") or 0) == 0
+                and event.get("ready") is True
+                and event.get("argv_exact") is True
+                and event.get("timeout_bounded") is True
+                for event in docker_daemon_events
+            )
         )
         s3_puts = [
             event
@@ -1082,16 +1114,27 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
                 for event in production_git_rejections
             )
         )
+        explicit_subprocess_probe_ids = Counter(
+            str(event.get("probe_id") or "")
+            for event in explicit_subprocess_rejections
+        )
         unknown_subprocess_rejected = (
-            len(explicit_subprocess_rejections) == 1
-            and explicit_subprocess_rejections[0].get("probe_id")
-            == "subprocess"
-            and explicit_subprocess_rejections[0].get("command_class")
-            == "other"
-            and explicit_subprocess_rejections[0].get("command_name")
-            == "dev-snapshot-undeclared"
+            explicit_subprocess_probe_ids
+            == Counter({"subprocess": 1, "docker_argv": 1})
+            and any(
+                event.get("probe_id") == "subprocess"
+                and event.get("command_class") == "other"
+                and event.get("command_name") == "dev-snapshot-undeclared"
+                for event in explicit_subprocess_rejections
+            )
+            and any(
+                event.get("probe_id") == "docker_argv"
+                and event.get("command_class") == "docker"
+                and event.get("command_name") == "docker"
+                for event in explicit_subprocess_rejections
+            )
             and production_git_discovery_fail_closed
-            and len(subprocess_rejections) == 3
+            and len(subprocess_rejections) == 4
         )
         aws_rejections = [
             event
@@ -1112,6 +1155,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
                 "httpx_async": 1,
                 "aiohttp": 1,
                 "subprocess": 1,
+                "docker_argv": 1,
                 "aws_service": 1,
             }
         )
@@ -1146,6 +1190,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             "configured_baseline_complete": configured_baseline_complete,
             "supabase_export_exact": supabase_export_exact,
             "provider_record_replay_exact": provider_record_replay_exact,
+            "docker_daemon_readiness_exact": docker_daemon_readiness_exact,
             "immutable_ready_before_pointer": immutable_ready_before_pointer,
             "signed_readiness_exact": signed_readiness_exact,
             "active_identity_rechecked": active_identity_rechecked,
@@ -1200,6 +1245,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             "container_execution_count": (
                 container_counts["record"] + container_counts["replay"]
             ),
+            "docker_daemon_readiness_count": len(docker_daemon_events),
             "s3_object_put_count": len(s3_puts),
             "kms_verification_count": len(kms_verifies),
             "production_cli_argv_contract_hashes": command_hashes,

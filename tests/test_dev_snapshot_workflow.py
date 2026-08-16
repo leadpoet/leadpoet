@@ -29,6 +29,7 @@ _PASS_PREDICATES = (
     "configured_baseline_complete",
     "supabase_export_exact",
     "provider_record_replay_exact",
+    "docker_daemon_readiness_exact",
     "immutable_ready_before_pointer",
     "signed_readiness_exact",
     "active_identity_rechecked",
@@ -64,6 +65,10 @@ def test_exact_dev_snapshot_downstream_publication(
     assert all(result[name] is True for name in _PASS_PREDICATES)
     assert result["configured_bank_size"] >= result["configured_tree_width"] > 0
     assert result["container_execution_count"] == 3 * result["configured_bank_size"]
+    assert (
+        result["docker_daemon_readiness_count"]
+        == result["container_execution_count"]
+    )
     assert result["provider_request_count"] == 3 * result["configured_bank_size"]
     assert result["production_cli_argv_contract_hashes"] == list(
         expected_cli_argv_contract_hashes().values()
@@ -78,6 +83,7 @@ def test_exact_dev_snapshot_downstream_publication(
         "httpx_async": 1,
         "aiohttp": 1,
         "subprocess": 1,
+        "docker_argv": 1,
         "aws_service": 1,
     }
     assert result["production_git_rejection_count"] == 2

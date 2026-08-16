@@ -894,7 +894,7 @@ if _state_path_raw:
             len(values) < 12
             or values[:4] != ["docker", "run", "--rm", "--name"]
             or values[5] != "-i"
-            or float(timeout or 0.0) != 900.0
+            or not 0.1 <= float(timeout or 0.0) <= 900.0
         ):
             raise RuntimeError("dev-snapshot Docker run contract differs")
         container_name = values[4]
@@ -1093,8 +1093,50 @@ if _state_path_raw:
             reuse_existing=reuse_existing,
             bootstrap_hash=bootstrap_hash,
             argv_exact=True,
+            timeout_bounded=True,
         )
         return completed
+
+    def _docker_info(
+        argv: Sequence[str],
+        *,
+        options: Mapping[str, Any],
+    ) -> subprocess.CompletedProcess[str]:
+        """Model the shared-lock daemon readiness probe exactly."""
+
+        _require_declared_boundary("docker_daemon", "state")
+        timeout = options.get("timeout")
+        try:
+            timeout_seconds = float(timeout)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "dev-snapshot Docker info timeout differs"
+            ) from exc
+        if (
+            list(argv) != ["docker", "info"]
+            or set(options)
+            != {"text", "capture_output", "timeout", "env", "check"}
+            or options.get("text") is not True
+            or options.get("capture_output") is not True
+            or options.get("check") is not False
+            or not isinstance(options.get("env"), Mapping)
+            or not 0.1 <= timeout_seconds <= 10.0
+        ):
+            raise RuntimeError("dev-snapshot Docker info contract differs")
+        _event(
+            "docker_daemon",
+            "state",
+            returncode=0,
+            ready=True,
+            argv_exact=True,
+            timeout_bounded=True,
+        )
+        return subprocess.CompletedProcess(
+            list(argv),
+            0,
+            stdout="rehearsal Docker daemon ready\n",
+            stderr="",
+        )
 
     def _patched_run(*popenargs: Any, **kwargs: Any) -> Any:
         command = popenargs[0] if popenargs else kwargs.get("args")
@@ -1110,6 +1152,18 @@ if _state_path_raw:
                             environment=dict(kwargs.get("env") or os.environ),
                             timeout=kwargs.get("timeout"),
                         )
+                    except Exception:
+                        _event(
+                            "subprocess",
+                            "rejected",
+                            command_class="docker",
+                            command_name="docker",
+                            **_negative_probe_fields("docker_argv"),
+                        )
+                        raise
+                elif argv[1:2] == ["info"]:
+                    try:
+                        completed = _docker_info(argv, options=kwargs)
                     except Exception:
                         _event(
                             "subprocess",

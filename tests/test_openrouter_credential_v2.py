@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -29,6 +30,7 @@ from gateway.tee.openrouter_credential_v2 import (
     validate_openrouter_ingress_envelope_v2,
 )
 from gateway.tee.provider_broker_v2 import (
+    HTTPXProviderTransport,
     ProviderBrokerV2,
     credential_value_hash,
 )
@@ -165,7 +167,10 @@ def test_openrouter_seal_rpc_retry_is_idempotent_and_rejects_rebinding(
     tee_service.v2_ingress_seal_cache.clear()
 
 
-def test_registration_executes_unchanged_provider_sequence_and_seals_jobs():
+def test_registration_executes_unchanged_provider_sequence_and_seals_jobs(
+    monkeypatch,
+):
+    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_coordinator")
     recipient = _recipient()
     vault = _vault()
     runtime_envelope = _ingress_envelope(
@@ -176,14 +181,30 @@ def test_registration_executes_unchanged_provider_sequence_and_seals_jobs():
     )
     observed = []
 
-    def transport(**request):
-        parsed = urlsplit(request["url"])
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class NetworkStream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+        def close(self):
+            return None
+
+    def raw_send(_client, request, *args, **kwargs):
+        parsed = urlsplit(str(request.url))
         observed.append(
             (
-                request["method"],
+                request.method,
                 parsed.path,
                 parsed.query,
-                request["headers"].get("Authorization"),
+                request.headers.get("Authorization"),
             )
         )
         if parsed.path == "/api/v1/key":
@@ -198,7 +219,7 @@ def test_registration_executes_unchanged_provider_sequence_and_seals_jobs():
                     "disabled": False,
                 }
             }
-        elif parsed.path == "/api/v1/workspaces" and request["method"] == "GET":
+        elif parsed.path == "/api/v1/workspaces" and request.method == "GET":
             body = {"data": [{"id": "workspace-1"}], "total_count": 1}
         elif parsed.path == "/api/v1/keys":
             query = parse_qs(parsed.query)
@@ -215,7 +236,7 @@ def test_registration_executes_unchanged_provider_sequence_and_seals_jobs():
                 if query.get("offset") == ["0"]
                 else {"data": []}
             )
-        elif request["method"] == "PATCH":
+        elif request.method == "PATCH":
             body = {"data": {"id": "workspace-1"}}
         else:
             body = {
@@ -227,13 +248,20 @@ def test_registration_executes_unchanged_provider_sequence_and_seals_jobs():
                     "io_logging_api_key_ids": [],
                 }
             }
-        return {
-            "http_status": 200,
-            "headers": {"content-type": "application/json"},
-            "body": json.dumps(body, sort_keys=True).encode("utf-8"),
-            "tls_peer_chain_hash": "sha256:" + "c" * 64,
-            "tls_protocol": "TLSv1.3",
-        }
+        encoded = json.dumps(body, sort_keys=True).encode("utf-8")
+        return httpx.Response(
+            200,
+            headers={
+                "content-length": str(len(encoded)),
+                "content-type": "application/json",
+            },
+            content=encoded,
+            extensions={"network_stream": NetworkStream()},
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx.Client, "send", raw_send)
+    physical_transport = HTTPXProviderTransport()
 
     broker = ProviderBrokerV2(
         credential_ref_hashes={},
@@ -241,7 +269,7 @@ def test_registration_executes_unchanged_provider_sequence_and_seals_jobs():
             "openrouter": HASH,
             "openrouter_management": HASH,
         },
-        transport=transport,
+        transport=physical_transport,
         artifact_sink=lambda plaintext, **scope: vault.seal(plaintext, **scope),
     )
     intercepted = BrokeredProviderTransportV2(broker.execute)
@@ -276,6 +304,7 @@ def test_registration_executes_unchanged_provider_sequence_and_seals_jobs():
         )
     finally:
         intercepted.restore()
+        physical_transport.close()
 
     assert [(method, path) for method, path, _query, _auth in observed] == [
         ("GET", "/api/v1/key"),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import contextmanager
+import contextvars
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import errno
@@ -18,6 +19,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+import weakref
 import zlib
 
 from httpx import SyncByteStream
@@ -29,6 +31,11 @@ from gateway.tee.egress_framing import (
 from gateway.tee.egress_policy import normalize_destination, normalize_proxy_destination
 from gateway.tee.egress_proxy import DEFAULT_IDLE_TIMEOUT_SECONDS
 from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
+from gateway.tee.rpc_authority import (
+    COORDINATOR_ROLE,
+    RPCAuthorityError,
+    active_enclave_role,
+)
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
     build_transport_attempt,
@@ -146,6 +153,15 @@ _CHAIN_WEIGHT_OBSERVATION_PURPOSE = (
     "research_lab.chain_weight_observation.v1"
 )
 _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE = "_leadpoet_explicit_http_transport"
+_BROKER_OWNED_HTTPX_CLIENTS_LOCK = threading.Lock()
+_BROKER_OWNED_HTTPX_CLIENTS: Dict[
+    int,
+    Tuple[weakref.ReferenceType[Any], Any],
+] = {}
+_BROKER_OWNED_HTTPX_SEND_GRANT = contextvars.ContextVar(
+    "leadpoet_broker_owned_httpx_send_grant",
+    default=None,
+)
 _PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_FIELDS = frozenset(
     {
         "schema_version",
@@ -199,6 +215,77 @@ class ProviderTransportCleanupError(ProviderBrokerV2Error):
         )
         if not self.cleanup_errno:
             self.cleanup_errno = _exception_errno(cleanup_error)
+
+
+def _register_broker_owned_httpx_client(
+    client: Any,
+    explicit_transport: Any,
+) -> None:
+    """Bind one module-created HTTPX client to its explicit transport."""
+
+    if getattr(client, _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE, None) is not (
+        explicit_transport
+    ):
+        raise ProviderBrokerV2Error(
+            "provider HTTPX client transport binding is invalid"
+        )
+    client_id = id(client)
+
+    def forget(reference: weakref.ReferenceType[Any]) -> None:
+        with _BROKER_OWNED_HTTPX_CLIENTS_LOCK:
+            current = _BROKER_OWNED_HTTPX_CLIENTS.get(client_id)
+            if current is not None and current[0] is reference:
+                _BROKER_OWNED_HTTPX_CLIENTS.pop(client_id, None)
+
+    reference = weakref.ref(client, forget)
+    with _BROKER_OWNED_HTTPX_CLIENTS_LOCK:
+        _BROKER_OWNED_HTTPX_CLIENTS[client_id] = (
+            reference,
+            explicit_transport,
+        )
+
+
+def is_broker_owned_httpx_client(client: Any) -> bool:
+    """Return true only for the exact HTTPX client created by this broker."""
+
+    if _BROKER_OWNED_HTTPX_SEND_GRANT.get() is not client:
+        return False
+    try:
+        if active_enclave_role() != COORDINATOR_ROLE:
+            return False
+    except RPCAuthorityError:
+        return False
+    with _BROKER_OWNED_HTTPX_CLIENTS_LOCK:
+        current = _BROKER_OWNED_HTTPX_CLIENTS.get(id(client))
+        if current is None:
+            return False
+        reference, explicit_transport = current
+        return (
+            reference() is client
+            and getattr(
+                client,
+                _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE,
+                None,
+            )
+            is explicit_transport
+            and getattr(client, "_transport", None) is explicit_transport
+            and getattr(client, "_mounts", None) == {}
+            and getattr(client, "follow_redirects", None) is False
+        )
+
+
+@contextmanager
+def _broker_owned_httpx_send_scope(client: Any, *args: Any, **kwargs: Any):
+    """Grant captured-send access only while the broker opens one stream."""
+
+    if _BROKER_OWNED_HTTPX_SEND_GRANT.get() is not None:
+        raise ProviderBrokerV2Error("provider HTTPX send grant is already active")
+    token = _BROKER_OWNED_HTTPX_SEND_GRANT.set(client)
+    try:
+        with client.stream(*args, **kwargs) as response:
+            yield response
+    finally:
+        _BROKER_OWNED_HTTPX_SEND_GRANT.reset(token)
 
 
 _EGRESS_PROXY_SLOT_REF_HASH = sha256_json(
@@ -1344,6 +1431,7 @@ class HTTPXProviderTransport:
             _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE,
             explicit_transport,
         )
+        _register_broker_owned_httpx_client(client, explicit_transport)
         return client
 
     @contextmanager
@@ -1649,7 +1737,8 @@ class HTTPXProviderTransport:
         allow_authenticated_complete_body_eof: bool = False,
         force_close_network_stream: bool = False,
     ) -> Dict[str, Any]:
-        with client.stream(
+        with _broker_owned_httpx_send_scope(
+            client,
             method,
             url,
             headers=dict(headers),

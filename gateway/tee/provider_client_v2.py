@@ -19,7 +19,10 @@ import urllib.request
 import urllib.response
 from urllib.parse import urljoin, urlsplit
 
-from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
+from gateway.tee.provider_broker_v2 import (
+    PROVIDER_BROKER_SCHEMA_VERSION,
+    is_broker_owned_httpx_client,
+)
 from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_ENDPOINT_HOST,
@@ -585,6 +588,8 @@ class BrokeredProviderTransportV2:
             original_async_send = httpx.AsyncClient.send
 
             def _sync_send(client, request, *args, **kwargs):
+                if is_broker_owned_httpx_client(client):
+                    return original_sync_send(client, request, *args, **kwargs)
                 if self._scope.get() is None:
                     if _loopback_url(str(request.url)):
                         return original_sync_send(client, request, *args, **kwargs)

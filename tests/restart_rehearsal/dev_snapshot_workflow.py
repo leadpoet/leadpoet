@@ -221,6 +221,95 @@ def _run_in_new_process_group(
     )
 
 
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def _exercise_production_command_lifecycle(root: Path) -> dict[str, bool]:
+    """Exercise the candidate controller's real timeout and cancellation path."""
+
+    from gateway.research_lab.snapshot_refresh import (
+        _await_command_completion,
+        _run_command,
+    )
+
+    timeout_pid_path = root / "production-timeout.pid"
+    timeout_source = (
+        "import os, pathlib, time\n"
+        f"pathlib.Path({str(timeout_pid_path)!r}).write_text(str(os.getpid()))\n"
+        "while True: time.sleep(1)\n"
+    )
+    timeout_raised = False
+    try:
+        _run_command(
+            [sys.executable, "-c", timeout_source],
+            os.environ,
+            0.2,
+        )
+    except subprocess.TimeoutExpired:
+        timeout_raised = True
+    timeout_pid = int(timeout_pid_path.read_text(encoding="utf-8"))
+    timeout_teardown_exact = timeout_raised and not _process_alive(timeout_pid)
+
+    cancellation_pid_path = root / "production-cancellation.pid"
+    cancellation_source = (
+        "import os, pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"pathlib.Path({str(cancellation_pid_path)!r}).write_text(str(os.getpid()))\n"
+        "os.close(1)\n"
+        "os.close(2)\n"
+        "while True: time.sleep(1)\n"
+    )
+    command = asyncio.create_task(
+        _await_command_completion(
+            _run_command,
+            [sys.executable, "-c", cancellation_source],
+            os.environ,
+            60,
+        )
+    )
+    deadline = asyncio.get_running_loop().time() + 5
+    while not cancellation_pid_path.is_file():
+        if asyncio.get_running_loop().time() >= deadline:
+            command.cancel()
+            try:
+                await command
+            except asyncio.CancelledError:
+                pass
+            except BaseException as exc:
+                raise RuntimeError(
+                    "production cancellation probe cleanup failed"
+                ) from exc
+            raise RuntimeError("production cancellation probe did not start")
+        await asyncio.sleep(0.01)
+    cancellation_pid = int(
+        cancellation_pid_path.read_text(encoding="utf-8")
+    )
+    command.cancel()
+    await asyncio.sleep(0.1)
+    cancellation_deferred = not command.done() and _process_alive(cancellation_pid)
+    cancelled = False
+    try:
+        await command
+    except asyncio.CancelledError:
+        cancelled = True
+    cancellation_teardown_exact = (
+        cancellation_deferred
+        and cancelled
+        and not _process_alive(cancellation_pid)
+    )
+    return {
+        "production_command_timeout_teardown_exact": timeout_teardown_exact,
+        "production_command_cancellation_teardown_exact": (
+            cancellation_teardown_exact
+        ),
+    }
+
+
 def _source_root() -> Path:
     configured = str(os.getenv("REHEARSAL_SOURCE_ROOT") or "/source").strip()
     resolved = Path(configured).resolve()
@@ -855,6 +944,9 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             raise RuntimeError("exact dev-snapshot child returned invalid evidence") from exc
         except OSError as exc:
             raise RuntimeError("exact dev-snapshot child emitted no evidence") from exc
+        lifecycle_predicates = asyncio.run(
+            _exercise_production_command_lifecycle(root)
+        )
         _run_negative_boundary_probes(child_env)
         events = _load_events(root / "events.jsonl")
         readiness = dict(child.get("readiness") or {})
@@ -892,6 +984,13 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             int(event.get("returncode") or 0) == 0
             for event in events
             if event.get("kind") == "production_command"
+        )
+        production_command_process_groups_isolated = (
+            len(command_events) == len(expected_phases)
+            and all(
+                event.get("process_group_isolated") is True
+                for event in command_events
+            )
         )
         selected_tables = [
             str(event.get("table") or "")
@@ -1184,7 +1283,11 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             and negative_boundary_evidence_complete
         )
         predicates = {
+            **lifecycle_predicates,
             "production_commands_exact": production_commands_exact,
+            "production_command_process_groups_isolated": (
+                production_command_process_groups_isolated
+            ),
             "production_cli_argv_contracts_exact": (
                 production_cli_argv_contracts_exact
             ),

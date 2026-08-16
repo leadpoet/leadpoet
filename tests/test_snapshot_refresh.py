@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
+
+import pytest
 
 from gateway.research_lab import snapshot_refresh
 from gateway.research_lab.config import RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD
@@ -79,6 +84,88 @@ def _pipeline_output(command: Sequence[str], *, bank_size: int = 40) -> str:
     return _publish_output() if "--skip-current-pointer" in command else "ok"
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_run_command_timeout_reaps_its_process_group(monkeypatch, tmp_path):
+    pid_path = tmp_path / "timed-out.pid"
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "COMMAND_TERMINATION_GRACE_SECONDS",
+        0.1,
+    )
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_KILL_WAIT_SECONDS", 2.0)
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import os, pathlib, sys, time\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "while True: time.sleep(1)\n"
+        ),
+        str(pid_path),
+    ]
+
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        snapshot_refresh._run_command(command, dict(os.environ), 0.2)
+
+    assert time.monotonic() - started < 3.0
+    pid = int(pid_path.read_text(encoding="utf-8"))
+    assert not _pid_alive(pid)
+
+
+def test_run_command_kills_term_ignoring_descendant_that_closed_pipes(
+    monkeypatch, tmp_path
+):
+    descendant_pid_path = tmp_path / "descendant.pid"
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "COMMAND_TERMINATION_GRACE_SECONDS",
+        0.1,
+    )
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_KILL_WAIT_SECONDS", 3.0)
+    descendant_code = (
+        "import os, pathlib, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "os.close(1)\n"
+        "os.close(2)\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "while True: time.sleep(1)\n"
+    )
+    launcher_code = (
+        "import pathlib, subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]])\n"
+        "deadline = time.monotonic() + 2\n"
+        "while not pathlib.Path(sys.argv[1]).is_file():\n"
+        "    if time.monotonic() >= deadline: raise SystemExit(2)\n"
+        "    time.sleep(0.01)\n"
+    )
+
+    with pytest.raises(RuntimeError, match="left a live descendant process"):
+        snapshot_refresh._run_command(
+            [
+                sys.executable,
+                "-c",
+                launcher_code,
+                str(descendant_pid_path),
+                descendant_code,
+            ],
+            dict(os.environ),
+            2,
+        )
+
+    descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
+    assert not _pid_alive(descendant_pid)
+
+
 def test_published_snapshot_uri_requires_one_content_addressed_target():
     expected = "s3://private-bucket/dev/" + "e" * 64
     assert snapshot_refresh._published_snapshot_uri(
@@ -120,6 +207,118 @@ def _configure(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(SNAPSHOT_URI_ENV, "s3://private-bucket/dev/current.json")
 
 
+def test_cancellation_keeps_refresh_lock_and_workdir_until_command_is_gone(
+    monkeypatch, tmp_path
+):
+    _configure(monkeypatch, tmp_path)
+    runtime_root = tmp_path / "runtime"
+    scripts_dir = runtime_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    recorder_pid_path = tmp_path / "recorder.pid"
+    monkeypatch.setenv(snapshot_refresh.RUNTIME_SOURCE_ROOT_ENV, str(runtime_root))
+    monkeypatch.setenv("SNAPSHOT_TEST_RECORDER_PID_PATH", str(recorder_pid_path))
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "COMMAND_TERMINATION_GRACE_SECONDS",
+        0.75,
+    )
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_KILL_WAIT_SECONDS", 3.0)
+    (scripts_dir / "export_research_lab_dev_icp_inputs.py").write_text(
+        "import argparse, json, pathlib\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--out-dir', required=True)\n"
+        "parser.add_argument('--seed')\n"
+        "parser.add_argument('--expected-private-model-manifest-hash')\n"
+        "args = parser.parse_args()\n"
+        "out = pathlib.Path(args.out_dir)\n"
+        "out.mkdir(parents=True)\n"
+        "document = {\n"
+        "    'schema_version': 'research_lab.dev_icp_export.v2',\n"
+        "    'items': [{'icp_ref': 'one'}],\n"
+        "    'daily_bank_manifest': {'bank_size': 1},\n"
+        "}\n"
+        "(out / 'source_icps.json').write_text(json.dumps(document))\n",
+        encoding="utf-8",
+    )
+    (scripts_dir / "record_research_lab_dev_snapshots.py").write_text(
+        "import os, pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pathlib.Path(os.environ['SNAPSHOT_TEST_RECORDER_PID_PATH']).write_text(\n"
+        "    str(os.getpid())\n"
+        ")\n"
+        "os.close(1)\n"
+        "os.close(2)\n"
+        "while True: time.sleep(1)\n",
+        encoding="utf-8",
+    )
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return _active()
+
+    async def scenario() -> None:
+        refresh = asyncio.create_task(
+            snapshot_refresh.maybe_refresh_dev_snapshot(
+                SimpleNamespace(),
+                worker_index=0,
+                tree_policy=TreePolicy(mode="active"),
+                now=1000,
+                readiness_loader=lambda _uri, **_kwargs: _ready(
+                    ready=False,
+                    reason="snapshot_not_ready",
+                ),
+                active_loader=active_loader,
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 5
+        while not recorder_pid_path.is_file():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("recorder process did not start")
+            await asyncio.sleep(0.01)
+        recorder_pid = int(recorder_pid_path.read_text(encoding="utf-8"))
+        work_dirs = list((tmp_path / "work").glob("refresh-*"))
+        assert len(work_dirs) == 1
+
+        refresh.cancel()
+        await asyncio.sleep(0.1)
+        assert not refresh.done()
+        assert work_dirs[0].is_dir()
+        assert _pid_alive(recorder_pid)
+
+        contender = await snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=1,
+            tree_policy=TreePolicy(mode="active"),
+            now=1001,
+            readiness_loader=lambda _uri, **_kwargs: _ready(
+                ready=False,
+                reason="snapshot_not_ready",
+            ),
+            active_loader=active_loader,
+        )
+        assert contender == {"status": "skipped", "reason": "refresh_lock_held"}
+
+        with pytest.raises(asyncio.CancelledError):
+            await refresh
+        assert not _pid_alive(recorder_pid)
+        assert not any((tmp_path / "work").glob("refresh-*"))
+        failure_state = json.loads(
+            Path(os.environ[snapshot_refresh.REFRESH_STATE_PATH_ENV]).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert failure_state["status"] == "failed"
+        assert failure_state["last_error"] == (
+            "CancelledError:snapshot refresh cancelled"
+        )
+        with snapshot_refresh._exclusive_refresh_lock(
+            Path(os.environ[snapshot_refresh.REFRESH_STATE_PATH_ENV])
+        ) as acquired:
+            assert acquired is True
+
+    asyncio.run(scenario())
+
+
 def test_auto_refresh_defaults_on_and_explicit_false_disables(monkeypatch):
     monkeypatch.delenv(snapshot_refresh.AUTO_REFRESH_ENABLED_ENV, raising=False)
     assert snapshot_refresh.snapshot_auto_refresh_enabled() is True
@@ -129,6 +328,28 @@ def test_auto_refresh_defaults_on_and_explicit_false_disables(monkeypatch):
 
     monkeypatch.setenv(snapshot_refresh.AUTO_REFRESH_ENABLED_ENV, "invalid")
     assert snapshot_refresh.snapshot_auto_refresh_enabled() is False
+
+
+def test_command_timeout_environment_is_finitely_capped(monkeypatch):
+    assert snapshot_refresh.MAX_COMMAND_TIMEOUT_SECONDS == 2_622_300
+    monkeypatch.setenv(
+        snapshot_refresh.COMMAND_TIMEOUT_ENV,
+        str(snapshot_refresh.MAX_COMMAND_TIMEOUT_SECONDS + 1),
+    )
+    assert snapshot_refresh._positive_env_int(
+        snapshot_refresh.COMMAND_TIMEOUT_ENV,
+        snapshot_refresh.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        minimum=300,
+        maximum=snapshot_refresh.MAX_COMMAND_TIMEOUT_SECONDS,
+    ) == snapshot_refresh.MAX_COMMAND_TIMEOUT_SECONDS
+
+    monkeypatch.setenv(snapshot_refresh.COMMAND_TIMEOUT_ENV, "inf")
+    assert snapshot_refresh._positive_env_int(
+        snapshot_refresh.COMMAND_TIMEOUT_ENV,
+        snapshot_refresh.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        minimum=300,
+        maximum=snapshot_refresh.MAX_COMMAND_TIMEOUT_SECONDS,
+    ) == snapshot_refresh.DEFAULT_COMMAND_TIMEOUT_SECONDS
 
 
 def test_any_paid_worker_can_refresh_under_shared_lock(monkeypatch, tmp_path):

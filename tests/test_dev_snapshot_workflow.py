@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -9,12 +10,11 @@ import time
 
 import pytest
 
+from gateway.research_lab import snapshot_refresh
 from tests.restart_rehearsal.dev_snapshot_workflow import (
     BOUNDARY_SCHEMA,
-    DevSnapshotWorkflowTimeout,
     SCENARIO_INVARIANT,
     SCENARIO_NAME,
-    _run_in_new_process_group,
     _source_root,
     expected_cli_argv_contract_hashes,
     expected_docker_bootstrap_hashes,
@@ -23,7 +23,10 @@ from tests.restart_rehearsal.dev_snapshot_workflow import (
 
 
 _PASS_PREDICATES = (
+    "production_command_timeout_teardown_exact",
+    "production_command_cancellation_teardown_exact",
     "production_commands_exact",
+    "production_command_process_groups_isolated",
     "production_cli_argv_contracts_exact",
     "docker_bootstrap_contracts_exact",
     "configured_baseline_complete",
@@ -291,7 +294,18 @@ def test_dev_snapshot_boundary_rejects_tampered_docker_bootstrap(
     )
 
 
-def test_snapshot_timeout_kills_and_reaps_process_group(tmp_path: Path) -> None:
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_snapshot_timeout_executes_production_group_teardown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     started = tmp_path / "grandchild-started"
     escaped = tmp_path / "grandchild-escaped"
     grandchild = (
@@ -308,18 +322,69 @@ def test_snapshot_timeout_kills_and_reaps_process_group(tmp_path: Path) -> None:
         "time.sleep(60)\n"
     )
 
-    with pytest.raises(DevSnapshotWorkflowTimeout) as exc_info:
-        _run_in_new_process_group(
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "COMMAND_TERMINATION_GRACE_SECONDS",
+        0.1,
+    )
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_KILL_WAIT_SECONDS", 3.0)
+    with pytest.raises(subprocess.TimeoutExpired):
+        snapshot_refresh._run_command(
             [sys.executable, "-c", leader],
-            env=os.environ,
-            timeout_seconds=0.5,
-            label="snapshot-timeout-test",
-            term_grace_seconds=0.1,
+            os.environ,
+            0.5,
         )
 
     assert started.is_file()
-    assert exc_info.value.term_sent is True
-    assert exc_info.value.kill_sent is True
-    assert exc_info.value.returncode is not None
+    grandchild_pid = int(started.read_text(encoding="utf-8"))
+    assert not _pid_alive(grandchild_pid)
     time.sleep(1.6)
     assert not escaped.exists()
+
+
+def test_snapshot_cancellation_executes_production_group_teardown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = tmp_path / "cancelled-started"
+    command_source = (
+        "import os, pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"pathlib.Path({str(started)!r}).write_text(str(os.getpid()))\n"
+        "os.close(1)\n"
+        "os.close(2)\n"
+        "while True: time.sleep(1)\n"
+    )
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "COMMAND_TERMINATION_GRACE_SECONDS",
+        0.5,
+    )
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_KILL_WAIT_SECONDS", 3.0)
+
+    async def scenario() -> None:
+        command = asyncio.create_task(
+            snapshot_refresh._await_command_completion(
+                snapshot_refresh._run_command,
+                [sys.executable, "-c", command_source],
+                os.environ,
+                60,
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 5
+        while not started.is_file():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("production cancellation process did not start")
+            await asyncio.sleep(0.01)
+        pid = int(started.read_text(encoding="utf-8"))
+        command.cancel()
+        await asyncio.sleep(0.1)
+        assert not command.done()
+        assert _pid_alive(pid)
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        assert not _pid_alive(pid)
+
+    asyncio.run(scenario())

@@ -60,8 +60,10 @@ if _state_path_raw:
     )
     _adapter_root = Path(__file__).resolve().parent
     _real_subprocess_run = subprocess.run
+    _real_subprocess_popen = subprocess.Popen
     _observed_refresh_work_dir: Path | None = None
     _observed_production_command_phases: list[str] = []
+    _production_run_in_progress = False
 
     for _required_path in (_root, _source_root, _champion_root):
         if not _required_path.exists():
@@ -1150,7 +1152,94 @@ if _state_path_raw:
             stderr="",
         )
 
+    class _ObservedProductionPopen:
+        def __init__(
+            self,
+            popenargs: tuple[Any, ...],
+            kwargs: Mapping[str, Any],
+            *,
+            argv: list[str],
+            phase: str,
+            argv_contract_hash: str,
+        ) -> None:
+            self._process = _real_subprocess_popen(*popenargs, **dict(kwargs))
+            self._argv = list(argv)
+            self._phase = str(phase)
+            self._argv_contract_hash = str(argv_contract_hash)
+            self._recorded = False
+
+        def _record_if_complete(self) -> None:
+            if self._recorded or self._process.returncode is None:
+                return
+            _event(
+                "production_command",
+                Path(self._argv[1]).name,
+                phase=self._phase,
+                argv_contract_hash=self._argv_contract_hash,
+                argv_redacted=True,
+                argv_argument_count=len(self._argv),
+                process_group_isolated=True,
+                returncode=int(self._process.returncode),
+            )
+            self._recorded = True
+
+        @property
+        def pid(self) -> int:
+            return int(self._process.pid)
+
+        @property
+        def returncode(self) -> int | None:
+            return self._process.returncode
+
+        def communicate(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return self._process.communicate(*args, **kwargs)
+            finally:
+                self._record_if_complete()
+
+        def poll(self) -> int | None:
+            result = self._process.poll()
+            self._record_if_complete()
+            return result
+
+        def wait(self, *args: Any, **kwargs: Any) -> int:
+            try:
+                return int(self._process.wait(*args, **kwargs))
+            finally:
+                self._record_if_complete()
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._process, name)
+
+    def _patched_popen(*popenargs: Any, **kwargs: Any) -> Any:
+        command = popenargs[0] if popenargs else kwargs.get("args")
+        if _production_run_in_progress:
+            return _real_subprocess_popen(*popenargs, **kwargs)
+        if isinstance(command, (list, tuple)) and len(command) >= 2:
+            argv = [str(value) for value in command]
+            if Path(argv[1]).name in _PRODUCTION_SCRIPT_NAMES:
+                if (
+                    kwargs.get("start_new_session") is not True
+                    or kwargs.get("text") is not True
+                    or kwargs.get("stdout") is not subprocess.PIPE
+                    or kwargs.get("stderr") is not subprocess.PIPE
+                    or not isinstance(kwargs.get("env"), Mapping)
+                ):
+                    raise RuntimeError(
+                        "dev-snapshot production process-group contract differs"
+                    )
+                phase, argv_contract_hash = _validate_production_command(argv)
+                return _ObservedProductionPopen(
+                    popenargs,
+                    kwargs,
+                    argv=argv,
+                    phase=phase,
+                    argv_contract_hash=argv_contract_hash,
+                )
+        return _real_subprocess_popen(*popenargs, **kwargs)
+
     def _patched_run(*popenargs: Any, **kwargs: Any) -> Any:
+        global _production_run_in_progress
         command = popenargs[0] if popenargs else kwargs.get("args")
         if isinstance(command, (list, tuple)) and command:
             argv = [str(value) for value in command]
@@ -1226,7 +1315,11 @@ if _state_path_raw:
                 return completed
             if len(argv) >= 2 and Path(argv[1]).name in _PRODUCTION_SCRIPT_NAMES:
                 phase, argv_contract_hash = _validate_production_command(argv)
-                completed = _real_subprocess_run(*popenargs, **kwargs)
+                _production_run_in_progress = True
+                try:
+                    completed = _real_subprocess_run(*popenargs, **kwargs)
+                finally:
+                    _production_run_in_progress = False
                 _event(
                     "production_command",
                     Path(argv[1]).name,
@@ -1257,4 +1350,5 @@ if _state_path_raw:
         )
         raise RuntimeError("dev-snapshot subprocess operation is not allowlisted")
 
+    subprocess.Popen = _patched_popen
     subprocess.run = _patched_run

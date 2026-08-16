@@ -102,11 +102,35 @@ def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
         "snapshot_export_bank_size",
         "snapshot_record_workflow_timeout_seconds",
         "_run_named_docker",
+        "_record_icp_with_retries",
+        "_close_snapshot_request_set",
+        "_replay_icp_with_docker",
+        "main",
     } <= set(
         PROTECTED_SYMBOLS["scripts/record_research_lab_dev_snapshots.py"]
     )
-    assert {"maybe_refresh_dev_snapshot"} <= set(
+    assert {
+        "COMMAND_TIMEOUT_ENV",
+        "DEFAULT_COMMAND_TIMEOUT_SECONDS",
+        "MAX_COMMAND_TIMEOUT_SECONDS",
+        "COMMAND_POLL_INTERVAL_SECONDS",
+        "COMMAND_TERMINATION_GRACE_SECONDS",
+        "COMMAND_KILL_WAIT_SECONDS",
+        "COMMAND_PIPE_DRAIN_TIMEOUT_SECONDS",
+        "_CommandCancellationRequested",
+        "_positive_env_int",
+        "_process_group_alive",
+        "_signal_process_group",
+        "_wait_for_process_group_exit",
+        "_terminate_process_group",
+        "_run_command",
+        "_await_command_completion",
+        "maybe_refresh_dev_snapshot",
+    } <= set(
         PROTECTED_SYMBOLS["gateway/research_lab/snapshot_refresh.py"]
+    )
+    assert {"MAX_DEV_SNAPSHOT_BANK_ICP_COUNT"} <= set(
+        PROTECTED_SYMBOLS["gateway/research_lab/dev_eval_runner.py"]
     )
     assert {
         "_DOCKER_OPERATION_LOCK_DEFAULT_TIMEOUT_SECONDS",

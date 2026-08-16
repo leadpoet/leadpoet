@@ -262,6 +262,11 @@
       "symbol": "SIGNATURE_DOMAIN"
     },
     {
+      "ast_sha256": "sha256:fb02dbe526d664184401e133e0d4380422c91d91d34729172ba67e039cfb3523",
+      "path": "leadpoet_canonical/auditor_latest_verified_bundle_v2.py",
+      "symbol": "_compact_weights_hash"
+    },
+    {
       "ast_sha256": "sha256:5d916ae29a6c669437551695263ff9fca14a19e88c5690c00547c4b89f38243c",
       "path": "leadpoet_canonical/auditor_latest_verified_bundle_v2.py",
       "symbol": "build_latest_verified_bundle_record_v2"
@@ -277,7 +282,7 @@
       "symbol": "validate_latest_verified_bundle_record_v2"
     },
     {
-      "ast_sha256": "sha256:9b5cdaec9e7c68e09339095fc5fff4bc78692c28944315e6732abd857ba8c56d",
+      "ast_sha256": "sha256:45875ad9786267ded1f24808de329a6d28af237304a1b5a7d01447579e912d4a",
       "path": "leadpoet_canonical/auditor_latest_verified_bundle_v2.py",
       "symbol": "verified_bundle_projection_v2"
     },

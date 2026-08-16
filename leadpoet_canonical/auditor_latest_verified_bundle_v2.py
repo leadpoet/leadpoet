@@ -42,6 +42,17 @@ def _hash(value: Any, field: str) -> str:
     return normalized
 
 
+def _compact_weights_hash(value: Any) -> str:
+    """Normalize the compact verifier's canonical raw digest for storage."""
+
+    normalized = str(value or "").lower()
+    if len(normalized) == 64 and all(
+        character in "0123456789abcdef" for character in normalized
+    ):
+        normalized = "sha256:" + normalized
+    return _hash(normalized, "weights hash")
+
+
 def _no_duplicate_object(pairs):
     value = {}
     for key, child in pairs:
@@ -103,7 +114,7 @@ def verified_bundle_projection_v2(value: Mapping[str, Any]) -> Dict[str, Any]:
         "block": _integer(value.get("block"), "bundle block", minimum=1),
         "uids": normalized_uids,
         "weights_u16": normalized_weights,
-        "weights_hash": _hash(value.get("weights_hash"), "weights hash"),
+        "weights_hash": _compact_weights_hash(value.get("weights_hash")),
         "bundle_hash": _hash(value.get("bundle_hash"), "bundle hash"),
         "authority_stage": stage,
         "validator_hotkey": validator_hotkey,

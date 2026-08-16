@@ -194,6 +194,7 @@ PROTECTED_SYMBOLS = {
         "SCHEMA_VERSION",
         "SIGNATURE_DOMAIN",
         "MAX_RECORD_BYTES",
+        "_compact_weights_hash",
         "verified_bundle_projection_v2",
         "record_signature_message_v2",
         "build_latest_verified_bundle_record_v2",

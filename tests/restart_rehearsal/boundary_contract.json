@@ -6,11 +6,11 @@
       "reject_unknown": true
     },
     "aws_kms": {
-      "allowed_operations": ["decrypt", "encrypt", "generate_data_key_pair_without_plaintext", "verify"],
+      "allowed_operations": ["decrypt", "encrypt", "generate_data_key_pair_without_plaintext", "sign", "verify"],
       "reject_unknown": true
     },
     "aws_s3_object_lock": {
-      "allowed_operations": ["get_object", "head_object", "put_object"],
+      "allowed_operations": ["get_object", "head_object", "list_objects_v2", "put_object"],
       "reject_unknown": true
     },
     "docker_daemon": {
@@ -50,6 +50,7 @@
         "download",
         "external_ip",
         "gateway_request",
+        "provider_request",
         "proxy_connect",
         "proxy_dns",
         "proxy_tls_connect"

@@ -3898,6 +3898,89 @@ def test_rehearsal_build_binds_the_platform_specific_base(
     ]
 
 
+def test_rehearsal_build_stages_compact_weight_readiness_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+
+    @contextmanager
+    def temporary_directory(*, prefix: str):
+        assert prefix == "leadpoet-restart-image-"
+        yield str(tmp_path)
+
+    monkeypatch.setattr(
+        rehearsal.tempfile,
+        "TemporaryDirectory",
+        temporary_directory,
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "_git_file",
+        lambda _sha, path: (repository_root / path).read_bytes(),
+    )
+    monkeypatch.setattr(rehearsal, "_run", lambda *_args, **_kwargs: None)
+
+    candidate_sha = "a" * 40
+    rehearsal._build_image(
+        "leadpoet-test:compact-weight-import",
+        harness_sha=candidate_sha,
+        docker_platform="linux/amd64",
+        wheelhouse_shas=(candidate_sha,),
+    )
+
+    staged_harness = tmp_path / "harness"
+    staged_compact_runner = staged_harness / "compact_weight_joined_runner.py"
+    staged_dependency = staged_harness / "weight_readiness_runner.py"
+    assert staged_compact_runner.is_file()
+    assert staged_dependency.is_file()
+
+    environment = {
+        key: value for key, value in os.environ.items() if key != "PYTHONPATH"
+    }
+    environment.update(
+        {
+            "REHEARSAL_CANDIDATE_SHA": candidate_sha,
+            "REHEARSAL_SCOPE": "exact",
+            "REHEARSAL_SOURCE_ROOT": str(repository_root),
+            "REHEARSAL_STATE_ROOT": str(tmp_path / "state"),
+        }
+    )
+    # Match /source:/harness resolution without auto-loading the unrelated
+    # process-wide sitecustomize adapters during this import-only probe.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import sys",
+                    "from pathlib import Path",
+                    "sys.path[:0] = "
+                    f"[{str(repository_root)!r}, {str(staged_harness)!r}]",
+                    "import compact_weight_joined_runner as compact",
+                    "import weight_readiness_runner as readiness",
+                    "assert Path(compact.__file__).resolve() == "
+                    f"Path({str(staged_compact_runner)!r}).resolve()",
+                    "assert 'weight_readiness_runner' in "
+                    "compact._allocation_guard.__code__.co_names",
+                    "assert Path(readiness.__file__).resolve() == "
+                    f"Path({str(staged_dependency)!r}).resolve()",
+                )
+            ),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+
+
 def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> None:
     harness_root = Path(__file__).resolve().parent
     run_inside = (harness_root / "run_inside.sh").read_text(encoding="utf-8")
@@ -4742,6 +4825,124 @@ def test_candidate_owned_guard_probe_does_not_mutate_rollback_transition_ledger(
     assert source.count("activate(new_id)\n") == 1
     assert source.count("activate(new_id, record_transition=False)\n") == 1
     assert "if record_transition:\n            transitions.append(" in source
+
+
+def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
+    monkeypatch,
+) -> None:
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+
+    source_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "SOURCE_ROOT",
+        source_root,
+    )
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+
+    evidence = (
+        production_workflow_runner._exercise_full_rebenchmark_publication_path()
+    )
+
+    assert evidence["configured_icp_count"] > 0
+    assert evidence["model_invocation_count"] == evidence["configured_icp_count"]
+    assert evidence["scorer_invocation_count"] == evidence["configured_icp_count"]
+    assert evidence["aggregate_score"] > 0.0
+    assert evidence["positive_score_verified"] is True
+    assert evidence["every_configured_icp_positive"] is True
+    assert evidence["configured_icp_identity_exact"] is True
+    assert evidence["candidate_release_identity_exact"] is True
+    assert evidence["production_model_runner_exact"] is True
+    assert evidence["production_scorer_path_exact"] is True
+    assert evidence["model_attested_outcome_count"] == evidence["configured_icp_count"]
+    assert evidence["scorer_attested_outcome_count"] == evidence["configured_icp_count"]
+    assert evidence["complete_company_fit_receipt_count"] == evidence[
+        "configured_icp_count"
+    ]
+    assert evidence["incomplete_company_fit_receipt_rejected"] is True
+    assert evidence["model_input_artifact_sets_exact"] is True
+    assert evidence["scorer_input_artifact_sets_exact"] is True
+    assert evidence["baseline_parent_receipt_count"] == 2 * evidence[
+        "configured_icp_count"
+    ]
+    assert evidence["baseline_input_artifact_count"] == 1
+    assert evidence["independent_baseline_authority_exact"] is True
+    policy = ResearchLabGatewayConfig().conditional_validation_policy()
+    assert evidence["configured_icp_count"] == policy.total_icps
+    assert evidence["category_counts"] == {
+        "public": policy.public_total_icps,
+        "private": policy.private_total_icps,
+        "conditional": policy.conditional_total_icps,
+    }
+    assert evidence["candidate_scoring_ready"] is True
+    assert evidence["external_dashboard_projection_adapter_verified"] is True
+    assert evidence["live_dashboard_readback_claimed"] is False
+    assert evidence["production_active_model_sync_load_exact"] is True
+    assert evidence["production_active_model_assertion_exact"] is True
+    assert evidence["production_repo_head_guard_exact"] is True
+    assert evidence["repo_head_change_rejected"] is True
+    assert evidence["production_source_bundle_exact"] is True
+    assert evidence["production_catalog_loader_exact"] is True
+    assert evidence["production_icp_window_loader_exact"] is True
+    assert evidence["provider_preflight_production_facade_exact"] is True
+    assert evidence["maintenance_boundary_production_exact"] is True
+    assert evidence["provider_preflight_boundary_adapted"] is True
+    assert evidence["checkpoint_boundary_adapted"] is True
+    assert evidence["checkpoint_write_count"] >= evidence["configured_icp_count"]
+    assert evidence["checkpoint_full_bank_persisted"] is True
+    assert evidence["checkpoint_restart_status"] == "completed"
+    assert evidence["checkpoint_restart_reused_without_provider_spend"] is True
+    assert evidence["actual_audit_publication_verified"] is True
+    assert evidence["audit_completed_dispatch_count"] >= 1
+    assert evidence["production_artifact_link_hash_exact"] is True
+    assert evidence["artifact_link_conflict_rejected"] is True
+    assert evidence["business_artifact_link_count"] >= 4
+    assert evidence["restart_status"] == "already_benchmarked"
+    assert evidence["restart_reused_without_provider_spend"] is True
+
+
+def test_full_rebenchmark_publication_derives_window_shape_from_candidate(
+    monkeypatch,
+) -> None:
+    from gateway.research_lab import config as config_module
+    from gateway.research_lab import icp_window as icp_window_module
+
+    source_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(production_workflow_runner, "SOURCE_ROOT", source_root)
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    original_config = config_module.ResearchLabGatewayConfig
+    original_selector = icp_window_module.select_rolling_icp_window_from_sets
+    observed: list[dict[str, object]] = []
+
+    def _candidate_config(**kwargs):
+        return original_config(
+            lab_champion_eval_days=7,
+            lab_champion_icps_per_day=3,
+            **kwargs,
+        )
+
+    _candidate_config.from_env = original_config.from_env
+
+    def _candidate_selector(rows, **kwargs):
+        observed.append(dict(kwargs))
+        return original_selector(rows, **kwargs)
+
+    monkeypatch.setattr(config_module, "ResearchLabGatewayConfig", _candidate_config)
+    monkeypatch.setattr(
+        icp_window_module,
+        "select_rolling_icp_window_from_sets",
+        _candidate_selector,
+    )
+
+    evidence = (
+        production_workflow_runner._exercise_full_rebenchmark_publication_path()
+    )
+
+    assert evidence["configured_icp_count"] > 0
+    assert observed
+    assert observed[0]["days"] == 7
+    assert observed[0]["icps_per_day"] == 3
+    assert observed[0]["window_mode"] == "hybrid_fresh_retained"
 
 
 def test_historical_layout_scenario_follows_candidate_policy(

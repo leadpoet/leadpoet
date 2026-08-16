@@ -21,6 +21,7 @@ def _result(
         "role": role,
         "pcr0": pcr0,
         "image_id": image,
+        "rootfs_layer_hashes": ["sha256:" + "1" * 64],
         "eif_sha256": eif,
         "source_manifest_hash": "sha256:source",
         "build_identity_hash": "sha256:identity",
@@ -35,6 +36,7 @@ def test_repeated_builds_must_match_every_identity_field(tmp_path, monkeypatch):
     commit = "1" * 40
     monkeypatch.setattr(gateway_pcr0_builder, "resolve_commit", lambda *_args: commit)
     monkeypatch.setattr(gateway_pcr0_builder, "extract_clean_commit", lambda **kwargs: kwargs["destination"].mkdir())
+    monkeypatch.setattr(gateway_pcr0_builder, "_prune_builder_cache", lambda: None)
     monkeypatch.setattr(
         gateway_pcr0_builder,
         "_build_once",
@@ -63,6 +65,7 @@ def test_repeated_build_divergence_fails_closed(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(gateway_pcr0_builder, "resolve_commit", lambda *_args: commit)
     monkeypatch.setattr(gateway_pcr0_builder, "extract_clean_commit", lambda **kwargs: kwargs["destination"].mkdir())
+    monkeypatch.setattr(gateway_pcr0_builder, "_prune_builder_cache", lambda: None)
 
     def _build(**kwargs):
         calls.append(kwargs["index"])
@@ -87,6 +90,7 @@ def test_repeated_build_eif_metadata_may_differ_when_identity_matches(
     commit = "3" * 40
     monkeypatch.setattr(gateway_pcr0_builder, "resolve_commit", lambda *_args: commit)
     monkeypatch.setattr(gateway_pcr0_builder, "extract_clean_commit", lambda **kwargs: kwargs["destination"].mkdir())
+    monkeypatch.setattr(gateway_pcr0_builder, "_prune_builder_cache", lambda: None)
 
     def _build(**kwargs):
         result = _result(commit)
@@ -157,6 +161,144 @@ def test_gateway_build_command_binds_reproducible_epoch(tmp_path):
     assert "LEADPOET_ENCLAVE_ROLE=gateway_coordinator" in command
 
 
+def test_normalized_rootfs_layer_hashes_are_strict(monkeypatch):
+    layer = "sha256:" + "a" * 64
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "_run",
+        lambda *_args, **_kwargs: type("Result", (), {"stdout": json.dumps([layer])})(),
+    )
+
+    assert gateway_pcr0_builder._normalized_rootfs_layer_hashes("image") == [layer]
+
+
+def test_normalized_rootfs_layer_hashes_reject_invalid_identity(monkeypatch):
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "_run",
+        lambda *_args, **_kwargs: type("Result", (), {"stdout": '["latest"]'})(),
+    )
+
+    with pytest.raises(
+        gateway_pcr0_builder.GatewayPCR0BuildError,
+        match="layer identity is invalid",
+    ):
+        gateway_pcr0_builder._normalized_rootfs_layer_hashes("image")
+
+
+def test_builder_cache_prune_is_fail_closed(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "_run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    gateway_pcr0_builder._prune_builder_cache()
+
+    assert calls == [
+        (["docker", "builder", "prune", "-af"], {"timeout": 600})
+    ]
+
+
+def test_repeated_builds_prune_before_ordinal_one(tmp_path, monkeypatch):
+    commit = "5" * 40
+    events = []
+    monkeypatch.setattr(gateway_pcr0_builder, "resolve_commit", lambda *_args: commit)
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "extract_clean_commit",
+        lambda **kwargs: kwargs["destination"].mkdir(),
+    )
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "_prune_builder_cache",
+        lambda: events.append("prune"),
+    )
+
+    def _build(**kwargs):
+        events.append("build-%s" % kwargs["index"])
+        return _result(commit)
+
+    monkeypatch.setattr(gateway_pcr0_builder, "_build_once", _build)
+    gateway_pcr0_builder.build_reproducible_gateway_pcr0(
+        repo_root=tmp_path,
+        revision="HEAD",
+        work_root=tmp_path / "work",
+    )
+
+    assert events == ["prune", "build-1", "build-2", "build-3"]
+
+
+def test_required_builder_prune_failure_aborts_before_build(tmp_path, monkeypatch):
+    commit = "6" * 40
+    builds = []
+    monkeypatch.setattr(gateway_pcr0_builder, "resolve_commit", lambda *_args: commit)
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "extract_clean_commit",
+        lambda **kwargs: kwargs["destination"].mkdir(),
+    )
+
+    def _fail_prune():
+        raise gateway_pcr0_builder.GatewayPCR0BuildError("builder prune failed")
+
+    monkeypatch.setattr(gateway_pcr0_builder, "_prune_builder_cache", _fail_prune)
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "_build_once",
+        lambda **kwargs: builds.append(kwargs["index"]),
+    )
+
+    with pytest.raises(
+        gateway_pcr0_builder.GatewayPCR0BuildError,
+        match="builder prune failed",
+    ):
+        gateway_pcr0_builder.build_reproducible_gateway_pcr0(
+            repo_root=tmp_path,
+            revision="HEAD",
+            work_root=tmp_path / "work",
+        )
+
+    assert builds == []
+
+
+def test_divergence_reports_every_safe_build_identity(tmp_path, monkeypatch):
+    commit = "7" * 40
+    monkeypatch.setattr(gateway_pcr0_builder, "resolve_commit", lambda *_args: commit)
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "extract_clean_commit",
+        lambda **kwargs: kwargs["destination"].mkdir(),
+    )
+    monkeypatch.setattr(gateway_pcr0_builder, "_prune_builder_cache", lambda: None)
+
+    def _build(**kwargs):
+        index = kwargs["index"]
+        result = _result(
+            commit,
+            pcr0=("a" if index == 1 else "b") * 96,
+            image="sha256:" + ("1" if index == 1 else "2") * 64,
+        )
+        result["rootfs_layer_hashes"] = ["sha256:" + ("3" if index == 1 else "4") * 64]
+        result["source_manifest_hash"] = "sha256:" + ("5" if index == 1 else "6") * 64
+        return result
+
+    monkeypatch.setattr(gateway_pcr0_builder, "_build_once", _build)
+    with pytest.raises(gateway_pcr0_builder.GatewayPCR0BuildError) as raised:
+        gateway_pcr0_builder.build_reproducible_gateway_pcr0(
+            repo_root=tmp_path,
+            revision="HEAD",
+            work_root=tmp_path / "work",
+        )
+
+    message = str(raised.value)
+    assert '"pcr0"' in message
+    assert '"image_id"' in message
+    assert '"rootfs_layer_hashes"' in message
+    assert '"source_manifest_hash"' in message
+
+
 def test_gateway_builder_normalizes_image_before_eif():
     source = Path(gateway_pcr0_builder.__file__).read_text(encoding="utf-8")
 
@@ -176,6 +318,7 @@ def test_gateway_builder_discards_large_intermediate_artifacts():
     )
     normalization = source.index("image_id = normalize_docker_image(", build)
     assert build < pre_normalization_prune < normalization
+    assert 'builder", "prune", "-af"], check=False' not in source
 
 
 def test_cache_keeps_latest_twenty_verified_commits(tmp_path):

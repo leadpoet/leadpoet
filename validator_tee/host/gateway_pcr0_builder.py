@@ -1,8 +1,9 @@
 """Independently rebuild the gateway EIF from a clean Git commit.
 
-This verifier is intentionally operator-run. It never restarts services, prunes
-shared Docker state, or changes validator weights. A cache entry is written only
-after repeated clean builds produce the same image ID and PCR0.
+This verifier is intentionally operator-run. It never restarts services or
+changes validator weights. It prunes BuildKit cache to establish the same clean
+boundary for every build, and writes a cache entry only after repeated clean
+builds produce the same image ID and PCR0.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ GATEWAY_ROLES = (
 )
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class GatewayPCR0BuildError(RuntimeError):
@@ -191,6 +193,44 @@ def _deterministic_docker_build_command(
     ]
 
 
+def _prune_builder_cache() -> None:
+    """Require a clean BuildKit state before the repeated-build boundary."""
+
+    _run(["docker", "builder", "prune", "-af"], timeout=600)
+
+
+def _normalized_rootfs_layer_hashes(image: str) -> list[str]:
+    result = _run(
+        [
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{json .RootFS.Layers}}",
+            image,
+        ],
+        timeout=120,
+    )
+    try:
+        layers = json.loads(result.stdout.strip())
+    except json.JSONDecodeError as exc:
+        raise GatewayPCR0BuildError(
+            "normalized gateway image layer identity is invalid"
+        ) from exc
+    if (
+        not isinstance(layers, list)
+        or not layers
+        or any(
+            not isinstance(layer, str) or not _SHA256_RE.fullmatch(layer)
+            for layer in layers
+        )
+    ):
+        raise GatewayPCR0BuildError(
+            "normalized gateway image layer identity is invalid"
+        )
+    return layers
+
+
 def _build_once(
     *,
     source_root: Path,
@@ -245,13 +285,14 @@ def _build_once(
     # The tagged image retains every layer needed for normalization. Drop the
     # duplicate BuildKit cache before docker save so constrained independent
     # builders do not need space for the image, cache, and export at once.
-    _run(["docker", "builder", "prune", "-af"], check=False, timeout=600)
+    _run(["docker", "builder", "prune", "-af"], timeout=600)
     image_id = normalize_docker_image(
         source_image=raw_image,
         normalized_image=image,
     )
     if not image_id.startswith("sha256:"):
         raise GatewayPCR0BuildError("gateway image ID is invalid")
+    rootfs_layer_hashes = _normalized_rootfs_layer_hashes(image)
 
     eif_path = work_root / (
         "gateway-%s-%s-%s.eif" % (role, commit[:12], index)
@@ -275,12 +316,13 @@ def _build_once(
         (gateway_root / "tee" / "Dockerfile.enclave").read_bytes()
     ).hexdigest()
     _run(["docker", "rmi", "-f", image, raw_image], check=False, timeout=120)
-    _run(["docker", "builder", "prune", "-af"], check=False, timeout=600)
+    _run(["docker", "builder", "prune", "-af"], timeout=600)
     return {
         "commit_sha": commit,
         "role": role,
         "pcr0": pcr0,
         "image_id": image_id,
+        "rootfs_layer_hashes": rootfs_layer_hashes,
         "eif_sha256": eif_hash,
         "source_manifest_hash": context_hash,
         "build_identity_hash": str(build_identity.get("identity_hash") or ""),
@@ -317,6 +359,11 @@ def build_reproducible_gateway_pcr0(
     work_root.mkdir(parents=True, exist_ok=True)
     source_root = work_root / "source"
     extract_clean_commit(repo_root=repo_root, commit=commit, destination=source_root)
+    # A previous failed attestation can leave BuildKit state behind before its
+    # normal post-build prune.  The repeated-build authority must therefore
+    # establish the same clean cache boundary before ordinal one that later
+    # ordinals receive from their predecessor.
+    _prune_builder_cache()
     results = [
         _build_once(
             source_root=source_root,
@@ -327,23 +374,40 @@ def build_reproducible_gateway_pcr0(
         )
         for index in range(repetitions)
     ]
-    for field in (
+    reproducibility_fields = (
         "pcr0",
         "image_id",
+        "rootfs_layer_hashes",
         "source_manifest_hash",
         "build_identity_hash",
         "execution_manifest_hash",
         "dependency_lock_hash",
         "dockerfile_hash",
         "topology_hash",
-    ):
-        values = {result[field] for result in results}
-        if len(values) != 1:
-            observed = [result[field] for result in results]
-            raise GatewayPCR0BuildError(
-                "gateway builds diverged at %s: %s"
-                % (field, json.dumps(observed, separators=(",", ":")))
+    )
+    divergences = {
+        field: [result[field] for result in results]
+        for field in reproducibility_fields
+        if len(
+            {
+                json.dumps(result[field], sort_keys=True, separators=(",", ":"))
+                for result in results
+            }
+        )
+        != 1
+    }
+    if divergences:
+        first_field = next(
+            field for field in reproducibility_fields if field in divergences
+        )
+        raise GatewayPCR0BuildError(
+            "gateway builds diverged at %s: %s; divergent_build_diagnostics=%s"
+            % (
+                first_field,
+                json.dumps(divergences[first_field], separators=(",", ":")),
+                json.dumps(divergences, sort_keys=True, separators=(",", ":")),
             )
+        )
     evidence = [
         {
             "schema_version": BUILD_EVIDENCE_SCHEMA_VERSION,

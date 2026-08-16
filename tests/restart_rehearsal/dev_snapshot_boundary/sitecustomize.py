@@ -726,6 +726,8 @@ if _state_path_raw:
                 "<active-config-hash>",
                 "--private-model-manifest-hash",
                 "<active-manifest-hash>",
+                "--cancel-file",
+                "<refresh>/cancel-recording",
                 "--record",
                 *provider_args,
             ],
@@ -825,6 +827,8 @@ if _state_path_raw:
                 str(_active_artifact["config_hash"]),
                 "--private-model-manifest-hash",
                 str(_active_artifact["manifest_hash"]),
+                "--cancel-file",
+                str(work_dir / "cancel-recording"),
                 "--record",
                 *provider_args,
             ]

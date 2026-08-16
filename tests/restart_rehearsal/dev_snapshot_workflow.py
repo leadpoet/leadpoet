@@ -95,6 +95,8 @@ def _redacted_cli_argv_shapes() -> dict[str, list[str]]:
             "<active-config-hash>",
             "--private-model-manifest-hash",
             "<active-manifest-hash>",
+            "--cancel-file",
+            "<refresh>/cancel-recording",
             "--record",
             *provider_args,
         ],
@@ -1041,7 +1043,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             and readiness.get("benchmark_date") == now.date().isoformat()
         )
         active_identity_rechecked = (
-            int(child.get("active_load_count") or 0) == 3
+            int(child.get("active_load_count") or 0) >= 4
             and readiness.get("private_model_manifest_hash")
             == active_artifact["manifest_hash"]
             and readiness.get("champion_image_digest")

@@ -18,7 +18,7 @@ the rehearsal contract may be implemented locally.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 import fcntl
 from functools import partial
@@ -884,6 +884,63 @@ def _run_independent_stage(
     return True, value
 
 
+def _run_prepush_component_and_workflow_stages(
+    *,
+    component_actions: Sequence[tuple[str, Callable[[], Any]]],
+    workflow_action: tuple[str, Callable[[], Any]],
+    stages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Run the bounded prepush stages with at most two live containers.
+
+    Gateway and validator begin together.  Once the first component settles,
+    the independent workflow consumes that freed executor slot while the
+    slower component finishes. Component results are appended canonically;
+    workflow results are returned so the caller can preserve fixture-cleanup
+    ordering in the durable stage ledger.
+    """
+
+    if len(component_actions) != 2:
+        raise ValueError(
+            "prepush component/workflow overlap requires exactly two components"
+        )
+
+    def run_stage(
+        item: tuple[str, Callable[[], Any]],
+    ) -> list[dict[str, Any]]:
+        local_stages: list[dict[str, Any]] = []
+        _run_independent_stage(
+            stage=item[0],
+            action=item[1],
+            stages=local_stages,
+        )
+        return local_stages
+
+    ordered_component_stages = [item[0] for item in component_actions]
+    component_results: dict[str, list[dict[str, Any]]] = {}
+    workflow_results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(run_stage, item): item[0]
+            for item in component_actions
+        }
+        first_future = next(as_completed(tuple(futures)))
+        first_stage = futures.pop(first_future)
+        component_results[first_stage] = first_future.result()
+
+        _run_independent_stage(
+            stage=workflow_action[0],
+            action=workflow_action[1],
+            stages=workflow_results,
+        )
+        for future in as_completed(tuple(futures)):
+            stage = futures[future]
+            component_results[stage] = future.result()
+
+    for stage in ordered_component_stages:
+        stages.extend(component_results[stage])
+    return workflow_results
+
+
 def _mark_stage_unexercised(
     *,
     stage: str,
@@ -1409,6 +1466,22 @@ def _run_profile(args: argparse.Namespace) -> int:
             transitions = (transition,)
             if args.profile == "release" and transition == "forward":
                 transitions = ("forward", "rollback", "forward")
+            workflow_stage = f"workflow-{args.profile}"
+            workflow_action = (
+                workflow_stage,
+                partial(
+                    _run_workflow,
+                    tag,
+                    source_root=source_root,
+                    from_sha=from_sha,
+                    candidate_sha=candidate_sha,
+                    evidence_root=evidence_root,
+                    profile=args.profile,
+                    docker_platform=docker_platform,
+                    production_allocation=args.production_allocation,
+                ),
+            )
+            deferred_workflow_results: list[dict[str, Any]] | None = None
             # Candidate startup can reconstruct receipts issued by the
             # deployed release, so both immutable release channels must be
             # available even in the one-way prepush profile.
@@ -1539,26 +1612,18 @@ def _run_profile(args: argparse.Namespace) -> int:
                             )
                         )
                     if args.profile == "prepush" and len(component_actions) > 1:
-                        def run_component_stage(
-                            item: tuple[str, Callable[[], Any]],
-                        ) -> list[dict[str, Any]]:
-                            local_stages: list[dict[str, Any]] = []
-                            _run_independent_stage(
-                                stage=item[0],
-                                action=item[1],
-                                stages=local_stages,
+                        print(
+                            "Running production V2 workflow in the first "
+                            "settled component slot (prepush)",
+                            flush=True,
+                        )
+                        deferred_workflow_results = (
+                            _run_prepush_component_and_workflow_stages(
+                                component_actions=component_actions,
+                                workflow_action=workflow_action,
+                                stages=stage_results,
                             )
-                            return local_stages
-
-                        with ThreadPoolExecutor(
-                            max_workers=len(component_actions)
-                        ) as executor:
-                            futures = [
-                                executor.submit(run_component_stage, item)
-                                for item in component_actions
-                            ]
-                            for future in futures:
-                                stage_results.extend(future.result())
+                        )
                     else:
                         for stage, action in component_actions:
                             _run_independent_stage(
@@ -1566,26 +1631,19 @@ def _run_profile(args: argparse.Namespace) -> int:
                                 action=action,
                                 stages=stage_results,
                             )
-            print(
-                "Running production V2 workflow against strict local "
-                f"boundaries ({args.profile})",
-                flush=True,
-            )
-            workflow_stage = f"workflow-{args.profile}"
-            _run_independent_stage(
-                stage=workflow_stage,
-                action=lambda: _run_workflow(
-                    tag,
-                    source_root=source_root,
-                    from_sha=from_sha,
-                    candidate_sha=candidate_sha,
-                    evidence_root=evidence_root,
-                    profile=args.profile,
-                    docker_platform=docker_platform,
-                    production_allocation=args.production_allocation,
-                ),
-                stages=stage_results,
-            )
+            if deferred_workflow_results is None:
+                print(
+                    "Running production V2 workflow against strict local "
+                    f"boundaries ({args.profile})",
+                    flush=True,
+                )
+                _run_independent_stage(
+                    stage=workflow_action[0],
+                    action=workflow_action[1],
+                    stages=stage_results,
+                )
+            else:
+                stage_results.extend(deferred_workflow_results)
             required_join_stages = [
                 item["stage"]
                 for item in stage_results

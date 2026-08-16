@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -124,6 +125,71 @@ def test_time_budget_is_not_swallowed_as_an_independent_stage_failure() -> None:
             )
 
     assert stages == []
+
+
+def test_prepush_workflow_uses_first_settled_component_slot() -> None:
+    controller = _load_controller()
+    validator_started = threading.Event()
+    workflow_started = threading.Event()
+    active: set[str] = set()
+    peak_active = 0
+    active_lock = threading.Lock()
+
+    def enter(name: str) -> None:
+        nonlocal peak_active
+        with active_lock:
+            active.add(name)
+            peak_active = max(peak_active, len(active))
+
+    def leave(name: str) -> None:
+        with active_lock:
+            active.remove(name)
+
+    def gateway() -> None:
+        enter("gateway")
+        try:
+            assert validator_started.wait(timeout=5)
+        finally:
+            leave("gateway")
+
+    def validator() -> None:
+        enter("validator")
+        validator_started.set()
+        try:
+            assert workflow_started.wait(timeout=5)
+        finally:
+            leave("validator")
+
+    def workflow() -> None:
+        assert threading.current_thread() is threading.main_thread()
+        enter("workflow")
+        try:
+            with active_lock:
+                assert active == {"validator", "workflow"}
+            workflow_started.set()
+        finally:
+            leave("workflow")
+
+    stages: list[dict[str, object]] = []
+    with controller._recording_fixture_stack(stages):
+        workflow_results = controller._run_prepush_component_and_workflow_stages(
+            component_actions=(
+                ("gateway-forward-1", gateway),
+                ("validator-forward-1", validator),
+            ),
+            workflow_action=("workflow-prepush", workflow),
+            stages=stages,
+        )
+    stages.extend(workflow_results)
+
+    assert peak_active == 2
+    assert [item["stage"] for item in stages] == [
+        "gateway-forward-1",
+        "validator-forward-1",
+        "fixture-cleanup",
+        "workflow-prepush",
+    ]
+    assert all(item["status"] == "passed" for item in stages)
 
 
 def test_workflow_preserves_distinct_n_minus_one_identity(

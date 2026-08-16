@@ -35,11 +35,11 @@ RUN python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
       awscli
 
 COPY scoring-locks/ /opt/leadpoet/scoring-locks/
-ARG REHEARSAL_HARNESS_SHA
 RUN mkdir -p /opt/leadpoet/scoring-wheelhouses \
     && for lock in /opt/leadpoet/scoring-locks/*.lock; do \
-      commit="$(basename "${lock}" .lock)"; \
-      destination="/opt/leadpoet/scoring-wheelhouses/${commit}"; \
+      lock_sha256="$(basename "${lock}" .lock)"; \
+      test "$(sha256sum "${lock}" | cut -d' ' -f1)" = "${lock_sha256}"; \
+      destination="/opt/leadpoet/scoring-wheelhouses/${lock_sha256}"; \
       mkdir -p "${destination}"; \
       python3.11 -m pip download \
         --require-hashes \
@@ -51,11 +51,7 @@ RUN mkdir -p /opt/leadpoet/scoring-wheelhouses \
         --abi cp39 \
         --dest "${destination}" \
         --requirement "${lock}"; \
-    done \
-    && test -d "/opt/leadpoet/scoring-wheelhouses/${REHEARSAL_HARNESS_SHA}" \
-    && ln -s \
-      "/opt/leadpoet/scoring-wheelhouses/${REHEARSAL_HARNESS_SHA}" \
-      /opt/leadpoet/scoring-wheelhouse
+    done
 
 COPY runsc-runtime.lock.json /opt/leadpoet/runsc-runtime.lock.json
 COPY runtime-artifacts-v2.lock.json /opt/leadpoet/runtime-artifacts-v2.lock.json
@@ -64,6 +60,17 @@ RUN python3.11 /opt/leadpoet/prepare_external_artifacts.py \
       --runsc-lock /opt/leadpoet/runsc-runtime.lock.json \
       --validator-runtime-lock /opt/leadpoet/runtime-artifacts-v2.lock.json \
       --output-root /opt/leadpoet/external-artifacts
+
+ARG REHEARSAL_SCORING_LOCK_SHA256
+COPY scoring-lock-aliases.json /opt/leadpoet/scoring-lock-aliases.json
+COPY harness/prepare_scoring_wheelhouse_aliases.py /opt/leadpoet/prepare_scoring_wheelhouse_aliases.py
+RUN python3.11 /opt/leadpoet/prepare_scoring_wheelhouse_aliases.py \
+      --root /opt/leadpoet/scoring-wheelhouses \
+      --aliases /opt/leadpoet/scoring-lock-aliases.json \
+    && test -d "/opt/leadpoet/scoring-wheelhouses/${REHEARSAL_SCORING_LOCK_SHA256}" \
+    && ln -s \
+      "/opt/leadpoet/scoring-wheelhouses/${REHEARSAL_SCORING_LOCK_SHA256}" \
+      /opt/leadpoet/scoring-wheelhouse
 
 COPY harness/ /harness/
 RUN chmod 755 \
@@ -75,6 +82,7 @@ RUN chmod 755 \
       /harness/local_services.py \
       /harness/prepare_external_artifacts.py \
       /harness/prepare_host_fixtures.py \
+      /harness/prepare_scoring_wheelhouse_aliases.py \
       /harness/postgres_v2_contract_probe.py \
       /harness/production_workflow_runner.py \
       /harness/tls_connect_proxy_service.py \

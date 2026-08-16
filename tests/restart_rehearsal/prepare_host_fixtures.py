@@ -81,10 +81,14 @@ def _prepare_offline_root(
     source_root: Path,
     destination: Path,
     commit: str,
+    scoring_wheelhouse_root: Path = Path(
+        "/opt/leadpoet/scoring-wheelhouses"
+    ),
+    external_artifact_root: Path = Path(
+        "/opt/leadpoet/external-artifacts"
+    ),
 ) -> None:
-    scoring_wheelhouse = (
-        Path("/opt/leadpoet/scoring-wheelhouses") / commit
-    )
+    scoring_wheelhouse = scoring_wheelhouse_root / commit
     if not scoring_wheelhouse.is_dir():
         raise SystemExit(
             "exact scoring wheelhouse is unavailable for fixture commit"
@@ -93,7 +97,7 @@ def _prepare_offline_root(
         scoring_wheelhouse,
         destination / "scoring-wheelhouse-py39",
     )
-    external = Path("/opt/leadpoet/external-artifacts")
+    external = external_artifact_root
     runsc_lock = json.loads(
         (source_root / "gateway/tee/runsc-runtime.lock.json").read_text(
             encoding="utf-8"

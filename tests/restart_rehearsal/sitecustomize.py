@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import builtins
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -3891,6 +3892,7 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     import bittensor
     import urllib.request
     from bittensor.core import subtensor as bittensor_subtensor
+    from gateway.tee.topology import validate_manifest as _validate_topology_manifest
 
     _REAL_SUBTENSOR_CLASS = bittensor.Subtensor
     bittensor.Subtensor = _LocalSubtensor
@@ -3898,6 +3900,7 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     bittensor.Metagraph = _LocalMetagraph
     bittensor_subtensor.Subtensor = _LocalSubtensor
     _real_boto3_client = boto3.client
+    _real_open = builtins.open
     _real_path_read_text = Path.read_text
     _real_socket = _ORIGINAL_SOCKET
     _real_getaddrinfo = _ORIGINAL_GETADDRINFO
@@ -3909,6 +3912,20 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     }
     _rehearsal_proxy_address = "93.184.216.34"
     _rehearsal_proxy_port = 18443
+    _rehearsal_topology_path = SOURCE_ROOT / "gateway/tee/topology.json"
+    _rehearsal_topology = _validate_topology_manifest(
+        json.loads(
+            _real_path_read_text(
+                _rehearsal_topology_path,
+                encoding="utf-8",
+            )
+        )
+    )
+    _rehearsal_host_reserved_memory_mib = int(
+        _rehearsal_topology["host_reserved_memory_mib"]
+    )
+    if _rehearsal_host_reserved_memory_mib <= 0:
+        raise ValueError("candidate topology host memory reservation is invalid")
 
     def _local_boto3_client(service_name: str, *args: Any, **kwargs: Any) -> Any:
         if service_name == "s3":
@@ -3985,20 +4002,51 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
             return 16
         return _real_sysconf(name)
 
+    def _local_meminfo_text(*, read_interface: str) -> str:
+        memory_kib = _rehearsal_host_reserved_memory_mib * 1024
+        _external_event(
+            "host_kernel",
+            "memory_capacity",
+            read_interface=read_interface,
+            memory_mib=_rehearsal_host_reserved_memory_mib,
+            available_memory_mib=_rehearsal_host_reserved_memory_mib,
+            capacity_source="candidate_topology.host_reserved_memory_mib",
+            topology_hash=str(_rehearsal_topology["topology_hash"]),
+            topology_path="gateway/tee/topology.json",
+        )
+        return (
+            f"MemTotal:       {memory_kib} kB\n"
+            f"MemAvailable:   {memory_kib} kB\n"
+        )
+
+    def _local_open(
+        file: Any,
+        mode: str = "r",
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        try:
+            path = os.fspath(file)
+        except TypeError:
+            return _real_open(file, mode, *args, **kwargs)
+        if path != "/proc/meminfo":
+            return _real_open(file, mode, *args, **kwargs)
+        if mode not in {"r", "rt", "rb"}:
+            raise ValueError("local /proc/meminfo boundary is read-only")
+        value = _local_meminfo_text(read_interface="builtins.open")
+        if mode == "rb":
+            if any(name in kwargs for name in ("encoding", "errors", "newline")):
+                raise ValueError("binary mode doesn't take an encoding argument")
+            return io.BytesIO(value.encode("utf-8"))
+        return io.StringIO(value, newline=kwargs.get("newline"))
+
     def _local_path_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
         if str(path) == "/proc/meminfo":
-            _external_event(
-                "host_kernel",
-                "memory_capacity",
-                memory_mib=131_072,
-            )
-            return (
-                "MemTotal:       134217728 kB\n"
-                "MemAvailable:   134217728 kB\n"
-            )
+            return _local_meminfo_text(read_interface="pathlib.Path.read_text")
         return _real_path_read_text(path, *args, **kwargs)
 
     os.sysconf = _local_sysconf
+    builtins.open = _local_open
     Path.read_text = _local_path_read_text
     socket.getaddrinfo = _local_getaddrinfo
     socket.socket = _RehearsalSocket

@@ -3,6 +3,7 @@ import gzip
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
@@ -428,6 +429,54 @@ def _patch_compact_submission_route(monkeypatch, *, calls, coordinator):
         lambda *_args, **_kwargs: None,
     )
     return normalized, verified
+
+
+@pytest.mark.asyncio
+async def test_compact_ancestry_timeout_is_reported_as_retryable_dependency(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    calls = []
+    failures = []
+
+    async def coordinator(**_kwargs):
+        raise AssertionError("ancestry timeout must stop before publication")
+
+    _patch_compact_submission_route(
+        monkeypatch,
+        calls=calls,
+        coordinator=coordinator,
+    )
+
+    async def timeout_checkpoint(*_args, **_kwargs):
+        raise httpx.ReadTimeout("checkpoint durable readback timed out")
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_ancestry_checkpoint_v2",
+        timeout_checkpoint,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "capture_failure",
+        lambda code, **kwargs: failures.append((code, kwargs)),
+    )
+
+    with pytest.raises(HTTPException) as captured:
+        await weights_api.submit_compact_weights_v2(_compact_submission())
+
+    assert captured.value.status_code == 503
+    assert len(failures) == 1
+    code, failure = failures[0]
+    assert code == "authority.dependency_unreadable"
+    assert failure["stage"] == (
+        "compact_bundle_validator_ancestry_persistence"
+    )
+    assert failure["terminal"] is False
+    assert failure["retryable"] is True
+    assert failure["fail_closed"] is True
+    assert calls == ["cutover", "graph"]
 
 
 @pytest.mark.asyncio

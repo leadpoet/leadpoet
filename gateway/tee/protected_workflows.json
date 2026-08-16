@@ -32,7 +32,7 @@
       "symbol": "get_weight_inputs_v2"
     },
     {
-      "ast_sha256": "sha256:38d1bc4023366170fad77748ad9f4a6d9afff55f0d293586bc58c15d7fb8eaa5",
+      "ast_sha256": "sha256:7688bcaa01998c43e8988d920481b0d5078bb264566624712b421e7688f3c915",
       "path": "gateway/api/weights.py",
       "symbol": "submit_compact_weights_v2"
     },
@@ -192,6 +192,16 @@
       "symbol": "execute_scoring_v2"
     },
     {
+      "ast_sha256": "sha256:dad14978e3c332536f2badf4bdde239ad1973e3306a2a064e191919e0f282252",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:aefc68ff23a361576ace928e913f91521be556e53226893ecde35a2c643cadc5",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "_ancestry_checkpoint_unknown_commit_sleep"
+    },
+    {
       "ast_sha256": "sha256:cf0b450a6c135c4ab64c8491b9ed7a3d5ddb65d33d786d8748b9b6eaa2d7732f",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "_load_receipt_graph_batch_v2"
@@ -287,7 +297,7 @@
       "symbol": "persist_allocation_settlement_frontier_v2"
     },
     {
-      "ast_sha256": "sha256:b12e845e36d4938487d1104b765fc3489f00fe34f780109093f7681dba6c07c2",
+      "ast_sha256": "sha256:39454d854dbf99dbfa0f2a7795bc3bbbc1f24faa043c135af5b3fc778c287f69",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "persist_ancestry_checkpoint_v2"
     },
@@ -1025,6 +1035,21 @@
       "ast_sha256": "sha256:0f37e8ea08ca6269b061bcd5a10fa1f8bfb8dd0cd7111bbad1ea63a79e150b9f",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "process_source_add_work_item"
+    },
+    {
+      "ast_sha256": "sha256:ad8eaa4971c6a18443a98d76fe45be3e000ba7cc419c3b3a32133608620d8343",
+      "path": "gateway/research_lab/store.py",
+      "symbol": "_TRANSIENT_ERROR_SIGNATURES"
+    },
+    {
+      "ast_sha256": "sha256:05777ece9d9be338ff04c3c2e24505df9f87f20c388c40c1f6c73aff2c5835db",
+      "path": "gateway/research_lab/store.py",
+      "symbol": "_TRANSIENT_ERROR_TYPE_SIGNATURES"
+    },
+    {
+      "ast_sha256": "sha256:9146cee84f0cd702e4cee4ab499490e831f5d4b74aa59272a5bc266285e4c14e",
+      "path": "gateway/research_lab/store.py",
+      "symbol": "_is_transient_store_error"
     },
     {
       "ast_sha256": "sha256:15bf4fe51b68e05e3a85bd0cb3fc3318f97485f0e6357ae0aa3d5b24aad0d1e6",
@@ -2020,6 +2045,16 @@
       "ast_sha256": "sha256:7da2dbb5b956aa09fb97070376f579696769dfc2396f003e8f73438d75ffbf9e",
       "path": "gateway/tee/reward_executor_v2.py",
       "symbol": "source_add_reward_row_projection_v2"
+    },
+    {
+      "ast_sha256": "sha256:488aeb4b207ea7bc668e6260b394f4306fff41b59650da19ce5e0ef5f6e834f1",
+      "path": "gateway/tee/rpc_authority.py",
+      "symbol": "COORDINATOR_ROLE"
+    },
+    {
+      "ast_sha256": "sha256:9a1fbbcd9c93e9d2123124f16403e875cc32cc0b1d61505afdc68513fe050b0d",
+      "path": "gateway/tee/rpc_authority.py",
+      "symbol": "active_enclave_role"
     },
     {
       "ast_sha256": "sha256:7eb3184f87913fc67b445cb046705d0c156fff0d912941ba08d8fde8db3e1e22",
@@ -3512,7 +3547,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:a9a45636d4207cca1d54054434197810e02be66dd9bd32ad3f2d20210ab912c2",
-  "protected_source_commit": "41abf627680b477a78b042b1b51d5d1902a5f2d5",
+  "manifest_hash": "sha256:190de62f4390b4452d3ba624255b9c79e9dba1d67840b1b5c60886c4e79ebcc3",
+  "protected_source_commit": "94fbad06a2c3d20adc4ed9327cafe27a0a8a055a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

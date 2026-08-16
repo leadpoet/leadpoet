@@ -397,36 +397,171 @@ def test_restart_summary_reports_first_failure_and_missing_milestones(
     assert fields["duration_seconds"] == 17
 
 
-def test_successful_but_slow_restart_emits_deadline_alert(tmp_path, monkeypatch):
-    ledger = tmp_path / "restart.jsonl"
-    _write_ledger(
-        ledger,
-        (
-            {"stage": "release_ready", "status": "passed", "elapsed_seconds": 1},
-            {"stage": "completed", "status": "passed", "elapsed_seconds": 20},
-        ),
-    )
-    failures = []
-    monkeypatch.setenv("LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS", "5")
-    monkeypatch.setattr(
-        sentry_operations, "capture_failure", lambda *args, **kwargs: failures.append((args, kwargs))
-    )
+def _collect_restart_summary_telemetry(monkeypatch):
+    breadcrumbs = []
+    distributions = []
+    terminal_events = []
     monkeypatch.setattr(sentry_operations, "record_stage", lambda **kwargs: None)
     monkeypatch.setattr(
         sentry_operations.sentry_bootstrap,
+        "add_sentry_breadcrumb",
+        lambda **kwargs: breadcrumbs.append(kwargs),
+    )
+    monkeypatch.setattr(
+        sentry_operations.sentry_bootstrap,
         "record_sentry_distribution",
-        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: distributions.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        sentry_operations.sentry_bootstrap,
+        "capture_sentry_failure",
+        lambda **kwargs: terminal_events.append(kwargs) or True,
+    )
+    return breadcrumbs, distributions, terminal_events
+
+
+def test_completed_restart_with_slow_passive_wait_is_nonterminal(
+    tmp_path, monkeypatch
+):
+    ledger = tmp_path / "restart.jsonl"
+    milestones = sentry_operations._RESTART_MILESTONES["gateway"]
+    passive_wait_stage = milestones[0]
+    completion_stage = milestones[-1]
+    deadline_seconds = 900
+    _write_ledger(
+        ledger,
+        (
+            {
+                "stage": passive_wait_stage,
+                "status": "passed",
+                "elapsed_seconds": deadline_seconds + 1,
+            },
+            {
+                "stage": completion_stage,
+                "status": "passed",
+                "elapsed_seconds": deadline_seconds + 2,
+            },
+        ),
+    )
+    monkeypatch.setenv(
+        "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
+        str(deadline_seconds),
+    )
+    breadcrumbs, distributions, terminal_events = (
+        _collect_restart_summary_telemetry(monkeypatch)
     )
     sentry_operations.emit_restart_summary(
         component="gateway",
-        status="passed",
-        stage="completed",
+        # A completed:passed ledger is authoritative even if an outer wrapper
+        # reports a later nonzero status while unwinding.
+        status="failed",
+        stage=completion_stage,
         ledger_path=ledger,
         restart_invocation_id="restart:test",
         candidate_sha="ab" * 20,
     )
-    assert failures[0][0] == ("restart.stage_deadline_exceeded",)
-    assert failures[0][1]["fail_closed"] is False
+    assert terminal_events == []
+    assert any(
+        args[0] == "leadpoet.restart.duration"
+        and kwargs["tags"] == {"component": "gateway", "status": "passed"}
+        for args, kwargs in distributions
+    )
+    slow_wait = [
+        item
+        for item in breadcrumbs
+        if item.get("category") == "leadpoet.retry"
+        and item.get("message") == "restart.stage_deadline_exceeded"
+    ]
+    assert len(slow_wait) == 1
+    assert slow_wait[0]["data"]["stage"] == passive_wait_stage
+    assert slow_wait[0]["data"]["terminal"] is False
+    assert slow_wait[0]["data"]["fail_closed"] is False
+
+
+def test_failed_causal_stage_deadline_is_terminal(tmp_path, monkeypatch):
+    ledger = tmp_path / "restart.jsonl"
+    passive_wait_stage = sentry_operations._RESTART_MILESTONES["gateway"][0]
+    failed_stage = "active_restart_work"
+    deadline_seconds = 900
+    _write_ledger(
+        ledger,
+        (
+            {
+                "stage": passive_wait_stage,
+                "status": "passed",
+                "elapsed_seconds": 1,
+            },
+            {
+                "stage": failed_stage,
+                "status": "failed",
+                "elapsed_seconds": deadline_seconds + 2,
+            },
+        ),
+    )
+    monkeypatch.setenv(
+        "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
+        str(deadline_seconds),
+    )
+    _, _, terminal_events = _collect_restart_summary_telemetry(monkeypatch)
+    sentry_operations.emit_restart_summary(
+        component="gateway",
+        status="failed",
+        stage=failed_stage,
+        ledger_path=ledger,
+        restart_invocation_id="restart:test",
+        candidate_sha="ab" * 20,
+    )
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["failure_code"] == "restart.stage_deadline_exceeded"
+    assert terminal_events[0]["context"]["terminal"] is True
+    assert terminal_events[0]["context"]["fail_closed"] is True
+
+
+def test_slow_passive_wait_does_not_relabel_later_failure(tmp_path, monkeypatch):
+    ledger = tmp_path / "restart.jsonl"
+    milestones = sentry_operations._RESTART_MILESTONES["validator"]
+    passive_wait_stage = milestones[0]
+    completion_stage = milestones[-1]
+    failed_stage = "active_restart_work"
+    deadline_seconds = 900
+    _write_ledger(
+        ledger,
+        (
+            {
+                "stage": passive_wait_stage,
+                "status": "passed",
+                "elapsed_seconds": deadline_seconds + 1,
+            },
+            {
+                # A stale completion record is not success authority when a
+                # subsequent record proves the same invocation failed.
+                "stage": completion_stage,
+                "status": "passed",
+                "elapsed_seconds": deadline_seconds + 2,
+            },
+            {
+                "stage": failed_stage,
+                "status": "failed",
+                "elapsed_seconds": deadline_seconds + 3,
+            },
+        ),
+    )
+    monkeypatch.setenv(
+        "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
+        str(deadline_seconds),
+    )
+    _, _, terminal_events = _collect_restart_summary_telemetry(monkeypatch)
+    sentry_operations.emit_restart_summary(
+        component="validator",
+        status="failed",
+        stage=failed_stage,
+        ledger_path=ledger,
+        restart_invocation_id="restart:test",
+        candidate_sha="ab" * 20,
+    )
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["failure_code"] == "restart.terminal_failure"
+    assert terminal_events[0]["context"]["terminal"] is True
 
 
 def test_release_summary_preserves_stage_ledger_and_reports_first_failure(monkeypatch):

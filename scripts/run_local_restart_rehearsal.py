@@ -75,6 +75,7 @@ COMMITTED_HARNESS_PATHS = (
     "tests/restart_rehearsal/local_services.py",
     "tests/restart_rehearsal/prepare_external_artifacts.py",
     "tests/restart_rehearsal/prepare_host_fixtures.py",
+    "tests/restart_rehearsal/prepare_scoring_wheelhouse_aliases.py",
     "tests/restart_rehearsal/postgres_v2_contract_probe.py",
     "tests/restart_rehearsal/production_workflow_runner.py",
     "tests/restart_rehearsal/sanitized_weight_fixture.py",
@@ -350,13 +351,38 @@ def _build_image(
         )
         scoring_locks = context / "scoring-locks"
         scoring_locks.mkdir()
+        scoring_lock_payloads: dict[str, bytes] = {}
+        scoring_lock_aliases: dict[str, str] = {}
         for wheelhouse_sha in sorted(set(wheelhouse_shas)):
-            (scoring_locks / f"{wheelhouse_sha}.lock").write_bytes(
-                _git_file(
-                    wheelhouse_sha,
-                    "gateway/tee/requirements-scoring-py39.lock",
-                )
+            payload = _git_file(
+                wheelhouse_sha,
+                "gateway/tee/requirements-scoring-py39.lock",
             )
+            lock_sha256 = hashlib.sha256(payload).hexdigest()
+            scoring_lock_payloads[lock_sha256] = payload
+            scoring_lock_aliases[wheelhouse_sha] = lock_sha256
+        candidate_scoring_lock = _git_file(
+            harness_sha,
+            "gateway/tee/requirements-scoring-py39.lock",
+        )
+        candidate_scoring_lock_sha256 = hashlib.sha256(
+            candidate_scoring_lock
+        ).hexdigest()
+        scoring_lock_payloads[candidate_scoring_lock_sha256] = (
+            candidate_scoring_lock
+        )
+        scoring_lock_aliases[harness_sha] = candidate_scoring_lock_sha256
+        for lock_sha256, payload in sorted(scoring_lock_payloads.items()):
+            (scoring_locks / f"{lock_sha256}.lock").write_bytes(payload)
+        (context / "scoring-lock-aliases.json").write_text(
+            json.dumps(
+                scoring_lock_aliases,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         for path in EXTERNAL_ARTIFACT_LOCK_PATHS:
             (context / Path(path).name).write_bytes(
                 _git_file(harness_sha, path)
@@ -378,7 +404,8 @@ def _build_image(
                 "REHEARSAL_BASE_IMAGE="
                 + _rehearsal_base_image(docker_platform),
                 "--build-arg",
-                f"REHEARSAL_HARNESS_SHA={harness_sha}",
+                "REHEARSAL_SCORING_LOCK_SHA256="
+                + candidate_scoring_lock_sha256,
                 "--tag",
                 tag,
                 ".",

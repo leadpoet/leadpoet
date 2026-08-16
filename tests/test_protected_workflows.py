@@ -78,6 +78,16 @@ def test_scoring_receipt_failure_policy_is_protected():
     } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
 
 
+def test_ancestry_unknown_commit_recovery_is_protected():
+    assert {
+        "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS",
+        "_ancestry_checkpoint_unknown_commit_sleep",
+        "persist_ancestry_checkpoint_v2",
+    } <= set(
+        PROTECTED_SYMBOLS["gateway/research_lab/attested_v2_store.py"]
+    )
+
+
 def test_inter_enclave_replay_and_identity_boundaries_are_protected():
     assert {
         "_select_committed_encrypted_artifacts",
@@ -215,6 +225,15 @@ def test_artifact_egress_transport_boundaries_are_protected():
     assert "BrokeredProviderTransportV2.install" in PROTECTED_SYMBOLS[
         "gateway/tee/provider_client_v2.py"
     ]
+    assert {
+        "_TRANSIENT_ERROR_SIGNATURES",
+        "_TRANSIENT_ERROR_TYPE_SIGNATURES",
+        "_is_transient_store_error",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/store.py"])
+    assert {
+        "COORDINATOR_ROLE",
+        "active_enclave_role",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/rpc_authority.py"])
     assert {
         "_FAIL_CLOSED_REQUEST_SCHEMA_VERSION",
         "_SEMANTICS_HEALTH_STAGES",

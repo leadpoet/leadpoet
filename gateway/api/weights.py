@@ -2890,16 +2890,26 @@ async def submit_compact_weights_v2(
     except HTTPException:
         raise
     except Exception as exc:
+        from gateway.research_lab.store import _is_transient_store_error
+
+        retryable_dependency = (
+            current_stage == "compact_bundle_validator_ancestry_persistence"
+            and _is_transient_store_error(exc)
+        )
         capture_failure(
-            failure_code_for_exception(
-                exc,
-                default="weight.authoritative_result_invalid",
+            (
+                "authority.dependency_unreadable"
+                if retryable_dependency
+                else failure_code_for_exception(
+                    exc,
+                    default="weight.authoritative_result_invalid",
+                )
             ),
             component="gateway",
             stage=current_stage,
             exception=exc,
-            terminal=True,
-            retryable=False,
+            terminal=not retryable_dependency,
+            retryable=retryable_dependency,
             fail_closed=True,
             **_weight_telemetry_fields(
                 netuid=normalized.get("weight_result", {}).get("netuid"),

@@ -717,6 +717,8 @@ async def test_checkpoint_persistence_compacts_after_full_graph_validation(
     )
     durable = {}
     rpc_calls = 0
+    sleeps = []
+    rpc_error = httpx.ReadTimeout("checkpoint response timed out")
 
     async def select_one(table, *, filters):
         if table == attested_v2_store.ANCESTRY_CHECKPOINT_TABLE:
@@ -814,6 +816,8 @@ async def test_checkpoint_persistence_recovers_only_exact_timeout_commit(
     )
     durable = {}
     rpc_calls = 0
+    sleeps = []
+    rpc_error = httpx.ReadTimeout("checkpoint response timed out")
 
     async def select_one(table, *, filters):
         if table == attested_v2_store.ANCESTRY_CHECKPOINT_TABLE:
@@ -843,10 +847,18 @@ async def test_checkpoint_persistence_recovers_only_exact_timeout_commit(
                     else "sha256:" + "0" * 64
                 ),
             }
-        raise httpx.ReadTimeout("checkpoint response timed out")
+        raise rpc_error
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
 
     monkeypatch.setattr(attested_v2_store, "select_one", select_one)
     monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_ancestry_checkpoint_unknown_commit_sleep",
+        sleep,
+    )
 
     kwargs = {
         "proof": ancestry_fixture["proof"],
@@ -856,8 +868,13 @@ async def test_checkpoint_persistence_recovers_only_exact_timeout_commit(
         "allowed_issuer_roles": (SCORING_ROLE,),
     }
     if durable_mode == "missing":
-        with pytest.raises(httpx.ReadTimeout):
+        with pytest.raises(httpx.ReadTimeout) as captured:
             await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
+        assert captured.value is rpc_error
+        assert rpc_calls == 1
+        assert sleeps == list(
+            attested_v2_store._ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS
+        )
         return
     if durable_mode == "conflict":
         with pytest.raises(
@@ -865,11 +882,106 @@ async def test_checkpoint_persistence_recovers_only_exact_timeout_commit(
             match="activations_v2 stored row conflicts",
         ):
             await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
+        assert rpc_calls == 1
+        assert sleeps == []
         return
 
     result = await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
     assert result["root_activated"] is True
     assert result["root_receipt_hash"] == delta["root_receipt_hash"]
+
+    replay = await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
+    assert replay == result
+    assert rpc_calls == 1
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_persistence_polls_read_only_for_delayed_exact_commit(
+    ancestry_fixture, monkeypatch
+):
+    from gateway.research_lab import attested_v2_store
+
+    delta = ancestry_fixture["delta"]
+    graph = build_checkpointed_receipt_graph(
+        root_receipt_hash=delta["root_receipt_hash"],
+        boot_identities=delta["boot_identities"],
+        receipts=delta["receipts"],
+        transport_attempts=delta["transport_attempts"],
+        host_operations=delta["host_operations"],
+        ancestry_lineage_id=LINEAGE_ID,
+        ancestry_proof=ancestry_fixture["proof"],
+        boot_attestation_verifier=_boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    durable = {}
+    pending = {}
+    rpc_calls = 0
+    post_timeout_checkpoint_reads = 0
+    sleeps = []
+    rpc_error = httpx.ReadTimeout("checkpoint response timed out")
+
+    async def select_one(table, *, filters):
+        nonlocal post_timeout_checkpoint_reads
+        if table == attested_v2_store.ANCESTRY_CHECKPOINT_TABLE:
+            assert filters == (
+                ("root_receipt_hash", delta["root_receipt_hash"]),
+            )
+            if pending:
+                post_timeout_checkpoint_reads += 1
+                if post_timeout_checkpoint_reads == 1:
+                    raise httpx.ReadTimeout("checkpoint readback timed out")
+                if post_timeout_checkpoint_reads == 3:
+                    row = dict(pending["row"])
+                    durable["row"] = row
+                    durable["activation"] = {
+                        "lineage_id": row["lineage_id"],
+                        "activation_root_receipt_hash": row[
+                            "root_receipt_hash"
+                        ],
+                        "activation_certificate_hash": row[
+                            "certificate_hash"
+                        ],
+                    }
+            return durable.get("row")
+        assert table == attested_v2_store.ANCESTRY_ACTIVATION_TABLE
+        assert filters == (
+            ("activation_root_receipt_hash", delta["root_receipt_hash"]),
+        )
+        return durable.get("activation")
+
+    async def call_rpc(name, payload):
+        nonlocal rpc_calls
+        rpc_calls += 1
+        assert name == attested_v2_store.ANCESTRY_CHECKPOINT_RPC
+        pending["row"] = dict(payload["checkpoint"])
+        raise rpc_error
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(attested_v2_store, "select_one", select_one)
+    monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_ancestry_checkpoint_unknown_commit_sleep",
+        sleep,
+    )
+
+    kwargs = {
+        "proof": ancestry_fixture["proof"],
+        "checkpointed_graph": graph,
+        "expected_lineage_id": LINEAGE_ID,
+        "boot_attestation_verifier": _boot_verifier,
+        "allowed_issuer_roles": (SCORING_ROLE,),
+    }
+    result = await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
+
+    assert result["root_activated"] is True
+    assert result["root_receipt_hash"] == delta["root_receipt_hash"]
+    assert rpc_calls == 1
+    assert post_timeout_checkpoint_reads == 3
+    assert sleeps == [1.0, 2.0]
 
     replay = await attested_v2_store.persist_ancestry_checkpoint_v2(**kwargs)
     assert replay == result

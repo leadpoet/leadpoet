@@ -1637,11 +1637,13 @@ dst = Path(sys.argv[2])
 raw = src.read_text()
 restart_only_keys = {
     "GATEWAY_DEPLOY_COMMIT",
+    "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_V2_DEFER_WORKER_FLEETS",
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES",
+    "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_SENTRY_API_TOKEN",
 }
 
@@ -1700,6 +1702,7 @@ skip_keys = {
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
     "GATEWAY_DEPLOY_COMMIT",
+    "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_V2_DEFER_WORKER_FLEETS",
     "LEADPOET_REPO_ROOT",
     "GATEWAY_ROOT",
@@ -1724,6 +1727,7 @@ skip_keys = {
     "GATEWAY_ANCESTRY_SAFE_EPOCH",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "LEADPOET_RESTART_START_PATH",
+    "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_SENTRY_API_TOKEN",
     "GATEWAY_RESTART_LOCK_HELD",
     "GATEWAY_RESTART_LOCK_FILE",
@@ -1795,6 +1799,7 @@ skip_keys = {
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
     "GATEWAY_DEPLOY_COMMIT",
+    "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_V2_DEFER_WORKER_FLEETS",
     "LEADPOET_REPO_ROOT",
     "GATEWAY_ROOT",
@@ -1819,6 +1824,7 @@ skip_keys = {
     "GATEWAY_ANCESTRY_SAFE_EPOCH",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "LEADPOET_RESTART_START_PATH",
+    "LEADPOET_RESTART_INVOCATION_ID",
     "GATEWAY_RESTART_LOCK_HELD",
     "GATEWAY_RESTART_LOCK_FILE",
     "GATEWAY_DEPLOY_PLAN_FILE",
@@ -1867,6 +1873,14 @@ else
 fi
 
 cat "$ENV_SECRET" >> "$ENV_CLONE"
+# Per-invocation telemetry identity belongs to this restart controller, never
+# to a cached secret or the previously running gateway.  Keep the authoritative
+# values last so every later environment reload and launched process agrees
+# with the active timing ledger.
+printf 'export GATEWAY_RESTART_INVOCATION_ID=%q\n' \
+  "$GATEWAY_RESTART_INVOCATION_ID" >> "$ENV_CLONE"
+printf 'export LEADPOET_RESTART_INVOCATION_ID=%q\n' \
+  "$GATEWAY_RESTART_INVOCATION_ID" >> "$ENV_CLONE"
 
 if [ -f "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" ]; then
   echo "Loading the canonical stateful epoch cutover manifest"

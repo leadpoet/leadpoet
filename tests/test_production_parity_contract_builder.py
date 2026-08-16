@@ -26,6 +26,14 @@ HOST_RPC_TRANSPORT_PATHS = {
     "validator_tee/host/chain_relay_v2.py",
     "validator_tee/host/vsock_client.py",
 }
+REBENCHMARK_TRANSPORT_EVIDENCE_PATHS = {
+    "gateway/tee/execution_job_manager_v2.py",
+    "gateway/tee/provider_broker_v2.py",
+    "gateway/tee/provider_client_v2.py",
+    "gateway/tee/provider_outcome_store_v2.py",
+    "gateway/tee/rpc_authority.py",
+    "leadpoet_observability/sentry_operations.py",
+}
 
 
 def test_host_rpc_transports_are_exact_candidate_git_blobs() -> None:
@@ -50,6 +58,31 @@ def test_host_rpc_transports_are_exact_candidate_git_blobs() -> None:
         ROOT,
         candidate_sha,
         sorted(HOST_RPC_TRANSPORT_PATHS),
+    ) == expected
+
+
+def test_rebenchmark_transport_evidence_sources_are_exact_candidate_git_blobs() -> None:
+    assert REBENCHMARK_TRANSPORT_EVIDENCE_PATHS <= set(ALWAYS_COMMITTED_PATHS)
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    expected = []
+    for path in sorted(REBENCHMARK_TRANSPORT_EVIDENCE_PATHS):
+        candidate_blob = subprocess.run(
+            ["git", "show", "%s:%s" % (candidate_sha, path)],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+        expected.append({"path": path, "sha256": sha256_bytes(candidate_blob)})
+    assert _source_commitments(
+        ROOT,
+        candidate_sha,
+        sorted(REBENCHMARK_TRANSPORT_EVIDENCE_PATHS),
     ) == expected
 
 
@@ -128,8 +161,13 @@ def test_host_transport_contract_is_enforced_against_each_checkout_blob(
     assert HOST_RPC_TRANSPORT_PATHS <= {
         item["path"] for item in contract["source_commitments"]
     }
+    assert REBENCHMARK_TRANSPORT_EVIDENCE_PATHS <= {
+        item["path"] for item in contract["source_commitments"]
+    }
     assert verify_contract_checkout(checkout, contract) == contract
-    for relative_path in sorted(HOST_RPC_TRANSPORT_PATHS):
+    for relative_path in sorted(
+        HOST_RPC_TRANSPORT_PATHS | REBENCHMARK_TRANSPORT_EVIDENCE_PATHS
+    ):
         target = checkout / relative_path
         original = target.read_bytes()
         target.write_bytes(original + b"\n# transport-tamper\n")

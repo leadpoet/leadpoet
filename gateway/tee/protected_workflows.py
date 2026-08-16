@@ -186,6 +186,11 @@ PROTECTED_SYMBOLS = {
         "DEFAULT_PRIVATE_TEST_CMD",
         "DEFAULT_PRIVATE_BUILD_CMD",
     ),
+    "gateway/research_lab/store.py": (
+        "_TRANSIENT_ERROR_SIGNATURES",
+        "_TRANSIENT_ERROR_TYPE_SIGNATURES",
+        "_is_transient_store_error",
+    ),
     "gateway/research_lab/code_build.py": (
         "validate_private_code_edit_diff_artifact",
         "_verify_built_candidate_artifact",
@@ -287,6 +292,8 @@ PROTECTED_SYMBOLS = {
         "champion_v2_cutover_readiness",
     ),
     "gateway/research_lab/attested_v2_store.py": (
+        "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS",
+        "_ancestry_checkpoint_unknown_commit_sleep",
         "_select_by_values",
         "persist_receipt_graph_v2",
         "persist_ancestry_checkpoint_v2",
@@ -883,6 +890,8 @@ PROTECTED_SYMBOLS = {
         "verify_roles",
     ),
     "gateway/tee/rpc_authority.py": (
+        "COORDINATOR_ROLE",
+        "active_enclave_role",
         "allowed_exact_methods",
         "rpc_method_allowed",
     ),

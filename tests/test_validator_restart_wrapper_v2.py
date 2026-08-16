@@ -248,7 +248,7 @@ def test_unpinned_validator_release_wait_follows_new_main_before_shutdown():
     ]
 
 
-def test_secret_hydration_cannot_replace_operator_gateway_barrier(
+def test_secret_hydration_cannot_replace_restart_controller_state(
     tmp_path: Path,
 ) -> None:
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
@@ -268,6 +268,8 @@ def test_secret_hydration_cannot_replace_operator_gateway_barrier(
                 "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=/tmp/stale-marker",
                 "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS=1",
                 "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS=1",
+                "VALIDATOR_RESTART_INVOCATION_ID=validator-stale",
+                "LEADPOET_RESTART_INVOCATION_ID=validator-stale",
                 "VALIDATOR_NETUID=71",
             )
         )
@@ -287,6 +289,11 @@ def test_secret_hydration_cannot_replace_operator_gateway_barrier(
     assert "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE" not in exports
     assert "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS" not in exports
     assert "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS" not in exports
+    assert "VALIDATOR_RESTART_INVOCATION_ID" not in exports
+    assert "LEADPOET_RESTART_INVOCATION_ID" not in exports
+    cached = cache.read_text(encoding="utf-8")
+    assert "VALIDATOR_RESTART_INVOCATION_ID" not in cached
+    assert "LEADPOET_RESTART_INVOCATION_ID" not in cached
 
     preserved = subprocess.run(
         [
@@ -294,10 +301,12 @@ def test_secret_hydration_cannot_replace_operator_gateway_barrier(
             "-c",
             (
                 "set -a; . \"$1\"; set +a; "
-                "printf '%s\\n%s\\n%s\\n' "
+                "printf '%s\\n%s\\n%s\\n%s\\n%s\\n' "
                 "\"$VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE\" "
                 "\"$VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS\" "
-                "\"$VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS\""
+                "\"$VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS\" "
+                "\"$VALIDATOR_RESTART_INVOCATION_ID\" "
+                "\"$LEADPOET_RESTART_INVOCATION_ID\""
             ),
             "bash",
             str(export_file),
@@ -310,12 +319,16 @@ def test_secret_hydration_cannot_replace_operator_gateway_barrier(
             "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE": "/tmp/operator-marker",
             "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS": "600",
             "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS": "2100",
+            "VALIDATOR_RESTART_INVOCATION_ID": "validator-active",
+            "LEADPOET_RESTART_INVOCATION_ID": "validator-active",
         },
     )
     assert preserved.stdout.splitlines() == [
         "/tmp/operator-marker",
         "600",
         "2100",
+        "validator-active",
+        "validator-active",
     ]
 
 

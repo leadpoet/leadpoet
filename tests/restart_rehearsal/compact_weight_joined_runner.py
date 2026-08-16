@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 from bittensor_wallet import Keypair
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+import httpx
 from starlette.requests import Request
 
 from Leadpoet.utils.subnet_epoch import SubnetEpochCutover, SubnetEpochSnapshot
@@ -206,6 +207,12 @@ class _MemoryPostgREST:
     def __init__(self) -> None:
         self.tables: dict[str, list[dict[str, Any]]] = {}
         self.insert_count = 0
+        self.checkpoint_rpc_writes: dict[str, int] = {}
+        self.unknown_commit_root: str | None = None
+        self.unknown_commit_pending: dict[str, dict[str, Any]] | None = None
+        self.unknown_commit_readbacks = 0
+        self.unknown_commit_sleep_delays: list[float] = []
+        self.unknown_commit_visible = False
 
     @staticmethod
     def _matches(row: Mapping[str, Any], filters: Iterable[tuple]) -> bool:
@@ -239,10 +246,40 @@ class _MemoryPostgREST:
     async def select_one(
         self, table: str, *, filters: Iterable[tuple], **_kwargs: Any
     ) -> dict[str, Any] | None:
+        from gateway.research_lab import attested_v2_store as store
+
+        normalized_filters = tuple(filters)
+        if (
+            str(table) == store.ANCESTRY_CHECKPOINT_TABLE
+            and self.unknown_commit_pending is not None
+            and normalized_filters
+            == (("root_receipt_hash", self.unknown_commit_root),)
+        ):
+            self.unknown_commit_readbacks += 1
+            if (
+                self.unknown_commit_readbacks == 3
+                and not self.unknown_commit_visible
+            ):
+                checkpoint = copy.deepcopy(
+                    self.unknown_commit_pending["checkpoint"]
+                )
+                activation = copy.deepcopy(
+                    self.unknown_commit_pending["activation"]
+                )
+                self.tables.setdefault(
+                    store.ANCESTRY_CHECKPOINT_TABLE,
+                    [],
+                ).append(checkpoint)
+                self.tables.setdefault(
+                    store.ANCESTRY_ACTIVATION_TABLE,
+                    [],
+                ).append(activation)
+                self.insert_count += 2
+                self.unknown_commit_visible = True
         rows = [
             row
             for row in self.tables.get(str(table), [])
-            if self._matches(row, filters)
+            if self._matches(row, normalized_filters)
         ]
         if len(rows) > 1:
             raise RuntimeError("compact rehearsal select_one is ambiguous")
@@ -278,10 +315,40 @@ class _MemoryPostgREST:
             raise RuntimeError("compact rehearsal received an unknown store RPC")
         row = copy.deepcopy(dict(payload["checkpoint"]))
         root = str(row["root_receipt_hash"])
+        self.checkpoint_rpc_writes[root] = (
+            self.checkpoint_rpc_writes.get(root, 0) + 1
+        )
         existing = await self.select_one(
             store.ANCESTRY_CHECKPOINT_TABLE,
             filters=(("root_receipt_hash", root),),
         )
+        certificate = row.get("certificate_doc")
+        issuer = (
+            certificate.get("issuer_boot_identity")
+            if isinstance(certificate, Mapping)
+            else None
+        )
+        if (
+            self.unknown_commit_root is None
+            and isinstance(issuer, Mapping)
+            and issuer.get("role") == "validator_weights"
+        ):
+            if existing is not None:
+                raise RuntimeError(
+                    "compact unknown-commit fault targeted an existing checkpoint"
+                )
+            self.unknown_commit_root = root
+            self.unknown_commit_pending = {
+                "checkpoint": row,
+                "activation": {
+                    "lineage_id": row["lineage_id"],
+                    "activation_root_receipt_hash": root,
+                    "activation_certificate_hash": row["certificate_hash"],
+                },
+            }
+            raise httpx.ReadTimeout(
+                "compact rehearsal checkpoint response timed out after commit"
+            )
         if existing is None:
             await self.insert_row(store.ANCESTRY_CHECKPOINT_TABLE, row)
             await self.insert_row(
@@ -303,6 +370,9 @@ class _MemoryPostgREST:
             "checkpoint_graph_hash": row["checkpoint_graph_hash"],
             "root_activated": True,
         }
+
+    async def unknown_commit_sleep(self, seconds: float) -> None:
+        self.unknown_commit_sleep_delays.append(float(seconds))
 
 
 class _StrictCutoverQuery:
@@ -2054,6 +2124,13 @@ async def _run_joined(runtime: Mapping[str, Any]) -> dict[str, Any]:
             stack.enter_context(_patched(store_module, "call_rpc", memory.call_rpc))
             stack.enter_context(
                 _patched(
+                    store_module,
+                    "_ancestry_checkpoint_unknown_commit_sleep",
+                    memory.unknown_commit_sleep,
+                )
+            )
+            stack.enter_context(
+                _patched(
                     release_lineage_module,
                     "_fetch_historical_release",
                     load_release_channel,
@@ -2410,6 +2487,61 @@ async def _run_joined(runtime: Mapping[str, Any]) -> dict[str, Any]:
         ):
             raise RuntimeError("compact auditor vector hash evidence is invalid")
 
+        unknown_commit_root = memory.unknown_commit_root
+        unknown_commit_writes = memory.checkpoint_rpc_writes.get(
+            str(unknown_commit_root),
+            0,
+        )
+        expected_delays = list(
+            store_module._ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS[
+                :2
+            ]
+        )
+        checkpoint_rows = [
+            row
+            for row in memory.tables.get(
+                store_module.ANCESTRY_CHECKPOINT_TABLE,
+                [],
+            )
+            if row.get("root_receipt_hash") == unknown_commit_root
+        ]
+        activation_rows = [
+            row
+            for row in memory.tables.get(
+                store_module.ANCESTRY_ACTIVATION_TABLE,
+                [],
+            )
+            if row.get("activation_root_receipt_hash")
+            == unknown_commit_root
+        ]
+        authority_rows = memory.tables.get(
+            store_module.COMPACT_WEIGHT_AUTHORITY_TABLE,
+            [],
+        )
+        authority_stages = [
+            str(row.get("authority_stage") or "") for row in authority_rows
+        ]
+        if (
+            not isinstance(unknown_commit_root, str)
+            or not unknown_commit_root.startswith("sha256:")
+            or unknown_commit_writes != 1
+            or memory.unknown_commit_readbacks != 3
+            or memory.unknown_commit_sleep_delays != expected_delays
+            or memory.unknown_commit_visible is not True
+            or len(checkpoint_rows) != 1
+            or len(activation_rows) != 1
+            or authority_stages.count("published") != 1
+            or authority_stages.count("finalized") != 1
+            or len(authority_rows) != 2
+            or {
+                str(row.get("bundle_hash") or "") for row in authority_rows
+            }
+            != {str(final_verified["bundle_hash"])}
+        ):
+            raise RuntimeError(
+                "compact ancestry unknown-commit recovery evidence differs"
+            )
+
         cutover_database.assert_complete()
         if len(epoch_evidence_acknowledgments) != 1:
             raise RuntimeError("real compact epoch evidence execution count differs")
@@ -2442,6 +2574,12 @@ async def _run_joined(runtime: Mapping[str, Any]) -> dict[str, Any]:
             "cutover_authority_db_boundary_exact": True,
             "release_lineage_file_archive_boundary_exact": True,
             "compact_ancestry_checkpoint_persistence": True,
+            "ancestry_unknown_commit_recovered_read_only": True,
+            "ancestry_unknown_commit_rpc_write_count": unknown_commit_writes,
+            "ancestry_unknown_commit_readback_count": (
+                memory.unknown_commit_readbacks
+            ),
+            "single_canonical_publish_finalize_after_unknown_commit": True,
             "primary_auditor_byte_identity": True,
             "independent_auditor_count": 2,
             "independent_auditor_submission_count": len(

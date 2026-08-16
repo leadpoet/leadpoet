@@ -626,7 +626,11 @@ src = Path(sys.argv[1])
 cache = Path(sys.argv[2])
 export_file = Path(sys.argv[3])
 raw = src.read_text()
-cache_excluded_keys = {"LEADPOET_SENTRY_API_TOKEN"}
+cache_excluded_keys = {
+    "LEADPOET_RESTART_INVOCATION_ID",
+    "LEADPOET_SENTRY_API_TOKEN",
+    "VALIDATOR_RESTART_INVOCATION_ID",
+}
 
 try:
     parsed = json.loads(raw)
@@ -679,6 +683,8 @@ skip_keys = {
     "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS",
     "VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "VALIDATOR_RESTART_CLEANUP_MAX_CANDIDATES",
+    "VALIDATOR_RESTART_INVOCATION_ID",
+    "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_SENTRY_API_TOKEN",
 }
 exports = []
@@ -713,6 +719,8 @@ chmod 600 "$VALIDATOR_ENV_FILE"
 set -a
 . "$VALIDATOR_ENV_EXPORT"
 set +a
+export VALIDATOR_RESTART_INVOCATION_ID
+export LEADPOET_RESTART_INVOCATION_ID="$VALIDATOR_RESTART_INVOCATION_ID"
 prepare_validator_sentry_host_runtime
 
 if [ ! -s "$VALIDATOR_STATEFUL_CUTOVER_MANIFEST" ]; then

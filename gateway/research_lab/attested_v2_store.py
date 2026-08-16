@@ -122,6 +122,7 @@ _EXACT_INSERT_ATTEMPTS = 4
 _EXACT_INSERT_BACKOFF_SECONDS = (0.25, 0.75, 1.5)
 _DUPLICATE_READBACK_ATTEMPTS = 4
 _DUPLICATE_READBACK_BACKOFF_SECONDS = (0.1, 0.25, 0.5)
+_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0)
 _REPLAYABLE_EXECUTION_PAIRS = frozenset(
     {
         ("research_lab_allocation", "research_lab.allocation.v2"),
@@ -158,6 +159,12 @@ logger = logging.getLogger(__name__)
 
 class AttestedV2StoreError(RuntimeError):
     """A V2 append or durable readback failed or conflicted."""
+
+
+async def _ancestry_checkpoint_unknown_commit_sleep(seconds: float) -> None:
+    """Sleep between read-only checks for one unknown RPC commit outcome."""
+
+    await asyncio.sleep(seconds)
 
 
 def replayable_execution_result_v2(*, operation: str, purpose: str) -> bool:
@@ -991,15 +998,49 @@ async def persist_ancestry_checkpoint_v2(
     except Exception as exc:
         if not _is_transient_store_error(exc):
             raise
-        durable_ack = await exact_durable_ack()
-        if durable_ack is None:
-            raise
+        readback_attempts = (
+            len(_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS) + 1
+        )
+        for readback_attempt in range(readback_attempts):
+            if readback_attempt:
+                delay = _ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS[
+                    readback_attempt - 1
+                ]
+                logger.warning(
+                    "ancestry_checkpoint_rpc_unknown_commit_pending "
+                    "root=%s attempt=%s/%s delay_seconds=%s type=%s",
+                    root_hash,
+                    readback_attempt + 1,
+                    readback_attempts,
+                    delay,
+                    type(exc).__name__,
+                )
+                await _ancestry_checkpoint_unknown_commit_sleep(delay)
+            try:
+                durable_ack = await exact_durable_ack()
+            except Exception as readback_exc:
+                if not _is_transient_store_error(readback_exc):
+                    raise
+                durable_ack = None
+            if durable_ack is None:
+                continue
+            logger.warning(
+                "ancestry_checkpoint_rpc_transient_recovered "
+                "root=%s attempt=%s/%s type=%s",
+                root_hash,
+                readback_attempt + 1,
+                readback_attempts,
+                type(exc).__name__,
+            )
+            return durable_ack
         logger.warning(
-            "ancestry_checkpoint_rpc_transient_recovered root=%s type=%s",
+            "ancestry_checkpoint_rpc_unknown_commit_exhausted "
+            "root=%s attempts=%s type=%s",
             root_hash,
+            readback_attempts,
             type(exc).__name__,
         )
-        return durable_ack
+        raise
     if not isinstance(result, Mapping):
         raise AttestedV2StoreError(
             "ancestry checkpoint RPC returned no durable acknowledgment"

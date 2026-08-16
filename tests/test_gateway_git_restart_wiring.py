@@ -1545,7 +1545,9 @@ def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> Non
     ) in script
 
 
-def test_gateway_runtime_env_cannot_replace_current_restart_controller_state() -> None:
+def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
+    tmp_path: Path,
+) -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     for key in (
@@ -1561,6 +1563,53 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state() -
     merge = script.index('cat "$ENV_SECRET" >> "$ENV_CLONE"')
     first_reload = script.index('. "$ENV_CLONE"', merge)
     assert clone < merge < first_reload
+
+    invocation_keys = (
+        "GATEWAY_RESTART_INVOCATION_ID",
+        "LEADPOET_RESTART_INVOCATION_ID",
+    )
+    for key in invocation_keys:
+        # Secrets-cache, prepared-secret, and live-process parsers must all
+        # remove stale values before the active controller reasserts them.
+        assert script.count(f'    "{key}",') == 3
+
+    merge_end = script.index(
+        'if [ -f "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" ]; then', merge
+    )
+    merge_and_reassert = script[merge:merge_end]
+    env_clone = tmp_path / "gateway.env.clone"
+    env_secret = tmp_path / "gateway.env.secret"
+    for path in (env_clone, env_secret):
+        path.write_text(
+            "export GATEWAY_RESTART_INVOCATION_ID=stale\n"
+            "export LEADPOET_RESTART_INVOCATION_ID=stale\n",
+            encoding="utf-8",
+        )
+    active_invocation = "gateway-active-invocation"
+    preserved = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "set -euo pipefail\n"
+                + merge_and_reassert
+                + '\nset -a\n. "$ENV_CLONE"\nset +a\n'
+                + "printf '%s\\n%s\\n' \"$GATEWAY_RESTART_INVOCATION_ID\" "
+                + '"$LEADPOET_RESTART_INVOCATION_ID"\n'
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ENV_CLONE": str(env_clone),
+            "ENV_SECRET": str(env_secret),
+            "GATEWAY_RESTART_INVOCATION_ID": active_invocation,
+            "LEADPOET_RESTART_INVOCATION_ID": "stale-parent",
+        },
+    )
+    assert preserved.stdout.splitlines() == [active_invocation, active_invocation]
 
 
 def test_gateway_restart_preserves_operator_maintenance_after_readiness() -> None:

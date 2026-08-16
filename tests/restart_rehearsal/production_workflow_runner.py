@@ -6356,6 +6356,366 @@ def _exercise_stateful_compact_graph_readback() -> dict[str, Any]:
     }
 
 
+_BROKER_OWNED_HTTPX_FAIL_CLOSED_CASES = (
+    "async_client_marker",
+    "copied_marker",
+    "genuine_client_without_grant",
+    "injected_mount",
+    "redirect_enabled",
+    "transport_swap",
+    "wrong_role",
+)
+
+
+def _coordinator_broker_httpx_evidence_is_complete(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    blocked = value.get("fail_closed_cases")
+    return (
+        set(value)
+        == {
+            "coordinator_role_authority_bound",
+            "direct_supabase_sidecar_receipt_bound",
+            "fail_closed_cases",
+            "real_broker_external_send_bound",
+        }
+        and value.get("coordinator_role_authority_bound") is True
+        and value.get("real_broker_external_send_bound") is True
+        and value.get("direct_supabase_sidecar_receipt_bound") is True
+        and isinstance(blocked, Mapping)
+        and set(blocked) == set(_BROKER_OWNED_HTTPX_FAIL_CLOSED_CASES)
+        and all(
+            blocked.get(case) is True
+            for case in _BROKER_OWNED_HTTPX_FAIL_CLOSED_CASES
+        )
+    )
+
+
+def _exercise_coordinator_broker_owned_httpx_grant() -> dict[str, Any]:
+    """Exercise the exact coordinator HTTPX bypass and its fail-closed shape."""
+
+    import httpx
+
+    from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
+    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+    from gateway.tee.provider_broker_v2 import (
+        BUILTIN_PROVIDER_ROUTES,
+        HTTPXProviderTransport,
+        ProviderBrokerV2,
+        _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE,
+        _broker_owned_httpx_send_scope,
+        _close_client_transports,
+        credential_reference_hash,
+        expected_provider_credential_slots,
+        is_broker_owned_httpx_client,
+    )
+    from gateway.tee.provider_client_v2 import (
+        BrokeredProviderTransportV2,
+        ProviderClientV2Error,
+    )
+    from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
+    from gateway.tee.rpc_authority import COORDINATOR_ROLE as RPC_COORDINATOR_ROLE
+    from gateway.tee.topology import (
+        COORDINATOR_ROLE as TOPOLOGY_COORDINATOR_ROLE,
+        ROLE_SPECS,
+        topology_document,
+    )
+    from leadpoet_canonical.attested_v2 import (
+        DIRECT_EGRESS_REF_HASH,
+        sha256_json,
+    )
+
+    class _TLS:
+        def getpeercert(self, binary_form=False, /):
+            if binary_form is not True:
+                raise RuntimeError("broker HTTPX TLS evidence was not requested in DER")
+            return b"candidate-derived-broker-httpx-peer"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class _NetworkStream:
+        def get_extra_info(self, name):
+            if name != "ssl_object":
+                raise RuntimeError("unexpected broker HTTPX stream evidence lookup")
+            return _TLS()
+
+        def close(self):
+            return None
+
+    original_sync_send = httpx.Client.send
+    previous_role = os.environ.get("LEADPOET_ENCLAVE_ROLE")
+    physical_transport = HTTPXProviderTransport()
+    router = None
+    sync_clients: list[Any] = []
+    async_client = None
+    external_requests: list[httpx.Request] = []
+    untrusted_requests: list[httpx.Request] = []
+    blocked: dict[str, bool] = {}
+    try:
+        topology = topology_document()
+        role_document = topology.get("roles", {}).get(TOPOLOGY_COORDINATOR_ROLE)
+        if (
+            RPC_COORDINATOR_ROLE != TOPOLOGY_COORDINATOR_ROLE
+            or RPC_COORDINATOR_ROLE != "gateway_coordinator"
+            or not isinstance(role_document, Mapping)
+            or role_document.get("service_role") != RPC_COORDINATOR_ROLE
+            or ROLE_SPECS.get(RPC_COORDINATOR_ROLE) != role_document
+        ):
+            raise RuntimeError("broker HTTPX coordinator role authority differs")
+        os.environ["LEADPOET_ENCLAVE_ROLE"] = RPC_COORDINATOR_ROLE
+        credential_values = {
+            slot: "rehearsal-%s" % slot
+            for slot in expected_provider_credential_slots()
+        }
+        retry_policy_hashes = {
+            provider_id: sha256_json(
+                {
+                    "schema_version": "leadpoet.rehearsal_retry_policy.v1",
+                    "provider_id": provider_id,
+                }
+            )
+            for provider_id in BUILTIN_PROVIDER_ROUTES
+        }
+        vault = EncryptedArtifactVaultV2(
+            master_key=bytes(reversed(range(32))),
+            boot_identity_hash=sha256_json(
+                {"boot": "coordinator-broker-httpx-grant"}
+            ),
+            retention_days=30,
+        )
+
+        def strict_external_send(client, request, *args, **kwargs):
+            if args or kwargs.get("stream") is not True:
+                raise RuntimeError("broker HTTPX external send options differ")
+            if not is_broker_owned_httpx_client(client):
+                raise RuntimeError("unowned HTTPX client reached the external adapter")
+            route = BUILTIN_PROVIDER_ROUTES["supabase"]
+            if (
+                request.method != "GET"
+                or request.url.host not in route.hosts
+                or not any(
+                    request.url.path.startswith(path)
+                    for path in route.path_prefixes
+                )
+            ):
+                raise RuntimeError(
+                    "broker HTTPX external request differs from Supabase route"
+                )
+            required_headers = {
+                name.lower()
+                for name in (
+                    route.credential_name,
+                    *(alias for alias, _prefix in route.credential_header_aliases),
+                )
+                if name
+            }
+            if not required_headers <= set(request.headers):
+                raise RuntimeError("broker HTTPX credential headers are incomplete")
+            external_requests.append(request)
+            body = b"[]"
+            return httpx.Response(
+                200,
+                headers={
+                    "content-length": str(len(body)),
+                    "content-type": "application/json",
+                },
+                content=body,
+                extensions={"network_stream": _NetworkStream()},
+                request=request,
+            )
+
+        httpx.Client.send = strict_external_send
+        broker = ProviderBrokerV2(
+            credential_ref_hashes={
+                slot: credential_reference_hash(value)
+                for slot, value in credential_values.items()
+            },
+            retry_policy_hashes=retry_policy_hashes,
+            transport=physical_transport,
+            artifact_sink=vault.seal,
+            clock=lambda: NOW,
+        )
+        broker.provision_credentials(credential_values)
+        router = BrokeredProviderTransportV2(
+            lambda _request: (_ for _ in ()).throw(
+                RuntimeError("raw broker HTTPX request was recursively intercepted")
+            )
+        )
+        router.install()
+
+        job_id = "rehearsal:coordinator-broker-httpx"
+        purpose = "research_lab.provider_preflight.v2"
+        outcome_store = ProviderOutcomeStoreV2(
+            broker=broker,
+            vault=vault,
+            sleeper=lambda _seconds: None,
+        )
+        sidecar = outcome_store.load_latest(
+            utc_day=NOW[:10],
+            job_id=job_id,
+            purpose=purpose,
+            operation_suffix="httpx-grant",
+        )
+        assigned_proxy_hash = sha256_json(
+            {"credential": "coordinator-broker-httpx-assigned-proxy"}
+        )
+        execution_context = ExecutionContextV2(
+            job_id=job_id,
+            purpose=purpose,
+            epoch_id=1,
+            provider_credential_ref_hashes={
+                "egress_proxy": assigned_proxy_hash,
+            },
+        )
+        for attempt in sidecar.get("transport_attempts") or ():
+            execution_context.record_transport(attempt)
+        if (
+            sidecar.get("found") is not False
+            or not external_requests
+            or len(execution_context.transport_attempts)
+            != len(external_requests)
+            or any(
+                attempt["provider_id"] != "supabase"
+                or attempt["egress_proxy_ref_hash"] != DIRECT_EGRESS_REF_HASH
+                or not str(attempt["logical_operation_id"]).startswith(
+                    job_id + ":provider-outcome:"
+                )
+                for attempt in execution_context.transport_attempts
+            )
+        ):
+            raise RuntimeError("broker HTTPX Supabase sidecar evidence differs")
+
+        probe_url = str(external_requests[0].url)
+
+        def expect_sync_blocked(name: str, client: Any, *, grant: bool) -> None:
+            before = len(external_requests)
+            try:
+                if grant:
+                    with _broker_owned_httpx_send_scope(
+                        client,
+                        "GET",
+                        probe_url,
+                    ):
+                        raise RuntimeError("blocked broker HTTPX client returned a response")
+                else:
+                    client.get(probe_url)
+            except ProviderClientV2Error as exc:
+                if "outside an attested job" not in str(exc):
+                    raise
+            else:
+                raise RuntimeError(
+                    "broker HTTPX bypass mutation was accepted: " + name
+                )
+            if len(external_requests) != before:
+                raise RuntimeError(
+                    "broker HTTPX bypass mutation reached external send: " + name
+                )
+            blocked[name] = True
+
+        genuine_without_grant = physical_transport._new_client()
+        sync_clients.append(genuine_without_grant)
+        expect_sync_blocked(
+            "genuine_client_without_grant",
+            genuine_without_grant,
+            grant=False,
+        )
+
+        def untrusted_send(request):
+            untrusted_requests.append(request)
+            return httpx.Response(200, content=b"{}", request=request)
+
+        copied_marker = httpx.Client(
+            transport=httpx.MockTransport(untrusted_send),
+            trust_env=False,
+            follow_redirects=False,
+        )
+        sync_clients.append(copied_marker)
+        setattr(
+            copied_marker,
+            _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE,
+            copied_marker._transport,
+        )
+        expect_sync_blocked("copied_marker", copied_marker, grant=True)
+
+        transport_swap = physical_transport._new_client()
+        sync_clients.append(transport_swap)
+        transport_swap._transport = httpx.MockTransport(untrusted_send)
+        expect_sync_blocked("transport_swap", transport_swap, grant=True)
+
+        injected_mount = physical_transport._new_client()
+        sync_clients.append(injected_mount)
+        injected_mount._mounts = {object(): httpx.MockTransport(untrusted_send)}
+        expect_sync_blocked("injected_mount", injected_mount, grant=True)
+
+        redirect_enabled = physical_transport._new_client()
+        sync_clients.append(redirect_enabled)
+        redirect_enabled.follow_redirects = True
+        expect_sync_blocked("redirect_enabled", redirect_enabled, grant=True)
+
+        wrong_role = physical_transport._new_client()
+        sync_clients.append(wrong_role)
+        os.environ["LEADPOET_ENCLAVE_ROLE"] = next(
+            role for role in ROLE_SPECS if role != RPC_COORDINATOR_ROLE
+        )
+        try:
+            expect_sync_blocked("wrong_role", wrong_role, grant=True)
+        finally:
+            os.environ["LEADPOET_ENCLAVE_ROLE"] = RPC_COORDINATOR_ROLE
+
+        async def async_untrusted_send(request):
+            untrusted_requests.append(request)
+            return httpx.Response(200, content=b"{}", request=request)
+
+        async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(async_untrusted_send),
+            trust_env=False,
+            follow_redirects=False,
+        )
+        setattr(
+            async_client,
+            _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE,
+            async_client._transport,
+        )
+
+        async def expect_async_blocked() -> None:
+            try:
+                await async_client.get(probe_url)
+            except ProviderClientV2Error as exc:
+                if "outside an attested job" not in str(exc):
+                    raise
+            else:
+                raise RuntimeError("async HTTPX marker bypass was accepted")
+
+        asyncio.run(expect_async_blocked())
+        blocked["async_client_marker"] = True
+        if untrusted_requests:
+            raise RuntimeError("broker HTTPX mutation reached an untrusted transport")
+    finally:
+        for client in reversed(sync_clients):
+            _close_client_transports(client)
+        if async_client is not None:
+            asyncio.run(async_client.aclose())
+        if router is not None:
+            router.restore()
+        httpx.Client.send = original_sync_send
+        physical_transport.close()
+        if previous_role is None:
+            os.environ.pop("LEADPOET_ENCLAVE_ROLE", None)
+        else:
+            os.environ["LEADPOET_ENCLAVE_ROLE"] = previous_role
+
+    evidence = {
+        "coordinator_role_authority_bound": True,
+        "real_broker_external_send_bound": True,
+        "direct_supabase_sidecar_receipt_bound": True,
+        "fail_closed_cases": blocked,
+    }
+    if not _coordinator_broker_httpx_evidence_is_complete(evidence):
+        raise RuntimeError("broker HTTPX grant evidence is incomplete")
+    return evidence
+
+
 def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
     """Prove repeated nonterminal polls retain unique measured evidence."""
 
@@ -6419,6 +6779,8 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         sha256_bytes,
         sha256_json,
     )
+
+    coordinator_httpx_grant = _exercise_coordinator_broker_owned_httpx_grant()
 
     if MAX_RESPONSE_BODY_BYTES != _provider_rpc_response_body_limit(
         frame_bytes=MAX_FRAME_BYTES,
@@ -8565,6 +8927,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
         "complete_gzip_get_post_eof_recovered": True,
         "measured_provider_response_encoding_bound": True,
         "complete_http2_provider_post_eof_recovered": True,
+        "coordinator_broker_owned_httpx_grant": coordinator_httpx_grant,
     }
 
 
@@ -9870,6 +10233,7 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
         HOST_RESERVED_MEMORY_MIB,
         ROLE_SPECS,
         topology_hash,
+        validate_manifest,
     )
     from leadpoet_canonical.attested_v2 import (
         EMPTY_HOST_OPERATION_ROOT,
@@ -11444,11 +11808,6 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
         ),
         patch.object(scoring_worker_module, "legacy_v1_enabled", lambda: False),
         patch.object(scoring_worker_module, "scoring_telemetry_enabled", lambda _config: False),
-        patch.object(
-            scoring_worker_module,
-            "_read_mem_available_mb",
-            return_value=HOST_RESERVED_MEMORY_MIB,
-        ),
         patch.dict(
             os.environ,
             {
@@ -11465,11 +11824,72 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
             return_value=config,
         ),
     )
+    if os.environ.get("REHEARSAL_SCOPE") != "exact":
+        patchers += (
+            patch.object(
+                scoring_worker_module,
+                "_read_mem_available_mb",
+                return_value=HOST_RESERVED_MEMORY_MIB,
+            ),
+        )
 
     async def _run() -> dict[str, Any]:
         with ExitStack() as patch_stack:
             for patcher in patchers:
                 patch_stack.enter_context(patcher)
+            candidate_topology = validate_manifest(
+                json.loads(
+                    (
+                        SOURCE_ROOT / "gateway/tee/topology.json"
+                    ).read_text(encoding="utf-8")
+                )
+            )
+            expected_available_memory_mib = int(
+                candidate_topology["host_reserved_memory_mib"]
+            )
+            observed_available_memory_mib = (
+                scoring_worker_module._read_mem_available_mb()
+            )
+            memory_boundary_event_count = 0
+            candidate_topology_memory_boundary_exact = False
+            if os.environ.get("REHEARSAL_SCOPE") == "exact":
+                event_path = Path(
+                    os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state")
+                ) / "events.jsonl"
+                event_rows = [
+                    json.loads(line)
+                    for line in event_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                matching_memory_events = [
+                    row
+                    for row in event_rows
+                    if row.get("boundary") == "host_kernel"
+                    and row.get("operation") == "memory_capacity"
+                    and row.get("read_interface") == "builtins.open"
+                    and row.get("capacity_source")
+                    == "candidate_topology.host_reserved_memory_mib"
+                    and row.get("topology_hash")
+                    == candidate_topology["topology_hash"]
+                    and row.get("topology_path") == "gateway/tee/topology.json"
+                    and int(row.get("memory_mib") or 0)
+                    == expected_available_memory_mib
+                    and int(row.get("available_memory_mib") or 0)
+                    == expected_available_memory_mib
+                ]
+                memory_boundary_event_count = len(matching_memory_events)
+                candidate_topology_memory_boundary_exact = (
+                    observed_available_memory_mib
+                    == expected_available_memory_mib
+                    and memory_boundary_event_count >= 1
+                )
+                if not candidate_topology_memory_boundary_exact:
+                    raise RuntimeError(
+                        "candidate topology memory boundary differs: "
+                        f"expected={expected_available_memory_mib} "
+                        f"observed={observed_available_memory_mib} "
+                        f"events={memory_boundary_event_count}"
+                    )
             with model_authority_v2._SOURCE_BUNDLE_CACHE_LOCK:
                 model_authority_v2._SOURCE_BUNDLE_CACHE.pop(
                     (artifact.model_artifact_hash, artifact.image_digest),
@@ -11920,7 +12340,16 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                 "production_icp_window_loader_exact": True,
                 "provider_preflight_production_facade_exact": True,
                 "maintenance_boundary_production_exact": True,
-                "production_host_memory_boundary_adapted": True,
+                "candidate_topology_memory_boundary_exact": (
+                    candidate_topology_memory_boundary_exact
+                ),
+                "memory_boundary_expected_available_mib": (
+                    expected_available_memory_mib
+                ),
+                "memory_boundary_observed_available_mib": (
+                    observed_available_memory_mib
+                ),
+                "memory_boundary_event_count": memory_boundary_event_count,
                 "provider_preflight_boundary_adapted": True,
                 "checkpoint_boundary_adapted": True,
                 "checkpoint_write_count": len(checkpoint_s3.put_documents),
@@ -11957,6 +12386,275 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
             return asyncio.run(_run())
 
 
+_RESTART_SUMMARY_DEADLINE_EVIDENCE_FIELDS = (
+    "active_timeout_terminal",
+    "later_failure_overrides_stale_completion",
+    "passive_wait_does_not_relabel_failure",
+    "restart_invocation_identity_exact",
+    "successful_slow_wait_nonterminal",
+    "successful_duration_metrics_retained",
+)
+
+
+def _restart_summary_deadline_evidence_is_complete(value: Any) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == set(_RESTART_SUMMARY_DEADLINE_EVIDENCE_FIELDS)
+        and all(
+            value.get(field) is True
+            for field in _RESTART_SUMMARY_DEADLINE_EVIDENCE_FIELDS
+        )
+    )
+
+
+def _exercise_restart_summary_deadline_classification() -> dict[str, Any]:
+    """Replay exact candidate restart summaries without sleeping or Sentry I/O."""
+
+    from leadpoet_observability import sentry_operations
+
+    candidate_sha = str(
+        os.environ.get("REHEARSAL_CANDIDATE_SHA") or ""
+    ).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
+        raise RuntimeError("restart summary rehearsal candidate SHA is invalid")
+
+    breadcrumbs: list[dict[str, Any]] = []
+    distributions: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    terminal_events: list[dict[str, Any]] = []
+    configured_contexts: list[dict[str, Any]] = []
+    recorded_stages: list[dict[str, Any]] = []
+    previous_deadline = os.environ.get(
+        "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS"
+    )
+    deadline_seconds = 5
+
+    original_configure = sentry_operations.configure_sentry_context
+    original_record_stage = sentry_operations.record_stage
+    original_breadcrumb = sentry_operations.sentry_bootstrap.add_sentry_breadcrumb
+    original_distribution = (
+        sentry_operations.sentry_bootstrap.record_sentry_distribution
+    )
+    original_capture = sentry_operations.sentry_bootstrap.capture_sentry_failure
+
+    def write_ledger(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
+        path.write_text(
+            "".join(
+                json.dumps(dict(record), sort_keys=True, separators=(",", ":"))
+                + "\n"
+                for record in records
+            ),
+            encoding="utf-8",
+        )
+
+    def emit(
+        *,
+        component: str,
+        status: str,
+        stage: str,
+        ledger_path: Path,
+    ) -> None:
+        sentry_operations.emit_restart_summary(
+            component=component,
+            status=status,
+            stage=stage,
+            ledger_path=ledger_path,
+            restart_invocation_id=ledger_path.stem,
+            candidate_sha=candidate_sha,
+        )
+
+    try:
+        os.environ["LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS"] = str(
+            deadline_seconds
+        )
+        sentry_operations.configure_sentry_context = (
+            lambda **fields: configured_contexts.append(dict(fields))
+        )
+        sentry_operations.record_stage = (
+            lambda **fields: recorded_stages.append(dict(fields))
+        )
+        sentry_operations.sentry_bootstrap.add_sentry_breadcrumb = (
+            lambda **fields: breadcrumbs.append(dict(fields))
+        )
+        sentry_operations.sentry_bootstrap.record_sentry_distribution = (
+            lambda *args, **kwargs: distributions.append((args, dict(kwargs)))
+        )
+        sentry_operations.sentry_bootstrap.capture_sentry_failure = (
+            lambda **fields: terminal_events.append(dict(fields)) or True
+        )
+
+        with tempfile.TemporaryDirectory(
+            prefix="restart-summary-rehearsal-"
+        ) as raw:
+            root = Path(raw)
+            token = root.name
+            successful_invocations: set[str] = set()
+            for component, milestones in sorted(
+                sentry_operations._RESTART_MILESTONES.items()
+            ):
+                if not milestones or milestones[-1] != "completed":
+                    raise RuntimeError("candidate restart milestone contract differs")
+                elapsed = float(deadline_seconds + 1)
+                records = []
+                for ordinal, milestone in enumerate(milestones):
+                    if ordinal:
+                        elapsed += 1.0
+                    records.append(
+                        {
+                            "stage": milestone,
+                            "status": "passed",
+                            "elapsed_seconds": elapsed,
+                        }
+                    )
+                ledger = root / f"{component}-success-{token}.jsonl"
+                write_ledger(ledger, records)
+                emit(
+                    component=component,
+                    status="failed",
+                    stage=milestones[-1],
+                    ledger_path=ledger,
+                )
+                successful_invocations.add(ledger.stem)
+
+            active_timeout = root / f"gateway-active-timeout-{token}.jsonl"
+            write_ledger(
+                active_timeout,
+                (
+                    {
+                        "stage": "active_restart_work",
+                        "status": "failed",
+                        "elapsed_seconds": float(deadline_seconds + 1),
+                    },
+                ),
+            )
+            emit(
+                component="gateway",
+                status="failed",
+                stage="active_restart_work",
+                ledger_path=active_timeout,
+            )
+
+            passive_then_failure = root / f"validator-passive-failure-{token}.jsonl"
+            validator_milestones = sentry_operations._RESTART_MILESTONES[
+                "validator"
+            ]
+            write_ledger(
+                passive_then_failure,
+                (
+                    {
+                        "stage": validator_milestones[0],
+                        "status": "passed",
+                        "elapsed_seconds": float(deadline_seconds + 1),
+                    },
+                    {
+                        "stage": "active_restart_work",
+                        "status": "failed",
+                        "elapsed_seconds": float(deadline_seconds + 2),
+                    },
+                ),
+            )
+            emit(
+                component="validator",
+                status="failed",
+                stage="active_restart_work",
+                ledger_path=passive_then_failure,
+            )
+
+            stale_completion = root / f"gateway-stale-completion-{token}.jsonl"
+            gateway_milestones = sentry_operations._RESTART_MILESTONES["gateway"]
+            write_ledger(
+                stale_completion,
+                (
+                    {
+                        "stage": gateway_milestones[-1],
+                        "status": "passed",
+                        "elapsed_seconds": 1.0,
+                    },
+                    {
+                        "stage": "active_restart_work",
+                        "status": "failed",
+                        "elapsed_seconds": 2.0,
+                    },
+                ),
+            )
+            emit(
+                component="gateway",
+                status="failed",
+                stage="active_restart_work",
+                ledger_path=stale_completion,
+            )
+
+            terminal_codes = [
+                str(event.get("failure_code") or "")
+                for event in terminal_events
+            ]
+            terminal_ids = {
+                str(event.get("context", {}).get("restart_invocation_id") or "")
+                for event in terminal_events
+            }
+            context_ids = {
+                str(context.get("restart_invocation_id") or "")
+                for context in configured_contexts
+            }
+            warning_ids = {
+                str(item.get("data", {}).get("restart_invocation_id") or "")
+                for item in breadcrumbs
+                if item.get("message") == "restart.stage_deadline_exceeded"
+            }
+
+            if len(distributions) != len(successful_invocations):
+                raise RuntimeError("successful restart duration metrics differ")
+            if warning_ids != successful_invocations:
+                raise RuntimeError("successful restart warning identity differs")
+            if terminal_codes.count("restart.stage_deadline_exceeded") != 1:
+                raise RuntimeError("active restart timeout classification differs")
+            if terminal_codes.count("restart.terminal_failure") != 2:
+                raise RuntimeError("non-timeout restart failure classification differs")
+            if successful_invocations & terminal_ids:
+                raise RuntimeError("successful restart emitted a terminal event")
+            expected_invocations = successful_invocations | {
+                active_timeout.stem,
+                passive_then_failure.stem,
+                stale_completion.stem,
+            }
+            if context_ids != expected_invocations or terminal_ids != {
+                active_timeout.stem,
+                passive_then_failure.stem,
+                stale_completion.stem,
+            }:
+                raise RuntimeError("restart invocation identity differs from ledger")
+            if not recorded_stages:
+                raise RuntimeError("candidate restart stage diagnostics were skipped")
+    finally:
+        sentry_operations.configure_sentry_context = original_configure
+        sentry_operations.record_stage = original_record_stage
+        sentry_operations.sentry_bootstrap.add_sentry_breadcrumb = original_breadcrumb
+        sentry_operations.sentry_bootstrap.record_sentry_distribution = (
+            original_distribution
+        )
+        sentry_operations.sentry_bootstrap.capture_sentry_failure = original_capture
+        if previous_deadline is None:
+            os.environ.pop(
+                "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
+                None,
+            )
+        else:
+            os.environ[
+                "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS"
+            ] = previous_deadline
+
+    evidence = {
+        "active_timeout_terminal": True,
+        "later_failure_overrides_stale_completion": True,
+        "passive_wait_does_not_relabel_failure": True,
+        "restart_invocation_identity_exact": True,
+        "successful_slow_wait_nonterminal": True,
+        "successful_duration_metrics_retained": True,
+    }
+    if not _restart_summary_deadline_evidence_is_complete(evidence):
+        raise RuntimeError("restart summary deadline evidence is incomplete")
+    return evidence
+
+
 def _exercise_compact_weight_joined_path() -> dict[str, Any]:
     from compact_weight_joined_runner import exercise_compact_weight_joined_path
 
@@ -11981,6 +12679,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "rebenchmark-sandbox-retry": _exercise_rebenchmark_sandbox_retry_contract,
     "rebenchmark-provider-transport-evidence": (
         _exercise_rebenchmark_provider_transport_evidence
+    ),
+    "restart-summary-deadline-classification": (
+        _exercise_restart_summary_deadline_classification
     ),
     "full-rebenchmark-publication-path": (
         _exercise_full_rebenchmark_publication_path
@@ -12694,6 +13395,22 @@ def main() -> int:
             ).get("baseline_pause_checkpoint_resume_complete")
             is True
         ),
+        "coordinator_broker_owned_sync_httpx_grant_exact": (
+            _coordinator_broker_httpx_evidence_is_complete(
+                behavior_evidence.get(
+                    "rebenchmark-provider-transport-evidence",
+                    {},
+                ).get("coordinator_broker_owned_httpx_grant")
+            )
+        ),
+        "restart_summary_deadline_classification_exact": (
+            _restart_summary_deadline_evidence_is_complete(
+                behavior_evidence.get(
+                    "restart-summary-deadline-classification",
+                    {},
+                )
+            )
+        ),
         "full_rebenchmark_publication_path_verified": (
             behavior_evidence.get(
                 "full-rebenchmark-publication-path",
@@ -12834,12 +13551,28 @@ def main() -> int:
                     "production_icp_window_loader_exact",
                     "provider_preflight_production_facade_exact",
                     "maintenance_boundary_production_exact",
-                    "production_host_memory_boundary_adapted",
+                    "candidate_topology_memory_boundary_exact",
                     "actual_audit_publication_verified",
                     "production_artifact_link_hash_exact",
                     "artifact_link_conflict_rejected",
                 )
             )
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("memory_boundary_expected_available_mib")
+            == behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("memory_boundary_observed_available_mib")
+            and int(
+                behavior_evidence.get(
+                    "full-rebenchmark-publication-path",
+                    {},
+                ).get("memory_boundary_event_count")
+                or 0
+            )
+            >= 1
             and behavior_evidence.get(
                 "full-rebenchmark-publication-path",
                 {},
@@ -12985,6 +13718,28 @@ def main() -> int:
                 or 0
             )
             > 0
+        ),
+        "compact_ancestry_unknown_commit_recovery_verified": (
+            behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("ancestry_unknown_commit_recovered_read_only")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("ancestry_unknown_commit_rpc_write_count")
+            == 1
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("ancestry_unknown_commit_readback_count")
+            == 3
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("single_canonical_publish_finalize_after_unknown_commit")
+            is True
         ),
         "compact_primary_auditor_byte_identity_verified": (
             behavior_evidence.get(

@@ -115,6 +115,29 @@ COMMIT = "1" * 40
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 
 
+@pytest.fixture
+def python39_import_event_loop():
+    """Isolate modules that still acquire their asyncio lock at import."""
+
+    import asyncio
+
+    try:
+        previous_loop = asyncio.get_event_loop()
+    except RuntimeError:
+        previous_loop = None
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        yield
+    finally:
+        loop.close()
+        asyncio.set_event_loop(
+            previous_loop
+            if previous_loop is not None and not previous_loop.is_closed()
+            else None
+        )
+
+
 def test_git_tree_rehearsal_ticket_seed_includes_required_miner() -> None:
     ticket_id = "00000000-0000-4000-8000-000000000096"
 
@@ -2738,6 +2761,7 @@ def test_sitecustomize_installs_vsock_adapter_under_production_safe_path(
         "PYTHONSAFEPATH": "1",
         "REHEARSAL_CANDIDATE_SHA": COMMIT,
         "REHEARSAL_SCOPE": "exact",
+        "REHEARSAL_SOURCE_ROOT": str(repository_root),
         "REHEARSAL_STATE_ROOT": str(tmp_path),
         "AWS_EC2_METADATA_DISABLED": "true",
     }
@@ -2781,6 +2805,78 @@ def test_sitecustomize_installs_vsock_adapter_under_production_safe_path(
     observed_stderr = stderr_path.read_text(encoding="utf-8")
     assert returncode == 0, observed_stderr
     assert observed_stdout.strip() == "_LocalVsock"
+    assert "Error in sitecustomize" not in observed_stderr
+
+
+def test_sitecustomize_derives_exact_meminfo_reads_from_candidate_topology(
+    tmp_path,
+) -> None:
+    harness_root = Path(__file__).resolve().parent
+    repository_root = Path(__file__).resolve().parents[2]
+    state_root = tmp_path / "state"
+    ordinary_path = tmp_path / "ordinary.txt"
+    ordinary_path.write_text("ordinary-boundary", encoding="utf-8")
+    environment = {
+        **os.environ,
+        "PYTHONPATH": f"{harness_root}:{repository_root}",
+        "REHEARSAL_CANDIDATE_SHA": COMMIT,
+        "REHEARSAL_SCOPE": "exact",
+        "REHEARSAL_SOURCE_ROOT": str(repository_root),
+        "REHEARSAL_STATE_ROOT": str(state_root),
+        "AWS_EC2_METADATA_DISABLED": "true",
+    }
+    stderr_path = tmp_path / "meminfo.stderr"
+    with stderr_path.open("w", encoding="utf-8") as stderr:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "\n".join(
+                    (
+                    "import builtins",
+                    "import json",
+                    "import os",
+                    "from pathlib import Path",
+                    "from gateway.research_lab.scoring_worker import _read_mem_available_mb",
+                    "from gateway.tee.topology import validate_manifest",
+                    f"source_root = Path({str(repository_root)!r})",
+                    f"ordinary_path = Path({str(ordinary_path)!r})",
+                    f"state_root = Path({str(state_root)!r})",
+                    "topology = validate_manifest(json.loads((source_root / 'gateway/tee/topology.json').read_text(encoding='utf-8')))",
+                    "expected_mib = int(topology['host_reserved_memory_mib'])",
+                    "assert _read_mem_available_mb() == expected_mib",
+                    "with builtins.open('/proc/meminfo', 'r', encoding='utf-8') as handle:",
+                    "    builtin_text = handle.read()",
+                    "path_text = Path('/proc/meminfo').read_text(encoding='utf-8')",
+                    "def memory_values(value):",
+                    "    return {line.split(':', 1)[0]: int(line.split()[1]) // 1024 for line in value.splitlines()}",
+                    "assert memory_values(builtin_text) == {'MemTotal': expected_mib, 'MemAvailable': expected_mib}",
+                    "assert memory_values(path_text) == {'MemTotal': expected_mib, 'MemAvailable': expected_mib}",
+                    "with builtins.open(ordinary_path, 'rb', buffering=0) as handle:",
+                    "    assert handle.read() == b'ordinary-boundary'",
+                    "assert ordinary_path.read_text(encoding='utf-8') == 'ordinary-boundary'",
+                    "event_rows = [json.loads(line) for line in (state_root / 'events.jsonl').read_text(encoding='utf-8').splitlines()]",
+                    "memory_rows = [row for row in event_rows if row.get('boundary') == 'host_kernel' and row.get('operation') == 'memory_capacity']",
+                    "assert {row.get('read_interface') for row in memory_rows} == {'builtins.open', 'pathlib.Path.read_text'}",
+                    "assert all(row.get('capacity_source') == 'candidate_topology.host_reserved_memory_mib' for row in memory_rows)",
+                    "assert all(row.get('topology_hash') == topology['topology_hash'] for row in memory_rows)",
+                    "assert all(int(row.get('memory_mib') or 0) == expected_mib for row in memory_rows)",
+                    "assert all(int(row.get('available_memory_mib') or 0) == expected_mib for row in memory_rows)",
+                    "os._exit(0)",
+                    )
+                ),
+            ],
+            cwd=tmp_path,
+            env=environment,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr,
+            check=False,
+            timeout=30,
+        )
+
+    observed_stderr = stderr_path.read_text(encoding="utf-8")
+    assert result.returncode == 0, observed_stderr
     assert "Error in sitecustomize" not in observed_stderr
 
 
@@ -3855,7 +3951,11 @@ def test_rehearsal_build_binds_the_platform_specific_base(
         lambda _sha, path: (
             (Path(__file__).resolve().parent / "Dockerfile").read_bytes()
             if path == "tests/restart_rehearsal/Dockerfile"
-            else b""
+            else (
+                b"same-scoring-lock"
+                if path == "gateway/tee/requirements-scoring-py39.lock"
+                else b""
+            )
         ),
     )
     monkeypatch.setattr(
@@ -3884,7 +3984,8 @@ def test_rehearsal_build_binds_the_platform_specific_base(
                 "REHEARSAL_BASE_IMAGE="
                 + rehearsal.REHEARSAL_BASE_IMAGES["linux/amd64"],
                 "--build-arg",
-                "REHEARSAL_HARNESS_SHA=" + "a" * 40,
+                "REHEARSAL_SCORING_LOCK_SHA256="
+                + hashlib.sha256(b"same-scoring-lock").hexdigest(),
                 "--tag",
                 "leadpoet-test:platform",
                 ".",
@@ -3893,9 +3994,14 @@ def test_rehearsal_build_binds_the_platform_specific_base(
         )
     ]
     assert sorted(path.name for path in (tmp_path / "scoring-locks").iterdir()) == [
-        "a" * 40 + ".lock",
-        "b" * 40 + ".lock",
+        hashlib.sha256(b"same-scoring-lock").hexdigest() + ".lock",
     ]
+    assert json.loads(
+        (tmp_path / "scoring-lock-aliases.json").read_text(encoding="utf-8")
+    ) == {
+        "a" * 40: hashlib.sha256(b"same-scoring-lock").hexdigest(),
+        "b" * 40: hashlib.sha256(b"same-scoring-lock").hexdigest(),
+    }
 
 
 def test_rehearsal_candidate_identity_does_not_invalidate_stable_dependencies():
@@ -3903,13 +4009,210 @@ def test_rehearsal_candidate_identity_does_not_invalidate_stable_dependencies():
         Path(__file__).resolve().parent / "Dockerfile"
     ).read_text(encoding="utf-8")
 
-    candidate_arg = dockerfile.index("ARG REHEARSAL_HARNESS_SHA")
+    candidate_arg = dockerfile.index("ARG REHEARSAL_SCORING_LOCK_SHA256")
     assert dockerfile.index("RUN dnf install") < candidate_arg
     assert dockerfile.index("COPY requirements.txt") < candidate_arg
+    assert dockerfile.index("RUN python3.11 -m pip install") < candidate_arg
     assert dockerfile.index("COPY scoring-locks/") < candidate_arg
+    assert dockerfile.index("python3.11 -m pip download") < candidate_arg
+    assert dockerfile.index(
+        "RUN python3.11 /opt/leadpoet/prepare_external_artifacts.py"
+    ) < candidate_arg
+    assert candidate_arg < dockerfile.index("COPY scoring-lock-aliases.json")
     assert candidate_arg < dockerfile.index(
-        'scoring-wheelhouses/${REHEARSAL_HARNESS_SHA}'
+        "COPY harness/prepare_scoring_wheelhouse_aliases.py"
     )
+    assert candidate_arg < dockerfile.index(
+        'scoring-wheelhouses/${REHEARSAL_SCORING_LOCK_SHA256}'
+    )
+    assert 'sha256sum "${lock}"' in dockerfile
+    assert (
+        "tests/restart_rehearsal/prepare_scoring_wheelhouse_aliases.py"
+        in rehearsal.COMMITTED_HARNESS_PATHS
+    )
+
+
+def test_rehearsal_build_maps_both_transition_commits_to_exact_lock_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from_sha = "1" * 40
+    candidate_sha = "2" * 40
+    from_lock = b"from-lock"
+    candidate_lock = b"candidate-lock"
+
+    @contextmanager
+    def temporary_directory(*, prefix: str):
+        assert prefix == "leadpoet-restart-image-"
+        yield str(tmp_path)
+
+    def git_file(sha: str, path: str) -> bytes:
+        if path == "tests/restart_rehearsal/Dockerfile":
+            return (Path(__file__).resolve().parent / "Dockerfile").read_bytes()
+        if path == "gateway/tee/requirements-scoring-py39.lock":
+            return from_lock if sha == from_sha else candidate_lock
+        return b""
+
+    monkeypatch.setattr(
+        rehearsal.tempfile,
+        "TemporaryDirectory",
+        temporary_directory,
+    )
+    monkeypatch.setattr(rehearsal, "_git_file", git_file)
+    monkeypatch.setattr(rehearsal, "_run", lambda *_args, **_kwargs: None)
+
+    rehearsal._build_image(
+        "leadpoet-test:transition-locks",
+        harness_sha=candidate_sha,
+        docker_platform="linux/amd64",
+        wheelhouse_shas=(from_sha, candidate_sha),
+    )
+
+    aliases = json.loads(
+        (tmp_path / "scoring-lock-aliases.json").read_text(encoding="utf-8")
+    )
+    assert aliases == {
+        from_sha: hashlib.sha256(from_lock).hexdigest(),
+        candidate_sha: hashlib.sha256(candidate_lock).hexdigest(),
+    }
+    assert {
+        path.name for path in (tmp_path / "scoring-locks").iterdir()
+    } == {
+        hashlib.sha256(from_lock).hexdigest() + ".lock",
+        hashlib.sha256(candidate_lock).hexdigest() + ".lock",
+    }
+
+
+def test_scoring_wheelhouse_aliases_resolve_n_minus_one_and_candidate(
+    tmp_path: Path,
+) -> None:
+    from tests.restart_rehearsal.prepare_scoring_wheelhouse_aliases import (
+        install_aliases,
+    )
+
+    from_sha = "1" * 40
+    candidate_sha = "2" * 40
+    from_digest = "a" * 64
+    candidate_digest = "b" * 64
+    root = tmp_path / "scoring-wheelhouses"
+    (root / from_digest).mkdir(parents=True)
+    (root / candidate_digest).mkdir()
+    aliases_path = tmp_path / "aliases.json"
+    aliases_path.write_text(
+        json.dumps(
+            {
+                from_sha: from_digest,
+                candidate_sha: candidate_digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    install_aliases(root=root, aliases_path=aliases_path)
+
+    assert (root / from_sha).resolve() == (root / from_digest).resolve()
+    assert (root / candidate_sha).resolve() == (root / candidate_digest).resolve()
+
+
+def test_host_fixture_preparation_consumes_both_transition_wheelhouse_aliases(
+    tmp_path: Path,
+) -> None:
+    from tests.restart_rehearsal.prepare_host_fixtures import (
+        _prepare_offline_root,
+    )
+    from tests.restart_rehearsal.prepare_scoring_wheelhouse_aliases import (
+        install_aliases,
+    )
+
+    from_sha = "1" * 40
+    candidate_sha = "2" * 40
+    from_digest = "a" * 64
+    candidate_digest = "b" * 64
+    wheelhouses = tmp_path / "scoring-wheelhouses"
+    for digest, marker in (
+        (from_digest, b"n-minus-one"),
+        (candidate_digest, b"candidate"),
+    ):
+        target = wheelhouses / digest
+        target.mkdir(parents=True)
+        (target / "locked.whl").write_bytes(marker)
+    aliases_path = tmp_path / "aliases.json"
+    aliases_path.write_text(
+        json.dumps(
+            {
+                from_sha: from_digest,
+                candidate_sha: candidate_digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+    install_aliases(root=wheelhouses, aliases_path=aliases_path)
+
+    source_root = tmp_path / "source"
+    (source_root / "gateway/tee").mkdir(parents=True)
+    (source_root / "validator_tee").mkdir()
+    (source_root / "gateway/tee/runsc-runtime.lock.json").write_text(
+        json.dumps({"artifact_filename": "runsc.bin"}),
+        encoding="utf-8",
+    )
+    (source_root / "validator_tee/runtime-artifacts-v2.lock.json").write_text(
+        json.dumps({"artifacts": {"runtime": {"filename": "runtime.bin"}}}),
+        encoding="utf-8",
+    )
+    external = tmp_path / "external-artifacts"
+    external.mkdir()
+    (external / "runsc.bin").write_bytes(b"runsc")
+    (external / "runtime.bin").write_bytes(b"runtime")
+
+    observed = {}
+    for commit in (from_sha, candidate_sha):
+        destination = tmp_path / ("offline-" + commit)
+        destination.mkdir()
+        _prepare_offline_root(
+            source_root=source_root,
+            destination=destination,
+            commit=commit,
+            scoring_wheelhouse_root=wheelhouses,
+            external_artifact_root=external,
+        )
+        observed[commit] = (
+            destination / "scoring-wheelhouse-py39/locked.whl"
+        ).read_bytes()
+        assert (destination / "runsc.bin").read_bytes() == b"runsc"
+        assert (
+            destination / "validator-runtime/runtime.bin"
+        ).read_bytes() == b"runtime"
+    assert observed == {
+        from_sha: b"n-minus-one",
+        candidate_sha: b"candidate",
+    }
+
+
+@pytest.mark.parametrize(
+    ("aliases", "target_digest", "message"),
+    (
+        ({"../escape": "a" * 64}, "a" * 64, "commit is invalid"),
+        ({"1" * 40: "not-a-digest"}, "a" * 64, "digest is invalid"),
+        ({"1" * 40: "b" * 64}, "a" * 64, "target is unavailable"),
+    ),
+)
+def test_scoring_wheelhouse_aliases_fail_closed(
+    tmp_path: Path,
+    aliases: dict[str, str],
+    target_digest: str,
+    message: str,
+) -> None:
+    from tests.restart_rehearsal.prepare_scoring_wheelhouse_aliases import (
+        install_aliases,
+    )
+
+    root = tmp_path / "scoring-wheelhouses"
+    (root / target_digest).mkdir(parents=True)
+    aliases_path = tmp_path / "aliases.json"
+    aliases_path.write_text(json.dumps(aliases), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        install_aliases(root=root, aliases_path=aliases_path)
 
 
 def test_rehearsal_build_stages_compact_weight_readiness_dependency(
@@ -4108,6 +4411,32 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "delayed_private_source_manifest_recovery_verified" in set(
         behavior_contract["required_invariant_ids"]
     )
+    assert "rebenchmark-provider-transport-evidence" in set(
+        behavior_contract["behavior_scenarios"]
+    )
+    assert "coordinator_broker_owned_sync_httpx_grant_exact" in set(
+        behavior_contract["required_invariant_ids"]
+    )
+    assert "restart-summary-deadline-classification" in set(
+        behavior_contract["behavior_scenarios"]
+    )
+    assert "restart_summary_deadline_classification_exact" in set(
+        behavior_contract["required_invariant_ids"]
+    )
+    assert "compact-weight-joined-path" in set(
+        behavior_contract["behavior_scenarios"]
+    )
+    assert "compact_ancestry_unknown_commit_recovery_verified" in set(
+        behavior_contract["required_invariant_ids"]
+    )
+    assert {
+        "gateway/tee/execution_job_manager_v2.py",
+        "gateway/tee/provider_broker_v2.py",
+        "gateway/tee/provider_client_v2.py",
+        "gateway/tee/provider_outcome_store_v2.py",
+        "gateway/tee/rpc_authority.py",
+        "leadpoet_observability/sentry_operations.py",
+    } <= set(behavior_contract["production_source_paths"])
     assert "proxy-authorization:" in tls_proxy_service
     assert "ssl.PROTOCOL_TLS_SERVER" in tls_proxy_service
     assert '"openrouter.ai:443"' in tls_proxy_service
@@ -4124,6 +4453,87 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "_handle_gateway_enclave_rpc(" in gateway_service
     assert "while True:" in service
     assert "while True:" in gateway_service
+
+
+def test_coordinator_broker_httpx_grant_evidence_is_exact_and_fail_closed() -> None:
+    evidence = production_workflow_runner._exercise_coordinator_broker_owned_httpx_grant()
+    assert (
+        production_workflow_runner._coordinator_broker_httpx_evidence_is_complete(
+            evidence
+        )
+        is True
+    )
+
+    for case in production_workflow_runner._BROKER_OWNED_HTTPX_FAIL_CLOSED_CASES:
+        mutated = {
+            **evidence,
+            "fail_closed_cases": {
+                **evidence["fail_closed_cases"],
+                case: False,
+            },
+        }
+        assert (
+            production_workflow_runner._coordinator_broker_httpx_evidence_is_complete(
+                mutated
+            )
+            is False
+        )
+
+    for required_field in (
+        "coordinator_role_authority_bound",
+        "direct_supabase_sidecar_receipt_bound",
+        "real_broker_external_send_bound",
+    ):
+        mutated = {**evidence, required_field: False}
+        assert (
+            production_workflow_runner._coordinator_broker_httpx_evidence_is_complete(
+                mutated
+            )
+            is False
+        )
+
+
+def test_rebenchmark_provider_transport_action_requires_httpx_grant_evidence() -> None:
+    evidence = (
+        production_workflow_runner._exercise_rebenchmark_provider_transport_evidence()
+    )
+    assert evidence["assigned_provider_direct_supabase_sidecars_bound"] is True
+    assert (
+        production_workflow_runner._coordinator_broker_httpx_evidence_is_complete(
+            evidence["coordinator_broker_owned_httpx_grant"]
+        )
+        is True
+    )
+
+
+def test_restart_summary_deadline_action_is_exact_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", "a" * 40)
+    evidence = (
+        production_workflow_runner._exercise_restart_summary_deadline_classification()
+    )
+    assert (
+        production_workflow_runner._restart_summary_deadline_evidence_is_complete(
+            evidence
+        )
+        is True
+    )
+    for field in (
+        production_workflow_runner._RESTART_SUMMARY_DEADLINE_EVIDENCE_FIELDS
+    ):
+        assert (
+            production_workflow_runner._restart_summary_deadline_evidence_is_complete(
+                {**evidence, field: False}
+            )
+            is False
+        )
+    assert (
+        production_workflow_runner._restart_summary_deadline_evidence_is_complete(
+            {**evidence, "unexpected": True}
+        )
+        is False
+    )
 
 
 def test_gateway_restart_records_proxy_preflight_as_a_pre_shutdown_stage() -> None:
@@ -4843,6 +5253,7 @@ def test_candidate_owned_guard_probe_does_not_mutate_rollback_transition_ledger(
 
 def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
     monkeypatch,
+    python39_import_event_loop,
 ) -> None:
     from gateway.research_lab.config import ResearchLabGatewayConfig
 
@@ -4900,7 +5311,6 @@ def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
     assert evidence["production_icp_window_loader_exact"] is True
     assert evidence["provider_preflight_production_facade_exact"] is True
     assert evidence["maintenance_boundary_production_exact"] is True
-    assert evidence["production_host_memory_boundary_adapted"] is True
     assert evidence["provider_preflight_boundary_adapted"] is True
     assert evidence["checkpoint_boundary_adapted"] is True
     assert evidence["checkpoint_write_count"] >= evidence["configured_icp_count"]
@@ -4918,6 +5328,7 @@ def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
 
 def test_full_rebenchmark_publication_derives_window_shape_from_candidate(
     monkeypatch,
+    python39_import_event_loop,
 ) -> None:
     from gateway.research_lab import config as config_module
     from gateway.research_lab import icp_window as icp_window_module

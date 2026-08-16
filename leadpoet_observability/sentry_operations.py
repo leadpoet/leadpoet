@@ -954,6 +954,13 @@ def emit_restart_summary(
     records = load_restart_ledger(ledger_path)
     reached = {str(item["stage"]) for item in records}
     expected = _RESTART_MILESTONES.get(component, ())
+    completion_stage = expected[-1] if expected else "completed"
+    terminal_record = records[-1] if records else {}
+    completed_passed = (
+        terminal_record.get("stage") == completion_stage
+        and terminal_record.get("status") == "passed"
+    )
+    summary_passed = completed_passed
     missing = [item for item in expected if item not in reached]
     passed = [
         str(item["stage"])
@@ -990,7 +997,7 @@ def emit_restart_summary(
         correlation_id=restart_invocation_id,
         release_correlation_id=release_correlation_id(candidate_sha),
         stage=stage,
-        status=status,
+        status="passed" if summary_passed else status,
         release_attempts=release_attempts,
     )
     for record in records:
@@ -1002,7 +1009,12 @@ def emit_restart_summary(
             restart_invocation_id=restart_invocation_id,
             candidate_sha=candidate_sha,
         )
-    if status == "passed":
+    # The restart scripts write ``completed:passed`` only after their complete
+    # fail-closed verification.  When it is the final ledger record, a long
+    # release/attestation wait remains a latency diagnostic and can never turn
+    # the successful restart into a terminal incident.  A later failure record
+    # still wins.
+    if summary_passed:
         sentry_bootstrap.record_sentry_distribution(
             "leadpoet.restart.duration",
             total or 0.0,
@@ -1014,14 +1026,14 @@ def emit_restart_summary(
                 "restart.stage_deadline_exceeded",
                 component=component,
                 stage=str(slowest["stage"]),
-                terminal=True,
+                terminal=False,
                 retryable=False,
                 fail_closed=False,
                 restart_invocation_id=restart_invocation_id,
                 candidate_sha=candidate_sha,
                 duration_seconds=float(slowest["duration_seconds"]),
                 timed_out=False,
-                last_successful_stage="completed",
+                last_successful_stage=completion_stage,
                 stage_ledger=records,
                 release_attempts=release_attempts,
             )
@@ -1031,10 +1043,18 @@ def emit_restart_summary(
         stage=stage,
         evidence_paths=evidence_paths,
     )
+    causal_failure = next(
+        (
+            item
+            for item in reversed(records)
+            if item.get("stage") == stage and item.get("status") == "failed"
+        ),
+        None,
+    )
     if (
         code == "restart.terminal_failure"
-        and slowest is not None
-        and float(slowest["duration_seconds"]) > stage_deadline
+        and causal_failure is not None
+        and float(causal_failure["duration_seconds"]) > stage_deadline
     ):
         code = "restart.stage_deadline_exceeded"
     capture_failure(

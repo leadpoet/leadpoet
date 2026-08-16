@@ -1377,9 +1377,19 @@
       "symbol": "_shutdown_and_close_socket"
     },
     {
+      "ast_sha256": "sha256:411ea0310645d53dd2c935239260849722a8438beda99ef49b1f2fc3e3bb0f52",
+      "path": "gateway/tee/execution_job_manager_v2.py",
+      "symbol": "ExecutionContextV2.record_transport"
+    },
+    {
       "ast_sha256": "sha256:4e67bf654cb46e0ff990514f49a0ee38b568b30c0d4bd37e525ff78af1ae2ec0",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
+    },
+    {
+      "ast_sha256": "sha256:b227e46cacdf93a6af979732ca8fdf3176c71fea506ea6f3b380cb3fbfb1cc6d",
+      "path": "gateway/tee/execution_job_manager_v2.py",
+      "symbol": "_DIRECT_SUPABASE_SIDECAR_NAMESPACES"
     },
     {
       "ast_sha256": "sha256:bd18ac4063df04e713b3b4f152e55bae0a06835c631b15b5d6a12c99480068c5",
@@ -3502,7 +3512,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:184a4f6148e0692ad18acb8772710981ab490b99e7e6852f529b21a606252bf6",
-  "protected_source_commit": "8e8d467c99e235b0deb1649321fba47c414e0abf",
+  "manifest_hash": "sha256:a9a45636d4207cca1d54054434197810e02be66dd9bd32ad3f2d20210ab912c2",
+  "protected_source_commit": "41abf627680b477a78b042b1b51d5d1902a5f2d5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

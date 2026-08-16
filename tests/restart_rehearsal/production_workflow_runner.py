@@ -12,7 +12,7 @@ import argparse
 import asyncio
 import base64
 import copy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -27,7 +28,7 @@ import threading
 import time
 import traceback
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -9684,6 +9685,2165 @@ def _exercise_measured_coordinator_raw_transport() -> dict[str, Any]:
     return evidence
 
 
+def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
+    """Run the configured daily baseline through its production orchestrator.
+
+    Nitro execution, KMS, per-ICP checkpoint S3, PostgREST, and the external
+    dashboard projection are strict adapted boundaries. The production model
+    runner, qualification scorer, V2 authority facades, window selection,
+    every configured ICP evaluation, scoring/aggregation, conditional
+    assignment, durable store writers, public report endpoint, audit bundle,
+    candidate-readiness gate, and restart repair all execute the candidate's
+    production code in one joined scenario.
+    """
+
+    from collections import defaultdict
+    from io import BytesIO
+    from unittest.mock import patch
+
+    import boto3
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from gateway.research_lab import api as research_lab_api
+    from gateway.research_lab import active_model_authority_v2
+    from gateway.research_lab import attested_coordinator_v2
+    from gateway.research_lab import attested_v2_store
+    from gateway.research_lab import maintenance as maintenance_module
+    from gateway.research_lab import model_authority_v2
+    from gateway.research_lab import promotion as promotion_module
+    from gateway.research_lab import provider_preflight as provider_preflight_module
+    from gateway.research_lab import scoring_worker as scoring_worker_module
+    from gateway.research_lab import store as research_lab_store
+    from gateway.research_lab import v2_authority
+    from gateway.db import client as db_client_module
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+    from gateway.research_lab.icp_window import (
+        select_rolling_icp_window_from_sets,
+    )
+    from qualification.scoring.company_fit_decision import (
+        COMPANY_FIT_DIMENSIONS,
+        aggregate_company_fit_decisions,
+        company_fit_match,
+    )
+    from research_lab.eval.artifacts import (
+        PrivateModelArtifactManifest,
+        private_model_artifact_replay_identity_v2,
+    )
+    from research_lab.eval.evaluator import (
+        scorer_breakdown_has_complete_current_company_fit_receipt,
+    )
+    from research_lab.eval import private_runtime as private_runtime_module
+    from gateway.tee.model_sandbox_v2 import MODEL_SANDBOX_REQUEST_SCHEMA_VERSION
+    from gateway.tee.scoring_executor import (
+        ScoringExecutionResult,
+        execute_scoring_operation,
+    )
+    from gateway.tee.scoring_executor_v2 import (
+        OP_PROVIDER_PREFLIGHT_V2,
+        OP_RUN_MODEL_SANDBOX_V2,
+        PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
+        ScoringExecutorV2,
+    )
+    from gateway.tee.source_bundle_v2 import extract_source_bundle_v2
+    from gateway.tee.source_add_runtime_v2 import build_source_add_runtime_catalog_v2
+    from gateway.tee.release_manifest_v2 import (
+        build_release_manifest,
+        role_expectation,
+    )
+    from gateway.tee.topology import ROLE_SPECS, topology_hash
+    from leadpoet_canonical.attested_v2 import (
+        EMPTY_HOST_OPERATION_ROOT,
+        EMPTY_TRANSPORT_ROOT,
+        build_boot_identity_body,
+        build_execution_receipt_body,
+        build_receipt_graph,
+        create_boot_identity,
+        create_signed_execution_receipt,
+        merkle_root,
+        validate_receipt_graphs,
+    )
+    from research_lab.eval.private_runtime import compute_private_source_tree_hash
+    from scripts.run_physical_v2_staging import (
+        _contains_dashboard_identity,
+        _rebenchmark_identity,
+    )
+
+    fixed_now = datetime(2026, 7, 25, 0, 30, tzinfo=timezone.utc)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    class _MemoryPostgrestBoundary:
+        """Strict in-memory replacement for only the PostgREST wire boundary."""
+
+        def __init__(self, seed: Mapping[str, list[Mapping[str, Any]]]) -> None:
+            self.tables: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            self._ordinal = 0
+            self.select_log: list[tuple[str, tuple[Any, ...]]] = []
+            self.insert_log: list[str] = []
+            for table, rows in seed.items():
+                self.tables[table] = [copy.deepcopy(dict(row)) for row in rows]
+
+        def _stamp(self) -> str:
+            self._ordinal += 1
+            return (
+                fixed_now.replace(microsecond=self._ordinal)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+
+        @staticmethod
+        def _event_projection(
+            base_rows: list[dict[str, Any]],
+            event_rows: list[dict[str, Any]],
+            *,
+            key_field: str,
+            status_field: str,
+            projected_status_field: str,
+        ) -> list[dict[str, Any]]:
+            projected: list[dict[str, Any]] = []
+            for base in base_rows:
+                key = base.get(key_field)
+                events = sorted(
+                    (row for row in event_rows if row.get(key_field) == key),
+                    key=lambda row: int(row.get("seq") or 0),
+                    reverse=True,
+                )
+                if not events:
+                    continue
+                latest = events[0]
+                projected.append(
+                    {
+                        **copy.deepcopy(base),
+                        "current_event_seq": int(latest.get("seq") or 0),
+                        "current_event_type": str(latest.get("event_type") or ""),
+                        projected_status_field: str(latest.get(status_field) or ""),
+                        "current_event_hash": str(latest.get("anchored_hash") or ""),
+                        "current_status_at": str(latest.get("created_at") or ""),
+                    }
+                )
+            return projected
+
+        def rows(self, table: str) -> list[dict[str, Any]]:
+            if table == "research_lab_private_model_benchmark_current":
+                return self._event_projection(
+                    self.tables["research_lab_private_model_benchmark_bundles"],
+                    self.tables["research_lab_private_model_benchmark_events"],
+                    key_field="benchmark_bundle_id",
+                    status_field="benchmark_status",
+                    projected_status_field="current_benchmark_status",
+                )
+            if table == "research_lab_public_benchmark_report_current":
+                return self._event_projection(
+                    self.tables["research_lab_public_benchmark_reports"],
+                    self.tables["research_lab_public_benchmark_report_events"],
+                    key_field="report_id",
+                    status_field="report_status",
+                    projected_status_field="current_report_status",
+                )
+            # The joined audit builder intentionally sees empty production
+            # domains that this scenario does not create, while consuming real
+            # rows for the rolling window/baseline/report/dispatch domains.
+            return [copy.deepcopy(row) for row in self.tables.get(table, ())]
+
+        @staticmethod
+        def _matches(row: Mapping[str, Any], raw_filter: tuple[Any, ...]) -> bool:
+            if len(raw_filter) == 2:
+                field, expected = raw_filter
+                return row.get(str(field)) == expected
+            if len(raw_filter) != 3:
+                raise AssertionError(f"unsupported PostgREST filter: {raw_filter!r}")
+            field, operator, expected = raw_filter
+            actual = row.get(str(field))
+            if operator == "eq":
+                return actual == expected
+            if operator == "lt":
+                return actual is not None and actual < expected
+            if operator == "lte":
+                return actual is not None and actual <= expected
+            if operator == "gte":
+                return actual is not None and actual >= expected
+            if operator == "in":
+                return actual in tuple(expected)
+            raise AssertionError(f"unsupported PostgREST operator: {operator}")
+
+        async def select_many(
+            self,
+            table: str,
+            *,
+            filters: Any = (),
+            order_by: Any = (),
+            limit: int = 1000,
+            **_kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            self.select_log.append((str(table), tuple(filters)))
+            rows = [
+                row
+                for row in self.rows(table)
+                if all(self._matches(row, tuple(item)) for item in tuple(filters))
+            ]
+            for field, descending in reversed(tuple(order_by)):
+                rows.sort(
+                    key=lambda row: (row.get(str(field)) is not None, row.get(str(field))),
+                    reverse=bool(descending),
+                )
+            return [copy.deepcopy(row) for row in rows[: int(limit)]]
+
+        async def select_one(self, table: str, **kwargs: Any) -> dict[str, Any] | None:
+            rows = await self.select_many(table, limit=1, **kwargs)
+            return rows[0] if rows else None
+
+        async def select_all(
+            self,
+            table: str,
+            *,
+            filters: Any = (),
+            order_by: Any = (),
+            max_rows: int = 10_000,
+            **kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            return await self.select_many(
+                table,
+                filters=filters,
+                order_by=order_by,
+                limit=max_rows,
+                **kwargs,
+            )
+
+        async def insert_row(self, table: str, row: Mapping[str, Any]) -> dict[str, Any]:
+            inserted = copy.deepcopy(dict(row))
+            inserted.setdefault("created_at", self._stamp())
+            self.insert_log.append(str(table))
+            if table == attested_v2_store.BUSINESS_ARTIFACT_TABLE:
+                unique_key = tuple(
+                    str(inserted.get(field) or "")
+                    for field in ("artifact_kind", "artifact_ref", "artifact_hash")
+                )
+                if any(
+                    tuple(
+                        str(existing.get(field) or "")
+                        for field in (
+                            "artifact_kind",
+                            "artifact_ref",
+                            "artifact_hash",
+                        )
+                    )
+                    == unique_key
+                    for existing in self.tables[table]
+                ):
+                    raise RuntimeError(
+                        "23505 duplicate key unique constraint "
+                        "research_lab_attested_business_artifact_links_v2_key"
+                    )
+            # Production event tables enforce UNIQUE(owner, seq). Preserve that
+            # exact failure signature so append_event_with_seq remains tested.
+            if "seq" in inserted:
+                owner_fields = [
+                    field
+                    for field in inserted
+                    if field.endswith("_id") and field != "event_id"
+                ]
+                for existing in self.tables[table]:
+                    if (
+                        int(existing.get("seq") or 0) == int(inserted["seq"])
+                        and any(
+                            existing.get(field) == inserted.get(field)
+                            for field in owner_fields
+                        )
+                    ):
+                        raise RuntimeError("23505 duplicate key unique constraint seq")
+            self.tables[table].append(inserted)
+            return copy.deepcopy(inserted)
+
+        async def next_event_seq(
+            self,
+            table: str,
+            key_field: str,
+            key_value: Any,
+        ) -> int:
+            matching = [
+                int(row.get("seq") or 0)
+                for row in self.tables.get(table, ())
+                if row.get(key_field) == key_value
+            ]
+            return max(matching) + 1 if matching else 0
+
+    class _StrictIcpPostgrestBoundary:
+        """Adapt only the synchronous Supabase query used by the ICP loader."""
+
+        _COLUMNS = (
+            "set_id,icps,icp_set_hash,active_from,active_until,is_active"
+        )
+
+        def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+            self._rows = [copy.deepcopy(dict(row)) for row in rows]
+            self.query_count = 0
+
+        def table(self, table: str) -> "_StrictIcpPostgrestBoundary":
+            if table != "qualification_private_icp_sets":
+                raise RuntimeError("rolling ICP loader escaped its PostgREST table")
+            return self
+
+        def select(self, columns: str) -> "_StrictIcpPostgrestBoundary":
+            if columns != self._COLUMNS:
+                raise RuntimeError("rolling ICP loader changed its selected columns")
+            return self
+
+        def lte(self, field: str, value: Any) -> "_StrictIcpPostgrestBoundary":
+            if field != "set_id" or int(value) != fresh_set_id:
+                raise RuntimeError("rolling ICP loader changed its freshness bound")
+            return self
+
+        def order(
+            self,
+            field: str,
+            *,
+            desc: bool,
+        ) -> "_StrictIcpPostgrestBoundary":
+            if field != "set_id" or desc is not True:
+                raise RuntimeError("rolling ICP loader changed its set ordering")
+            return self
+
+        def limit(self, value: int) -> "_StrictIcpPostgrestBoundary":
+            if int(value) < 2:
+                raise RuntimeError("rolling ICP loader truncated the configured window")
+            return self
+
+        def execute(self) -> Any:
+            self.query_count += 1
+            rows = sorted(
+                (
+                    row
+                    for row in self._rows
+                    if int(row.get("set_id") or 0) <= fresh_set_id
+                ),
+                key=lambda row: int(row.get("set_id") or 0),
+                reverse=True,
+            )
+            return SimpleNamespace(data=copy.deepcopy(rows))
+
+    config = ResearchLabGatewayConfig(
+        api_enabled=True,
+        reports_enabled=True,
+        baseline_start_utc_offset_seconds=0,
+        private_repo_url="ssh://strict-rehearsal/private-sourcing-model.git",
+    )
+    policy = config.conditional_validation_policy()
+    if not policy.enabled:
+        raise RuntimeError("production conditional ICP policy is not enabled")
+    total_icps = int(policy.total_icps)
+    if total_icps != int(policy.fresh_icp_count + policy.retained_icp_count):
+        raise RuntimeError("configured ICP policy does not partition the complete bank")
+
+    def _icp(index: int) -> dict[str, Any]:
+        return {
+            "icp_id": f"production-shaped-{index:03d}",
+            "industry": f"industry-{index:03d}",
+            "sub_industry": f"sub-industry-{index:03d}",
+            "product_service": f"service-{index:03d}",
+            "intent_signals": [f"intent-signal-{index:03d}"],
+            "employee_count": "51-200",
+            "company_count": 1,
+        }
+
+    fresh_set_id = int(fixed_now.strftime("%Y%m%d"))
+    private_set_rows = [
+        {
+            "set_id": fresh_set_id,
+            "icps": [_icp(index) for index in range(policy.fresh_icp_count)],
+            "icp_set_hash": sha256_json({"set": "fresh", "count": policy.fresh_icp_count}),
+            "active_from": "2026-07-25T00:00:00Z",
+            "active_until": "2026-07-26T00:00:00Z",
+            "is_active": True,
+        },
+        {
+            "set_id": fresh_set_id - 1,
+            "icps": [
+                _icp(index)
+                for index in range(
+                    policy.fresh_icp_count,
+                    policy.fresh_icp_count + policy.retained_icp_count,
+                )
+            ],
+            "icp_set_hash": sha256_json(
+                {"set": "retained", "count": policy.retained_icp_count}
+            ),
+            "active_from": "2026-07-24T00:00:00Z",
+            "active_until": "2026-07-25T00:00:00Z",
+            "is_active": False,
+        },
+    ]
+    icp_postgrest = _StrictIcpPostgrestBoundary(private_set_rows)
+    window = select_rolling_icp_window_from_sets(
+        private_set_rows,
+        days=config.lab_champion_eval_days,
+        icps_per_day=config.lab_champion_icps_per_day,
+        window_mode=config.lab_champion_window_mode,
+        fresh_icp_count=policy.fresh_icp_count,
+        retained_icp_count=policy.retained_icp_count,
+        min_new_icp_count=policy.fresh_icp_count,
+        required_total_icps=policy.total_icps,
+        require_unique_icps=True,
+        required_fresh_set_id=fresh_set_id,
+        require_fresh_set_active_at=fixed_now,
+    )
+    if len(window.benchmark_items) != total_icps:
+        raise RuntimeError("production selector did not return every configured ICP")
+    item_ref_by_icp_hash = {
+        sha256_json(dict(item["icp"])): str(item["icp_ref"])
+        for item in window.benchmark_items
+    }
+    item_ref_by_icp_id = {
+        str(item["icp"]["icp_id"]): str(item["icp_ref"])
+        for item in window.benchmark_items
+    }
+    if len(item_ref_by_icp_hash) != total_icps:
+        raise RuntimeError("production selector returned duplicate ICP identities")
+
+    candidate_commit = str(
+        os.environ.get("REHEARSAL_CANDIDATE_SHA") or ""
+    ).strip().lower()
+    if len(candidate_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in candidate_commit
+    ):
+        raise RuntimeError(
+            "full rebenchmark requires the frozen candidate Git SHA"
+        )
+
+    def _strict_release_hash(label: str) -> str:
+        return "sha256:" + hashlib.sha256(
+            f"strict-rebenchmark-release:{candidate_commit}:{label}".encode("ascii")
+        ).hexdigest()
+
+    # Independent EIF reproduction is an external Docker/Nitro boundary in
+    # this joined workflow. Feed deterministic candidate-bound build records
+    # through the real release-manifest builder, then make the production
+    # active-model authority load that exact validated document from disk.
+    release_evidence: list[dict[str, Any]] = []
+    for physical_role in sorted(ROLE_SPECS):
+        deterministic = {
+            "commit_sha": candidate_commit,
+            "pcr0": hashlib.sha384(
+                f"strict-rebenchmark-pcr0:{candidate_commit}:{physical_role}".encode(
+                    "ascii"
+                )
+            ).hexdigest(),
+            "normalized_image_hash": _strict_release_hash(
+                f"{physical_role}:normalized-image"
+            ),
+            "source_manifest_hash": _strict_release_hash(
+                f"{physical_role}:source-manifest"
+            ),
+            "build_identity_hash": _strict_release_hash(
+                f"{physical_role}:build-identity"
+            ),
+            "execution_manifest_hash": _strict_release_hash(
+                f"{physical_role}:execution-manifest"
+            ),
+            "dependency_lock_hash": _strict_release_hash(
+                f"{physical_role}:dependency-lock"
+            ),
+            "dockerfile_hash": _strict_release_hash(
+                f"{physical_role}:dockerfile"
+            ),
+            "topology_hash": topology_hash(),
+        }
+        for builder_domain in ("gateway", "validator"):
+            for build_ordinal in (1, 2, 3):
+                release_evidence.append(
+                    {
+                        "schema_version": (
+                            "leadpoet.gateway_role_build_evidence.v2"
+                        ),
+                        "builder_domain": builder_domain,
+                        "builder_id": f"strict-{builder_domain}-builder",
+                        "build_ordinal": build_ordinal,
+                        "physical_role": physical_role,
+                        "service_role": ROLE_SPECS[physical_role]["service_role"],
+                        **deterministic,
+                        "eif_hash": _strict_release_hash(
+                            f"{physical_role}:{builder_domain}:{build_ordinal}:eif"
+                        ),
+                    }
+                )
+    release = build_release_manifest(
+        release_evidence,
+        acceptance_signer_pubkey_hash=_strict_release_hash(
+            "acceptance-signer-pubkey"
+        ),
+    )
+    release_hash = str(release["release_hash"])
+    role_expectations = {
+        role: role_expectation(release, role)
+        for role in ("gateway_coordinator", "gateway_scoring")
+    }
+
+    # The immutable source tree is produced through the Docker extraction
+    # boundary below.  Derive the signed manifest identity from those exact
+    # bytes so the production source-bundle builder, rather than a harness
+    # substitute, proves the tree/archive commitment.
+    model_source_name = "rehearsal_private_model.py"
+    model_source_bytes = (
+        b"def run_icp(icp, context):\n"
+        b"    raise RuntimeError('strict Nitro boundary owns execution')\n"
+    )
+    model_source_tree_hash = sha256_json(
+        [
+            (
+                model_source_name,
+                "sha256:" + hashlib.sha256(model_source_bytes).hexdigest(),
+            )
+        ]
+    )
+    artifact_doc = copy.deepcopy(
+        SIGNED_PRIVATE_MODEL_RELEASES["leadpoet-sourcing-wrapper-contract-v11"]
+    )
+    artifact_doc["model_artifact_hash"] = model_source_tree_hash
+    artifact_doc["manifest_hash"] = ""
+    unsigned_artifact_doc = dict(artifact_doc)
+    unsigned_artifact_doc.pop("manifest_hash", None)
+    artifact_doc["manifest_hash"] = sha256_json(unsigned_artifact_doc)
+    artifact = PrivateModelArtifactManifest.from_mapping(artifact_doc)
+    checkpoint_location = scoring_worker_module._baseline_progress_s3_location(
+        artifact.manifest_uri,
+        benchmark_date=fixed_now.date().isoformat(),
+        window_hash=window.window_hash,
+        private_model_artifact_hash=artifact.model_artifact_hash,
+    )
+    if checkpoint_location is None:
+        raise RuntimeError("production baseline checkpoint location is unavailable")
+
+    class _StrictCheckpointS3Boundary:
+        """Own the exact S3/KMS wire operations used by this run."""
+
+        def __init__(self) -> None:
+            self.objects: dict[tuple[str, str], bytes] = {}
+            self.put_documents: list[dict[str, Any]] = []
+            self.get_count = 0
+            self.manifest_read_count = 0
+            self.signature_verify_count = 0
+            self.digest_sign_count = 0
+
+        @staticmethod
+        def _s3_location(uri: str) -> tuple[str, str]:
+            value = str(uri)
+            if not value.startswith("s3://") or "/" not in value[5:]:
+                raise RuntimeError("strict rehearsal S3 URI is invalid")
+            bucket, key = value[5:].split("/", 1)
+            return bucket, key
+
+        def client(self, service_name: str, *args: Any, **kwargs: Any):
+            if service_name not in {"s3", "kms"} or args or kwargs:
+                raise RuntimeError("rebenchmark escaped the strict AWS boundary")
+            return self
+
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: Any,
+            ContentType: str,
+        ) -> dict[str, Any]:
+            if (Bucket, Key) != checkpoint_location:
+                raise RuntimeError("baseline checkpoint object identity differs")
+            if ContentType != "application/json" or not isinstance(
+                Body, (bytes, bytearray)
+            ):
+                raise RuntimeError("baseline checkpoint wire shape differs")
+            encoded = bytes(Body)
+            document = json.loads(encoded.decode("utf-8"))
+            if not isinstance(document, dict):
+                raise RuntimeError("baseline checkpoint document is not an object")
+            self.objects[(Bucket, Key)] = encoded
+            self.put_documents.append(copy.deepcopy(document))
+            return {"ETag": sha256_json(document)}
+
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+            location = (Bucket, Key)
+            if location == checkpoint_location:
+                self.get_count += 1
+                try:
+                    encoded = self.objects[location]
+                except KeyError as exc:
+                    raise RuntimeError("baseline checkpoint object is absent") from exc
+                return {"Body": BytesIO(encoded)}
+            if location in {
+                self._s3_location(config.private_model_manifest_uri),
+                self._s3_location(artifact.manifest_uri),
+            }:
+                self.manifest_read_count += 1
+                return {
+                    "Body": BytesIO(
+                        json.dumps(
+                            artifact.to_dict(),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    )
+                }
+            if location == self._s3_location(artifact.signature_ref):
+                return {
+                    "Body": BytesIO(
+                        base64.b64encode(b"strict-rehearsal-manifest-signature")
+                    )
+                }
+            raise RuntimeError("rebenchmark S3 read identity differs")
+
+        def verify(self, **kwargs: Any) -> dict[str, Any]:
+            expected_fields = {
+                "KeyId",
+                "Message",
+                "MessageType",
+                "Signature",
+                "SigningAlgorithm",
+            }
+            if (
+                set(kwargs) != expected_fields
+                or kwargs["Message"] != artifact.manifest_hash.encode("utf-8")
+                or kwargs["MessageType"] != "RAW"
+                or kwargs["Signature"]
+                != b"strict-rehearsal-manifest-signature"
+                or kwargs["SigningAlgorithm"] != "ECDSA_SHA_256"
+            ):
+                raise RuntimeError("private manifest KMS verification shape differs")
+            self.signature_verify_count += 1
+            return {
+                "SignatureValid": True,
+                "KeyId": str(kwargs["KeyId"]),
+                "SigningAlgorithm": "ECDSA_SHA_256",
+            }
+
+        def sign(self, **kwargs: Any) -> dict[str, Any]:
+            if (
+                set(kwargs)
+                != {"KeyId", "Message", "MessageType", "SigningAlgorithm"}
+                or not isinstance(kwargs["Message"], bytes)
+                or len(kwargs["Message"]) != 32
+                or kwargs["MessageType"] != "DIGEST"
+                or kwargs["SigningAlgorithm"] != "ECDSA_SHA_256"
+            ):
+                raise RuntimeError("score-bundle KMS signing shape differs")
+            self.digest_sign_count += 1
+            return {
+                "Signature": b"strict-rehearsal-kms-signature-"
+                + kwargs["Message"][:8]
+            }
+
+    active_version_row = {
+        "private_model_version_id": "private-model-version:strict-rehearsal",
+        "model_artifact_hash": artifact.model_artifact_hash,
+        "private_model_manifest_hash": artifact.manifest_hash,
+        "private_model_manifest_uri": artifact.manifest_uri,
+        "git_commit_sha": artifact.git_commit_sha,
+        "config_hash": artifact.config_hash,
+        "component_registry_version": artifact.component_registry_version,
+        "scoring_adapter_version": artifact.scoring_adapter_version,
+        "signature_ref": artifact.signature_ref,
+        "build_id": artifact.build_id,
+        "source_candidate_id": "",
+        "source_score_bundle_id": "",
+        "source_benchmark_bundle_id": "",
+        "redacted_version_doc": {
+            "source": "repo_head_sync",
+            "model_artifact_hash": artifact.model_artifact_hash,
+            "private_model_manifest_hash": artifact.manifest_hash,
+            "git_commit_sha": artifact.git_commit_sha,
+            "component_registry_version": artifact.component_registry_version,
+            "scoring_adapter_version": artifact.scoring_adapter_version,
+            "repo_main_sha": artifact.git_commit_sha,
+            "current_json_manifest_uri": artifact.manifest_uri,
+        },
+        "current_version_status": "active",
+        "current_status_at": fixed_now.isoformat().replace("+00:00", "Z"),
+        "created_at": fixed_now.isoformat().replace("+00:00", "Z"),
+    }
+    checkpoint_s3 = _StrictCheckpointS3Boundary()
+    boundary = _MemoryPostgrestBoundary(
+        {
+            "qualification_private_icp_sets": private_set_rows,
+            "research_lab_private_model_version_current": [active_version_row],
+        }
+    )
+    model_calls: list[str] = []
+    scorer_calls: list[str] = []
+    receipt_graphs: dict[str, dict[str, Any]] = {}
+    model_instances: list[Any] = []
+    scorer_instances: list[Any] = []
+    model_input_artifact_sets: list[tuple[str, ...]] = []
+    scorer_input_artifact_sets: list[tuple[str, ...]] = []
+    baseline_parent_roots: tuple[str, ...] = ()
+    baseline_input_artifacts: tuple[str, ...] = ()
+    complete_company_fit_receipts = 0
+    catalog_facade_call_count = 0
+    active_assertion_execution_count = 0
+    active_assertion_nitro_verification_count = 0
+    source_bundle_validation_count = 0
+    docker_source_extract_count = 0
+    provider_preflight_execution_count = 0
+    git_head_query_count = 0
+    git_head_state = {"sha": artifact.git_commit_sha}
+    signing_key = Ed25519PrivateKey.generate()
+    signing_pubkey = signing_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    boot_identities: dict[str, dict[str, Any]] = {}
+    if any(
+        expectation["commit_sha"] != candidate_commit
+        for expectation in role_expectations.values()
+    ):
+        raise RuntimeError("rebenchmark candidate differs from the exact V2 release")
+
+    def _boot_identity(role: str) -> dict[str, Any]:
+        cached = boot_identities.get(role)
+        if cached is not None:
+            return copy.deepcopy(cached)
+        expectation = role_expectations[role]
+        body = build_boot_identity_body(
+            role=role,
+            physical_role=str(expectation["physical_role"]),
+            commit_sha=str(expectation["commit_sha"]),
+            pcr0=str(expectation["pcr0"]),
+            build_manifest_hash=str(expectation["build_manifest_hash"]),
+            dependency_lock_hash=str(expectation["dependency_lock_hash"]),
+            config_hash=str(
+                expectation.get("config_hash") or ("sha256:" + "3" * 64)
+            ),
+            boot_nonce=hashlib.sha256(role.encode("ascii")).hexdigest()[:32],
+            signing_pubkey=signing_pubkey,
+            transport_pubkey=signing_pubkey,
+            transport_certificate_hash="sha256:" + "5" * 64,
+            attestation_user_data_hash="sha256:" + "6" * 64,
+            issued_at=fixed_now.isoformat().replace("+00:00", "Z"),
+        )
+        identity = create_boot_identity(
+            body=body,
+            attestation_document_b64=base64.b64encode(
+                b"strict-rehearsal-attestation"
+            ).decode("ascii"),
+        )
+        boot_identities[role] = copy.deepcopy(identity)
+        return identity
+
+    def _signed_outcome(
+        *,
+        role: str,
+        purpose: str,
+        epoch_id: int,
+        sequence: int,
+        payload: Mapping[str, Any],
+        result: Mapping[str, Any],
+        parent_graphs: Sequence[Mapping[str, Any]] = (),
+        artifact_hashes: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        normalized_parents = tuple(copy.deepcopy(dict(item)) for item in parent_graphs)
+        if normalized_parents:
+            validate_receipt_graphs(normalized_parents)
+        parent_hashes = tuple(
+            str(item.get("root_receipt_hash") or "") for item in normalized_parents
+        )
+        artifacts = tuple(sorted({str(item) for item in artifact_hashes}))
+        boot_identity = _boot_identity(role)
+        body = build_execution_receipt_body(
+            role=role,
+            purpose=purpose,
+            job_id=(
+                "rehearsal-"
+                + sha256_json(
+                    {
+                        "purpose": purpose,
+                        "epoch": int(epoch_id),
+                        "sequence": int(sequence),
+                        "payload": dict(payload),
+                    }
+                ).split(":", 1)[1][:24]
+            ),
+            epoch_id=int(epoch_id),
+            sequence=int(sequence),
+            commit_sha=candidate_commit,
+            pcr0=str(boot_identity["pcr0"]),
+            build_manifest_hash=str(boot_identity["build_manifest_hash"]),
+            dependency_lock_hash=str(boot_identity["dependency_lock_hash"]),
+            config_hash=str(boot_identity["config_hash"]),
+            boot_identity_hash=str(boot_identity["boot_identity_hash"]),
+            input_root=sha256_json(dict(payload)),
+            output_root=sha256_json(dict(result)),
+            transport_root_hash=EMPTY_TRANSPORT_ROOT,
+            host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+            artifact_root=merkle_root(artifacts, domain="leadpoet-artifact-v2"),
+            parent_receipt_hashes=parent_hashes,
+            status="succeeded",
+            failure_code=None,
+            issued_at=fixed_now.isoformat().replace("+00:00", "Z"),
+        )
+        receipt = create_signed_execution_receipt(
+            body=body,
+            enclave_pubkey=signing_pubkey,
+            sign_digest=signing_key.sign,
+        )
+        receipts_by_hash = {
+            str(parent_receipt["receipt_hash"]): copy.deepcopy(dict(parent_receipt))
+            for graph in normalized_parents
+            for parent_receipt in graph.get("receipts") or ()
+        }
+        receipts_by_hash[str(receipt["receipt_hash"])] = dict(receipt)
+        boots_by_hash = {
+            str(parent_boot["boot_identity_hash"]): copy.deepcopy(dict(parent_boot))
+            for graph in normalized_parents
+            for parent_boot in graph.get("boot_identities") or ()
+        }
+        boots_by_hash[str(boot_identity["boot_identity_hash"])] = dict(boot_identity)
+        graph = build_receipt_graph(
+            root_receipt_hash=str(receipt["receipt_hash"]),
+            boot_identities=list(boots_by_hash.values()),
+            receipts=list(receipts_by_hash.values()),
+            transport_attempts=(),
+            host_operations=(),
+        )
+        receipt_graphs[str(receipt["receipt_hash"])] = copy.deepcopy(graph)
+        return {
+            "status": "succeeded",
+            "result": copy.deepcopy(dict(result)),
+            "receipt": dict(receipt),
+            "execution_receipt": dict(receipt),
+            "receipt_graph": copy.deepcopy(graph),
+            "execution_receipt_graph": copy.deepcopy(graph),
+            "artifact_hashes": list(artifacts),
+            "release_hash": release_hash,
+            "physical_role": role,
+        }
+
+    runtime_catalog = build_source_add_runtime_catalog_v2([])
+    catalog_result = {
+        "schema_version": "leadpoet.source_add_catalog_snapshot.v2",
+        "provisioned_sources": [],
+        "provisioned_sources_hash": sha256_json([]),
+        "private_registry_rows": [],
+        "private_registry_rows_hash": sha256_json([]),
+        "runtime_catalog": runtime_catalog,
+        "runtime_catalog_hash": runtime_catalog["catalog_hash"],
+    }
+    catalog_authority_roots: set[str] = set()
+
+    def _strict_extract_parent_image_source(
+        *, image_digest: str, source_dir: Path, timeout_seconds: int
+    ) -> tuple[str, list[str]]:
+        nonlocal docker_source_extract_count
+        if (
+            image_digest != artifact.image_digest
+            or timeout_seconds < 120
+            or source_dir.exists()
+        ):
+            raise RuntimeError("private model Docker extraction shape differs")
+        source_dir.mkdir(parents=True)
+        (source_dir / model_source_name).write_bytes(model_source_bytes)
+        observed = compute_private_source_tree_hash(source_dir)
+        if observed != artifact.model_artifact_hash:
+            raise RuntimeError("private model Docker extraction tree differs")
+        docker_source_extract_count += 1
+        return observed, [model_source_name]
+
+    def _strict_nitro_boot_verifier(
+        identity: Mapping[str, Any],
+        *,
+        expected_pcr0: str,
+        certificate_validity_at_attestation_time: bool,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        nonlocal active_assertion_nitro_verification_count
+        role = str(identity.get("role") or "")
+        expectation = role_expectations.get(role)
+        if (
+            expectation is None
+            or expected_pcr0 != expectation["pcr0"]
+            or identity.get("pcr0") != expectation["pcr0"]
+            or identity.get("commit_sha") != expectation["commit_sha"]
+            or identity.get("build_manifest_hash")
+            != expectation["build_manifest_hash"]
+            or identity.get("dependency_lock_hash")
+            != expectation["dependency_lock_hash"]
+            or not certificate_validity_at_attestation_time
+            or identity.get("attestation_document_b64")
+            != base64.b64encode(b"strict-rehearsal-attestation").decode("ascii")
+        ):
+            raise RuntimeError("strict Nitro boot verification differs")
+        active_assertion_nitro_verification_count += 1
+        return {"verified": True, "role": role}
+
+    async def _persist_strict_outcome(
+        outcome: Mapping[str, Any],
+        *,
+        operation: str = "",
+    ) -> dict[str, Any]:
+        graph = outcome.get("execution_receipt_graph")
+        receipt = outcome.get("execution_receipt")
+        if not isinstance(graph, Mapping) or not isinstance(receipt, Mapping):
+            raise RuntimeError("strict Nitro outcome graph is incomplete")
+        persistence = await attested_v2_store.persist_receipt_graph_v2(graph)
+        if operation and attested_v2_store.replayable_execution_result_v2(
+            operation=operation,
+            purpose=str(receipt.get("purpose") or ""),
+        ):
+            await attested_v2_store.persist_execution_result_v2(
+                operation=operation,
+                result=dict(outcome["result"]),
+                receipt=receipt,
+                artifact_hashes=tuple(outcome.get("artifact_hashes") or ()),
+                release_hash=release_hash,
+            )
+        return {**dict(outcome), "persistence": dict(persistence)}
+
+    async def _strict_coordinator_execute(**kwargs: Any) -> dict[str, Any]:
+        nonlocal active_assertion_execution_count
+        operation = str(kwargs.get("operation") or "")
+        purpose = str(kwargs.get("purpose") or "")
+        epoch_id = int(kwargs.get("epoch_id") or 0)
+        sequence = int(kwargs.get("sequence") or 0)
+        payload = kwargs.get("payload")
+        parent_graphs = tuple(kwargs.get("parent_graphs") or ())
+        if not isinstance(payload, Mapping) or sequence != 0:
+            raise RuntimeError("coordinator Nitro request shape differs")
+        if operation == "source_add_catalog_snapshot_v2":
+            if (
+                purpose != "research_lab.source_add_catalog_snapshot.v2"
+                or epoch_id != 24_600
+                or dict(payload) != {"limit": 200}
+                or parent_graphs
+            ):
+                raise RuntimeError("production catalog snapshot authority differs")
+            artifacts = (
+                str(catalog_result["provisioned_sources_hash"]),
+                str(catalog_result["private_registry_rows_hash"]),
+                str(catalog_result["runtime_catalog_hash"]),
+            )
+            outcome = _signed_outcome(
+                role="gateway_coordinator",
+                purpose=purpose,
+                epoch_id=epoch_id,
+                sequence=sequence,
+                payload=payload,
+                result=catalog_result,
+                artifact_hashes=artifacts,
+            )
+            catalog_authority_roots.add(
+                str(outcome["execution_receipt"]["receipt_hash"])
+            )
+            return await _persist_strict_outcome(outcome, operation=operation)
+        if operation == "attest_active_private_model":
+            if (
+                purpose != "research_lab.active_private_model.v2"
+                or epoch_id != 24_600
+                or dict(payload) != {"artifact": artifact.to_dict()}
+                or parent_graphs
+                or tuple(
+                    sorted(
+                        {
+                            str(item)
+                            for item in kwargs.get("input_artifact_hashes") or ()
+                        }
+                    )
+                )
+                != tuple(
+                    sorted(
+                        (
+                            artifact.model_artifact_hash,
+                            artifact.manifest_hash,
+                        )
+                    )
+                )
+                or kwargs.get("release_manifest") != release
+            ):
+                raise RuntimeError("active private model authority differs")
+            active_assertion_execution_count += 1
+            expected_active, expected_parents = (
+                active_model_authority_v2._expected_active_model_authority_v2(
+                    artifact=artifact,
+                    row=active_version_row,
+                    promotion_graph=None,
+                )
+            )
+            if expected_parents:
+                raise RuntimeError("direct active model gained promotion ancestry")
+            source_state = {
+                "active_model": dict(expected_active),
+                "redacted_version_doc": dict(
+                    active_version_row["redacted_version_doc"]
+                ),
+                "current_status_at": str(active_version_row["current_status_at"]),
+            }
+            result = {
+                "schema_version": "leadpoet.active_private_model.v2",
+                "artifact": private_model_artifact_replay_identity_v2(artifact),
+                "active_model": dict(expected_active),
+                "source_state_hash": sha256_json(source_state),
+            }
+            artifacts = (
+                artifact.model_artifact_hash,
+                artifact.manifest_hash,
+                str(result["source_state_hash"]),
+            )
+            outcome = _signed_outcome(
+                role="gateway_coordinator",
+                purpose=purpose,
+                epoch_id=epoch_id,
+                sequence=sequence,
+                payload=payload,
+                result=result,
+                artifact_hashes=artifacts,
+            )
+            return await _persist_strict_outcome(outcome, operation=operation)
+        raise RuntimeError("unknown coordinator Nitro operation")
+
+    def _runtime_receipt(runtime_cap_seconds: float) -> dict[str, Any]:
+        return {
+            "kind": "sourcing_branch_receipt",
+            "runtime_cap_seconds": float(runtime_cap_seconds),
+            "capability_contract": {
+                "host_registered": [
+                    "deadline",
+                    "emit",
+                    "probe_origin",
+                    "resolve_host",
+                ]
+            },
+            "industry_taxonomy": {
+                "taxonomy_content_hash": "sha256:" + "d" * 64
+            },
+            "firmographic_discovery": {"plan": {"target": 5}},
+            "branches": [
+                {
+                    "source": "news",
+                    "compiled_source": "news",
+                    "source_override": False,
+                    "route_tool_ids": ["intent.news", "intent.company_site"],
+                    "route_sources": ["news", "company_site"],
+                    "route_plan_sha256": "5" * 64,
+                    "route_policy_sha256": "6" * 64,
+                    "route_catalog_sha256": "7" * 64,
+                    "route_context_sha256": "8" * 64,
+                }
+            ],
+        }
+
+    original_load_catalog_snapshot_v2 = v2_authority.load_source_add_catalog_snapshot_v2
+
+    async def _load_catalog(*, epoch_id: int) -> dict[str, Any]:
+        nonlocal catalog_facade_call_count
+        if int(epoch_id) != 24_600:
+            raise RuntimeError("model catalog epoch differs")
+        catalog_facade_call_count += 1
+        return await original_load_catalog_snapshot_v2(
+            epoch_id=epoch_id,
+            execute=_strict_coordinator_execute,
+        )
+
+    async def _strict_model_execute(**kwargs: Any) -> dict[str, Any]:
+        nonlocal source_bundle_validation_count
+        if (
+            kwargs.get("operation") != OP_RUN_MODEL_SANDBOX_V2
+            or kwargs.get("purpose") != "research_lab.private_model_run.v2"
+            or int(kwargs.get("epoch_id") or -1) != 24_600
+            or kwargs.get("provider_credential_profile") != "benchmark_model"
+            or kwargs.get("provider_credential_ref_hashes") != {}
+        ):
+            raise RuntimeError("production model execution authority differs")
+        payload = kwargs.get("payload")
+        if not isinstance(payload, Mapping):
+            raise RuntimeError("production model payload is missing")
+        input_doc = payload.get("input")
+        context = dict(input_doc.get("context") or {}) if isinstance(input_doc, Mapping) else {}
+        icp = dict(input_doc.get("icp") or {}) if isinstance(input_doc, Mapping) else {}
+        item_ref = item_ref_by_icp_id.get(str(icp.get("icp_id") or ""), "")
+        source_bundle = payload.get("source_bundle")
+        if not isinstance(source_bundle, Mapping):
+            raise RuntimeError("production source bundle is missing")
+        if not source_bundle_validation_count:
+            with tempfile.TemporaryDirectory(
+                prefix="rehearsal-source-bundle-validation-"
+            ) as extraction_tmp:
+                extracted_path = Path(extraction_tmp) / "source"
+                extracted = extract_source_bundle_v2(
+                    source_bundle,
+                    destination=extracted_path,
+                    expected_source_tree_hash=artifact.model_artifact_hash,
+                )
+                if (
+                    extracted.get("file_count") != 1
+                    or compute_private_source_tree_hash(extracted_path)
+                    != artifact.model_artifact_hash
+                    or (extracted_path / model_source_name).read_bytes()
+                    != model_source_bytes
+                ):
+                    raise RuntimeError("production source bundle extraction differs")
+            source_bundle_validation_count += 1
+        environment = payload.get("environment")
+        forbidden_environment = (
+            model_authority_v2._CREDENTIAL_ENV_NAMES
+            | model_authority_v2._HOST_ONLY_ENV_NAMES
+        )
+        request_checks = {
+            "schema": payload.get("schema_version")
+            == MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
+            "model_kind": payload.get("model_kind") == "private",
+            "operation": payload.get("operation") == "run_icp",
+            "artifact": payload.get("artifact") == artifact.to_dict(),
+            "source_bundle": source_bundle.get("source_tree_hash")
+            == artifact.model_artifact_hash,
+            "evidence_mode": payload.get("provider_evidence_mode") == "record",
+            "runtime_catalog": payload.get("provider_runtime_catalog")
+            == runtime_catalog,
+            "catalog_evidence": (
+                isinstance(payload.get("provider_catalog_evidence"), Mapping)
+                and payload["provider_catalog_evidence"].get("result")
+                == catalog_result
+                and payload["provider_catalog_evidence"].get(
+                    "root_receipt_hash"
+                )
+                in catalog_authority_roots
+            ),
+            "context_mode": context.get("mode") == "private_baseline",
+            "runtime_options": isinstance(context.get("runtime_options"), Mapping),
+            "icp_identity": bool(item_ref),
+            "environment": isinstance(environment, Mapping),
+            "credential_stripping": not forbidden_environment.intersection(
+                environment if isinstance(environment, Mapping) else {}
+            ),
+            "envelope_builder": callable(
+                kwargs.get("additional_job_credential_envelope_builder")
+            ),
+        }
+        if not all(request_checks.values()):
+            raise RuntimeError(
+                "production model request contract differs: "
+                + ",".join(
+                    name for name, passed in request_checks.items() if not passed
+                )
+            )
+        if kwargs["additional_job_credential_envelope_builder"](
+            "rehearsal-model-job"
+        ) != []:
+            raise RuntimeError("production model credential envelope differs")
+        parent_graphs = tuple(kwargs.get("parent_graphs") or ())
+        parent_roots = {
+            str(item.get("root_receipt_hash") or "") for item in parent_graphs
+        }
+        parent_purposes = {
+            str(receipt.get("purpose") or "")
+            for graph in parent_graphs
+            for receipt in graph.get("receipts") or ()
+            if receipt.get("receipt_hash") == graph.get("root_receipt_hash")
+        }
+        if (
+            len(parent_graphs) != 2
+            or len(parent_roots) != 2
+            or parent_purposes
+            != {
+                "research_lab.active_private_model.v2",
+                "research_lab.source_add_catalog_snapshot.v2",
+            }
+            or not catalog_authority_roots.intersection(parent_roots)
+        ):
+            raise RuntimeError("production model authority lineage differs")
+        input_artifacts = tuple(
+            sorted({str(item) for item in kwargs.get("input_artifact_hashes") or ()})
+        )
+        image_hash = "sha256:" + artifact.image_digest.rsplit("@sha256:", 1)[1]
+        expected_input_artifacts = tuple(
+            sorted(
+                {
+                    artifact.model_artifact_hash,
+                    artifact.manifest_hash,
+                    image_hash,
+                    str(source_bundle["archive_sha256"]),
+                    sha256_json({}),
+                    *catalog_authority_roots,
+                    str(catalog_result["provisioned_sources_hash"]),
+                    str(catalog_result["private_registry_rows_hash"]),
+                    str(catalog_result["runtime_catalog_hash"]),
+                }
+            )
+        )
+        if input_artifacts != expected_input_artifacts:
+            raise RuntimeError("production model input artifact hashes differ")
+        model_input_artifact_sets.append(input_artifacts)
+        model_calls.append(item_ref)
+        label = str(icp["icp_id"])
+        output = [
+            {
+                "company_name": f"Measured Company {label}",
+                "company_website": f"https://{label}.example",
+                "company_linkedin": f"https://linkedin.com/company/{label}",
+            }
+        ]
+        trace_entries = [
+            _runtime_receipt(
+                float(context["runtime_options"]["runtime_cap_seconds"])
+            )
+        ]
+        result = {
+            "schema_version": "leadpoet.model_sandbox_result.v2",
+            "model_kind": "private",
+            "operation": "run_icp",
+            "model_artifact_hash": artifact.model_artifact_hash,
+            "model_manifest_hash": artifact.manifest_hash,
+            "compatibility_image_digest": artifact.image_digest,
+            "source_bundle_hash": source_bundle["archive_sha256"],
+            "runtime_config_hash": sha256_json({"runtime": "strict-adapter"}),
+            "input_hash": sha256_json(dict(input_doc)),
+            "provider_evidence_cache_hash": sha256_json(
+                dict(payload.get("provider_evidence_cache") or {})
+            ),
+            "provider_evidence_cache_ref": str(
+                payload.get("provider_evidence_cache_ref") or ""
+            ),
+            "provider_evidence_mode": "record",
+            "provider_snapshot_archive_hash": sha256_json({}),
+            "provider_snapshot_tree_hash": sha256_json({}),
+            "provider_snapshot_manifest_hash": sha256_json({}),
+            "provider_cost_cap_microusd": 0,
+            "provider_call_cap": 0,
+            "provider_runtime_catalog_hash": runtime_catalog["catalog_hash"],
+            "generated_provider_evidence_cache_hash": sha256_json({}),
+            "trace_entries_hash": sha256_json(trace_entries),
+            "output_hash": sha256_json(output),
+            "output": output,
+            "trace_entries": trace_entries,
+            "generated_provider_evidence_cache": {},
+        }
+        receipt_artifacts = tuple(
+            str(result[field])
+            for field in (
+                "model_artifact_hash",
+                "model_manifest_hash",
+                "source_bundle_hash",
+                "runtime_config_hash",
+                "input_hash",
+                "provider_evidence_cache_hash",
+                "provider_snapshot_archive_hash",
+                "provider_snapshot_tree_hash",
+                "provider_snapshot_manifest_hash",
+                "provider_runtime_catalog_hash",
+                "generated_provider_evidence_cache_hash",
+                "trace_entries_hash",
+                "output_hash",
+            )
+        )
+        outcome = _signed_outcome(
+            role="gateway_scoring",
+            purpose="research_lab.private_model_run.v2",
+            epoch_id=24_600,
+            sequence=int(kwargs.get("sequence") or 0),
+            payload=dict(payload),
+            result=result,
+            parent_graphs=parent_graphs,
+            artifact_hashes=receipt_artifacts,
+        )
+        return await _persist_strict_outcome(outcome)
+
+    real_model_runner_type = model_authority_v2.AttestedPrivateModelRunnerV2
+    real_scorer_type = scoring_worker_module.QualificationStyleCompanyScorer
+
+    class _StrictProductionModelRunner(real_model_runner_type):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(
+                **kwargs,
+                execute=_strict_model_execute,
+                catalog_snapshot_loader=_load_catalog,
+            )
+            model_instances.append(self)
+
+    class _StrictProductionScorer(real_scorer_type):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            scorer_instances.append(self)
+
+    async def _strict_scoring_execute(**kwargs: Any) -> dict[str, Any]:
+        nonlocal complete_company_fit_receipts
+        nonlocal provider_preflight_execution_count
+        payload = kwargs.get("payload")
+        if kwargs.get("operation") == OP_PROVIDER_PREFLIGHT_V2:
+            preflight_checks = {
+                "purpose": kwargs.get("purpose")
+                == "research_lab.provider_preflight.v2",
+                "epoch": kwargs.get("epoch_id") == 0,
+                "sequence": kwargs.get("sequence") == 0,
+                "profile": kwargs.get("provider_credential_profile")
+                == "provider_preflight",
+                "payload_mapping": isinstance(payload, Mapping),
+                "payload_fields": isinstance(payload, Mapping)
+                and set(payload)
+                == {
+                    "schema_version",
+                    "measurement_id",
+                    "scope_key",
+                    "force",
+                    "settings",
+                },
+                "schema": isinstance(payload, Mapping)
+                and payload.get("schema_version")
+                == PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
+                "settings": isinstance(payload, Mapping)
+                and dict(payload.get("settings") or {})
+                == provider_preflight_module.provider_preflight_settings(),
+                "measurement": isinstance(payload, Mapping)
+                and re.fullmatch(
+                    r"[0-9a-f]{32}", str(payload.get("measurement_id") or "")
+                )
+                is not None,
+            }
+            if not all(preflight_checks.values()):
+                raise RuntimeError(
+                    "production provider preflight authority differs: "
+                    + ",".join(
+                        name
+                        for name, passed in preflight_checks.items()
+                        if not passed
+                    )
+                )
+            result = {
+                "healthy": True,
+                "pause_worthy": False,
+                "disabled": False,
+                "verdicts": [
+                    {
+                        "provider": "scrapingdog",
+                        "healthy": True,
+                        "status": "healthy",
+                        "detail": "strict measured boundary",
+                        "http_status": 200,
+                    },
+                    {
+                        "provider": "exa",
+                        "healthy": True,
+                        "status": "healthy",
+                        "detail": "strict measured boundary",
+                        "http_status": 200,
+                    },
+                ],
+            }
+            provider_preflight_execution_count += 1
+            outcome = _signed_outcome(
+                role="gateway_scoring",
+                purpose="research_lab.provider_preflight.v2",
+                epoch_id=0,
+                sequence=0,
+                payload=dict(payload),
+                result=result,
+            )
+            return await _persist_strict_outcome(outcome)
+        if (
+            kwargs.get("operation") != v2_authority.OP_QUALIFICATION_COMPANY_SCORES
+            or kwargs.get("purpose") != "research_lab.company_score.v2"
+            or int(kwargs.get("epoch_id") or -1) != 24_600
+            or int(kwargs.get("sequence") or 0) != 0
+            or kwargs.get("provider_credential_profile") != "benchmark_scorer"
+            or not isinstance(payload, Mapping)
+            or payload.get("is_reference_model") is not True
+            or payload.get("provider_execution_mode") != "live_enclave"
+            or payload.get("scoring_context_purpose")
+            != "research_lab.rebenchmark.v2"
+        ):
+            raise RuntimeError("production scoring authority differs")
+        companies = payload.get("companies")
+        icp = dict(payload.get("icp") or {})
+        item_ref = item_ref_by_icp_hash.get(sha256_json(icp), "")
+        if not isinstance(companies, list) or len(companies) != 1 or not item_ref:
+            raise RuntimeError("production scoring request differs")
+        scorer_inputs = tuple(
+            sorted({str(item) for item in kwargs.get("input_artifact_hashes") or ()})
+        )
+        if scorer_inputs:
+            raise RuntimeError("production company scorer gained host artifacts")
+        scorer_input_artifact_sets.append(scorer_inputs)
+        scorer_calls.append(item_ref)
+        ordinal = int(str(icp["icp_id"]).rsplit("-", 1)[1])
+        score = float(20 + (ordinal % 60))
+        dimension_decisions = {
+            dimension: "match" for dimension in COMPANY_FIT_DIMENSIONS
+        }
+        decision = aggregate_company_fit_decisions(
+            dimension_decisions,
+            stage_required=False,
+        )
+        if decision != "match":
+            raise RuntimeError("production company-fit aggregate differs")
+        fit_result = company_fit_match(
+            "strict measured verifier accepted",
+            details={
+                "company_fit_decision": decision,
+                "company_fit_dimensions": dict(dimension_decisions),
+                "company_fit_stage_required": False,
+                "dimension_evidence": {
+                    dimension: {
+                        "decision": value,
+                        "evidence_source": "strict-measured-provider-boundary",
+                    }
+                    for dimension, value in dimension_decisions.items()
+                },
+                "required_attribute_decision": "match",
+                "supporting_receipts": [],
+            },
+        )
+        company_fit_receipt = fit_result.receipt("company_fit")
+        breakdowns = [
+            {
+                "final_score": score,
+                "failure_reason": None,
+                "icp_fit": score,
+                "intent_signal_final": score,
+                "company_fit_decision": decision,
+                "verifier_gate_receipts": [company_fit_receipt],
+                "intent_signals_detail": [],
+            }
+        ]
+        if not scorer_breakdown_has_complete_current_company_fit_receipt(
+            breakdowns[0]
+        ):
+            raise RuntimeError("current company-fit verifier receipt is incomplete")
+        incomplete_breakdown = copy.deepcopy(breakdowns[0])
+        del incomplete_breakdown["verifier_gate_receipts"][0][
+            "dimension_evidence"
+        ]["industry"]
+        if scorer_breakdown_has_complete_current_company_fit_receipt(
+            incomplete_breakdown
+        ):
+            raise RuntimeError("incomplete company-fit verifier receipt was accepted")
+        complete_company_fit_receipts += 1
+        result = {"breakdowns": breakdowns, "scores": [score]}
+        provider_tape_hash = sha256_json(
+            {"provider_http_tape": item_ref, "score": score}
+        )
+        outcome = _signed_outcome(
+            role="gateway_scoring",
+            purpose="research_lab.company_score.v2",
+            epoch_id=24_600,
+            sequence=0,
+            payload=dict(payload),
+            result=result,
+            artifact_hashes=(provider_tape_hash,),
+        )
+        return await _persist_strict_outcome(outcome)
+
+    original_execute_company_scores_v2 = v2_authority.execute_company_scores_v2
+
+    async def _execute_company_scores_v2(**kwargs: Any) -> list[dict[str, Any]]:
+        return await original_execute_company_scores_v2(
+            **kwargs,
+            execute=_strict_scoring_execute,
+        )
+
+    async def _strict_baseline_execute(**kwargs: Any) -> dict[str, Any]:
+        nonlocal baseline_input_artifacts
+        nonlocal baseline_parent_roots
+        if (
+            kwargs.get("operation") != v2_authority.OP_BUILD_BASELINE_SCORE_SUMMARY
+            or kwargs.get("purpose") != "research_lab.rebenchmark.v2"
+            or int(kwargs.get("epoch_id") or -1) != 24_600
+            or int(kwargs.get("sequence") or 0) != 0
+        ):
+            raise RuntimeError("production baseline comparison authority differs")
+        payload = kwargs.get("payload")
+        if not isinstance(payload, Mapping):
+            raise RuntimeError("production baseline payload is missing")
+        measured_executor = object.__new__(ScoringExecutorV2)
+        measured_executor._config = config
+        measured_executor._validate_baseline_configuration(payload)
+        independently_built = await execute_scoring_operation(
+            v2_authority.OP_BUILD_BASELINE_SCORE_SUMMARY,
+            payload,
+        )
+        if not isinstance(independently_built, ScoringExecutionResult):
+            raise RuntimeError("protected baseline executor result differs")
+        measured_result = dict(independently_built.result)
+        parent_graphs = tuple(kwargs.get("parent_graphs") or ())
+        observed_roots = tuple(
+            sorted(str(graph.get("root_receipt_hash") or "") for graph in parent_graphs)
+        )
+        expected_roots = tuple(
+            sorted(
+                {
+                    str(receipt.get("receipt_hash") or "")
+                    for runner_instance in model_instances
+                    for receipt in runner_instance.attested_receipts()
+                }
+                | {
+                    str(receipt.get("receipt_hash") or "")
+                    for scorer_instance in scorer_instances
+                    for receipt in scorer_instance.attested_receipts()
+                }
+            )
+        )
+        if (
+            len(observed_roots) != total_icps * 2
+            or observed_roots != expected_roots
+            or len(set(observed_roots)) != len(observed_roots)
+        ):
+            raise RuntimeError("production baseline lost exact model/scorer lineage")
+        summary_hash = sha256_json(dict(measured_result["score_summary_doc"]))
+        observed_inputs = tuple(
+            sorted({str(item) for item in kwargs.get("input_artifact_hashes") or ()})
+        )
+        if (
+            observed_inputs != (summary_hash,)
+            or independently_built.evidence_roots
+            != {"baseline_score_summary": summary_hash}
+        ):
+            raise RuntimeError("production baseline input artifact hashes differ")
+        baseline_parent_roots = observed_roots
+        baseline_input_artifacts = observed_inputs
+        outcome = _signed_outcome(
+            role="gateway_scoring",
+            purpose="research_lab.rebenchmark.v2",
+            epoch_id=24_600,
+            sequence=0,
+            payload=dict(payload),
+            result=measured_result,
+            parent_graphs=parent_graphs,
+            artifact_hashes=(summary_hash,),
+        )
+        return await _persist_strict_outcome(outcome)
+
+    original_compare_baseline_summary_v2 = v2_authority.compare_baseline_summary_v2
+
+    async def _compare_baseline_summary_v2(**kwargs: Any) -> dict[str, Any]:
+        return await original_compare_baseline_summary_v2(
+            **kwargs,
+            execute=_strict_baseline_execute,
+        )
+
+    async def _resolve_epoch(_configured):
+        return 24_600, 8_900_000, "strict-chain-read-adapter"
+
+    def _resolve_private_repo_head_sha_boundary(
+        *, repo_url: str, branch_name: str, timeout_seconds: int | None = None
+    ) -> str:
+        nonlocal git_head_query_count
+        if (
+            repo_url != config.private_repo_url
+            or branch_name != config.private_repo_branch
+            or (timeout_seconds is not None and int(timeout_seconds) <= 0)
+        ):
+            raise RuntimeError("private repo Git boundary differs")
+        git_head_query_count += 1
+        return str(git_head_state["sha"])
+
+    original_execute_provider_preflight_v2 = (
+        v2_authority.execute_provider_preflight_v2
+    )
+
+    async def _execute_provider_preflight_v2(**kwargs: Any) -> dict[str, Any]:
+        return await original_execute_provider_preflight_v2(
+            **kwargs,
+            execute=_strict_scoring_execute,
+        )
+
+    class _StrictHeldMaintenanceLease:
+        def __init__(self) -> None:
+            self.check_count = 0
+
+        def ensure_held(self) -> None:
+            self.check_count += 1
+
+    patchers = (
+        patch.object(research_lab_store, "insert_row", boundary.insert_row),
+        patch.object(research_lab_store, "select_one", boundary.select_one),
+        patch.object(research_lab_store, "select_many", boundary.select_many),
+        patch.object(research_lab_store, "select_all", boundary.select_all),
+        patch.object(research_lab_store, "next_event_seq", boundary.next_event_seq),
+        patch.object(scoring_worker_module, "insert_row", boundary.insert_row),
+        patch.object(scoring_worker_module, "select_one", boundary.select_one),
+        patch.object(scoring_worker_module, "select_many", boundary.select_many),
+        patch.object(scoring_worker_module, "select_all", boundary.select_all),
+        patch.object(
+            db_client_module,
+            "get_write_client",
+            return_value=icp_postgrest,
+        ),
+        patch.object(promotion_module, "select_one", boundary.select_one),
+        patch.object(promotion_module, "select_many", boundary.select_many),
+        patch.object(promotion_module, "select_all", boundary.select_all),
+        patch.object(
+            promotion_module,
+            "_resolve_private_repo_head_sha",
+            _resolve_private_repo_head_sha_boundary,
+        ),
+        patch.object(active_model_authority_v2, "select_many", boundary.select_many),
+        patch.object(attested_v2_store, "insert_row", boundary.insert_row),
+        patch.object(attested_v2_store, "select_one", boundary.select_one),
+        patch.object(attested_v2_store, "select_many", boundary.select_many),
+        patch.object(attested_v2_store, "select_all", boundary.select_all),
+        patch.object(maintenance_module, "select_one", boundary.select_one),
+        patch.object(scoring_worker_module, "datetime", _FixedDateTime),
+        patch.object(
+            scoring_worker_module,
+            "resolve_research_lab_evaluation_epoch",
+            _resolve_epoch,
+        ),
+        patch.object(
+            scoring_worker_module,
+            "AttestedPrivateModelRunnerV2",
+            _StrictProductionModelRunner,
+        ),
+        patch.object(
+            scoring_worker_module,
+            "QualificationStyleCompanyScorer",
+            _StrictProductionScorer,
+        ),
+        patch.object(
+            model_authority_v2,
+            "_extract_parent_image_source",
+            _strict_extract_parent_image_source,
+        ),
+        patch.object(
+            attested_coordinator_v2,
+            "execute_scoring_v2",
+            _strict_coordinator_execute,
+        ),
+        patch.object(
+            active_model_authority_v2,
+            "verify_boot_identity_nitro",
+            _strict_nitro_boot_verifier,
+        ),
+        patch.object(
+            v2_authority,
+            "execute_company_scores_v2",
+            _execute_company_scores_v2,
+        ),
+        patch.object(
+            v2_authority,
+            "execute_provider_preflight_v2",
+            _execute_provider_preflight_v2,
+        ),
+        patch.object(
+            v2_authority,
+            "compare_baseline_summary_v2",
+            _compare_baseline_summary_v2,
+        ),
+        patch.object(scoring_worker_module, "legacy_v1_enabled", lambda: False),
+        patch.object(scoring_worker_module, "scoring_telemetry_enabled", lambda _config: False),
+        patch.dict(
+            os.environ,
+            {
+                "RESEARCH_LAB_SCORING_PER_ICP_CHECKPOINT": "true",
+                "ATTESTED_RUNTIME_COMMIT_SHA": candidate_commit,
+            },
+        ),
+        patch.object(boto3, "client", checkpoint_s3.client),
+        patch.object(scoring_worker_module, "incontainer_trace_capture_enabled", lambda: False),
+        patch.object(research_lab_api, "select_many", boundary.select_many),
+        patch.object(
+            research_lab_api.ResearchLabGatewayConfig,
+            "from_env",
+            return_value=config,
+        ),
+    )
+
+    async def _run() -> dict[str, Any]:
+        with ExitStack() as patch_stack:
+            for patcher in patchers:
+                patch_stack.enter_context(patcher)
+            with model_authority_v2._SOURCE_BUNDLE_CACHE_LOCK:
+                model_authority_v2._SOURCE_BUNDLE_CACHE.pop(
+                    (artifact.model_artifact_hash, artifact.image_digest),
+                    None,
+                )
+            (
+                private_runtime_module
+                ._verify_private_artifact_manifest_signature_cached.cache_clear()
+            )
+            with provider_preflight_module._attested_preflight_cache_lock:
+                provider_preflight_module._attested_preflight_cache.clear()
+            worker = scoring_worker_module.ResearchLabGatewayScoringWorker(
+                config,
+                worker_ref="rehearsal-rebenchmark-worker",
+            )
+            held_lease = _StrictHeldMaintenanceLease()
+            preflight = await worker._run_owned_provider_preflight(
+                maintenance_state={
+                    "control_key": "scoring_maintenance",
+                    "paused": False,
+                    "status": "inactive",
+                },
+                heartbeat=held_lease,
+                force_measurement=True,
+            )
+            if (
+                not preflight.get("proceed")
+                or preflight.get("reason") != "healthy"
+                or provider_preflight_execution_count
+                != max(1, int(config.scoring_worker_total_workers or 1))
+                or held_lease.check_count < 2
+            ):
+                raise RuntimeError(
+                    "production full-fleet provider preflight differs: "
+                    f"{preflight!r} executions={provider_preflight_execution_count} "
+                    f"lease_checks={held_lease.check_count}"
+                )
+            alignment = await promotion_module.private_repo_head_alignment_status(
+                config
+            )
+            active = await promotion_module.load_active_private_model(
+                config,
+                register_bootstrap=True,
+            )
+            if (
+                not alignment.get("ok")
+                or alignment.get("status") != "active_is_repo_head"
+                or active.artifact != artifact
+            ):
+                raise RuntimeError("production active-model resolution differs")
+            result = await worker._maybe_run_private_baseline()
+            if result.get("status") != "completed":
+                raise RuntimeError(
+                    f"full configured rebenchmark did not complete: {result!r}"
+                )
+            durable_bundle = await boundary.select_one(
+                "research_lab_private_model_benchmark_current",
+                filters=(("benchmark_bundle_id", result["benchmark_bundle_id"]),),
+            )
+            if durable_bundle is None:
+                raise RuntimeError("completed rebenchmark bundle is not durable")
+            public_report = await research_lab_api.get_latest_public_benchmark_report()
+            candidate_gate = await worker._candidate_scoring_start_gate(now=fixed_now)
+            public_identity = _rebenchmark_identity(
+                public_report,
+                policy=policy.to_dict(),
+            )
+            # The dashboard is a separate deployment.  Its HTTP read is an
+            # explicit external adapter here; production publication/API rows
+            # above remain the durable authority and this scenario does not
+            # claim a live dashboard request occurred.
+            external_dashboard_projection_adapter = {
+                "success": True,
+                "data": {
+                    "benchmark": {
+                        "reportId": public_identity["report_id"],
+                        "benchmarkDate": public_identity["benchmark_date"],
+                        "rollingWindowHash": public_identity[
+                            "rolling_window_hash"
+                        ],
+                        "aggregateScore": public_identity["aggregate_score"],
+                        "itemCount": public_identity["item_count"],
+                    }
+                },
+            }
+            model_call_count = len(model_calls)
+            scorer_call_count = len(scorer_calls)
+
+            checkpoint_doc = json.loads(
+                checkpoint_s3.objects[checkpoint_location].decode("utf-8")
+            )
+            if (
+                checkpoint_doc.get("checkpoint_status") != "active"
+                or int(checkpoint_doc.get("completed_icp_count") or 0)
+                != total_icps
+                or len(checkpoint_doc.get("per_icp_results") or ()) != total_icps
+                or len(
+                    (checkpoint_doc.get("attempt_ledger") or {}).get(
+                        "entries", ()
+                    )
+                )
+                != total_icps
+            ):
+                raise RuntimeError("full-bank baseline checkpoint is incomplete")
+
+            recovery_boundary = _MemoryPostgrestBoundary(
+                {"qualification_private_icp_sets": private_set_rows}
+            )
+            with ExitStack() as recovery_stack:
+                for module in (research_lab_store, scoring_worker_module):
+                    recovery_stack.enter_context(
+                        patch.object(module, "insert_row", recovery_boundary.insert_row)
+                    )
+                    recovery_stack.enter_context(
+                        patch.object(module, "select_one", recovery_boundary.select_one)
+                    )
+                    recovery_stack.enter_context(
+                        patch.object(module, "select_many", recovery_boundary.select_many)
+                    )
+                    recovery_stack.enter_context(
+                        patch.object(module, "select_all", recovery_boundary.select_all)
+                    )
+                recovery_stack.enter_context(
+                    patch.object(
+                        research_lab_store,
+                        "next_event_seq",
+                        recovery_boundary.next_event_seq,
+                    )
+                )
+                recovery_stack.enter_context(
+                    patch.object(
+                        research_lab_api,
+                        "select_many",
+                        recovery_boundary.select_many,
+                    )
+                )
+                checkpoint_restarted = (
+                    scoring_worker_module.ResearchLabGatewayScoringWorker(
+                        config,
+                        worker_ref="rehearsal-rebenchmark-checkpoint-restarted",
+                    )
+                )
+                checkpoint_restart_result = (
+                    await checkpoint_restarted._maybe_run_private_baseline()
+                )
+            if checkpoint_restart_result.get("status") != "completed":
+                raise RuntimeError(
+                    "per-ICP checkpoint restart did not complete: "
+                    f"{checkpoint_restart_result!r}"
+                )
+            if len(model_calls) != model_call_count or len(scorer_calls) != scorer_call_count:
+                raise RuntimeError("checkpoint restart repeated paid rebenchmark work")
+
+            restarted = scoring_worker_module.ResearchLabGatewayScoringWorker(
+                config,
+                worker_ref="rehearsal-rebenchmark-worker-restarted",
+            )
+            restart_result = await restarted._maybe_run_private_baseline()
+
+            categories = boundary.rows("research_lab_scoring_category_results")
+            audit_rows = boundary.rows("research_lab_signed_audit_bundles")
+            business_artifact_rows = boundary.rows(
+                attested_v2_store.BUSINESS_ARTIFACT_TABLE
+            )
+            completed_dispatches = await boundary.select_many(
+                "research_lab_scoring_dispatch_events",
+                filters=(
+                    ("dispatch_type", "private_baseline_rebenchmark"),
+                    ("dispatch_status", "completed"),
+                ),
+            )
+            completed_audit_dispatches = await boundary.select_many(
+                "research_lab_scoring_dispatch_events",
+                filters=(
+                    ("dispatch_type", "audit_bundle_build"),
+                    ("dispatch_status", "completed"),
+                ),
+            )
+            failed_audit_dispatches = await boundary.select_many(
+                "research_lab_scoring_dispatch_events",
+                filters=(
+                    ("dispatch_type", "audit_bundle_build"),
+                    ("dispatch_status", "failed"),
+                ),
+            )
+            score_summary = durable_bundle.get("score_summary_doc") or {}
+            summaries = list(score_summary.get("per_icp_summaries") or ())
+            expected_refs = set(window.item_refs)
+            summary_refs = {
+                str(row.get("icp_ref") or "") for row in summaries
+            }
+            assignment = score_summary.get("category_assignment") or {}
+            expected_counts = {
+                "public": policy.public_total_icps,
+                "private": policy.private_total_icps,
+                "conditional": policy.conditional_total_icps,
+            }
+            if len(summaries) != total_icps or len(model_calls) != total_icps:
+                raise RuntimeError("full rebenchmark did not execute every configured ICP")
+            if (
+                len(expected_refs) != total_icps
+                or set(model_calls) != expected_refs
+                or len(set(model_calls)) != total_icps
+                or set(scorer_calls) != expected_refs
+                or len(set(scorer_calls)) != total_icps
+                or summary_refs != expected_refs
+                or len(summary_refs) != total_icps
+            ):
+                raise RuntimeError("full rebenchmark ICP identity coverage differs")
+            if len(scorer_calls) != total_icps or any(
+                float(row.get("score") or 0.0) <= 0.0 for row in summaries
+            ):
+                raise RuntimeError(
+                    "full rebenchmark did not positively score every configured ICP"
+                )
+            model_receipt_hashes = {
+                str(receipt.get("receipt_hash") or "")
+                for runner_instance in model_instances
+                for receipt in runner_instance.attested_receipts()
+            }
+            scorer_receipt_hashes = {
+                str(receipt.get("receipt_hash") or "")
+                for scorer_instance in scorer_instances
+                for receipt in scorer_instance.attested_receipts()
+            }
+            scorer_attested_outcomes = sum(
+                int(scorer_instance.attested_outcome_count())
+                for scorer_instance in scorer_instances
+            )
+            if (
+                len(model_receipt_hashes) != total_icps
+                or len(scorer_receipt_hashes) != total_icps
+                or scorer_attested_outcomes != total_icps
+                or complete_company_fit_receipts != total_icps
+                or len(model_input_artifact_sets) != total_icps
+                or len(set(model_input_artifact_sets)) != 1
+                or len(scorer_input_artifact_sets) != total_icps
+                or any(scorer_input_artifact_sets)
+                or len(baseline_parent_roots) != total_icps * 2
+                or len(baseline_input_artifacts) != 1
+            ):
+                raise RuntimeError(
+                    "production model/scorer authority coverage differs"
+                )
+            active_assertion_links = [
+                row
+                for row in business_artifact_rows
+                if row.get("artifact_kind")
+                == "active_private_model_assertion_v2"
+            ]
+            benchmark_bundle_links = [
+                row
+                for row in business_artifact_rows
+                if row.get("artifact_kind") == "benchmark_bundle"
+                and row.get("artifact_ref") == result.get("benchmark_bundle_id")
+            ]
+            if len(active_assertion_links) != 1 or len(benchmark_bundle_links) != 1:
+                raise RuntimeError(
+                    "production active/baseline business artifact links are incomplete"
+                )
+            exact_link_row = {
+                field: str(benchmark_bundle_links[0][field])
+                for field in (
+                    "receipt_hash",
+                    "artifact_kind",
+                    "artifact_ref",
+                    "artifact_hash",
+                )
+            }
+            exact_link_status = (
+                await attested_v2_store.persist_business_artifact_links_v2(
+                    receipt_hash=exact_link_row["receipt_hash"],
+                    artifacts=(
+                        {
+                            field: exact_link_row[field]
+                            for field in (
+                                "artifact_kind",
+                                "artifact_ref",
+                                "artifact_hash",
+                            )
+                        },
+                    ),
+                )
+            )
+            if (
+                exact_link_status.get("business_artifact_link_count") != 1
+                or exact_link_status.get("business_artifact_link_set_hash")
+                != sha256_json([exact_link_row])
+            ):
+                raise RuntimeError(
+                    "production business artifact exact replay hash differs"
+                )
+            conflicting_outcome = _signed_outcome(
+                role="gateway_scoring",
+                purpose="research_lab.rebenchmark.v2",
+                epoch_id=24_600,
+                sequence=1,
+                payload={"strict_conflict_probe": True},
+                result={"strict_conflict_probe": "different-root"},
+            )
+            await _persist_strict_outcome(conflicting_outcome)
+            conflicting_receipt = conflicting_outcome["execution_receipt"]
+            try:
+                await attested_v2_store.persist_business_artifact_links_v2(
+                    receipt_hash=str(conflicting_receipt["receipt_hash"]),
+                    artifacts=(
+                        {
+                            field: exact_link_row[field]
+                            for field in (
+                                "artifact_kind",
+                                "artifact_ref",
+                                "artifact_hash",
+                            )
+                        },
+                    ),
+                )
+            except attested_v2_store.AttestedV2StoreError as exc:
+                if "stored row conflicts at receipt_hash" not in str(exc):
+                    raise RuntimeError(
+                        "business artifact conflict failed for the wrong reason"
+                    ) from exc
+            else:
+                raise RuntimeError(
+                    "business artifact accepted a second authority root"
+                )
+            if dict(assignment.get("category_counts") or {}) != expected_counts:
+                raise RuntimeError("full rebenchmark category assignment differs")
+            if {row.get("category") for row in categories} != {
+                "public",
+                "private",
+                "conditional",
+                "overall",
+            }:
+                raise RuntimeError("durable category aggregates are incomplete")
+            if (
+                public_report.get("report_id")
+                != result.get("public_report_id")
+                or public_report.get("current_report_status") != "published"
+            ):
+                raise RuntimeError("public benchmark endpoint differs from publication")
+            if not candidate_gate.get("available"):
+                raise RuntimeError(f"candidate scoring gate stayed closed: {candidate_gate!r}")
+            original_repo_head = str(git_head_state["sha"])
+            git_head_state["sha"] = "b" * 40
+            try:
+                try:
+                    await worker._ensure_private_baseline_repo_head_unchanged(
+                        expected_git_sha=original_repo_head,
+                        benchmark_date=fixed_now.date().isoformat(),
+                        item_index=total_icps,
+                        total_icps=total_icps,
+                    )
+                except scoring_worker_module.PrivateBaselineRepoHeadChanged:
+                    pass
+                else:
+                    raise RuntimeError(
+                        "production repo-head guard accepted a changed source branch"
+                    )
+            finally:
+                git_head_state["sha"] = original_repo_head
+            if not _contains_dashboard_identity(
+                external_dashboard_projection_adapter,
+                public_identity,
+            ):
+                raise RuntimeError(
+                    "external dashboard projection adapter differs from publication"
+                )
+            maintenance_boundary_check_count = sum(
+                1
+                for table, filters in boundary.select_log
+                if table == "research_lab_gateway_control_current"
+                and ("control_key", "scoring_maintenance") in filters
+            )
+            if (
+                not audit_rows
+                or not completed_dispatches
+                or not completed_audit_dispatches
+                or failed_audit_dispatches
+                or not business_artifact_rows
+            ):
+                raise RuntimeError("full rebenchmark downstream persistence is incomplete")
+            if (
+                active_assertion_execution_count != 1
+                or active_assertion_nitro_verification_count < 1
+                or catalog_facade_call_count < 1
+                or docker_source_extract_count != 1
+                or source_bundle_validation_count != 1
+                or icp_postgrest.query_count < 3
+                or checkpoint_s3.manifest_read_count < 1
+                or checkpoint_s3.signature_verify_count < 1
+                or checkpoint_s3.digest_sign_count < 2
+                or maintenance_boundary_check_count < 1
+                or git_head_query_count < 4
+            ):
+                raise RuntimeError(
+                    "production rebenchmark facade coverage is incomplete: "
+                    f"active_execute={active_assertion_execution_count} "
+                    f"active_verify={active_assertion_nitro_verification_count} "
+                    f"catalog={catalog_facade_call_count} "
+                    f"docker_extract={docker_source_extract_count} "
+                    f"source_validate={source_bundle_validation_count} "
+                    f"icp_queries={icp_postgrest.query_count} "
+                    f"manifest_reads={checkpoint_s3.manifest_read_count} "
+                    f"signature_verifies={checkpoint_s3.signature_verify_count} "
+                    f"digest_signs={checkpoint_s3.digest_sign_count} "
+                    f"maintenance={maintenance_boundary_check_count} "
+                    f"git_head_queries={git_head_query_count}"
+                )
+            if restart_result.get("status") != "already_benchmarked":
+                raise RuntimeError("restart did not repair/reuse the durable benchmark")
+            if len(model_calls) != model_call_count or len(scorer_calls) != scorer_call_count:
+                raise RuntimeError("restart recovery repeated paid rebenchmark work")
+            return {
+                "configured_icp_count": total_icps,
+                "model_invocation_count": model_call_count,
+                "scorer_invocation_count": scorer_call_count,
+                "aggregate_score": float(durable_bundle["aggregate_score"]),
+                "positive_score_verified": True,
+                "every_configured_icp_positive": True,
+                "configured_icp_identity_exact": True,
+                "candidate_release_identity_exact": True,
+                "production_model_runner_exact": True,
+                "production_scorer_path_exact": True,
+                "model_attested_outcome_count": len(model_receipt_hashes),
+                "scorer_attested_outcome_count": scorer_attested_outcomes,
+                "complete_company_fit_receipt_count": (
+                    complete_company_fit_receipts
+                ),
+                "incomplete_company_fit_receipt_rejected": True,
+                "model_input_artifact_sets_exact": True,
+                "scorer_input_artifact_sets_exact": True,
+                "baseline_parent_receipt_count": len(baseline_parent_roots),
+                "baseline_input_artifact_count": len(baseline_input_artifacts),
+                "independent_baseline_authority_exact": True,
+                "category_counts": expected_counts,
+                "category_assignment_hash": str(assignment.get("assignment_hash") or ""),
+                "public_report_id": str(public_report["report_id"]),
+                "public_report_hash": str(public_report["report_hash"]),
+                "candidate_scoring_ready": True,
+                "external_dashboard_projection_adapter_verified": True,
+                "live_dashboard_readback_claimed": False,
+                "production_active_model_sync_load_exact": True,
+                "production_active_model_assertion_exact": True,
+                "production_repo_head_guard_exact": True,
+                "repo_head_change_rejected": True,
+                "production_source_bundle_exact": True,
+                "production_catalog_loader_exact": True,
+                "production_icp_window_loader_exact": True,
+                "provider_preflight_production_facade_exact": True,
+                "maintenance_boundary_production_exact": True,
+                "provider_preflight_boundary_adapted": True,
+                "checkpoint_boundary_adapted": True,
+                "checkpoint_write_count": len(checkpoint_s3.put_documents),
+                "checkpoint_full_bank_persisted": True,
+                "checkpoint_restart_status": str(
+                    checkpoint_restart_result["status"]
+                ),
+                "checkpoint_restart_reused_without_provider_spend": True,
+                "audit_bundle_count": len(audit_rows),
+                "actual_audit_publication_verified": True,
+                "audit_completed_dispatch_count": len(
+                    completed_audit_dispatches
+                ),
+                "production_artifact_link_hash_exact": True,
+                "artifact_link_conflict_rejected": True,
+                "business_artifact_link_count": len(business_artifact_rows),
+                "restart_status": str(restart_result["status"]),
+                "restart_reused_without_provider_spend": True,
+            }
+
+    with tempfile.TemporaryDirectory(
+        prefix="strict-rebenchmark-release-"
+    ) as release_tmp:
+        release_manifest_path = Path(release_tmp) / "gateway-v2-release-manifest.json"
+        release_manifest_path.write_text(
+            json.dumps(release, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        with patch.object(
+            active_model_authority_v2,
+            "DEFAULT_RELEASE_MANIFEST_PATH",
+            release_manifest_path,
+        ):
+            return asyncio.run(_run())
+
+
+def _exercise_compact_weight_joined_path() -> dict[str, Any]:
+    from compact_weight_joined_runner import exercise_compact_weight_joined_path
+
+    return exercise_compact_weight_joined_path()
+
+
+def _exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
+    from dev_snapshot_workflow import exercise_dev_snapshot_downstream_publication
+
+    return exercise_dev_snapshot_downstream_publication()
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "signed-private-model-contract-transition": (
         _exercise_signed_private_model_contract_transition
@@ -9697,6 +11857,13 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "rebenchmark-provider-transport-evidence": (
         _exercise_rebenchmark_provider_transport_evidence
     ),
+    "full-rebenchmark-publication-path": (
+        _exercise_full_rebenchmark_publication_path
+    ),
+    "dev-snapshot-downstream-publication": (
+        _exercise_dev_snapshot_downstream_publication
+    ),
+    "compact-weight-joined-path": _exercise_compact_weight_joined_path,
     "company-fit-numeric-observation-projection": (
         _exercise_company_fit_numeric_observation_projection
     ),
@@ -10381,6 +12548,397 @@ def main() -> int:
                 "rebenchmark-provider-transport-evidence",
                 {},
             ).get("baseline_pause_checkpoint_resume_complete")
+            is True
+        ),
+        "full_rebenchmark_publication_path_verified": (
+            behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("configured_icp_count")
+            == behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("model_invocation_count")
+            == behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("scorer_invocation_count")
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("configured_icp_count", 0)
+            > 0
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("positive_score_verified")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("every_configured_icp_positive")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("configured_icp_identity_exact")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("candidate_release_identity_exact")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("production_model_runner_exact")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("production_scorer_path_exact")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("model_attested_outcome_count")
+            == behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("configured_icp_count")
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("scorer_attested_outcome_count")
+            == behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("configured_icp_count")
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("complete_company_fit_receipt_count")
+            == behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("configured_icp_count")
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("incomplete_company_fit_receipt_rejected")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("model_input_artifact_sets_exact")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("scorer_input_artifact_sets_exact")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("baseline_parent_receipt_count")
+            == 2
+            * int(
+                behavior_evidence.get(
+                    "full-rebenchmark-publication-path",
+                    {},
+                ).get("configured_icp_count")
+                or 0
+            )
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("baseline_input_artifact_count")
+            == 1
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("independent_baseline_authority_exact")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("candidate_scoring_ready")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("external_dashboard_projection_adapter_verified")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("live_dashboard_readback_claimed")
+            is False
+            and all(
+                behavior_evidence.get(
+                    "full-rebenchmark-publication-path",
+                    {},
+                ).get(key)
+                is True
+                for key in (
+                    "production_active_model_sync_load_exact",
+                    "production_active_model_assertion_exact",
+                    "production_repo_head_guard_exact",
+                    "repo_head_change_rejected",
+                    "production_source_bundle_exact",
+                    "production_catalog_loader_exact",
+                    "production_icp_window_loader_exact",
+                    "provider_preflight_production_facade_exact",
+                    "maintenance_boundary_production_exact",
+                    "actual_audit_publication_verified",
+                    "production_artifact_link_hash_exact",
+                    "artifact_link_conflict_rejected",
+                )
+            )
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("provider_preflight_boundary_adapted")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("checkpoint_boundary_adapted")
+            is True
+            and int(
+                behavior_evidence.get(
+                    "full-rebenchmark-publication-path",
+                    {},
+                ).get("checkpoint_write_count")
+                or 0
+            )
+            >= int(
+                behavior_evidence.get(
+                    "full-rebenchmark-publication-path",
+                    {},
+                ).get("configured_icp_count")
+                or 0
+            )
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("checkpoint_full_bank_persisted")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("checkpoint_restart_status")
+            == "completed"
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("checkpoint_restart_reused_without_provider_spend")
+            is True
+            and int(
+                behavior_evidence.get(
+                    "full-rebenchmark-publication-path",
+                    {},
+                ).get("audit_completed_dispatch_count")
+                or 0
+            )
+            >= 1
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("restart_status")
+            == "already_benchmarked"
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("restart_reused_without_provider_spend")
+            is True
+        ),
+        "dev_snapshot_downstream_publication_verified": all(
+            behavior_evidence.get(
+                "dev-snapshot-downstream-publication",
+                {},
+            ).get(name)
+            is True
+            for name in (
+                "production_commands_exact",
+                "configured_baseline_complete",
+                "supabase_export_exact",
+                "provider_record_replay_exact",
+                "immutable_ready_before_pointer",
+                "signed_readiness_exact",
+                "active_identity_rechecked",
+                "immutable_target_exact",
+                "cleanup_complete",
+                "unknown_boundaries_rejected",
+                "production_cli_argv_contracts_exact",
+                "docker_bootstrap_contracts_exact",
+                "alternate_http_seams_fail_closed",
+                "unknown_subprocess_rejected",
+                "production_git_discovery_fail_closed",
+                "unknown_aws_service_rejected",
+                "declared_boundary_operations_exact",
+                "negative_boundary_evidence_complete",
+            )
+        ),
+        "compact_weight_joined_path_verified": (
+            behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("production_allocation_guard")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("production_primary_compact_lifecycle")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("gateway_compact_submit_persist_get_finalize")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("compact_ancestry_checkpoint_persistence")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("real_epoch_evidence_endpoint")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("stateful_epoch_evidence_persisted")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("stateful_epoch_evidence_readback_exact")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("cutover_authority_db_boundary_exact")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("release_lineage_file_archive_boundary_exact")
+            is True
+            and bool(
+                behavior_evidence.get(
+                    "compact-weight-joined-path",
+                    {},
+                ).get("extrinsic_hash")
+            )
+            and int(
+                behavior_evidence.get(
+                    "compact-weight-joined-path",
+                    {},
+                ).get("finalized_block")
+                or 0
+            )
+            > 0
+        ),
+        "compact_primary_auditor_byte_identity_verified": (
+            behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("primary_auditor_byte_identity")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("independent_auditor_count")
+            == 2
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("independent_auditor_submission_count")
+            == 2
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("auditor_submission_success")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("auditor_last_update_advanced")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("auditor_finalized_vector_readback_equal")
+            is True
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(
+                    behavior_evidence.get(
+                        "compact-weight-joined-path",
+                        {},
+                    ).get("primary_auditor_vector_hash")
+                    or ""
+                ),
+            )
+            is not None
+            and len(
+                behavior_evidence.get(
+                    "compact-weight-joined-path",
+                    {},
+                ).get("auditor_submission_states")
+                or ()
+            )
+            == 2
+            and len(
+                {
+                    int(state.get("uid") or -1)
+                    for state in (
+                        behavior_evidence.get(
+                            "compact-weight-joined-path",
+                            {},
+                        ).get("auditor_submission_states")
+                        or ()
+                    )
+                }
+            )
+            == 2
+            and {
+                str(state.get("vector_hash") or "")
+                for state in (
+                    behavior_evidence.get(
+                        "compact-weight-joined-path",
+                        {},
+                    ).get("auditor_submission_states")
+                    or ()
+                )
+            }
+            == {
+                str(
+                    behavior_evidence.get(
+                        "compact-weight-joined-path",
+                        {},
+                    ).get("primary_auditor_vector_hash")
+                    or ""
+                )
+            }
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("auditor_verified_cache_replay")
+            is True
+        ),
+        "compact_publication_journal_recovery_verified": (
+            behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("same_epoch_compact_journal_recovered")
+            is True
+            and behavior_evidence.get(
+                "compact-weight-joined-path",
+                {},
+            ).get("next_epoch_compact_journal_retired")
             is True
         ),
         "company_fit_numeric_observation_projection_verified": (

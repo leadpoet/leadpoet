@@ -78,6 +78,9 @@ def test_committed_validator_protected_manifest_matches_source():
         "ValidatorEnclaveClient._require_retired_cleanup",
         "ValidatorEnclaveClient._send_request",
     } <= set(PROTECTED_SYMBOLS["validator_tee/host/vsock_client.py"])
+    assert "_compact_weights_hash" in PROTECTED_SYMBOLS[
+        "leadpoet_canonical/auditor_latest_verified_bundle_v2.py"
+    ]
 
 
 def test_validator_protected_manifest_detects_weight_logic_change(tmp_path: Path):

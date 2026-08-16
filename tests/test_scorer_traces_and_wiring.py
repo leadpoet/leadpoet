@@ -693,8 +693,16 @@ async def test_company_label_examples_capture_positive_negative_sanitized(monkey
     assert inserted[0]["company_name"] == "TraceCo"
     assert inserted[0]["final_score"] == 72.5
     assert inserted[0]["failure_reason"] is None
+    assert inserted[0]["failure_stage"] is None
+    assert inserted[0]["fit_passed"] is True
+    assert inserted[0]["attribute_passed"] is True
+    assert inserted[0]["intent_passed"] is True
     assert inserted[1]["final_score"] == 0.0
     assert inserted[1]["failure_reason"] == "intent_fabricated"
+    assert inserted[1]["failure_stage"] == "intent"
+    assert inserted[1]["fit_passed"] is True
+    assert inserted[1]["attribute_passed"] is True
+    assert inserted[1]["intent_passed"] is False
     assert inserted[0]["intent_evidence_url"] == "https://example.com/jobs"
     assert inserted[0]["attribute_evidence_url"] == "https://example.com/about"
     assert inserted[0]["raw_trace_refs"] == [

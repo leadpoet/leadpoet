@@ -42,9 +42,9 @@ from typing import Any, Mapping, Sequence, Optional
 # (e.g. "Employee count mismatch: '...' not in {...}").
 _REASON_CATEGORIES: list[tuple[str, str]] = [
     ("employee count mismatch", "employee_count_mismatch"),
-    ("missing employee_count", "employee_count_missing"),
+    ("missing employee count", "employee_count_missing"),
     ("company stage mismatch", "company_stage_mismatch"),
-    ("missing company_stage", "company_stage_missing"),
+    ("missing company stage", "company_stage_missing"),
     ("company verification failed", "company_unverifiable"),
     ("company verification error", "company_unverifiable"),
     ("fabricat", "intent_fabricated"),          # "Intent fabrication detected ..."
@@ -52,6 +52,21 @@ _REASON_CATEGORIES: list[tuple[str, str]] = [
     ("pre-check", "failed_prechecks"),
     ("duplicate", "duplicate_company"),
 ]
+
+# Stable reporting stages. These are intentionally broader than scorer-internal
+# labels such as ``pre_checks`` so reports can compare runs across scorer
+# revisions without treating an implementation detail as a new funnel stage.
+_REASON_STAGES: dict[str, str] = {
+    "employee_count_mismatch": "firmographic",
+    "employee_count_missing": "firmographic",
+    "company_stage_mismatch": "firmographic",
+    "company_stage_missing": "firmographic",
+    "company_unverifiable": "verifier",
+    "intent_fabricated": "intent",
+    "scoring_error": "intent",
+    "failed_prechecks": "identity",
+    "duplicate_company": "uniqueness",
+}
 
 # Decay multiplier -> human band (mirrors calculate_time_decay_multiplier:
 # 1.0 = <=2mo, 0.5 = <=12mo or undated, 0.25 = >12mo).
@@ -76,6 +91,61 @@ def _categorize_reason(reason: Any) -> str:
         if needle in r:
             return cat
     return "other"
+
+
+def normalize_failure_reporting_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]:
+    """Return stable, counts-safe fields for failure-funnel reporting.
+
+    The scorer has emitted several historical ``failure_reason`` shapes and
+    often omits ``stage_failed`` and pass flags. This helper uses the same
+    reason taxonomy as ``build_icp_stats`` to fill only missing reporting
+    fields. It does not change the score or scorer verdict.
+    """
+    reason = breakdown.get("failure_reason")
+    reason_code = _categorize_reason(reason)
+    has_failure = bool(str(reason or "").strip()) or float(breakdown.get("final_score") or 0.0) <= 0.0
+
+    explicit_stage = str(breakdown.get("stage_failed") or "").strip().lower()
+    failure_stage = _REASON_STAGES.get(reason_code)
+    if not failure_stage and has_failure:
+        failure_stage = explicit_stage or "unclassified"
+
+    fit_default: bool | None = None
+    attribute_default: bool | None = None
+    intent_default: bool | None = None
+    if not has_failure:
+        fit_default = attribute_default = intent_default = True
+    elif failure_stage in {"identity", "uniqueness", "firmographic"}:
+        fit_default = False
+        if reason_code in {"company_stage_mismatch", "company_stage_missing"}:
+            attribute_default = False
+    elif failure_stage == "verifier":
+        fit_default = True
+        attribute_default = True
+    elif failure_stage == "intent":
+        fit_default = True
+        attribute_default = True
+        intent_default = False
+
+    def _explicit_bool(name: str, fallback: bool | None) -> bool | None:
+        value = breakdown.get(name)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1"}:
+                return True
+            if normalized in {"false", "0"}:
+                return False
+        return fallback
+
+    return {
+        "failure_stage": failure_stage,
+        "reason_code": reason_code if has_failure else None,
+        "fit_passed": _explicit_bool("fit_passed", fit_default),
+        "attribute_passed": _explicit_bool("attribute_passed", attribute_default),
+        "intent_passed": _explicit_bool("intent_passed", intent_default),
+    }
 
 
 def _decay_band(mult: Any) -> str:

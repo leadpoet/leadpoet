@@ -194,7 +194,10 @@ from research_lab.eval.baseline_summary import (
     daily_noise_budget_doc as shared_daily_noise_budget_doc,
     with_baseline_evaluation_contexts as shared_with_baseline_evaluation_contexts,
 )
-from research_lab.eval.miner_report_stats import build_icp_stats
+from research_lab.eval.miner_report_stats import (
+    build_icp_stats,
+    normalize_failure_reporting_fields,
+)
 from research_lab.eval.evaluator import (
     ConditionalValidationRetryableError,
     INCONTAINER_TRACE_KMS_KEY_ENV,
@@ -3394,6 +3397,7 @@ async def _persist_company_label_examples(
         identity = _scorer_trace_company_identity(output)
         company_key = _company_identity_key(identity)
         failure_reason = str(breakdown.get("failure_reason") or "").strip()
+        reporting_fields = normalize_failure_reporting_fields(breakdown)
         intent_doc = output.get("intent") if isinstance(output.get("intent"), Mapping) else {}
         attr_doc = (
             output.get("required_attribute")
@@ -3442,10 +3446,10 @@ async def _persist_company_label_examples(
             "attribute_evidence_url": _optional_public_url(attr_doc.get("evidence_url")),
             "final_score": float(breakdown.get("final_score", 0.0) or 0.0),
             "failure_reason": _optional_text(failure_reason, 500),
-            "failure_stage": _optional_text(breakdown.get("stage_failed"), 120),
-            "fit_passed": _optional_bool(breakdown.get("fit_passed")),
-            "attribute_passed": _optional_bool(breakdown.get("attribute_passed")),
-            "intent_passed": _optional_bool(breakdown.get("intent_passed")),
+            "failure_stage": _optional_text(reporting_fields.get("failure_stage"), 120),
+            "fit_passed": reporting_fields.get("fit_passed"),
+            "attribute_passed": reporting_fields.get("attribute_passed"),
+            "intent_passed": reporting_fields.get("intent_passed"),
             "icp_fit": _optional_score(breakdown.get("icp_fit")),
             "intent_signal_raw": _optional_score(breakdown.get("intent_signal_raw")),
             "time_decay_multiplier": _optional_score(breakdown.get("time_decay_multiplier")),
@@ -3511,6 +3515,7 @@ async def _persist_rejected_companies(
             failure_reason = str(breakdown.get("failure_reason") or "").strip()
             if final_score > 0.0 and not failure_reason:
                 continue  # accepted / scored — not a rejection
+            reporting_fields = normalize_failure_reporting_fields(breakdown)
             identity = _scorer_trace_company_identity(output)
             # Dedup identity: SAME company + SAME error + SAME icp -> one row
             # (regardless of baseline vs candidate). Key on the company NAME,
@@ -3575,10 +3580,10 @@ async def _persist_rejected_companies(
                 # harness outcome
                 "final_score": final_score,
                 "failure_reason": failure_reason or None,
-                "failure_stage": (str(breakdown.get("stage_failed") or "").strip() or None),
-                "fit_passed": _optional_bool(breakdown.get("fit_passed")),
-                "attribute_passed": _optional_bool(breakdown.get("attribute_passed")),
-                "intent_passed": _optional_bool(breakdown.get("intent_passed")),
+                "failure_stage": reporting_fields.get("failure_stage"),
+                "fit_passed": reporting_fields.get("fit_passed"),
+                "attribute_passed": reporting_fields.get("attribute_passed"),
+                "intent_passed": reporting_fields.get("intent_passed"),
                 "icp_fit": _optional_score(breakdown.get("icp_fit")),
                 "intent_signal_raw": _optional_score(breakdown.get("intent_signal_raw")),
                 "time_decay_multiplier": _optional_score(breakdown.get("time_decay_multiplier")),

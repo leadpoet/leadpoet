@@ -92,7 +92,7 @@ async def test_field_mapping(collector):
         is_reference_model=True, outputs=_outputs(), breakdowns=_breakdowns())
     beta = collector.rows[0]
     assert beta["failure_reason"] == "company_stage_mismatch"
-    assert beta["failure_stage"] == "pre_checks"
+    assert beta["failure_stage"] == "firmographic"
     assert beta["fit_passed"] is False
     assert beta["attribute_passed"] is True
     assert beta["intent_passed"] is None          # not present in breakdown -> None
@@ -107,6 +107,9 @@ async def test_field_mapping(collector):
     assert isinstance(beta["dedup_key"], str) and beta["dedup_key"]
     gamma = collector.rows[1]
     assert gamma["failure_reason"] == "intent_fabricated"
+    assert gamma["failure_stage"] == "intent"
+    assert gamma["fit_passed"] is True
+    assert gamma["attribute_passed"] is True
     assert gamma["intent_signal"] == 0.1
     assert gamma["intent_passed"] is False
 

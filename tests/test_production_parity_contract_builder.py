@@ -16,13 +16,13 @@ from scripts.build_production_parity_contract import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PHYSICAL_STAGING_PATH = "scripts/run_physical_v2_staging.py"
+PHYSICAL_STAGING_PATH = "scripts/run_production_parity_full_host.py"
 HOST_RPC_TRANSPORT_PATHS = {
     "gateway/tee/proxy_transport_preflight_v2.py",
     "gateway/utils/tee_client.py",
     "gateway/utils/tee_egress_forwarder.py",
     "gateway/utils/tee_inter_enclave_relay.py",
-    "scripts/run_physical_v2_staging.py",
+    "scripts/run_production_parity_full_host.py",
     "validator_tee/host/chain_relay_v2.py",
     "validator_tee/host/vsock_client.py",
 }

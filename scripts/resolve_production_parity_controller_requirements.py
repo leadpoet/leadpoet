@@ -10,7 +10,7 @@ import sys
 from typing import Sequence
 
 
-REQUIRED_PACKAGES = ("boto3", "cryptography", "httpx")
+REQUIRED_PACKAGES = ("boto3", "cryptography", "httpx", "supabase")
 NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)")
 
 

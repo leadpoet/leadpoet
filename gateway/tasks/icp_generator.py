@@ -53,6 +53,16 @@ import pytz
 
 logger = logging.getLogger(__name__)
 
+
+def _rebenchmark_now() -> datetime:
+    """Use the attested parity date only inside a complete parity run."""
+
+    from leadpoet_canonical.production_parity_boundary_v2 import (
+        configured_rebenchmark_now_v2,
+    )
+
+    return configured_rebenchmark_now_v2()
+
 # =============================================================================
 # OpenRouter Configuration for LLM-Based ICP Generation
 # =============================================================================
@@ -1569,7 +1579,7 @@ def get_next_reset_time() -> datetime:
     Returns:
         datetime: Next reset time in UTC
     """
-    now_utc = datetime.now(timezone.utc)
+    now_utc = _rebenchmark_now()
     
     # Next 12:00 AM UTC (midnight UTC)
     next_midnight_utc = datetime(
@@ -1618,7 +1628,7 @@ async def generate_and_activate_icp_set(
         set_id if successful, None otherwise
     """
     if for_date is None:
-        for_date = datetime.now(timezone.utc)
+        for_date = _rebenchmark_now()
     
     # Compute set_id (based on UTC date)
     set_id = get_set_id_for_date(for_date)
@@ -1725,7 +1735,7 @@ async def generate_and_activate_icp_set(
                 "event_type": "ICP_SET_ACTIVATED",
                 "actor_hotkey": "system",
                 "nonce": str(uuid4()),
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": _rebenchmark_now().isoformat(),
                 "payload": {
                     "set_id": set_id,
                     "icp_count": len(icps),
@@ -1992,7 +2002,7 @@ async def icp_rotation_task():
     
     while True:
         try:
-            now = datetime.now(timezone.utc)
+            now = _rebenchmark_now()
             current_date = now.strftime("%Y-%m-%d")
             today_set_id = get_set_id_for_date(now)
             
@@ -2091,7 +2101,7 @@ async def ensure_icp_set_exists():
                 else:
                     active_until = active_until_str
                 
-                now = datetime.now(timezone.utc)
+                now = _rebenchmark_now()
                 
                 if now < active_until:
                     logger.info(f"Active ICP set found: {active_set['set_id']} (valid until {active_until})")

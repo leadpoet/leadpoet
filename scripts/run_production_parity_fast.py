@@ -19,7 +19,10 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 from urllib.error import HTTPError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +49,10 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
 from scripts.production_parity_snapshot import (  # noqa: E402
     restore_snapshot,
     verify_snapshot,
+)
+from scripts.materialize_production_parity_secrets import (  # noqa: E402
+    SecretMaterializationError,
+    _parse_environment_document,
 )
 
 
@@ -155,6 +162,130 @@ class _CloneSupabaseProvider:
         }
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+class _ProductionReadOnlySupabaseProvider:
+    """Execute only candidate-generated GETs against the exact live origin."""
+
+    adapter_name = "strict-read-only-production-postgrest"
+
+    def __init__(self, *, origin: str, service_role_key: str) -> None:
+        normalized = str(origin or "").strip().rstrip("/")
+        if normalized != SUPABASE_WEIGHT_SOURCE_ORIGIN:
+            raise ProductionParityError(
+                "production PostgREST origin differs from the measured origin"
+            )
+        if not str(service_role_key or "").strip():
+            raise ProductionParityError("production PostgREST read credential is missing")
+        self.origin = normalized
+        self.service_role_key = str(service_role_key)
+        self.pages: list[dict[str, Any]] = []
+        self._opener = build_opener(_NoRedirect)
+
+    def __call__(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        url = str(request.get("url") or "")
+        parsed = urlsplit(url)
+        production = urlsplit(self.origin)
+        try:
+            body = base64.b64decode(str(request.get("body_b64") or ""), validate=True)
+        except ValueError as exc:
+            raise ProductionParityError(
+                "production read adapter rejected malformed request bytes"
+            ) from exc
+        if (
+            request.get("provider_id") != "supabase"
+            or request.get("method") != "GET"
+            or body
+            or parsed.scheme != "https"
+            or parsed.hostname != production.hostname
+            or parsed.port not in (None, 443)
+            or not parsed.path.startswith("/rest/v1/")
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ProductionParityError(
+                "production read adapter rejected a non-GET or foreign request"
+            )
+        headers = {
+            str(name): str(value)
+            for name, value in dict(request.get("headers") or {}).items()
+            if str(name).lower() not in {"authorization", "apikey"}
+        }
+        headers.update(
+            {
+                "Authorization": f"Bearer {self.service_role_key}",
+                "apikey": self.service_role_key,
+            }
+        )
+        outbound = Request(url, headers=headers, method="GET")
+        try:
+            with self._opener.open(
+                outbound,
+                timeout=max(1, int(request.get("timeout_ms") or 0) // 1000),
+            ) as response:
+                response_body = response.read()
+                status = int(response.status)
+        except HTTPError as exc:
+            response_body = exc.read()
+            status = int(exc.code)
+        response_hash = "sha256:" + hashlib.sha256(response_body).hexdigest()
+        request_artifact_hash = sha256_json(
+            {
+                "schema_version": "leadpoet.production_parity_live_read.v1",
+                "logical_operation_id": request.get("logical_operation_id"),
+                "method": "GET",
+                "path_and_query": urlunsplit(("", "", parsed.path, parsed.query, "")),
+                "range": headers.get("range"),
+            }
+        )
+        self.pages.append(
+            {
+                "http_status": status,
+                "response_bytes": len(response_body),
+                "response_hash": response_hash,
+                "request_artifact_hash": request_artifact_hash,
+            }
+        )
+        attempt = {
+            "terminal_status": "authenticated_response",
+            "http_status": status,
+            "response_hash": response_hash,
+            "request_artifact_hash": request_artifact_hash,
+            "response_artifact_hash": response_hash,
+            "adapter": self.adapter_name,
+        }
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": status,
+            "body_b64": base64.b64encode(response_body).decode("ascii"),
+            "transport_attempt": attempt,
+        }
+
+
+def _load_production_supabase_read(
+    *, region: str, secret_id: str
+) -> _ProductionReadOnlySupabaseProvider:
+    try:
+        raw = boto3.client("secretsmanager", region_name=region).get_secret_value(
+            SecretId=secret_id
+        ).get("SecretString")
+        values = _parse_environment_document(
+            str(raw or ""), field="production gateway environment"
+        )
+    except (BotoCoreError, ClientError, SecretMaterializationError) as exc:
+        raise ProductionParityError(
+            "production PostgREST read configuration is unavailable"
+        ) from exc
+    return _ProductionReadOnlySupabaseProvider(
+        origin=str(values.get("SUPABASE_URL") or ""),
+        service_role_key=str(values.get("SUPABASE_SERVICE_ROLE_KEY") or ""),
+    )
+
+
 def _load_json(path: Path, *, description: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -223,6 +354,8 @@ class _DockerDatabase:
         candidate_sha: str,
         postgres_image: str,
         postgrest_image: str,
+        postgres_publish: str = "127.0.0.1::5432",
+        postgrest_publish: str = "127.0.0.1::3000",
     ) -> None:
         for field_name, image in (
             ("postgres image", postgres_image),
@@ -240,6 +373,8 @@ class _DockerDatabase:
         self.authenticator_password = secrets.token_urlsafe(24)
         self.postgres_image = postgres_image
         self.postgrest_image = postgrest_image
+        self.postgres_publish = str(postgres_publish)
+        self.postgrest_publish = str(postgrest_publish)
         self.target_dsn = ""
         self.supabase_url = ""
 
@@ -259,7 +394,7 @@ class _DockerDatabase:
                     "--network",
                     self.network,
                     "-p",
-                    "127.0.0.1::5432",
+                    self.postgres_publish,
                     "-e",
                     f"POSTGRES_PASSWORD={self.password}",
                     "-e",
@@ -325,11 +460,9 @@ DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL;
 DO $$ BEGIN CREATE ROLE service_role NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 GRANT anon, service_role TO authenticator;
 GRANT USAGE ON SCHEMA public TO anon, service_role;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO anon;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service_role;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO service_role;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO anon;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_role;
@@ -350,7 +483,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_
                     "--network",
                     self.network,
                     "-p",
-                    "127.0.0.1::3000",
+                    self.postgrest_publish,
                     "-e",
                     f"PGRST_DB_URI={db_uri}",
                     "-e",
@@ -388,6 +521,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_
         *,
         service_role_key: str,
         expected_shape: Mapping[str, Any],
+        capture_mode: str,
     ) -> dict[str, Any]:
         restored_raw = self._psql(
             """
@@ -413,6 +547,21 @@ WHERE c.relkind IN ('r', 'm')
         restored_total = int(restored.get("total_relation_bytes") or 0)
         if expected_total <= 0 or restored_total <= 0:
             raise ProductionParityError("restored production data shape is empty")
+        if capture_mode == "schema-only":
+            return {
+                "capture_mode": capture_mode,
+                "captured_relation_count": expected_relations,
+                "restored_relation_count": restored_relations,
+                "candidate_relation_delta": restored_relations - expected_relations,
+                "captured_total_relation_bytes": expected_total,
+                "captured_largest_relation_bytes": int(
+                    expected_shape.get("largest_relation_bytes") or 0
+                ),
+                "restored_schema_bytes": restored_total,
+                "live_rows_copied": 0,
+            }
+        if capture_mode != "full":
+            raise ProductionParityError("snapshot capture mode is unsupported")
         size_ratio = restored_total / expected_total
         if not 0.5 <= size_ratio <= 2.0:
             raise ProductionParityError(
@@ -450,6 +599,7 @@ LIMIT 1;
         if status != 200:
             raise ProductionParityError("production-shaped PostgREST read failed")
         return {
+            "capture_mode": capture_mode,
             "captured_relation_count": expected_relations,
             "restored_relation_count": restored_relations,
             "candidate_relation_delta": restored_relations - expected_relations,
@@ -466,9 +616,12 @@ LIMIT 1;
         self,
         *,
         service_role_key: str,
+        scope: Mapping[str, Any] | None = None,
+        provider: Any | None = None,
     ) -> dict[str, Any]:
-        scope_raw = self._psql(
-            """
+        if scope is None:
+            scope_raw = self._psql(
+                """
 SELECT json_build_object(
   'netuid', netuid,
   'start_epoch', MIN(epoch_id),
@@ -480,20 +633,21 @@ GROUP BY netuid
 ORDER BY COUNT(*) DESC, netuid
 LIMIT 1;
 """
-        ).strip()
-        if not scope_raw:
-            raise ProductionParityError(
-                "production snapshot has no finalized allocation authority history"
-            )
-        scope = json.loads(scope_raw)
+            ).strip()
+            if not scope_raw:
+                raise ProductionParityError(
+                    "production snapshot has no finalized allocation authority history"
+                )
+            scope = json.loads(scope_raw)
+        else:
+            scope = dict(scope)
         expected_rows = int(scope.get("expected_rows") or 0)
         if expected_rows <= 0:
             raise ProductionParityError(
                 "production finalized allocation authority history is empty"
             )
-        adapter = _CloneSupabaseProvider(
-            clone_url=self.supabase_url,
-            service_role_key=service_role_key,
+        adapter = provider or _CloneSupabaseProvider(
+            clone_url=self.supabase_url, service_role_key=service_role_key
         )
         attempts: list[dict[str, Any]] = []
         artifacts: list[str] = []
@@ -531,7 +685,11 @@ LIMIT 1;
             "max_page_bytes": max(page_bytes),
             "response_hashes": [item["response_hash"] for item in adapter.pages],
             "artifact_count": len(artifacts),
-            "adapter": "strict-production-origin-to-disposable-clone",
+            "adapter": getattr(
+                adapter,
+                "adapter_name",
+                "strict-production-origin-to-disposable-clone",
+            ),
         }
 
     def cleanup(self) -> dict[str, Any]:
@@ -603,6 +761,8 @@ def _run_database_lane(
     production_host: str,
     postgres_image: str,
     postgrest_image: str,
+    region: str,
+    production_gateway_secret_id: str,
 ) -> dict[str, Any]:
     contract = validate_contract(_load_json(contract_path, description="parity contract"))
     database = _DockerDatabase(
@@ -637,9 +797,15 @@ def _run_database_lane(
         shape = database.shape_evidence(
             service_role_key=service_role_key,
             expected_shape=manifest["database"],
+            capture_mode=manifest["capture_mode"],
+        )
+        live_provider = _load_production_supabase_read(
+            region=region, secret_id=production_gateway_secret_id
         )
         weight_input_scale = database.weight_input_scale_evidence(
-            service_role_key=service_role_key
+            service_role_key=service_role_key,
+            scope=manifest["database"]["weight_history_scope"],
+            provider=live_provider,
         )
         result = {
             "restore": restore,
@@ -661,6 +827,8 @@ def run_fast_lane(
     production_host: str,
     postgres_image: str,
     postgrest_image: str,
+    region: str,
+    production_gateway_secret_id: str,
 ) -> dict[str, Any]:
     contract = verify_contract_checkout(
         ROOT, _load_json(contract_path, description="parity contract")
@@ -668,6 +836,8 @@ def run_fast_lane(
     manifest = validate_snapshot_manifest(
         _load_json(manifest_path, description="snapshot manifest")
     )
+    if manifest["capture_mode"] != "schema-only":
+        raise ProductionParityError("fast lane requires a bounded schema-only snapshot")
     oracle = validate_historical_oracle(
         _load_json(
             ROOT / "tests/restart_rehearsal/fixtures/august_9_known_good_v2.json",
@@ -766,6 +936,8 @@ def run_fast_lane(
             production_host=production_host,
             postgres_image=postgres_image,
             postgrest_image=postgrest_image,
+            region=region,
+            production_gateway_secret_id=production_gateway_secret_id,
         )
     started = {name: time.monotonic() for name in actions}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(actions)) as pool:
@@ -909,6 +1081,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--production-db-host", required=True)
     parser.add_argument("--postgres-image", required=True)
     parser.add_argument("--postgrest-image", required=True)
+    parser.add_argument("--region", required=True)
+    parser.add_argument("--production-gateway-secret-id", required=True)
     args = parser.parse_args(argv)
     try:
         result = run_fast_lane(
@@ -919,6 +1093,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             production_host=args.production_db_host,
             postgres_image=args.postgres_image,
             postgrest_image=args.postgrest_image,
+            region=args.region,
+            production_gateway_secret_id=args.production_gateway_secret_id,
         )
     except (OSError, ValueError, ProductionParityError, subprocess.TimeoutExpired) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

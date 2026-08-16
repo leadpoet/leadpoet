@@ -415,6 +415,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("prepush included undeclared release-only evidence")
 
     last_epoch = epochs[-1]
+    production_allocation_rows = [
+        {
+            "allocation_hash": epoch.get("production_allocation_hash"),
+            "handoff_hash": epoch.get(
+                "production_allocation_handoff_hash"
+            ),
+            "source_epoch": epoch.get("production_allocation_source_epoch"),
+        }
+        for epoch in epochs
+        if epoch.get("production_allocation_hash") is not None
+    ]
+    if production_allocation_rows and (
+        len(production_allocation_rows) != len(epochs)
+        or len(
+            {
+                json.dumps(row, sort_keys=True, separators=(",", ":"))
+                for row in production_allocation_rows
+            }
+        )
+        != 1
+        or any(
+            not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(row.get(field) or ""),
+            )
+            for row in production_allocation_rows
+            for field in ("allocation_hash", "handoff_hash")
+        )
+        or any(
+            not isinstance(row.get("source_epoch"), int)
+            or int(row["source_epoch"]) <= 0
+            for row in production_allocation_rows
+        )
+    ):
+        raise SystemExit("production allocation binding evidence differs")
     joined = {
         "schema_version": "leadpoet.local_restart_rehearsal_evidence.v1",
         "status": "passed",
@@ -464,6 +499,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "cleanup": cleanup,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
+    if production_allocation_rows:
+        joined["production_allocation"] = production_allocation_rows[0]
     args.output.write_text(
         json.dumps(joined, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",

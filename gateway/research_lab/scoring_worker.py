@@ -1382,7 +1382,11 @@ async def _enforce_baseline_wave_maintenance_boundary(
     now: datetime | None = None,
 ) -> None:
     if benchmark_date:
-        current_date = (now or datetime.now(timezone.utc)).astimezone(
+        from leadpoet_canonical.production_parity_boundary_v2 import (
+            configured_rebenchmark_now_v2,
+        )
+
+        current_date = (now or configured_rebenchmark_now_v2()).astimezone(
             timezone.utc
         ).date().isoformat()
         if current_date != benchmark_date:
@@ -5824,6 +5828,15 @@ class ResearchLabGatewayScoringWorker:
         )
 
     async def _candidate_claim_capacity(self) -> dict[str, Any]:
+        from leadpoet_canonical.production_parity_boundary_v2 import (
+            production_parity_enabled_v2,
+        )
+
+        if production_parity_enabled_v2():
+            return {
+                "available": False,
+                "reason": "production_parity_candidate_claims_disabled",
+            }
         host_pressure = _scoring_host_pressure_capacity(
             min_available_memory_mb=getattr(self.config, "scoring_worker_min_available_memory_mb", 0),
             max_load_per_cpu=getattr(self.config, "scoring_worker_max_load_per_cpu", 0.0),
@@ -12386,7 +12399,11 @@ class ResearchLabGatewayScoringWorker:
         }
 
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
-        now = datetime.now(timezone.utc)
+        from leadpoet_canonical.production_parity_boundary_v2 import (
+            configured_rebenchmark_now_v2,
+        )
+
+        now = configured_rebenchmark_now_v2()
         today = now.date().isoformat()
         baseline_start_offset = int(
             getattr(

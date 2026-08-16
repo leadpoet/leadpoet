@@ -9,6 +9,7 @@ bundle it emits is constructed by candidate production code.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 from typing import Any, Mapping
 
@@ -58,9 +59,20 @@ VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 class SanitizedWeightFixture:
     """One deterministic, credential-free production-shaped epoch."""
 
-    def __init__(self, *, candidate_sha: str, epoch_id: int):
+    def __init__(
+        self,
+        *,
+        candidate_sha: str,
+        epoch_id: int,
+        production_allocation_doc: Mapping[str, Any] | None = None,
+    ):
         self.candidate_sha = candidate_sha
         self.epoch_id = int(epoch_id)
+        self.production_allocation_doc = (
+            copy.deepcopy(dict(production_allocation_doc))
+            if production_allocation_doc is not None
+            else None
+        )
         self.pcr0 = hashlib.sha384(
             b"leadpoet-local-pcr0:" + candidate_sha.encode("ascii")
         ).hexdigest()
@@ -289,30 +301,71 @@ class SanitizedWeightFixture:
         parent_hashes: list[str],
         allocation_hash: str,
     ) -> dict[str, Any]:
-        allocation_doc = {
-            "epoch": self.epoch_id,
-            "lab_cap_percent": 20.0,
-            "unallocated_percent": 15.0,
-            "champion_credit_policy": "accelerated_lifetime_cap_v1",
-            "reimbursement_allocations": [],
-            "champion_allocations": [
-                {
-                    "champion_reward_id": (
-                        f"rehearsal-champion-{self.epoch_id}"
-                    ),
-                    "uid": 2,
-                    "miner_hotkey": "lab-hotkey",
-                    "paid_alpha_percent": 5.0,
-                    "base_desired_alpha_percent": 7.3,
-                    "total_due_alpha_percent": 146.0,
-                    "paid_alpha_percent_to_date": 30.0,
-                    "remaining_alpha_percent_before_epoch": 116.0,
-                    "remaining_alpha_percent_after_epoch": 111.0,
-                }
-            ],
-            "queued_champion_allocations": [],
-        }
-        allocation_doc["allocation_hash"] = sha256_json(allocation_doc)
+        if self.production_allocation_doc is None:
+            allocation_doc = {
+                "epoch": self.epoch_id,
+                "lab_cap_percent": 20.0,
+                "unallocated_percent": 15.0,
+                "champion_credit_policy": "accelerated_lifetime_cap_v1",
+                "reimbursement_allocations": [],
+                "champion_allocations": [
+                    {
+                        "champion_reward_id": (
+                            f"rehearsal-champion-{self.epoch_id}"
+                        ),
+                        "uid": 2,
+                        "miner_hotkey": "lab-hotkey",
+                        "paid_alpha_percent": 5.0,
+                        "base_desired_alpha_percent": 7.3,
+                        "total_due_alpha_percent": 146.0,
+                        "paid_alpha_percent_to_date": 30.0,
+                        "remaining_alpha_percent_before_epoch": 116.0,
+                        "remaining_alpha_percent_after_epoch": 111.0,
+                    }
+                ],
+                "queued_champion_allocations": [],
+            }
+            allocation_doc["allocation_hash"] = sha256_json(allocation_doc)
+        else:
+            allocation_doc = copy.deepcopy(self.production_allocation_doc)
+            expected_hash = str(allocation_doc.get("allocation_hash") or "")
+            hash_payload = {
+                key: value
+                for key, value in allocation_doc.items()
+                if key != "allocation_hash"
+            }
+            if expected_hash != sha256_json(hash_payload):
+                raise ValueError("production allocation document hash differs")
+
+        metagraph_hotkeys = [
+            "burn-hotkey",
+            "fulfillment-hotkey",
+            "lab-hotkey",
+            "source-hotkey",
+        ]
+        allocation_rows = []
+        for section in (
+            "source_add_allocations",
+            "reimbursement_allocations",
+            "champion_allocations",
+            "queued_champion_allocations",
+        ):
+            allocation_rows.extend(allocation_doc.get(section) or [])
+        for row in allocation_rows:
+            if not isinstance(row, Mapping):
+                continue
+            try:
+                uid = int(row.get("uid"))
+            except (TypeError, ValueError):
+                continue
+            hotkey = str(row.get("miner_hotkey") or "")
+            if uid < 0 or not hotkey:
+                continue
+            while len(metagraph_hotkeys) <= uid:
+                metagraph_hotkeys.append(
+                    f"rehearsal-unregistered-hotkey-{len(metagraph_hotkeys)}"
+                )
+            metagraph_hotkeys[uid] = hotkey
         snapshot = {
             "schema_version": WEIGHT_SNAPSHOT_SCHEMA_VERSION,
             "netuid": 71,
@@ -324,12 +377,7 @@ class SanitizedWeightFixture:
             "research_lab_allocation_receipt_hash": allocation_hash,
             "burn_target_uid": 0,
             "expected_burn_target_hotkey": "burn-hotkey",
-            "metagraph_hotkeys": [
-                "burn-hotkey",
-                "fulfillment-hotkey",
-                "lab-hotkey",
-                "source-hotkey",
-            ],
+            "metagraph_hotkeys": metagraph_hotkeys,
             "banned_hotkeys": [],
             "banned_lookup_ok": True,
             "ff_enabled": True,

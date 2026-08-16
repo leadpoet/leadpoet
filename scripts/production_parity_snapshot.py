@@ -124,6 +124,42 @@ SELECT json_build_object(
     SELECT COUNT(*)
     FROM public.research_lab_private_model_benchmark_bundles
     WHERE benchmark_date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
+  ),
+  'weight_history_scope', (
+    SELECT json_build_object(
+      'netuid', netuid,
+      'start_epoch', MIN(epoch_id),
+      'end_epoch', MAX(epoch_id),
+      'expected_rows', COUNT(*)
+    )
+    FROM public.research_lab_finalized_allocation_epochs_v2
+    GROUP BY netuid
+    ORDER BY COUNT(*) DESC, netuid
+    LIMIT 1
+  ),
+  'source_role', (
+    SELECT json_build_object(
+      'role_name', rolname,
+      'transaction_read_only', current_setting('transaction_read_only') = 'on',
+      'superuser', rolsuper,
+      'bypass_rls', rolbypassrls,
+      'replication', rolreplication,
+      'table_write_capable', EXISTS (
+        SELECT 1
+        FROM pg_class AS writable_class
+        JOIN pg_namespace AS writable_namespace
+          ON writable_namespace.oid = writable_class.relnamespace
+        WHERE writable_namespace.nspname = 'public'
+          AND writable_class.relkind IN ('r', 'p')
+          AND has_table_privilege(
+            current_user,
+            writable_class.oid,
+            'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER'
+          )
+      )
+    )
+    FROM pg_roles
+    WHERE rolname = current_user
   )
 )::text
 FROM pg_class AS c
@@ -149,6 +185,10 @@ WHERE c.relkind IN ('r', 'm')
         raise ProductionParityError(
             "production database shape response is not an object"
         )
+    source_role = value.get("source_role")
+    if isinstance(source_role, Mapping):
+        role_name = str(source_role.pop("role_name", ""))
+        source_role["role_hash"] = sha256_json({"role": role_name})
     return value
 
 
@@ -159,17 +199,10 @@ def _target_rebenchmark_date(stats: Mapping[str, Any]) -> date:
         ).astimezone(timezone.utc)
     except ValueError as exc:
         raise ProductionParityError("production snapshot clock is invalid") from exc
-    target = captured.date() + (timedelta(days=1) if captured.hour >= 20 else timedelta())
-    latest = stats.get("latest_completed_benchmark_date")
-    if target == captured.date() and (
-        int(stats.get("current_day_rebenchmark_run_count") or 0) != 0
-        or int(stats.get("current_day_benchmark_bundle_count") or 0) != 0
-        or (latest is not None and str(latest) >= target.isoformat())
-    ):
-        raise ProductionParityError(
-            "production snapshot missed the clean target-day rebenchmark frontier"
-        )
-    return target
+    # The clone executes tomorrow's normal production workflow. Candidate
+    # code creates that date's ICP set itself, so the test never deletes,
+    # rewrites, or reuses a consumed production daily slot.
+    return captured.date() + timedelta(days=1)
 
 
 def _git(
@@ -242,10 +275,9 @@ def capture_snapshot(
     manifest_path: Path,
     dsn: str,
     expected_production_host: str,
-    s3_uri: str,
-    kms_key_arn: str,
     ttl_hours: int,
     source_sha: str,
+    capture_mode: str = "full",
 ) -> dict[str, Any]:
     contract = validate_contract(_load_json(contract_path, description="parity contract"))
     env, observed_host = _postgres_env(dsn, read_only=True)
@@ -253,6 +285,8 @@ def capture_snapshot(
         raise ProductionParityError("snapshot source is not the expected production database")
     if ttl_hours < 1 or ttl_hours > 48:
         raise ProductionParityError("snapshot TTL must be between 1 and 48 hours")
+    if capture_mode not in {"full", "schema-only"}:
+        raise ProductionParityError("production snapshot capture mode is invalid")
 
     read_only = _require_success(
         _run(
@@ -266,6 +300,18 @@ def capture_snapshot(
         raise ProductionParityError("production snapshot session is not read-only")
 
     stats = _database_stats(env)
+    source_role = stats.get("source_role")
+    if (
+        not isinstance(source_role, Mapping)
+        or source_role.get("transaction_read_only") is not True
+        or source_role.get("superuser") is not False
+        or not isinstance(source_role.get("bypass_rls"), bool)
+        or source_role.get("replication") is not False
+        or source_role.get("table_write_capable") is not False
+    ):
+        raise ProductionParityError(
+            "production snapshot credential is not a dedicated read-only role"
+        )
     target_rebenchmark_date = _target_rebenchmark_date(stats)
     source_migrations = _source_migrations(
         root=ROOT,
@@ -274,17 +320,21 @@ def capture_snapshot(
     )
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
-    result = _run(
-        [
+    dump_command = [
             "pg_dump",
             "--format=custom",
             "--compress=6",
+            "--schema=public",
             "--no-owner",
             "--no-acl",
             "--serializable-deferrable",
             "--file",
             str(archive_path),
-        ],
+        ]
+    if capture_mode == "schema-only":
+        dump_command.insert(4, "--schema-only")
+    result = _run(
+        dump_command,
         env=env,
         timeout=900,
     )
@@ -312,10 +362,15 @@ def capture_snapshot(
         "captured_at": captured_at.isoformat(),
         "expires_at": (captured_at + timedelta(hours=ttl_hours)).isoformat(),
         "capture_transaction_read_only": True,
+        "capture_mode": capture_mode,
         "archive": {
-            "format": "postgres-custom",
-            "kms_key_arn": str(kms_key_arn),
-            "s3_uri": str(s3_uri),
+            "format": (
+                "postgres-custom"
+                if capture_mode == "full"
+                else "postgres-schema-custom"
+            ),
+            "storage": "ephemeral-encrypted-volume",
+            "persisted": False,
             "sha256": file_sha256(archive_path),
             "size_bytes": archive_path.stat().st_size,
         },
@@ -335,9 +390,11 @@ def capture_snapshot(
             "current_day_benchmark_bundle_count": int(
                 stats.get("current_day_benchmark_bundle_count") or 0
             ),
+            "source_role": dict(source_role),
+            "weight_history_scope": dict(stats.get("weight_history_scope") or {}),
         },
         "migrations": source_migrations,
-        "data_classification": "production-confidential-kms-encrypted",
+        "data_classification": "production-confidential-ephemeral",
     }
     manifest = validate_snapshot_manifest(
         {**body, "manifest_hash": sha256_json(body)}, now=captured_at
@@ -459,10 +516,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     capture.add_argument("--manifest", type=Path, required=True)
     capture.add_argument("--dsn-env", default="LEADPOET_PARITY_PRODUCTION_READONLY_DSN")
     capture.add_argument("--expected-host-env", default="LEADPOET_PARITY_PRODUCTION_DB_HOST")
-    capture.add_argument("--s3-uri", required=True)
-    capture.add_argument("--kms-key-arn", required=True)
     capture.add_argument("--ttl-hours", type=int, default=24)
     capture.add_argument("--source-sha", required=True)
+    capture.add_argument(
+        "--mode", choices=("full", "schema-only"), default="full"
+    )
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--contract", type=Path, required=True)
@@ -490,10 +548,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest_path=args.manifest,
                 dsn=dsn,
                 expected_production_host=host,
-                s3_uri=args.s3_uri,
-                kms_key_arn=args.kms_key_arn,
                 ttl_hours=args.ttl_hours,
                 source_sha=args.source_sha,
+                capture_mode=args.mode,
             )
         elif args.command == "verify":
             result = verify_snapshot(

@@ -1,8 +1,14 @@
-"""Fail-closed external boundary selection for disposable parity deployments."""
+"""Fail-closed database boundary for disposable production-parity runs.
+
+Parity deliberately changes only the Supabase-compatible data plane and the
+daily benchmark date. Chain reads, signing profiles, netuid, and network stay
+identical to production; irreversible chain writes are stopped by the external
+submission-capture adapter rather than by changing measured validator policy.
+"""
 
 from __future__ import annotations
 
-import ipaddress
+from datetime import date, datetime, timezone
 import os
 from pathlib import Path
 import re
@@ -13,29 +19,23 @@ from urllib.parse import urlsplit
 PRODUCTION_SUPABASE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
 PRODUCTION_CHAIN_HOST = "entrypoint-finney.opentensor.ai"
 PRODUCTION_CHAIN_ARCHIVE_HOST = "archive.chain.opentensor.ai"
-PRODUCTION_PARITY_CHAIN_HOST = "test.finney.opentensor.ai"
 PRODUCTION_PARITY_MODE_ENV = "LEADPOET_PRODUCTION_PARITY_MODE"
 PRODUCTION_PARITY_RUN_ID_ENV = "LEADPOET_PRODUCTION_PARITY_RUN_ID"
 PRODUCTION_PARITY_SUPABASE_ORIGIN_ENV = (
     "LEADPOET_PRODUCTION_PARITY_SUPABASE_ORIGIN"
 )
-PRODUCTION_PARITY_CHAIN_HOST_ENV = "LEADPOET_PRODUCTION_PARITY_CHAIN_HOST"
-PRODUCTION_PARITY_CHAIN_ARCHIVE_HOST_ENV = (
-    "LEADPOET_PRODUCTION_PARITY_CHAIN_ARCHIVE_HOST"
+PRODUCTION_PARITY_BENCHMARK_DATE_ENV = (
+    "LEADPOET_PRODUCTION_PARITY_BENCHMARK_DATE"
 )
 PRODUCTION_PARITY_ENV_NAMES = (
     PRODUCTION_PARITY_MODE_ENV,
     PRODUCTION_PARITY_RUN_ID_ENV,
     PRODUCTION_PARITY_SUPABASE_ORIGIN_ENV,
-    PRODUCTION_PARITY_CHAIN_HOST_ENV,
-    PRODUCTION_PARITY_CHAIN_ARCHIVE_HOST_ENV,
+    PRODUCTION_PARITY_BENCHMARK_DATE_ENV,
 )
 
 _RUN_ID_RE = re.compile(r"^[a-z0-9-]{6,40}$")
-_HOST_RE = re.compile(
-    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
-)
+_CLOUDFRONT_HOST_RE = re.compile(r"^[a-z0-9-]+\.cloudfront\.net$")
 
 
 class ProductionParityBoundaryV2Error(ValueError):
@@ -50,17 +50,6 @@ def _optional_text(environment: Mapping[str, object], name: str) -> Optional[str
         raise ProductionParityBoundaryV2Error(f"{name} must be text or null")
     normalized = value.strip()
     return normalized or None
-
-
-def _validate_hostname(value: str, *, field: str) -> str:
-    hostname = str(value or "").strip().lower()
-    if not _HOST_RE.fullmatch(hostname):
-        raise ProductionParityBoundaryV2Error(f"{field} is invalid")
-    try:
-        ipaddress.ip_address(hostname)
-    except ValueError:
-        return hostname
-    raise ProductionParityBoundaryV2Error(f"{field} cannot be an IP address")
 
 
 def _parity_configuration(
@@ -94,10 +83,7 @@ def _parity_configuration(
         raise ProductionParityBoundaryV2Error(
             "production-parity Supabase origin port is invalid"
         ) from exc
-    hostname = _validate_hostname(
-        str(parsed.hostname or ""), field="production-parity Supabase hostname"
-    )
-    expected_prefix = f"database-{run_id}."
+    hostname = str(parsed.hostname or "").strip().lower()
     if (
         parsed.scheme.lower() != "https"
         or port not in (None, 443)
@@ -106,33 +92,23 @@ def _parity_configuration(
         or parsed.path not in ("", "/")
         or parsed.query
         or parsed.fragment
-        or not hostname.startswith(expected_prefix)
-        or hostname == PRODUCTION_SUPABASE_ORIGIN.split("://", 1)[1]
+        or not _CLOUDFRONT_HOST_RE.fullmatch(hostname)
+        or origin.rstrip("/") == PRODUCTION_SUPABASE_ORIGIN
     ):
         raise ProductionParityBoundaryV2Error(
             "production-parity Supabase origin is outside the run-scoped TLS boundary"
         )
-    chain_host = _validate_hostname(
-        str(values[PRODUCTION_PARITY_CHAIN_HOST_ENV]),
-        field="production-parity chain host",
-    )
-    archive_host = _validate_hostname(
-        str(values[PRODUCTION_PARITY_CHAIN_ARCHIVE_HOST_ENV]),
-        field="production-parity archive host",
-    )
-    if (
-        chain_host != PRODUCTION_PARITY_CHAIN_HOST
-        or archive_host != PRODUCTION_PARITY_CHAIN_HOST
-    ):
+    benchmark_date = str(values[PRODUCTION_PARITY_BENCHMARK_DATE_ENV])
+    try:
+        normalized_date = date.fromisoformat(benchmark_date).isoformat()
+    except ValueError as exc:
         raise ProductionParityBoundaryV2Error(
-            "production-parity chain boundary is not the reviewed test network"
-        )
+            "production-parity benchmark date is invalid"
+        ) from exc
     return {
         "run_id": run_id,
-        "supabase_origin": f"https://{hostname}"
-        + (":443" if port == 443 else ""),
-        "chain_host": chain_host,
-        "chain_archive_host": archive_host,
+        "supabase_origin": f"https://{hostname}" + (":443" if port == 443 else ""),
+        "benchmark_date": normalized_date,
     }
 
 
@@ -149,14 +125,20 @@ def validate_production_parity_boundary_document_v2(
         return {
             "mode": "production",
             "supabase_origin": PRODUCTION_SUPABASE_ORIGIN,
+            "benchmark_date": None,
             "chain_host": PRODUCTION_CHAIN_HOST,
             "chain_archive_host": PRODUCTION_CHAIN_ARCHIVE_HOST,
         }
-    if str(network or "").strip().lower() != "test" or int(netuid) == 71:
+    if str(network or "").strip().lower() != "finney" or int(netuid) != 71:
         raise ProductionParityBoundaryV2Error(
-            "production-parity boundary requires the isolated test network"
+            "production-parity must retain the production network and netuid"
         )
-    return {"mode": "production-parity", **parity}
+    return {
+        "mode": "production-parity",
+        **parity,
+        "chain_host": PRODUCTION_CHAIN_HOST,
+        "chain_archive_host": PRODUCTION_CHAIN_ARCHIVE_HOST,
+    }
 
 
 def validate_production_parity_boundary_v2(
@@ -183,10 +165,16 @@ def configured_boundary_document_v2(
         return {
             "mode": "production",
             "supabase_origin": PRODUCTION_SUPABASE_ORIGIN,
+            "benchmark_date": None,
             "chain_host": PRODUCTION_CHAIN_HOST,
             "chain_archive_host": PRODUCTION_CHAIN_ARCHIVE_HOST,
         }
-    return {"mode": "production-parity", **parity}
+    return {
+        "mode": "production-parity",
+        **parity,
+        "chain_host": PRODUCTION_CHAIN_HOST,
+        "chain_archive_host": PRODUCTION_CHAIN_ARCHIVE_HOST,
+    }
 
 
 def configured_supabase_origin_v2(
@@ -197,15 +185,23 @@ def configured_supabase_origin_v2(
     return str(configured_boundary_document_v2(environment)["supabase_origin"])
 
 
+def production_parity_enabled_v2(
+    environment: Optional[Mapping[str, object]] = None,
+) -> bool:
+    """Return true only for a complete, validated parity configuration."""
+
+    return configured_boundary_document_v2(environment)["mode"] == "production-parity"
+
+
 def configured_chain_source_boundary_v2(
     environment: Optional[Mapping[str, object]] = None,
 ) -> Dict[str, str]:
-    """Resolve the already-attested live/archive chain hosts."""
+    """Return the production chain boundary in every mode."""
 
-    document = configured_boundary_document_v2(environment)
+    configured_boundary_document_v2(environment)
     return {
-        "chain_host": str(document["chain_host"]),
-        "chain_archive_host": str(document["chain_archive_host"]),
+        "chain_host": PRODUCTION_CHAIN_HOST,
+        "chain_archive_host": PRODUCTION_CHAIN_ARCHIVE_HOST,
     }
 
 
@@ -214,11 +210,23 @@ def configured_chain_signing_profile_path_v2(
     *,
     environment: Optional[Mapping[str, object]] = None,
 ) -> Path:
-    """Select one measured profile without accepting a caller-chosen path."""
+    """Retain the measured production signing profile in every parity mode."""
 
-    source = os.environ if environment is None else environment
-    parity = _parity_configuration(source)
-    path = Path(production_profile_path)
-    if parity is None:
-        return path
-    return path.with_name("chain_signing_profile_test_v2.json")
+    configured_boundary_document_v2(environment)
+    return Path(production_profile_path)
+
+
+def configured_rebenchmark_now_v2(
+    *,
+    environment: Optional[Mapping[str, object]] = None,
+    now: Optional[datetime] = None,
+) -> datetime:
+    """Return UTC now, replacing only the date inside a complete parity run."""
+
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    document = configured_boundary_document_v2(environment)
+    benchmark_date = document.get("benchmark_date")
+    if benchmark_date is None:
+        return current
+    selected = date.fromisoformat(str(benchmark_date))
+    return current.replace(year=selected.year, month=selected.month, day=selected.day)

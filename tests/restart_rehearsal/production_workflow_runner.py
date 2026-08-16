@@ -1768,17 +1768,87 @@ def _recompose_candidate_bundle(
     )
 
 
+def _load_production_allocation(
+    path: Path | None,
+    *,
+    candidate_sha: str,
+) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("production allocation override is unreadable") from exc
+    expected_fields = {
+        "schema_version",
+        "candidate_sha",
+        "source_epoch",
+        "root_receipt_hash",
+        "handoff_hash",
+        "allocation_hash",
+        "allocation_doc",
+    }
+    if (
+        not isinstance(document, Mapping)
+        or set(document) != expected_fields
+        or document.get("schema_version")
+        != "leadpoet.rehearsal_production_allocation.v1"
+        or document.get("candidate_sha") != candidate_sha
+    ):
+        raise RuntimeError("production allocation override identity differs")
+    try:
+        source_epoch = int(document["source_epoch"])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("production allocation source epoch is invalid") from exc
+    allocation_doc = document.get("allocation_doc")
+    allocation_hash = str(document.get("allocation_hash") or "")
+    hash_payload = (
+        {
+            key: value
+            for key, value in dict(allocation_doc).items()
+            if key != "allocation_hash"
+        }
+        if isinstance(allocation_doc, Mapping)
+        else {}
+    )
+    hashes = (
+        allocation_hash,
+        str(document.get("root_receipt_hash") or ""),
+        str(document.get("handoff_hash") or ""),
+    )
+    if (
+        source_epoch <= 0
+        or not isinstance(allocation_doc, Mapping)
+        or any(
+            len(value) != 71
+            or not value.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in value[7:])
+            for value in hashes
+        )
+        or allocation_doc.get("allocation_hash") != allocation_hash
+        or sha256_json(hash_payload) != allocation_hash
+    ):
+        raise RuntimeError("production allocation override hash differs")
+    return dict(document)
+
+
 def _run_independent_epoch_diagnostics(
     *,
     candidate_sha: str,
     epoch_id: int,
     stages: list[dict[str, Any]],
+    production_allocation: Mapping[str, Any] | None = None,
 ) -> None:
     """Exercise independent downstream contracts before the joined epoch."""
 
     epoch_fixture = SanitizedWeightFixture(
         candidate_sha=candidate_sha,
         epoch_id=epoch_id,
+        production_allocation_doc=(
+            production_allocation.get("allocation_doc")
+            if production_allocation is not None
+            else None
+        ),
     )
     bundle_passed, bundle = _run_workflow_stage(
         stage="diagnostic:candidate-bundle-generation",
@@ -1885,10 +1955,16 @@ def _run_epoch(
     fixture: Mapping[str, Any],
     candidate_sha: str,
     epoch_id: int,
+    production_allocation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     epoch_fixture = SanitizedWeightFixture(
         candidate_sha=candidate_sha,
         epoch_id=epoch_id,
+        production_allocation_doc=(
+            production_allocation.get("allocation_doc")
+            if production_allocation is not None
+            else None
+        ),
     )
     coordinator_key = epoch_fixture.coordinator_key
     weight_key = epoch_fixture.weight_key
@@ -2225,7 +2301,7 @@ def _run_epoch(
     revealed = services.request("GET", f"/chain/epoch/{epoch_id}/reveal")
     if revealed["reveal"]["vector_hash"] != reveal["vector_hash"]:
         raise RuntimeError("revealed vector readback differs")
-    return {
+    result = {
         "epoch_id": epoch_id,
         "pcr0": weight_boot["pcr0"],
         "bundle_hash": verified_bundle["bundle_hash"],
@@ -2249,6 +2325,17 @@ def _run_epoch(
         "auditor_verified": True,
         "auditor_runtime_verified": True,
     }
+    if production_allocation is not None:
+        result["production_allocation_hash"] = production_allocation[
+            "allocation_hash"
+        ]
+        result["production_allocation_handoff_hash"] = production_allocation[
+            "handoff_hash"
+        ]
+        result["production_allocation_source_epoch"] = int(
+            production_allocation["source_epoch"]
+        )
+    return result
 
 
 def _exercise_fault(
@@ -9742,6 +9829,7 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, required=True)
     parser.add_argument("--fixture", type=Path, required=True)
     parser.add_argument("--boundary-contract", type=Path, required=True)
+    parser.add_argument("--production-allocation", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if len(args.candidate_sha) != 40 or any(
@@ -9807,6 +9895,17 @@ def main() -> int:
     if inputs_passed:
         fixture, boundary_contract, behavior_contract = inputs
 
+    allocation_passed, production_allocation = _run_workflow_stage(
+        stage="production-allocation-input",
+        action=lambda: _load_production_allocation(
+            args.production_allocation,
+            candidate_sha=args.candidate_sha,
+        ),
+        stages=stages,
+    )
+    if not allocation_passed:
+        production_allocation = None
+
     identities: list[dict[str, str]] = []
     source_paths = (
         list(behavior_contract["production_source_paths"])
@@ -9853,6 +9952,7 @@ def main() -> int:
         candidate_sha=args.candidate_sha,
         epoch_id=30_000,
         stages=stages,
+        production_allocation=production_allocation,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -9953,6 +10053,7 @@ def main() -> int:
                             fixture=fixture,
                             candidate_sha=args.candidate_sha,
                             epoch_id=epoch_id,
+                            production_allocation=production_allocation,
                         ),
                         stages=stages,
                     )

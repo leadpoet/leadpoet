@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 
 CONTRACT_SCHEMA_VERSION = "leadpoet.production_parity_contract.v1"
-SNAPSHOT_SCHEMA_VERSION = "leadpoet.production_parity_snapshot.v2"
+SNAPSHOT_SCHEMA_VERSION = "leadpoet.production_parity_snapshot.v4"
 LEDGER_SCHEMA_VERSION = "leadpoet.production_parity_ledger.v1"
 HISTORICAL_ORACLE_SCHEMA_VERSION = (
     "leadpoet.production_parity_historical_oracle.v1"
@@ -29,7 +29,6 @@ HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 MIGRATION_RE = re.compile(
     r"^scripts/(?P<sequence>[0-9]+)-.+(?P<concurrent>\.concurrent)?\.sql$"
 )
-S3_URI_RE = re.compile(r"^s3://[A-Za-z0-9][A-Za-z0-9._-]*/[^\s]+$")
 
 
 class ProductionParityError(RuntimeError):
@@ -315,25 +314,30 @@ def validate_snapshot_manifest(
         raise ProductionParityError("production snapshot has expired")
     if document.get("capture_transaction_read_only") is not True:
         raise ProductionParityError("snapshot capture was not transaction-read-only")
+    capture_mode = str(document.get("capture_mode") or "")
+    if capture_mode not in {"full", "schema-only"}:
+        raise ProductionParityError("snapshot capture mode is unsupported")
+    document["capture_mode"] = capture_mode
     archive = document.get("archive")
     if not isinstance(archive, Mapping):
         raise ProductionParityError("snapshot archive metadata is missing")
-    archive_uri = str(archive.get("s3_uri") or "")
-    if not S3_URI_RE.fullmatch(archive_uri):
-        raise ProductionParityError("snapshot archive URI is invalid")
     archive_hash = _require_hash(archive.get("sha256"), field_name="archive.sha256")
     archive_size = archive.get("size_bytes")
     if not isinstance(archive_size, int) or isinstance(archive_size, bool) or archive_size <= 0:
         raise ProductionParityError("snapshot archive size is invalid")
-    kms_key = str(archive.get("kms_key_arn") or "")
-    if not kms_key.startswith("arn:aws:kms:"):
-        raise ProductionParityError("snapshot archive is not KMS-bound")
-    if archive.get("format") != "postgres-custom":
+    expected_archive_format = (
+        "postgres-custom" if capture_mode == "full" else "postgres-schema-custom"
+    )
+    if (
+        archive.get("format") != expected_archive_format
+        or archive.get("storage") != "ephemeral-encrypted-volume"
+        or archive.get("persisted") is not False
+    ):
         raise ProductionParityError("snapshot archive format is unsupported")
     document["archive"] = {
-        "format": "postgres-custom",
-        "kms_key_arn": kms_key,
-        "s3_uri": archive_uri,
+        "format": expected_archive_format,
+        "storage": "ephemeral-encrypted-volume",
+        "persisted": False,
         "sha256": archive_hash,
         "size_bytes": archive_size,
     }
@@ -361,6 +365,8 @@ def validate_snapshot_manifest(
     current_day_benchmark_bundle_count = database.get(
         "current_day_benchmark_bundle_count"
     )
+    source_role = database.get("source_role")
+    weight_history_scope = database.get("weight_history_scope")
     if (
         not isinstance(relation_count, int)
         or isinstance(relation_count, bool)
@@ -374,8 +380,7 @@ def validate_snapshot_manifest(
         or largest_relation_bytes > total_relation_bytes
         or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", capture_utc_date)
         or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", target_rebenchmark_date)
-        or target_date_value < capture_date_value
-        or target_date_value > capture_date_value + timedelta(days=1)
+        or target_date_value != capture_date_value + timedelta(days=1)
         or (
             latest_completed_benchmark_date is not None
             and not re.fullmatch(
@@ -393,6 +398,27 @@ def validate_snapshot_manifest(
         or not isinstance(current_day_benchmark_bundle_count, int)
         or isinstance(current_day_benchmark_bundle_count, bool)
         or current_day_benchmark_bundle_count < 0
+        or not isinstance(source_role, Mapping)
+        or not str(source_role.get("role_hash") or "").startswith("sha256:")
+        or source_role.get("transaction_read_only") is not True
+        or source_role.get("superuser") is not False
+        or not isinstance(source_role.get("bypass_rls"), bool)
+        or source_role.get("replication") is not False
+        or source_role.get("table_write_capable") is not False
+        or not isinstance(weight_history_scope, Mapping)
+        or not isinstance(weight_history_scope.get("netuid"), int)
+        or isinstance(weight_history_scope.get("netuid"), bool)
+        or int(weight_history_scope.get("netuid")) < 0
+        or not isinstance(weight_history_scope.get("start_epoch"), int)
+        or isinstance(weight_history_scope.get("start_epoch"), bool)
+        or int(weight_history_scope.get("start_epoch")) < 0
+        or not isinstance(weight_history_scope.get("end_epoch"), int)
+        or isinstance(weight_history_scope.get("end_epoch"), bool)
+        or int(weight_history_scope.get("end_epoch"))
+        < int(weight_history_scope.get("start_epoch"))
+        or not isinstance(weight_history_scope.get("expected_rows"), int)
+        or isinstance(weight_history_scope.get("expected_rows"), bool)
+        or int(weight_history_scope.get("expected_rows")) <= 0
     ):
         raise ProductionParityError("snapshot database shape is invalid")
     document["database"] = {
@@ -409,6 +435,22 @@ def validate_snapshot_manifest(
         ),
         "current_day_rebenchmark_run_count": current_day_rebenchmark_run_count,
         "current_day_benchmark_bundle_count": current_day_benchmark_bundle_count,
+        "source_role": {
+            "role_hash": _require_hash(
+                source_role.get("role_hash"), field_name="database.source_role.role_hash"
+            ),
+            "transaction_read_only": True,
+            "superuser": False,
+            "bypass_rls": bool(source_role.get("bypass_rls")),
+            "replication": False,
+            "table_write_capable": False,
+        },
+        "weight_history_scope": {
+            "netuid": int(weight_history_scope["netuid"]),
+            "start_epoch": int(weight_history_scope["start_epoch"]),
+            "end_epoch": int(weight_history_scope["end_epoch"]),
+            "expected_rows": int(weight_history_scope["expected_rows"]),
+        },
     }
     document["migrations"] = normalize_migrations(
         document.get("migrations"), field_name="migrations"

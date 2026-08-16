@@ -15,11 +15,7 @@ permissions:
 
 env:
   RELEASE_BUCKET: leadpoet-attested-v2-artifacts-493765492819
-  # Once the one-time parity prerequisites are installed, builders publish an
-  # immutable candidate channel and full staging alone promotes production.
-  # Until then, preserve the existing production channel to avoid a cutover
-  # deadlock caused by missing infrastructure.
-  RELEASE_PREFIX: ${{ vars.LEADPOET_PARITY_ENFORCEMENT_ENABLED == 'true' && 'attested-v2/candidates' || 'attested-v2/releases' }}
+  RELEASE_PREFIX: attested-v2/releases
   ACCEPTANCE_SIGNER_PUBKEY_HASH: sha256:cdc20e17d9ecee5da04b30604ac72bc015326640ab98501646551f075d60ef36
 
 jobs:

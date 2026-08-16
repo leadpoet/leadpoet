@@ -49,12 +49,19 @@ if [ "$COMPONENT" = "workflow" ]; then
       exit 2
       ;;
   esac
+  PRODUCTION_ALLOCATION_ARGS=()
+  if [ -n "${REHEARSAL_PRODUCTION_ALLOCATION:-}" ]; then
+    PRODUCTION_ALLOCATION_ARGS=(
+      --production-allocation "$REHEARSAL_PRODUCTION_ALLOCATION"
+    )
+  fi
   exec /usr/bin/python3.11 /harness/production_workflow_runner.py \
     --profile "$REHEARSAL_PROFILE" \
     --candidate-sha "$CANDIDATE_SHA" \
     --epochs "${REHEARSAL_EPOCHS:?REHEARSAL_EPOCHS is required}" \
     --fixture /harness/fixtures/production_shaped_v2.json \
     --boundary-contract /harness/boundary_contract.json \
+    "${PRODUCTION_ALLOCATION_ARGS[@]}" \
     --output /evidence/workflow.json
 fi
 

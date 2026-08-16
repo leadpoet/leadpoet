@@ -330,6 +330,7 @@ def build_rehearsal_behavior_contract_v2(
 
     required_stages = [
         "input-contract",
+        "production-allocation-input",
         *[f"source-identity:{path}" for path in source_paths],
         *[
             f"behavior:{scenario}"

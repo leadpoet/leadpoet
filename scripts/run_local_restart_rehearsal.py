@@ -1075,6 +1075,7 @@ def _run_workflow(
     candidate_sha: str,
     profile: str,
     docker_platform: str,
+    production_allocation: Path | None,
 ) -> None:
     limits = PROFILE_LIMITS[profile]
     command = [
@@ -1122,8 +1123,23 @@ def _run_workflow(
         "REHEARSAL_WEIGHT_READINESS_FAIL_ONCE=1",
         "--env",
         "GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS=0",
-        tag,
     ]
+    if production_allocation is not None:
+        command.extend(
+            [
+                "--mount",
+                (
+                    f"type=bind,src={production_allocation.resolve()},"
+                    "dst=/rehearsal-production-allocation.json,readonly"
+                ),
+                "--env",
+                (
+                    "REHEARSAL_PRODUCTION_ALLOCATION="
+                    "/rehearsal-production-allocation.json"
+                ),
+            ]
+        )
+    command.append(tag)
     try:
         _run(command)
     except BaseException:
@@ -1267,7 +1283,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--rebuild-image", action="store_true")
+    parser.add_argument(
+        "--production-allocation",
+        type=Path,
+        help=(
+            "Optional hash-bound allocation emitted by a disposable "
+            "production-parity gateway. It is mounted read-only into only "
+            "the canonical workflow stage."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.production_allocation is not None:
+        args.production_allocation = args.production_allocation.resolve()
+        if not args.production_allocation.is_file():
+            parser.error("--production-allocation must be a readable file")
     args.profile = _runtime_profile(args.profile)
 
     with _exclusive_rehearsal_lock(), _isolated_docker_client_config():
@@ -1518,6 +1547,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                     evidence_root=evidence_root,
                     profile=args.profile,
                     docker_platform=docker_platform,
+                    production_allocation=args.production_allocation,
                 ),
                 stages=stage_results,
             )

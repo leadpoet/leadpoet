@@ -9,6 +9,10 @@ from typing import Any, Mapping
 
 from research_lab.canonical import sha256_json
 
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    configured_rebenchmark_now_v2,
+)
+
 from .config import ResearchLabGatewayConfig
 from .promotion import load_active_private_model
 from .store import select_many
@@ -294,7 +298,7 @@ async def autoresearch_daily_baseline_readiness(
     if not config.private_baseline_rebenchmark_enabled:
         return {"available": True, "reason": "daily_baseline_disabled"}
 
-    benchmark_date = (now or datetime.now(timezone.utc)).astimezone(
+    benchmark_date = (now or configured_rebenchmark_now_v2()).astimezone(
         timezone.utc
     ).date().isoformat()
     try:

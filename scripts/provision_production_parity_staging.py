@@ -1,848 +1,547 @@
 #!/usr/bin/env python3
-"""Provision and destroy one candidate-bound physical parity stack."""
+"""Provision one disposable Nitro host for full production-parity validation."""
 
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
-import subprocess
 import sys
+import time
 from typing import Any, Mapping, Sequence
-from urllib.request import urlopen
+
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from leadpoet_canonical.production_parity_wallet import (  # noqa: E402
-    ProductionParityWalletError,
-    install_base,
-    normalize_spec,
-    validate_head,
-)
-from leadpoet_canonical.production_parity_epoch_authority import (  # noqa: E402
-    ProductionParityEpochAuthorityError,
-    install_base as epoch_authority_install_base,
-    normalize_spec as normalize_epoch_authority_spec,
-    validate_head as validate_epoch_authority_head,
-)
-
-SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 RUN_RE = re.compile(r"^[a-z0-9-]{6,40}$")
-SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:@+=,-]+$")
-INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
-AMI_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 INSTANCE_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,31}$")
-REPO_URL_RE = re.compile(
-    r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$"
-)
-SCHEMA_VERSION = "leadpoet.production_parity_infra.v1"
+IP_RE = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+SCHEMA_VERSION = "leadpoet.production_parity_ephemeral_stack.v2"
+TAG_RUN = "leadpoet:parity-run"
+TAG_SHA = "leadpoet:candidate-sha"
+TAG_EPHEMERAL = "leadpoet:ephemeral"
+ARTIFACT_RETENTION_DAYS = 1
+EARLY_BOOT_ISOLATION = """#cloud-boothook
+#!/bin/bash
+set -eu
+for unit in $(systemctl list-unit-files --no-legend 2>/dev/null \
+  | awk '$1 ~ /(leadpoet|research-lab|gateway|validator)/ {print $1}'); do
+  systemctl mask --now "$unit" >/dev/null 2>&1 || true
+done
+install -d -m 0700 /run/leadpoet-production-parity
+printf '%s\n' isolated >/run/leadpoet-production-parity/early-boot-isolated
+"""
 
 
 class ProvisioningError(RuntimeError):
-    pass
+    """A transient stack could not be proven bounded to one candidate."""
 
 
-def _load(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ProvisioningError("parity infrastructure config is unreadable") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
-        raise ProvisioningError("parity infrastructure config schema differs")
-    return value
+def _tags(run_id: str, candidate_sha: str) -> list[dict[str, str]]:
+    return [
+        {"Key": TAG_RUN, "Value": run_id},
+        {"Key": TAG_SHA, "Value": candidate_sha},
+        {"Key": TAG_EPHEMERAL, "Value": "true"},
+        {"Key": "Name", "Value": f"leadpoet-parity-{run_id}"},
+    ]
 
 
-def _run(command: Sequence[str], *, timeout: int) -> str:
-    result = subprocess.run(
-        list(command),
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()[-1000:]
-        raise ProvisioningError(f"command failed: {detail}")
-    return result.stdout
+def _artifact_bucket_name(
+    *, account_id: str, run_id: str, candidate_sha: str
+) -> str:
+    if not re.fullmatch(r"^[0-9]{12}$", account_id):
+        raise ProvisioningError("AWS account identity is invalid")
+    suffix = hashlib.sha256(
+        f"{account_id}:{run_id}:{candidate_sha}".encode("ascii")
+    ).hexdigest()[:16]
+    return f"leadpoet-parity-{account_id}-{suffix}"
 
 
-def _aws(region: str, *args: str, timeout: int = 300) -> str:
-    return _run(["aws", "--region", region, *args], timeout=timeout)
-
-
-def _public_cidr() -> str:
-    with urlopen("https://checkip.amazonaws.com", timeout=15) as response:
-        value = response.read().decode("ascii").strip()
-    if not re.fullmatch(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", value):
-        raise ProvisioningError("controller public address is invalid")
-    return value + "/32"
-
-
-def _require_config_mapping(config: Mapping[str, Any], field: str) -> Mapping[str, Any]:
-    value = config.get(field)
-    if not isinstance(value, Mapping):
-        raise ProvisioningError(f"{field} must be an object")
-    return value
-
-
-def _parameter_values(config: Mapping[str, Any]) -> dict[str, str]:
-    parameters = _require_config_mapping(config, "cloudformation_parameters")
-    derived = {
-        "GatewayImageId",
-        "ValidatorImageId",
-        "AuditorImageId",
-        "GatewayInstanceType",
-        "ValidatorInstanceType",
-        "AuditorInstanceType",
-    }
-    supplied_derived = sorted(derived & set(parameters))
-    if supplied_derived:
-        raise ProvisioningError(
-            "production-derived CloudFormation parameters must not be configured: "
-            + ",".join(supplied_derived)
-        )
-    required = {
-        "VpcId",
-        "SubnetId",
-        "DatabaseImageId",
-        "DashboardImageId",
-        "DatabaseInstanceType",
-        "DashboardInstanceType",
-        "GatewayInstanceProfile",
-        "ValidatorInstanceProfile",
-        "AuditorInstanceProfile",
-        "DatabaseInstanceProfile",
-        "DashboardInstanceProfile",
-        "DatabaseCertificateArn",
-        "HostedZoneId",
-        "BaseDomain",
-    }
-    missing = sorted(required - set(parameters))
-    if missing:
-        raise ProvisioningError("missing CloudFormation parameters: " + ",".join(missing))
-    result = {str(key): str(value) for key, value in parameters.items()}
-    if any(not SAFE_VALUE_RE.fullmatch(value) for value in result.values()):
-        raise ProvisioningError("CloudFormation parameter contains an unsafe value")
-    return result
-
-
-def _production_reference(
-    config: Mapping[str, Any], *, role: str
-) -> Mapping[str, Any]:
-    references = _require_config_mapping(config, "production_references")
-    value = _require_config_mapping(references, role)
-    instance_id = str(value.get("instance_id") or "").strip()
-    public_ip = str(value.get("public_ip") or "").strip()
-    if bool(instance_id) == bool(public_ip):
-        raise ProvisioningError(
-            f"{role} production reference requires exactly one instance_id or public_ip"
-        )
-    if instance_id and not INSTANCE_ID_RE.fullmatch(instance_id):
-        raise ProvisioningError(f"{role} production instance ID is invalid")
-    if public_ip and not re.fullmatch(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", public_ip):
-        raise ProvisioningError(f"{role} production public IP is invalid")
-    return {"instance_id": instance_id, "public_ip": public_ip}
-
-
-def _describe_reference_instance(
-    region: str, *, role: str, reference: Mapping[str, Any]
-) -> dict[str, str]:
-    selector: list[str]
-    if reference.get("instance_id"):
-        selector = ["--instance-ids", str(reference["instance_id"])]
-    else:
-        selector = [
-            "--filters",
-            f"Name=ip-address,Values={reference['public_ip']}",
-        ]
-    raw = _aws(
-        region,
-        "ec2",
-        "describe-instances",
-        *selector,
-        "--output",
-        "json",
-    )
-    try:
-        document = json.loads(raw)
-        instances = [
-            instance
-            for reservation in document.get("Reservations", [])
-            if isinstance(reservation, Mapping)
-            for instance in reservation.get("Instances", [])
-            if isinstance(instance, Mapping)
-        ]
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise ProvisioningError(
-            f"{role} production instance evidence is invalid"
-        ) from exc
-    if len(instances) != 1:
-        raise ProvisioningError(
-            f"{role} production reference did not resolve exactly one instance"
-        )
-    value = instances[0]
-    instance_id = str(value.get("InstanceId") or "")
-    image_id = str(value.get("ImageId") or "")
-    instance_type = str(value.get("InstanceType") or "")
-    architecture = str(value.get("Architecture") or "")
-    state = value.get("State")
-    enclave_options = value.get("EnclaveOptions")
-    metadata_options = value.get("MetadataOptions")
-    if (
-        not INSTANCE_ID_RE.fullmatch(instance_id)
-        or not AMI_RE.fullmatch(image_id)
-        or not INSTANCE_TYPE_RE.fullmatch(instance_type)
-        or architecture not in {"x86_64", "arm64"}
-        or not isinstance(state, Mapping)
-        or state.get("Name") != "running"
-        or not isinstance(enclave_options, Mapping)
-        or enclave_options.get("Enabled") is not True
-        or not isinstance(metadata_options, Mapping)
-        or metadata_options.get("HttpTokens") != "required"
-    ):
-        raise ProvisioningError(
-            f"{role} production instance is not a running IMDSv2/Nitro reference"
-        )
-    return {
-        "instance_id": instance_id,
-        "image_id": image_id,
-        "instance_type": instance_type,
-        "architecture": architecture,
-    }
-
-
-def _wallet_artifacts(
-    config: Mapping[str, Any], *, region: str
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    settings = _require_config_mapping(config, "wallet_artifacts")
-    runtime = _require_config_mapping(config, "runtime_metadata")
-    network = str(runtime.get("network") or "").strip().lower()
-    try:
-        netuid = int(runtime.get("netuid"))
-    except (TypeError, ValueError) as exc:
-        raise ProvisioningError("staging wallet netuid is invalid") from exc
-    raw_auditors = settings.get("audit_validators")
-    if not isinstance(raw_auditors, list) or len(raw_auditors) != 2:
-        raise ProvisioningError("exactly two audit wallet artifacts are required")
-    raw_specs = {
-        "primary-validator": _require_config_mapping(
-            settings, "primary_validator"
-        ),
-        "auditor-a": _require_config_mapping(
-            {"auditor-a": raw_auditors[0]}, "auditor-a"
-        ),
-        "auditor-b": _require_config_mapping(
-            {"auditor-b": raw_auditors[1]}, "auditor-b"
-        ),
-    }
-    specs: dict[str, dict[str, Any]] = {}
-    evidence: dict[str, dict[str, Any]] = {}
-    try:
-        for role, value in raw_specs.items():
-            spec = normalize_spec(value, role=role, network=network, netuid=netuid)
-            head = json.loads(
-                _aws(
-                    region,
-                    "s3api",
-                    "head-object",
-                    "--bucket",
-                    spec["bucket"],
-                    "--key",
-                    spec["key"],
-                    "--version-id",
-                    spec["version_id"],
-                    "--output",
-                    "json",
-                )
-            )
-            specs[role] = spec
-            evidence[role] = validate_head(spec, head)
-    except (ProductionParityWalletError, TypeError, ValueError) as exc:
-        raise ProvisioningError("staging wallet artifact validation failed") from exc
-    hotkeys = [spec["expected_hotkey"] for spec in specs.values()]
-    if len(set(hotkeys)) != 3:
-        raise ProvisioningError("staging wallet hotkeys must be distinct")
-    return specs, evidence
-
-
-def _epoch_authority_artifact(
-    config: Mapping[str, Any], *, region: str
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    runtime = _require_config_mapping(config, "runtime_metadata")
-    value = _require_config_mapping(config, "epoch_authority_artifact")
-    network = str(runtime.get("network") or "").strip().lower()
-    try:
-        netuid = int(runtime.get("netuid"))
-        spec = normalize_epoch_authority_spec(
-            value,
-            network=network,
-            netuid=netuid,
-        )
-        head = json.loads(
-            _aws(
-                region,
-                "s3api",
-                "head-object",
-                "--bucket",
-                spec["bucket"],
-                "--key",
-                spec["key"],
-                "--version-id",
-                spec["version_id"],
-                "--output",
-                "json",
-            )
-        )
-        evidence = validate_epoch_authority_head(spec, head)
-    except (
-        ProductionParityEpochAuthorityError,
-        TypeError,
-        ValueError,
-    ) as exc:
-        raise ProvisioningError(
-            "testnet epoch authority artifact validation failed"
-        ) from exc
-    return spec, evidence
-
-
-def _stack_outputs(region: str, stack_name: str) -> dict[str, str]:
-    raw = _aws(
-        region,
-        "cloudformation",
-        "describe-stacks",
-        "--stack-name",
-        stack_name,
-        "--query",
-        "Stacks[0].Outputs",
-        "--output",
-        "json",
-    )
-    values = json.loads(raw)
-    if not isinstance(values, list):
-        raise ProvisioningError("CloudFormation outputs are invalid")
-    return {
-        str(item["OutputKey"]): str(item["OutputValue"])
-        for item in values
-        if isinstance(item, Mapping) and item.get("OutputKey") and item.get("OutputValue")
-    }
-
-
-def _resolve_remote_main(repository_url: str) -> str:
-    if not REPO_URL_RE.fullmatch(repository_url):
-        raise ProvisioningError("dashboard repository URL is invalid")
-    output = _run(
-        ["git", "ls-remote", repository_url, "refs/heads/main"], timeout=60
-    )
-    fields = output.strip().split()
-    if len(fields) != 2 or fields[1] != "refs/heads/main" or not SHA_RE.fullmatch(fields[0]):
-        raise ProvisioningError("dashboard main commit could not be frozen")
-    return fields[0]
-
-
-def _cleanup_failed_stack(
+def _create_artifact_bucket(
+    s3: Any,
     *,
     region: str,
-    stack_name: str,
-    key_name: str,
-    key_path: Path,
-    public_path: Path,
-) -> None:
+    account_id: str,
+    run_id: str,
+    candidate_sha: str,
+) -> str:
+    bucket = _artifact_bucket_name(
+        account_id=account_id,
+        run_id=run_id,
+        candidate_sha=candidate_sha,
+    )
+    create: dict[str, Any] = {
+        "Bucket": bucket,
+        "ObjectLockEnabledForBucket": True,
+    }
+    if region != "us-east-1":
+        create["CreateBucketConfiguration"] = {
+            "LocationConstraint": region
+        }
+    created = False
     try:
-        try:
-            _aws(region, "cloudformation", "delete-stack", "--stack-name", stack_name)
-            _aws(
-                region,
-                "cloudformation",
-                "wait",
-                "stack-delete-complete",
-                "--stack-name",
-                stack_name,
-                timeout=1800,
-            )
-        except Exception:
-            pass
-    finally:
-        try:
+        s3.create_bucket(**create)
+        created = True
+        s3.put_bucket_tagging(
+            Bucket=bucket,
+            Tagging={"TagSet": _tags(run_id, candidate_sha)},
+        )
+        s3.put_public_access_block(
+            Bucket=bucket,
+            PublicAccessBlockConfiguration={
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            },
+        )
+        s3.put_bucket_encryption(
+            Bucket=bucket,
+            ServerSideEncryptionConfiguration={
+                "Rules": [
+                    {
+                        "ApplyServerSideEncryptionByDefault": {
+                            "SSEAlgorithm": "AES256"
+                        },
+                        "BucketKeyEnabled": False,
+                    }
+                ]
+            },
+        )
+        s3.put_bucket_versioning(
+            Bucket=bucket,
+            VersioningConfiguration={"Status": "Enabled"},
+        )
+        s3.put_object_lock_configuration(
+            Bucket=bucket,
+            ObjectLockConfiguration={
+                "ObjectLockEnabled": "Enabled",
+                "Rule": {
+                    "DefaultRetention": {
+                        "Mode": "COMPLIANCE",
+                        "Days": ARTIFACT_RETENTION_DAYS,
+                    }
+                },
+            },
+        )
+    except Exception:
+        if created:
             try:
-                _aws(region, "ec2", "delete-key-pair", "--key-name", key_name)
+                s3.delete_bucket(Bucket=bucket)
             except Exception:
                 pass
-        finally:
-            key_path.unlink(missing_ok=True)
-            public_path.unlink(missing_ok=True)
+        raise
+    return bucket
 
 
-def _verify_encrypted_instance_volumes(
-    region: str,
-    instance_ids: Sequence[str],
-) -> dict[str, list[str]]:
-    evidence: dict[str, list[str]] = {}
-    for instance_id in instance_ids:
-        raw = _aws(
-            region,
-            "ec2",
-            "describe-volumes",
-            "--filters",
-            f"Name=attachment.instance-id,Values={instance_id}",
-            "--query",
-            "Volumes[].{VolumeId:VolumeId,Encrypted:Encrypted}",
-            "--output",
-            "json",
-        )
-        values = json.loads(raw)
-        if (
-            not isinstance(values, list)
-            or not values
-            or any(
-                not isinstance(value, Mapping)
-                or value.get("Encrypted") is not True
-                or not str(value.get("VolumeId") or "").startswith("vol-")
-                for value in values
-            )
-        ):
-            raise ProvisioningError(
-                f"ephemeral instance storage is not fully encrypted: {instance_id}"
-            )
-        evidence[instance_id] = [str(value["VolumeId"]) for value in values]
-    return evidence
-
-
-def _provision(
-    *,
-    config: Mapping[str, Any],
-    candidate_sha: str,
-    run_id: str,
-    output_dir: Path,
-) -> dict[str, Any]:
-    if not SHA_RE.fullmatch(candidate_sha) or not RUN_RE.fullmatch(run_id):
-        raise ProvisioningError("candidate SHA or run ID is invalid")
-    region = str(config.get("region") or "").strip()
-    if not re.fullmatch(r"[a-z]{2}-[a-z]+-[0-9]", region):
-        raise ProvisioningError("AWS region is invalid")
-    stack_name = f"leadpoet-parity-{run_id}"
-    key_name = stack_name
-    metadata = _require_config_mapping(config, "runtime_metadata")
-    if str(metadata.get("gateway_public_url_template") or "") != "https://{gateway_domain}":
-        raise ProvisioningError(
-            "gateway public URL template must use the run-scoped TLS domain"
-        )
-    dashboard_template = str(metadata.get("dashboard_report_url_template") or "")
-    if dashboard_template != "https://{dashboard_domain}/api/research-lab":
-        raise ProvisioningError(
-            "dashboard URL template must use the real run-scoped dashboard API"
-        )
-    dashboard_repository_url = str(
-        metadata.get("dashboard_repository_url") or ""
+def _single_production_instance(ec2: Any, public_ip: str) -> Mapping[str, Any]:
+    if not IP_RE.fullmatch(public_ip):
+        raise ProvisioningError("production gateway address is invalid")
+    response = ec2.describe_instances(
+        Filters=[
+            {"Name": "ip-address", "Values": [public_ip]},
+            {"Name": "instance-state-name", "Values": ["running"]},
+        ]
     )
-    dashboard_source_sha = _resolve_remote_main(dashboard_repository_url)
-    wallet_specs, wallet_evidence = _wallet_artifacts(config, region=region)
-    epoch_authority_spec, epoch_authority_evidence = _epoch_authority_artifact(
-        config,
-        region=region,
-    )
-    auditor_hotkeys = [
-        wallet_specs["auditor-a"]["expected_hotkey"],
-        wallet_specs["auditor-b"]["expected_hotkey"],
+    instances = [
+        instance
+        for reservation in response.get("Reservations", [])
+        for instance in reservation.get("Instances", [])
     ]
-    parameters = _parameter_values(config)
-    gateway_reference = _describe_reference_instance(
-        region,
-        role="gateway",
-        reference=_production_reference(config, role="gateway"),
-    )
-    validator_reference = _describe_reference_instance(
-        region,
-        role="validator",
-        reference=_production_reference(config, role="validator"),
-    )
-    if gateway_reference["instance_id"] == validator_reference["instance_id"]:
-        raise ProvisioningError("gateway and validator production references must differ")
-    parameters.update(
-        {
-            "GatewayImageId": gateway_reference["image_id"],
-            "GatewayInstanceType": gateway_reference["instance_type"],
-            "ValidatorImageId": validator_reference["image_id"],
-            "ValidatorInstanceType": validator_reference["instance_type"],
-            "AuditorImageId": validator_reference["image_id"],
-            "AuditorInstanceType": validator_reference["instance_type"],
-        }
-    )
-    allowed_ssh_cidr = _public_cidr()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    key_path = output_dir / "controller.pem"
-    public_path = Path(str(key_path) + ".pub")
-    if key_path.exists() or public_path.exists():
-        raise ProvisioningError("ephemeral controller key already exists")
-    _run(
-        [
-            "ssh-keygen",
-            "-q",
-            "-t",
-            "ed25519",
-            "-N",
-            "",
-            "-C",
-            stack_name,
-            "-f",
-            str(key_path),
-        ],
-        timeout=30,
-    )
-    key_path.chmod(0o600)
-    _aws(
-        region,
-        "ec2",
-        "import-key-pair",
-        "--key-name",
-        key_name,
-        "--public-key-material",
-        "fileb://" + str(public_path),
-        "--tag-specifications",
-        (
-            "ResourceType=key-pair,Tags=["
-            f"{{Key=leadpoet:parity-run,Value={run_id}}},"
-            f"{{Key=leadpoet:candidate-sha,Value={candidate_sha}}}]"
-        ),
-    )
-    parameters.update(
-        {
-            "RunId": run_id,
-            "CandidateSha": candidate_sha,
-            "AllowedSshCidr": allowed_ssh_cidr,
-            "KeyName": key_name,
-        }
-    )
-    parameter_args = [f"{key}={value}" for key, value in sorted(parameters.items())]
-    try:
-        _aws(
-            region,
-            "cloudformation",
-            "deploy",
-            "--stack-name",
-            stack_name,
-            "--template-file",
-            str(ROOT / "infra/production-parity-staging.yml"),
-            "--capabilities",
-            "CAPABILITY_NAMED_IAM",
-            "--no-fail-on-empty-changeset",
-            "--tags",
-            f"leadpoet:parity-run={run_id}",
-            f"leadpoet:candidate-sha={candidate_sha}",
-            "--parameter-overrides",
-            *parameter_args,
-            timeout=1800,
+    if len(instances) != 1:
+        raise ProvisioningError(
+            "production gateway address did not resolve one running instance"
         )
-        outputs = _stack_outputs(region, stack_name)
-    except Exception:
-        _cleanup_failed_stack(
-            region=region,
-            stack_name=stack_name,
-            key_name=key_name,
-            key_path=key_path,
-            public_path=public_path,
+    instance = instances[0]
+    if (
+        instance.get("EnclaveOptions", {}).get("Enabled") is not True
+        or instance.get("MetadataOptions", {}).get("HttpTokens") != "required"
+        or not instance.get("ImageId")
+        or not instance.get("SubnetId")
+        or not instance.get("VpcId")
+    ):
+        raise ProvisioningError(
+            "production gateway is not a complete Nitro/IMDSv2 reference"
         )
-        raise
-    required_outputs = {
-        "GatewayPublicIp",
-        "ValidatorPublicIp",
-        "AuditorAPublicIp",
-        "AuditorBPublicIp",
-        "DatabasePublicIp",
-        "DatabasePrivateIp",
-        "DashboardPublicIp",
-        "GatewayDomain",
-        "DatabaseDomain",
-        "DashboardDomain",
-        "GatewayInstanceId",
-        "ValidatorInstanceId",
-        "AuditorAInstanceId",
-        "AuditorBInstanceId",
-        "DatabaseInstanceId",
-        "DashboardInstanceId",
-        "GatewayWebSecurityGroupId",
-        "DatabaseWebSecurityGroupId",
-        "DatabaseServiceSecurityGroupId",
-        "DashboardWebSecurityGroupId",
-    }
-    if required_outputs - set(outputs):
-        _cleanup_failed_stack(
-            region=region,
-            stack_name=stack_name,
-            key_name=key_name,
-            key_path=key_path,
-            public_path=public_path,
-        )
-        raise ProvisioningError("ephemeral stack outputs are incomplete")
-    try:
-        encrypted_volumes = _verify_encrypted_instance_volumes(
-            region,
-            [
-                outputs["GatewayInstanceId"],
-                outputs["ValidatorInstanceId"],
-                outputs["AuditorAInstanceId"],
-                outputs["AuditorBInstanceId"],
-                outputs["DatabaseInstanceId"],
-                outputs["DashboardInstanceId"],
-            ],
-        )
-    except Exception:
-        _cleanup_failed_stack(
-            region=region,
-            stack_name=stack_name,
-            key_name=key_name,
-            key_path=key_path,
-            public_path=public_path,
-        )
-        raise
-    replacements = {
-        "{gateway_ip}": outputs["GatewayPublicIp"],
-        "{database_ip}": outputs["DatabasePublicIp"],
-        "{gateway_domain}": outputs["GatewayDomain"],
-        "{database_domain}": outputs["DatabaseDomain"],
-        "{dashboard_domain}": outputs["DashboardDomain"],
-    }
-    gateway_url = str(metadata.get("gateway_public_url_template") or "")
-    dashboard_url = str(metadata.get("dashboard_report_url_template") or "")
-    for marker, replacement in replacements.items():
-        gateway_url = gateway_url.replace(marker, replacement)
-        dashboard_url = dashboard_url.replace(marker, replacement)
-    if gateway_url != f"https://{outputs['GatewayDomain']}":
-        raise ProvisioningError("gateway public URL must use the run-scoped TLS domain")
-    ssh_user = str(metadata.get("ssh_user") or "ec2-user")
-    secret_prefix = f"leadpoet/staging/production-parity/{run_id}"
-    physical_config = {
-        "schema_version": "leadpoet.physical_v2_staging_config.v2",
-        "environment": "production-parity-ephemeral",
-        "ephemeral_stack_id": run_id,
-        "network": "test",
-        "netuid": int(metadata.get("netuid") or 1),
-        "chain_endpoint": str(metadata.get("testnet_chain_endpoint") or ""),
-        "network_genesis_hash": str(
-            epoch_authority_spec["network_genesis_hash"]
-        ),
-        "gateway_public_url": gateway_url,
-        "dashboard_report_url": dashboard_url,
-        "dashboard_source_sha": dashboard_source_sha,
-        "timeout_seconds": int(metadata.get("timeout_seconds") or 14400),
-        "rebenchmark_timeout_seconds": int(
-            metadata.get("rebenchmark_timeout_seconds") or 14400
-        ),
-        "poll_seconds": int(metadata.get("poll_seconds") or 10),
-        "required_consecutive_epochs": 3,
-        "gateway": {
-            "ssh_host": f"{ssh_user}@{outputs['GatewayPublicIp']}",
-            "ssh_key": str(key_path),
-            "restart_path": str(metadata.get("gateway_restart_path") or "/home/ec2-user/gw_restart.sh"),
-            "secret_id": secret_prefix + "/gateway",
-            "repo_root": str(
-                metadata.get("gateway_repo_root")
-                or "/home/ec2-user/leadpoet_repo"
-            ),
-            "python_bin": str(
-                metadata.get("gateway_python_bin")
-                or "/home/ec2-user/venv311/bin/python3"
-            ),
-        },
-        "primary_validator": {
-            "ssh_host": f"{ssh_user}@{outputs['ValidatorPublicIp']}",
-            "ssh_key": str(key_path),
-            "restart_path": str(metadata.get("validator_restart_path") or "/home/ec2-user/leadpoet/leadpoet/validator_restart.sh"),
-            "secret_id": secret_prefix + "/validator",
-            "repo_root": str(metadata.get("validator_repo_root") or "/home/ec2-user/leadpoet/leadpoet"),
-            "container_name": str(metadata.get("validator_container_name") or "leadpoet-validator-main"),
-            "expected_hotkey": wallet_specs["primary-validator"][
-                "expected_hotkey"
-            ],
-        },
-        "audit_validators": [
+    return instance
+
+
+def _cloudfront_prefix_list(ec2: Any) -> str:
+    response = ec2.describe_managed_prefix_lists(
+        Filters=[
             {
-                "ssh_host": f"{ssh_user}@{outputs['AuditorAPublicIp']}",
-                "ssh_key": str(key_path),
-                "repo_root": str(metadata.get("auditor_repo_root") or "/home/ec2-user/leadpoet/leadpoet"),
-                "unit_name": str(metadata.get("auditor_a_unit") or "leadpoet-auditor-a.service"),
-                "expected_hotkey": str(auditor_hotkeys[0]),
-                "secret_id": secret_prefix + "/auditor-a",
-            },
-            {
-                "ssh_host": f"{ssh_user}@{outputs['AuditorBPublicIp']}",
-                "ssh_key": str(key_path),
-                "repo_root": str(metadata.get("auditor_repo_root") or "/home/ec2-user/leadpoet/leadpoet"),
-                "unit_name": str(metadata.get("auditor_b_unit") or "leadpoet-auditor-b.service"),
-                "expected_hotkey": str(auditor_hotkeys[1]),
-                "secret_id": secret_prefix + "/auditor-b",
-            },
-        ],
-        "database": {
-            "ssh_host": f"{ssh_user}@{outputs['DatabasePublicIp']}",
-            "private_ip": outputs.get("DatabasePrivateIp", ""),
-            "public_domain": outputs["DatabaseDomain"],
-            "secret_id": secret_prefix + "/database",
-        },
-        "dashboard": {
-            "ssh_host": f"{ssh_user}@{outputs['DashboardPublicIp']}",
-            "ssh_key": str(key_path),
-            "public_domain": outputs["DashboardDomain"],
-            "secret_id": secret_prefix + "/dashboard",
-            "source_sha": dashboard_source_sha,
-            "repo_root": str(
-                metadata.get("dashboard_repo_root")
-                or "/home/ec2-user/subnet_dashboard"
-            ),
-            "unit_name": str(
-                metadata.get("dashboard_unit")
-                or "leadpoet-parity-dashboard.service"
-            ),
-        },
-    }
-    config_path = output_dir / "physical-staging.json"
-    state = {
-        "schema_version": "leadpoet.production_parity_stack_state.v1",
-        "candidate_sha": candidate_sha,
-        "run_id": run_id,
-        "region": region,
-        "stack_name": stack_name,
-        "key_name": key_name,
-        "key_path": str(key_path),
-        "config_path": str(config_path),
-        "outputs": outputs,
-        "encrypted_volumes": encrypted_volumes,
-        "dashboard_source_sha": dashboard_source_sha,
-        "dashboard_repository_url": dashboard_repository_url,
-        "production_references": {
-            "gateway": gateway_reference,
-            "validator": validator_reference,
-            "auditors_derive_from": "validator",
-        },
-        "wallet_artifacts": {
-            role: {
-                **spec,
-                "install_base": str(install_base(run_id, role)),
-                "immutability": wallet_evidence[role],
+                "Name": "prefix-list-name",
+                "Values": ["com.amazonaws.global.cloudfront.origin-facing"],
             }
-            for role, spec in wallet_specs.items()
-        },
-        "epoch_authority_artifact": {
-            **epoch_authority_spec,
-            "install_base": str(epoch_authority_install_base(run_id)),
-            "immutability": epoch_authority_evidence,
-        },
-    }
-    state_path = output_dir / "stack-state.json"
-    try:
-        config_path.write_text(
-            json.dumps(physical_config, sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        config_path.chmod(0o600)
-        state_path.write_text(
-            json.dumps(state, sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        state_path.chmod(0o600)
-    except Exception:
-        _cleanup_failed_stack(
-            region=region,
-            stack_name=stack_name,
-            key_name=key_name,
-            key_path=key_path,
-            public_path=public_path,
-        )
-        raise
-    return state
-
-
-def provision(
-    *,
-    config: Mapping[str, Any],
-    candidate_sha: str,
-    run_id: str,
-    output_dir: Path,
-) -> dict[str, Any]:
-    """Provision atomically; every exception removes the deterministic stack/key."""
-
-    try:
-        return _provision(
-            config=config,
-            candidate_sha=candidate_sha,
-            run_id=run_id,
-            output_dir=output_dir,
-        )
-    except Exception:
-        region = str(config.get("region") or "").strip()
-        key_path = output_dir / "controller.pem"
-        public_path = Path(str(key_path) + ".pub")
-        if (
-            RUN_RE.fullmatch(run_id)
-            and re.fullmatch(r"[a-z]{2}-[a-z]+-[0-9]", region)
-            and (key_path.exists() or public_path.exists())
-        ):
-            stack_name = f"leadpoet-parity-{run_id}"
-            _cleanup_failed_stack(
-                region=region,
-                stack_name=stack_name,
-                key_name=stack_name,
-                key_path=key_path,
-                public_path=public_path,
-            )
-        raise
-
-
-def destroy(*, state: Mapping[str, Any]) -> dict[str, Any]:
-    region = str(state.get("region") or "")
-    stack_name = str(state.get("stack_name") or "")
-    key_name = str(state.get("key_name") or "")
-    run_id = str(state.get("run_id") or "")
-    if not RUN_RE.fullmatch(run_id) or stack_name != f"leadpoet-parity-{run_id}" or key_name != stack_name:
-        raise ProvisioningError("ephemeral stack state is invalid")
-    _aws(region, "cloudformation", "delete-stack", "--stack-name", stack_name)
-    _aws(
-        region,
-        "cloudformation",
-        "wait",
-        "stack-delete-complete",
-        "--stack-name",
-        stack_name,
-        timeout=1800,
+        ]
     )
-    _aws(region, "ec2", "delete-key-pair", "--key-name", key_name)
-    for path_value in (state.get("key_path"), str(state.get("key_path") or "") + ".pub"):
-        path = Path(str(path_value or ""))
-        if path.is_file():
-            path.unlink()
-    return {"run_id": run_id, "stack_deleted": True, "key_deleted": True}
+    values = [
+        str(item.get("PrefixListId") or "")
+        for item in response.get("PrefixLists", [])
+        if item.get("State") in (None, "create-complete", "modify-complete")
+    ]
+    if len(values) != 1 or not values[0].startswith("pl-"):
+        raise ProvisioningError("CloudFront origin prefix list is unavailable")
+    return values[0]
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    up = subparsers.add_parser("up")
-    up.add_argument("--config", type=Path, required=True)
-    up.add_argument("--candidate-sha", required=True)
-    up.add_argument("--run-id", required=True)
-    up.add_argument("--output-dir", type=Path, required=True)
-    down = subparsers.add_parser("down")
-    down.add_argument("--state", type=Path, required=True)
-    args = parser.parse_args(argv)
-    try:
-        if args.command == "up":
-            result = provision(
-                config=_load(args.config),
-                candidate_sha=str(args.candidate_sha).lower(),
-                run_id=str(args.run_id).lower(),
-                output_dir=args.output_dir,
+def _managed_policy_id(client: Any, *, policy_type: str, name: str) -> str:
+    paginator = client.get_paginator(f"list_{policy_type}_policies")
+    key = "CachePolicyList" if policy_type == "cache" else "OriginRequestPolicyList"
+    for page in paginator.paginate(Type="managed"):
+        for item in page.get(key, {}).get("Items", []):
+            policy = item.get(
+                "CachePolicy" if policy_type == "cache" else "OriginRequestPolicy",
+                {},
             )
-        else:
-            result = destroy(state=_load_state(args.state))
-    except (OSError, ValueError, ProvisioningError, subprocess.TimeoutExpired) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
-    print(json.dumps(result, sort_keys=True))
-    return 0
+            config = policy.get(
+                "CachePolicyConfig"
+                if policy_type == "cache"
+                else "OriginRequestPolicyConfig",
+                {},
+            )
+            if config.get("Name") == name:
+                value = str(policy.get("Id") or "")
+                if value:
+                    return value
+    raise ProvisioningError(f"CloudFront managed policy is unavailable: {name}")
+
+
+def _wait_ssm_online(ssm: Any, instance_id: str, *, timeout_seconds: int = 600) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        response = ssm.describe_instance_information(
+            Filters=[{"Key": "InstanceIds", "Values": [instance_id]}]
+        )
+        values = response.get("InstanceInformationList", [])
+        if len(values) == 1 and values[0].get("PingStatus") == "Online":
+            return
+        time.sleep(5)
+    raise ProvisioningError("ephemeral parity host did not become SSM-online")
+
+
+def _wait_distribution(
+    cloudfront: Any, distribution_id: str, *, enabled: bool, timeout_seconds: int = 1200
+) -> Mapping[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        value = cloudfront.get_distribution(Id=distribution_id)["Distribution"]
+        observed_enabled = bool(value.get("DistributionConfig", {}).get("Enabled"))
+        if value.get("Status") == "Deployed" and observed_enabled is enabled:
+            return value
+        time.sleep(10)
+    raise ProvisioningError("CloudFront parity boundary did not converge")
+
+
+def _create_stack_resources(
+    *,
+    ec2: Any,
+    ssm: Any,
+    cloudfront: Any,
+    s3: Any,
+    region: str,
+    account_id: str,
+    run_id: str,
+    candidate_sha: str,
+    production_gateway_ip: str,
+    instance_profile_name: str,
+    instance_type: str | None,
+    volume_gib: int,
+    journal: dict[str, str],
+) -> dict[str, Any]:
+    if (
+        not RUN_RE.fullmatch(run_id)
+        or not SHA_RE.fullmatch(candidate_sha)
+        or not instance_profile_name
+        or volume_gib < 100
+        or volume_gib > 1024
+    ):
+        raise ProvisioningError("ephemeral stack inputs are invalid")
+    reference = _single_production_instance(ec2, production_gateway_ip)
+    selected_type = str(instance_type or reference.get("InstanceType") or "")
+    if not INSTANCE_TYPE_RE.fullmatch(selected_type):
+        raise ProvisioningError("ephemeral instance type is invalid")
+
+    artifact_bucket = _create_artifact_bucket(
+        s3,
+        region=region,
+        account_id=account_id,
+        run_id=run_id,
+        candidate_sha=candidate_sha,
+    )
+    journal["artifact_bucket"] = artifact_bucket
+    security_group = ec2.create_security_group(
+        GroupName=f"leadpoet-parity-{run_id}",
+        Description=f"Disposable Leadpoet parity database origin {run_id}",
+        VpcId=reference["VpcId"],
+        TagSpecifications=[{"ResourceType": "security-group", "Tags": _tags(run_id, candidate_sha)}],
+    )
+    security_group_id = str(security_group["GroupId"])
+    journal["security_group_id"] = security_group_id
+    prefix_list_id = _cloudfront_prefix_list(ec2)
+    ec2.authorize_security_group_ingress(
+        GroupId=security_group_id,
+        IpPermissions=[
+            {
+                "IpProtocol": "tcp",
+                "FromPort": 3000,
+                "ToPort": 3000,
+                "PrefixListIds": [{"PrefixListId": prefix_list_id}],
+            }
+        ],
+    )
+
+    launched = ec2.run_instances(
+        ImageId=reference["ImageId"],
+        InstanceType=selected_type,
+        MinCount=1,
+        MaxCount=1,
+        NetworkInterfaces=[
+            {
+                "DeviceIndex": 0,
+                "SubnetId": reference["SubnetId"],
+                "Groups": [security_group_id],
+                "AssociatePublicIpAddress": True,
+                "DeleteOnTermination": True,
+            }
+        ],
+        IamInstanceProfile={"Name": instance_profile_name},
+        EnclaveOptions={"Enabled": True},
+        MetadataOptions={
+            "HttpEndpoint": "enabled",
+            "HttpTokens": "required",
+            "HttpPutResponseHopLimit": 2,
+            "InstanceMetadataTags": "enabled",
+        },
+        BlockDeviceMappings=[
+            {
+                "DeviceName": str(reference.get("RootDeviceName") or "/dev/xvda"),
+                "Ebs": {
+                    "DeleteOnTermination": True,
+                    "Encrypted": True,
+                    "VolumeSize": volume_gib,
+                    "VolumeType": "gp3",
+                },
+            }
+        ],
+        InstanceInitiatedShutdownBehavior="terminate",
+        UserData=EARLY_BOOT_ISOLATION,
+        TagSpecifications=[
+            {"ResourceType": "instance", "Tags": _tags(run_id, candidate_sha)},
+            {"ResourceType": "volume", "Tags": _tags(run_id, candidate_sha)},
+        ],
+    )
+    values = launched.get("Instances", [])
+    if len(values) != 1:
+        raise ProvisioningError("ephemeral host launch returned an invalid inventory")
+    instance_id = str(values[0].get("InstanceId") or "")
+    journal["instance_id"] = instance_id
+    ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
+    described = ec2.describe_instances(InstanceIds=[instance_id])
+    host = described["Reservations"][0]["Instances"][0]
+    public_dns = str(host.get("PublicDnsName") or "")
+    if not public_dns:
+        raise ProvisioningError("ephemeral parity host has no public origin address")
+    _wait_ssm_online(ssm, instance_id)
+
+    cache_policy_id = _managed_policy_id(
+        cloudfront, policy_type="cache", name="Managed-CachingDisabled"
+    )
+    origin_policy_id = _managed_policy_id(
+        cloudfront,
+        policy_type="origin_request",
+        name="Managed-AllViewerExceptHostHeader",
+    )
+    created = cloudfront.create_distribution(
+        DistributionConfig={
+            "CallerReference": f"{run_id}-{candidate_sha}",
+            "Comment": f"Disposable Leadpoet parity {run_id}",
+            "Enabled": True,
+            "HttpVersion": "http2and3",
+            "IsIPV6Enabled": True,
+            "PriceClass": "PriceClass_100",
+            "Origins": {
+                "Quantity": 1,
+                "Items": [
+                    {
+                        "Id": "parity-postgrest",
+                        "DomainName": public_dns,
+                        "ConnectionAttempts": 3,
+                        "ConnectionTimeout": 10,
+                        "CustomOriginConfig": {
+                            "HTTPPort": 3000,
+                            "HTTPSPort": 443,
+                            "OriginProtocolPolicy": "http-only",
+                            "OriginSslProtocols": {"Quantity": 1, "Items": ["TLSv1.2"]},
+                            "OriginReadTimeout": 60,
+                            "OriginKeepaliveTimeout": 60,
+                        },
+                    }
+                ],
+            },
+            "DefaultCacheBehavior": {
+                "TargetOriginId": "parity-postgrest",
+                "ViewerProtocolPolicy": "https-only",
+                "AllowedMethods": {
+                    "Quantity": 7,
+                    "Items": ["GET", "HEAD", "OPTIONS", "PUT", "PATCH", "POST", "DELETE"],
+                    "CachedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]},
+                },
+                "Compress": False,
+                "CachePolicyId": cache_policy_id,
+                "OriginRequestPolicyId": origin_policy_id,
+                "SmoothStreaming": False,
+            },
+            "ViewerCertificate": {"CloudFrontDefaultCertificate": True},
+            "Restrictions": {
+                "GeoRestriction": {"RestrictionType": "none", "Quantity": 0}
+            },
+        }
+    )
+    distribution = created["Distribution"]
+    distribution_id = str(distribution["Id"])
+    journal["cloudfront_distribution_id"] = distribution_id
+    cloudfront.tag_resource(
+        Resource=distribution["ARN"],
+        Tags={"Items": _tags(run_id, candidate_sha)},
+    )
+    deployed = _wait_distribution(cloudfront, distribution_id, enabled=True)
+    domain = str(deployed.get("DomainName") or "")
+    if not domain.endswith(".cloudfront.net"):
+        raise ProvisioningError("CloudFront parity domain is invalid")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "ready",
+        "region": region,
+        "run_id": run_id,
+        "candidate_sha": candidate_sha,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "instance_id": instance_id,
+        "security_group_id": security_group_id,
+        "cloudfront_distribution_id": distribution_id,
+        "cloudfront_distribution_arn": str(deployed.get("ARN") or ""),
+        "supabase_origin": f"https://{domain}",
+        "artifact_bucket": artifact_bucket,
+        "artifact_retention_days": ARTIFACT_RETENTION_DAYS,
+        "reference_image_id": str(reference["ImageId"]),
+        "reference_instance_type": str(reference["InstanceType"]),
+        "selected_instance_type": selected_type,
+        "volume_gib": volume_gib,
+    }
+
+
+def _rollback_partial_stack(
+    *,
+    ec2: Any,
+    cloudfront: Any,
+    s3: Any,
+    journal: Mapping[str, str],
+) -> list[str]:
+    """Best-effort immediate rollback; exact-tag cleanup remains the backstop."""
+
+    errors: list[str] = []
+    distribution_id = str(journal.get("cloudfront_distribution_id") or "")
+    if distribution_id:
+        try:
+            current = cloudfront.get_distribution_config(Id=distribution_id)
+            config = dict(current["DistributionConfig"])
+            if config.get("Enabled") is True:
+                config["Enabled"] = False
+                cloudfront.update_distribution(
+                    Id=distribution_id,
+                    IfMatch=current["ETag"],
+                    DistributionConfig=config,
+                )
+                _wait_distribution(cloudfront, distribution_id, enabled=False)
+            current = cloudfront.get_distribution_config(Id=distribution_id)
+            cloudfront.delete_distribution(
+                Id=distribution_id, IfMatch=current["ETag"]
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve the original failure
+            errors.append(f"cloudfront:{type(exc).__name__}")
+    instance_id = str(journal.get("instance_id") or "")
+    if instance_id:
+        try:
+            ec2.terminate_instances(InstanceIds=[instance_id])
+            ec2.get_waiter("instance_terminated").wait(InstanceIds=[instance_id])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"instance:{type(exc).__name__}")
+    security_group_id = str(journal.get("security_group_id") or "")
+    if security_group_id:
+        try:
+            deadline = time.monotonic() + 180
+            while True:
+                try:
+                    ec2.delete_security_group(GroupId=security_group_id)
+                    break
+                except ClientError as exc:
+                    if (
+                        exc.response.get("Error", {}).get("Code")
+                        != "DependencyViolation"
+                        or time.monotonic() >= deadline
+                    ):
+                        raise
+                    time.sleep(5)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"security-group:{type(exc).__name__}")
+    artifact_bucket = str(journal.get("artifact_bucket") or "")
+    if artifact_bucket:
+        try:
+            # Provisioning has not uploaded anything yet. Object Lock does not
+            # prevent deletion of a still-empty bucket.
+            s3.delete_bucket(Bucket=artifact_bucket)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"artifact-bucket:{type(exc).__name__}")
+    return errors
+
+
+def create_stack(
+    *,
+    ec2: Any,
+    ssm: Any,
+    cloudfront: Any,
+    s3: Any,
+    region: str,
+    account_id: str,
+    run_id: str,
+    candidate_sha: str,
+    production_gateway_ip: str,
+    instance_profile_name: str,
+    instance_type: str | None,
+    volume_gib: int,
+) -> dict[str, Any]:
+    journal: dict[str, str] = {}
+    try:
+        return _create_stack_resources(
+            ec2=ec2,
+            ssm=ssm,
+            cloudfront=cloudfront,
+            s3=s3,
+            region=region,
+            account_id=account_id,
+            run_id=run_id,
+            candidate_sha=candidate_sha,
+            production_gateway_ip=production_gateway_ip,
+            instance_profile_name=instance_profile_name,
+            instance_type=instance_type,
+            volume_gib=volume_gib,
+            journal=journal,
+        )
+    except Exception as exc:
+        rollback_errors = _rollback_partial_stack(
+            ec2=ec2, cloudfront=cloudfront, s3=s3, journal=journal
+        )
+        if rollback_errors:
+            raise ProvisioningError(
+                "ephemeral stack creation failed and immediate rollback was "
+                "incomplete: " + ",".join(rollback_errors)
+            ) from exc
+        raise
 
 
 def _load_state(path: Path) -> dict[str, Any]:
@@ -850,9 +549,108 @@ def _load_state(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ProvisioningError("ephemeral stack state is unreadable") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != "leadpoet.production_parity_stack_state.v1":
+    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
         raise ProvisioningError("ephemeral stack state schema differs")
+    if not RUN_RE.fullmatch(str(value.get("run_id") or "")):
+        raise ProvisioningError("ephemeral stack state run identity is invalid")
     return value
+
+
+def delete_stack(*, ec2: Any, cloudfront: Any, state: Mapping[str, Any]) -> dict[str, Any]:
+    distribution_id = str(state.get("cloudfront_distribution_id") or "")
+    instance_id = str(state.get("instance_id") or "")
+    security_group_id = str(state.get("security_group_id") or "")
+    artifact_bucket = str(state.get("artifact_bucket") or "")
+    if distribution_id:
+        current = cloudfront.get_distribution_config(Id=distribution_id)
+        config = dict(current["DistributionConfig"])
+        if config.get("Enabled") is True:
+            config["Enabled"] = False
+            cloudfront.update_distribution(
+                Id=distribution_id,
+                IfMatch=current["ETag"],
+                DistributionConfig=config,
+            )
+            _wait_distribution(cloudfront, distribution_id, enabled=False)
+        current = cloudfront.get_distribution_config(Id=distribution_id)
+        cloudfront.delete_distribution(Id=distribution_id, IfMatch=current["ETag"])
+    if instance_id:
+        ec2.terminate_instances(InstanceIds=[instance_id])
+        ec2.get_waiter("instance_terminated").wait(InstanceIds=[instance_id])
+    if security_group_id:
+        deadline = time.monotonic() + 180
+        while True:
+            try:
+                ec2.delete_security_group(GroupId=security_group_id)
+                break
+            except ClientError as exc:
+                if (
+                    exc.response.get("Error", {}).get("Code") != "DependencyViolation"
+                    or time.monotonic() >= deadline
+                ):
+                    raise
+                time.sleep(5)
+    return {
+        "run_id": state["run_id"],
+        "instance_terminated": bool(instance_id),
+        "distribution_deleted": bool(distribution_id),
+        "security_group_deleted": bool(security_group_id),
+        # COMPLIANCE retention is intentionally irreversible. The scheduled
+        # exact-tag cleanup deletes versions and this bucket after one day.
+        "artifact_bucket_retained_for_compliance": bool(artifact_bucket),
+    }
+
+
+def _write(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(value), sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--region", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    create_parser = subparsers.add_parser("create")
+    create_parser.add_argument("--run-id", required=True)
+    create_parser.add_argument("--candidate-sha", required=True)
+    create_parser.add_argument("--production-gateway-ip", required=True)
+    create_parser.add_argument("--instance-profile-name", required=True)
+    create_parser.add_argument("--instance-type")
+    create_parser.add_argument("--volume-gib", type=int, default=200)
+    create_parser.add_argument("--state", type=Path, required=True)
+    delete_parser = subparsers.add_parser("delete")
+    delete_parser.add_argument("--state", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        ec2 = boto3.client("ec2", region_name=args.region)
+        ssm = boto3.client("ssm", region_name=args.region)
+        cloudfront = boto3.client("cloudfront")
+        s3 = boto3.client("s3", region_name=args.region)
+        sts = boto3.client("sts", region_name=args.region)
+        if args.command == "create":
+            result = create_stack(
+                ec2=ec2,
+                ssm=ssm,
+                cloudfront=cloudfront,
+                s3=s3,
+                region=args.region,
+                account_id=str(sts.get_caller_identity()["Account"]),
+                run_id=args.run_id,
+                candidate_sha=args.candidate_sha.lower(),
+                production_gateway_ip=args.production_gateway_ip,
+                instance_profile_name=args.instance_profile_name,
+                instance_type=args.instance_type,
+                volume_gib=args.volume_gib,
+            )
+            _write(args.state, result)
+        else:
+            state = _load_state(args.state)
+            result = delete_stack(ec2=ec2, cloudfront=cloudfront, state=state)
+    except (BotoCoreError, ClientError, OSError, ValueError, ProvisioningError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":

@@ -28,16 +28,15 @@ runs:
       run: |
         set -Eeuo pipefail
         scripts=(
-          scripts/bootstrap_production_parity_staging.py
+          scripts/build_production_parity_contract.py
           scripts/capture_production_parity_runtime_config.py
           scripts/cleanup_production_parity_staging.py
           scripts/materialize_production_parity_secrets.py
           scripts/production_parity_snapshot.py
           scripts/provision_production_parity_staging.py
-          scripts/publish_production_parity_evidence.py
-          scripts/read_production_parity_chain_state.py
-          scripts/run_physical_v2_staging.py
           scripts/run_production_parity_fast.py
+          scripts/run_production_parity_full_host.py
+          scripts/setup_production_parity_staging.py
         )
         for script in "${scripts[@]}"; do
           python3 "$script" --help >/dev/null

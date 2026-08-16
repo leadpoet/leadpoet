@@ -15,7 +15,6 @@ import re
 import subprocess
 import sys
 from typing import Any, Iterator, Mapping, Sequence
-from urllib.parse import urlparse
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -86,12 +85,14 @@ def _secret_environment(secret_id: str, candidate_sha: str) -> dict[str, str]:
         raise RebenchmarkReadinessError(
             "gateway staging secret is bound to another candidate"
         )
-    supabase = urlparse(environment.get("SUPABASE_URL", ""))
-    if (
-        supabase.scheme != "https"
-        or not supabase.hostname
-        or not supabase.hostname.startswith("database-")
-    ):
+    from leadpoet_canonical.production_parity_boundary_v2 import (
+        validate_production_parity_boundary_document_v2,
+    )
+
+    boundary = validate_production_parity_boundary_document_v2(
+        environment, network="finney", netuid=71
+    )
+    if boundary.get("mode") != "production-parity":
         raise RebenchmarkReadinessError(
             "gateway readiness probe is not bound to disposable state"
         )

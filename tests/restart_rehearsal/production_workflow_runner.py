@@ -11844,6 +11844,9 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                     ).read_text(encoding="utf-8")
                 )
             )
+            expected_parent_memory_mib = int(
+                candidate_topology["production_parent_memory_mib"]
+            )
             expected_available_memory_mib = int(
                 candidate_topology["host_reserved_memory_mib"]
             )
@@ -11867,13 +11870,15 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                     if row.get("boundary") == "host_kernel"
                     and row.get("operation") == "memory_capacity"
                     and row.get("read_interface") == "builtins.open"
-                    and row.get("capacity_source")
+                    and row.get("memory_capacity_source")
+                    == "candidate_topology.production_parent_memory_mib"
+                    and row.get("available_memory_capacity_source")
                     == "candidate_topology.host_reserved_memory_mib"
                     and row.get("topology_hash")
                     == candidate_topology["topology_hash"]
                     and row.get("topology_path") == "gateway/tee/topology.json"
                     and int(row.get("memory_mib") or 0)
-                    == expected_available_memory_mib
+                    == expected_parent_memory_mib
                     and int(row.get("available_memory_mib") or 0)
                     == expected_available_memory_mib
                 ]
@@ -12345,6 +12350,9 @@ def _exercise_full_rebenchmark_publication_path() -> dict[str, Any]:
                 ),
                 "memory_boundary_expected_available_mib": (
                     expected_available_memory_mib
+                ),
+                "memory_boundary_expected_parent_mib": (
+                    expected_parent_memory_mib
                 ),
                 "memory_boundary_observed_available_mib": (
                     observed_available_memory_mib
@@ -13565,6 +13573,20 @@ def main() -> int:
                 "full-rebenchmark-publication-path",
                 {},
             ).get("memory_boundary_observed_available_mib")
+            and int(
+                behavior_evidence.get(
+                    "full-rebenchmark-publication-path",
+                    {},
+                ).get("memory_boundary_expected_parent_mib")
+                or 0
+            )
+            > int(
+                behavior_evidence.get(
+                    "full-rebenchmark-publication-path",
+                    {},
+                ).get("memory_boundary_expected_available_mib")
+                or 0
+            )
             and int(
                 behavior_evidence.get(
                     "full-rebenchmark-publication-path",

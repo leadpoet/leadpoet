@@ -3931,9 +3931,16 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
         _rehearsal_host_reserved_memory_mib = int(
             _rehearsal_topology["host_reserved_memory_mib"]
         )
-        if _rehearsal_host_reserved_memory_mib <= 0:
+        _rehearsal_parent_memory_mib = int(
+            _rehearsal_topology["production_parent_memory_mib"]
+        )
+        if (
+            _rehearsal_host_reserved_memory_mib <= 0
+            or _rehearsal_parent_memory_mib
+            < _rehearsal_host_reserved_memory_mib
+        ):
             raise ValueError(
-                "candidate topology host memory reservation is invalid"
+                "candidate topology memory capacity is invalid"
             )
     except Exception as exc:
         raise SystemExit(
@@ -4038,20 +4045,26 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
         return _real_sysconf(name)
 
     def _local_meminfo_text(*, read_interface: str) -> str:
-        memory_kib = _rehearsal_host_reserved_memory_mib * 1024
+        total_memory_kib = _rehearsal_parent_memory_mib * 1024
+        available_memory_kib = _rehearsal_host_reserved_memory_mib * 1024
         _external_event(
             "host_kernel",
             "memory_capacity",
             read_interface=read_interface,
-            memory_mib=_rehearsal_host_reserved_memory_mib,
+            memory_mib=_rehearsal_parent_memory_mib,
             available_memory_mib=_rehearsal_host_reserved_memory_mib,
-            capacity_source="candidate_topology.host_reserved_memory_mib",
+            memory_capacity_source=(
+                "candidate_topology.production_parent_memory_mib"
+            ),
+            available_memory_capacity_source=(
+                "candidate_topology.host_reserved_memory_mib"
+            ),
             topology_hash=str(_rehearsal_topology["topology_hash"]),
             topology_path="gateway/tee/topology.json",
         )
         return (
-            f"MemTotal:       {memory_kib} kB\n"
-            f"MemAvailable:   {memory_kib} kB\n"
+            f"MemTotal:       {total_memory_kib} kB\n"
+            f"MemAvailable:   {available_memory_kib} kB\n"
         )
 
     def _local_open(

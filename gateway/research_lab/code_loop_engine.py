@@ -4260,6 +4260,36 @@ class CodeEditLoopEngine:
             for index in range(tree_policy.branch_factor)
         ]
         if any(item is None for item in valid_root_objectives):
+            valid_branch_count = sum(item is not None for item in valid_root_objectives)
+            branch_references: list[str] = []
+            for raw_path in tree_base_plan_doc.get("ranked_paths", []):
+                if not isinstance(raw_path, Mapping):
+                    continue
+                for raw_reference in raw_path.get("must_inspect", []):
+                    reference = str(raw_reference or "").strip()
+                    if reference and reference not in branch_references:
+                        branch_references.append(reference)
+            branch_reason = (
+                "tree_branch_objectives_incomplete:"
+                f"expected={tree_policy.branch_factor}:valid={valid_branch_count}"
+            )
+            repaired_doc = await _attempt_planner_reference_repair(
+                trigger="tree_branch_objective_validation",
+                reason=branch_reason,
+                plan_doc=tree_base_plan_doc,
+                explicit_references=branch_references,
+                feasibility_errors=(branch_reason,),
+            )
+            if repaired_doc is not None and not bool(repaired_doc.get("no_new_safe_path")):
+                tree_base_plan_doc = dict(repaired_doc)
+                valid_root_objectives = [
+                    _tree_branch_direction_plan(
+                        tree_base_plan_doc,
+                        root_slot_index=index,
+                    )
+                    for index in range(tree_policy.branch_factor)
+                ]
+        if any(item is None for item in valid_root_objectives):
             planner_terminal_without_candidate = True
             binding_plan_terminal_without_candidate = True
             stop_reason = "tree_branch_objectives_incomplete"

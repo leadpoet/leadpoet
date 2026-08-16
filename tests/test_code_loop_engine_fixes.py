@@ -2263,6 +2263,126 @@ async def test_v1_1_infeasible_test_plan_gets_one_bounded_repair(tmp_path):
     assert repair_checkpoints[1]["planner_reference_repair_status"] == "repaired"
 
 
+async def test_incomplete_root_path_set_gets_one_bounded_repair(tmp_path):
+    events = []
+    calls = []
+    builder = _PlannerBuildsCandidateBuilder(_source_context(tmp_path))
+    builder.config.planner_reference_repair_enabled = True
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(_loop_direction_plan_v1_1_payload()),
+                provider_usage={"provider": "openrouter", "response_id": "planner"},
+                cost_microusd=1000,
+            )
+        if stage == "loop_planner_reference_repair":
+            context = json.loads(messages[1]["content"].split("Context JSON:\n", 1)[1])
+            assert context["required_root_branch_count"] == 2
+            assert context["reference_resolution"]["resolved_reference_count"] == 1
+            assert context["feasibility_errors"] == [
+                "tree_branch_objectives_incomplete:expected=2:valid=1"
+            ]
+            repaired = _loop_direction_plan_v1_1_payload()
+            repaired["ranked_paths"].append(
+                {
+                    **repaired["ranked_paths"][0],
+                    "path_id": "query_recall_fallback_path",
+                    "mechanism": "add one bounded fallback query after an empty primary query",
+                    "target_behavior": ["recover completed-empty sparse searches"],
+                    "novelty_requirements": ["use a distinct fallback-query mechanism"],
+                }
+            )
+            return OpenRouterCallResult(
+                content=json.dumps(repaired),
+                provider_usage={"provider": "openrouter", "response_id": "repair"},
+                cost_microusd=1000,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect"},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "candidates": [
+                            _draft(
+                                lane="query_construction",
+                                plan_path_id="query_recall_path",
+                            ).to_dict()
+                        ]
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft"},
+                cost_microusd=1000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchRuntimeSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=2,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=builder,
+    ).run(
+        run_id="run-incomplete-root-path-repair",
+        ticket={
+            "ticket_id": "ticket-incomplete-root-path-repair",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "ticket_doc": {"brief_public_summary": "improve query recall"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={
+            "requested_compute_budget_usd": 5.0,
+            "tree_policy": _tree_runtime_policy(
+                TreePolicy(
+                    mode="active",
+                    branch_factor=2,
+                    beam_width=2,
+                    max_depth=1,
+                    max_nodes=2,
+                    shortlist_size=2,
+                    diversity_floor=2,
+                    deadline_seconds=300,
+                    finalization_reserve_seconds=30,
+                )
+            ),
+        },
+        requested_loop_count=1,
+    )
+
+    assert result.status == "completed"
+    assert calls.count("loop_planner_reference_repair") == 1
+    assert calls.index("loop_planner_reference_repair") < calls.index("source_inspection")
+    assert builder.builds == [("query_recall_path", 0)]
+    assert not [
+        event
+        for event in events
+        if event.event_doc.get("failure_class")
+        == "tree_branch_objectives_incomplete"
+    ]
+
+
 async def test_ambiguous_symbol_fails_without_paid_reference_repair(tmp_path):
     source_context = _source_context(tmp_path)
     helper = source_context.source_root / "sourcing_model" / "helper.py"

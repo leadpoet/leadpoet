@@ -562,6 +562,11 @@
       "symbol": "DockerReplayDevEvaluator._run_icp_in_docker_default"
     },
     {
+      "ast_sha256": "sha256:36186379ed189f413f3bf4fdab67dff8d776e6ddf5e3e92c23c46577fc160fe2",
+      "path": "gateway/research_lab/dev_eval_runner.py",
+      "symbol": "MAX_DEV_SNAPSHOT_BANK_ICP_COUNT"
+    },
+    {
       "ast_sha256": "sha256:4a20c974029ac8af0a9e91a4d46cc34c6a9e1955de925e159c42af5505837ab5",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "snapshot_readiness"
@@ -1052,7 +1057,27 @@
       "symbol": "_load_candidate_source_diff"
     },
     {
-      "ast_sha256": "sha256:463f33536f78ed2b37a520d4b5fa1115bab852f8f175f48aadd1e3b060bc3cb2",
+      "ast_sha256": "sha256:a92d087a10ac413de4b67399ec1701cb638c895e524167dcb99c778dec818515",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "ACTIVE_MODEL_GUARD_INTERVAL_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:d6fbf1bb40ceeb81cccd1300157c0bdce7401d4ec86d598daa59e30ae92787a2",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "SnapshotRefreshSupersededError"
+    },
+    {
+      "ast_sha256": "sha256:ae4a5d97ac6b14104557dd0eb2b442db6f172f56eb2d0a6126b6705166f85689",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_run_record_command_with_active_guard"
+    },
+    {
+      "ast_sha256": "sha256:bd80865b2a81911cc786b7ee9740b6be954a789eb26e72d295a65c4421c71455",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_write_record_cancel_marker"
+    },
+    {
+      "ast_sha256": "sha256:3f90f2c4231189399493035be05388e9612bb63d783a4a42f6e5a2880509b3f0",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
     },
@@ -3932,6 +3957,11 @@
       "symbol": "SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS"
     },
     {
+      "ast_sha256": "sha256:22756540d16e226db15291c649a12399c1b7e9f4d8af3569aa19f3914a614e43",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "SNAPSHOT_RECORD_CANCELLED_EXIT_CODE"
+    },
+    {
       "ast_sha256": "sha256:d3a909743663e78451e3ba0fc1f333e8c11c3adba9a9fa5202b4580d7afeee25",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS"
@@ -3942,9 +3972,39 @@
       "symbol": "SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS"
     },
     {
+      "ast_sha256": "sha256:a8c6448afc0e2111ab48d25af55f1692d5dd1e45349ada9a09742b9730082395",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "SnapshotRecordingCancelled"
+    },
+    {
+      "ast_sha256": "sha256:9e500fd173f109e9cb21ca7293ac62758ab20c29862c7e1658db74793ea00cb0",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_close_snapshot_request_set"
+    },
+    {
+      "ast_sha256": "sha256:1d3c56d8990adc8b9f354a3d9530b3634a5a7a2ca846720a0dfa7c37a06ba174",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_raise_if_snapshot_record_cancelled"
+    },
+    {
+      "ast_sha256": "sha256:c91895614112b9e6d8a6093a235ac99cfb66232b8ad705f64daa62a9a2fb49c1",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_record_icp_with_retries"
+    },
+    {
+      "ast_sha256": "sha256:f254845dd65ae5d738047256b8c9b184a97196b7ba0e7dc03581357b47667e50",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_replay_icp_with_docker"
+    },
+    {
       "ast_sha256": "sha256:3f908577f23b109bdb86d7f8b38b4c68a5278f4626a8a3a53d76ff692eb18998",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "_run_named_docker"
+    },
+    {
+      "ast_sha256": "sha256:d836be0317a333a46bb72d21184202537af1e6798accf67b576f267a0d1e7087",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "main"
     },
     {
       "ast_sha256": "sha256:048b8a1028295b618869ccd120d907c7f7e1283f872e108f9aa68cbabed83bc7",
@@ -3977,7 +4037,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:0aa53fe524fe82b70b0017c9b25de3b7e94e96eb6c5c7026778a483c4f36aff8",
-  "protected_source_commit": "320d15491eecc22a8816b67421a7f030e9911295",
+  "manifest_hash": "sha256:bb0c360cd63664ac06bae396671eab03af90eb073e4b868331dccf1310b597da",
+  "protected_source_commit": "5f4bee1534be188237e1ccedba629d181ae0215a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -674,6 +674,8 @@ def test_active_model_guard_cancels_stale_recording_before_publish(
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
+        if command[1].endswith("export_research_lab_dev_icp_inputs.py"):
+            return _pipeline_output(command)
         if not command[1].endswith("record_research_lab_dev_snapshots.py"):
             return "ok"
         cancel_file = Path(command[command.index("--cancel-file") + 1])

@@ -254,12 +254,19 @@ PROTECTED_SYMBOLS = {
         "MAX_SNAPSHOT_CLOSURE_ROUNDS",
         "MAX_SNAPSHOT_RECORD_ATTEMPTS",
         "SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS",
+        "SNAPSHOT_RECORD_CANCELLED_EXIT_CODE",
         "DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS",
         "SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS",
         "SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS",
+        "SnapshotRecordingCancelled",
+        "_raise_if_snapshot_record_cancelled",
         "snapshot_export_bank_size",
         "snapshot_record_workflow_timeout_seconds",
         "_run_named_docker",
+        "_record_icp_with_retries",
+        "_close_snapshot_request_set",
+        "_replay_icp_with_docker",
+        "main",
     ),
     "gateway/utils/pcr0_builder.py": (
         "DOCKER_OPERATION_LOCK_FILE",
@@ -370,6 +377,7 @@ PROTECTED_SYMBOLS = {
         "classify_candidate_tree_evaluation",
     ),
     "gateway/research_lab/dev_eval_runner.py": (
+        "MAX_DEV_SNAPSHOT_BANK_ICP_COUNT",
         "snapshot_readiness",
         "DockerReplayDevEvaluator",
         "DockerReplayDevEvaluator._run_icp_in_docker_default",
@@ -453,6 +461,10 @@ PROTECTED_SYMBOLS = {
         "run_authoritative_autoresearch_v2",
     ),
     "gateway/research_lab/snapshot_refresh.py": (
+        "ACTIVE_MODEL_GUARD_INTERVAL_SECONDS",
+        "SnapshotRefreshSupersededError",
+        "_write_record_cancel_marker",
+        "_run_record_command_with_active_guard",
         "maybe_refresh_dev_snapshot",
     ),
     "gateway/tee/autoresearch_executor_v2.py": (

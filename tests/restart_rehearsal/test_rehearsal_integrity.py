@@ -5468,8 +5468,35 @@ def test_dynamic_rebenchmark_restart_recovery_follows_exact_launch(
         capture_output=True,
         text=True,
     ).stdout.strip()
+    docker_lock_introduction_sha = subprocess.run(
+        [
+            "git",
+            "log",
+            "-1",
+            "--diff-filter=A",
+            "--format=%H",
+            candidate_sha,
+            "--",
+            "research_lab/docker_operation_lock_v2.py",
+        ],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if (
+        len(docker_lock_introduction_sha) != 40
+        or any(
+            character not in "0123456789abcdef"
+            for character in docker_lock_introduction_sha
+        )
+    ):
+        raise AssertionError("Docker lifecycle lock introduction is unavailable")
+    # Follow-up rehearsal-only commits may sit above the coordination change.
+    # Derive the exact pre-lock N-1 tree from the production path addition
+    # instead of incorrectly treating the candidate's immediate parent as N-1.
     from_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD^"],
+        ["git", "rev-parse", f"{docker_lock_introduction_sha}^"],
         cwd=source_root,
         check=True,
         capture_output=True,

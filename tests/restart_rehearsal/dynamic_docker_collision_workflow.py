@@ -1007,11 +1007,46 @@ exit 98
             timeout_seconds=model_timeout_seconds,
             collision_timeout_seconds=collision_timeout,
         )
-        _wait_for(
-            lambda: "n_minus_reader_started"
-            in (event_path.read_text(encoding="utf-8") if event_path.exists() else ""),
-            timeout_seconds=collision_timeout,
-        )
+
+        def reader_started_or_fail() -> bool:
+            if "n_minus_reader_started" in (
+                event_path.read_text(encoding="utf-8")
+                if event_path.exists()
+                else ""
+            ):
+                return True
+            if reader.poll() is None:
+                return False
+            failed = _communicate(
+                reader,
+                timeout_seconds=collision_timeout,
+                label="exact N-1 Docker source reader pre-start",
+            )
+            reader_started.touch()
+            reclaim_cleanup_detail = ""
+            try:
+                reclaimed = _communicate(
+                    reclaim,
+                    timeout_seconds=collision_timeout,
+                    label="candidate Docker reclaim after reader failure",
+                )
+            except Exception as cleanup_exc:  # noqa: BLE001 - preserve root failure
+                reclaim_cleanup_detail = (
+                    "; reclaim cleanup failed: " + type(cleanup_exc).__name__
+                )
+            else:
+                if reclaimed.returncode:
+                    reclaim_cleanup_detail = (
+                        "; reclaim cleanup exit=" + str(reclaimed.returncode)
+                    )
+            raise RuntimeError(
+                "exact N-1 Docker source reader exited before its first "
+                "Docker operation: "
+                + str(failed.stderr or failed.stdout)[-1000:]
+                + reclaim_cleanup_detail
+            )
+
+        _wait_for(reader_started_or_fail, timeout_seconds=collision_timeout)
         reader_started.touch()
         reader_result = _json_result(
             _communicate(

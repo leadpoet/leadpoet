@@ -860,16 +860,26 @@ with module._baseline_wave_watchdog(
         deadline = time.monotonic() + max(
             1.0, poll_seconds * expected_scoring_workers * 4
         )
-        while (
-            len(supervised_children) == initial_child_count
-            and time.monotonic() < deadline
-        ):
+        resumed_health = None
+        while time.monotonic() < deadline:
+            if len(supervised_children) > initial_child_count:
+                try:
+                    observed_health = supervisor.health()
+                except worker_autostart_module.ResearchLabWorkerStartupError:
+                    pass
+                else:
+                    if (
+                        int(observed_health["scoring_running"])
+                        == expected_scoring_workers
+                    ):
+                        resumed_health = observed_health
+                        break
             time.sleep(poll_seconds)
-        resumed_health = supervisor.health()
         supervisor.stop()
     if (
         len(supervised_children) <= initial_child_count
         or int(initial_health["scoring_running"]) != expected_scoring_workers
+        or resumed_health is None
         or int(resumed_health["scoring_running"]) != expected_scoring_workers
         or not any(
             Path(child.command[1]).resolve()

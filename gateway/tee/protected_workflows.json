@@ -1132,7 +1132,7 @@
       "symbol": "_run_command"
     },
     {
-      "ast_sha256": "sha256:94998872d6f8f155037340882711759915c0f19aa7d5757c6d72ee55c035f548",
+      "ast_sha256": "sha256:e5683c0e360f2dd2732840af342e9d4ba41921cc56bda2b56cad190b0efc889d",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "_run_record_command_with_active_guard"
     },
@@ -1157,7 +1157,7 @@
       "symbol": "_write_record_cancel_marker"
     },
     {
-      "ast_sha256": "sha256:2943f95ef9bf4d0d2fff48899d62007ab3f0abe2bc53f8fba4cc40565f2419b2",
+      "ast_sha256": "sha256:819c69525035b5d2fece8b0db2576a3c930f4ffd60f730b38f4ee1e70e54086e",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
     },
@@ -4177,7 +4177,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:c30a24e2f6c6e9b16de496af4e7a4fdc50bedb9607e0aa7fff07d4b15dd00c6e",
-  "protected_source_commit": "d6d4fc5eca58f906765ee763f21839da73e500ae",
+  "manifest_hash": "sha256:599b917cd7236589ca9ad487f69d3cc7fa5f6c646c39fceb5b2908755eed2c0e",
+  "protected_source_commit": "5dd9f6210f90d97c903999d014b4f518fb1d0379",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

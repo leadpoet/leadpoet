@@ -376,6 +376,8 @@ async def _await_command_completion(
     command: Sequence[str],
     env: Mapping[str, str],
     timeout_seconds: int,
+    *,
+    cancellation_teardown_errors: list[Exception] | None = None,
 ) -> str:
     """Defer cancellation until the command-owning thread has fully stopped."""
 
@@ -410,6 +412,12 @@ async def _await_command_completion(
         if cancellation is not None:
             raise cancellation
         raise
+    except Exception as teardown_exc:
+        if cancellation is not None:
+            if cancellation_teardown_errors is not None:
+                cancellation_teardown_errors.append(teardown_exc)
+            raise cancellation from teardown_exc
+        raise
     if cancellation is not None:
         raise cancellation
     return result
@@ -438,12 +446,14 @@ async def _run_record_command_with_active_guard(
 ) -> str:
     """Record while polling model authority; cancel only at recorder boundaries."""
 
+    cancellation_teardown_errors: list[Exception] = []
     task = asyncio.create_task(
         _await_command_completion(
             command_runner,
             command,
             env,
             timeout_seconds,
+            cancellation_teardown_errors=cancellation_teardown_errors,
         )
     )
     superseded = False
@@ -490,10 +500,13 @@ async def _run_record_command_with_active_guard(
         task.cancel()
         try:
             await task
-        except asyncio.CancelledError:
-            pass
+        except asyncio.CancelledError as task_cancellation:
+            if isinstance(task_cancellation.__cause__, Exception):
+                raise cancellation from task_cancellation.__cause__
         except Exception as teardown_exc:
             raise cancellation from teardown_exc
+        if cancellation_teardown_errors:
+            raise cancellation from cancellation_teardown_errors[0]
         raise cancellation
 
 

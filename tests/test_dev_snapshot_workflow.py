@@ -329,8 +329,8 @@ def test_dev_snapshot_boundary_rejects_popen_execution_and_env_overrides(
         [
             sys.executable,
             "-c",
-            "import os, subprocess\n"
-            + f"command = {[sys.executable, *production_command[1:]]!r}\n"
+            "import os, subprocess, sys\n"
+            + f"command = [sys.executable, *{production_command[1:]!r}]\n"
             + "subprocess.run(command, text=True, capture_output=True, "
             + "env=dict(os.environ), executable='/bin/true')\n",
         ],

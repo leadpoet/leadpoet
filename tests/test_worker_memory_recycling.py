@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -145,6 +146,55 @@ async def test_worker_supervisor_cancellation_waits_before_stop() -> None:
     supervisor.stop()
     assert finished.is_set()
     assert stop_raced_start is False
+
+
+@pytest.mark.asyncio
+async def test_real_supervisor_spawns_on_event_loop_thread_and_waits_off_thread(
+    monkeypatch,
+) -> None:
+    caller_thread = threading.get_ident()
+    popen_threads: list[int] = []
+    wait_threads: list[int] = []
+
+    class ReadyChild:
+        def __init__(self, _command, **kwargs):
+            popen_threads.append(threading.get_ident())
+            os.write(int(kwargs["env"]["RESEARCH_LAB_WORKER_READY_FD"]), b"ready\n")
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            raise AssertionError("ready worker was unexpectedly terminated")
+
+    plan = ResearchLabWorkerAutoStartPlan(
+        auto_start_enabled=True,
+        hosted=_fleet("hosted", 1),
+        scoring=_fleet("scoring", 1),
+    )
+    supervisor = ResearchLabWorkerSupervisor(plan)
+    original_wait = supervisor._wait_for_child_ready
+
+    def observed_wait(*args, **kwargs):
+        wait_threads.append(threading.get_ident())
+        return original_wait(*args, **kwargs)
+
+    monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
+    monkeypatch.setattr(
+        worker_autostart,
+        "build_research_lab_worker_environment",
+        lambda: {},
+    )
+    monkeypatch.setattr(worker_autostart.subprocess, "Popen", ReadyChild)
+    monkeypatch.setattr(supervisor, "_wait_for_child_ready", observed_wait)
+    monkeypatch.setattr(supervisor, "_monitor_children", lambda: None)
+
+    health = await start_worker_supervisor_without_blocking_event_loop(supervisor)
+
+    assert health["status"] == "ready"
+    assert popen_threads == [caller_thread, caller_thread]
+    assert len(wait_threads) == 2
+    assert all(thread_id != caller_thread for thread_id in wait_threads)
 
 
 def test_child_rss_for_bogus_pid_is_none():

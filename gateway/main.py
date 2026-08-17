@@ -448,11 +448,6 @@ async def lifespan(app: FastAPI):
                 fulfillment_task_handle = asyncio.create_task(fulfillment_lifecycle_task())
                 print("✅ Fulfillment lifecycle task started")
         
-        # Start PCR0 builder for trustless verification
-        from gateway.utils.pcr0_builder import start_pcr0_builder
-        start_pcr0_builder()
-        print("✅ PCR0 builder started (trustless validator verification)")
-
         # Start gateway-owned Research Lab worker fleets. This mirrors the
         # validator dynamic worker model: one auto-research/scoring worker per
         # configured gateway proxy, supervised by the gateway process.
@@ -480,6 +475,16 @@ async def lifespan(app: FastAPI):
                 "deferred_roles="
                 f"{research_lab_worker_health['deferred_worker_fleet_roles']}"
             )
+
+            # Current-release PCR0 and attestation are verified by the restart
+            # preflight before this process starts.  Begin optional historical
+            # cache warming only after both authoritative worker fleets have
+            # finished launching, so its Docker subprocesses cannot race the
+            # fork-based worker readiness handshake during a cold restart.
+            from gateway.utils.pcr0_builder import start_pcr0_builder
+
+            start_pcr0_builder()
+            print("✅ PCR0 builder started (trustless validator verification)")
 
             from gateway.research_lab.config import ResearchLabGatewayConfig
 

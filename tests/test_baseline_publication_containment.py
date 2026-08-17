@@ -367,10 +367,14 @@ async def test_baseline_dispatch_history_is_scoped_to_date_window_and_model(monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("receipt_sequence", [0, 1])
+@pytest.mark.parametrize(
+    ("receipt_sequence", "output_root_matches"),
+    [(0, True), (1, True), (0, False)],
+)
 async def test_persisted_baseline_repairs_post_bundle_publication_without_rescoring(
     monkeypatch,
     receipt_sequence,
+    output_root_matches,
 ):
     artifact, window, protected_result, row = _persisted_baseline_publication_fixture(
         unicode_diagnostics=True
@@ -396,6 +400,7 @@ async def test_persisted_baseline_repairs_post_bundle_publication_without_rescor
     }
     summary_hash = attested_v2_sha256_json(protected_result["score_summary_doc"])
     assert summary_hash != sw.canonical_hash(protected_result["score_summary_doc"])
+    credential_ref_hash = "sha256:" + "6" * 64
     root_receipt = {
         "receipt_hash": "sha256:" + "7" * 64,
         "role": "gateway_scoring",
@@ -404,10 +409,17 @@ async def test_persisted_baseline_repairs_post_bundle_publication_without_rescor
         "epoch_id": 42,
         "sequence": receipt_sequence,
         "artifact_root": sw.merkle_root(
-            (summary_hash,),
+            # V2 execution adds credential commitments to the explicit input
+            # artifacts. Recovery verifies the signed result rather than
+            # incorrectly assuming this root contains only the summary hash.
+            (credential_ref_hash, summary_hash),
             domain="leadpoet-artifact-v2",
         ),
-        "output_root": sw.sha256_json(protected_result),
+        "output_root": (
+            sw.sha256_json(protected_result)
+            if output_root_matches
+            else "sha256:" + "9" * 64
+        ),
     }
 
     async def recover_bundle(**kwargs):
@@ -464,7 +476,7 @@ async def test_persisted_baseline_repairs_post_bundle_publication_without_rescor
     monkeypatch.setattr(sw, "emit_run_event", emit_event)
     worker._write_audit_bundle_inner = write_audit
 
-    if receipt_sequence != 0:
+    if receipt_sequence != 0 or not output_root_matches:
         with pytest.raises(
             RuntimeError,
             match="persisted private baseline attested authority differs",

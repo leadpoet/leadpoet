@@ -12246,6 +12246,10 @@ class ResearchLabGatewayScoringWorker:
                     artifact_ref=artifact_ref,
                     artifact_hash=str(validated["score_summary_hash"]),
                 )
+                # The receipt artifact root also commits the execution's
+                # credential references. The exact business-artifact lookup
+                # binds the summary hash; the signed output root proves the
+                # rebuilt protected result without assuming a one-item root.
                 if (
                     not isinstance(root_receipt, Mapping)
                     or root_receipt.get("role") != "gateway_scoring"
@@ -12259,11 +12263,6 @@ class ResearchLabGatewayScoringWorker:
                         else -1
                     )
                     != 0
-                    or root_receipt.get("artifact_root")
-                    != merkle_root(
-                        (str(validated["score_summary_hash"]),),
-                        domain="leadpoet-artifact-v2",
-                    )
                     or root_receipt.get("output_root")
                     != sha256_json(validated["protected_result"])
                 ):

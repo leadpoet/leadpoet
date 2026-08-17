@@ -1563,6 +1563,13 @@ def command_docker(argv: list[str]) -> int:
                 return _fail(
                     "docker", argv, "Docker exec target is not running"
                 )
+            # A real Docker daemon permits independent read-only exec probes to
+            # overlap. Release the adapter state lock before running the child
+            # so the exact launcher can exercise that production concurrency.
+            # Docker exec does not mutate the emulated container inventory.
+            row = dict(row)
+            _save_state(handle, state)
+            handle = None
             if (
                 len(command) >= 3
                 and command[:2] == ["sh", "-c"]
@@ -1656,7 +1663,8 @@ def command_docker(argv: list[str]) -> int:
             print(output)
         return status
     finally:
-        _save_state(handle, state)
+        if handle is not None:
+            _save_state(handle, state)
 
 
 def command_nitro(argv: list[str]) -> int:

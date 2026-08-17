@@ -30,7 +30,7 @@ from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
     frontier_bootstrap_artifact_hashes_v2,
     validate_allocation_settlement_frontier_bootstrap_v2,
 )
-from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.attested_v2 import ROLE_PURPOSES, sha256_json
 
 try:
     from fixture_contract import (
@@ -112,6 +112,19 @@ EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE = {
 CONTROL_QUERY_FIELDS = frozenset(
     {"columns", "limit", "offset", "on_conflict", "order", "select"}
 )
+
+
+def _candidate_hybrid_constraint_definition() -> str:
+    clauses = []
+    for role, purposes in ROLE_PURPOSES.items():
+        encoded_purposes = ", ".join(
+            "'%s'::text" % purpose for purpose in sorted(purposes)
+        )
+        clauses.append(
+            "((role = '%s'::text) AND (purpose = ANY (ARRAY[%s])))"
+            % (role, encoded_purposes)
+        )
+    return "CHECK (%s)" % " OR ".join(clauses)
 
 
 def _filter_scalar(raw: str, existing: Any) -> Any:
@@ -494,6 +507,7 @@ def _migration_schema_contract(
         "147-research-lab-source-catalog-auth-metadata.sql",
         "148-research-lab-atomic-credit-resume.sql",
         "149-research-lab-compact-weight-settlement-authority.sql",
+        "152-research-lab-candidate-hybrid-purposes.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -596,6 +610,7 @@ def _migration_schema_contract(
         "research_lab_allocation_frontier_bootstrap_contract_v2",
         "resume_research_lab_credit_blocked_run_v1",
         "research_lab_compact_weight_settlement_contract_v1",
+        "research_lab_candidate_hybrid_purpose_contract_v1",
     }
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(
@@ -2939,6 +2954,25 @@ class Handler(BaseHTTPRequestHandler):
                     "identity_unique_constraint_enabled": True,
                     "row_level_security_enabled": True,
                     "finalized_stage_supported": True,
+                }
+            elif name == (
+                "research_lab_candidate_hybrid_purpose_contract_v1"
+            ):
+                if body not in ({}, None):
+                    raise ValueError(
+                        "candidate hybrid purpose contract body is invalid"
+                    )
+                response = {
+                    "schema_version": (
+                        "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
+                    ),
+                    "constraint_name": (
+                        "research_lab_attested_execution_receipts_v2_role_purpose_check"
+                    ),
+                    "constraint_valid": True,
+                    "constraint_definition": (
+                        _candidate_hybrid_constraint_definition()
+                    ),
                 }
             elif name == "persist_research_lab_ancestry_checkpoint_v2":
                 response = self.server.state.persist_ancestry_checkpoint(body)

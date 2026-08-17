@@ -58,6 +58,7 @@ from gateway.tee.coordinator_executor_v2 import (
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
+    ROLE_PURPOSES,
     build_receipt_graph,
     build_transport_attempt,
     merkle_root,
@@ -224,6 +225,9 @@ ATOMIC_CREDIT_RESUME_MIGRATION = (
 COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION = (
     "149-research-lab-compact-weight-settlement-authority.sql"
 )
+CANDIDATE_HYBRID_PURPOSES_MIGRATION = (
+    "152-research-lab-candidate-hybrid-purposes.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -275,6 +279,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_CATALOG_AUTH_METADATA_MIGRATION,
     ATOMIC_CREDIT_RESUME_MIGRATION,
     COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION,
+    CANDIDATE_HYBRID_PURPOSES_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -303,6 +308,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_147_source_catalog_auth_metadata_contract_valid",
     "post_148_atomic_credit_resume_contract_valid",
     "post_149_compact_weight_settlement_contract_valid",
+    "post_152_candidate_hybrid_purpose_contract_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5243,6 +5249,48 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-149 compact weight settlement contract differs"
             )
+        database.apply_migration(scripts / CANDIDATE_HYBRID_PURPOSES_MIGRATION)
+        applied.append(CANDIDATE_HYBRID_PURPOSES_MIGRATION)
+        candidate_hybrid_purpose_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_candidate_hybrid_purpose_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        expected_pairs = {
+            str(role): frozenset(str(purpose) for purpose in purposes)
+            for role, purposes in ROLE_PURPOSES.items()
+        }
+        definition = candidate_hybrid_purpose_contract.get(
+            "constraint_definition"
+        )
+        clauses = re.findall(
+            r"\(role = '([^']+)'::text\)\s+AND\s+"
+            r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
+            definition if isinstance(definition, str) else "",
+            flags=re.DOTALL,
+        )
+        observed_pairs = {
+            role: frozenset(
+                re.findall(r"'([^']+)'::text", encoded_purposes)
+            )
+            for role, encoded_purposes in clauses
+        }
+        if (
+            candidate_hybrid_purpose_contract.get("schema_version")
+            != "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
+            or candidate_hybrid_purpose_contract.get("constraint_name")
+            != "research_lab_attested_execution_receipts_v2_role_purpose_check"
+            or candidate_hybrid_purpose_contract.get("constraint_valid")
+            is not True
+            or observed_pairs != expected_pairs
+        ):
+            raise PostgresContractProbeError(
+                "post-152 candidate hybrid purpose contract differs"
+            )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,
@@ -5357,6 +5405,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "atomic_credit_resume": atomic_credit_resume,
             "compact_weight_settlement_contract": (
                 compact_weight_settlement_contract
+            ),
+            "candidate_hybrid_purpose_contract": (
+                candidate_hybrid_purpose_contract
             ),
             "checks": {
                 name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS

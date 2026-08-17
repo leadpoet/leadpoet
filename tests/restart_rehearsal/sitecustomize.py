@@ -84,6 +84,21 @@ _RESTART_EPOCH_TRANSIENT_HEAD_CALLS = 0
 _BLOCK_NUMBERS_BY_HASH: dict[str, int] = {}
 
 
+def _candidate_hybrid_constraint_definition() -> str:
+    from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
+
+    clauses = []
+    for role, purposes in ROLE_PURPOSES.items():
+        encoded_purposes = ", ".join(
+            "'%s'::text" % purpose for purpose in sorted(purposes)
+        )
+        clauses.append(
+            "((role = '%s'::text) AND (purpose = ANY (ARRAY[%s])))"
+            % (role, encoded_purposes)
+        )
+    return "CHECK (%s)" % " OR ".join(clauses)
+
+
 def _block_hash(block: int) -> str:
     normalized_block = int(block)
     value = "0x" + hashlib.sha256(
@@ -3849,6 +3864,36 @@ def _local_urlopen(
                 "identity_unique_constraint_enabled": True,
                 "row_level_security_enabled": True,
                 "finalized_stage_supported": True,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
+        == "/rest/v1/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "candidate hybrid purpose contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "candidate hybrid purpose contract body differs"
+            )
+        body = json.dumps(
+            {
+                "schema_version": (
+                    "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
+                ),
+                "constraint_name": (
+                    "research_lab_attested_execution_receipts_v2_role_purpose_check"
+                ),
+                "constraint_valid": True,
+                "constraint_definition": (
+                    _candidate_hybrid_constraint_definition()
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),

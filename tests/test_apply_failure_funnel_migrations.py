@@ -200,6 +200,175 @@ def _free_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def _docker_container_state(container: str) -> str:
+    state = subprocess.run(
+        [
+            str(DOCKER),
+            "inspect",
+            "--format",
+            "{{.State.Running}}|{{.State.Status}}|{{.State.ExitCode}}|"
+            "{{.State.OOMKilled}}",
+            container,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if state.returncode == 0:
+        return state.stdout.strip()
+    detail = state.stderr.strip() or state.stdout.strip() or "inspect failed"
+    return "unavailable|%s" % detail
+
+
+def _connect_postgres_over_published_port(
+    psycopg2, *, port: int, container: str, timeout_seconds: float = 45
+):
+    deadline = time.monotonic() + timeout_seconds
+    last_error = "connection was not attempted"
+    while time.monotonic() < deadline:
+        state = _docker_container_state(container)
+        if not state.startswith("true|running|"):
+            raise AssertionError(
+                "PostgreSQL container stopped before its published port became "
+                "ready: %s" % state
+            )
+        try:
+            connection = psycopg2.connect(
+                host="127.0.0.1",
+                port=port,
+                user="postgres",
+                password="postgres",
+                dbname="postgres",
+                connect_timeout=2,
+            )
+        except psycopg2.OperationalError as exc:
+            last_error = str(exc).strip()
+            state = _docker_container_state(container)
+            if not state.startswith("true|running|"):
+                raise AssertionError(
+                    "PostgreSQL container stopped before its published port became "
+                    "ready: %s" % state
+                )
+            time.sleep(0.25)
+            continue
+
+        state = _docker_container_state(container)
+        if state.startswith("true|running|"):
+            return connection
+        connection.close()
+        raise AssertionError(
+            "PostgreSQL container stopped while its published port connection "
+            "was being established: %s" % state
+        )
+
+    raise AssertionError(
+        "PostgreSQL published port did not become ready within %.1f seconds; "
+        "container=%s; last_error=%s"
+        % (timeout_seconds, _docker_container_state(container), last_error)
+    )
+
+
+def test_published_postgres_readiness_retries_only_while_container_is_running(
+    monkeypatch,
+):
+    connection = object()
+
+    class FakePsycopg2:
+        class OperationalError(Exception):
+            pass
+
+        attempts = 0
+
+        @classmethod
+        def connect(cls, **_kwargs):
+            cls.attempts += 1
+            if cls.attempts == 1:
+                raise cls.OperationalError("published port is not ready")
+            return connection
+
+    monkeypatch.setitem(
+        globals(),
+        "_docker_container_state",
+        lambda _container: "true|running|0|false",
+    )
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    assert (
+        _connect_postgres_over_published_port(
+            FakePsycopg2,
+            port=5432,
+            container="fixture-postgres",
+        )
+        is connection
+    )
+    assert FakePsycopg2.attempts == 2
+
+
+def test_published_postgres_readiness_fails_before_connect_after_container_exit(
+    monkeypatch,
+):
+    class FakePsycopg2:
+        class OperationalError(Exception):
+            pass
+
+        attempts = 0
+
+        @classmethod
+        def connect(cls, **_kwargs):
+            cls.attempts += 1
+            raise cls.OperationalError("published port is not ready")
+
+    monkeypatch.setitem(
+        globals(),
+        "_docker_container_state",
+        lambda _container: "false|exited|1|true",
+    )
+
+    with pytest.raises(AssertionError, match="container stopped"):
+        _connect_postgres_over_published_port(
+            FakePsycopg2,
+            port=5432,
+            container="fixture-postgres",
+        )
+    assert FakePsycopg2.attempts == 0
+
+
+def test_published_postgres_readiness_rejects_success_after_container_exit(
+    monkeypatch,
+):
+    class FakeConnection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+
+    class FakePsycopg2:
+        class OperationalError(Exception):
+            pass
+
+        @staticmethod
+        def connect(**_kwargs):
+            return connection
+
+    states = iter(("true|running|0|false", "false|exited|1|true"))
+    monkeypatch.setitem(
+        globals(),
+        "_docker_container_state",
+        lambda _container: next(states),
+    )
+
+    with pytest.raises(AssertionError, match="stopped while"):
+        _connect_postgres_over_published_port(
+            FakePsycopg2,
+            port=5432,
+            container="fixture-postgres",
+        )
+    assert connection.closed is True
+
+
 @pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")
 def test_direct_autocommit_runner_resumes_partial_indexes_idempotently():
     psycopg2 = pytest.importorskip("psycopg2")
@@ -236,38 +405,13 @@ def test_direct_autocommit_runner_resumes_partial_indexes_idempotently():
             check=False,
         )
         if result.returncode != 0:
-            pytest.skip("PostgreSQL container could not start")
+            detail = result.stderr.strip() or result.stdout.strip() or "no output"
+            pytest.fail("PostgreSQL container could not start: %s" % detail[-1000:])
         started = True
-        deadline = time.monotonic() + 45
-        while time.monotonic() < deadline:
-            ready = subprocess.run(
-                [
-                    str(DOCKER),
-                    "exec",
-                    container,
-                    "pg_isready",
-                    "-h",
-                    "127.0.0.1",
-                    "-U",
-                    "postgres",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            if ready.returncode == 0:
-                break
-            time.sleep(0.25)
-        else:
-            pytest.fail("PostgreSQL container did not become ready")
-
-        connection = psycopg2.connect(
-            host="127.0.0.1",
+        connection = _connect_postgres_over_published_port(
+            psycopg2,
             port=port,
-            user="postgres",
-            password="postgres",
-            dbname="postgres",
+            container=container,
         )
         connection.autocommit = True
         with connection.cursor() as cursor:

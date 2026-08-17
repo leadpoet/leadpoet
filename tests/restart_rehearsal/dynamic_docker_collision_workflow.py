@@ -1004,12 +1004,8 @@ if [ "${REHEARSAL_ONLINE_RECLAIM:-0}" = "1" ]; then
       exit 0
       ;;
     "image ls -aq --no-trunc")
-      printf '%s\\n%s\\n' \
-        "$REHEARSAL_ONLINE_IMAGE_ONE" \
-        "$REHEARSAL_ONLINE_IMAGE_TWO"
-      printf '%s,%s\\n' \
-        "$REHEARSAL_ONLINE_IMAGE_ONE" \
-        "$REHEARSAL_ONLINE_IMAGE_TWO" \
+      printf '%s\\n' "$REHEARSAL_ONLINE_IMAGE_INVENTORY" | tr ',' '\\n'
+      printf '%s\\n' "$REHEARSAL_ONLINE_IMAGE_INVENTORY" \
         >> "$REHEARSAL_ONLINE_IMAGE_LOG"
       exit 0
       ;;
@@ -1033,19 +1029,48 @@ if [ "${REHEARSAL_ONLINE_RECLAIM:-0}" = "1" ]; then
       exit 0
       ;;
     "env PYTHONSAFEPATH=1 python3 $REHEARSAL_ONLINE_STALE_RECLAIMER --audit-only")
-      printf '%s\\n' '{"active_container_count":0,"active_image_count":2,"active_layer_count":2,"active_manifest_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","active_mount_count":0,"active_overlay_dir_count":2,"docker_root":"/var/lib/docker","mounted_overlay_count":0,"schema_version":"leadpoet.docker_stale_mount_audit.v3","stale_layer_record_count":0,"stale_mount_record_count":0,"stale_overlay_dir_count":0,"stale_overlay_link_count":0,"status":"ready"}'
+      mounted="$REHEARSAL_ONLINE_STALE_MOUNT_COUNT"
+      layer_records="$REHEARSAL_ONLINE_STALE_LAYER_RECORD_COUNT"
+      mount_records="$REHEARSAL_ONLINE_STALE_MOUNT_RECORD_COUNT"
+      overlay_dirs="$REHEARSAL_ONLINE_STALE_OVERLAY_DIR_COUNT"
+      overlay_links="$REHEARSAL_ONLINE_STALE_OVERLAY_LINK_COUNT"
+      if [ -f "$REHEARSAL_ONLINE_STALE_MARKER" ]; then
+        mounted=0
+        layer_records=0
+        mount_records=0
+        overlay_dirs=0
+        overlay_links=0
+      fi
+      printf '{"active_container_count":0,"active_image_count":%s,"active_layer_count":%s,"active_manifest_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","active_mount_count":0,"active_overlay_dir_count":%s,"docker_root":"/var/lib/docker","mounted_overlay_count":%s,"schema_version":"leadpoet.docker_stale_mount_audit.v3","stale_layer_record_count":%s,"stale_mount_record_count":%s,"stale_overlay_dir_count":%s,"stale_overlay_link_count":%s,"status":"ready"}\\n' \
+        "$REHEARSAL_ONLINE_ACTIVE_IMAGE_COUNT" \
+        "$REHEARSAL_ONLINE_ACTIVE_LAYER_COUNT" \
+        "$REHEARSAL_ONLINE_ACTIVE_OVERLAY_COUNT" \
+        "$mounted" \
+        "$layer_records" \
+        "$mount_records" \
+        "$overlay_dirs" \
+        "$overlay_links"
       exit 0
       ;;
     "env PYTHONSAFEPATH=1 python3 $REHEARSAL_ONLINE_STALE_RECLAIMER")
       touch "$REHEARSAL_ONLINE_STALE_MARKER"
-      printf '%s\\n' '{"active_container_count":0,"active_image_count":2,"active_layer_count":2,"active_mount_count":0,"mounted_overlay_count":0,"reclaimed_layer_record_count":1,"reclaimed_mount_count":0,"reclaimed_mount_record_count":1,"reclaimed_overlay_dir_count":1,"reclaimed_overlay_link_count":1,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}'
+      printf '{"active_container_count":0,"active_image_count":%s,"active_layer_count":%s,"active_mount_count":0,"docker_root":"/var/lib/docker","mounted_overlay_count":%s,"reclaimed_layer_record_count":%s,"reclaimed_mount_count":%s,"reclaimed_mount_record_count":%s,"reclaimed_overlay_dir_count":%s,"reclaimed_overlay_link_count":%s,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}\\n' \
+        "$REHEARSAL_ONLINE_ACTIVE_IMAGE_COUNT" \
+        "$REHEARSAL_ONLINE_ACTIVE_LAYER_COUNT" \
+        "$REHEARSAL_ONLINE_STALE_MOUNT_COUNT" \
+        "$REHEARSAL_ONLINE_STALE_LAYER_RECORD_COUNT" \
+        "$REHEARSAL_ONLINE_STALE_MOUNT_COUNT" \
+        "$REHEARSAL_ONLINE_STALE_MOUNT_RECORD_COUNT" \
+        "$REHEARSAL_ONLINE_STALE_OVERLAY_DIR_COUNT" \
+        "$REHEARSAL_ONLINE_STALE_OVERLAY_LINK_COUNT"
       exit 0
       ;;
     "env PYTHONSAFEPATH=1 python3 $REHEARSAL_ONLINE_ZERO_RUNTIME_RECONCILER "*)
       touch "$REHEARSAL_ONLINE_DAEMON_MARKER"
       printf 'systemctl restart docker.service\\n' \
         >> "$REHEARSAL_ONLINE_DAEMON_ACTION_LOG"
-      printf '%s\\n' '{"container_count":0,"containerd_container_count":0,"containerd_task_count":0,"docker_root":"/var/lib/docker","image_count":2,"image_manifest_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","moby_shim_count":0,"restart_performed":true,"root_device":1,"root_inode":2,"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1","status":"ready"}'
+      printf '{"container_count":0,"containerd_container_count":0,"containerd_task_count":0,"docker_root":"/var/lib/docker","image_count":%s,"image_manifest_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","moby_shim_count":0,"restart_performed":true,"root_device":1,"root_inode":2,"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1","status":"ready"}\\n' \
+        "$REHEARSAL_ONLINE_ACTIVE_IMAGE_COUNT"
       exit 0
       ;;
   esac
@@ -1240,6 +1265,16 @@ exit 96
             "sha256:" + hashlib.sha256(value.encode("ascii")).hexdigest()
             for value in (from_sha, candidate_sha)
         )
+        forced_image_ids = (
+            *image_ids,
+            *(
+                "sha256:"
+                + hashlib.sha256(
+                    f"forced-image-{index}-{candidate_sha}".encode("ascii")
+                ).hexdigest()
+                for index in range(12)
+            ),
+        )
         gateway_identity = tuple(
             (gateway_proc / name).read_bytes()
             for name in ("status", "cmdline", "stat")
@@ -1262,8 +1297,15 @@ exit 96
                 ),
                 "REHEARSAL_ONLINE_COMMAND_LOG": str(online_command_log),
                 "REHEARSAL_ONLINE_IMAGE_LOG": str(online_image_log),
-                "REHEARSAL_ONLINE_IMAGE_ONE": image_ids[0],
-                "REHEARSAL_ONLINE_IMAGE_TWO": image_ids[1],
+                "REHEARSAL_ONLINE_IMAGE_INVENTORY": ",".join(image_ids),
+                "REHEARSAL_ONLINE_ACTIVE_IMAGE_COUNT": "2",
+                "REHEARSAL_ONLINE_ACTIVE_LAYER_COUNT": "2",
+                "REHEARSAL_ONLINE_ACTIVE_OVERLAY_COUNT": "2",
+                "REHEARSAL_ONLINE_STALE_MOUNT_COUNT": "0",
+                "REHEARSAL_ONLINE_STALE_LAYER_RECORD_COUNT": "1",
+                "REHEARSAL_ONLINE_STALE_MOUNT_RECORD_COUNT": "1",
+                "REHEARSAL_ONLINE_STALE_OVERLAY_DIR_COUNT": "1",
+                "REHEARSAL_ONLINE_STALE_OVERLAY_LINK_COUNT": "1",
                 "REHEARSAL_ONLINE_STALE_RECLAIMER": str(stale_reclaimer),
                 "REHEARSAL_ONLINE_ZERO_RUNTIME_RECONCILER": str(
                     zero_runtime_reconciler
@@ -1337,9 +1379,11 @@ exit 96
         image_inventories = online_image_log.read_text(
             encoding="utf-8"
         ).splitlines()
-        daemon_actions = online_daemon_action_log.read_text(
-            encoding="utf-8"
-        ).splitlines()
+        daemon_actions = (
+            online_daemon_action_log.read_text(encoding="utf-8").splitlines()
+            if online_daemon_action_log.exists()
+            else []
+        )
         if (
             online_result.returncode != 0
             or mutation_kinds
@@ -1355,7 +1399,7 @@ exit 96
                 and not command.startswith(zero_runtime_prefix + " ")
                 for command in online_commands
             )
-            or online_commands.count(stale_audit_command) != 3
+            or online_commands.count(stale_audit_command) != 4
             or len(image_inventories) < 7
             or len(set(image_inventories)) != 1
             or any(
@@ -1379,7 +1423,7 @@ exit 96
             or online_result.stdout.count(
                 '"schema_version":"leadpoet.docker_stale_mount_audit.v3"'
             )
-            != 3
+            != 4
             or online_result.stdout.count(
                 '"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1"'
             )
@@ -1446,8 +1490,15 @@ exit 96
                 ),
                 "REHEARSAL_ONLINE_COMMAND_LOG": str(forced_command_log),
                 "REHEARSAL_ONLINE_IMAGE_LOG": str(forced_image_log),
-                "REHEARSAL_ONLINE_IMAGE_ONE": image_ids[0],
-                "REHEARSAL_ONLINE_IMAGE_TWO": image_ids[1],
+                "REHEARSAL_ONLINE_IMAGE_INVENTORY": ",".join(forced_image_ids),
+                "REHEARSAL_ONLINE_ACTIVE_IMAGE_COUNT": "14",
+                "REHEARSAL_ONLINE_ACTIVE_LAYER_COUNT": "65",
+                "REHEARSAL_ONLINE_ACTIVE_OVERLAY_COUNT": "65",
+                "REHEARSAL_ONLINE_STALE_MOUNT_COUNT": "0",
+                "REHEARSAL_ONLINE_STALE_LAYER_RECORD_COUNT": "0",
+                "REHEARSAL_ONLINE_STALE_MOUNT_RECORD_COUNT": "0",
+                "REHEARSAL_ONLINE_STALE_OVERLAY_DIR_COUNT": "0",
+                "REHEARSAL_ONLINE_STALE_OVERLAY_LINK_COUNT": "2",
                 "REHEARSAL_ONLINE_STALE_RECLAIMER": str(stale_reclaimer),
                 "REHEARSAL_ONLINE_ZERO_RUNTIME_RECONCILER": str(
                     zero_runtime_reconciler
@@ -1505,46 +1556,59 @@ exit 96
         forced_image_inventories = forced_image_log.read_text(
             encoding="utf-8"
         ).splitlines()
-        forced_daemon_actions = forced_daemon_action_log.read_text(
-            encoding="utf-8"
-        ).splitlines()
+        forced_daemon_actions = (
+            forced_daemon_action_log.read_text(encoding="utf-8").splitlines()
+            if forced_daemon_action_log.exists()
+            else []
+        )
         if (
             forced_result.returncode != 0
             or forced_mutation_kinds
-            != ["builder_prune", "dockerd_reconcile", "builder_prune"]
+            != [
+                "builder_prune",
+                "stale_reclaim",
+                "dockerd_reconcile",
+                "builder_prune",
+            ]
             or not forced_zero_runtime_arguments_exact
             or any(
                 command not in allowed_commands
                 and not command.startswith(zero_runtime_prefix + " ")
                 for command in forced_commands
             )
-            or forced_commands.count(stale_reclaim_command) != 0
-            or forced_commands.count(stale_audit_command) != 3
+            or forced_commands.count(stale_reclaim_command) != 1
+            or forced_commands.count(stale_audit_command) != 4
             or len(forced_image_inventories) < 6
             or len(set(forced_image_inventories)) != 1
+            or forced_image_inventories[0].split(",") != list(forced_image_ids)
             or any(
                 f"phase={phase} containers=0" not in forced_result.stdout
                 for phase in (
                     "pre-prune",
                     "post-builder-prune",
+                    "pre-stale-reclaim",
                     "pre-daemon-reconcile",
                     "post-daemon-reconcile",
                     "post-reconcile-builder-prune",
                     "post-reclaim",
                 )
             )
-            or "phase=pre-stale-reclaim" in forced_result.stdout
             or "storage maintenance deferred" in forced_result.stdout
             or "Docker storage ready after bounded online reclaim"
             not in forced_result.stdout
             or f"free_bytes={available_bytes}" not in forced_result.stdout
-            or forced_stale_marker.exists()
+            or not forced_stale_marker.is_file()
             or not forced_daemon_marker.is_file()
             or forced_daemon_actions != ["systemctl restart docker.service"]
             or forced_result.stdout.count(
                 '"schema_version":"leadpoet.docker_stale_mount_audit.v3"'
             )
-            != 3
+            != 4
+            or '"active_image_count":14' not in forced_result.stdout
+            or '"active_layer_count":65' not in forced_result.stdout
+            or '"active_overlay_dir_count":65' not in forced_result.stdout
+            or '"stale_overlay_link_count":2' not in forced_result.stdout
+            or '"reclaimed_overlay_link_count":2' not in forced_result.stdout
             or forced_result.stdout.count(
                 '"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1"'
             )

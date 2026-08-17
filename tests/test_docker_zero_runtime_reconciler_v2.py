@@ -50,6 +50,10 @@ class _Runtime:
         self.restart_count = 0
         self.start_count = 0
         self.commands: list[tuple[str, ...]] = []
+        self.replacement_root: Path | None = None
+        if self.change_root_inode:
+            self.replacement_root = root.with_name(root.name + "-replacement")
+            self.replacement_root.mkdir(mode=0o700)
         self.image_ids = (
             "sha256:" + hashlib.sha256(b"image-one").hexdigest(),
             "sha256:" + hashlib.sha256(b"image-two").hexdigest(),
@@ -122,8 +126,9 @@ class _Runtime:
         elif values == ("systemctl", "restart", "docker.service"):
             self.restart_count += 1
             if self.change_root_inode:
+                assert self.replacement_root is not None
                 self.root.rmdir()
-                self.root.mkdir(mode=0o700)
+                self.replacement_root.rename(self.root)
             if self.restart_failure:
                 returncode = 1
                 stderr = "restart failed"
@@ -299,6 +304,9 @@ def test_post_restart_identity_failures_are_terminal_but_recover_docker(
     root = tmp_path / "docker"
     root.mkdir(mode=0o700)
     runtime = _Runtime(root, **runtime_kwargs)
+    if runtime.change_root_inode:
+        assert runtime.replacement_root is not None
+        assert runtime.replacement_root.stat().st_ino != root.stat().st_ino
 
     with pytest.raises(DockerZeroRuntimeReconcilerV2Error, match=message):
         _reconcile(tmp_path, runtime)
@@ -539,7 +547,10 @@ def test_different_process_lock_does_not_authorize_an_unlocked_parent(
         "duplicate",
         "shared",
         "wrong_type",
-        "wrong_pid",
+        "negative_pid",
+        "signed_pid",
+        "leading_zero_pid",
+        "overflow_pid",
         "wrong_device",
         "wrong_fdinfo_inode",
         "wrong_lock_inode",
@@ -567,8 +578,14 @@ def test_parent_fdinfo_lock_proof_rejects_malformed_or_mismatched_records(
         payload = payload.replace("WRITE", "READ")
     elif case == "wrong_type":
         payload = payload.replace("FLOCK", "POSIX")
-    elif case == "wrong_pid":
-        payload = payload.replace("WRITE 0 ", "WRITE 9999 ")
+    elif case == "negative_pid":
+        payload = payload.replace("WRITE 0 ", "WRITE -1 ")
+    elif case == "signed_pid":
+        payload = payload.replace("WRITE 0 ", "WRITE +1 ")
+    elif case == "leading_zero_pid":
+        payload = payload.replace("WRITE 0 ", "WRITE 01 ")
+    elif case == "overflow_pid":
+        payload = payload.replace("WRITE 0 ", f"WRITE {1 << 31} ")
     elif case == "wrong_device":
         payload = payload.replace(
             f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:",
@@ -605,6 +622,32 @@ def test_parent_fdinfo_lock_proof_rejects_malformed_or_mismatched_records(
             ),
             label="Docker operation lock",
         )
+
+
+def test_parent_fdinfo_lock_proof_accepts_informational_acquirer_pid(
+    tmp_path: Path,
+) -> None:
+    lock_file = tmp_path / "operation.lock"
+    lock_file.touch(mode=0o600)
+    metadata = lock_file.stat()
+    owner_pid = 123
+    fdinfo = tmp_path / "proc" / str(owner_pid) / "fdinfo"
+    fdinfo.mkdir(parents=True)
+    (fdinfo / "7").write_text(
+        _fdinfo_payload(lock_file, owner_pid=9999),
+        encoding="ascii",
+    )
+
+    _require_parent_fd_lock(
+        proc_root=tmp_path / "proc",
+        owner_pid=owner_pid,
+        descriptor=7,
+        identity=_RootIdentity(
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+        ),
+        label="Docker operation lock",
+    )
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc fdinfo contract")

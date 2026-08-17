@@ -36,6 +36,7 @@ _FDINFO_LOCK_RE = re.compile(
 )
 _MAX_FDINFO_BYTES = 64 * 1024
 _MAX_FDINFO_LINES = 64
+_MAX_FDINFO_LOCK_PID = (1 << 31) - 1
 
 
 @dataclass(frozen=True)
@@ -473,10 +474,11 @@ def _require_parent_fd_lock(
             f"{label} fdinfo does not prove an exclusive whole-file FLOCK"
         )
     lock_pid = int(lock.group(2))
-    # util-linux acquires the lock in a short-lived child against the shell's
-    # inherited open-file description. Linux reports PID 0 after that child
-    # exits; a direct flock(2) by the parent reports the parent PID.
-    if lock_pid not in {0, owner_pid}:
+    # The kernel's FLOCK PID field is informational for locks attached to an
+    # open-file description: it may name the parent, a util-linux flock
+    # acquirer, or zero after that acquirer exits. Exact ownership is proved
+    # by this parent's fdinfo record, descriptor identity, and contention.
+    if lock_pid > _MAX_FDINFO_LOCK_PID:
         raise DockerZeroRuntimeReconcilerV2Error(
             f"{label} fdinfo lock owner is invalid"
         )

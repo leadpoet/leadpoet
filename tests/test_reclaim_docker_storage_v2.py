@@ -90,7 +90,7 @@ def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
     assert "docker image prune" not in source
     assert "docker system prune" not in source
     assert "docker_live_restore_reconciler_v2.py" not in source
-    assert source.count("--audit-only") == 3
+    assert source.count("--audit-only") == 4
     assert "--docker-lock-file" in source
     assert "--docker-admission-lock-file" in source
     assert "--docker-lock-owner-pid" in source
@@ -116,14 +116,17 @@ def test_required_zero_runtime_reconcile_is_strict_and_builder_first():
         '|| [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]', builder_prune
     )
     pre_audit = SCRIPT.index("--audit-only", reconcile_trigger)
-    helper = SCRIPT.index("docker_zero_runtime_reconciler_v2.py", pre_audit)
+    raw_apply = SCRIPT.index("if ! ONLINE_RECLAIM_RESULT", pre_audit)
+    post_apply_audit = SCRIPT.index("--audit-only", raw_apply)
+    helper = SCRIPT.index("docker_zero_runtime_reconciler_v2.py", post_apply_audit)
     post_helper_builder_prune = SCRIPT.index(
         "run_prune_with_retry builder docker builder prune --all --force", helper
     )
     final_audit = SCRIPT.index("--audit-only", post_helper_builder_prune)
 
     assert validation < acquire < lane < builder_prune < reconcile_trigger
-    assert reconcile_trigger < pre_audit < helper < post_helper_builder_prune
+    assert reconcile_trigger < pre_audit < raw_apply < post_apply_audit < helper
+    assert helper < post_helper_builder_prune
     assert post_helper_builder_prune < final_audit
     assert (
         '[ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "1" ]'

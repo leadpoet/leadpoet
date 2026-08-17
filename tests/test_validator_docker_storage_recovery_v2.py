@@ -35,6 +35,10 @@ def _run_recovery(
     moby_shims: int = 0,
     live_runtime_min_free_bytes: int = 18_000_000_000,
     stale_overlay_mounts: int = 0,
+    stale_layer_records: int = 0,
+    stale_mount_records: int = 0,
+    stale_overlay_directories: int = 0,
+    stale_overlay_links: int = 0,
     available_after_stale_reclaim: Optional[int] = None,
     available_after_builder_prune: Optional[int] = None,
     images_after_builder_prune: Optional[int] = None,
@@ -56,10 +60,18 @@ def _run_recovery(
     nonzero_shim_probe_reports_no_match: bool = False,
     fail_stale_reclaimer: bool = False,
     malformed_stale_reclaimer: bool = False,
+    pre_reclaim_audit_bool_field: Optional[str] = None,
+    reclaim_count_mismatch_field: Optional[str] = None,
+    post_reclaim_stale_field: Optional[str] = None,
+    post_reclaim_active_count_field: Optional[str] = None,
+    change_audit_manifest_after_stale_reclaim: bool = False,
     fail_zero_runtime_reconciler: bool = False,
     malformed_zero_runtime_reconciler: bool = False,
+    zero_runtime_boolean_field: Optional[str] = None,
     change_audit_manifest_after_reconcile: bool = False,
     change_audit_manifest_after_post_prune: bool = False,
+    post_reconcile_active_count_field: Optional[str] = None,
+    post_prune_active_count_field: Optional[str] = None,
     stale_audit_before_reconcile: bool = False,
     stale_audit_after_reconcile: bool = False,
     fail_umount: bool = False,
@@ -286,8 +298,24 @@ case "$command" in
           printf '{}\n'
           exit 0
         fi
-        printf '{"container_count":0,"containerd_container_count":0,"containerd_task_count":0,"docker_root":"/var/lib/docker","image_count":%s,"image_manifest_hash":"sha256:%064d","moby_shim_count":0,"restart_performed":true,"root_device":1,"root_inode":2,"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1","status":"ready"}\n' \
-          "$FAKE_IMAGES" 0
+        container_count=0
+        containerd_container_count=0
+        containerd_task_count=0
+        image_count="$FAKE_IMAGES"
+        moby_shim_count=0
+        root_device=1
+        root_inode=2
+        case "$FAKE_ZERO_RUNTIME_BOOLEAN_FIELD" in
+          container_count) container_count=true ;;
+          containerd_container_count) containerd_container_count=true ;;
+          containerd_task_count) containerd_task_count=true ;;
+          image_count) image_count=true ;;
+          moby_shim_count) moby_shim_count=true ;;
+          root_device) root_device=true ;;
+          root_inode) root_inode=true ;;
+        esac
+        printf '{"container_count":%s,"containerd_container_count":%s,"containerd_task_count":%s,"docker_root":"/var/lib/docker","image_count":%s,"image_manifest_hash":"sha256:%064d","moby_shim_count":%s,"restart_performed":true,"root_device":%s,"root_inode":%s,"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1","status":"ready"}\n' \
+          "$container_count" "$containerd_container_count" "$containerd_task_count" "$image_count" 0 "$moby_shim_count" "$root_device" "$root_inode"
         ;;
       *docker_live_restore_reconciler_v2.py*)
         printf '{"config_changed":true,"container_count":%s,"image_count":%s,"manifest_hash":"sha256:%064d","schema_version":"leadpoet.docker_live_restore_reconcile.v1","status":"ready"}\n' \
@@ -295,7 +323,28 @@ case "$command" in
         ;;
       *docker_stale_mount_reclaimer_v2.py*--audit-only*)
         manifest_digit=0
-        stale_count=0
+        active_container_count=0
+        active_image_count="$FAKE_IMAGES"
+        active_layer_count="$FAKE_LAYERDB_IMAGES"
+        active_mount_count=0
+        active_overlay_dir_count="$FAKE_LAYERDB_IMAGES"
+        mounted_overlay_count="$FAKE_STALE_OVERLAY_MOUNTS"
+        stale_layer_record_count="$FAKE_STALE_LAYER_RECORDS"
+        stale_mount_record_count="$FAKE_STALE_MOUNT_RECORDS"
+        stale_overlay_dir_count="$FAKE_STALE_OVERLAY_DIRECTORIES"
+        stale_overlay_link_count="$FAKE_STALE_OVERLAY_LINKS"
+        if [ -f "$FAKE_STALE_RECLAIM_MARKER" ]; then
+          mounted_overlay_count=0
+          stale_layer_record_count=0
+          stale_mount_record_count=0
+          stale_overlay_dir_count=0
+          stale_overlay_link_count=0
+        fi
+        if [ -f "$FAKE_STALE_RECLAIM_MARKER" ] \
+            && [ ! -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_CHANGE_AUDIT_MANIFEST_AFTER_STALE_RECLAIM" = "1" ]; then
+          manifest_digit=1
+        fi
         if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
             && [ "$FAKE_CHANGE_AUDIT_MANIFEST_AFTER_RECONCILE" = "1" ]; then
           manifest_digit=1
@@ -307,14 +356,65 @@ case "$command" in
         fi
         if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
             && [ "$FAKE_STALE_AUDIT_AFTER_RECONCILE" = "1" ]; then
-          stale_count=1
+          stale_layer_record_count=1
         fi
-        if [ ! -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+        if [ -f "$FAKE_STALE_RECLAIM_MARKER" ] \
+            && [ ! -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
             && [ "$FAKE_STALE_AUDIT_BEFORE_RECONCILE" = "1" ]; then
-          stale_count=1
+          stale_layer_record_count=1
         fi
-        printf '{"active_container_count":0,"active_image_count":%s,"active_layer_count":%s,"active_manifest_hash":"sha256:%064d","active_mount_count":0,"active_overlay_dir_count":%s,"docker_root":"/var/lib/docker","mounted_overlay_count":0,"schema_version":"leadpoet.docker_stale_mount_audit.v3","stale_layer_record_count":%s,"stale_mount_record_count":0,"stale_overlay_dir_count":0,"stale_overlay_link_count":0,"status":"ready"}\n' \
-          "$FAKE_IMAGES" "$FAKE_LAYERDB_IMAGES" "$manifest_digit" "$FAKE_LAYERDB_IMAGES" "$stale_count"
+        if [ -f "$FAKE_STALE_RECLAIM_MARKER" ] \
+            && [ ! -f "$FAKE_DAEMON_RECONCILE_MARKER" ]; then
+          case "$FAKE_POST_RECLAIM_STALE_FIELD" in
+            stale_layer_record_count) stale_layer_record_count=1 ;;
+            mounted_overlay_count) mounted_overlay_count=1 ;;
+            stale_mount_record_count) stale_mount_record_count=1 ;;
+            stale_overlay_dir_count) stale_overlay_dir_count=1 ;;
+            stale_overlay_link_count) stale_overlay_link_count=1 ;;
+          esac
+          case "$FAKE_POST_RECLAIM_ACTIVE_COUNT_FIELD" in
+            active_container_count) active_container_count=1 ;;
+            active_image_count) active_image_count=$((active_image_count + 1)) ;;
+            active_layer_count) active_layer_count=$((active_layer_count + 1)) ;;
+            active_mount_count) active_mount_count=1 ;;
+            active_overlay_dir_count) active_overlay_dir_count=$((active_overlay_dir_count + 1)) ;;
+          esac
+        fi
+        if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ]; then
+          case "$FAKE_POST_RECONCILE_ACTIVE_COUNT_FIELD" in
+            active_container_count) active_container_count=1 ;;
+            active_image_count) active_image_count=$((active_image_count + 1)) ;;
+            active_layer_count) active_layer_count=$((active_layer_count + 1)) ;;
+            active_mount_count) active_mount_count=1 ;;
+            active_overlay_dir_count) active_overlay_dir_count=$((active_overlay_dir_count + 1)) ;;
+          esac
+        fi
+        if [ -f "$FAKE_BUILDER_PRUNE_STATE" ] \
+            && [ "$(cat "$FAKE_BUILDER_PRUNE_STATE")" -ge 2 ]; then
+          case "$FAKE_POST_PRUNE_ACTIVE_COUNT_FIELD" in
+            active_container_count) active_container_count=1 ;;
+            active_image_count) active_image_count=$((active_image_count + 1)) ;;
+            active_layer_count) active_layer_count=$((active_layer_count + 1)) ;;
+            active_mount_count) active_mount_count=1 ;;
+            active_overlay_dir_count) active_overlay_dir_count=$((active_overlay_dir_count + 1)) ;;
+          esac
+        fi
+        if [ ! -f "$FAKE_STALE_RECLAIM_MARKER" ]; then
+          case "$FAKE_PRE_RECLAIM_AUDIT_BOOL_FIELD" in
+            active_container_count) active_container_count=true ;;
+            active_image_count) active_image_count=true ;;
+            active_layer_count) active_layer_count=true ;;
+            active_mount_count) active_mount_count=true ;;
+            active_overlay_dir_count) active_overlay_dir_count=true ;;
+            mounted_overlay_count) mounted_overlay_count=true ;;
+            stale_layer_record_count) stale_layer_record_count=true ;;
+            stale_mount_record_count) stale_mount_record_count=true ;;
+            stale_overlay_dir_count) stale_overlay_dir_count=true ;;
+            stale_overlay_link_count) stale_overlay_link_count=true ;;
+          esac
+        fi
+        printf '{"active_container_count":%s,"active_image_count":%s,"active_layer_count":%s,"active_manifest_hash":"sha256:%064d","active_mount_count":%s,"active_overlay_dir_count":%s,"docker_root":"/var/lib/docker","mounted_overlay_count":%s,"schema_version":"leadpoet.docker_stale_mount_audit.v3","stale_layer_record_count":%s,"stale_mount_record_count":%s,"stale_overlay_dir_count":%s,"stale_overlay_link_count":%s,"status":"ready"}\n' \
+          "$active_container_count" "$active_image_count" "$active_layer_count" "$manifest_digit" "$active_mount_count" "$active_overlay_dir_count" "$mounted_overlay_count" "$stale_layer_record_count" "$stale_mount_record_count" "$stale_overlay_dir_count" "$stale_overlay_link_count"
         ;;
       *docker_stale_mount_reclaimer_v2.py*)
         if [ "$FAKE_FAIL_STALE_RECLAIMER" = "1" ]; then
@@ -325,8 +425,30 @@ case "$command" in
           printf '{}\n'
           exit 0
         fi
-        printf '{"active_container_count":%s,"active_image_count":%s,"active_layer_count":%s,"active_mount_count":%s,"mounted_overlay_count":%s,"reclaimed_layer_record_count":0,"reclaimed_mount_count":%s,"reclaimed_mount_record_count":0,"reclaimed_overlay_dir_count":0,"reclaimed_overlay_link_count":0,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}\n' \
-          "$FAKE_CONTAINERS" "$FAKE_IMAGES" "$FAKE_LAYERDB_IMAGES" "$FAKE_CONTAINERS" "$((FAKE_CONTAINERS + FAKE_STALE_OVERLAY_MOUNTS))" "$FAKE_STALE_OVERLAY_MOUNTS"
+        active_container_count="$FAKE_CONTAINERS"
+        active_image_count="$FAKE_IMAGES"
+        active_layer_count="$FAKE_LAYERDB_IMAGES"
+        active_mount_count="$FAKE_CONTAINERS"
+        mounted_overlay_count="$((FAKE_CONTAINERS + FAKE_STALE_OVERLAY_MOUNTS))"
+        reclaimed_layer_record_count="$FAKE_STALE_LAYER_RECORDS"
+        reclaimed_mount_count="$FAKE_STALE_OVERLAY_MOUNTS"
+        reclaimed_mount_record_count="$FAKE_STALE_MOUNT_RECORDS"
+        reclaimed_overlay_dir_count="$FAKE_STALE_OVERLAY_DIRECTORIES"
+        reclaimed_overlay_link_count="$FAKE_STALE_OVERLAY_LINKS"
+        case "$FAKE_RECLAIM_COUNT_MISMATCH_FIELD" in
+          active_container_count) active_container_count=$((active_container_count + 1)) ;;
+          active_image_count) active_image_count=$((active_image_count + 1)) ;;
+          active_layer_count) active_layer_count=$((active_layer_count + 1)) ;;
+          active_mount_count) active_mount_count=$((active_mount_count + 1)) ;;
+          mounted_overlay_count) mounted_overlay_count=$((mounted_overlay_count + 1)) ;;
+          reclaimed_layer_record_count) reclaimed_layer_record_count=$((reclaimed_layer_record_count + 1)) ;;
+          reclaimed_mount_count) reclaimed_mount_count=$((reclaimed_mount_count + 1)) ;;
+          reclaimed_mount_record_count) reclaimed_mount_record_count=$((reclaimed_mount_record_count + 1)) ;;
+          reclaimed_overlay_dir_count) reclaimed_overlay_dir_count=$((reclaimed_overlay_dir_count + 1)) ;;
+          reclaimed_overlay_link_count) reclaimed_overlay_link_count=$((reclaimed_overlay_link_count + 1)) ;;
+        esac
+        printf '{"active_container_count":%s,"active_image_count":%s,"active_layer_count":%s,"active_mount_count":%s,"docker_root":"/var/lib/docker","mounted_overlay_count":%s,"reclaimed_layer_record_count":%s,"reclaimed_mount_count":%s,"reclaimed_mount_record_count":%s,"reclaimed_overlay_dir_count":%s,"reclaimed_overlay_link_count":%s,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}\n' \
+          "$active_container_count" "$active_image_count" "$active_layer_count" "$active_mount_count" "$mounted_overlay_count" "$reclaimed_layer_record_count" "$reclaimed_mount_count" "$reclaimed_mount_record_count" "$reclaimed_overlay_dir_count" "$reclaimed_overlay_link_count"
         ;;
       *) exit 2 ;;
     esac
@@ -552,6 +674,10 @@ exit 0
             "1" if nonzero_shim_probe_reports_no_match else "0"
         ),
         "FAKE_STALE_OVERLAY_MOUNTS": str(stale_overlay_mounts),
+        "FAKE_STALE_LAYER_RECORDS": str(stale_layer_records),
+        "FAKE_STALE_MOUNT_RECORDS": str(stale_mount_records),
+        "FAKE_STALE_OVERLAY_DIRECTORIES": str(stale_overlay_directories),
+        "FAKE_STALE_OVERLAY_LINKS": str(stale_overlay_links),
         "FAKE_STALE_RECLAIM_MARKER": str(tmp_path / "stale-mounts-reclaimed"),
         "FAKE_BUILDER_PRUNE_MARKER": str(tmp_path / "builder-pruned"),
         "FAKE_BUILDER_PRUNE_STATE": str(tmp_path / "builder-prune-count"),
@@ -566,17 +692,45 @@ exit 0
         "FAKE_MALFORMED_STALE_RECLAIMER": (
             "1" if malformed_stale_reclaimer else "0"
         ),
+        "FAKE_PRE_RECLAIM_AUDIT_BOOL_FIELD": (
+            "" if pre_reclaim_audit_bool_field is None else pre_reclaim_audit_bool_field
+        ),
+        "FAKE_RECLAIM_COUNT_MISMATCH_FIELD": (
+            "" if reclaim_count_mismatch_field is None else reclaim_count_mismatch_field
+        ),
+        "FAKE_POST_RECLAIM_STALE_FIELD": (
+            "" if post_reclaim_stale_field is None else post_reclaim_stale_field
+        ),
+        "FAKE_POST_RECLAIM_ACTIVE_COUNT_FIELD": (
+            ""
+            if post_reclaim_active_count_field is None
+            else post_reclaim_active_count_field
+        ),
+        "FAKE_CHANGE_AUDIT_MANIFEST_AFTER_STALE_RECLAIM": (
+            "1" if change_audit_manifest_after_stale_reclaim else "0"
+        ),
         "FAKE_FAIL_ZERO_RUNTIME_RECONCILER": (
             "1" if fail_zero_runtime_reconciler else "0"
         ),
         "FAKE_MALFORMED_ZERO_RUNTIME_RECONCILER": (
             "1" if malformed_zero_runtime_reconciler else "0"
         ),
+        "FAKE_ZERO_RUNTIME_BOOLEAN_FIELD": (
+            "" if zero_runtime_boolean_field is None else zero_runtime_boolean_field
+        ),
         "FAKE_CHANGE_AUDIT_MANIFEST_AFTER_RECONCILE": (
             "1" if change_audit_manifest_after_reconcile else "0"
         ),
         "FAKE_CHANGE_AUDIT_MANIFEST_AFTER_POST_PRUNE": (
             "1" if change_audit_manifest_after_post_prune else "0"
+        ),
+        "FAKE_POST_RECONCILE_ACTIVE_COUNT_FIELD": (
+            ""
+            if post_reconcile_active_count_field is None
+            else post_reconcile_active_count_field
+        ),
+        "FAKE_POST_PRUNE_ACTIVE_COUNT_FIELD": (
+            "" if post_prune_active_count_field is None else post_prune_active_count_field
         ),
         "FAKE_STALE_AUDIT_AFTER_RECONCILE": (
             "1" if stale_audit_after_reconcile else "0"
@@ -879,7 +1033,10 @@ def test_required_zero_runtime_reconcile_runs_with_ample_space(
     result, sudo_log = _run_recovery(
         tmp_path,
         available=25_000_000_000,
-        images=3,
+        images=14,
+        layerdb_images=65,
+        overlay_directories=65,
+        stale_overlay_links=2,
         host_gateway_live=True,
         allow_live_host_gateway_prune=True,
         require_zero_runtime_reconcile="1",
@@ -887,14 +1044,19 @@ def test_required_zero_runtime_reconcile_runs_with_ample_space(
 
     assert result.returncode == 0, result.stderr
     assert "storage maintenance deferred" not in result.stdout
-    assert "phase=pre-stale-reclaim" not in result.stdout
+    assert "phase=pre-stale-reclaim containers=0" in result.stdout
     assert "phase=pre-daemon-reconcile containers=0" in result.stdout
     assert "phase=post-daemon-reconcile containers=0" in result.stdout
     assert "phase=post-reconcile-builder-prune containers=0" in result.stdout
     assert "phase=post-reclaim containers=0" in result.stdout
     assert "Docker storage ready after bounded online reclaim" in result.stdout
     assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
-    assert not (tmp_path / "stale-mounts-reclaimed").exists()
+    assert (tmp_path / "stale-mounts-reclaimed").is_file()
+    assert '"active_image_count":14' in result.stdout
+    assert '"active_layer_count":65' in result.stdout
+    assert '"active_overlay_dir_count":65' in result.stdout
+    assert '"stale_overlay_link_count":2' in result.stdout
+    assert '"reclaimed_overlay_link_count":2' in result.stdout
     assert (tmp_path / "builder-prune-count").read_text().strip() == "2"
     operations = (tmp_path / "operations.log").read_text().splitlines()
     relevant_operations = []
@@ -910,6 +1072,8 @@ def test_required_zero_runtime_reconcile_runs_with_ample_space(
     assert relevant_operations == [
         "builder_prune",
         "stale_audit",
+        "stale_reclaim",
+        "stale_audit",
         "dockerd_reconcile",
         "stale_audit",
         "builder_prune",
@@ -920,6 +1084,345 @@ def test_required_zero_runtime_reconcile_runs_with_ample_space(
     assert "systemctl" not in sudo_log
     assert "rm " not in sudo_log
     assert "pkill" not in sudo_log
+
+
+@pytest.mark.parametrize(
+    "stale_state",
+    [
+        pytest.param({}, id="all-zero"),
+        pytest.param({"stale_layer_records": 1}, id="layer-record"),
+        pytest.param({"stale_overlay_mounts": 1}, id="mounted-overlay"),
+        pytest.param({"stale_mount_records": 1}, id="mount-record"),
+        pytest.param({"stale_overlay_directories": 1}, id="overlay-directory"),
+        pytest.param({"stale_overlay_links": 1}, id="overlay-link"),
+    ],
+)
+def test_required_zero_runtime_reconcile_applies_every_stale_dimension_and_zero(
+    tmp_path: Path,
+    stale_state: dict[str, int],
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=2,
+        layerdb_images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        **stale_state,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "stale-mounts-reclaimed").is_file()
+    assert (tmp_path / "daemon-reconciled").is_file()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "2"
+    operations = (tmp_path / "operations.log").read_text().splitlines()
+    sequence = []
+    for operation in operations:
+        if operation == "docker builder prune --all --force":
+            sequence.append("builder_prune")
+        elif "docker_zero_runtime_reconciler_v2.py" in operation:
+            sequence.append("dockerd_reconcile")
+        elif "docker_stale_mount_reclaimer_v2.py" in operation:
+            sequence.append(
+                "stale_audit" if operation.endswith(" --audit-only") else "stale_reclaim"
+            )
+    assert sequence == [
+        "builder_prune",
+        "stale_audit",
+        "stale_reclaim",
+        "stale_audit",
+        "dockerd_reconcile",
+        "stale_audit",
+        "builder_prune",
+        "stale_audit",
+    ]
+    assert "docker image prune" not in "\n".join(operations)
+    assert "docker system prune" not in "\n".join(operations)
+    assert "systemctl" not in sudo_log
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "active_container_count",
+        "active_image_count",
+        "active_layer_count",
+        "active_mount_count",
+        "mounted_overlay_count",
+        "reclaimed_layer_record_count",
+        "reclaimed_mount_count",
+        "reclaimed_mount_record_count",
+        "reclaimed_overlay_dir_count",
+        "reclaimed_overlay_link_count",
+    ],
+)
+def test_required_zero_runtime_reconcile_rejects_reclaim_count_mismatch(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=2,
+        layerdb_images=3,
+        stale_layer_records=1,
+        stale_overlay_mounts=1,
+        stale_mount_records=1,
+        stale_overlay_directories=1,
+        stale_overlay_links=1,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        reclaim_count_mismatch_field=field,
+    )
+
+    assert result.returncode == 1
+    assert "reclaim returned malformed evidence" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+    assert not (tmp_path / "daemon-reconciled").exists()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("fail_stale_reclaimer", "validated stale Docker overlay reclaim failed"),
+        ("malformed_stale_reclaimer", "reclaim returned malformed evidence"),
+    ],
+)
+def test_required_zero_runtime_reconcile_stale_apply_failure_is_terminal(
+    tmp_path: Path,
+    failure: str,
+    message: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        **{failure: True},
+    )
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+    assert not (tmp_path / "daemon-reconciled").exists()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "stale_layer_record_count",
+        "mounted_overlay_count",
+        "stale_mount_record_count",
+        "stale_overlay_dir_count",
+        "stale_overlay_link_count",
+    ],
+)
+def test_required_zero_runtime_reconcile_rejects_residual_stale_state(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        post_reclaim_stale_field=field,
+    )
+
+    assert result.returncode == 1
+    assert "audit was invalid before daemon reconciliation" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+    assert not (tmp_path / "daemon-reconciled").exists()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "active_container_count",
+        "active_image_count",
+        "active_layer_count",
+        "active_mount_count",
+        "active_overlay_dir_count",
+    ],
+)
+def test_required_zero_runtime_reconcile_rejects_post_reclaim_active_change(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=2,
+        layerdb_images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        post_reclaim_active_count_field=field,
+    )
+
+    assert result.returncode == 1
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+    assert not (tmp_path / "daemon-reconciled").exists()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "active_container_count",
+        "active_image_count",
+        "active_layer_count",
+        "active_mount_count",
+        "active_overlay_dir_count",
+        "mounted_overlay_count",
+        "stale_layer_record_count",
+        "stale_mount_record_count",
+        "stale_overlay_dir_count",
+        "stale_overlay_link_count",
+    ],
+)
+def test_required_zero_runtime_reconcile_rejects_boolean_pre_audit_counts(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        pre_reclaim_audit_bool_field=field,
+    )
+
+    assert result.returncode == 1
+    assert "audit was invalid before guarded stale reclaim" in result.stderr
+    assert not (tmp_path / "stale-mounts-reclaimed").exists()
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+
+
+def test_required_zero_runtime_reconcile_rejects_manifest_change_during_reclaim(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=2,
+        layerdb_images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        change_audit_manifest_after_stale_reclaim=True,
+    )
+
+    assert result.returncode == 1
+    assert "identity changed during guarded stale reclaim" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+    assert not (tmp_path / "daemon-reconciled").exists()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "container_count",
+        "containerd_container_count",
+        "containerd_task_count",
+        "image_count",
+        "moby_shim_count",
+        "root_device",
+        "root_inode",
+    ],
+)
+def test_required_zero_runtime_reconcile_rejects_boolean_helper_counts(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=2,
+        layerdb_images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        zero_runtime_boolean_field=field,
+    )
+
+    assert result.returncode == 1
+    assert "reconciliation returned malformed evidence" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert (tmp_path / "daemon-reconciled").is_file()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "active_container_count",
+        "active_image_count",
+        "active_layer_count",
+        "active_mount_count",
+        "active_overlay_dir_count",
+    ],
+)
+def test_required_zero_runtime_reconcile_rejects_post_helper_active_change(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=2,
+        layerdb_images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        post_reconcile_active_count_field=field,
+    )
+
+    assert result.returncode == 1
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert (tmp_path / "daemon-reconciled").is_file()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "active_container_count",
+        "active_image_count",
+        "active_layer_count",
+        "active_mount_count",
+        "active_overlay_dir_count",
+    ],
+)
+def test_required_zero_runtime_reconcile_rejects_post_prune_active_change(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=2,
+        layerdb_images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        post_prune_active_count_field=field,
+    )
+
+    assert result.returncode == 1
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert (tmp_path / "daemon-reconciled").is_file()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "2"
 
 
 @pytest.mark.parametrize("value", ["", "yes", "2", "-1"])

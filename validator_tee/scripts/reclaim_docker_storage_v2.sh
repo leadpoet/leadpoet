@@ -551,7 +551,7 @@ if document.get("schema_version") != "leadpoet.docker_stale_mount_audit.v3":
     raise SystemExit("invalid online Docker audit schema")
 if document.get("status") != "ready" or document.get("docker_root") != "/var/lib/docker":
     raise SystemExit("invalid online Docker audit identity")
-if any(not isinstance(document.get(field), int) or document[field] < 0 for field in count_fields):
+if any(type(document.get(field)) is not int or document[field] < 0 for field in count_fields):
     raise SystemExit("online Docker audit returned malformed counts")
 if any(document[field] != 0 for field in zero_fields):
     raise SystemExit("online Docker audit did not observe clean empty-runtime state")
@@ -559,6 +559,179 @@ manifest = document.get("active_manifest_hash")
 if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest) is None:
     raise SystemExit("online Docker audit returned malformed active identity")
 print(manifest)
+'
+}
+
+online_stale_audit_manifest_allowing_stale() {
+  python3 -c '
+import json
+import re
+import sys
+
+document = json.load(sys.stdin)
+count_fields = (
+    "active_container_count",
+    "active_image_count",
+    "active_layer_count",
+    "active_mount_count",
+    "active_overlay_dir_count",
+    "mounted_overlay_count",
+    "stale_layer_record_count",
+    "stale_mount_record_count",
+    "stale_overlay_dir_count",
+    "stale_overlay_link_count",
+)
+if document.get("schema_version") != "leadpoet.docker_stale_mount_audit.v3":
+    raise SystemExit("invalid pre-reclaim Docker audit schema")
+if document.get("status") != "ready" or document.get("docker_root") != "/var/lib/docker":
+    raise SystemExit("invalid pre-reclaim Docker audit identity")
+if any(type(document.get(field)) is not int or document[field] < 0 for field in count_fields):
+    raise SystemExit("pre-reclaim Docker audit returned malformed counts")
+if document["active_container_count"] != 0 or document["active_mount_count"] != 0:
+    raise SystemExit("pre-reclaim Docker audit observed a nonempty runtime")
+manifest = document.get("active_manifest_hash")
+if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest) is None:
+    raise SystemExit("pre-reclaim Docker audit returned malformed active identity")
+print(manifest)
+'
+}
+
+online_stale_reclaim_performed() {
+  python3 -c '
+import json
+import sys
+
+raw = sys.stdin.read(65537)
+if len(raw) > 65536:
+    raise SystemExit("online Docker reclaim evidence exceeds its size bound")
+lines = raw.splitlines()
+if len(lines) != 2:
+    raise SystemExit("online Docker reclaim evidence must contain exactly two documents")
+try:
+    before, result = (json.loads(line) for line in lines)
+except (TypeError, ValueError) as exc:
+    raise SystemExit("online Docker reclaim evidence is not valid JSON") from exc
+audit_counts = (
+    "active_container_count",
+    "active_image_count",
+    "active_layer_count",
+    "active_mount_count",
+    "active_overlay_dir_count",
+    "mounted_overlay_count",
+    "stale_layer_record_count",
+    "stale_mount_record_count",
+    "stale_overlay_dir_count",
+    "stale_overlay_link_count",
+)
+result_counts = (
+    "active_container_count",
+    "active_image_count",
+    "active_layer_count",
+    "active_mount_count",
+    "mounted_overlay_count",
+    "reclaimed_layer_record_count",
+    "reclaimed_mount_count",
+    "reclaimed_mount_record_count",
+    "reclaimed_overlay_dir_count",
+    "reclaimed_overlay_link_count",
+)
+if before.get("schema_version") != "leadpoet.docker_stale_mount_audit.v3":
+    raise SystemExit("invalid pre-reclaim Docker audit schema")
+if result.get("schema_version") != "leadpoet.docker_stale_mount_reclaim.v3":
+    raise SystemExit("invalid online Docker reclaim result schema")
+if any(document.get("status") != "ready" for document in (before, result)):
+    raise SystemExit("online Docker reclaim evidence did not report ready")
+if any(document.get("docker_root") != "/var/lib/docker" for document in (before, result)):
+    raise SystemExit("online Docker reclaim evidence returned an invalid data-root")
+if any(type(before.get(field)) is not int or before[field] < 0 for field in audit_counts):
+    raise SystemExit("pre-reclaim Docker audit returned malformed counts")
+if any(type(result.get(field)) is not int or result[field] < 0 for field in result_counts):
+    raise SystemExit("online Docker reclaim returned malformed counts")
+if before["active_container_count"] != 0 or before["active_mount_count"] != 0:
+    raise SystemExit("pre-reclaim Docker audit observed a nonempty runtime")
+active_pairs = (
+    ("active_container_count", "active_container_count"),
+    ("active_image_count", "active_image_count"),
+    ("active_layer_count", "active_layer_count"),
+    ("active_mount_count", "active_mount_count"),
+    ("mounted_overlay_count", "mounted_overlay_count"),
+)
+reclaimed_pairs = (
+    ("stale_layer_record_count", "reclaimed_layer_record_count"),
+    ("mounted_overlay_count", "reclaimed_mount_count"),
+    ("stale_mount_record_count", "reclaimed_mount_record_count"),
+    ("stale_overlay_dir_count", "reclaimed_overlay_dir_count"),
+    ("stale_overlay_link_count", "reclaimed_overlay_link_count"),
+)
+if any(before[audit_field] != result[result_field] for audit_field, result_field in active_pairs):
+    raise SystemExit("active Docker counts changed during guarded stale reclaim")
+if any(before[audit_field] != result[result_field] for audit_field, result_field in reclaimed_pairs):
+    raise SystemExit("Docker stale-state mutation counts do not match the pre-reclaim audit")
+stale_fields = tuple(audit_field for audit_field, _ in reclaimed_pairs)
+print(int(any(before[field] for field in stale_fields)))
+'
+}
+
+online_stale_audit_identity_preserved() {
+  python3 -c '
+import json
+import re
+import sys
+
+raw = sys.stdin.read(65537)
+if len(raw) > 65536:
+    raise SystemExit("online Docker audit evidence exceeds its size bound")
+lines = raw.splitlines()
+if len(lines) != 2:
+    raise SystemExit("online Docker audit evidence must contain exactly two documents")
+try:
+    before, after = (json.loads(line) for line in lines)
+except (TypeError, ValueError) as exc:
+    raise SystemExit("online Docker audit evidence is not valid JSON") from exc
+count_fields = (
+    "active_container_count",
+    "active_image_count",
+    "active_layer_count",
+    "active_mount_count",
+    "active_overlay_dir_count",
+    "mounted_overlay_count",
+    "stale_layer_record_count",
+    "stale_mount_record_count",
+    "stale_overlay_dir_count",
+    "stale_overlay_link_count",
+)
+active_fields = (
+    "active_container_count",
+    "active_image_count",
+    "active_layer_count",
+    "active_mount_count",
+    "active_overlay_dir_count",
+)
+zero_after_fields = (
+    "active_container_count",
+    "active_mount_count",
+    "mounted_overlay_count",
+    "stale_layer_record_count",
+    "stale_mount_record_count",
+    "stale_overlay_dir_count",
+    "stale_overlay_link_count",
+)
+for document in (before, after):
+    if document.get("schema_version") != "leadpoet.docker_stale_mount_audit.v3":
+        raise SystemExit("invalid online Docker audit schema")
+    if document.get("status") != "ready" or document.get("docker_root") != "/var/lib/docker":
+        raise SystemExit("invalid online Docker audit identity")
+    if any(type(document.get(field)) is not int or document[field] < 0 for field in count_fields):
+        raise SystemExit("online Docker audit returned malformed counts")
+    manifest = document.get("active_manifest_hash")
+    if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest) is None:
+        raise SystemExit("online Docker audit returned malformed active identity")
+if any(after[field] != 0 for field in zero_after_fields):
+    raise SystemExit("post-reclaim Docker audit did not observe clean empty-runtime state")
+if any(before[field] != after[field] for field in active_fields):
+    raise SystemExit("active Docker counts changed during guarded stale reclaim")
+if before["active_manifest_hash"] != after["active_manifest_hash"]:
+    raise SystemExit("active Docker manifest changed during guarded stale reclaim")
 '
 }
 
@@ -575,11 +748,28 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
   require_same_online_images "post-builder-prune"
   AVAILABLE="$(available_bytes)"
   ONLINE_RAW_RECLAIM_PERFORMED=0
-  if [ "$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES" ]; then
+  if [ "$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES" ] \
+      || [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
     inventory_empty_online_runtime "pre-stale-reclaim"
     require_same_online_gateway "pre-stale-reclaim"
     require_same_online_docker_root "pre-stale-reclaim"
     require_same_online_images "pre-stale-reclaim"
+    if ! ONLINE_PRE_RECLAIM_AUDIT="$(
+      run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+        "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
+        --audit-only
+    )"; then
+      echo "ERROR: Docker audit failed before guarded stale reclaim" >&2
+      exit 1
+    fi
+    printf '%s\n' "$ONLINE_PRE_RECLAIM_AUDIT"
+    if ! ONLINE_PRE_RECLAIM_MANIFEST="$(
+      printf '%s' "$ONLINE_PRE_RECLAIM_AUDIT" \
+        | online_stale_audit_manifest_allowing_stale
+    )"; then
+      echo "ERROR: Docker audit was invalid before guarded stale reclaim" >&2
+      exit 1
+    fi
     if ! ONLINE_RECLAIM_RESULT="$(
       run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
         "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py"
@@ -589,45 +779,34 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
     fi
     printf '%s\n' "$ONLINE_RECLAIM_RESULT"
     if ! ONLINE_RAW_RECLAIM_PERFORMED="$(
-      printf '%s' "$ONLINE_RECLAIM_RESULT" | python3 -c '
-import json
-import sys
-
-document = json.load(sys.stdin)
-count_fields = (
-    "active_container_count",
-    "active_image_count",
-    "active_layer_count",
-    "active_mount_count",
-    "mounted_overlay_count",
-    "reclaimed_layer_record_count",
-    "reclaimed_mount_count",
-    "reclaimed_mount_record_count",
-    "reclaimed_overlay_dir_count",
-    "reclaimed_overlay_link_count",
-)
-if document.get("schema_version") != "leadpoet.docker_stale_mount_reclaim.v3":
-    raise SystemExit("invalid online Docker reclaim result schema")
-if document.get("status") != "ready":
-    raise SystemExit("online Docker reclaim did not report ready")
-if any(
-    not isinstance(document.get(field), int) or document[field] < 0
-    for field in count_fields
-):
-    raise SystemExit("online Docker reclaim returned malformed counts")
-if document["active_container_count"] != 0 or document["active_mount_count"] != 0:
-    raise SystemExit("online Docker reclaim observed a nonempty runtime")
-deletion_fields = (
-    "reclaimed_layer_record_count",
-    "reclaimed_mount_count",
-    "reclaimed_mount_record_count",
-    "reclaimed_overlay_dir_count",
-    "reclaimed_overlay_link_count",
-)
-print(int(any(document[field] for field in deletion_fields)))
-'
+      printf '%s\n%s\n' "$ONLINE_PRE_RECLAIM_AUDIT" "$ONLINE_RECLAIM_RESULT" \
+        | online_stale_reclaim_performed
     )"; then
       echo "ERROR: validated stale Docker overlay reclaim returned malformed evidence" >&2
+      exit 1
+    fi
+    if ! ONLINE_PRE_RECONCILE_AUDIT="$(
+      run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+        "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
+        --audit-only
+    )"; then
+      echo "ERROR: post-reclaim Docker audit failed before daemon reconciliation" >&2
+      exit 1
+    fi
+    printf '%s\n' "$ONLINE_PRE_RECONCILE_AUDIT"
+    if ! ONLINE_PRE_RECONCILE_MANIFEST="$(
+      printf '%s' "$ONLINE_PRE_RECONCILE_AUDIT" | online_stale_audit_manifest
+    )"; then
+      echo "ERROR: post-reclaim Docker audit was invalid before daemon reconciliation" >&2
+      exit 1
+    fi
+    if [ "$ONLINE_PRE_RECONCILE_MANIFEST" != "$ONLINE_PRE_RECLAIM_MANIFEST" ]; then
+      echo "ERROR: active Docker image/layer identity changed during guarded stale reclaim" >&2
+      exit 1
+    fi
+    if ! printf '%s\n%s\n' "$ONLINE_PRE_RECLAIM_AUDIT" "$ONLINE_PRE_RECONCILE_AUDIT" \
+        | online_stale_audit_identity_preserved; then
+      echo "ERROR: active Docker inventory changed during guarded stale reclaim" >&2
       exit 1
     fi
   fi
@@ -637,21 +816,6 @@ print(int(any(document[field] for field in deletion_fields)))
       require_same_online_gateway "pre-daemon-reconcile"
       require_same_online_docker_root "pre-daemon-reconcile"
       require_same_online_images "pre-daemon-reconcile"
-      if ! ONLINE_PRE_RECONCILE_AUDIT="$(
-        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
-          "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
-          --audit-only
-      )"; then
-        echo "ERROR: post-reclaim Docker audit failed before daemon reconciliation" >&2
-        exit 1
-      fi
-      printf '%s\n' "$ONLINE_PRE_RECONCILE_AUDIT"
-      if ! ONLINE_PRE_RECONCILE_MANIFEST="$(
-        printf '%s' "$ONLINE_PRE_RECONCILE_AUDIT" | online_stale_audit_manifest
-      )"; then
-        echo "ERROR: post-reclaim Docker audit was invalid before daemon reconciliation" >&2
-        exit 1
-      fi
       PYTHONPATH="$REPO_ROOT" python3 \
         -m validator_tee.host.docker_operation_guard_v2 \
         --wait \
@@ -685,12 +849,12 @@ if document.get("status") != "ready" or document.get("restart_performed") is not
 if document.get("docker_root") != "/var/lib/docker":
     raise SystemExit("dockerd reconciliation returned an invalid data-root")
 for field in ("container_count", "containerd_container_count", "containerd_task_count", "moby_shim_count"):
-    if document.get(field) != 0:
+    if type(document.get(field)) is not int or document[field] != 0:
         raise SystemExit("dockerd reconciliation returned a nonempty runtime")
-if not isinstance(document.get("image_count"), int) or document["image_count"] < 0:
+if type(document.get("image_count")) is not int or document["image_count"] < 0:
     raise SystemExit("dockerd reconciliation returned malformed image count")
 for field in ("root_device", "root_inode"):
-    if not isinstance(document.get(field), int) or document[field] <= 0:
+    if type(document.get(field)) is not int or document[field] <= 0:
         raise SystemExit("dockerd reconciliation returned malformed root identity")
 manifest = document.get("image_manifest_hash")
 if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest) is None:
@@ -722,6 +886,11 @@ if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifes
         echo "ERROR: active Docker image/layer identity changed during daemon reconciliation" >&2
         exit 1
       fi
+      if ! printf '%s\n%s\n' "$ONLINE_PRE_RECLAIM_AUDIT" "$ONLINE_POST_RECONCILE_AUDIT" \
+          | online_stale_audit_identity_preserved; then
+        echo "ERROR: active Docker inventory changed during daemon reconciliation" >&2
+        exit 1
+      fi
       run_prune_with_retry builder docker builder prune --all --force
       inventory_empty_online_runtime "post-reconcile-builder-prune"
       require_same_online_gateway "post-reconcile-builder-prune"
@@ -744,6 +913,11 @@ if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifes
       fi
       if [ "$ONLINE_POST_PRUNE_MANIFEST" != "$ONLINE_PRE_RECONCILE_MANIFEST" ]; then
         echo "ERROR: active Docker image/layer identity changed during reconciled builder prune" >&2
+        exit 1
+      fi
+      if ! printf '%s\n%s\n' "$ONLINE_PRE_RECLAIM_AUDIT" "$ONLINE_POST_PRUNE_AUDIT" \
+          | online_stale_audit_identity_preserved; then
+        echo "ERROR: active Docker inventory changed during reconciled builder prune" >&2
         exit 1
       fi
   fi

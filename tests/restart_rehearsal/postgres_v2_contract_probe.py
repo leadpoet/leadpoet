@@ -5349,14 +5349,14 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                            AND tgenabled <> 'D'
                     ),
                     'protocol_marker_required',
-                        pg_catalog.position(
+                        pg_catalog.strpos(
+                            (SELECT definition FROM guard),
                             'leadpoet.private-model-activation.v1'
-                            IN (SELECT definition FROM guard)
                         ) > 0,
                     'global_generation_required',
-                        pg_catalog.position(
+                        pg_catalog.strpos(
+                            (SELECT definition FROM guard),
                             'expected_global_lineage_generation'
-                            IN (SELECT definition FROM guard)
                         ) > 0
                 )::text;
                 """,

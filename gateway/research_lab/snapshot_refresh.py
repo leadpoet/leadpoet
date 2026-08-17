@@ -293,6 +293,7 @@ def _run_command(
         env=dict(env),
     )
     deadline = time.monotonic() + timeout_seconds
+    completed_pipe_drain_deadline: float | None = None
     while True:
         if cancellation.is_set():
             _terminate_process_group(process)
@@ -314,10 +315,29 @@ def _run_command(
             )
         except subprocess.TimeoutExpired:
             if process.poll() is not None:
-                _terminate_process_group(process)
-                raise RuntimeError(
-                    "snapshot pipeline command left a live descendant process"
-                )
+                group_alive = _process_group_alive(process.pid)
+                if group_alive:
+                    group_alive = not _wait_for_process_group_exit(
+                        process,
+                        timeout_seconds=(
+                            COMMAND_GROUP_EXIT_CONFIRMATION_SECONDS
+                        ),
+                    )
+                if group_alive:
+                    _terminate_process_group(process)
+                    raise RuntimeError(
+                        "snapshot pipeline command left a live descendant process"
+                    )
+                now = time.monotonic()
+                if completed_pipe_drain_deadline is None:
+                    completed_pipe_drain_deadline = (
+                        now + COMMAND_PIPE_DRAIN_TIMEOUT_SECONDS
+                    )
+                if now >= completed_pipe_drain_deadline:
+                    raise RuntimeError(
+                        "snapshot pipeline process pipes remained open after "
+                        "group teardown"
+                    )
             continue
         if cancellation.is_set():
             if _process_group_alive(process.pid):
@@ -470,7 +490,7 @@ async def _run_record_command_with_active_guard(
         task.cancel()
         try:
             await task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             pass
         raise
 

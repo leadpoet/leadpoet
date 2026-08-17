@@ -862,8 +862,15 @@ if _state_path_raw and not _spawn_gate_invocation:
             raise RuntimeError("dev-snapshot production command is incomplete")
         script_name = Path(str(argv[1])).name
         script_path = (_source_root / "scripts" / script_name).resolve()
+        try:
+            command_interpreter = Path(str(argv[0])).resolve(strict=True)
+            boundary_interpreter = Path(sys.executable).resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError(
+                "dev-snapshot production command identity differs"
+            ) from exc
         if (
-            str(argv[0]) != sys.executable
+            command_interpreter != boundary_interpreter
             or script_name not in _PRODUCTION_SCRIPT_NAMES
             or Path(str(argv[1])).resolve() != script_path
             or not script_path.is_file()
@@ -942,7 +949,7 @@ if _state_path_raw and not _spawn_gate_invocation:
             if phase == "publish_immutable":
                 expected.append("--skip-current-pointer")
 
-        if list(argv) != expected:
+        if list(argv[1:]) != expected[1:]:
             raise RuntimeError(
                 f"dev-snapshot production {phase} argv contract differs"
             )
@@ -1443,6 +1450,7 @@ if _state_path_raw and not _spawn_gate_invocation:
                         "dev-snapshot production process-group contract differs"
                     )
                 phase, argv_contract_hash = _validate_production_command(argv)
+                argv[0] = str(Path(argv[0]).resolve(strict=True))
                 return _ObservedProductionPopen(
                     popenargs,
                     kwargs,
@@ -1616,6 +1624,17 @@ def _run_production_spawn_gate() -> None:
             "dev-snapshot production spawn gate payload is invalid"
         ) from exc
     argv = payload.get("argv") if isinstance(payload, Mapping) else None
+    try:
+        command_interpreter = (
+            Path(argv[0]).resolve(strict=True)
+            if isinstance(argv, list) and argv and isinstance(argv[0], str)
+            else None
+        )
+        gate_interpreter = Path(sys.executable).resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(
+            "dev-snapshot production spawn gate contract differs"
+        ) from exc
     if (
         not isinstance(payload, Mapping)
         or set(payload) != {"schema_version", "spawn_nonce", "argv"}
@@ -1624,10 +1643,11 @@ def _run_production_spawn_gate() -> None:
         or not isinstance(argv, list)
         or len(argv) < 2
         or any(not isinstance(value, str) for value in argv)
-        or argv[0] != sys.executable
+        or command_interpreter != gate_interpreter
     ):
         raise RuntimeError("dev-snapshot production spawn gate contract differs")
-    os.execve(argv[0], argv, dict(os.environ))
+    execution_argv = [str(gate_interpreter), *argv[1:]]
+    os.execve(execution_argv[0], execution_argv, dict(os.environ))
 
 
 if __name__ == "__main__":

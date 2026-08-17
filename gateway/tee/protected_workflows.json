@@ -1127,12 +1127,12 @@
       "symbol": "_process_group_alive"
     },
     {
-      "ast_sha256": "sha256:91b59ec448a6fe84bd5fb3da2ceaa6d881b91792859ec494f10ac5b1df77f201",
+      "ast_sha256": "sha256:161ca7374f564bb3f6da179c8fcf672fb435a0c2cc8af63a0efa08d2f2cc2e7d",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "_run_command"
     },
     {
-      "ast_sha256": "sha256:65e99f57a1f8c1732e070b73eee95fad7312db0936091d7dc9fa287798f60ec3",
+      "ast_sha256": "sha256:94998872d6f8f155037340882711759915c0f19aa7d5757c6d72ee55c035f548",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "_run_record_command_with_active_guard"
     },
@@ -4177,7 +4177,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:a367549ab2c2eae3ba30b714adea1a0235915f959d59ec83ab4d005807607b99",
+  "manifest_hash": "sha256:c30a24e2f6c6e9b16de496af4e7a4fdc50bedb9607e0aa7fff07d4b15dd00c6e",
   "protected_source_commit": "d6d4fc5eca58f906765ee763f21839da73e500ae",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

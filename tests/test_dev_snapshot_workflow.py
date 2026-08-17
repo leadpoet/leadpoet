@@ -27,6 +27,10 @@ from tests.restart_rehearsal.dev_snapshot_workflow import (
     expected_docker_bootstrap_hashes,
     exercise_dev_snapshot_downstream_publication,
 )
+from tests.restart_rehearsal.dev_snapshot_boundary.sitecustomize import (
+    PRODUCTION_SPAWN_GATE_ARGUMENT,
+    PRODUCTION_SPAWN_GATE_SCHEMA,
+)
 
 
 _PASS_PREDICATES = (
@@ -257,8 +261,10 @@ def test_dev_snapshot_boundary_rejects_popen_execution_and_env_overrides(
     env = _boundary_environment(state_path, source_root)
     inputs_dir = tmp_path / "work" / "refresh-999-popen-contract" / "inputs"
     export_script = source_root / "scripts" / "export_research_lab_dev_icp_inputs.py"
+    python_alias = tmp_path / "python-symlink"
+    python_alias.symlink_to(Path(sys.executable).resolve())
     production_command = [
-        sys.executable,
+        str(python_alias),
         str(export_script),
         "--out-dir",
         str(inputs_dir),
@@ -331,6 +337,55 @@ def test_dev_snapshot_boundary_rejects_popen_execution_and_env_overrides(
         in run_override.stderr
     )
     assert not inputs_dir.exists()
+
+
+def test_dev_snapshot_spawn_gate_accepts_same_interpreter_symlink(
+    tmp_path: Path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[1]
+    gate = (
+        source_root
+        / "tests"
+        / "restart_rehearsal"
+        / "dev_snapshot_boundary"
+        / "sitecustomize.py"
+    )
+    python_alias = tmp_path / "python-symlink"
+    python_alias.symlink_to(Path(sys.executable).resolve())
+    read_descriptor, write_descriptor = os.pipe()
+    spawn_nonce = "a" * 32
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-S",
+            str(gate),
+            PRODUCTION_SPAWN_GATE_ARGUMENT,
+            str(read_descriptor),
+            spawn_nonce,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        pass_fds=(read_descriptor,),
+    )
+    os.close(read_descriptor)
+    try:
+        payload = {
+            "schema_version": PRODUCTION_SPAWN_GATE_SCHEMA,
+            "spawn_nonce": spawn_nonce,
+            "argv": [str(python_alias), "-c", "pass"],
+        }
+        os.write(
+            write_descriptor,
+            (json.dumps(payload, separators=(",", ":")) + "\n").encode(
+                "utf-8"
+            ),
+        )
+    finally:
+        os.close(write_descriptor)
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode == 0, stderr or stdout
 
 
 def test_dev_snapshot_boundary_real_run_bypass_is_thread_local(

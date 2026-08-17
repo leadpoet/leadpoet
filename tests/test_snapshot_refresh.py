@@ -232,6 +232,82 @@ def test_run_command_confirms_transient_group_exit_after_communicate(
     assert observed_calls == 2
 
 
+def test_run_command_confirms_transient_group_exit_after_pipe_poll_timeout(
+    monkeypatch,
+):
+    class CompletedProcessWithDelayedPipeDrain:
+        pid = 424242
+        returncode = None
+        communicate_calls = 0
+
+        def communicate(self, *, timeout):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise subprocess.TimeoutExpired(["probe"], timeout)
+            self.returncode = 0
+            return "completed\n", ""
+
+        def poll(self):
+            self.returncode = 0
+            return self.returncode
+
+    process = CompletedProcessWithDelayedPipeDrain()
+    observations = iter((True, False, False))
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "_process_group_alive",
+        lambda _process_group_id: next(observations),
+    )
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "_terminate_process_group",
+        lambda _process: pytest.fail("transient group was terminated"),
+    )
+
+    assert snapshot_refresh._run_command(
+        [sys.executable, "-c", "print('completed')"],
+        dict(os.environ),
+        2,
+    ) == "completed\n"
+    assert process.communicate_calls == 2
+
+
+def test_run_command_bounds_pipe_drain_after_completed_group_exit(monkeypatch):
+    class CompletedProcessWithRetainedPipe:
+        pid = 424242
+        returncode = 0
+
+        def communicate(self, *, timeout):
+            raise subprocess.TimeoutExpired(["probe"], timeout)
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: CompletedProcessWithRetainedPipe(),
+    )
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "_process_group_alive",
+        lambda _process_group_id: False,
+    )
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "COMMAND_PIPE_DRAIN_TIMEOUT_SECONDS",
+        0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="pipes remained open"):
+        snapshot_refresh._run_command(
+            [sys.executable, "-c", "pass"],
+            dict(os.environ),
+            2,
+        )
+
+
 def test_cancellation_does_not_mask_command_teardown_failure(monkeypatch):
     started = threading.Event()
 
@@ -1039,6 +1115,53 @@ def test_active_model_guard_cancels_stale_recording_before_publish(
         for command in commands
     )
     assert not any((tmp_path / "work").glob("refresh-*"))
+
+
+def test_active_model_guard_cancellation_does_not_mask_teardown_failure(
+    monkeypatch,
+    tmp_path,
+):
+    started = threading.Event()
+
+    async def failed_teardown(*_args, **_kwargs):
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("snapshot command teardown failed") from exc
+
+    async def active_loader(*_args, **_kwargs):
+        return _active()
+
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "_await_command_completion",
+        failed_teardown,
+    )
+
+    async def scenario() -> None:
+        guarded = asyncio.create_task(
+            snapshot_refresh._run_record_command_with_active_guard(
+                config=SimpleNamespace(),
+                command_runner=lambda *_args, **_kwargs: "",
+                command=[sys.executable, "-c", "pass"],
+                env=dict(os.environ),
+                timeout_seconds=60,
+                active_loader=active_loader,
+                expected_identity=snapshot_refresh._artifact_identity(_active()),
+                cancel_file=tmp_path / "cancel-recording",
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 5
+        while not started.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("guarded recorder did not start")
+            await asyncio.sleep(0.01)
+        guarded.cancel()
+        with pytest.raises(RuntimeError, match="command teardown failed"):
+            await guarded
+
+    asyncio.run(scenario())
 
 
 def test_utc_rollover_never_promotes_stale_snapshot_pointer(monkeypatch, tmp_path):

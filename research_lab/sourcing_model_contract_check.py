@@ -1,6 +1,6 @@
 """Sourcing-model consumer-contract conformance checks.
 
-The reviewed model-owned v7/v8/v11/v12/v13/v26/v46 contracts are snapshotted byte-for-byte under
+The reviewed model-owned v7/v8/v11/v12/v13/v26/v46/v47 contracts are snapshotted byte-for-byte under
 ``research_lab/``. The exact function signatures
 the Lab and production harness call
 (``research_lab_adapter.run_icp``/``adapter_metadata``,
@@ -59,7 +59,30 @@ CONTRACT_V46_PATH = Path(__file__).with_name("sourcing_model_contract_v46.json")
 PARITY_FIXTURE_V46_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v46.json"
 )
+CONTRACT_V47_PATH = Path(__file__).with_name("sourcing_model_contract_v47.json")
+PARITY_FIXTURE_V47_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v47.json"
+)
 REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v47",
+        "contract_path": CONTRACT_V47_PATH,
+        "contract_sha256": (
+            "sha256:a6a388b731a11628a95491995fa87b80fc679a0576f9442d2b494dc9f450cb15"
+        ),
+        "parity_path": PARITY_FIXTURE_V47_PATH,
+        "parity_sha256": (
+            "sha256:da1bd8df2abb99bd617795613f09b3ce116079d46bc5de7cfa1dc23b77265619"
+        ),
+        "positional_exact_signatures": True,
+        "variadic_parameters": {
+            "sourcing_model/corporate_filing_contract.py:"
+            "build_corporate_filing_envelope": {
+                "vararg": None,
+                "kwarg": "payload",
+            },
+        },
+    },
     {
         "contract_id": "leadpoet-sourcing-wrapper-contract-v46",
         "contract_path": CONTRACT_V46_PATH,

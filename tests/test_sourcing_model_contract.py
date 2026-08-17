@@ -22,6 +22,7 @@ from research_lab.sourcing_model_contract_check import (
     CONTRACT_V13_PATH,
     CONTRACT_V26_PATH,
     CONTRACT_V46_PATH,
+    CONTRACT_V47_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
     PARITY_FIXTURE_V11_PATH,
@@ -29,6 +30,7 @@ from research_lab.sourcing_model_contract_check import (
     PARITY_FIXTURE_V13_PATH,
     PARITY_FIXTURE_V26_PATH,
     PARITY_FIXTURE_V46_PATH,
+    PARITY_FIXTURE_V47_PATH,
     PARITY_FIXTURE_V7_PATH,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
@@ -446,6 +448,7 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
         "leadpoet-sourcing-wrapper-contract-v13",
         "leadpoet-sourcing-wrapper-contract-v26",
         "leadpoet-sourcing-wrapper-contract-v46",
+        "leadpoet-sourcing-wrapper-contract-v47",
     }
 
 
@@ -530,6 +533,64 @@ def test_exact_v46_contract_pair_is_reviewed(tmp_path: Path) -> None:
     violations = verify_source_tree_contract(tmp_path)
     assert any(
         "build_corporate_filing_envelope" in item
+        and "parameter drift" in item
+        for item in violations
+    )
+
+
+def test_exact_v47_contract_pair_and_intent_outcome_surface_are_reviewed(
+    tmp_path: Path,
+) -> None:
+    contract = json.loads(CONTRACT_V47_PATH.read_text(encoding="utf-8"))
+    contract_path = tmp_path / contract["canonical_path"]
+    parity_path = tmp_path / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V47_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V47_PATH.read_bytes())
+    _write(
+        tmp_path,
+        "sourcing_model/intent_evidence_outcome.py",
+        """
+        def intent_evidence_outcome_contract_identity():
+            return None
+
+        def parse_intent_evidence_outcome(value):
+            return None
+
+        def project_intent_evidence_outcome(
+            *, review_state, company_qualification, intent_verification,
+            category, source, exact_source_retrieval, stage3_admission,
+            reason_code, reference_date, maximum_age_days
+        ):
+            return None
+
+        def project_intent_stage3_admission(*, category, stage1, source):
+            return None
+        """,
+    )
+
+    resolved = resolve_reviewed_consumer_snapshot(tmp_path)
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v47"
+    )
+    assert not any(
+        "intent_evidence_outcome.py" in item and "parameter drift" in item
+        for item in violations
+    )
+
+    outcome_path = tmp_path / "sourcing_model/intent_evidence_outcome.py"
+    outcome_path.write_text(
+        outcome_path.read_text(encoding="utf-8").replace(
+            "*, review_state", "review_state"
+        ),
+        encoding="utf-8",
+    )
+    violations = verify_source_tree_contract(tmp_path)
+    assert any(
+        "project_intent_evidence_outcome" in item
         and "parameter drift" in item
         for item in violations
     )

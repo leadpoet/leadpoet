@@ -90,19 +90,19 @@ def _champion_rows(allocation: dict[str, object]) -> list[dict[str, object]]:
     ]
 
 
-def test_new_config_defaults_are_explicitly_no_burn_and_no_champion_cap(
+def test_new_config_defaults_are_explicitly_conservative_with_champion_cap(
     monkeypatch,
 ):
     monkeypatch.delenv("ENABLE_CONSERVATIVE", raising=False)
     monkeypatch.delenv("ENABLE_CHAMP_CAP", raising=False)
     config = ResearchLabGatewayConfig.from_env()
 
-    assert config.enable_conservative is False
-    assert config.enable_champ_cap is False
+    assert config.enable_conservative is True
+    assert config.enable_champ_cap is True
     assert config.lab_reimbursement_max_cost_multiplier_with_champions == 2.0
     policy = config.reimbursement_policy_doc(enabled=True)
-    assert policy["enable_conservative"] is False
-    assert policy["enable_champ_cap"] is False
+    assert policy["enable_conservative"] is True
+    assert policy["enable_champ_cap"] is True
 
 
 def test_historical_policy_without_new_flags_preserves_old_burn_modes():

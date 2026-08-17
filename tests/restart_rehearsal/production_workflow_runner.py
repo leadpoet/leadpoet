@@ -3475,7 +3475,7 @@ def _exercise_historical_metagraph_layouts() -> dict[str, Any]:
 
 
 def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
-    """Exercise the configured no-burn and compatibility allocation modes."""
+    """Exercise the configured conservative and no-burn allocation modes."""
 
     from gateway.research_lab.config import ResearchLabGatewayConfig
     from leadpoet_verifier.economics import allocate_research_lab_epoch
@@ -3488,8 +3488,8 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
     cap = Decimal(str(policy["research_lab_emission_percent"]))
     if (
         cap <= 0
-        or policy.get("enable_conservative") is not False
-        or policy.get("enable_champ_cap") is not False
+        or policy.get("enable_conservative") is not True
+        or policy.get("enable_champ_cap") is not True
         or Decimal(
             str(
                 policy[
@@ -3500,8 +3500,11 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
         != Decimal("2")
     ):
         raise RuntimeError(
-            "Research Lab default allocation policy differs from no-burn V2"
+            "Research Lab default allocation policy differs from conservative V2"
         )
+    no_burn_policy = dict(policy)
+    no_burn_policy["enable_conservative"] = False
+    no_burn_policy["enable_champ_cap"] = False
 
     def reimbursement(
         uid: int,
@@ -3521,7 +3524,7 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
 
     current = allocate_research_lab_epoch(
         epoch,
-        policy,
+        no_burn_policy,
         [reimbursement(1, 1_000_000), reimbursement(2, 3_000_000)],
         [],
     )
@@ -3560,7 +3563,7 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
 
     historical = allocate_research_lab_epoch(
         epoch,
-        policy,
+        no_burn_policy,
         [],
         [],
         fallback_reimbursement_obligations=[
@@ -3611,7 +3614,7 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
     ]
     champion_allocation = allocate_research_lab_epoch(
         epoch,
-        policy,
+        no_burn_policy,
         [],
         champions,
     )
@@ -3639,7 +3642,7 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
     )
     capped = allocate_research_lab_epoch(
         epoch,
-        policy,
+        no_burn_policy,
         [
             reimbursement(
                 7,
@@ -3661,11 +3664,9 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
             "active-champion reimbursement cap or remainder differs"
         )
 
-    conservative_policy = dict(policy)
-    conservative_policy["enable_conservative"] = True
     conservative = allocate_research_lab_epoch(
         epoch,
-        conservative_policy,
+        policy,
         [],
         [],
     )

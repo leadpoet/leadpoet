@@ -1937,6 +1937,16 @@
       "symbol": "prepare_model_sandbox_cgroup_v2"
     },
     {
+      "ast_sha256": "sha256:b5488d76a7e9d380b3280c8f14d94fbb6700dd934156bcf5a41f8de0c21e4c25",
+      "path": "gateway/tee/mtls_identity.py",
+      "symbol": "ATTESTED_TLS_CERTIFICATE_CLOCK_SKEW"
+    },
+    {
+      "ast_sha256": "sha256:4df576012e3e4f5fd950fe99df611fd29c2fe76a862f68a3889b95e407827825",
+      "path": "gateway/tee/mtls_identity.py",
+      "symbol": "ATTESTED_TLS_CERTIFICATE_LIFETIME"
+    },
+    {
       "ast_sha256": "sha256:10d38e1376b9bd56f04b1a440cfda577800660e902e54029cc4d6c177cf7ab1e",
       "path": "gateway/tee/mtls_identity.py",
       "symbol": "_atomic_private_write"
@@ -1945,6 +1955,11 @@
       "ast_sha256": "sha256:0a5b87e7c425b7627e94271fc39db112a043ac579311262b52d4bf44e13ff2a3",
       "path": "gateway/tee/mtls_identity.py",
       "symbol": "create_mutual_tls_context"
+    },
+    {
+      "ast_sha256": "sha256:56b0a5b186a5268e9e5a56a9caf8378192c50ada26949d9ce1d12fdf9f2061fd",
+      "path": "gateway/tee/mtls_identity.py",
+      "symbol": "generate_ephemeral_tls_identity"
     },
     {
       "ast_sha256": "sha256:8d2f56c23dadc75302319d7e0d0b4d10bbddc7f7f1815d3a906b2fc7d603ebbb",
@@ -4177,7 +4192,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:2ad8cf4ce42a3883262e7654a8f197730b4a97a68cff96cf7e28f49ac71eef31",
-  "protected_source_commit": "88575fb01ff32bbc7974064dd6b4ce0f6a086388",
+  "manifest_hash": "sha256:38620e926d34e589d2c834cc960fefff7fafc465fb1f93a10cd7284d1efde8dc",
+  "protected_source_commit": "3450c2c64fb13f1ff2da9f7d8cf2de541244464c",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

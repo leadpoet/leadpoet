@@ -15,6 +15,7 @@ Covers the RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE pipeline:
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -355,6 +356,11 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
     reviewed_v6 = dict(ready)
     reviewed_v6["adapter_version"] = "sourcing-model-research-lab-adapter:v6"
     assert private_runtime.validate_sourcing_adapter_metadata(reviewed_v6) == reviewed_v6
+    reviewed_v7 = copy.deepcopy(ready)
+    reviewed_v7["adapter_version"] = "sourcing-model-research-lab-adapter:v7"
+    reviewed_v7["routing"]["compiler_version"] = "routing-compiler-v3"
+    reviewed_v7["runtime_routing"]["compiler_version"] = "routing-compiler-v3"
+    assert private_runtime.validate_sourcing_adapter_metadata(reviewed_v7) == reviewed_v7
     broken = dict(ready)
     broken.pop("industry_taxonomy")
     with pytest.raises(PrivateModelRuntimeError, match="taxonomy hash"):

@@ -21,8 +21,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_private_model_commands_require_reviewed_routing_adapters() -> None:
     assert "sourcing-model-research-lab-adapter:v3" in DEFAULT_PRIVATE_TEST_CMD
     assert "sourcing-model-research-lab-adapter:v6" in DEFAULT_PRIVATE_TEST_CMD
+    assert "sourcing-model-research-lab-adapter:v7" in DEFAULT_PRIVATE_TEST_CMD
     assert "sourcing-model-components:v2" in DEFAULT_PRIVATE_TEST_CMD
     assert "routing-compiler-v2" in DEFAULT_PRIVATE_TEST_CMD
+    assert "routing-compiler-v3" in DEFAULT_PRIVATE_TEST_CMD
     assert "SubprocessPrivateModelRunner" in DEFAULT_PRIVATE_BUILD_CMD
     assert "build_local_private_artifact_manifest" in DEFAULT_PRIVATE_BUILD_CMD
     assert "RESEARCH_LAB_RUNTIME_SOURCE_ROOT" in DEFAULT_PRIVATE_BUILD_CMD

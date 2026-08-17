@@ -1,6 +1,6 @@
 """Sourcing-model consumer-contract conformance checks.
 
-The reviewed model-owned v7/v8/v11/v12/v13/v26 contracts are snapshotted byte-for-byte under
+The reviewed model-owned v7/v8/v11/v12/v13/v26/v46 contracts are snapshotted byte-for-byte under
 ``research_lab/``. The exact function signatures
 the Lab and production harness call
 (``research_lab_adapter.run_icp``/``adapter_metadata``,
@@ -55,7 +55,30 @@ CONTRACT_V26_PATH = Path(__file__).with_name("sourcing_model_contract_v26.json")
 PARITY_FIXTURE_V26_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v26.json"
 )
+CONTRACT_V46_PATH = Path(__file__).with_name("sourcing_model_contract_v46.json")
+PARITY_FIXTURE_V46_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v46.json"
+)
 REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v46",
+        "contract_path": CONTRACT_V46_PATH,
+        "contract_sha256": (
+            "sha256:3e7bffd37cb3b33821717a66a65447e3862b2c87830685a8de46189d3bbd5ef6"
+        ),
+        "parity_path": PARITY_FIXTURE_V46_PATH,
+        "parity_sha256": (
+            "sha256:4ddc10fb52d9101c3a0981f954ef86abdae8d664c5020a4f88cacaeb30dc5422"
+        ),
+        "positional_exact_signatures": True,
+        "variadic_parameters": {
+            "sourcing_model/corporate_filing_contract.py:"
+            "build_corporate_filing_envelope": {
+                "vararg": None,
+                "kwarg": "payload",
+            },
+        },
+    },
     {
         "contract_id": "leadpoet-sourcing-wrapper-contract-v26",
         "contract_path": CONTRACT_V26_PATH,
@@ -187,6 +210,12 @@ def reviewed_consumer_snapshots() -> Dict[str, Dict[str, Any]]:
             "contract_sha256": contract_sha256,
             "parity_path": parity_path,
             "parity_sha256": parity_sha256,
+            "positional_exact_signatures": bool(
+                spec.get("positional_exact_signatures", False)
+            ),
+            "variadic_parameters": dict(
+                spec.get("variadic_parameters") or {}
+            ),
         }
     return snapshots
 
@@ -502,6 +531,12 @@ def verify_source_tree_contract(root: Path) -> List[str]:
     frozen_required_keyword_only = dict(
         document.get("required_keyword_only") or {}
     )
+    positional_exact_signatures = bool(
+        reviewed_snapshot.get("positional_exact_signatures", False)
+    )
+    reviewed_variadic_parameters = dict(
+        reviewed_snapshot.get("variadic_parameters") or {}
+    )
 
     canonical_relative = str(document.get("canonical_path") or "")
     canonical_path = root / canonical_relative
@@ -598,14 +633,18 @@ def verify_source_tree_contract(root: Path) -> List[str]:
             # all-parameter exactness.
             exact_actual = (
                 actual["params"]
-                if expected_full is not None
+                if expected_full is not None or positional_exact_signatures
                 else actual["all_params"]
+            )
+            expected_variadic = reviewed_variadic_parameters.get(
+                contract_key,
+                {"vararg": None, "kwarg": None},
             )
             if contract_key in exact_signatures and (
                 exact_actual != expected
                 or actual["positional_only"]
-                or actual["vararg"] is not None
-                or actual["kwarg"] is not None
+                or actual["vararg"] != expected_variadic["vararg"]
+                or actual["kwarg"] != expected_variadic["kwarg"]
             ):
                 violations.append(
                     f"exact parameter drift {relative}:{name}: expected "

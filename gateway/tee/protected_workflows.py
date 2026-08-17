@@ -207,7 +207,7 @@ PROTECTED_SYMBOLS = {
         "verify_source_tree_contract",
     ),
     "research_lab/eval/private_runtime.py": (
-        "EXPECTED_ROUTING_COMPILER_VERSION",
+        "EXPECTED_ROUTING_COMPILER_VERSIONS",
         "_REVIEWED_CONSUMER_MANIFEST_PAIRS",
         "_PROVIDER_OUTAGE_TEXT_MARKERS",
         "_provider_error_line_is_loop_ending",

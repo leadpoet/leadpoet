@@ -21,12 +21,14 @@ from research_lab.sourcing_model_contract_check import (
     CONTRACT_V12_PATH,
     CONTRACT_V13_PATH,
     CONTRACT_V26_PATH,
+    CONTRACT_V46_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
     PARITY_FIXTURE_V11_PATH,
     PARITY_FIXTURE_V12_PATH,
     PARITY_FIXTURE_V13_PATH,
     PARITY_FIXTURE_V26_PATH,
+    PARITY_FIXTURE_V46_PATH,
     PARITY_FIXTURE_V7_PATH,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
@@ -443,6 +445,7 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
         "leadpoet-sourcing-wrapper-contract-v12",
         "leadpoet-sourcing-wrapper-contract-v13",
         "leadpoet-sourcing-wrapper-contract-v26",
+        "leadpoet-sourcing-wrapper-contract-v46",
     }
 
 
@@ -477,6 +480,57 @@ def test_exact_v26_contract_pair_and_keyword_only_surface_are_reviewed(
     )
     assert not any(
         "intent_freshness.py:build_source_date_proof" in item
+        for item in violations
+    )
+
+
+def test_exact_v46_contract_pair_is_reviewed(tmp_path: Path) -> None:
+    contract = json.loads(CONTRACT_V46_PATH.read_text(encoding="utf-8"))
+    contract_path = tmp_path / contract["canonical_path"]
+    parity_path = tmp_path / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V46_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V46_PATH.read_bytes())
+    _write(
+        tmp_path,
+        "sourcing_model/corporate_filing_contract.py",
+        """
+        def compile_corporate_filing_request(
+            *, company_name, company_domain, category, issuer_anchors,
+            filing_forms, jurisdictions, reference_date, filters=None,
+            maximum_age_days=365, used_filing_ids=(), used_filing_urls=(),
+            query_variants=()
+        ):
+            return None
+
+        def build_corporate_filing_envelope(*, request=None, **payload):
+            return None
+        """,
+    )
+
+    resolved = resolve_reviewed_consumer_snapshot(tmp_path)
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v46"
+    )
+    assert not any(
+        "corporate_filing_contract.py" in item and "parameter drift" in item
+        for item in violations
+    )
+
+    corporate_path = tmp_path / "sourcing_model/corporate_filing_contract.py"
+    corporate_path.write_text(
+        corporate_path.read_text(encoding="utf-8").replace(
+            "**payload", "**unreviewed_payload"
+        ),
+        encoding="utf-8",
+    )
+    violations = verify_source_tree_contract(tmp_path)
+    assert any(
+        "build_corporate_filing_envelope" in item
+        and "parameter drift" in item
         for item in violations
     )
 

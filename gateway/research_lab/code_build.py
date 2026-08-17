@@ -2174,9 +2174,13 @@ metadata = research_lab_adapter.adapter_metadata()
 assert metadata.get("adapter_version") in {{
     "sourcing-model-research-lab-adapter:v3",
     "sourcing-model-research-lab-adapter:v6",
+    "sourcing-model-research-lab-adapter:v7",
 }}
 assert metadata.get("component_registry_version") == "sourcing-model-components:v2"
-assert metadata.get("routing", {{}}).get("compiler_version") == "routing-compiler-v2"
+assert metadata.get("routing", {{}}).get("compiler_version") in {{
+    "routing-compiler-v2",
+    "routing-compiler-v3",
+}}
 assert metadata.get("routing", {{}}).get("private_bindings_exposed") is False
 assert sourcing_model is not None
 PY

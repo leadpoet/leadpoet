@@ -99,7 +99,13 @@ EXPECTED_SOURCING_ADAPTER_VERSIONS = frozenset(
     for snapshot in reviewed_consumer_snapshots().values()
 )
 EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
-EXPECTED_ROUTING_COMPILER_VERSION = "routing-compiler-v2"
+EXPECTED_ROUTING_COMPILER_VERSIONS = frozenset(
+    str(
+        snapshot["contract"]["exact_constants"]
+        ["sourcing_model/routing/compiler.py"]["COMPILER_VERSION"]
+    )
+    for snapshot in reviewed_consumer_snapshots().values()
+)
 REQUIRED_RUNTIME_CANDIDATE_TOOLS = {
     "candidate.backlog",
     "candidate.registry_feed",
@@ -1216,7 +1222,7 @@ def validate_sourcing_adapter_metadata(
         raise PrivateModelRuntimeError(
             "private model does not declare model-owned routing metadata"
         )
-    if routing.get("compiler_version") != EXPECTED_ROUTING_COMPILER_VERSION:
+    if routing.get("compiler_version") not in EXPECTED_ROUTING_COMPILER_VERSIONS:
         raise PrivateModelRuntimeError(
             "private model routing compiler version is unsupported"
         )
@@ -1252,7 +1258,7 @@ def validate_sourcing_adapter_metadata(
         )
     if (
         runtime_routing.get("compiler_version")
-        != EXPECTED_ROUTING_COMPILER_VERSION
+        not in EXPECTED_ROUTING_COMPILER_VERSIONS
     ):
         raise PrivateModelRuntimeError(
             "private model runtime routing compiler version is unsupported"

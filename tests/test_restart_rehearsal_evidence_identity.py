@@ -282,6 +282,41 @@ def test_n_minus_one_docker_reader_uses_an_isolated_bounded_lock(
     assert reader_ready_log.read_text(encoding="utf-8").splitlines() == ["info"]
 
 
+def test_n_minus_one_docker_readiness_matches_exact_release_capability(
+    tmp_path: Path,
+) -> None:
+    from tests.restart_rehearsal import dynamic_docker_collision_workflow
+
+    exact_root = tmp_path / "exact"
+    ready_log = tmp_path / "ready.log"
+    assert dynamic_docker_collision_workflow._n_minus_one_docker_readiness_evidence(
+        exact_root=exact_root,
+        ready_log=ready_log,
+    ) == (False, [])
+
+    ready_log.write_text("info\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="readiness boundary differs"):
+        dynamic_docker_collision_workflow._n_minus_one_docker_readiness_evidence(
+            exact_root=exact_root,
+            ready_log=ready_log,
+        )
+    ready_log.unlink()
+
+    (exact_root / "research_lab").mkdir(parents=True)
+    (exact_root / "research_lab/docker_operation_lock_v2.py").touch()
+    with pytest.raises(RuntimeError, match="readiness boundary differs"):
+        dynamic_docker_collision_workflow._n_minus_one_docker_readiness_evidence(
+            exact_root=exact_root,
+            ready_log=ready_log,
+        )
+
+    ready_log.write_text("info\n", encoding="utf-8")
+    assert dynamic_docker_collision_workflow._n_minus_one_docker_readiness_evidence(
+        exact_root=exact_root,
+        ready_log=ready_log,
+    ) == (True, ["info"])
+
+
 def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:
     controller = (
         ROOT / "scripts/run_local_restart_rehearsal.py"

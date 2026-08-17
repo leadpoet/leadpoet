@@ -183,6 +183,23 @@ def _communicate(
     )
 
 
+def _n_minus_one_docker_readiness_evidence(
+    *, exact_root: Path, ready_log: Path
+) -> tuple[bool, list[str]]:
+    readiness_expected = (
+        exact_root / "research_lab/docker_operation_lock_v2.py"
+    ).is_file()
+    ready_calls = (
+        ready_log.read_text(encoding="utf-8").splitlines()
+        if ready_log.is_file()
+        else []
+    )
+    expected_calls = ["info"] if readiness_expected else []
+    if ready_calls != expected_calls:
+        raise RuntimeError("N-1 Docker readiness boundary differs")
+    return readiness_expected, ready_calls
+
+
 def _exclusive_probe(
     *,
     shell_lock_path: Path,
@@ -1089,13 +1106,10 @@ exit 98
             ),
             label="exact N-1 Docker source reader",
         )
-        reader_ready_calls = (
-            (root / "n-minus-reader-docker-ready.log")
-            .read_text(encoding="utf-8")
-            .splitlines()
+        _n_minus_one_docker_readiness_evidence(
+            exact_root=exact_root,
+            ready_log=root / "n-minus-reader-docker-ready.log",
         )
-        if reader_ready_calls != ["info"]:
-            raise RuntimeError("N-1 Docker readiness boundary differs")
         reclaim_result = _communicate(
             reclaim,
             timeout_seconds=collision_timeout,

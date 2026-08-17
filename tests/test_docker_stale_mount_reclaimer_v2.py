@@ -322,6 +322,132 @@ def test_audit_reports_exact_partition_without_mutation(tmp_path: Path) -> None:
     assert (fixture.root / "overlay2" / fixture.stale_cache).is_dir()
 
 
+def test_accepts_findmnt_no_overlay_match_status(tmp_path: Path) -> None:
+    fixture = _DockerFixture(tmp_path / "docker")
+    fixture.mounted.clear()
+
+    def no_overlay_runner(
+        command: Sequence[str],
+    ) -> subprocess.CompletedProcess[str]:
+        argv = list(command)
+        if argv == ["findmnt", "-rn", "-t", "overlay", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return fixture(command)
+
+    result = reclaim_stale_docker_overlay_mounts_v2(
+        runner=no_overlay_runner,
+        expected_root=fixture.root,
+    )
+
+    assert result.mounted_overlay_count == 0
+    assert result.reclaimed_mount_count == 0
+    assert result.reclaimed_layer_record_count == 1
+    assert fixture.unmounted == []
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr"),
+    [
+        (1, "/var/lib/docker/overlay2/unexpected/merged\n", ""),
+        (1, "\n", ""),
+        (1, "", "permission denied\n"),
+        (1, "", " "),
+        (2, "", ""),
+    ],
+)
+def test_refuses_nonempty_or_failed_findmnt_overlay_inventory(
+    tmp_path: Path,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> None:
+    fixture = _DockerFixture(tmp_path / "docker")
+
+    def failed_overlay_runner(
+        command: Sequence[str],
+    ) -> subprocess.CompletedProcess[str]:
+        argv = list(command)
+        if argv == ["findmnt", "-rn", "-t", "overlay", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(
+                argv,
+                returncode,
+                stdout,
+                stderr,
+            )
+        return fixture(command)
+
+    with pytest.raises(
+        DockerStaleMountReclaimerV2Error,
+        match="mounted overlay inventory failed",
+    ):
+        reclaim_stale_docker_overlay_mounts_v2(
+            runner=failed_overlay_runner,
+            expected_root=fixture.root,
+        )
+
+    assert fixture.unmounted == []
+    assert (fixture.root / "overlay2" / fixture.stale_cache).is_dir()
+
+
+def test_accepts_findmnt_no_match_after_guarded_unmount(tmp_path: Path) -> None:
+    fixture = _DockerFixture(tmp_path / "docker")
+    stale_target = str(
+        fixture.root / "overlay2" / fixture.stale_mount / "merged"
+    )
+    fixture.mounted = {stale_target}
+
+    def transition_runner(
+        command: Sequence[str],
+    ) -> subprocess.CompletedProcess[str]:
+        argv = list(command)
+        if (
+            argv == ["findmnt", "-rn", "-t", "overlay", "-o", "TARGET"]
+            and not fixture.mounted
+        ):
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return fixture(command)
+
+    result = reclaim_stale_docker_overlay_mounts_v2(
+        runner=transition_runner,
+        expected_root=fixture.root,
+    )
+
+    assert fixture.unmounted == [stale_target]
+    assert result.reclaimed_mount_count == 1
+    assert result.mounted_overlay_count == 1
+
+
+def test_silent_findmnt_no_match_cannot_hide_mounted_stale_descendant(
+    tmp_path: Path,
+) -> None:
+    fixture = _DockerFixture(tmp_path / "docker")
+
+    def silent_no_match_runner(
+        command: Sequence[str],
+    ) -> subprocess.CompletedProcess[str]:
+        argv = list(command)
+        if argv == ["findmnt", "-rn", "-t", "overlay", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return fixture(command)
+
+    with pytest.raises(
+        DockerStaleMountReclaimerV2Error,
+        match="mounted descendants remain",
+    ):
+        reclaim_stale_docker_overlay_mounts_v2(
+            runner=silent_no_match_runner,
+            expected_root=fixture.root,
+        )
+
+    assert fixture.unmounted == []
+    assert (fixture.root / "overlay2" / fixture.stale_cache).is_dir()
+    assert (
+        fixture.root
+        / "image/overlay2/layerdb/sha256"
+        / fixture.stale_chain.split(":", 1)[1]
+    ).is_dir()
+
+
 def test_accepts_exact_docker_backing_device_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

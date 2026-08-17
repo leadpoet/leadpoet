@@ -303,11 +303,21 @@ def _mounted_overlay_dirs(
     *,
     docker_root: Path,
 ) -> set[str]:
-    output = _checked_output(
-        runner,
-        ["findmnt", "-rn", "-t", "overlay", "-o", "TARGET"],
-        label="mounted overlay inventory",
-    )
+    command = ["findmnt", "-rn", "-t", "overlay", "-o", "TARGET"]
+    result = runner(command)
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    if result.returncode == 1 and stdout == "" and stderr == "":
+        # util-linux findmnt reports a clean no-match inventory with status 1.
+        output = ""
+    elif result.returncode != 0:
+        detail = (stderr or stdout).strip()
+        raise DockerStaleMountReclaimerV2Error(
+            "mounted overlay inventory failed"
+            + (f": {detail}" if detail else "")
+        )
+    else:
+        output = stdout
     prefix = f"{docker_root}/overlay2/"
     candidates = {
         value.strip()

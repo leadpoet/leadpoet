@@ -100,6 +100,37 @@ def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
     assert "exit 0" in source
 
 
+def test_required_zero_runtime_reconcile_is_strict_and_builder_first():
+    validation = SCRIPT.index(
+        "ERROR: REQUIRE_ZERO_RUNTIME_RECONCILE must be 0 or 1"
+    )
+    acquire = SCRIPT.index("leadpoet_acquire_docker_operation_lock_v2")
+    lane = SCRIPT.index(
+        'if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then',
+        SCRIPT.index("inventory_empty_online_runtime()"),
+    )
+    builder_prune = SCRIPT.index(
+        "run_prune_with_retry builder docker builder prune --all --force", lane
+    )
+    reconcile_trigger = SCRIPT.index(
+        '|| [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]', builder_prune
+    )
+    pre_audit = SCRIPT.index("--audit-only", reconcile_trigger)
+    helper = SCRIPT.index("docker_zero_runtime_reconciler_v2.py", pre_audit)
+    post_helper_builder_prune = SCRIPT.index(
+        "run_prune_with_retry builder docker builder prune --all --force", helper
+    )
+    final_audit = SCRIPT.index("--audit-only", post_helper_builder_prune)
+
+    assert validation < acquire < lane < builder_prune < reconcile_trigger
+    assert reconcile_trigger < pre_audit < helper < post_helper_builder_prune
+    assert post_helper_builder_prune < final_audit
+    assert (
+        '[ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "1" ]'
+        in SCRIPT[SCRIPT.index("protect_exact_host_gateway_runtime()"):lane]
+    )
+
+
 def test_data_root_reset_failure_recovers_daemons_before_exit():
     recovery = SCRIPT.index("recover_docker_daemons_on_exit()")
     arm = SCRIPT.index("trap recover_docker_daemons_on_exit EXIT")
@@ -204,7 +235,11 @@ def test_zero_runtime_helper_is_candidate_bound_and_required_by_rehearsal():
     assert stale in inventory[old_sha]
     assert stale in inventory[candidate_sha]
 
-    required_flag = "live_gateway_zero_runtime_reconcile_exact"
+    required_flags = (
+        "live_gateway_default_ample_space_defer_exact",
+        "live_gateway_zero_runtime_reconcile_exact",
+        "live_gateway_forced_zero_runtime_reconcile_exact",
+    )
     production = Path(
         "tests/restart_rehearsal/production_workflow_runner.py"
     ).read_text(encoding="utf-8")
@@ -215,5 +250,5 @@ def test_zero_runtime_helper_is_candidate_bound_and_required_by_rehearsal():
     dynamic = Path(
         "tests/restart_rehearsal/dynamic_rebenchmark_workflow_v2.py"
     ).read_text(encoding="utf-8")
-    assert required_flag in completeness
-    assert required_flag in dynamic
+    assert all(required_flag in completeness for required_flag in required_flags)
+    assert all(required_flag in dynamic for required_flag in required_flags)

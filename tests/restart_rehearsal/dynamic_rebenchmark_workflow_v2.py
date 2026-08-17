@@ -550,11 +550,19 @@ def exercise_transition(
         )
         is not True
         or docker_collision.get(
+            "live_gateway_default_ample_space_defer_exact"
+        )
+        is not True
+        or docker_collision.get(
             "live_gateway_online_reclaim_terminal_and_exact"
         )
         is not True
         or docker_collision.get(
             "live_gateway_zero_runtime_reconcile_exact"
+        )
+        is not True
+        or docker_collision.get(
+            "live_gateway_forced_zero_runtime_reconcile_exact"
         )
         is not True
     ):

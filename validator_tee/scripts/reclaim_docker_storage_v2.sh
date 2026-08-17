@@ -7,6 +7,7 @@ MIN_FREE_BYTES="${VALIDATOR_DOCKER_MIN_FREE_BYTES:-30000000000}"
 LIVE_RUNTIME_MIN_FREE_BYTES="${VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}"
 ALLOW_DATA_ROOT_RESET="${VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET:-0}"
 ALLOW_LIVE_HOST_GATEWAY_PRUNE="${VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE:-0}"
+REQUIRE_ZERO_RUNTIME_RECONCILE="${REQUIRE_ZERO_RUNTIME_RECONCILE-0}"
 PRUNE_ATTEMPTS="${VALIDATOR_DOCKER_PRUNE_ATTEMPTS:-5}"
 SETTLE_ATTEMPTS="${VALIDATOR_DOCKER_SETTLE_ATTEMPTS:-30}"
 DAEMON_READY_ATTEMPTS="${VALIDATOR_DOCKER_DAEMON_READY_ATTEMPTS:-30}"
@@ -66,6 +67,16 @@ done
 if [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" != "0" ] \
     && [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" != "1" ]; then
   echo "ERROR: VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE must be 0 or 1" >&2
+  exit 2
+fi
+if [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "0" ] \
+    && [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "1" ]; then
+  echo "ERROR: REQUIRE_ZERO_RUNTIME_RECONCILE must be 0 or 1" >&2
+  exit 2
+fi
+if [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ] \
+    && [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" != "1" ]; then
+  echo "ERROR: REQUIRE_ZERO_RUNTIME_RECONCILE requires VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1" >&2
   exit 2
 fi
 
@@ -178,7 +189,8 @@ protect_exact_host_gateway_runtime() {
   if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
     AVAILABLE="$(available_bytes)"
     echo "Docker storage requirement: runtime_mode=host-gateway-live phase=$phase required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
-    if [ "$AVAILABLE" -ge "$LIVE_RUNTIME_MIN_FREE_BYTES" ]; then
+    if [ "$AVAILABLE" -ge "$LIVE_RUNTIME_MIN_FREE_BYTES" ] \
+        && [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "1" ]; then
       echo "Docker storage maintenance deferred while the exact host gateway is live: phase=$phase free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
       exit 0
     fi
@@ -189,6 +201,10 @@ protect_exact_host_gateway_runtime() {
     fi
     echo "ERROR: exact host gateway runtime has only $AVAILABLE free bytes; $LIVE_RUNTIME_MIN_FREE_BYTES are required for an independent release build" >&2
     echo "ERROR: refusing Docker maintenance, daemon stop, or data-root reset while the host gateway is live" >&2
+    exit 1
+  fi
+  if [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
+    echo "ERROR: REQUIRE_ZERO_RUNTIME_RECONCILE requires the exact live host gateway" >&2
     exit 1
   fi
 }
@@ -558,6 +574,7 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
   require_same_online_docker_root "post-builder-prune"
   require_same_online_images "post-builder-prune"
   AVAILABLE="$(available_bytes)"
+  ONLINE_RAW_RECLAIM_PERFORMED=0
   if [ "$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES" ]; then
     inventory_empty_online_runtime "pre-stale-reclaim"
     require_same_online_gateway "pre-stale-reclaim"
@@ -613,7 +630,9 @@ print(int(any(document[field] for field in deletion_fields)))
       echo "ERROR: validated stale Docker overlay reclaim returned malformed evidence" >&2
       exit 1
     fi
-    if [ "$ONLINE_RAW_RECLAIM_PERFORMED" -eq 1 ]; then
+  fi
+  if [ "$ONLINE_RAW_RECLAIM_PERFORMED" -eq 1 ] \
+      || [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
       inventory_empty_online_runtime "pre-daemon-reconcile"
       require_same_online_gateway "pre-daemon-reconcile"
       require_same_online_docker_root "pre-daemon-reconcile"
@@ -727,7 +746,6 @@ if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifes
         echo "ERROR: active Docker image/layer identity changed during reconciled builder prune" >&2
         exit 1
       fi
-    fi
   fi
   inventory_empty_online_runtime "post-reclaim"
   require_same_online_gateway "post-reclaim"

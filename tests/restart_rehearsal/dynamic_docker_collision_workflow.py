@@ -1090,6 +1090,7 @@ exit 96
             "REHEARSAL_CANDIDATE_DOCKER_LOG": str(docker_log),
             "REHEARSAL_CANDIDATE_SUDO_LOG": str(sudo_log),
         }
+        reclaim_environment.pop("REQUIRE_ZERO_RUNTIME_RECONCILE", None)
         reclaim = subprocess.Popen(
             [
                 "bash",
@@ -1421,6 +1422,171 @@ exit 96
                 )
             )
 
+        forced_command_log = root / "forced-reconcile-commands.log"
+        forced_image_log = root / "forced-reconcile-images.log"
+        forced_stale_marker = root / "forced-stale-reclaimed"
+        forced_daemon_marker = root / "forced-daemon-reconciled"
+        forced_daemon_action_log = root / "forced-daemon-actions.log"
+        forced_result = subprocess.run(
+            ["bash", str(reclaim_script)],
+            cwd=normalized_root,
+            env={
+                **reclaim_environment,
+                "VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET": "1",
+                "VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE": "1",
+                "REQUIRE_ZERO_RUNTIME_RECONCILE": "1",
+                "VALIDATOR_DOCKER_PRUNE_ATTEMPTS": "1",
+                "REHEARSAL_ONLINE_RECLAIM": "1",
+                "REHEARSAL_ONLINE_AVAILABLE_BEFORE": str(available_bytes),
+                "REHEARSAL_ONLINE_AVAILABLE_AFTER": str(available_bytes),
+                "REHEARSAL_ONLINE_STALE_MARKER": str(forced_stale_marker),
+                "REHEARSAL_ONLINE_DAEMON_MARKER": str(forced_daemon_marker),
+                "REHEARSAL_ONLINE_DAEMON_ACTION_LOG": str(
+                    forced_daemon_action_log
+                ),
+                "REHEARSAL_ONLINE_COMMAND_LOG": str(forced_command_log),
+                "REHEARSAL_ONLINE_IMAGE_LOG": str(forced_image_log),
+                "REHEARSAL_ONLINE_IMAGE_ONE": image_ids[0],
+                "REHEARSAL_ONLINE_IMAGE_TWO": image_ids[1],
+                "REHEARSAL_ONLINE_STALE_RECLAIMER": str(stale_reclaimer),
+                "REHEARSAL_ONLINE_ZERO_RUNTIME_RECONCILER": str(
+                    zero_runtime_reconciler
+                ),
+            },
+            capture_output=True,
+            text=True,
+            timeout=collision_timeout,
+            check=False,
+        )
+        forced_commands = forced_command_log.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        forced_zero_runtime_commands = [
+            command
+            for command in forced_commands
+            if command.startswith(zero_runtime_prefix + " ")
+        ]
+        forced_zero_runtime_tokens = (
+            forced_zero_runtime_commands[0].split()
+            if len(forced_zero_runtime_commands) == 1
+            else []
+        )
+        forced_zero_runtime_arguments_exact = bool(
+            len(forced_zero_runtime_tokens) == 15
+            and forced_zero_runtime_tokens[:5]
+            == [
+                "sudo",
+                "env",
+                "PYTHONSAFEPATH=1",
+                "python3",
+                str(zero_runtime_reconciler),
+            ]
+            and forced_zero_runtime_tokens[5:7]
+            == ["--docker-lock-file", str((root / "release.lock").resolve())]
+            and forced_zero_runtime_tokens[7:9]
+            == [
+                "--docker-admission-lock-file",
+                str((root / "release.lock.admission").resolve()),
+            ]
+            and forced_zero_runtime_tokens[9] == "--docker-lock-owner-pid"
+            and forced_zero_runtime_tokens[10].isdigit()
+            and int(forced_zero_runtime_tokens[10]) > 0
+            and forced_zero_runtime_tokens[11:]
+            == ["--ready-attempts", "30", "--timeout-seconds", "480"]
+        )
+        forced_mutation_kinds: list[str] = []
+        for command in forced_commands:
+            if command == "docker builder prune --all --force":
+                forced_mutation_kinds.append("builder_prune")
+            elif command == stale_reclaim_command:
+                forced_mutation_kinds.append("stale_reclaim")
+            elif command.startswith(zero_runtime_prefix + " "):
+                forced_mutation_kinds.append("dockerd_reconcile")
+        forced_image_inventories = forced_image_log.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        forced_daemon_actions = forced_daemon_action_log.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if (
+            forced_result.returncode != 0
+            or forced_mutation_kinds
+            != ["builder_prune", "dockerd_reconcile", "builder_prune"]
+            or not forced_zero_runtime_arguments_exact
+            or any(
+                command not in allowed_commands
+                and not command.startswith(zero_runtime_prefix + " ")
+                for command in forced_commands
+            )
+            or forced_commands.count(stale_reclaim_command) != 0
+            or forced_commands.count(stale_audit_command) != 3
+            or len(forced_image_inventories) < 6
+            or len(set(forced_image_inventories)) != 1
+            or any(
+                f"phase={phase} containers=0" not in forced_result.stdout
+                for phase in (
+                    "pre-prune",
+                    "post-builder-prune",
+                    "pre-daemon-reconcile",
+                    "post-daemon-reconcile",
+                    "post-reconcile-builder-prune",
+                    "post-reclaim",
+                )
+            )
+            or "phase=pre-stale-reclaim" in forced_result.stdout
+            or "storage maintenance deferred" in forced_result.stdout
+            or "Docker storage ready after bounded online reclaim"
+            not in forced_result.stdout
+            or f"free_bytes={available_bytes}" not in forced_result.stdout
+            or forced_stale_marker.exists()
+            or not forced_daemon_marker.is_file()
+            or forced_daemon_actions != ["systemctl restart docker.service"]
+            or forced_result.stdout.count(
+                '"schema_version":"leadpoet.docker_stale_mount_audit.v3"'
+            )
+            != 3
+            or forced_result.stdout.count(
+                '"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1"'
+            )
+            != 1
+            or any(
+                forbidden in command
+                for command in forced_commands
+                for forbidden in (
+                    "docker image prune",
+                    "docker system prune",
+                    "systemctl start containerd",
+                    "systemctl stop containerd",
+                    "systemctl restart containerd",
+                    "rm -rf",
+                )
+            )
+            or gateway_identity
+            != tuple(
+                (gateway_proc / name).read_bytes()
+                for name in ("status", "cmdline", "stat")
+            )
+        ):
+            raise RuntimeError(
+                "forced ample-space zero-runtime reconcile contract differs: "
+                + json.dumps(
+                    {
+                        "commands": forced_commands,
+                        "daemon_actions": forced_daemon_actions,
+                        "image_inventory_count": len(forced_image_inventories),
+                        "mutation_kinds": forced_mutation_kinds,
+                        "returncode": forced_result.returncode,
+                        "stderr": forced_result.stderr[-1000:],
+                        "stdout": forced_result.stdout[-2000:],
+                        "zero_runtime_arguments_exact": (
+                            forced_zero_runtime_arguments_exact
+                        ),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+
     shared_matrix = _candidate_shared_lifecycle_matrix(
         source_root=normalized_root,
         timeout_seconds=model_timeout_seconds,
@@ -1440,8 +1606,10 @@ exit 96
         "host_live_prevented_docker_stop_or_reset": True,
         "candidate_gateway_emergency_uses_guarded_reclaim": True,
         "first_activation_requires_preexisting_disk_reserve": True,
+        "live_gateway_default_ample_space_defer_exact": True,
         "live_gateway_online_reclaim_terminal_and_exact": True,
         "live_gateway_zero_runtime_reconcile_exact": True,
+        "live_gateway_forced_zero_runtime_reconcile_exact": True,
         "dynamic_docker_collision_exact": True,
     }
 

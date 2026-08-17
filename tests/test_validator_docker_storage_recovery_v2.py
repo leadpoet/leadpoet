@@ -42,6 +42,7 @@ def _run_recovery(
     host_gateway_live: bool = False,
     host_gateway_live_after_inventory: bool = False,
     allow_live_host_gateway_prune: bool = False,
+    require_zero_runtime_reconcile: Optional[str] = None,
     host_gateway_exits_during_live_prune: bool = False,
     host_gateway_start_time_changes_during_live_prune: bool = False,
     host_gateway_exits_during_daemon_reconcile: bool = False,
@@ -59,6 +60,7 @@ def _run_recovery(
     malformed_zero_runtime_reconciler: bool = False,
     change_audit_manifest_after_reconcile: bool = False,
     change_audit_manifest_after_post_prune: bool = False,
+    stale_audit_before_reconcile: bool = False,
     stale_audit_after_reconcile: bool = False,
     fail_umount: bool = False,
     fail_systemctl_stop: bool = False,
@@ -123,6 +125,7 @@ emit_image_rows() {
     index=$((index + 1))
   done
 }
+printf 'docker %s\n' "$*" >> "$FAKE_OPERATION_LOG"
 if [ "${1:-}" = "info" ] && [ -f "$FAKE_DAEMONS_STOPPED_MARKER" ]; then
   if [ "$FAKE_HANG_DAEMON_PROBE" = "1" ]; then
     exec /bin/sleep 60
@@ -258,6 +261,7 @@ exit 0
         """#!/bin/bash
 command="$1"
 shift
+printf 'sudo %s %s\n' "$command" "$*" >> "$FAKE_OPERATION_LOG"
 emit_rows() {
   local count="$1"
   local index=0
@@ -303,6 +307,10 @@ case "$command" in
         fi
         if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
             && [ "$FAKE_STALE_AUDIT_AFTER_RECONCILE" = "1" ]; then
+          stale_count=1
+        fi
+        if [ ! -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_STALE_AUDIT_BEFORE_RECONCILE" = "1" ]; then
           stale_count=1
         fi
         printf '{"active_container_count":0,"active_image_count":%s,"active_layer_count":%s,"active_manifest_hash":"sha256:%064d","active_mount_count":0,"active_overlay_dir_count":%s,"docker_root":"/var/lib/docker","mounted_overlay_count":0,"schema_version":"leadpoet.docker_stale_mount_audit.v3","stale_layer_record_count":%s,"stale_mount_record_count":0,"stale_overlay_dir_count":0,"stale_overlay_link_count":0,"status":"ready"}\n' \
@@ -573,6 +581,9 @@ exit 0
         "FAKE_STALE_AUDIT_AFTER_RECONCILE": (
             "1" if stale_audit_after_reconcile else "0"
         ),
+        "FAKE_STALE_AUDIT_BEFORE_RECONCILE": (
+            "1" if stale_audit_before_reconcile else "0"
+        ),
         "FAKE_DAEMON_RECONCILE_MARKER": str(
             tmp_path / "daemon-reconciled"
         ),
@@ -608,6 +619,7 @@ exit 0
         ),
         "FAKE_DOCKER_ROOT_BYTES": "229720371200",
         "FAKE_SUDO_LOG": str(sudo_log),
+        "FAKE_OPERATION_LOG": str(tmp_path / "operations.log"),
         "VALIDATOR_DOCKER_PRUNE_ATTEMPTS": str(
             system_prune_failures + 1
             if prune_attempts is None
@@ -630,6 +642,9 @@ exit 0
             )
         ),
     }
+    env.pop("REQUIRE_ZERO_RUNTIME_RECONCILE", None)
+    if require_zero_runtime_reconcile is not None:
+        env["REQUIRE_ZERO_RUNTIME_RECONCILE"] = require_zero_runtime_reconcile
     result = subprocess.run(
         ["bash", str(ROOT / "validator_tee/scripts/reclaim_docker_storage_v2.sh")],
         check=False,
@@ -851,8 +866,176 @@ def test_validator_docker_recovery_defers_reset_for_exact_live_host_gateway(
     assert "runtime_mode=host-gateway-live" in result.stdout
     assert "storage maintenance deferred while the exact host gateway is live" in result.stdout
     assert not (tmp_path / "system-prune-attempts").exists()
+    assert not (tmp_path / "builder-pruned").exists()
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
     assert "systemctl stop" not in sudo_log
     assert "rm -rf" not in sudo_log
+
+
+def test_required_zero_runtime_reconcile_runs_with_ample_space(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "storage maintenance deferred" not in result.stdout
+    assert "phase=pre-stale-reclaim" not in result.stdout
+    assert "phase=pre-daemon-reconcile containers=0" in result.stdout
+    assert "phase=post-daemon-reconcile containers=0" in result.stdout
+    assert "phase=post-reconcile-builder-prune containers=0" in result.stdout
+    assert "phase=post-reclaim containers=0" in result.stdout
+    assert "Docker storage ready after bounded online reclaim" in result.stdout
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert not (tmp_path / "stale-mounts-reclaimed").exists()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "2"
+    operations = (tmp_path / "operations.log").read_text().splitlines()
+    relevant_operations = []
+    for operation in operations:
+        if operation == "docker builder prune --all --force":
+            relevant_operations.append("builder_prune")
+        elif "docker_zero_runtime_reconciler_v2.py" in operation:
+            relevant_operations.append("dockerd_reconcile")
+        elif "docker_stale_mount_reclaimer_v2.py" in operation:
+            relevant_operations.append(
+                "stale_audit" if operation.endswith(" --audit-only") else "stale_reclaim"
+            )
+    assert relevant_operations == [
+        "builder_prune",
+        "stale_audit",
+        "dockerd_reconcile",
+        "stale_audit",
+        "builder_prune",
+        "stale_audit",
+    ]
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+    assert "pkill" not in sudo_log
+
+
+@pytest.mark.parametrize("value", ["", "yes", "2", "-1"])
+def test_required_zero_runtime_reconcile_flag_is_strict(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile=value,
+    )
+
+    assert result.returncode == 2
+    assert "REQUIRE_ZERO_RUNTIME_RECONCILE must be 0 or 1" in result.stderr
+    assert sudo_log == ""
+    assert not (tmp_path / "builder-pruned").exists()
+
+
+def test_required_zero_runtime_reconcile_requires_live_prune_admission(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        host_gateway_live=True,
+        require_zero_runtime_reconcile="1",
+    )
+
+    assert result.returncode == 2
+    assert "requires VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1" in result.stderr
+    assert sudo_log == ""
+    assert not (tmp_path / "builder-pruned").exists()
+
+
+def test_required_zero_runtime_reconcile_requires_exact_live_gateway(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+    )
+
+    assert result.returncode == 1
+    assert "requires the exact live host gateway" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+    assert not (tmp_path / "builder-pruned").exists()
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        {"containers": 1},
+        {"containerd_containers": 1},
+        {"containerd_tasks": 1},
+        {"moby_shims": 1},
+    ],
+)
+def test_required_zero_runtime_reconcile_rejects_nonempty_runtime(
+    tmp_path: Path,
+    runtime: dict[str, int],
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        **runtime,
+    )
+
+    assert result.returncode == 1
+    assert "phase=pre-prune" in result.stderr
+    assert "exact container runtime is empty" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+    assert not (tmp_path / "builder-pruned").exists()
+
+
+def test_required_zero_runtime_reconcile_rejects_stale_pre_audit(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        stale_audit_before_reconcile=True,
+    )
+
+    assert result.returncode == 1
+    assert "audit was invalid before daemon reconciliation" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+
+
+def test_required_zero_runtime_reconcile_helper_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        fail_zero_runtime_reconciler=True,
+    )
+
+    assert result.returncode == 1
+    assert "dockerd reconciliation failed" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
 
 
 def test_validator_docker_recovery_fails_closed_for_low_space_host_gateway(

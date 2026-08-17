@@ -862,6 +862,8 @@ if _state_path_raw and not _spawn_gate_invocation:
             raise RuntimeError("dev-snapshot production command is incomplete")
         script_name = Path(str(argv[1])).name
         script_path = (_source_root / "scripts" / script_name).resolve()
+        if str(argv[0]) != sys.executable:
+            raise RuntimeError("dev-snapshot production command identity differs")
         try:
             command_interpreter = Path(str(argv[0])).resolve(strict=True)
             boundary_interpreter = Path(sys.executable).resolve(strict=True)
@@ -1450,7 +1452,6 @@ if _state_path_raw and not _spawn_gate_invocation:
                         "dev-snapshot production process-group contract differs"
                     )
                 phase, argv_contract_hash = _validate_production_command(argv)
-                argv[0] = str(Path(argv[0]).resolve(strict=True))
                 return _ObservedProductionPopen(
                     popenargs,
                     kwargs,
@@ -1646,8 +1647,7 @@ def _run_production_spawn_gate() -> None:
         or command_interpreter != gate_interpreter
     ):
         raise RuntimeError("dev-snapshot production spawn gate contract differs")
-    execution_argv = [str(gate_interpreter), *argv[1:]]
-    os.execve(execution_argv[0], execution_argv, dict(os.environ))
+    os.execve(argv[0], argv, dict(os.environ))
 
 
 if __name__ == "__main__":

@@ -28,6 +28,135 @@ from gateway.research_lab.promotion import (
 )
 
 
+def _candidate_progress_rows_for_recovery() -> list[dict[str, object]]:
+    return [
+        {
+            "icp_ref": "public-provider",
+            "failure_reason": "candidate_model_runtime_provider_error",
+        },
+        {
+            "icp_ref": "private-timeout",
+            "failure_reason": "candidate_model_runtime_timeout",
+        },
+        {
+            "icp_ref": "conditional-reference",
+            "failure_reason": "reference_model_runtime_provider_error",
+        },
+        {
+            "icp_ref": "valid-zero",
+            "failure_reason": "candidate_model_zero_companies",
+        },
+        {
+            "icp_ref": "model-invalid-json",
+            "failure_reason": "candidate_model_runtime_invalid_json",
+        },
+        {
+            "icp_ref": "legacy-provider-excluded",
+            "provider_excluded": True,
+        },
+        {
+            "icp_ref": "cost-cap",
+            "failure_reason": "provider_cost_cap_blocked",
+            "provider_cost_cap_blocked": True,
+        },
+        {
+            "icp_ref": "cost-tracking-provider",
+            "failure_reason": "candidate_model_runtime_provider_error;provider_cost_tracking_failed",
+            "provider_cost_tracking_failed": True,
+        },
+    ]
+
+
+def test_candidate_progress_ordinary_resume_preserves_existing_retry_boundary():
+    rows = sw._reusable_candidate_progress_rows(
+        _candidate_progress_rows_for_recovery(),
+        conditional_refs={"conditional-reference"},
+        provider_recovery_refresh=False,
+    )
+
+    assert [row["icp_ref"] for row in rows] == [
+        "public-provider",
+        "private-timeout",
+        "valid-zero",
+        "model-invalid-json",
+        "legacy-provider-excluded",
+        "cost-cap",
+        "cost-tracking-provider",
+    ]
+
+
+def test_candidate_progress_provider_recovery_refreshes_only_retryable_measurements():
+    rows = sw._reusable_candidate_progress_rows(
+        _candidate_progress_rows_for_recovery(),
+        conditional_refs={"conditional-reference"},
+        provider_recovery_refresh=True,
+    )
+
+    assert [row["icp_ref"] for row in rows] == [
+        "valid-zero",
+        "model-invalid-json",
+        "cost-cap",
+        "cost-tracking-provider",
+    ]
+
+
+def test_recovery_marker_lookup_is_limited_to_nonconditional_provider_rows():
+    rows = _candidate_progress_rows_for_recovery()
+
+    assert sw._candidate_progress_needs_recovery_marker(
+        [rows[2]],
+        conditional_refs={"conditional-reference"},
+    ) is False
+    assert sw._candidate_progress_needs_recovery_marker(
+        [rows[0]],
+        conditional_refs={"conditional-reference"},
+    ) is True
+    assert sw._candidate_progress_needs_recovery_marker(
+        [rows[-1]],
+        conditional_refs=set(),
+    ) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_row,expected", [({"event_id": "evt-1"}, True), (None, False)])
+async def test_provider_recovery_marker_uses_durable_queued_event(
+    monkeypatch,
+    stored_row,
+    expected,
+):
+    calls = []
+
+    async def fake_select_one(table, *, columns, filters):
+        calls.append((table, columns, filters))
+        return stored_row
+
+    monkeypatch.setattr(sw, "select_one", fake_select_one)
+
+    assert await sw._candidate_has_provider_recovery_rescore("candidate:abc") is expected
+    assert calls == [
+        (
+            "research_lab_candidate_evaluation_events",
+            "event_id",
+            (
+                ("candidate_id", "candidate:abc"),
+                ("event_type", "queued"),
+                ("reason", "provider_recovery_rescore"),
+            ),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_provider_recovery_marker_read_failure_propagates(monkeypatch):
+    async def fail_select_one(*_args, **_kwargs):
+        raise RuntimeError("durable marker read unavailable")
+
+    monkeypatch.setattr(sw, "select_one", fail_select_one)
+
+    with pytest.raises(RuntimeError, match="durable marker read unavailable"):
+        await sw._candidate_has_provider_recovery_rescore("candidate:abc")
+
+
 @pytest.mark.asyncio
 async def test_source_manifest_reconcile_precedes_baseline_repo_head_sync(monkeypatch):
     calls: list[str] = []

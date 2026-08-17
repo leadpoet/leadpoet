@@ -103,6 +103,40 @@ def _candidate_artifact() -> SimpleNamespace:
     )
 
 
+@pytest.mark.parametrize(
+    ("private_holdout_rejected", "scoring_health_gate", "expected"),
+    [
+        (
+            True,
+            {"decision": "quarantine"},
+            "scoring_health_quarantined",
+        ),
+        (
+            True,
+            {"decision": "allow"},
+            "public_holdout_rejected",
+        ),
+        (
+            False,
+            {"decision": "allow"},
+            "promotion",
+        ),
+    ],
+)
+def test_candidate_terminal_action_prioritizes_existing_health_quarantine(
+    private_holdout_rejected,
+    scoring_health_gate,
+    expected,
+):
+    assert (
+        sw._candidate_scoring_terminal_action(
+            private_holdout_rejected=private_holdout_rejected,
+            scoring_health_gate=scoring_health_gate,
+        )
+        == expected
+    )
+
+
 def _find_reusable(worker, *, evaluation_epoch: int):
     return worker._find_reusable_scored_bundle(
         candidate=_candidate_identity(),

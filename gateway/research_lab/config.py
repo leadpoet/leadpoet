@@ -690,8 +690,8 @@ class ResearchLabGatewayConfig:
     fulfillment_emission_percent: float = 60.5
     fulfillment_leaderboard_emission_percent: float = 9.5
     lab_reward_epochs: int = 20
-    enable_conservative: bool = False
-    enable_champ_cap: bool = False
+    enable_conservative: bool = True
+    enable_champ_cap: bool = True
     # Deprecated, inert compatibility field retained for the sealed V2 config
     # schema. The allocator no longer has an overpayment path.
     lab_reimbursement_allow_overpay_without_champions: bool = False
@@ -1252,8 +1252,8 @@ class ResearchLabGatewayConfig:
                 _float("RESEARCH_LAB_FULFILLMENT_LEADERBOARD_EMISSION_PERCENT", 9.5),
             ),
             lab_reward_epochs=max(1, _int("RESEARCH_LAB_REWARD_EPOCHS", 20)),
-            enable_conservative=_truthy("ENABLE_CONSERVATIVE", "false"),
-            enable_champ_cap=_truthy("ENABLE_CHAMP_CAP", "false"),
+            enable_conservative=_truthy("ENABLE_CONSERVATIVE", "true"),
+            enable_champ_cap=_truthy("ENABLE_CHAMP_CAP", "true"),
             lab_reimbursement_max_cost_multiplier_with_champions=max(
                 0.0,
                 _float(

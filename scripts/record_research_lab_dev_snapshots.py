@@ -73,6 +73,7 @@ from research_lab.docker_operation_lock_v2 import (  # noqa: E402
 from research_lab.eval.snapshot_store import (  # noqa: E402
     RECORDED_PROVIDER_MODELS_NAME,
     SNAPSHOT_MISS_SENTINEL,
+    SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV,
     SNAPSHOT_RECORD_REUSE_EXISTING_ENV,
 )
 
@@ -397,6 +398,7 @@ def _record_icp_with_docker(
     timeout_seconds: int,
     docker_executable: str = "docker",
     reuse_existing: bool = False,
+    retry_transient: bool = False,
 ) -> list[Mapping[str, Any]]:
     """Run one champion ICP through docker with the snapshot dir mounted.
 
@@ -429,6 +431,10 @@ def _record_icp_with_docker(
             env_args.extend(["-e", name])
     if reuse_existing:
         env_args.extend(["-e", f"{SNAPSHOT_RECORD_REUSE_EXISTING_ENV}=true"])
+    if retry_transient:
+        if not reuse_existing:
+            raise RuntimeError("transient retry requires existing snapshot reuse")
+        env_args.extend(["-e", f"{SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV}=true"])
     command = [
         docker_executable,
         "run",
@@ -506,6 +512,7 @@ def _record_icp_with_retries(
                 snapshot_dir=snapshot_dir,
                 timeout_seconds=timeout_seconds,
                 reuse_existing=reuse_existing or attempt > 1,
+                retry_transient=attempt > 1,
             )
         except Exception:  # noqa: BLE001 - bounded retry remains fail closed
             if attempt >= max_attempts:

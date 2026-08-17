@@ -45,6 +45,7 @@ from research_lab.eval.snapshot_store import (
     SNAPSHOT_DIR_ENV,
     SNAPSHOT_MISS_POLICY_ENV,
     SNAPSHOT_RECORD_REUSE_EXISTING_ENV,
+    SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV,
     SNAPSHOT_RUNTIME_SECRET_REDACTION,
     SNAPSHOT_URI_ENV,
     SYNTHESIZED_EMPTY_MARKER,
@@ -906,6 +907,88 @@ def test_record_bootstrap_reuses_existing_urllib_response_without_network(tmp_pa
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {"status": 200, "body": body}
+
+
+def test_record_bootstrap_retry_replaces_existing_urllib_transport_error(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import http.server
+import json
+import os
+import threading
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        body = b'{"results":["recovered"]}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/retry" % server.server_port
+assert _rl_dev_record(
+    "GET",
+    url,
+    None,
+    0,
+    {},
+    "",
+    response_override={
+        "outcome": "urllib_transport_error",
+        "error_type": "TimeoutError",
+        "reason_type": "timeout",
+    },
+)
+try:
+    with urllib.request.urlopen(url) as response:
+        body = response.read().decode("utf-8")
+finally:
+    server.shutdown()
+    server.server_close()
+snapshot_path = os.path.join(
+    os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"],
+    "snapshots",
+    os.listdir(os.path.join(
+        os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "snapshots"
+    ))[0],
+)
+with open(snapshot_path, "r", encoding="utf-8") as handle:
+    stored = json.load(handle)["response"]
+print(json.dumps({"body": body, "hits": len(hits), "stored": stored}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "body": '{"results":["recovered"]}',
+        "hits": 1,
+        "stored": {
+            "body_text": '{"results":["recovered"]}',
+            "headers": {"content-type": "application/json"},
+            "status": 200,
+        },
+    }
 
 
 def test_record_bootstrap_reuses_existing_httpx_async_response_without_network(

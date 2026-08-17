@@ -77,6 +77,9 @@ SNAPSHOT_DIR_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_DIR"
 SNAPSHOT_RECORD_REUSE_EXISTING_ENV = (
     "RESEARCH_LAB_DEV_SNAPSHOT_RECORD_REUSE_EXISTING"
 )
+SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV = (
+    "RESEARCH_LAB_DEV_SNAPSHOT_RECORD_RETRY_TRANSIENT"
+)
 SNAPSHOT_RUNTIME_SECRET_REDACTION = "[REDACTED_RUNTIME_SECRET]"
 MISS_POLICY_STRICT = "strict"
 MISS_POLICY_EMPTY = "empty"
@@ -1617,6 +1620,7 @@ from urllib.parse import parse_qsl, urlsplit
 _RL_DEV_SNAPSHOT_DIR = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_DIR", "").strip()
 _RL_DEV_MISS_POLICY = (os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_MISS_POLICY", "").strip().lower() or "strict")
 _RL_DEV_RECORD_REUSE_EXISTING = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_RECORD_REUSE_EXISTING", "").strip().lower() in ("1", "true", "yes", "on")
+_RL_DEV_RECORD_RETRY_TRANSIENT = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_RECORD_RETRY_TRANSIENT", "").strip().lower() in ("1", "true", "yes", "on")
 _RL_DEV_RECORD_ICP_REF = os.environ.get("RESEARCH_LAB_DEV_RECORD_ICP_REF", "").strip()
 _RL_DEV_AUTH_PARAMS = ("api_key", "apikey", "x-api-key", "authorization", "token", "access_token", "bearer")
 _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrouter": "{}"}
@@ -1847,6 +1851,11 @@ def _rl_dev_lookup_existing(method, url, body, params=None):
         raise RuntimeError(
             "existing provider snapshot is corrupt: " + request_key
         )
+    if _RL_DEV_RECORD_RETRY_TRANSIENT and response.get("outcome") in (
+        _RL_DEV_URLLIB_TRANSPORT_OUTCOME,
+        _RL_DEV_HTTPX_TRANSPORT_OUTCOME,
+    ):
+        return None
     return dict(response)
 
 

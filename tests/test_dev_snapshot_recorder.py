@@ -15,6 +15,7 @@ from research_lab.eval.snapshot_store import (
     DevSnapshotStoreError,
     MODE_RECORD,
     SNAPSHOT_MISS_SENTINEL,
+    SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV,
     SNAPSHOT_RECORD_REUSE_EXISTING_ENV,
     ProviderSnapshotStore,
     build_snapshot_request,
@@ -246,11 +247,15 @@ def test_recorder_sigterm_unwinds_through_named_docker_cleanup(
     assert calls[1][0] == ["docker", "rm", "-f", "snapshot-test"]
 
 
-@pytest.mark.parametrize("reuse_existing", [False, True])
+@pytest.mark.parametrize(
+    ("reuse_existing", "retry_transient"),
+    [(False, False), (True, False), (True, True)],
+)
 def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
     monkeypatch,
     tmp_path,
     reuse_existing,
+    retry_transient,
 ):
     captured = {}
 
@@ -275,6 +280,7 @@ def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
         snapshot_dir=str(tmp_path),
         timeout_seconds=300,
         reuse_existing=reuse_existing,
+        retry_transient=retry_transient,
     ) == []
 
     docker_environment = [
@@ -284,6 +290,8 @@ def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
     ]
     expected = f"{SNAPSHOT_RECORD_REUSE_EXISTING_ENV}=true"
     assert (expected in docker_environment) is reuse_existing
+    retry_expected = f"{SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV}=true"
+    assert (retry_expected in docker_environment) is retry_transient
 
 
 def test_snapshot_record_retry_reuses_partial_immutable_capture(
@@ -316,6 +324,7 @@ def test_snapshot_record_retry_reuses_partial_immutable_capture(
 
     assert result == [{"company": "accepted"}]
     assert [call["reuse_existing"] for call in calls] == [False, True]
+    assert [call["retry_transient"] for call in calls] == [False, True]
     assert delays == [5.0]
 
 
@@ -347,6 +356,7 @@ def test_snapshot_record_retry_remains_bounded_and_fail_closed(
         )
 
     assert [call["reuse_existing"] for call in calls] == [False, True, True]
+    assert [call["retry_transient"] for call in calls] == [False, True, True]
     assert delays == [5.0, 15.0]
 
 

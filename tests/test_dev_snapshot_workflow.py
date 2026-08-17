@@ -5,9 +5,11 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import time
+import venv
 
 import pytest
 
@@ -309,12 +311,26 @@ def test_dev_snapshot_boundary_rejects_popen_execution_and_env_overrides(
         timeout=10,
         env=env,
     )
-    run_override = subprocess.run(
+    interpreter_alias = subprocess.run(
         [
             sys.executable,
             "-c",
             "import os, subprocess\n"
             + common
+            + "subprocess.Popen(command, env=dict(os.environ), **options)\n",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+        env=env,
+    )
+    run_override = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, subprocess, sys\n"
+            + f"command = [sys.executable, *{production_command[1:]!r}]\n"
             + "subprocess.run(command, text=True, capture_output=True, "
             + "env=dict(os.environ), executable='/bin/true')\n",
         ],
@@ -331,6 +347,11 @@ def test_dev_snapshot_boundary_rejects_popen_execution_and_env_overrides(
             "dev-snapshot production process-group contract differs"
             in completed.stderr
         )
+    assert interpreter_alias.returncode != 0
+    assert (
+        "dev-snapshot production command identity differs"
+        in interpreter_alias.stderr
+    )
     assert run_override.returncode != 0
     assert (
         "dev-snapshot production commands require the private Popen contract"
@@ -386,6 +407,114 @@ def test_dev_snapshot_spawn_gate_accepts_same_interpreter_symlink(
     stdout, stderr = process.communicate(timeout=10)
 
     assert process.returncode == 0, stderr or stdout
+
+
+def test_dev_snapshot_production_spawn_preserves_virtualenv_identity(
+    tmp_path: Path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[1]
+    candidate_root = tmp_path / "candidate"
+    candidate_boundary = (
+        candidate_root
+        / "tests"
+        / "restart_rehearsal"
+        / "dev_snapshot_boundary"
+    )
+    candidate_boundary.mkdir(parents=True)
+    shutil.copyfile(
+        source_root
+        / "tests"
+        / "restart_rehearsal"
+        / "dev_snapshot_boundary"
+        / "sitecustomize.py",
+        candidate_boundary / "sitecustomize.py",
+    )
+    candidate_contract = (
+        candidate_root / "tests" / "restart_rehearsal" / "boundary_contract.json"
+    )
+    shutil.copyfile(
+        source_root / "tests" / "restart_rehearsal" / "boundary_contract.json",
+        candidate_contract,
+    )
+    candidate_scripts = candidate_root / "scripts"
+    candidate_scripts.mkdir()
+    export_script = candidate_scripts / "export_research_lab_dev_icp_inputs.py"
+    export_script.write_text(
+        "import json, leadpoet_venv_probe, sys\n"
+        "print(json.dumps({\n"
+        "    'base_prefix': sys.base_prefix,\n"
+        "    'executable': sys.executable,\n"
+        "    'prefix': sys.prefix,\n"
+        "    'probe': leadpoet_venv_probe.VALUE,\n"
+        "}, sort_keys=True))\n",
+        encoding="utf-8",
+    )
+
+    venv_root = tmp_path / "venv"
+    venv.EnvBuilder(
+        with_pip=False,
+        system_site_packages=True,
+        symlinks=True,
+    ).create(venv_root)
+    venv_python = venv_root / "bin" / "python"
+    site_packages = Path(
+        subprocess.run(
+            [
+                str(venv_python),
+                "-c",
+                (
+                    "import os, site, sys; "
+                    "print(next(path for path in site.getsitepackages() "
+                    "if path.startswith(sys.prefix + os.sep)))"
+                ),
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+    )
+    (site_packages / "leadpoet_venv_probe.py").write_text(
+        "VALUE = 'venv-only'\n",
+        encoding="utf-8",
+    )
+
+    state_path = _boundary_state(tmp_path, candidate_root)
+    inputs_dir = tmp_path / "work" / "refresh-999-venv" / "inputs"
+    production_arguments = [
+        str(export_script),
+        "--out-dir",
+        str(inputs_dir),
+        "--seed",
+        "exact-rehearsal-snapshot",
+        "--expected-private-model-manifest-hash",
+        "sha256:" + "d" * 64,
+    ]
+    source = (
+        "import os, subprocess, sys\n"
+        f"command = [sys.executable, *{production_arguments!r}]\n"
+        "process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, "
+        "stderr=subprocess.PIPE, start_new_session=True, env=dict(os.environ))\n"
+        "stdout, stderr = process.communicate(timeout=10)\n"
+        "if process.returncode:\n"
+        "    raise RuntimeError(stderr or stdout)\n"
+        "print(stdout, end='')\n"
+    )
+    completed = subprocess.run(
+        [str(venv_python), "-c", source],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=20,
+        env=_boundary_environment(state_path, candidate_root),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["executable"] == str(venv_python)
+    assert result["prefix"] == str(venv_root)
+    assert result["base_prefix"] != result["prefix"]
+    assert result["probe"] == "venv-only"
 
 
 def test_dev_snapshot_boundary_real_run_bypass_is_thread_local(

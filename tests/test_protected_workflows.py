@@ -1,6 +1,8 @@
+import io
 from pathlib import Path
 import re
 import subprocess
+import tarfile
 
 import pytest
 
@@ -19,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "gateway" / "tee" / "protected_workflows.json"
 
 
-def test_committed_protected_workflow_manifest_matches_source():
+def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     manifest = load_manifest(MANIFEST_PATH)
     verify_manifest(ROOT, manifest)
     assert re.fullmatch(r"[0-9a-f]{40}", manifest["baseline_commit"])
@@ -35,6 +37,36 @@ def test_committed_protected_workflow_manifest_matches_source():
         cwd=ROOT,
         check=True,
     )
+    archived = subprocess.run(
+        [
+            "git",
+            "archive",
+            "--format=tar",
+            protected_source,
+            "--",
+            *sorted(PROTECTED_SYMBOLS),
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        timeout=30,
+    ).stdout
+    protected_root = tmp_path / "protected-source"
+    with tarfile.open(fileobj=io.BytesIO(archived), mode="r:") as archive:
+        for relative_path in PROTECTED_SYMBOLS:
+            member = archive.getmember(relative_path)
+            assert member.isfile()
+            source = archive.extractfile(member)
+            assert source is not None
+            destination = protected_root / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(source.read())
+    reproduced = build_manifest(
+        protected_root,
+        baseline_commit=manifest["baseline_commit"],
+        protected_source_commit=protected_source,
+    )
+    assert reproduced == manifest
     assert len(manifest["entries"]) == sum(len(items) for items in PROTECTED_SYMBOLS.values())
 
 

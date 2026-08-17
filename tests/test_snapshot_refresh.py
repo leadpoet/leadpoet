@@ -308,7 +308,7 @@ def test_run_command_bounds_pipe_drain_after_completed_group_exit(monkeypatch):
         )
 
 
-def test_cancellation_does_not_mask_command_teardown_failure(monkeypatch):
+def test_command_teardown_failure_does_not_mask_cancellation(monkeypatch):
     started = threading.Event()
 
     def broken_runner(
@@ -326,22 +326,28 @@ def test_cancellation_does_not_mask_command_teardown_failure(monkeypatch):
     monkeypatch.setattr(snapshot_refresh, "_run_command", broken_runner)
 
     async def scenario() -> None:
-        command = asyncio.create_task(
-            snapshot_refresh._await_command_completion(
+        owner = asyncio.current_task()
+        assert owner is not None
+
+        async def cancel_when_started() -> None:
+            deadline = asyncio.get_running_loop().time() + 5
+            while not started.is_set():
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("command teardown probe did not start")
+                await asyncio.sleep(0.01)
+            owner.cancel()
+
+        canceller = asyncio.create_task(cancel_when_started())
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await snapshot_refresh._await_command_completion(
                 snapshot_refresh._run_command,
                 [sys.executable, "-c", "pass"],
                 os.environ,
                 60,
             )
-        )
-        deadline = asyncio.get_running_loop().time() + 5
-        while not started.is_set():
-            if asyncio.get_running_loop().time() >= deadline:
-                raise AssertionError("command teardown probe did not start")
-            await asyncio.sleep(0.01)
-        command.cancel()
-        with pytest.raises(RuntimeError, match="command teardown failed"):
-            await command
+        await canceller
+        assert isinstance(cancelled.value.__cause__, RuntimeError)
+        assert str(cancelled.value.__cause__) == "snapshot command teardown failed"
 
     asyncio.run(scenario())
 
@@ -1140,8 +1146,20 @@ def test_active_model_guard_cancellation_does_not_mask_teardown_failure(
     )
 
     async def scenario() -> None:
-        guarded = asyncio.create_task(
-            snapshot_refresh._run_record_command_with_active_guard(
+        owner = asyncio.current_task()
+        assert owner is not None
+
+        async def cancel_when_started() -> None:
+            deadline = asyncio.get_running_loop().time() + 5
+            while not started.is_set():
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("guarded recorder did not start")
+                await asyncio.sleep(0.01)
+            owner.cancel()
+
+        canceller = asyncio.create_task(cancel_when_started())
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await snapshot_refresh._run_record_command_with_active_guard(
                 config=SimpleNamespace(),
                 command_runner=lambda *_args, **_kwargs: "",
                 command=[sys.executable, "-c", "pass"],
@@ -1151,17 +1169,96 @@ def test_active_model_guard_cancellation_does_not_mask_teardown_failure(
                 expected_identity=snapshot_refresh._artifact_identity(_active()),
                 cancel_file=tmp_path / "cancel-recording",
             )
+        await canceller
+        assert isinstance(cancelled.value.__cause__, RuntimeError)
+        assert str(cancelled.value.__cause__) == "snapshot command teardown failed"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "cancelled_phase",
+    ("export", "record", "publish_immutable", "publish_pointer"),
+)
+def test_snapshot_refresh_cancellation_persists_teardown_failure_and_reraises(
+    monkeypatch,
+    tmp_path,
+    cancelled_phase,
+):
+    _configure(monkeypatch, tmp_path)
+    started = threading.Event()
+
+    def phase_for(command: Sequence[str]) -> str:
+        script_name = Path(command[1]).name
+        if script_name == "export_research_lab_dev_icp_inputs.py":
+            return "export"
+        if script_name == "record_research_lab_dev_snapshots.py":
+            return "record"
+        if "--skip-current-pointer" in command:
+            return "publish_immutable"
+        return "publish_pointer"
+
+    def command_runner(
+        command,
+        _env,
+        _timeout_seconds,
+        *,
+        cancellation_event=None,
+    ):
+        if phase_for(command) != cancelled_phase:
+            return _pipeline_output(command)
+        started.set()
+        assert cancellation_event is not None
+        assert cancellation_event.wait(timeout=5)
+        raise RuntimeError(f"{cancelled_phase} teardown failed")
+
+    monkeypatch.setattr(snapshot_refresh, "_run_command", command_runner)
+
+    async def active_loader(*_args, **_kwargs):
+        return _active()
+
+    readiness_calls = 0
+
+    def readiness_loader(_uri, **_kwargs):
+        nonlocal readiness_calls
+        readiness_calls += 1
+        if readiness_calls == 1:
+            return _ready(ready=False, reason="snapshot_not_ready")
+        return _ready(manifest_hash="sha256:" + "e" * 64)
+
+    async def scenario() -> None:
+        refresh = asyncio.create_task(
+            snapshot_refresh.maybe_refresh_dev_snapshot(
+                SimpleNamespace(),
+                worker_index=0,
+                tree_policy=TreePolicy(mode="active"),
+                now=1000,
+                command_runner=snapshot_refresh._run_command,
+                readiness_loader=readiness_loader,
+                active_loader=active_loader,
+            )
         )
         deadline = asyncio.get_running_loop().time() + 5
         while not started.is_set():
             if asyncio.get_running_loop().time() >= deadline:
-                raise AssertionError("guarded recorder did not start")
+                raise AssertionError(f"snapshot {cancelled_phase} did not start")
             await asyncio.sleep(0.01)
-        guarded.cancel()
-        with pytest.raises(RuntimeError, match="command teardown failed"):
-            await guarded
+        refresh.cancel()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await refresh
+        assert refresh.cancelled()
+        assert isinstance(cancelled.value, asyncio.CancelledError)
 
     asyncio.run(scenario())
+
+    state = json.loads(
+        (tmp_path / "state.json").read_text(encoding="utf-8")
+    )
+    assert state["status"] == "failed"
+    assert state["last_error"] == (
+        f"RuntimeError:{cancelled_phase} teardown failed"
+    )
+    assert not any((tmp_path / "work").glob("refresh-*"))
 
 
 def test_utc_rollover_never_promotes_stale_snapshot_pointer(monkeypatch, tmp_path):

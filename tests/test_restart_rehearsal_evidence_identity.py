@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import os
 from pathlib import Path
 import re
 import subprocess
+from typing import Optional
 
 import pytest
 
@@ -181,6 +183,138 @@ def test_gateway_provider_adapter_tracks_production_transport_interface() -> Non
     production_keywords = {arg.arg for arg in production_call.args.kwonlyargs}
     rehearsal_keywords = {arg.arg for arg in rehearsal_call.args.kwonlyargs}
     assert production_keywords <= rehearsal_keywords
+
+
+@pytest.mark.parametrize(
+    ("ambient_path", "expected_path_suffix"),
+    (("/ambient/bin", "/ambient/bin"), (None, os.defpath)),
+)
+def test_n_minus_one_docker_reader_uses_an_isolated_bounded_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ambient_path: Optional[str],
+    expected_path_suffix: str,
+) -> None:
+    from tests.restart_rehearsal import dynamic_docker_collision_workflow
+
+    observed: dict[str, object] = {}
+
+    class Child:
+        def __init__(self) -> None:
+            self.stdin = io.StringIO()
+
+    child = Child()
+
+    def popen(command, **kwargs):
+        observed["command"] = command
+        observed["environment"] = kwargs["env"]
+        return child
+
+    event_path = tmp_path / "events.log"
+    exact_root = tmp_path / "exact"
+    launch_environment = {
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE": "/ambient/operation.lock",
+        "LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE": (
+            "/ambient/admission.lock"
+        ),
+        "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": "999",
+        "LEADPOET_DOCKER_DAEMON_READY_TIMEOUT_SECONDS": "999",
+    }
+    if ambient_path is not None:
+        launch_environment["PATH"] = ambient_path
+    with monkeypatch.context() as scoped:
+        if ambient_path is None:
+            scoped.delenv("PATH", raising=False)
+        scoped.setattr(
+            dynamic_docker_collision_workflow.subprocess,
+            "Popen",
+            popen,
+        )
+        returned = (
+            dynamic_docker_collision_workflow._run_exact_n_minus_one_source_reader(
+                source_root=ROOT,
+                exact_root=exact_root,
+                environment=launch_environment,
+                event_path=event_path,
+                host_detect_path=tmp_path / "host-detect",
+                image_digest="registry.invalid/model@sha256:" + "a" * 64,
+                timeout_seconds=300,
+                collision_timeout_seconds=7.1,
+            )
+        )
+
+    environment = observed["environment"]
+    assert isinstance(environment, dict)
+    reader_lock = tmp_path / "n-minus-reader.lock"
+    assert environment["LEADPOET_DOCKER_OPERATION_LOCK_FILE"] == str(reader_lock)
+    assert environment["LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE"] == (
+        f"{reader_lock}.admission"
+    )
+    assert environment["LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS"] == "8"
+    assert environment["LEADPOET_DOCKER_DAEMON_READY_TIMEOUT_SECONDS"] == "8"
+    reader_docker = tmp_path / "n-minus-reader-bin" / "docker"
+    reader_ready_log = tmp_path / "n-minus-reader-docker-ready.log"
+    assert environment["REHEARSAL_N_MINUS_READER_DOCKER_READY_LOG"] == str(
+        reader_ready_log
+    )
+    assert environment["PATH"] == (
+        f"{reader_docker.parent}{os.pathsep}{expected_path_suffix}"
+    )
+    assert all(environment["PATH"].split(os.pathsep))
+    assert environment["PYTHONPATH"] == str(exact_root)
+    assert returned is child
+    assert (
+        subprocess.run(
+            [str(reader_docker), "info"],
+            check=False,
+            env=environment,
+        ).returncode
+        == 0
+    )
+    assert (
+        subprocess.run(
+            [str(reader_docker), "ps"],
+            check=False,
+            env=environment,
+        ).returncode
+        == 97
+    )
+    assert reader_ready_log.read_text(encoding="utf-8").splitlines() == ["info"]
+
+
+def test_n_minus_one_docker_readiness_matches_exact_release_capability(
+    tmp_path: Path,
+) -> None:
+    from tests.restart_rehearsal import dynamic_docker_collision_workflow
+
+    exact_root = tmp_path / "exact"
+    ready_log = tmp_path / "ready.log"
+    assert dynamic_docker_collision_workflow._n_minus_one_docker_readiness_evidence(
+        exact_root=exact_root,
+        ready_log=ready_log,
+    ) == (False, [])
+
+    ready_log.write_text("info\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="readiness boundary differs"):
+        dynamic_docker_collision_workflow._n_minus_one_docker_readiness_evidence(
+            exact_root=exact_root,
+            ready_log=ready_log,
+        )
+    ready_log.unlink()
+
+    (exact_root / "research_lab").mkdir(parents=True)
+    (exact_root / "research_lab/docker_operation_lock_v2.py").touch()
+    with pytest.raises(RuntimeError, match="readiness boundary differs"):
+        dynamic_docker_collision_workflow._n_minus_one_docker_readiness_evidence(
+            exact_root=exact_root,
+            ready_log=ready_log,
+        )
+
+    ready_log.write_text("info\n", encoding="utf-8")
+    assert dynamic_docker_collision_workflow._n_minus_one_docker_readiness_evidence(
+        exact_root=exact_root,
+        ready_log=ready_log,
+    ) == (True, ["info"])
 
 
 def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:

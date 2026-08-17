@@ -98,6 +98,39 @@ def _run_exact_n_minus_one_source_reader(
     child_environment.update(
         {str(key): str(value) for key, value in environment.items()}
     )
+    reader_bin = event_path.parent / "n-minus-reader-bin"
+    reader_bin.mkdir(mode=0o700)
+    _write_executable(
+        reader_bin / "docker",
+        """#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = "info" ]; then
+  printf 'info\n' >> "$REHEARSAL_N_MINUS_READER_DOCKER_READY_LOG"
+  exit 0
+fi
+echo "unexpected N-1 Docker readiness operation" >&2
+exit 97
+""",
+    )
+    reader_lock_path = event_path.parent / "n-minus-reader.lock"
+    reader_ready_log = event_path.parent / "n-minus-reader-docker-ready.log"
+    child_environment.update(
+        {
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(reader_lock_path),
+            "LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE": (
+                f"{reader_lock_path}.admission"
+            ),
+            "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": str(
+                max(1, math.ceil(collision_timeout_seconds))
+            ),
+            "LEADPOET_DOCKER_DAEMON_READY_TIMEOUT_SECONDS": str(
+                max(1, math.ceil(collision_timeout_seconds))
+            ),
+            "REHEARSAL_N_MINUS_READER_DOCKER_READY_LOG": str(reader_ready_log),
+            "PATH": str(reader_bin)
+            + os.pathsep
+            + (child_environment.get("PATH") or os.defpath),
+        }
+    )
     child_environment["PYTHONPATH"] = str(exact_root)
     child = subprocess.Popen(
         [
@@ -148,6 +181,23 @@ def _communicate(
         stdout=stdout,
         stderr=stderr,
     )
+
+
+def _n_minus_one_docker_readiness_evidence(
+    *, exact_root: Path, ready_log: Path
+) -> tuple[bool, list[str]]:
+    readiness_expected = (
+        exact_root / "research_lab/docker_operation_lock_v2.py"
+    ).is_file()
+    ready_calls = (
+        ready_log.read_text(encoding="utf-8").splitlines()
+        if ready_log.is_file()
+        else []
+    )
+    expected_calls = ["info"] if readiness_expected else []
+    if ready_calls != expected_calls:
+        raise RuntimeError("N-1 Docker readiness boundary differs")
+    return readiness_expected, ready_calls
 
 
 def _exclusive_probe(
@@ -1055,6 +1105,10 @@ exit 98
                 label="exact N-1 Docker source reader",
             ),
             label="exact N-1 Docker source reader",
+        )
+        _n_minus_one_docker_readiness_evidence(
+            exact_root=exact_root,
+            ready_log=root / "n-minus-reader-docker-ready.log",
         )
         reclaim_result = _communicate(
             reclaim,

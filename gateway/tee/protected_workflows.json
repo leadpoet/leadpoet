@@ -1112,7 +1112,7 @@
       "symbol": "_CommandCancellationRequested"
     },
     {
-      "ast_sha256": "sha256:3be47e0f7016b65dc1ca26fcb8693c891e330bc3d2759e2773c81b0e8bcda077",
+      "ast_sha256": "sha256:dd0bb94bd9ed51e682819326d6322ab45a5262efe5d3c4f87168e716db24f66d",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "_await_command_completion"
     },
@@ -1132,7 +1132,7 @@
       "symbol": "_run_command"
     },
     {
-      "ast_sha256": "sha256:94998872d6f8f155037340882711759915c0f19aa7d5757c6d72ee55c035f548",
+      "ast_sha256": "sha256:eb9341e7e13358475c00f6eca3c4fe0b7b22e7052e32e79acf38c8a84b118ee5",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "_run_record_command_with_active_guard"
     },
@@ -1157,7 +1157,7 @@
       "symbol": "_write_record_cancel_marker"
     },
     {
-      "ast_sha256": "sha256:2943f95ef9bf4d0d2fff48899d62007ab3f0abe2bc53f8fba4cc40565f2419b2",
+      "ast_sha256": "sha256:819c69525035b5d2fece8b0db2576a3c930f4ffd60f730b38f4ee1e70e54086e",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
     },
@@ -4177,7 +4177,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:c30a24e2f6c6e9b16de496af4e7a4fdc50bedb9607e0aa7fff07d4b15dd00c6e",
-  "protected_source_commit": "d6d4fc5eca58f906765ee763f21839da73e500ae",
+  "manifest_hash": "sha256:716048869fbe9b756b1b02925d98b21cc23e8f601d570f5699366c4023e66d83",
+  "protected_source_commit": "0f042e5a08ccc1aa4ba119958e302f67b259993d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

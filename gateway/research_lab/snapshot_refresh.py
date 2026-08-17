@@ -376,6 +376,8 @@ async def _await_command_completion(
     command: Sequence[str],
     env: Mapping[str, str],
     timeout_seconds: int,
+    *,
+    cancellation_teardown_errors: list[Exception] | None = None,
 ) -> str:
     """Defer cancellation until the command-owning thread has fully stopped."""
 
@@ -410,6 +412,12 @@ async def _await_command_completion(
         if cancellation is not None:
             raise cancellation
         raise
+    except Exception as teardown_exc:
+        if cancellation is not None:
+            if cancellation_teardown_errors is not None:
+                cancellation_teardown_errors.append(teardown_exc)
+            raise cancellation from teardown_exc
+        raise
     if cancellation is not None:
         raise cancellation
     return result
@@ -438,12 +446,14 @@ async def _run_record_command_with_active_guard(
 ) -> str:
     """Record while polling model authority; cancel only at recorder boundaries."""
 
+    cancellation_teardown_errors: list[Exception] = []
     task = asyncio.create_task(
         _await_command_completion(
             command_runner,
             command,
             env,
             timeout_seconds,
+            cancellation_teardown_errors=cancellation_teardown_errors,
         )
     )
     superseded = False
@@ -486,13 +496,18 @@ async def _run_record_command_with_active_guard(
                 "active private model changed during snapshot recording"
             )
         return output
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
         task.cancel()
         try:
             await task
-        except asyncio.CancelledError:
-            pass
-        raise
+        except asyncio.CancelledError as task_cancellation:
+            if isinstance(task_cancellation.__cause__, Exception):
+                raise cancellation from task_cancellation.__cause__
+        except Exception as teardown_exc:
+            raise cancellation from teardown_exc
+        if cancellation_teardown_errors:
+            raise cancellation from cancellation_teardown_errors[0]
+        raise cancellation
 
 
 def _state_artifact_identity(
@@ -861,7 +876,12 @@ async def maybe_refresh_dev_snapshot(
                 completed["snapshot_manifest_hash"][:24],
             )
             return completed
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            teardown_error = (
+                _safe_error(exc.__cause__)
+                if isinstance(exc.__cause__, Exception)
+                else "CancelledError:snapshot refresh cancelled"
+            )
             failure = {
                 **failure_base,
                 "schema_version": "research_lab.dev_snapshot_refresh_state.v1",
@@ -870,7 +890,7 @@ async def maybe_refresh_dev_snapshot(
                 "last_check_at": datetime.fromtimestamp(
                     timestamp, tz=timezone.utc
                 ).isoformat(),
-                "last_error": "CancelledError:snapshot refresh cancelled",
+                "last_error": teardown_error,
             }
             _write_state(state_path, failure)
             logger.warning(

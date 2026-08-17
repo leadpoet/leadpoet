@@ -4,6 +4,25 @@ Opt-in OpenTelemetry for the gateway HOST process. One server span per HTTP
 request; nothing else. See `gateway/observability/otel_bootstrap.py` for the
 full contract.
 
+## Facts
+
+- `service_name` — one value: `leadpoet-gateway`. Nothing else in this repo
+  emits OTel. (verified 2026-08-17)
+- `env` — empty on every signal. The resource is a fixed dict with no
+  `deployment.environment*` key, so there is no environment to filter on.
+  (verified 2026-08-17)
+- `scope_name` — always `gateway.http`. (verified 2026-08-17)
+- Span `name` — exactly `<METHOD> <route-template>`. Filter on `name`, not on
+  the `http.route` attribute: the attribute read costs ~16× the bytes for the
+  same answer. (verified 2026-08-17)
+- `kind` — always `2` (SERVER), and every span is a root
+  (`parent_span_id = ''`). There are no client spans. (verified 2026-08-17)
+- `status_code` — `2` on 5xx only. A 4xx leaves it `0` (Unset), so count 4xx
+  from the `http.response.status_code` attribute, not from span status.
+  (verified 2026-08-17)
+- Signals present — spans only. Zero metric points, zero histogram points and
+  zero log records arrive from any service in this repo. (verified 2026-08-17)
+
 ## What a span contains — and all it can ever contain
 
 | attribute | example |
@@ -14,61 +33,107 @@ full contract.
 | `duration_ms` | `12.4` |
 
 No bodies, query strings, headers, DB statements, model I/O, prompts, or
-completions. Health/liveness routes are suppressed entirely.
+completions.
+
+**Suppression is three exact paths, not a family.** `_SUPPRESSED_ROUTES` in
+`otel_bootstrap.py` is `{"/health", "/health/live", "/health/ready"}`, matched
+against the concrete request path. Every other health or liveness route is
+traced normally — `/health/v2-authority`, `/attest/health` and
+`/attestation/health` all export spans and all appear in the store. Do not
+read "health routes are suppressed" into a query; `/health/v2-authority` is
+one of the busier routes on the gateway.
+
+## Spans
+
+One span per HTTP request, emitted by the pure-ASGI middleware in
+`gateway/observability/otel_bootstrap.py`.
+
+| span name | kind | emitted by | when | attributes |
+|---|---|---|---|---|
+| `<METHOD> <route-template>` | 2 (SERVER) | `otel_bootstrap.py` middleware | once per HTTP request that resolves to a registered route, apart from the three suppressed paths above | the four in the table above |
+| `<METHOD> /_unmatched` | 2 (SERVER) | same | a request whose path matches no registered route; the concrete path is never exported | same |
+
+## Metrics
+
+None reach the store. Gateway host CPU / memory / disk / network are available
+from a **separate** OpenTelemetry Collector process — config, installer and
+systemd unit all shipped, documented in
+[`gateway/observability/HOST_METRICS.md`](gateway/observability/HOST_METRICS.md).
+Installing it is deliberately an explicit, separately authorized host
+operation and is *not* wired into `gw_restart.sh`, so a gateway restart never
+depends on it. As of 2026-08-17 no gateway metric point has arrived, which
+means the collector is not running on the hosts — expect `hostmetrics`
+receiver names (`system.cpu.*`, `system.memory.*`, `system.disk.*`,
+`system.network.*`, `system.paging.*`) once it is installed.
+
+## Logs
+
+None reach the store. The gateway ships no OTLP log exporter, and error
+capture goes to Sentry instead (see below) — a different destination, so
+Sentry events are not queryable alongside these spans.
 
 ## Service map
 
 One service reports telemetry: **`leadpoet-gateway`**. By design it emits a
 single `SERVER` span per HTTP request and nothing else — so it makes no
 instrumented outgoing (client) calls, and it reports **no environment**
-(`deployment.environment.name` is unset; the resource is a fixed attribute
-dict with a constant service name, never an env value).
+(the resource is a fixed attribute dict with a constant service name, never
+an env value).
 
-| service | incoming (server spans, `kind = 2`) | outgoing (client spans, `kind = 3`) | environments |
-|---|---|---|---|
-| `leadpoet-gateway` | HTTP routes across the families below | none — server spans only | none reported |
+### leadpoet-gateway
 
-**Incoming route families** (span name is `<method> <route-template>`; the
-list is the live surface observed over the trailing 7 days, grouped by area):
+- **Environments:** none reported (`env` is empty).
+- **Outgoing (client, `kind = 3`):** none — server spans only.
+- **Incoming (server, `kind = 2`):** the route families below. Span name is
+  `<METHOD> <route-template>`.
 
 - **Fulfillment** — `/fulfillment/results/{request_id}`,
   `/fulfillment/requests/active`, `/fulfillment/scoring`,
   `/fulfillment/leaderboard`, `/fulfillment/rewards/active`,
   `/fulfillment/banned-hotkeys`, `/fulfillment/excluded-now/{request_id}`.
+  (`/fulfillment/scoring` is the fulfillment scorer — it is not the Research
+  Lab scorer, which runs headless and emits no spans at all.)
 - **Research Lab** — `/research-lab/source-adapters`, `/research-lab/status`,
   `/research-lab/public/loops`, `/research-lab/public/loops/{ticket_id}`,
   `/research-lab/public/loops/summary`,
+  `/research-lab/public/topic-groups`,
   `/research-lab/benchmarks/public/latest`,
+  `/research-lab/benchmarks/public/{benchmark_date}`,
   `/research-lab/allocations/attested/{epoch}`,
   `/research-lab/allocations/live/{epoch}`, `/research-lab/openrouter-keys`,
   `/research-lab/openrouter-keys/credential-recipient`,
   `/research-lab/tickets`, `/research-lab/loop-start`,
-  `/research-lab/reports/*`, `/research-lab/engine/issues`.
+  `/research-lab/reports/daily-noise-budget/latest`,
+  `/research-lab/reports/candidate-generation-failures`,
+  `/research-lab/engine/issues`.
 - **Weights (v2)** — `/weights/v2/published/{netuid}/{epoch_id}`,
   `/weights/v2/published-compact/{netuid}/{epoch_id}`,
   `/weights/v2/release-evidence/{commit_sha}`,
   `/weights/v2/latest/{netuid}/{epoch_id}`, `/weights/current/{netuid}`,
-  `/weights/inputs/v2`, `/weights/submit/v2`, `/weights/submit/compact/v2`,
+  `/weights/latest/{netuid}/{epoch_id}`, `/weights/inputs/v2`,
+  `/weights/submit/v2`, `/weights/submit/compact/v2`,
   `/weights/finalize/v2`, `/weights/finalize/compact/v2`,
   `/weights/subnet-epoch/boundary/v1`.
 - **Attestation** — `/attestation/deploy-readiness`,
   `/attestation/document`, `/attestation/health`, `/attest`,
   `/attest/health`.
 - **Qualification** — `/qualification/model/presign`,
-  `/qualification/leaderboard`,
+  `/qualification/leaderboard`, `/qualification/champion`,
   `/qualification/model/rate-limit/{miner_hotkey}`.
 - **Epoch** — `/epoch/state`, `/epoch/current`, `/epoch/{epoch_id}/leads`.
 - **Meta / root** — `/`, `/build-info`, `/health/v2-authority`, `/metrics`.
 - **Unresolved** — any path that matches no registered route exports the
-  fixed `/_unmatched` template (never the concrete path).
+  fixed `/_unmatched` template (never the concrete path). Both
+  `GET /_unmatched` and `POST /_unmatched` occur routinely.
 
-The map has two sources that agree here: the routes the gateway registers in
-code and the server spans that actually arrive. Regenerate this section from
-live telemetry (server/client span names by `service_name`) whenever the doc
-is touched. Note: PR #41 wires standalone-collector *host metrics* for the
-gateway, but no gateway metrics are arriving at the OnePatch store yet — the
-only metrics present are OnePatch's own internal ones — so metrics are
-intentionally absent from this map until they land.
+Every route above is registered in code. A handful are registered but carried
+no traffic in the trailing 7 days — `/fulfillment/excluded-now/{request_id}`,
+`/weights/submit/v2`, `/weights/finalize/v2`,
+`/weights/subnet-epoch/boundary/v1`,
+`/qualification/model/rate-limit/{miner_hotkey}`, `/epoch/{epoch_id}/leads`
+and `/metrics` — so absence of spans on those is quiet traffic, not missing
+instrumentation. Regenerate this section from live telemetry (server/client
+span names by `service_name`) whenever the doc is touched.
 
 ## Enabling (gateway host only)
 
@@ -138,7 +203,14 @@ Error capture (crashes and ERROR-level logs) is a separate, equally
 fail-closed integration with the same philosophy — namespaced
 `LEADPOET_SENTRY_*` variables, explicit options, host processes only, never
 the enclaves, and a scrubber that keeps trajectory/training data, prompts,
-benchmarks, and contact data out of every event. See
-[`docs/sentry_error_monitoring.md`](docs/sentry_error_monitoring.md) and
-`leadpoet_observability/sentry_bootstrap.py`;
-`tests/test_sentry_boundary_guard.py` enforces the boundary in CI.
+benchmarks, and contact data out of every event. It has grown past the
+bootstrap: `sentry_operations.py` emits the bounded restart and release
+summaries (stdlib-only, and its payloads deliberately exclude `icp_score` and
+every other private lead signal), `sentry_scrubbing.py` holds the redaction
+rules, `sentry_cli.py` is the one-shot bridge host shell workflows call, and
+`host_runtime.py` builds the small hash-locked interpreter that bridge runs in
+so the validator's authoritative interpreter is never touched. See
+[`docs/sentry_error_monitoring.md`](docs/sentry_error_monitoring.md);
+`tests/test_sentry_boundary_guard.py` and `tests/test_sentry_operations.py`
+enforce the boundary in CI. These events go to Sentry, not to the OTel
+store — they are not queryable alongside the spans above.

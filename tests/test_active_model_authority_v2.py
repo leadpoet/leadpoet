@@ -24,13 +24,15 @@ from leadpoet_canonical.attested_v2 import (
     create_signed_execution_receipt,
     sha256_json,
 )
-from research_lab.eval import build_local_private_artifact_manifest
 from research_lab.eval.artifacts import (
     PrivateModelArtifactManifest,
     private_model_artifact_replay_identity_v2,
 )
 from research_lab.eval.promotion_metric import promotion_gate_decision
-from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
+from tests.private_model_artifact_fixtures import (
+    build_private_artifact_with_adapted_source_admission,
+    install_reviewed_consumer_snapshot,
+)
 
 
 class _Reader:
@@ -52,7 +54,7 @@ def _artifact(tmp_path) -> PrivateModelArtifactManifest:
     )
     install_reviewed_consumer_snapshot(source)
     return PrivateModelArtifactManifest.from_mapping(
-        build_local_private_artifact_manifest(
+        build_private_artifact_with_adapted_source_admission(
             source_path=source,
             git_commit_sha="a" * 40,
             image_digest=(

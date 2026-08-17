@@ -156,6 +156,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "research_lab/sourcing_model_contract_v7.json",
     "research_lab/sourcing_model_parity_fixtures.json",
     "research_lab/sourcing_model_parity_fixtures_v7.json",
+    "research_lab/sourcing_model_semantic_compatibility_v1.json",
     "gateway/research_lab/champion_settlement_v2.py",
     "gateway/research_lab/allocations.py",
     "gateway/research_lab/stateful_epoch_authority_v1.py",

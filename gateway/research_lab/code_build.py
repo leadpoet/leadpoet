@@ -45,6 +45,10 @@ from research_lab.eval import (
     validate_private_model_artifact_manifest,
     verify_private_artifact_manifest_signature,
 )
+from research_lab.sourcing_model_contract_check import (
+    source_tree_compatibility_admission_v1,
+    validate_reviewed_legacy_release_manifest_identity_v1,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -584,6 +588,9 @@ PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID_ENV = (
 
 def _verify_built_candidate_artifact(
     candidate_manifest: PrivateModelArtifactManifest,
+    *,
+    source_tree_hash: str,
+    source_compatibility_receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Verify one built candidate before it can enter paid scoring.
 
@@ -607,7 +614,7 @@ def _verify_built_candidate_artifact(
         or DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID
     )
     try:
-        return verify_private_artifact_manifest_signature(
+        verification = verify_private_artifact_manifest_signature(
             candidate_manifest,
             key_id=signing_key_id,
         )
@@ -620,6 +627,31 @@ def _verify_built_candidate_artifact(
         raise CodeEditImageBuildError(
             "candidate artifact manifest failed exact contract/signature verification"
         ) from exc
+    contract = dict(candidate_manifest.compatibility_contract or {})
+    parity = dict(candidate_manifest.consumer_parity_fixtures or {})
+    try:
+        validate_reviewed_legacy_release_manifest_identity_v1(
+            source_compatibility_receipt,
+            candidate_manifest.to_dict(),
+        )
+    except ValueError as exc:
+        raise CodeEditImageBuildError(str(exc)) from exc
+    if (
+        candidate_manifest.model_artifact_hash != source_tree_hash
+        or source_compatibility_receipt.get("decision") != "accepted"
+        or source_compatibility_receipt.get("source_tree_hash")
+        != source_tree_hash
+        or source_compatibility_receipt.get("contract_id")
+        != contract.get("contract_id")
+        or source_compatibility_receipt.get("contract_hash")
+        != contract.get("sha256")
+        or source_compatibility_receipt.get("parity_hash")
+        != parity.get("sha256")
+    ):
+        raise CodeEditImageBuildError(
+            "candidate artifact differs from its admitted source identity"
+        )
+    return verification
 
 
 @dataclass(frozen=True)
@@ -1084,6 +1116,15 @@ class CodeEditCandidateBuilder:
                     len(commit_excluded_paths),
                     ", ".join(commit_excluded_paths[:20]),
                 )
+            admitted_source = _sourcing_contract_gate(
+                repo_dir,
+                force_enforce=True,
+            )
+            if admitted_source is None:
+                raise CodeEditPrivateTestError(
+                    "candidate source compatibility admission did not return a receipt"
+                )
+            candidate_source_tree_hash, candidate_source_receipt = admitted_source
             # §5.3: make sure the parent image is cached locally BEFORE the build
             # command starts, so a cold registry pull never eats the build budget
             # (matters especially on the source_context path, which touches no
@@ -1114,7 +1155,11 @@ class CodeEditCandidateBuilder:
             candidate_manifest = PrivateModelArtifactManifest.from_mapping(
                 json.loads(manifest_path.read_text(encoding="utf-8"))
             )
-            _verify_built_candidate_artifact(candidate_manifest)
+            _verify_built_candidate_artifact(
+                candidate_manifest,
+                source_tree_hash=candidate_source_tree_hash,
+                source_compatibility_receipt=candidate_source_receipt,
+            )
             if candidate_manifest.model_artifact_hash == parent_artifact.model_artifact_hash:
                 raise CodeEditImageBuildError("candidate artifact hash must differ from parent artifact hash")
             build_doc = {
@@ -2170,18 +2215,24 @@ COPY . /app
 RUN python - <<'PY'
 import research_lab_adapter
 import sourcing_model
+import re
 metadata = research_lab_adapter.adapter_metadata()
-assert metadata.get("adapter_version") in {{
-    "sourcing-model-research-lab-adapter:v3",
-    "sourcing-model-research-lab-adapter:v6",
-    "sourcing-model-research-lab-adapter:v7",
-}}
+assert re.fullmatch(
+    r"sourcing-model-research-lab-adapter:[A-Za-z0-9][A-Za-z0-9._-]{{0,63}}",
+    str(metadata.get("adapter_version") or ""),
+)
 assert metadata.get("component_registry_version") == "sourcing-model-components:v2"
-assert metadata.get("routing", {{}}).get("compiler_version") in {{
-    "routing-compiler-v2",
-    "routing-compiler-v3",
+assert metadata.get("scoring_adapter_version") == "qualification-company-scorer:v1"
+assert metadata.get("capability_contract_version") == "sourcing-model-runtime-capabilities:v2"
+assert set(metadata.get("runtime_capabilities") or ()) == {{
+    "deadline", "emit", "http_fetch", "probe_origin", "resolve_host"
 }}
+compiler_version = str(metadata.get("routing", {{}}).get("compiler_version") or "")
+assert re.fullmatch(r"routing-compiler-[A-Za-z0-9][A-Za-z0-9._-]{{0,63}}", compiler_version)
+assert metadata.get("runtime_routing", {{}}).get("compiler_version") == compiler_version
 assert metadata.get("routing", {{}}).get("private_bindings_exposed") is False
+assert metadata.get("routing", {{}}).get("source_add_requires_manifest_sha256") is True
+assert metadata.get("runtime_routing", {{}}).get("private_bindings_exposed") is False
 assert sourcing_model is not None
 PY
 CMD ["python", "-c", "import json, research_lab_adapter; print(json.dumps(research_lab_adapter.adapter_metadata(), sort_keys=True))"]
@@ -2480,31 +2531,41 @@ def _sourcing_contract_check_mode() -> str:
     return value
 
 
-def _sourcing_contract_gate(repo_dir: Path) -> None:
-    """Validate the patched model source against the frozen wrapper contract.
+def _sourcing_contract_gate(
+    repo_dir: Path,
+    *,
+    force_enforce: bool = False,
+) -> tuple[str, dict[str, Any]] | None:
+    """Admit the patched model source through the unified consumer contract.
 
-    The sourcing model's research-lab surface (research_lab_adapter.run_icp /
-    adapter_metadata, sourcing_model.core.qualify, and the discovery/
-    validation/client seams the production harness monkey-patches) is frozen
-    by research_lab/sourcing_model_contract.json. A code-edit candidate that
-    breaks those symbols would build an image the benchmark runtime and the
-    harness cannot invoke — catch it here, at build time, with a specific
-    violation list instead of a downstream invocation failure.
+    Exact legacy snapshots and future semantic-compatible releases use the
+    same canonical tree identity. The forced post-test call is the immutable
+    source receipt later cross-bound to the signed candidate manifest.
 
     Modes via RESEARCH_LAB_SOURCING_CONTRACT_CHECK: enforce (default) fails
     the build; shadow logs violations and lets the build proceed; disabled
     skips. Internal checker errors fail closed in enforce mode because a
     verifier outage must not admit an unverified model artifact.
     """
-    mode = _sourcing_contract_check_mode()
+    mode = "enforce" if force_enforce else _sourcing_contract_check_mode()
     if mode == "disabled":
-        return
+        return None
     try:
-        from research_lab.sourcing_model_contract_check import (
-            verify_source_tree_contract,
+        source_tree_hash = compute_private_source_tree_hash(repo_dir)
+        receipt = source_tree_compatibility_admission_v1(
+            repo_dir,
+            source_tree_hash=source_tree_hash,
         )
-
-        violations = verify_source_tree_contract(repo_dir)
+    except ValueError as exc:
+        if mode == "shadow":
+            logger.warning(
+                "sourcing_contract_gate_shadow_violation error=%s",
+                str(exc)[:800],
+            )
+            return None
+        raise CodeEditPrivateTestError(
+            "sourcing wrapper contract violation: " + str(exc)[:800]
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — convert to a stable build error
         logger.warning(
             "sourcing_contract_gate_error mode=%s error=%s", mode, str(exc)[:200]
@@ -2513,19 +2574,8 @@ def _sourcing_contract_gate(repo_dir: Path) -> None:
             raise CodeEditPrivateTestError(
                 "sourcing wrapper contract verification failed internally"
             ) from exc
-        return
-    if not violations:
-        return
-    if mode == "shadow":
-        logger.warning(
-            "sourcing_contract_gate_shadow_violation count=%d violations=%s",
-            len(violations),
-            "; ".join(violations[:8])[:800],
-        )
-        return
-    raise CodeEditPrivateTestError(
-        "sourcing wrapper contract violation: " + "; ".join(violations[:8])
-    )
+        return None
+    return source_tree_hash, receipt
 
 
 def _run_git_apply(

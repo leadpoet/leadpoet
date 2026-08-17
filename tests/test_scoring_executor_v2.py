@@ -14,6 +14,7 @@ from gateway.tee.scoring_executor import (
 from gateway.tee.scoring_executor_v2 import (
     DEV_HYBRID_REQUEST_SCHEMA_VERSION,
     DEV_REPLAY_REQUEST_SCHEMA_VERSION,
+    MODEL_COMPATIBILITY_PURPOSE_V2,
     OP_DEV_HYBRID_V2,
     OP_DEV_REPLAY_V2,
     OP_PROVIDER_PREFLIGHT_V2,
@@ -46,7 +47,9 @@ from research_lab.eval.provider_evidence_cache import (
 )
 from research_lab.eval.snapshot_store import MODE_RECORD, MODE_REPLAY, ProviderSnapshotStore
 from tests.v2_epoch_test_utils import epoch_test_environment
-from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
+from tests.test_sourcing_model_semantic_compatibility_v1 import (
+    _install_future_tree,
+)
 
 
 HASH = "sha256:" + "a" * 64
@@ -894,6 +897,8 @@ async def test_v2_adapter_routes_model_jobs_through_measured_sandbox():
         "model_artifact_hash": "sha256:" + "1" * 64,
         "model_manifest_hash": "sha256:" + "2" * 64,
         "source_bundle_hash": "sha256:" + "3" * 64,
+        "compatibility_policy_hash": "sha256:" + "a" * 64,
+        "compatibility_admission_hash": "sha256:" + "b" * 64,
         "runtime_config_hash": "sha256:" + "4" * 64,
         "input_hash": "sha256:" + "5" * 64,
         "provider_evidence_cache_hash": "sha256:" + "6" * 64,
@@ -976,6 +981,173 @@ async def test_v2_adapter_routes_model_jobs_through_measured_sandbox():
     ]
 
 
+def _metadata_compatibility_payload() -> dict:
+    return {
+        "model_kind": "private",
+        "operation": "metadata",
+        "input": {},
+        "environment": {},
+        "provider_evidence_cache": {},
+        "provider_evidence_cache_ref": "",
+        "provider_evidence_mode": "",
+        "provider_snapshot_bundle": {},
+        "provider_snapshot_tree_hash": "",
+        "provider_snapshot_manifest_hash": "",
+        "provider_cost_scope": "",
+        "provider_cost_cap_microusd": 0,
+        "provider_call_cap": 0,
+        "provider_runtime_catalog": {},
+        "provider_catalog_evidence": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_model_metadata_uses_dedicated_zero_credential_authority(
+    monkeypatch,
+):
+    observed = {}
+    commitments = {
+        "model_artifact_hash": "sha256:" + "1" * 64,
+        "model_manifest_hash": "sha256:" + "2" * 64,
+        "source_bundle_hash": "sha256:" + "3" * 64,
+        "compatibility_policy_hash": "sha256:" + "4" * 64,
+        "compatibility_admission_hash": "sha256:" + "5" * 64,
+        "runtime_config_hash": "sha256:" + "6" * 64,
+        "input_hash": sha256_json({}),
+        "provider_evidence_cache_hash": sha256_json({}),
+        "provider_snapshot_archive_hash": sha256_json({}),
+        "provider_snapshot_tree_hash": sha256_json({}),
+        "provider_snapshot_manifest_hash": sha256_json({}),
+        "provider_runtime_catalog_hash": sha256_json({}),
+        "generated_provider_evidence_cache_hash": sha256_json({}),
+        "trace_entries_hash": sha256_json([]),
+        "output_hash": sha256_json({"version": "measured"}),
+    }
+
+    class _Sandbox:
+        def execute(self, payload, **kwargs):
+            observed["payload"] = dict(payload)
+            observed["kwargs"] = dict(kwargs)
+            return {
+                **commitments,
+                "output": {"version": "measured"},
+                "trace_entries": [],
+                "generated_provider_evidence_cache": {},
+            }
+
+    context = ExecutionContextV2(
+        job_id="model-metadata-compatibility",
+        purpose=MODEL_COMPATIBILITY_PURPOSE_V2,
+        epoch_id=24000,
+    )
+    executor = ScoringExecutorV2(
+        provider_execute=lambda _request: pytest.fail(
+            "metadata compatibility must not call a provider"
+        ),
+        retry_policy_hashes={},
+        model_sandbox=_Sandbox(),
+        artifact_seal=_seal_artifact,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_validate_model_provider_catalog_ancestry",
+        lambda *_args, **_kwargs: pytest.fail(
+            "metadata compatibility must not validate provider ancestry"
+        ),
+    )
+    monkeypatch.setattr(
+        "gateway.tee.scoring_executor_v2.validate_model_sandbox_environment",
+        lambda *_args, **_kwargs: pytest.fail(
+            "metadata compatibility must not derive provider environment"
+        ),
+    )
+    try:
+        result = await executor(
+            OP_RUN_MODEL_SANDBOX_V2,
+            _metadata_compatibility_payload(),
+            context,
+        )
+    finally:
+        executor.close()
+
+    assert observed["payload"] == _metadata_compatibility_payload()
+    assert observed["kwargs"]["purpose"] == MODEL_COMPATIBILITY_PURPOSE_V2
+    assert context.provider_credential_ref_hashes == {}
+    assert result.output["trace_entries"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("operation", "run_icp"),
+        ("input", {"unexpected": True}),
+        ("environment", {"OPENROUTER_API_KEY": "must-not-cross"}),
+        ("provider_evidence_mode", "live"),
+        ("provider_cost_scope", HASH),
+        ("provider_runtime_catalog", {"catalog_hash": HASH}),
+        ("provider_catalog_evidence", {"result": {}}),
+    ),
+)
+async def test_model_metadata_authority_rejects_provider_state(field, value):
+    calls = []
+
+    class _Sandbox:
+        def execute(self, payload, **kwargs):
+            calls.append((dict(payload), dict(kwargs)))
+            return {}
+
+    context = ExecutionContextV2(
+        job_id="model-metadata-leak",
+        purpose=MODEL_COMPATIBILITY_PURPOSE_V2,
+        epoch_id=24000,
+    )
+    executor = ScoringExecutorV2(
+        provider_execute=lambda _request: {},
+        retry_policy_hashes={},
+        model_sandbox=_Sandbox(),
+        artifact_seal=_seal_artifact,
+    )
+    payload = _metadata_compatibility_payload()
+    payload[field] = value
+    try:
+        with pytest.raises(
+            ValueError,
+            match="metadata authority is not isolated",
+        ):
+            await executor(OP_RUN_MODEL_SANDBOX_V2, payload, context)
+    finally:
+        executor.close()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_model_metadata_cannot_use_ordinary_model_purpose():
+    context = ExecutionContextV2(
+        job_id="model-metadata-wrong-purpose",
+        purpose="research_lab.private_model_run.v2",
+        epoch_id=24000,
+    )
+    executor = ScoringExecutorV2(
+        provider_execute=lambda _request: {},
+        retry_policy_hashes={},
+        model_sandbox=object(),
+        artifact_seal=_seal_artifact,
+    )
+    try:
+        with pytest.raises(
+            ValueError,
+            match="metadata requires compatibility authority",
+        ):
+            await executor(
+                OP_RUN_MODEL_SANDBOX_V2,
+                _metadata_compatibility_payload(),
+                context,
+            )
+    finally:
+        executor.close()
+
+
 @pytest.mark.asyncio
 async def test_v2_model_cache_requires_exact_tape_ancestry():
     runtime_catalog, catalog_evidence, catalog_graph = _model_catalog_evidence()
@@ -996,7 +1168,9 @@ async def test_v2_model_cache_requires_exact_tape_ancestry():
             return {
                 "model_artifact_hash": HASH,
                 "model_manifest_hash": HASH,
-                "source_bundle_hash": HASH,
+                    "source_bundle_hash": HASH,
+                    "compatibility_policy_hash": "sha256:" + "a" * 64,
+                    "compatibility_admission_hash": "sha256:" + "b" * 64,
                 "runtime_config_hash": HASH,
                 "input_hash": HASH,
                 "provider_evidence_cache_hash": cache_hash,
@@ -1084,14 +1258,12 @@ async def test_v2_model_cache_requires_exact_tape_ancestry():
 
 
 @pytest.mark.asyncio
-async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(tmp_path):
+async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(
+    tmp_path,
+    monkeypatch,
+):
     source = tmp_path / "candidate-source"
-    source.mkdir()
-    (source / "research_lab_adapter.py").write_text(
-        "def run_icp(icp, context):\n    return []\n",
-        encoding="utf-8",
-    )
-    install_reviewed_consumer_snapshot(source)
+    _install_future_tree(source, monkeypatch)
     artifact = build_local_private_artifact_manifest(
         source_path=source,
         git_commit_sha="a" * 40,

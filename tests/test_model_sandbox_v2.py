@@ -4,16 +4,19 @@ import ast
 import json
 import os
 import base64
+import io
 from pathlib import Path
 import socket
 import subprocess
 import sys
 import shutil
 import tempfile
+import threading
 from types import SimpleNamespace
 
 import pytest
 
+from gateway.tee import model_sandbox_v2
 from gateway.tee.model_sandbox_v2 import (
     MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
     MODEL_SANDBOX_BROKER_DIRECTORY,
@@ -26,6 +29,7 @@ from gateway.tee.model_sandbox_v2 import (
     ModelSandboxV2Error,
     RunscModelSandboxV2,
     RunscSandboxConfigV2,
+    _MEASURED_METADATA_BOOTSTRAP,
     _model_sandbox_process_timeout_seconds,
     _oci_config,
     _runsc_failure_evidence,
@@ -55,13 +59,15 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
 )
 from research_lab.eval import build_local_private_artifact_manifest
+import research_lab.eval.private_runtime as private_runtime_module
 from research_lab.eval.private_runtime import canonicalize_private_model_icp
 from research_lab.eval.provider_evidence_cache import (
     build_evidence_cache_from_trace_entries,
     icp_evidence_cache_key,
 )
 from research_lab.eval.snapshot_store import SNAPSHOT_MISS_SENTINEL, SnapshotMiss
-from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
+from tests.test_sourcing_model_contract import _conforming_tree
+import research_lab.sourcing_model_contract_check as compatibility
 
 
 _SHORT_TEST_ROOTFS: list[Path] = []
@@ -74,6 +80,67 @@ def _cleanup_short_test_rootfs():
     for rootfs in _SHORT_TEST_ROOTFS[start:]:
         shutil.rmtree(rootfs, ignore_errors=True)
     del _SHORT_TEST_ROOTFS[start:]
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_source_admission_boundary(monkeypatch):
+    """Adapt source admission only for sandbox launcher/mechanics unit tests."""
+
+    calls = []
+
+    def admit(
+        root,
+        *,
+        manifest=None,
+        source_tree_hash="",
+        use_cache=False,
+    ):
+        source_root = Path(root)
+        policy, policy_hash = compatibility.semantic_compatibility_policy_identity_v1()
+        contract_path = source_root / policy["canonical_contract_path"]
+        parity_path = source_root / policy["canonical_parity_path"]
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        manifest_document = compatibility._manifest_document(manifest)
+        receipt = compatibility._semantic_compatibility_receipt(
+            mode="semantic_v1",
+            consumer_api_version=policy["consumer_api_version"],
+            policy_hash=policy_hash,
+            source_tree_hash=str(source_tree_hash),
+            manifest=manifest_document,
+            contract=contract,
+            contract_hash=compatibility._snapshot_sha256(contract_path),
+            parity_hash=compatibility._snapshot_sha256(parity_path),
+            bindings={
+                "adapter_version": "sourcing-model-research-lab-adapter:v7",
+                "capability_contract_version": (
+                    "sourcing-model-runtime-capabilities:v2"
+                ),
+                "component_registry_version": "sourcing-model-components:v2",
+                "routing_compiler_version": "routing-compiler-v3",
+                "scoring_adapter_version": "qualification-company-scorer:v1",
+            },
+        )
+        calls.append(
+            {
+                "manifest_bound": bool(manifest_document),
+                "source_admission_exercised": False,
+                "use_cache": bool(use_cache),
+                "receipt_hash": receipt["receipt_hash"],
+            }
+        )
+        return receipt
+
+    monkeypatch.setattr(
+        private_runtime_module,
+        "source_tree_compatibility_admission_v1",
+        admit,
+    )
+    monkeypatch.setattr(
+        model_sandbox_v2,
+        "source_tree_compatibility_admission_v1",
+        admit,
+    )
+    yield calls
 
 
 def _runtime_receipt_stderr(stdin_payload: str) -> str:
@@ -171,12 +238,7 @@ def _runtime(tmp_path: Path):
 
 def _request(tmp_path: Path):
     source = tmp_path / "source"
-    source.mkdir()
-    (source / "research_lab_adapter.py").write_text(
-        "def adapter_metadata():\n    return {'version': '1'}\n",
-        encoding="utf-8",
-    )
-    install_reviewed_consumer_snapshot(source)
+    _conforming_tree(source)
     artifact = build_local_private_artifact_manifest(
         source_path=source,
         git_commit_sha="a" * 40,
@@ -226,6 +288,19 @@ def _request(tmp_path: Path):
     }
 
 
+def _metadata_request(tmp_path: Path):
+    request = _request(tmp_path)
+    request.update(
+        {
+            "provider_evidence_mode": "",
+            "provider_cost_scope": "",
+            "provider_runtime_catalog": {},
+            "provider_catalog_evidence": {},
+        }
+    )
+    return request
+
+
 def _transport_failure_result(request):
     attempt = build_transport_attempt(
         request_id="f" * 32,
@@ -262,11 +337,32 @@ def _transport_failure_result(request):
     }
 
 
-def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
+def test_runsc_model_sandbox_builds_broker_free_metadata_oci_bundle(
+    tmp_path, monkeypatch, _sandbox_source_admission_boundary
+):
     observed = {}
+    probe = {"measured": "probe"}
+
+    def validate_metadata(metadata, **kwargs):
+        observed["metadata_bindings"] = kwargs["expected_semantic_bindings"]
+        return dict(metadata)
+
+    monkeypatch.setattr(
+        model_sandbox_v2,
+        "validate_sourcing_adapter_metadata",
+        validate_metadata,
+    )
+    monkeypatch.setattr(
+        model_sandbox_v2,
+        "_build_consumer_runtime_probe_from_observation_v1",
+        lambda value, **_kwargs: (
+            probe if value == {"invariants": {"hostile": "raw-observation"}} else {}
+        ),
+    )
 
     def runner(command, **kwargs):
         if "run" in command:
+            observed["timeout"] = kwargs["timeout"]
             bundle_arg = next(item for item in command if item.startswith("--bundle="))
             config = json.loads(
                 (Path(bundle_arg.split("=", 1)[1]) / "config.json").read_text()
@@ -278,30 +374,22 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
                 item.split("=", 1) for item in config["process"]["env"]
             )
             rootfs = Path(config["root"]["path"])
-            broker_root = rootfs / process_env[
-                "LEADPOET_SANDBOX_PROVIDER_SOCKET"
-            ].lstrip("/")
-            broker_root = broker_root.parent
             source_root = rootfs / process_env[
                 "LEADPOET_MODEL_SOURCE_ROOT"
             ].lstrip("/")
-            provider_socket = broker_root / "provider.sock"
-            observed["broker_identity"] = (
-                broker_root.stat().st_uid,
-                broker_root.stat().st_gid,
-                provider_socket.stat().st_uid,
-                provider_socket.stat().st_gid,
-                provider_socket.stat().st_mode & 0o777,
-            )
-            observed["broker_root"] = broker_root
             observed["source_root"] = source_root
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                client.connect(str(provider_socket))
-            finally:
-                client.close()
-            observed["broker_connected"] = True
-            return SimpleNamespace(returncode=0, stdout='{"version":"1"}', stderr="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "metadata": {"version": "1"},
+                        "runtime_observation": {
+                            "invariants": {"hostile": "raw-observation"},
+                        },
+                    }
+                ),
+                stderr="",
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     transport = BrokeredProviderTransportV2(
@@ -312,10 +400,18 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
         transport=transport,
         cgroup_parent="leadpoet-model",
         process_runner=runner,
+        metadata_process_runner=runner,
+    )
+    monkeypatch.setattr(
+        sandbox,
+        "_create_provider_scope_v2",
+        lambda *_args, **_kwargs: pytest.fail(
+            "metadata must not create a provider scope"
+        ),
     )
     try:
         result = sandbox.execute(
-            _request(tmp_path),
+            _metadata_request(tmp_path),
             job_id="model-job-1",
             purpose="research_lab.private_model_run.v2",
             retry_policy_hashes={"openrouter": "sha256:" + "1" * 64},
@@ -327,6 +423,18 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
 
     assert result["output"] == {"version": "1"}
     assert result["input_hash"] == sha256_json({})
+    assert result["compatibility_policy_hash"].startswith("sha256:")
+    assert result["compatibility_admission_hash"].startswith("sha256:")
+    assert result["consumer_runtime_probe"] == probe
+    assert result["consumer_runtime_probe_hash"] == sha256_json(probe)
+    assert observed["timeout"] == model_sandbox_v2.MODEL_SANDBOX_METADATA_TIMEOUT_SECONDS
+    assert observed["metadata_bindings"] == {
+        "adapter_version": "sourcing-model-research-lab-adapter:v7",
+        "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
+        "component_registry_version": "sourcing-model-components:v2",
+        "routing_compiler_version": "routing-compiler-v3",
+        "scoring_adapter_version": "qualification-company-scorer:v1",
+    }
     assert "--rootless=false" in observed["command"]
     assert "--rootless=true" not in observed["command"]
     assert "--network=none" in observed["command"]
@@ -334,6 +442,11 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     assert config["linux"]["cgroupsPath"].startswith("leadpoet-model/lp-")
     assert config["root"]["readonly"] is True
     assert config["process"]["cwd"] == "/tmp"
+    process_args = config["process"]["args"]
+    assert process_args[1:4] == ["-I", "-B", "-c"]
+    assert "trusted_model_sandbox_import_bootstrap" not in process_args[4]
+    assert "import gateway" not in process_args[4]
+    assert "from gateway" not in process_args[4]
     process_env = dict(item.split("=", 1) for item in config["process"]["env"])
     assert process_env["PYTHONPATH"].split(":")[:2] == [
         "/app",
@@ -356,37 +469,329 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     }
     assert all(item["type"] != "bind" for item in config["mounts"])
     assert "/dev/nsm" in config["linux"]["maskedPaths"]
-    assert observed["stdin"] == "{}"
-    assert "--host-uds=open" in observed["command"]
+    assert set(json.loads(observed["stdin"])) == {"observation_plan"}
+    assert "--host-uds=none" in observed["command"]
+    assert "--host-uds=open" not in observed["command"]
+    assert "LEADPOET_SANDBOX_PROVIDER_SOCKET" not in process_env
+    assert "RESEARCH_LAB_PROVIDER_COST_SCOPE" not in process_env
     run_mount = next(
         item for item in config["mounts"] if item["destination"] == "/run"
     )
     assert run_mount["type"] == "tmpfs"
     assert "noexec" in run_mount["options"]
-    sandbox_socket = Path(process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"])
-    assert sandbox_socket.parts[:2] == ("/", MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/"))
-    assert sandbox_socket.name == "provider.sock"
-    assert sandbox_socket.parent.name == MODEL_SANDBOX_BROKER_DIRECTORY
-    assert observed["broker_root"].is_relative_to(Path(config["root"]["path"]))
     assert observed["source_root"].is_relative_to(Path(config["root"]["path"]))
     assert observed["source_root"].name == MODEL_SANDBOX_SOURCE_DIRECTORY
-    assert observed["source_root"].parent == observed["broker_root"].parent
+    assert not (observed["source_root"].parent / MODEL_SANDBOX_BROKER_DIRECTORY).exists()
     assert "/dev/log" in config["linux"]["maskedPaths"]
-    assert observed["broker_identity"] == (
-        sandbox.config.uid,
-        sandbox.config.gid,
-        sandbox.config.uid,
-        sandbox.config.gid,
-        0o600,
-    )
-    assert observed["broker_connected"] is True
-    assert not observed["broker_root"].exists()
     assert not observed["source_root"].exists()
     visible_parent = (
         Path(config["root"]["path"])
         / MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/")
     )
     assert list(visible_parent.iterdir()) == []
+    assert [
+        item["manifest_bound"] for item in _sandbox_source_admission_boundary
+    ] == [False, True]
+    assert all(
+        item["source_admission_exercised"] is False
+        for item in _sandbox_source_admission_boundary
+    )
+
+
+def test_bounded_metadata_process_drains_stdout_and_stderr_concurrently():
+    byte_count = 128 * 1024
+    completed = model_sandbox_v2._run_bounded_metadata_process(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os\n"
+                f"payload = b'x' * {byte_count}\n"
+                "os.write(1, payload)\n"
+                "os.write(2, payload)\n"
+            ),
+        ],
+        input_payload="{}",
+        timeout_seconds=5,
+        environment=dict(os.environ),
+        stdout_limit=byte_count,
+        stderr_limit=byte_count,
+        termination_grace_seconds=0.5,
+    )
+
+    assert completed.returncode == 0
+    assert len(completed.stdout.encode("utf-8")) == byte_count
+    assert len(completed.stderr.encode("utf-8")) == byte_count
+
+
+@pytest.mark.parametrize("extra_byte", (0, 1))
+def test_bounded_metadata_process_enforces_dedicated_stdout_cap(extra_byte):
+    byte_count = model_sandbox_v2.MAX_MODEL_METADATA_OUTPUT_BYTES + extra_byte
+
+    def call():
+        return model_sandbox_v2._run_bounded_metadata_process(
+            [
+                sys.executable,
+                "-c",
+                f"import os\nos.write(1, b'x' * {byte_count})\n",
+            ],
+            input_payload="{}",
+            timeout_seconds=5,
+            environment=dict(os.environ),
+            termination_grace_seconds=0.5,
+        )
+
+    if extra_byte:
+        with pytest.raises(ModelSandboxV2Error, match="output exceeds limit"):
+            call()
+    else:
+        assert len(call().stdout.encode("utf-8")) == byte_count
+
+
+def test_bounded_metadata_process_stops_hostile_stdout():
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="model sandbox output exceeds limit",
+    ):
+        model_sandbox_v2._run_bounded_metadata_process(
+            [
+                sys.executable,
+                "-c",
+                "import os\nwhile True: os.write(1, b'x' * 65536)\n",
+            ],
+            input_payload="{}",
+            timeout_seconds=5,
+            environment=dict(os.environ),
+            stdout_limit=4096,
+            stderr_limit=4096,
+            termination_grace_seconds=0.5,
+        )
+
+
+def test_bounded_metadata_process_stops_hostile_stderr_without_disclosure():
+    secret = "metadata-diagnostic-secret"
+    with pytest.raises(ModelSandboxV2Error) as raised:
+        model_sandbox_v2._run_bounded_metadata_process(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os\n"
+                    f"payload = {secret!r}.encode() * 4096\n"
+                    "while True: os.write(2, payload)\n"
+                ),
+            ],
+            input_payload="{}",
+            timeout_seconds=5,
+            environment=dict(os.environ),
+            stdout_limit=4096,
+            stderr_limit=4096,
+            termination_grace_seconds=0.5,
+        )
+
+    message = str(raised.value)
+    assert "diagnostic output exceeds limit" in message
+    assert "stderr_prefix_hash=sha256:" in message
+    assert secret not in message
+
+
+def test_metadata_timeout_terminates_kills_and_force_deletes(
+    tmp_path,
+    _sandbox_source_admission_boundary,
+):
+    class StubbornProcess:
+        def __init__(self):
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+            self.returncode = None
+            self.terminate_calls = 0
+            self.kill_calls = 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+        def kill(self):
+            self.kill_calls += 1
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired("runsc", timeout)
+            return self.returncode
+
+    process = StubbornProcess()
+    delete_commands = []
+
+    def metadata_runner(command, **kwargs):
+        return model_sandbox_v2._run_bounded_metadata_process(
+            command,
+            input_payload=kwargs["input"],
+            timeout_seconds=0.01,
+            environment=kwargs["env"],
+            process_factory=lambda *_args, **_kwargs: process,
+            stdout_limit=4096,
+            stderr_limit=4096,
+            termination_grace_seconds=0.01,
+        )
+
+    def cleanup_runner(command, **_kwargs):
+        delete_commands.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=cleanup_runner,
+        metadata_process_runner=metadata_runner,
+    )
+    try:
+        with pytest.raises(ModelSandboxV2Error, match="model sandbox timed out"):
+            sandbox.execute(
+                _metadata_request(tmp_path),
+                job_id="metadata-timeout-job",
+                purpose="research_lab.private_model_run.v2",
+                retry_policy_hashes={"openrouter": "sha256:" + "1" * 64},
+                terminal_sink=lambda _attempt: None,
+                artifact_sink=lambda _artifact: None,
+            )
+    finally:
+        transport.restore()
+
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert len(delete_commands) == 1
+    assert delete_commands[0][-3:-1] == ["delete", "--force"]
+    assert delete_commands[0][-1].startswith("lp-")
+    assert [
+        item["manifest_bound"] for item in _sandbox_source_admission_boundary
+    ] == [False, True]
+    assert all(
+        item["source_admission_exercised"] is False
+        for item in _sandbox_source_admission_boundary
+    )
+
+
+def test_bounded_metadata_cleanup_closes_pipes_when_process_cannot_be_reaped():
+    class UnreapedProcess:
+        def __init__(self):
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+        def kill(self):
+            return None
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("runsc", timeout)
+
+    process = UnreapedProcess()
+
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="process could not be stopped",
+    ):
+        model_sandbox_v2._run_bounded_metadata_process(
+            ["runsc", "run", "metadata"],
+            input_payload="{}",
+            timeout_seconds=0.01,
+            environment={},
+            process_factory=lambda *_args, **_kwargs: process,
+            termination_grace_seconds=0.01,
+        )
+
+    assert process.stdin.closed
+    assert process.stdout.closed
+    assert process.stderr.closed
+
+
+@pytest.mark.parametrize("failed_start", (2, 3))
+def test_bounded_metadata_cleanup_survives_thread_start_failure(
+    monkeypatch,
+    failed_start,
+):
+    class StoppableProcess:
+        def __init__(self):
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+            self.returncode = None
+            self.terminate_calls = 0
+            self.kill_calls = 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminate_calls += 1
+            self.returncode = -15
+
+        def kill(self):
+            self.kill_calls += 1
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired("runsc", timeout)
+            return self.returncode
+
+    real_thread = threading.Thread
+    created_threads = []
+    start_count = 0
+
+    class ControlledThread:
+        def __init__(self, *args, **kwargs):
+            self._thread = real_thread(*args, **kwargs)
+            self.started = False
+            created_threads.append(self)
+
+        def start(self):
+            nonlocal start_count
+            start_count += 1
+            if start_count == failed_start:
+                raise RuntimeError("bounded metadata thread start failed")
+            self.started = True
+            self._thread.start()
+
+        def join(self, timeout=None):
+            self._thread.join(timeout)
+
+        def is_alive(self):
+            return self._thread.is_alive()
+
+    process = StoppableProcess()
+    monkeypatch.setattr(model_sandbox_v2, "Thread", ControlledThread)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        model_sandbox_v2._run_bounded_metadata_process(
+            ["runsc", "run", "metadata"],
+            input_payload="{}",
+            timeout_seconds=1,
+            environment={},
+            process_factory=lambda *_args, **_kwargs: process,
+            termination_grace_seconds=0.01,
+        )
+
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 0
+    assert process.stdin.closed
+    assert process.stdout.closed
+    assert process.stderr.closed
+    assert not any(
+        thread.is_alive() for thread in created_threads if thread.started
+    )
 
 
 def test_runsc_model_sandbox_self_test_uses_production_launcher_and_broker(tmp_path):
@@ -1144,6 +1549,189 @@ print('trusted-provider-helpers-with-model-qualification')
     assert completed.stdout.strip() == "trusted-provider-helpers-with-model-qualification"
 
 
+@pytest.mark.parametrize(
+    "forbidden_import",
+    (
+        "gateway.tee.model_sandbox_v2",
+        "gateway.research_lab.model_authority_v2",
+        "research_lab.sourcing_model_contract_check",
+    ),
+)
+def test_metadata_observer_cannot_import_trusted_authority_modules(
+    tmp_path,
+    forbidden_import,
+):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "research_lab_adapter.py").write_text(
+        "import %s\n\ndef adapter_metadata():\n    return {}\n"
+        % forbidden_import,
+        encoding="utf-8",
+    )
+    observation_plan = {
+        "schema_version": "leadpoet.consumer-runtime-observation-plan.v1",
+        "runtime_invariants": None,
+    }
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            _MEASURED_METADATA_BOOTSTRAP,
+            "research_lab_adapter",
+            "adapter_metadata",
+        ],
+        input=json.dumps({"observation_plan": observation_plan}),
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env={
+            "HOME": str(tmp_path),
+            "PATH": os.environ.get("PATH", ""),
+            "LEADPOET_MODEL_SOURCE_ROOT": str(source_root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "metadata observer import is denied" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "harmless_import",
+    ("xml.etree.ElementTree", "typing_extensions"),
+)
+def test_metadata_observer_allows_unlisted_harmless_dependencies(
+    tmp_path,
+    harmless_import,
+):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "research_lab_adapter.py").write_text(
+        "import %s\n\ndef adapter_metadata():\n    return {}\n"
+        % harmless_import,
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            _MEASURED_METADATA_BOOTSTRAP,
+            "research_lab_adapter",
+            "adapter_metadata",
+        ],
+        input=json.dumps(
+            {
+                "observation_plan": {
+                    "schema_version": (
+                        "leadpoet.consumer-runtime-observation-plan.v1"
+                    ),
+                    "runtime_invariants": None,
+                }
+            }
+        ),
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env={
+            "HOME": str(tmp_path),
+            "PATH": os.environ.get("PATH", ""),
+            "LEADPOET_MODEL_SOURCE_ROOT": str(source_root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "metadata": {},
+        "runtime_observation": {"invariants": {"profile": "legacy_exact"}},
+    }
+
+
+@pytest.mark.parametrize(
+    "dangerous_body",
+    (
+        "import socket\nsocket.socket()",
+        "from pathlib import Path\nPath('observer-write').write_text('no')",
+        "import subprocess\nsubprocess.run(['true'])",
+    ),
+)
+def test_metadata_observer_denies_host_interaction(tmp_path, dangerous_body):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "research_lab_adapter.py").write_text(
+        dangerous_body + "\n\ndef adapter_metadata():\n    return {}\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            _MEASURED_METADATA_BOOTSTRAP,
+            "research_lab_adapter",
+            "adapter_metadata",
+        ],
+        input=json.dumps(
+            {
+                "observation_plan": {
+                    "schema_version": (
+                        "leadpoet.consumer-runtime-observation-plan.v1"
+                    ),
+                    "runtime_invariants": None,
+                }
+            }
+        ),
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env={
+            "HOME": str(tmp_path),
+            "PATH": os.environ.get("PATH", ""),
+            "LEADPOET_MODEL_SOURCE_ROOT": str(source_root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "metadata observer" in completed.stderr
+    assert "is denied" in completed.stderr
+    assert not (tmp_path / "observer-write").exists()
+
+
+def test_trusted_parent_rejects_child_claimed_compatibility_decision():
+    hostile_observation = {
+        "callables": {},
+        "constants": {},
+        "imports": {},
+        "capabilities": {},
+        "invariants": {},
+        "decision": "accepted",
+    }
+
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="runtime observation fields are invalid",
+    ):
+        model_sandbox_v2._build_consumer_runtime_probe_from_observation_v1(
+            hostile_observation,
+            compatibility_receipt={},
+            metadata={},
+            expected_source_tree_hash="sha256:" + "1" * 64,
+            expected_manifest_hash="sha256:" + "2" * 64,
+            expected_image_digest="example.invalid/model@sha256:" + "3" * 64,
+            expected_module_name="research_lab_adapter",
+            expected_callable_name="adapter_metadata",
+        )
+
+
 def test_eval_package_exports_are_lazy_and_backward_compatible(tmp_path):
     code = """
 import sys
@@ -1404,9 +1992,23 @@ def test_model_sandbox_accepts_measured_transport_failure_after_model_fallback(
         return {"version": "fallback"}, []
 
     sandbox._run = run_model
+    request = _request(tmp_path)
+    canonical_icp = canonicalize_private_model_icp(
+        {"industry": "Software", "intent_signal": "Hiring"}
+    )
+    request.update(
+        {
+            "operation": "run_icp",
+            "callable_name": "run_icp",
+            "input": {"icp": canonical_icp, "context": {}},
+            "provider_evidence_cache_ref": icp_evidence_cache_key(
+                canonical_icp
+            ),
+        }
+    )
     try:
         result = sandbox.execute(
-            _request(tmp_path),
+            request,
             job_id="model-job-fallback",
             purpose="research_lab.private_model_run.v2",
             retry_policy_hashes={"public_web": "sha256:" + "6" * 64},
@@ -1452,13 +2054,27 @@ def test_model_sandbox_still_rejects_missing_transport_terminal(
         return {"version": "must-not-authorize"}, []
 
     sandbox._run = run_model
+    request = _request(tmp_path)
+    canonical_icp = canonicalize_private_model_icp(
+        {"industry": "Software", "intent_signal": "Hiring"}
+    )
+    request.update(
+        {
+            "operation": "run_icp",
+            "callable_name": "run_icp",
+            "input": {"icp": canonical_icp, "context": {}},
+            "provider_evidence_cache_ref": icp_evidence_cache_key(
+                canonical_icp
+            ),
+        }
+    )
     try:
         with pytest.raises(
             ProviderClientV2Error,
             match="missing a signed terminal record",
         ):
             sandbox.execute(
-                _request(tmp_path),
+                request,
                 job_id="model-job-missing-terminal",
                 purpose="research_lab.private_model_run.v2",
                 retry_policy_hashes={"public_web": "sha256:" + "6" * 64},
@@ -1750,6 +2366,17 @@ def test_model_sandbox_rejects_malformed_provider_catalog_rows(
     value,
 ):
     request = _request(tmp_path)
+    icp = canonicalize_private_model_icp(
+        {"industry": "Software", "intent_signal": "Hiring"}
+    )
+    request.update(
+        {
+            "operation": "run_icp",
+            "callable_name": "run_icp",
+            "input": {"icp": icp, "context": {}},
+            "provider_evidence_cache_ref": icp_evidence_cache_key(icp),
+        }
+    )
     request["provider_catalog_evidence"]["result"] = dict(
         request["provider_catalog_evidence"]["result"]
     )

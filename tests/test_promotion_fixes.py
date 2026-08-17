@@ -31,7 +31,7 @@ from typing import Any, Mapping
 import pytest
 
 import gateway.research_lab.promotion as promotion
-from gateway.research_lab import attested_v2_store, v2_authority
+from gateway.research_lab import attested_v2_store, model_authority_v2, v2_authority
 from gateway.research_lab.config import DEFAULT_PRIVATE_REPO_BRANCH
 from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 import gateway.research_lab.store as store_module
@@ -54,6 +54,25 @@ from research_lab.eval.promotion_metric import (
     PAIRED_LCB_PROMOTION_METRIC_VERSION,
 )
 from gateway.research_lab.source_add_llm_judge import SourceAddJudgeVerdict
+from research_lab.sourcing_model_contract_check import (
+    SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+    SEMANTIC_COMPATIBILITY_CONSUMER_API_V1,
+    SEMANTIC_COMPATIBILITY_RECEIPT_SCHEMA_V1,
+    reviewed_consumer_snapshots,
+    semantic_compatibility_policy_identity_v1,
+)
+from tests.private_model_artifact_fixtures import DEFAULT_CONSUMER_CONTRACT_ID
+
+
+_TEST_CONSUMER_SNAPSHOT = reviewed_consumer_snapshots()[
+    DEFAULT_CONSUMER_CONTRACT_ID
+]
+_REAL_PREFLIGHT_PRIVATE_MODEL_ACTIVATION = (
+    promotion._preflight_private_model_activation
+)
+_REAL_ACTIVATE_PRIVATE_MODEL_GENERATION = (
+    promotion._activate_private_model_generation
+)
 
 
 def _git(cmd, *, cwd=None):
@@ -463,6 +482,29 @@ class FakeArtifact:
     image_digest: str = "493765492819.dkr.ecr.us-east-1.amazonaws.com/research-lab/test@sha256:" + "a" * 64
     component_registry_version: str = "1.0"
     scoring_adapter_version: str = "1.0"
+    compatibility_contract_override: Mapping[str, str] | None = None
+    consumer_parity_fixtures_override: Mapping[str, str] | None = None
+
+    @property
+    def compatibility_contract(self) -> dict[str, str]:
+        if self.compatibility_contract_override is not None:
+            return dict(self.compatibility_contract_override)
+        contract = _TEST_CONSUMER_SNAPSHOT["contract"]
+        return {
+            "contract_id": str(contract["contract_id"]),
+            "path": str(contract["canonical_path"]),
+            "sha256": str(_TEST_CONSUMER_SNAPSHOT["contract_sha256"]),
+        }
+
+    @property
+    def consumer_parity_fixtures(self) -> dict[str, str]:
+        if self.consumer_parity_fixtures_override is not None:
+            return dict(self.consumer_parity_fixtures_override)
+        contract = _TEST_CONSUMER_SNAPSHOT["contract"]
+        return {
+            "path": str(contract["parity_fixture_path"]),
+            "sha256": str(_TEST_CONSUMER_SNAPSHOT["parity_sha256"]),
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -476,6 +518,8 @@ class FakeArtifact:
             "scoring_adapter_version": self.scoring_adapter_version,
             "signature_ref": "sig",
             "build_id": "",
+            "compatibility_contract": self.compatibility_contract,
+            "consumer_parity_fixtures": self.consumer_parity_fixtures,
         }
 
 
@@ -487,6 +531,327 @@ def _valid_fake_artifact(**overrides: Any) -> FakeArtifact:
     return artifact
 
 
+def _valid_fake_artifact_for_mode(
+    admission_mode: str,
+    **overrides: Any,
+) -> FakeArtifact:
+    if admission_mode == "semantic_v1":
+        policy, _policy_hash = semantic_compatibility_policy_identity_v1()
+        overrides = {
+            "compatibility_contract_override": {
+                "contract_id": "leadpoet-sourcing-wrapper-contract-future-test",
+                "path": str(policy["canonical_contract_path"]),
+                "sha256": "sha256:" + "6" * 64,
+            },
+            "consumer_parity_fixtures_override": {
+                "path": str(policy["canonical_parity_path"]),
+                "sha256": "sha256:" + "7" * 64,
+            },
+            **overrides,
+        }
+    return _valid_fake_artifact(**overrides)
+
+
+def _compatibility_receipt(
+    artifact: FakeArtifact,
+    *,
+    admission_mode: str = "legacy_exact",
+    binding_suffix: str = "",
+) -> dict[str, Any]:
+    _policy, policy_hash = semantic_compatibility_policy_identity_v1()
+    source_body = {
+        "schema_version": SEMANTIC_COMPATIBILITY_RECEIPT_SCHEMA_V1,
+        "consumer_api_version": SEMANTIC_COMPATIBILITY_CONSUMER_API_V1,
+        "decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "admission_mode": admission_mode,
+        "policy_hash": policy_hash,
+        "source_tree_hash": artifact.model_artifact_hash,
+        "manifest_hash": artifact.manifest_hash,
+        "image_digest": artifact.image_digest,
+        "contract_id": artifact.compatibility_contract["contract_id"],
+        "contract_schema_major": 1,
+        "contract_hash": artifact.compatibility_contract["sha256"],
+        "parity_hash": artifact.consumer_parity_fixtures["sha256"],
+        "bindings": {"adapter_version": "test-adapter" + binding_suffix},
+    }
+    source_receipt = {
+        **source_body,
+        "receipt_hash": sha256_json(source_body),
+    }
+    measured_body = {
+        "schema_version": (
+            model_authority_v2.MEASURED_COMPATIBILITY_ADMISSION_SCHEMA_V1
+        ),
+        "decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "admission_mode": admission_mode,
+        "consumer_api_version": SEMANTIC_COMPATIBILITY_CONSUMER_API_V1,
+        "compatibility_policy_hash": policy_hash,
+        "compatibility_admission_hash": source_receipt["receipt_hash"],
+        "source_tree_hash": artifact.model_artifact_hash,
+        "manifest_hash": artifact.manifest_hash,
+        "image_digest": artifact.image_digest,
+        "module_name": "research_lab_adapter",
+        "callable_name": "adapter_metadata",
+        "consumer_runtime_probe_hash": sha256_json(
+            {"probe": artifact.manifest_hash, "suffix": binding_suffix}
+        ),
+        "adapter_metadata_hash": sha256_json(
+            {"metadata": artifact.manifest_hash, "suffix": binding_suffix}
+        ),
+        "execution_receipt_hash": sha256_json(
+            {"execution": artifact.manifest_hash, "suffix": binding_suffix}
+        ),
+    }
+    measured = {
+        **measured_body,
+        "receipt_hash": sha256_json(measured_body),
+    }
+    combined_body = {
+        "decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "host_compatibility_receipt_hash": source_receipt["receipt_hash"],
+        "measured_runtime_receipt_hash": measured["receipt_hash"],
+        "measured_runtime_probe_hash": measured[
+            "consumer_runtime_probe_hash"
+        ],
+    }
+    return {
+        **source_receipt,
+        "measured_runtime_admission": measured,
+        "measured_runtime_decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "measured_runtime_probe_hash": measured[
+            "consumer_runtime_probe_hash"
+        ],
+        "combined_receipt_hash": sha256_json(combined_body),
+    }
+
+
+@pytest.mark.parametrize("admission_mode", ["legacy_exact", "semantic_v1"])
+async def test_private_artifact_compatibility_always_uses_source_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    admission_mode: str,
+) -> None:
+    artifact = _valid_fake_artifact_for_mode(admission_mode)
+    calls: list[tuple[FakeArtifact, int]] = []
+
+    async def _admit(
+        admitted_artifact: FakeArtifact,
+        *,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        calls.append((admitted_artifact, timeout_seconds))
+        return _compatibility_receipt(
+            admitted_artifact,
+            admission_mode=admission_mode,
+        )
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "preflight_private_model_compatibility_v2",
+        _admit,
+    )
+
+    receipt = await promotion._preflight_private_artifact_compatibility(artifact)
+
+    assert receipt["admission_mode"] == admission_mode
+    assert calls == [
+        (
+            artifact,
+            promotion.PRIVATE_MODEL_COMPATIBILITY_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+    ]
+
+
+async def test_forward_rollback_and_old_restoration_all_reread_pointer_and_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_legacy = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "8" * 64,
+        git_commit_sha="8" * 40,
+    )
+    semantic_forward = _valid_fake_artifact_for_mode(
+        "semantic_v1",
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="9" * 40,
+        image_digest="private.invalid/model@sha256:" + "9" * 64,
+    )
+    legacy_rollback = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "a" * 64,
+        git_commit_sha="a" * 40,
+        image_digest="private.invalid/model@sha256:" + "a" * 64,
+    )
+    mode_by_artifact_hash = {
+        old_legacy.model_artifact_hash: "legacy_exact",
+        semantic_forward.model_artifact_hash: "semantic_v1",
+        legacy_rollback.model_artifact_hash: "legacy_exact",
+    }
+    pointer = [old_legacy]
+    branch = [old_legacy.git_commit_sha]
+    calls: list[str] = []
+
+    async def _admit(
+        admitted_artifact: FakeArtifact,
+        *,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        del timeout_seconds
+        calls.append("source")
+        return _compatibility_receipt(
+            admitted_artifact,
+            admission_mode=mode_by_artifact_hash[
+                admitted_artifact.model_artifact_hash
+            ],
+        )
+
+    def _load_pointer(_uri: str) -> FakeArtifact:
+        calls.append("pointer")
+        return pointer[0]
+
+    def _resolve_branch(**_kwargs: Any) -> str:
+        calls.append("branch")
+        return branch[0]
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "preflight_private_model_compatibility_v2",
+        _admit,
+    )
+    monkeypatch.setattr(promotion, "_load_valid_artifact", _load_pointer)
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        _resolve_branch,
+    )
+
+    transitions = [semantic_forward, legacy_rollback, old_legacy]
+    observed_modes: list[str] = []
+    for artifact in transitions:
+        pointer[0] = artifact
+        branch[0] = artifact.git_commit_sha
+        admission = await _REAL_PREFLIGHT_PRIVATE_MODEL_ACTIVATION(
+            _controller_config(),
+            artifact,
+            pointer_uri="s3://private/current.json",
+            mode=promotion.PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD,
+            expected_branch_sha=artifact.git_commit_sha,
+        )
+        assert admission.artifact is artifact
+        observed_modes.append(
+            str(admission.compatibility_receipt["admission_mode"])
+        )
+
+    assert observed_modes == ["semantic_v1", "legacy_exact", "legacy_exact"]
+    assert calls == ["source", "pointer", "branch"] * 3
+
+
+@pytest.mark.parametrize(
+    ("mode", "sha_length"),
+    [
+        (promotion.PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD, 7),
+        (promotion.PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE, 8),
+        (promotion.PRIVATE_MODEL_ACTIVATION_MODE_RECONCILE_SUPERSEDED, 39),
+    ],
+)
+async def test_activation_rejects_collision_prefix_commit_before_slow_work(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    sha_length: int,
+) -> None:
+    artifact = _valid_fake_artifact(git_commit_sha="a" * sha_length)
+
+    async def _unexpected_admission(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("abbreviated commit must fail before source admission")
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "preflight_private_model_compatibility_v2",
+        _unexpected_admission,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_load_valid_artifact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("abbreviated commit must fail before pointer reread")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="exact 40-character commit"):
+        await _REAL_PREFLIGHT_PRIVATE_MODEL_ACTIVATION(
+            _controller_config(),
+            artifact,
+            pointer_uri=artifact.manifest_uri,
+            mode=mode,
+        )
+
+
+@pytest.mark.parametrize(
+    ("repo_url", "resolved_branch", "expected_fence"),
+    [
+        (
+            "git@example.invalid/private.git",
+            "e" * 40,
+            "remote_branch_stable",
+        ),
+        ("", None, "immutable_manifest_only"),
+    ],
+)
+async def test_immutable_candidate_uses_signed_manifest_and_optional_branch_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    repo_url: str,
+    resolved_branch: str | None,
+    expected_fence: str,
+) -> None:
+    artifact = _valid_fake_artifact(
+        git_commit_sha="d" * 40,
+        manifest_uri="s3://bucket/immutable-candidate.json",
+    )
+    calls: list[str] = []
+
+    async def _admit(
+        admitted_artifact: FakeArtifact,
+        *,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        del timeout_seconds
+        assert admitted_artifact is artifact
+        calls.append("source")
+        return _compatibility_receipt(admitted_artifact)
+
+    def _load(uri: str) -> FakeArtifact:
+        assert uri == artifact.manifest_uri
+        calls.append("manifest")
+        return artifact
+
+    def _branch(**_kwargs: Any) -> str:
+        if resolved_branch is None:
+            raise AssertionError("repo-less immutable candidate must not resolve a branch")
+        calls.append("branch")
+        return resolved_branch
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "preflight_private_model_compatibility_v2",
+        _admit,
+    )
+    monkeypatch.setattr(promotion, "_load_valid_artifact", _load)
+    monkeypatch.setattr(promotion, "_resolve_private_repo_head_sha", _branch)
+
+    admitted = await _REAL_PREFLIGHT_PRIVATE_MODEL_ACTIVATION(
+        _controller_config(private_repo_url=repo_url),
+        artifact,
+        pointer_uri=artifact.manifest_uri,
+        mode=promotion.PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE,
+    )
+
+    assert admitted.artifact is artifact
+    assert admitted.branch_fence_mode == expected_fence
+    assert admitted.branch_sha == (resolved_branch or artifact.git_commit_sha)
+    assert calls == (
+        ["source", "manifest", "branch"]
+        if resolved_branch is not None
+        else ["source", "manifest"]
+    )
+
+
 @dataclass
 class FakeStore:
     """Table-name-dispatched fakes for the store functions promotion.py uses."""
@@ -494,6 +859,9 @@ class FakeStore:
     select_many_results: dict[str, Any] = field(default_factory=dict)
     select_one_results: dict[str, Any] = field(default_factory=dict)
     select_many_calls: list[tuple[str, tuple]] = field(default_factory=list)
+    select_many_shapes: list[tuple[str, tuple, int | None]] = field(
+        default_factory=list
+    )
     select_all_calls: list[tuple[str, tuple]] = field(default_factory=list)
     select_all_order_by_calls: list[tuple[str, tuple]] = field(default_factory=list)
     version_writes: list[dict[str, Any]] = field(default_factory=list)
@@ -505,9 +873,60 @@ class FakeStore:
     private_benchmark_writes: list[dict[str, Any]] = field(default_factory=list)
     public_report_writes: list[dict[str, Any]] = field(default_factory=list)
     generic_insert_writes: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    lineage_generation_value: int = 0
+
+    def _lineage_rows(self) -> list[dict[str, Any]]:
+        unfiltered_key = (
+            "research_lab_private_model_version_current:unfiltered"
+        )
+        if unfiltered_key not in self.select_many_results:
+            self.select_many_results[unfiltered_key] = list(
+                self.select_many_results.get(
+                    "research_lab_private_model_version_current:active",
+                    [],
+                )
+            )
+        rows = self.select_many_results[unfiltered_key]
+        if isinstance(rows, Exception) or callable(rows):
+            return []
+        return rows
 
     async def select_many(self, table: str, **kwargs: Any) -> list[dict[str, Any]]:
-        self.select_many_calls.append((table, tuple(kwargs.get("filters") or ())))
+        filters = tuple(kwargs.get("filters") or ())
+        self.select_many_calls.append((table, filters))
+        self.select_many_shapes.append((table, filters, kwargs.get("limit")))
+        if table == "research_lab_private_model_version_current":
+            configured = self.select_many_results.get(
+                self._select_many_key(table, kwargs)
+            )
+            if isinstance(configured, Exception):
+                raise configured
+            if callable(configured):
+                return list(configured(kwargs))
+            rows = list(self._lineage_rows())
+            filters = tuple(kwargs.get("filters") or ())
+            for field, *rest in filters:
+                if field in {
+                    "current_version_status",
+                    "model_artifact_hash",
+                    "private_model_version_id",
+                } and rest:
+                    rows = [
+                        row
+                        for row in rows
+                        if row.get(field) == rest[0]
+                    ]
+            return rows[: int(kwargs.get("limit") or len(rows) or 1)]
+        if table == "research_lab_private_model_version_events":
+            rows = list(self.version_event_writes)
+            for spec in tuple(kwargs.get("filters") or ()):
+                if len(spec) == 2:
+                    rows = [
+                        row
+                        for row in rows
+                        if row.get(spec[0]) == spec[1]
+                    ]
+            return rows[: int(kwargs.get("limit") or len(rows) or 1)]
         result = self.select_many_results.get(self._select_many_key(table, kwargs))
         if result is None:
             result = self.select_many_results.get(table, [])
@@ -522,6 +941,8 @@ class FakeStore:
         self.select_all_order_by_calls.append(
             (table, tuple(kwargs.get("order_by") or ()))
         )
+        if table == "research_lab_private_model_version_current":
+            return list(self._lineage_rows())
         result = self.select_many_results.get(self._select_many_key(table, kwargs))
         if result is None:
             result = self.select_many_results.get(table, [])
@@ -558,6 +979,96 @@ class FakeStore:
     async def create_private_model_version_event(self, **kwargs: Any) -> dict[str, Any]:
         self.version_event_writes.append(kwargs)
         return {"event_id": f"evt-{len(self.version_event_writes)}", **kwargs}
+
+    async def ensure_private_model_version_row_exact(
+        self,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], bool]:
+        artifact = dict(kwargs["artifact_manifest"])
+        rows = self._lineage_rows()
+        for row in rows:
+            if row.get("model_artifact_hash") == artifact["model_artifact_hash"]:
+                return dict(row), False
+        self.version_writes.append(dict(kwargs))
+        row = {
+            "private_model_version_id": (
+                "private_model_version:" + artifact["model_artifact_hash"]
+            ),
+            "model_artifact_hash": artifact["model_artifact_hash"],
+            "private_model_manifest_hash": artifact["manifest_hash"],
+            "private_model_manifest_uri": kwargs["manifest_uri"],
+            "git_commit_sha": artifact["git_commit_sha"],
+            "source_candidate_id": kwargs.get("source_candidate_id"),
+            "source_score_bundle_id": kwargs.get("source_score_bundle_id"),
+            "source_benchmark_bundle_id": kwargs.get(
+                "source_benchmark_bundle_id"
+            ),
+            "current_version_status": None,
+            "current_status_at": None,
+            "current_event_seq": None,
+            "current_event_hash": None,
+        }
+        rows.append(row)
+        return dict(row), True
+
+    async def create_private_model_version_event_cas(
+        self,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        version_id = str(kwargs["private_model_version_id"])
+        rows = self._lineage_rows()
+        matching = [
+            row
+            for row in rows
+            if str(row.get("private_model_version_id") or "") == version_id
+        ]
+        if len(matching) != 1:
+            raise RuntimeError("fake private model CAS target missing")
+        row = matching[0]
+        expected_seq = kwargs.get("expected_current_event_seq")
+        if expected_seq is None:
+            matches = row.get("current_event_seq") is None
+            next_seq = 0
+        else:
+            matches = (
+                row.get("current_event_seq") == expected_seq
+                and row.get("current_event_hash")
+                == kwargs.get("expected_current_event_hash")
+                and row.get("current_version_status")
+                == kwargs.get("expected_current_version_status")
+            )
+            next_seq = int(expected_seq) + 1
+        if not matches:
+            raise RuntimeError("fake private model CAS conflict")
+        payload = {
+            "private_model_version_id": version_id,
+            "seq": next_seq,
+            "event_type": kwargs["event_type"],
+            "version_status": kwargs["version_status"],
+            "reason": kwargs.get("reason"),
+            "event_doc": dict(kwargs.get("event_doc") or {}),
+        }
+        event = {
+            "event_id": f"evt-{len(self.version_event_writes) + 1}",
+            **payload,
+            "anchored_hash": promotion.canonical_hash(payload),
+        }
+        self.version_event_writes.append(event)
+        self.lineage_generation_value += 1
+        row.update(
+            {
+                "current_event_seq": next_seq,
+                "current_event_hash": event["anchored_hash"],
+                "current_version_status": kwargs["version_status"],
+                "current_status_at": (
+                    f"2026-08-17T00:00:{self.lineage_generation_value:02d}+00:00"
+                ),
+            }
+        )
+        return dict(event)
+
+    async def private_model_lineage_generation(self) -> int:
+        return self.lineage_generation_value
 
     async def create_candidate_promotion_event(self, **kwargs: Any) -> dict[str, Any]:
         self.promotion_event_writes.append(kwargs)
@@ -608,8 +1119,21 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
     monkeypatch.setattr(promotion, "select_many", fake.select_many)
     monkeypatch.setattr(promotion, "select_all", fake.select_all)
     monkeypatch.setattr(promotion, "select_one", fake.select_one)
-    monkeypatch.setattr(promotion, "create_private_model_version", fake.create_private_model_version)
-    monkeypatch.setattr(promotion, "create_private_model_version_event", fake.create_private_model_version_event)
+    monkeypatch.setattr(
+        promotion,
+        "ensure_private_model_version_row_exact",
+        fake.ensure_private_model_version_row_exact,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "create_private_model_version_event_cas",
+        fake.create_private_model_version_event_cas,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "private_model_lineage_generation",
+        fake.private_model_lineage_generation,
+    )
     monkeypatch.setattr(promotion, "create_candidate_promotion_event", fake.create_candidate_promotion_event)
     monkeypatch.setattr(promotion, "create_candidate_evaluation_event", fake.create_candidate_evaluation_event)
     monkeypatch.setattr(promotion, "create_scoring_dispatch_event", fake.create_scoring_dispatch_event)
@@ -619,6 +1143,82 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
     monkeypatch.setattr(store_module, "insert_row", fake.insert_row)
     monkeypatch.setattr(promotion, "insert_row", fake.insert_row)
     monkeypatch.setattr(promotion, "sign_digest_with_kms", lambda **kwargs: "kms-signature:test")
+
+    async def _admit_artifact(
+        artifact: FakeArtifact,
+        *,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        assert timeout_seconds == promotion.PRIVATE_MODEL_COMPATIBILITY_PREFLIGHT_TIMEOUT_SECONDS
+        return _compatibility_receipt(artifact)
+
+    async def _admit_activation(
+        config: Any,
+        artifact: FakeArtifact,
+        *,
+        pointer_uri: str,
+        mode: str,
+        expected_branch_sha: str = "",
+    ) -> Any:
+        receipt = _compatibility_receipt(artifact)
+        branch_sha = expected_branch_sha or artifact.git_commit_sha
+        branch_fence_mode = (
+            "immutable_manifest_only"
+            if mode
+            == promotion.PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE
+            and not str(getattr(config, "private_repo_url", "") or "")
+            else "remote_branch_stable"
+        )
+        identity = promotion._private_artifact_compatibility_identity(artifact)
+        receipt_hash = sha256_json(receipt)
+        generation_hash = sha256_json(
+            {
+                "schema_version": (
+                    "leadpoet.private-model-activation-generation.v1"
+                ),
+                "activation_mode": mode,
+                "artifact_identity": list(identity),
+                "compatibility_receipt_hash": receipt_hash,
+                "pointer_ref_hash": sha256_json(
+                    {"private_model_pointer_uri": pointer_uri}
+                ),
+                "branch_sha": branch_sha,
+                "branch_fence_mode": branch_fence_mode,
+            }
+        )
+        return promotion._PrivateModelActivationAdmission(
+            mode=mode,
+            artifact=artifact,
+            artifact_identity=identity,
+            compatibility_receipt=receipt,
+            compatibility_receipt_hash=receipt_hash,
+            pointer_uri=pointer_uri,
+            branch_sha=branch_sha,
+            branch_fence_mode=branch_fence_mode,
+            generation_hash=generation_hash,
+        )
+
+    async def _fence_activation_references(
+        config: Any,
+        admitted: Any,
+    ) -> None:
+        del config, admitted
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "preflight_private_model_compatibility_v2",
+        _admit_artifact,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_preflight_private_model_activation",
+        _admit_activation,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_revalidate_private_model_activation_references",
+        _fence_activation_references,
+    )
     monkeypatch.delenv(promotion.ALLOW_BOOTSTRAP_REGISTER_ENV, raising=False)
     monkeypatch.delenv(promotion.AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV, raising=False)
     return fake
@@ -632,7 +1232,11 @@ def bootstrap_artifact(monkeypatch: pytest.MonkeyPatch) -> FakeArtifact:
 
 
 def _config() -> Any:
-    return SimpleNamespace(private_model_manifest_uri="s3://bucket/bootstrap-manifest.json")
+    return SimpleNamespace(
+        private_model_manifest_uri="s3://bucket/bootstrap-manifest.json",
+        private_repo_url="git@example.invalid/private.git",
+        private_repo_branch=DEFAULT_PRIVATE_REPO_BRANCH,
+    )
 
 
 def _active_row(artifact: FakeArtifact) -> dict[str, Any]:
@@ -641,8 +1245,11 @@ def _active_row(artifact: FakeArtifact) -> dict[str, Any]:
         "private_model_manifest_uri": artifact.manifest_uri,
         "model_artifact_hash": artifact.model_artifact_hash,
         "private_model_manifest_hash": artifact.manifest_hash,
+        "git_commit_sha": artifact.git_commit_sha,
         "current_version_status": "active",
         "current_status_at": "2026-07-01T00:00:00+00:00",
+        "current_event_seq": 0,
+        "current_event_hash": "sha256:" + "1" * 64,
     }
 
 
@@ -681,10 +1288,96 @@ async def test_lineage_empty_with_flag_registers_bootstrap(store, bootstrap_arti
     result = await load_active_private_model(_config(), register_bootstrap=True)
     assert result.version_row is not None
     assert len(store.version_writes) == 1
-    assert store.version_writes[0]["version_status"] == "active"
-    assert store.version_writes[0]["reason"] == "bootstrap_private_model_manifest_uri"
     assert store.version_writes[0]["manifest_uri"] == bootstrap_artifact.manifest_uri
     assert store.version_writes[0]["manifest_uri"] != _config().private_model_manifest_uri
+    assert len(store.version_event_writes) == 1
+    assert store.version_event_writes[0]["version_status"] == "active"
+    assert (
+        store.version_event_writes[0]["reason"]
+        == "bootstrap_private_model_manifest_uri"
+    )
+    assert (
+        store.version_event_writes[0]["event_doc"][
+            "activation_protocol_version"
+        ]
+        == promotion.PRIVATE_MODEL_ACTIVATION_PROTOCOL_V1
+    )
+
+
+async def test_bootstrap_retry_after_row_insert_crash_activates_same_row(
+    store: FakeStore,
+    bootstrap_artifact: FakeArtifact,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(promotion.ALLOW_BOOTSTRAP_REGISTER_ENV, "true")
+    original_cas = store.create_private_model_version_event_cas
+    crash_once = True
+
+    async def _crash_after_row_insert(**kwargs: Any) -> dict[str, Any]:
+        nonlocal crash_once
+        if crash_once:
+            crash_once = False
+            raise RuntimeError("injected crash after immutable version row insert")
+        return await original_cas(**kwargs)
+
+    monkeypatch.setattr(
+        promotion,
+        "create_private_model_version_event_cas",
+        _crash_after_row_insert,
+    )
+    with pytest.raises(RuntimeError, match="injected crash"):
+        await load_active_private_model(_config(), register_bootstrap=True)
+
+    assert len(store.version_writes) == 1
+    assert store.version_event_writes == []
+    orphan_id = store._lineage_rows()[0]["private_model_version_id"]
+
+    recovered = await load_active_private_model(
+        _config(), register_bootstrap=True
+    )
+
+    assert recovered.artifact is bootstrap_artifact
+    assert recovered.version_row["private_model_version_id"] == orphan_id
+    assert len(store.version_writes) == 1
+    assert len(store.version_event_writes) == 1
+    assert store.version_event_writes[0]["seq"] == 0
+    assert store.version_event_writes[0]["version_status"] == "active"
+    event_doc = store.version_event_writes[0]["event_doc"]
+    assert event_doc["source"] == "bootstrap_private_model_manifest_uri"
+    assert event_doc["activation_protocol_version"] == (
+        promotion.PRIVATE_MODEL_ACTIVATION_PROTOCOL_V1
+    )
+    assert event_doc["expected_global_lineage_generation"] == 0
+
+
+async def test_bootstrap_orphan_with_nonzero_generation_never_writes(
+    store: FakeStore,
+    bootstrap_artifact: FakeArtifact,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(promotion.ALLOW_BOOTSTRAP_REGISTER_ENV, "true")
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = [
+        {
+            "private_model_version_id": "private_model_version:orphan",
+            "private_model_manifest_uri": bootstrap_artifact.manifest_uri,
+            "model_artifact_hash": bootstrap_artifact.model_artifact_hash,
+            "private_model_manifest_hash": bootstrap_artifact.manifest_hash,
+            "git_commit_sha": bootstrap_artifact.git_commit_sha,
+            "current_version_status": None,
+            "current_status_at": None,
+            "current_event_seq": None,
+            "current_event_hash": None,
+        }
+    ]
+    store.lineage_generation_value = 1
+
+    with pytest.raises(NoActivePrivateModelVersionError):
+        await load_active_private_model(_config(), register_bootstrap=True)
+
+    assert store.version_writes == []
+    assert store.version_event_writes == []
 
 
 async def test_lineage_empty_register_bootstrap_false_never_writes(store, bootstrap_artifact, monkeypatch):
@@ -765,12 +1458,28 @@ async def test_reconcile_noop_when_active_present(store):
     assert store.version_event_writes == []
 
 
-async def test_reconcile_picks_newest_superseded(store):
+async def test_reconcile_picks_newest_superseded(store, monkeypatch):
+    artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="9" * 40,
+        manifest_uri="s3://bucket/superseded-v-new.json",
+    )
+    monkeypatch.setattr(promotion, "_load_valid_artifact", lambda _uri: artifact)
     store.select_many_results["research_lab_private_model_version_current:active"] = []
     store.select_many_results["research_lab_private_model_version_current:unfiltered"] = [
         # Ordered newest-first by current_status_at, as the query requests.
         {"private_model_version_id": "v-tomb", "current_version_status": "tombstoned", "current_status_at": "2026-07-03"},
-        {"private_model_version_id": "v-new", "current_version_status": "superseded", "current_status_at": "2026-07-02", "model_artifact_hash": "sha256:" + "9" * 64},
+        {
+            "private_model_version_id": "v-new",
+            "current_version_status": "superseded",
+            "current_status_at": "2026-07-02",
+            "current_event_seq": 1,
+            "current_event_hash": "sha256:" + "2" * 64,
+            "model_artifact_hash": artifact.model_artifact_hash,
+            "private_model_manifest_hash": artifact.manifest_hash,
+            "private_model_manifest_uri": artifact.manifest_uri,
+            "git_commit_sha": artifact.git_commit_sha,
+        },
         {"private_model_version_id": "v-old", "current_version_status": "superseded", "current_status_at": "2026-07-01"},
     ]
     dry = await reconcile_active_private_model_lineage(actor_ref="test", dry_run=True)
@@ -778,7 +1487,9 @@ async def test_reconcile_picks_newest_superseded(store):
     assert dry["planned"]["private_model_version_id"] == "v-new"
     assert store.version_event_writes == []
 
-    applied = await reconcile_active_private_model_lineage(actor_ref="test", dry_run=False)
+    applied = await reconcile_active_private_model_lineage(
+        _config(), actor_ref="test", dry_run=False
+    )
     assert applied["status"] == "reactivated_newest_superseded"
     assert len(store.version_event_writes) == 1
     write = store.version_event_writes[0]
@@ -792,6 +1503,309 @@ async def test_reconcile_lineage_empty(store):
     store.select_many_results["research_lab_private_model_version_current:unfiltered"] = []
     result = await reconcile_active_private_model_lineage(actor_ref="test", dry_run=False)
     assert result["status"] == "lineage_empty"
+    assert store.version_event_writes == []
+
+
+async def test_bootstrap_final_reference_drift_has_zero_lineage_writes(
+    store: FakeStore,
+    bootstrap_artifact: FakeArtifact,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del bootstrap_artifact
+    monkeypatch.setenv(promotion.ALLOW_BOOTSTRAP_REGISTER_ENV, "true")
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = []
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = []
+
+    async def _drift(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("branch changed during bootstrap admission")
+
+    monkeypatch.setattr(
+        promotion,
+        "_revalidate_private_model_activation",
+        _drift,
+    )
+    with pytest.raises(RuntimeError, match="branch changed"):
+        await load_active_private_model(_config(), register_bootstrap=True)
+    assert store.version_writes == []
+    assert store.version_event_writes == []
+
+
+async def test_reconcile_final_reference_drift_has_zero_lineage_writes(
+    store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="9" * 40,
+        manifest_uri="s3://bucket/reconcile-target.json",
+    )
+    target = {
+        **_active_row(artifact),
+        "private_model_version_id": "version:reconcile",
+        "current_version_status": "superseded",
+    }
+    monkeypatch.setattr(promotion, "_load_valid_artifact", lambda _uri: artifact)
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = []
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = [target]
+
+    async def _drift(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("pointer changed during reconcile admission")
+
+    monkeypatch.setattr(
+        promotion,
+        "_revalidate_private_model_activation",
+        _drift,
+    )
+    with pytest.raises(RuntimeError, match="pointer changed"):
+        await reconcile_active_private_model_lineage(
+            _config(), actor_ref="test", dry_run=False
+        )
+    assert store.version_writes == []
+    assert store.version_event_writes == []
+
+
+async def test_reregister_final_reference_drift_has_zero_lineage_writes(
+    store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_artifact = FakeArtifact()
+    new_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="9" * 40,
+        manifest_uri=old_artifact.manifest_uri,
+    )
+    old_row = _active_row(old_artifact)
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [old_row]
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = [old_row]
+    monkeypatch.setattr(
+        promotion,
+        "_load_valid_artifact",
+        lambda _uri: new_artifact,
+    )
+
+    async def _drift(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("branch changed during reregister admission")
+
+    monkeypatch.setattr(
+        promotion,
+        "_revalidate_private_model_activation",
+        _drift,
+    )
+    with pytest.raises(RuntimeError, match="branch changed"):
+        await promotion.reregister_active_manifest(
+            _config(), actor_ref="test", dry_run=False
+        )
+    assert store.version_writes == []
+    assert store.version_event_writes == []
+
+
+async def test_repo_sync_final_reference_drift_has_zero_lineage_writes(
+    store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_artifact = FakeArtifact()
+    current_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="9" * 40,
+    )
+    old_row = _active_row(old_artifact)
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [old_row]
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = [old_row]
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        lambda **_kwargs: current_artifact.git_commit_sha,
+    )
+
+    async def _manifest(*_args: Any, **_kwargs: Any) -> tuple[FakeArtifact, dict[str, Any]]:
+        return current_artifact, {"status": "manifest_ready"}
+
+    async def _drift(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("pointer changed during repo sync admission")
+
+    monkeypatch.setattr(
+        promotion,
+        "_load_repo_head_current_manifest",
+        _manifest,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_revalidate_private_model_activation",
+        _drift,
+    )
+    with pytest.raises(RuntimeError, match="pointer changed"):
+        await sync_active_model_to_repo_head(
+            _controller_config(), actor_ref="test", dry_run=False
+        )
+    assert store.version_writes == []
+    assert store.version_event_writes == []
+
+
+async def test_activation_uses_bounded_queries_and_resumes_after_later_event(
+    store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = FakeArtifact()
+    target = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="9" * 40,
+        manifest_uri="s3://bucket/activation-target.json",
+    )
+    parent_row = _active_row(parent)
+    history = [parent_row]
+    history.extend(
+        {
+            "private_model_version_id": f"private_model_version:history:{index}",
+            "model_artifact_hash": "sha256:" + f"{index:064x}"[-64:],
+            "current_version_status": "superseded",
+            "current_event_seq": 1,
+            "current_event_hash": "sha256:" + "a" * 64,
+        }
+        for index in range(10_000)
+    )
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = history
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [parent_row]
+    admitted = await promotion._preflight_private_model_activation(
+        _config(),
+        target,
+        pointer_uri=target.manifest_uri,
+        mode=promotion.PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD,
+        expected_branch_sha=target.git_commit_sha,
+    )
+    original_cas = store.create_private_model_version_event_cas
+    injected = False
+
+    async def _cas_with_later_unrelated_event(**kwargs: Any) -> dict[str, Any]:
+        nonlocal injected
+        event = await original_cas(**kwargs)
+        if kwargs["version_status"] == "active" and not injected:
+            injected = True
+            # Represents an unrelated committed lineage append immediately
+            # after activation; the active target itself remains unchanged.
+            store.lineage_generation_value += 1
+        return event
+
+    monkeypatch.setattr(
+        promotion,
+        "create_private_model_version_event_cas",
+        _cas_with_later_unrelated_event,
+    )
+    event_doc = {
+        "source_candidate_id": "candidate:exact",
+        "source_score_bundle_id": "score:exact",
+        "source_benchmark_bundle_id": "benchmark:exact",
+    }
+
+    first = await _REAL_ACTIVATE_PRIVATE_MODEL_GENERATION(
+        _config(),
+        admitted,
+        expected_active_row=parent_row,
+        source_candidate_id="candidate:exact",
+        source_score_bundle_id="score:exact",
+        source_benchmark_bundle_id="benchmark:exact",
+        activation_reason=(
+            "research_lab_image_build_candidate_repo_head_manifest_promoted"
+        ),
+        activation_event_doc=event_doc,
+    )
+    current_target = next(
+        row
+        for row in store._lineage_rows()
+        if row.get("model_artifact_hash") == target.model_artifact_hash
+    )
+    writes_after_first = len(store.version_event_writes)
+    resumed = await _REAL_ACTIVATE_PRIVATE_MODEL_GENERATION(
+        _config(),
+        admitted,
+        expected_active_row=dict(current_target),
+        source_candidate_id="candidate:exact",
+        source_score_bundle_id="score:exact",
+        source_benchmark_bundle_id="benchmark:exact",
+        activation_reason=(
+            "research_lab_image_build_candidate_repo_head_manifest_promoted"
+        ),
+        activation_event_doc=event_doc,
+    )
+
+    assert first.lineage_generation_after == 3
+    assert first.superseded_event["event_doc"][
+        "activation_protocol_version"
+    ] == promotion.PRIVATE_MODEL_ACTIVATION_PROTOCOL_V1
+    assert first.superseded_event["event_doc"][
+        "expected_global_lineage_generation"
+    ] == 0
+    assert resumed.activation_event == first.activation_event
+    assert len(store.version_event_writes) == writes_after_first == 2
+    lineage_shapes = [
+        shape
+        for shape in store.select_many_shapes
+        if shape[0] == "research_lab_private_model_version_current"
+    ]
+    assert lineage_shapes
+    assert all(limit == 2 for _table, _filters, limit in lineage_shapes)
+    assert store.select_all_calls == []
+
+
+async def test_promotion_rejects_existing_target_with_other_provenance(
+    store: FakeStore,
+) -> None:
+    parent = FakeArtifact()
+    target = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="9" * 40,
+        manifest_uri="s3://bucket/existing-target.json",
+    )
+    parent_row = _active_row(parent)
+    target_row = {
+        **_active_row(target),
+        "current_version_status": "superseded",
+        "source_candidate_id": "candidate:other",
+        "source_score_bundle_id": "score:other",
+        "source_benchmark_bundle_id": "benchmark:other",
+    }
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = [parent_row, target_row]
+    admitted = await promotion._preflight_private_model_activation(
+        _config(),
+        target,
+        pointer_uri=target.manifest_uri,
+        mode=promotion.PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD,
+        expected_branch_sha=target.git_commit_sha,
+    )
+
+    with pytest.raises(RuntimeError, match="different promotion provenance"):
+        await _REAL_ACTIVATE_PRIVATE_MODEL_GENERATION(
+            _config(),
+            admitted,
+            expected_active_row=parent_row,
+            source_candidate_id="candidate:requested",
+            source_score_bundle_id="score:requested",
+            source_benchmark_bundle_id="benchmark:requested",
+            activation_reason="promotion",
+        )
+
+    assert store.version_writes == []
     assert store.version_event_writes == []
 
 
@@ -1026,6 +2040,8 @@ def _controller_config(**overrides: Any) -> Any:
         "auto_commit_enabled": False,
         "improvement_threshold_points": 1.0,
         "private_model_manifest_uri": "s3://bucket/bootstrap-manifest.json",
+        "private_repo_url": "git@example.invalid/private.git",
+        "private_repo_branch": DEFAULT_PRIVATE_REPO_BRANCH,
         "score_bundle_kms_key_id": "arn:aws:kms:us-east-1:123456789012:alias/test",
         "score_bundle_signature_uri_prefix": "s3://bucket/signatures",
     }
@@ -1110,8 +2126,15 @@ async def test_repo_head_sync_registers_current_json_with_db_safe_doc(store, mon
     assert "image_digest" not in json.dumps(version_doc, sort_keys=True, default=str)
 
 
-async def test_repo_head_sync_defers_candidate_owned_commit_until_activation_completes(
-    store, monkeypatch
+@pytest.mark.parametrize(
+    ("commit_status", "has_commit_sha", "event_doc"),
+    [
+        ("pushed", True, {}),
+        ("started", False, {"source_push_attempt": 1}),
+    ],
+)
+async def test_repo_head_sync_defers_candidate_owned_publication_until_activation_completes(
+    store, monkeypatch, commit_status, has_commit_sha, event_doc
 ):
     current_artifact = _valid_fake_artifact(
         model_artifact_hash="sha256:" + "9" * 64,
@@ -1132,10 +2155,13 @@ async def test_repo_head_sync_defers_candidate_owned_commit_until_activation_com
     store.select_many_results["research_lab_private_repo_commit_events"] = [
         {
             "commit_event_id": "commit-event-pending",
-            "commit_status": "pushed",
-            "git_commit_sha": current_artifact.git_commit_sha,
+            "commit_status": commit_status,
+            "git_commit_sha": (
+                current_artifact.git_commit_sha if has_commit_sha else None
+            ),
             "candidate_id": "candidate:pending",
             "score_bundle_id": "score-bundle:pending",
+            "event_doc": event_doc,
             "created_at": "2026-08-05T00:00:00+00:00",
         }
     ]
@@ -1164,6 +2190,80 @@ async def test_repo_head_sync_defers_candidate_owned_commit_until_activation_com
     assert result["candidate_id"] == "candidate:pending"
     assert result["score_bundle_id"] == "score-bundle:pending"
     assert result["repo_main_sha"] == current_artifact.git_commit_sha
+    assert store.version_event_writes == []
+    assert store.version_writes == []
+
+
+async def test_repo_head_sync_rereads_candidate_ownership_immediately_before_activation(
+    store, monkeypatch
+):
+    current_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="e" * 40,
+    )
+    previous_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "8" * 64,
+        git_commit_sha="d" * 40,
+    )
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [
+        {
+            **_active_row(previous_artifact),
+            "git_commit_sha": previous_artifact.git_commit_sha,
+        }
+    ]
+    ownership_reads = 0
+
+    def _publication_interleaving(_kwargs):
+        nonlocal ownership_reads
+        ownership_reads += 1
+        if ownership_reads == 1:
+            return []
+        return [
+            {
+                "commit_event_id": "commit-event-started-during-preflight",
+                "commit_status": "started",
+                "git_commit_sha": None,
+                "branch_name": DEFAULT_PRIVATE_REPO_BRANCH,
+                "candidate_id": "candidate:interleaved",
+                "score_bundle_id": "score-bundle:interleaved",
+                "event_doc": {"source_push_attempt": 1},
+                "created_at": "2026-08-17T00:00:00+00:00",
+            }
+        ]
+
+    store.select_many_results[
+        "research_lab_private_repo_commit_events"
+    ] = _publication_interleaving
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        lambda **_kwargs: current_artifact.git_commit_sha,
+    )
+
+    async def _manifest(*_args: Any, **_kwargs: Any):
+        return current_artifact, {"status": "manifest_ready"}
+
+    monkeypatch.setattr(promotion, "_load_repo_head_current_manifest", _manifest)
+
+    result = await sync_active_model_to_repo_head(
+        _controller_config(
+            private_repo_url="git@example.invalid/private.git",
+            private_repo_branch=DEFAULT_PRIVATE_REPO_BRANCH,
+        ),
+        actor_ref="test",
+        dry_run=False,
+    )
+
+    assert ownership_reads == 2
+    assert result["ok"] is False
+    assert result["status"] == "candidate_source_publication_pending"
+    assert result["candidate_id"] == "candidate:interleaved"
+    assert result["score_bundle_id"] == "score-bundle:interleaved"
+    assert result["source_commit_event_id"] == (
+        "commit-event-started-during-preflight"
+    )
     assert store.version_event_writes == []
     assert store.version_writes == []
 
@@ -1618,6 +2718,65 @@ def controller_env(store: FakeStore, monkeypatch: pytest.MonkeyPatch) -> dict[st
     return {"artifact": artifact, "controller": controller, "store": store}
 
 
+async def test_pending_exact_activation_resumes_before_stale_parent_gate(
+    controller_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact: FakeArtifact = controller_env["artifact"]
+    controller: ResearchLabPromotionController = controller_env["controller"]
+    pending_event = {
+        "event_type": "active",
+        "version_status": "active",
+        "event_doc": {
+            "activation_mode": (
+                promotion.PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE
+            )
+        },
+    }
+    calls: list[dict[str, Any]] = []
+
+    async def _pending(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return pending_event
+
+    async def _resume(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self
+        calls.append(dict(kwargs))
+        assert kwargs["resume_activation_event"] is pending_event
+        return {"status": "merged", "private_model_version_id": "version:exact"}
+
+    monkeypatch.setattr(
+        promotion,
+        "_active_version_has_pending_candidate_activation",
+        _pending,
+    )
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "_promote_built_image_candidate",
+        _resume,
+    )
+    candidate = {
+        **_candidate(artifact),
+        "parent_artifact_hash": "sha256:" + "0" * 64,
+    }
+
+    result = await controller.process_scored_candidate(
+        candidate=candidate,
+        score_bundle_row={"score_bundle_id": "sb-exact"},
+        score_bundle=_score_bundle(_approved_gate()),
+    )
+
+    assert result == {
+        "status": "merged",
+        "private_model_version_id": "version:exact",
+        "activation_resume": True,
+    }
+    assert len(calls) == 1
+    assert not any(
+        event.get("event_type") == "stale_parent_detected"
+        for event in controller_env["store"].promotion_event_writes
+    )
+
+
 async def test_baseline_health_gate_failed_does_not_hold(controller_env, monkeypatch):
     """Score-only: an unhealthy daily baseline (gate_passed=False) is audit
     metadata — the merge proceeds on the stored score alone."""
@@ -1837,6 +2996,13 @@ async def test_promoted_candidate_writes_derived_benchmark_and_links_active_vers
     )
 
     controller = ResearchLabPromotionController(_controller_config(auto_commit_enabled=True), worker_ref="test-worker")
+    parent_row = _active_row(parent)
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [parent_row]
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = [parent_row]
     candidate = {
         "candidate_id": "candidate:" + "1" * 64,
         "parent_artifact_hash": parent.model_artifact_hash,
@@ -1852,7 +3018,7 @@ async def test_promoted_candidate_writes_derived_benchmark_and_links_active_vers
         candidate=candidate,
         score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
         score_bundle=score_bundle,
-        active=ActivePrivateModel(artifact=parent, version_row=_active_row(parent)),
+        active=ActivePrivateModel(artifact=parent, version_row=parent_row),
         active_parent=parent.model_artifact_hash,
         candidate_parent=parent.model_artifact_hash,
         rolling_window_hash=window_hash,
@@ -1890,6 +3056,14 @@ async def test_promoted_candidate_writes_derived_benchmark_and_links_active_vers
     assert store.version_writes[0]["artifact_manifest"]["model_artifact_hash"] == (
         activation_artifact.model_artifact_hash
     )
+    lineage_active = [
+        event
+        for event in store.version_event_writes
+        if event["version_status"] == "active"
+    ]
+    assert lineage_active[0]["event_doc"]["activation_mode"] == (
+        promotion.PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD
+    )
     version_doc = store.version_writes[0]["redacted_version_doc"]
     _assert_db_doc_safe(version_doc)
     assert version_doc["image_ref_hash"].startswith("sha256:")
@@ -1902,6 +3076,99 @@ async def test_promoted_candidate_writes_derived_benchmark_and_links_active_vers
     )
     assert active_events[0]["event_doc"]["new_model_artifact_hash"] == activation_artifact.model_artifact_hash
     assert active_events[0]["event_doc"]["new_image_ref_hash"].startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    ("auto_commit_enabled", "repo_url", "expected_fence"),
+    [
+        (False, "git@example.invalid/private.git", "remote_branch_stable"),
+        (True, "", "immutable_manifest_only"),
+    ],
+)
+async def test_no_push_promotion_uses_explicit_immutable_candidate_mode(
+    store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+    auto_commit_enabled: bool,
+    repo_url: str,
+    expected_fence: str,
+) -> None:
+    parent = FakeArtifact()
+    candidate_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "c" * 64,
+        git_commit_sha="d" * 40,
+        manifest_uri="s3://bucket/immutable-candidate.json",
+    )
+    parent_row = _active_row(parent)
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [parent_row]
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = [parent_row]
+
+    async def _bridge(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "created",
+            "benchmark_bundle_id": "private_benchmark:" + "8" * 64,
+        }
+
+    async def _reward(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"champion_reward_status": "created"}
+
+    monkeypatch.setattr(
+        promotion,
+        "verify_private_artifact_manifest_signature",
+        lambda *_args, **_kwargs: {"verified": True},
+    )
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "_create_promoted_candidate_benchmark_bridge",
+        _bridge,
+    )
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "_maybe_create_champion_reward",
+        _reward,
+    )
+    controller = ResearchLabPromotionController(
+        _controller_config(
+            auto_commit_enabled=auto_commit_enabled,
+            private_repo_url=repo_url,
+        ),
+        worker_ref="test-worker",
+    )
+
+    result = await controller._promote_built_image_candidate(
+        candidate={
+            "candidate_id": "candidate:" + "1" * 64,
+            "parent_artifact_hash": parent.model_artifact_hash,
+            "candidate_kind": "image_build",
+            "candidate_model_manifest_doc": candidate_artifact.to_dict(),
+        },
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={
+            "candidate_artifact_hash": candidate_artifact.model_artifact_hash
+        },
+        active=ActivePrivateModel(artifact=parent, version_row=parent_row),
+        active_parent=parent.model_artifact_hash,
+        candidate_parent=parent.model_artifact_hash,
+        rolling_window_hash="sha256:" + "3" * 64,
+        improvement_points=2.0,
+        threshold=1.0,
+    )
+
+    assert result["status"] == "merged"
+    active_lineage_events = [
+        event
+        for event in store.version_event_writes
+        if event["version_status"] == "active"
+    ]
+    assert len(active_lineage_events) == 1
+    activation_doc = active_lineage_events[0]["event_doc"]
+    assert activation_doc["activation_mode"] == (
+        promotion.PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE
+    )
+    assert activation_doc["activation_branch_fence_mode"] == expected_fence
 
 
 async def test_promoted_candidate_source_push_pending_leaves_previous_active_model_active(store, monkeypatch):
@@ -1983,6 +3250,203 @@ async def test_promoted_candidate_source_push_pending_leaves_previous_active_mod
     )
 
 
+@pytest.mark.parametrize(
+    ("admission_mode", "drift"),
+    [
+        pytest.param("semantic_v1", "pointer", id="semantic-forward-pointer-drift"),
+        pytest.param("legacy_exact", "branch", id="legacy-rollback-branch-drift"),
+        pytest.param("legacy_exact", "receipt", id="old-restoration-receipt-drift"),
+    ],
+)
+async def test_promoted_candidate_revalidates_after_bridge_before_lineage_write(
+    store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+    admission_mode: str,
+    drift: str,
+) -> None:
+    parent = FakeArtifact()
+    candidate_artifact = _valid_fake_artifact_for_mode(
+        admission_mode,
+        model_artifact_hash="sha256:" + "c" * 64,
+        git_commit_sha="d" * 40,
+    )
+    activation_artifact = _valid_fake_artifact_for_mode(
+        admission_mode,
+        model_artifact_hash="sha256:" + "e" * 64,
+        git_commit_sha="e" * 40,
+        manifest_uri="s3://bucket/research-lab/sourcing-model/current.json",
+        image_digest=(
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/research-lab/test@sha256:"
+            + "e" * 64
+        ),
+    )
+    changed_pointer = _valid_fake_artifact_for_mode(
+        admission_mode,
+        model_artifact_hash="sha256:" + "f" * 64,
+        git_commit_sha=activation_artifact.git_commit_sha,
+        manifest_uri=activation_artifact.manifest_uri,
+        image_digest=(
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/research-lab/test@sha256:"
+            + "f" * 64
+        ),
+    )
+    pointer = [activation_artifact]
+    branch = [activation_artifact.git_commit_sha]
+    receipt_generation = [0]
+    timeline: list[str] = []
+
+    async def _push_source(self: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "private_source_pushed",
+            "git_commit_sha": activation_artifact.git_commit_sha,
+        }
+
+    async def _wait_for_pointer(
+        _config: Any,
+        *,
+        expected_git_sha: str,
+        timeout_seconds: int | None = None,
+        poll_seconds: int | None = None,
+    ) -> tuple[FakeArtifact, dict[str, Any]]:
+        del timeout_seconds, poll_seconds
+        assert expected_git_sha == activation_artifact.git_commit_sha
+        return activation_artifact, {"status": "manifest_ready"}
+
+    async def _admit_source(
+        admitted_artifact: FakeArtifact,
+        *,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        del timeout_seconds
+        receipt_generation[0] += 1
+        timeline.append(f"admit:{receipt_generation[0]}")
+        suffix = (
+            "-changed"
+            if drift == "receipt" and receipt_generation[0] > 2
+            else ""
+        )
+        return _compatibility_receipt(
+            admitted_artifact,
+            admission_mode=admission_mode,
+            binding_suffix=suffix,
+        )
+
+    def _load_pointer(_uri: str) -> FakeArtifact:
+        timeline.append("pointer")
+        return pointer[0]
+
+    def _resolve_branch(**_kwargs: Any) -> str:
+        timeline.append("branch")
+        return branch[0]
+
+    async def _bridge(self: Any, **_kwargs: Any) -> dict[str, Any]:
+        timeline.append("bridge")
+        if drift == "pointer":
+            pointer[0] = changed_pointer
+        elif drift == "branch":
+            branch[0] = "f" * 40
+        return {
+            "status": "created",
+            "benchmark_bundle_id": "private_benchmark:" + "8" * 64,
+        }
+
+    async def _unexpected_reward(self: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("reward must not follow failed final compatibility preflight")
+
+    monkeypatch.setattr(
+        promotion,
+        "_preflight_private_model_activation",
+        _REAL_PREFLIGHT_PRIVATE_MODEL_ACTIVATION,
+    )
+    monkeypatch.setattr(
+        model_authority_v2,
+        "preflight_private_model_compatibility_v2",
+        _admit_source,
+    )
+    monkeypatch.setattr(promotion, "_load_valid_artifact", _load_pointer)
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        _resolve_branch,
+    )
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "_maybe_push_private_repo_candidate",
+        _push_source,
+    )
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "_create_promoted_candidate_benchmark_bridge",
+        _bridge,
+    )
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "_maybe_create_champion_reward",
+        _unexpected_reward,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "wait_for_current_manifest_git_sha",
+        _wait_for_pointer,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "verify_private_artifact_manifest_signature",
+        lambda *_args, **_kwargs: {"verified": True},
+    )
+
+    controller = ResearchLabPromotionController(
+        _controller_config(auto_commit_enabled=True),
+        worker_ref="test-worker",
+    )
+    parent_row = _active_row(parent)
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [parent_row]
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = [parent_row]
+    candidate = {
+        "candidate_id": "candidate:" + "1" * 64,
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "candidate_kind": "image_build",
+        "candidate_model_manifest_doc": candidate_artifact.to_dict(),
+        "candidate_source_diff_hash": "sha256:" + "2" * 64,
+        "miner_hotkey": "hk-1",
+        "ticket_id": "ticket-1",
+        "run_id": "run-1",
+    }
+
+    with pytest.raises(RuntimeError):
+        await controller._promote_built_image_candidate(
+            candidate=candidate,
+            score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+            score_bundle={
+                "candidate_artifact_hash": candidate_artifact.model_artifact_hash
+            },
+            active=ActivePrivateModel(
+                artifact=parent,
+                version_row=parent_row,
+            ),
+            active_parent=parent.model_artifact_hash,
+            candidate_parent=parent.model_artifact_hash,
+            rolling_window_hash="sha256:" + "3" * 64,
+            improvement_points=2.0,
+            threshold=1.0,
+        )
+
+    assert timeline[:5] == [
+        "admit:1",
+        "admit:2",
+        "pointer",
+        "branch",
+        "bridge",
+    ]
+    assert timeline.count("admit:3") == 1
+    assert store.version_event_writes == []
+    assert store.version_writes == []
+
+
 async def test_promoted_candidate_rejects_unverified_artifact_before_side_effects(
     store,
     monkeypatch,
@@ -2054,6 +3518,73 @@ async def test_promoted_candidate_rejects_unverified_artifact_before_side_effect
         store.generic_insert_writes,
     ):
         assert writes == []
+
+
+async def test_incompatible_signed_candidate_is_rejected_before_source_push(
+    store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = FakeArtifact()
+    candidate_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "c" * 64,
+        git_commit_sha="d" * 40,
+    )
+
+    async def _reject_compatibility(_artifact: FakeArtifact) -> dict[str, Any]:
+        raise RuntimeError("measured compatibility probe rejected")
+
+    async def _unexpected_push(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("incompatible candidate must not mutate source")
+
+    monkeypatch.setattr(
+        promotion,
+        "verify_private_artifact_manifest_signature",
+        lambda *_args, **_kwargs: {"verified": True},
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_preflight_private_artifact_compatibility",
+        _reject_compatibility,
+    )
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "_maybe_push_private_repo_candidate",
+        _unexpected_push,
+    )
+    controller = ResearchLabPromotionController(
+        _controller_config(auto_commit_enabled=True),
+        worker_ref="test-worker",
+    )
+
+    with pytest.raises(RuntimeError, match="compatibility probe rejected"):
+        await controller._promote_built_image_candidate(
+            candidate={
+                "candidate_id": "candidate:" + "1" * 64,
+                "parent_artifact_hash": parent.model_artifact_hash,
+                "candidate_kind": "image_build",
+                "candidate_model_manifest_doc": candidate_artifact.to_dict(),
+            },
+            score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+            score_bundle={
+                "candidate_artifact_hash": candidate_artifact.model_artifact_hash
+            },
+            active=ActivePrivateModel(
+                artifact=parent,
+                version_row=_active_row(parent),
+            ),
+            active_parent=parent.model_artifact_hash,
+            candidate_parent=parent.model_artifact_hash,
+            rolling_window_hash="sha256:" + "3" * 64,
+            improvement_points=2.0,
+            threshold=1.0,
+        )
+
+    assert store.version_writes == []
+    assert store.version_event_writes == []
+    assert store.promotion_event_writes == []
+    assert store.private_benchmark_writes == []
+    assert store.public_report_writes == []
+    assert store.reward_obligation_writes == []
 
 
 async def test_promoted_candidate_bridge_reuses_existing_rows_without_duplicate_writes(store):

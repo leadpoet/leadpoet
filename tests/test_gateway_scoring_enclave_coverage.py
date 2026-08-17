@@ -133,6 +133,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_parity_fixtures_v46.json",
         "research_lab/sourcing_model_parity_fixtures_v47.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
+        "research_lab/sourcing_model_semantic_compatibility_v1.json",
     } <= set(MEASURED_DATA_PATHS)
     contract_data_paths = {
         "research_lab/sourcing_model_contract.json",
@@ -151,6 +152,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_parity_fixtures_v46.json",
         "research_lab/sourcing_model_parity_fixtures_v47.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
+        "research_lab/sourcing_model_semantic_compatibility_v1.json",
     }
     for role_manifest in manifest["role_manifests"].values():
         assert contract_data_paths <= {

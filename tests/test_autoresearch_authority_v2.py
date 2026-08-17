@@ -26,10 +26,7 @@ from leadpoet_canonical.attested_v2 import (
     sha256_bytes,
     sha256_json,
 )
-from research_lab.eval import (
-    build_local_private_artifact_manifest,
-    private_model_artifact_replay_identity_v2,
-)
+from research_lab.eval import private_model_artifact_replay_identity_v2
 from gateway.research_lab.autoresearch_runtime import AutoResearchRuntimeSettings
 from gateway.research_lab.git_tree_models import (
     TreeCheckpoint,
@@ -39,7 +36,10 @@ from gateway.research_lab.git_tree_models import (
 )
 from gateway.research_lab.git_tree_repository import GitTreeRepository
 from gateway.tee.autoresearch_executor_v2 import _candidate_document
-from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
+from tests.private_model_artifact_fixtures import (
+    build_private_artifact_with_adapted_source_admission,
+    install_reviewed_consumer_snapshot,
+)
 from research_lab.code_editing import code_edit_candidate_manifest
 
 
@@ -334,7 +334,7 @@ def _artifact(tmp_path: Path):
     )
     install_reviewed_consumer_snapshot(source)
     return authority.PrivateModelArtifactManifest.from_mapping(
-        build_local_private_artifact_manifest(
+        build_private_artifact_with_adapted_source_admission(
             source_path=source,
             git_commit_sha="a" * 40,
             image_digest=(
@@ -358,7 +358,7 @@ def _canonical_image_build_candidate(tmp_path: Path):
         encoding="utf-8",
     )
     candidate_manifest = authority.PrivateModelArtifactManifest.from_mapping(
-        build_local_private_artifact_manifest(
+        build_private_artifact_with_adapted_source_admission(
             source_path=candidate_source,
             git_commit_sha="c" * 40,
             image_digest=(

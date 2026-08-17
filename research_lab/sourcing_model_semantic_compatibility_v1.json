@@ -1,0 +1,236 @@
+{
+  "schema_version": "leadpoet.sourcing-model-compatibility-policy.v1",
+  "consumer_api_version": "research-lab-consumer-api:v1",
+  "contract_schema_major": 1,
+  "canonical_contract_path": "sourcing_model/consumer_contract.json",
+  "canonical_parity_path": "sourcing_model/consumer_parity_fixtures.json",
+  "required_files": [
+    "qualification/scoring/company_fit_decision.py",
+    "research_lab_adapter.py",
+    "sourcing_model/__init__.py",
+    "sourcing_model/clients.py",
+    "sourcing_model/core.py",
+    "sourcing_model/discovery.py",
+    "sourcing_model/orchestrator.py",
+    "sourcing_model/routing/compiler.py",
+    "sourcing_model/routing/defaults.py",
+    "sourcing_model/routing/runtime.py",
+    "sourcing_model/runtime_capabilities.py",
+    "sourcing_model/validation.py"
+  ],
+  "callables": {
+    "qualification/scoring/company_fit_decision.py": {
+      "aggregate_company_fit_decisions": {"positional": ["decisions"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "company_fit_decision_contract_identity": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "reconcile_company_fit_decisions": {"positional": ["decisions"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "strict_company_fit_boolean": {"positional": ["value"], "required_positional": 1, "required_keyword_only": [], "is_async": false}
+    },
+    "research_lab_adapter.py": {
+      "adapter_metadata": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "run_icp": {"positional": ["icp", "context"], "required_positional": 1, "required_keyword_only": [], "is_async": false}
+    },
+    "sourcing_model/clients.py": {
+      "_exa_call": {"positional": ["body"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "agent_get": {"positional": ["url"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "agent_post": {"positional": ["url", "body"], "required_positional": 2, "required_keyword_only": [], "is_async": false},
+      "exa_search": {"positional": ["body"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "has_keys": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "sd_company": {"positional": ["slug"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "sd_scrape": {"positional": ["url", "dynamic"], "required_positional": 1, "required_keyword_only": [], "is_async": false}
+    },
+    "sourcing_model/core.py": {
+      "_qualify_async": {"positional": ["icp", "_progress"], "required_positional": 1, "required_keyword_only": [], "is_async": true},
+      "qualify": {"positional": ["icp"], "required_positional": 1, "required_keyword_only": [], "is_async": false}
+    },
+    "sourcing_model/discovery.py": {
+      "build_query": {"positional": ["icp", "source"], "required_positional": 2, "required_keyword_only": [], "is_async": false}
+    },
+    "sourcing_model/orchestrator.py": {
+      "flow_mode": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "plan_branches": {"positional": ["icp"], "required_positional": 1, "required_keyword_only": ["max_companies"], "is_async": false},
+      "reset_run_state": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "run_branches": {"positional": ["icp", "qualify_fn"], "required_positional": 2, "required_keyword_only": ["max_companies"], "is_async": false}
+    },
+    "sourcing_model/routing/compiler.py": {
+      "compile_route": {"positional": ["catalog", "policy", "context"], "required_positional": 3, "required_keyword_only": [], "is_async": false},
+      "eligible_route_candidates": {"positional": ["catalog", "policy", "context"], "required_positional": 3, "required_keyword_only": [], "is_async": false}
+    },
+    "sourcing_model/routing/defaults.py": {
+      "routing_metadata": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false}
+    },
+    "sourcing_model/routing/runtime.py": {
+      "runtime_routing_metadata": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false}
+    },
+    "sourcing_model/runtime_capabilities.py": {
+      "capability_metadata": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "capability": {"positional": ["name"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "deadline": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "default_deadline": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "default_emit": {"positional": ["event"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "default_http_fetch": {"positional": ["url"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "default_probe_origin": {"positional": ["host"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "default_resolve_host": {"positional": ["name"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "emit": {"positional": ["event"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "http_fetch": {"positional": ["url"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "is_terminally_unresolvable": {"positional": ["resolution"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "may_attempt": {"positional": ["reachability"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "probe_origin": {"positional": ["host"], "required_positional": 1, "required_keyword_only": [], "is_async": false},
+      "register": {"positional": ["name", "implementation"], "required_positional": 2, "required_keyword_only": [], "is_async": false},
+      "registered_capabilities": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "reset": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "resolve_host": {"positional": ["name"], "required_positional": 1, "required_keyword_only": [], "is_async": false}
+    },
+    "sourcing_model/validation.py": {
+      "first_party_industry_run": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false},
+      "qualification_reason_contract_identity": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false}
+    }
+  },
+  "integer_minimums": {
+    "sourcing_model/core.py": {
+      "_GOAL_MAX_COMPANIES": 50,
+      "_GOAL_MAX_ROUNDS": 8
+    }
+  },
+  "critical_binding_slices": {
+    "qualification/scoring/company_fit_decision.py": {
+      "roots": ["aggregate_company_fit_decisions", "company_fit_decision_contract_identity", "reconcile_company_fit_decisions", "strict_company_fit_boolean"],
+      "sha256": "sha256:20bd1891412627b78903e148b1b2214df1af92c15c90cac18ffc0c4ba0711157"
+    },
+    "research_lab_adapter.py": {
+      "roots": ["adapter_metadata", "run_icp"],
+      "sha256": "sha256:4b3e1ac780d17f3b451d7e6473046a91b57e4c0132d529db882c67c049d6e608"
+    },
+    "sourcing_model/runtime_capabilities.py": {
+      "roots": ["capability_metadata", "capability", "deadline", "default_deadline", "default_emit", "default_http_fetch", "default_probe_origin", "default_resolve_host", "emit", "http_fetch", "is_terminally_unresolvable", "may_attempt", "probe_origin", "register", "registered_capabilities", "reset", "resolve_host"],
+      "sha256": "sha256:bfd5b7c1f21e422d5d95f0becfcaf548b7d9107ce3847a1f21c20b99953ede86"
+    }
+  },
+  "import_time_binding_slices": {
+    "sourcing_model/clients.py": "sha256:5db08ec04b132ac283e79758d78bf2e9591ccc66217e742a51c209f48bff1f98",
+    "sourcing_model/core.py": "sha256:89e458f6b0952345fe648e4178eec25d7775e93b03fbcaac4be3d150c4a8ed75",
+    "sourcing_model/discovery.py": "sha256:94e83e4071253d20dc987f1d719c9d698913c3094cc811f87464ffeeb203cf53",
+    "sourcing_model/orchestrator.py": "sha256:e171473e419d68282a75e48eca070a1054a47038e8e894609f2f8f275a414173",
+    "sourcing_model/routing/compiler.py": "sha256:56d356fadb8c4203dbb5e3357f6ed18e175b171bfd2b9040be319d43ef27cf83",
+    "sourcing_model/routing/defaults.py": "sha256:0a23f761e8720e6b27d82d0ab3fd0ca9de8ef32eb8f5f2ef478e751a1eef3094",
+    "sourcing_model/routing/runtime.py": "sha256:84421274d813c88aed959ee2efbb197862fd31bacf1b0697b36a231ebbce0ed3",
+    "sourcing_model/validation.py": "sha256:1e4d2be813016b7dc99579300b42c45f2e394ca0448eba12ca5d589fe0fdcdd5"
+  },
+  "exact_constants": {
+    "qualification/scoring/company_fit_decision.py": {
+      "COMPANY_FIT_CONDITIONAL_DIMENSIONS": ["stage"],
+      "COMPANY_FIT_DECISIONS": ["match", "mismatch", "unavailable"],
+      "COMPANY_FIT_DECISION_CONTRACT_ID": "company-fit-decision:v1",
+      "COMPANY_FIT_DECISION_PRECEDENCE": ["mismatch", "unavailable", "match"],
+      "COMPANY_FIT_DIMENSIONS": ["identity", "employee_size", "industry", "geography", "stage"],
+      "COMPANY_FIT_PASSING_OUTCOME": "match",
+      "COMPANY_FIT_REQUIRED_DIMENSIONS": ["identity", "employee_size", "industry", "geography"]
+    },
+    "research_lab_adapter.py": {
+      "COMPONENT_REGISTRY_VERSION": "sourcing-model-components:v2",
+      "RESEARCH_LAB_ICP_PROJECTION_SCHEMA_VERSION": "research-lab-icp-projection:v1",
+      "RESEARCH_LAB_SIGNAL_PROFILE_RECEIPT_AUDIENCE": "private_evaluator_only",
+      "RESEARCH_LAB_SIGNAL_PROFILE_RECEIPT_SCHEMA_VERSION": "research-lab-signal-profile-receipt:v1",
+      "SCORING_ADAPTER_VERSION": "qualification-company-scorer:v1"
+    },
+    "sourcing_model/core.py": {
+      "MAX_LEADS": 5
+    },
+    "sourcing_model/runtime_capabilities.py": {
+      "CAPABILITY_CONTRACT_VERSION": "sourcing-model-runtime-capabilities:v2"
+    }
+  },
+  "runtime_invariants": {
+    "schema_version": "leadpoet.sourcing-model-runtime-invariants.v1",
+    "adapter_dependencies": {
+      "build_query": {
+        "icp": {"industry": "Consumer Probe", "geography": "United States"},
+        "source": "news"
+      },
+      "flow_modes": ["branch", "legacy"]
+    },
+    "company_fit": {
+      "identity": {
+        "contract_id": "company-fit-decision:v1",
+        "outcomes": ["match", "mismatch", "unavailable"],
+        "precedence": ["mismatch", "unavailable", "match"],
+        "passing_outcome": "match",
+        "required_dimensions": ["identity", "employee_size", "industry", "geography"],
+        "conditional_dimensions": ["stage"]
+      },
+      "strict_boolean_cases": [
+        {"case_id": "true", "input": true, "expected": true},
+        {"case_id": "false", "input": false, "expected": false},
+        {"case_id": "string_false", "input": "false", "expected": null},
+        {"case_id": "integer_one", "input": 1, "expected": null},
+        {"case_id": "none", "input": null, "expected": null}
+      ],
+      "reconcile_cases": [
+        {"case_id": "empty", "decisions": [], "expected": "unavailable"},
+        {"case_id": "all_match", "decisions": ["match", "match"], "expected": "match"},
+        {"case_id": "unavailable", "decisions": ["match", "unavailable"], "expected": "unavailable"},
+        {"case_id": "unknown", "decisions": ["match", "future"], "expected": "unavailable"},
+        {"case_id": "mismatch", "decisions": ["match", "mismatch"], "expected": "mismatch"},
+        {"case_id": "mixed_nonstring", "decisions": ["match", 1], "expected": "unavailable"}
+      ],
+      "aggregate_cases": [
+        {"case_id": "empty", "decisions": {}, "stage_required": false, "expected": "unavailable"},
+        {"case_id": "complete", "decisions": {"identity": "match", "employee_size": "match", "industry": "match", "geography": "match"}, "stage_required": false, "expected": "match"},
+        {"case_id": "missing", "decisions": {"identity": "match", "industry": "match"}, "stage_required": false, "expected": "unavailable"},
+        {"case_id": "unknown_extra", "decisions": {"identity": "match", "employee_size": "match", "industry": "match", "geography": "match", "invented": "match"}, "stage_required": false, "expected": "unavailable"},
+        {"case_id": "mismatch_wins", "decisions": {"identity": "unavailable", "industry": "mismatch"}, "stage_required": false, "expected": "mismatch"},
+        {"case_id": "stage_optional", "decisions": {"identity": "match", "employee_size": "match", "industry": "match", "geography": "match", "stage": "unavailable"}, "stage_required": false, "expected": "match"},
+        {"case_id": "stage_required_missing", "decisions": {"identity": "match", "employee_size": "match", "industry": "match", "geography": "match"}, "stage_required": true, "expected": "unavailable"},
+        {"case_id": "stage_required_match", "decisions": {"identity": "match", "employee_size": "match", "industry": "match", "geography": "match", "stage": "match"}, "stage_required": true, "expected": "match"},
+        {"case_id": "stage_required_mismatch", "decisions": {"identity": "match", "employee_size": "match", "industry": "match", "geography": "match", "stage": "mismatch"}, "stage_required": true, "expected": "mismatch"}
+      ]
+    },
+    "runtime_capabilities": {
+      "contract_version": "sourcing-model-runtime-capabilities:v2",
+      "names": ["deadline", "emit", "http_fetch", "probe_origin", "resolve_host"],
+      "host_resolution": {"TIMEOUT": "timeout", "NXDOMAIN": "nxdomain"},
+      "origin_reachability": {"UNKNOWN": "unknown", "REACHABLE": "reachable"},
+      "sentinel": {
+        "deadline": 123.5,
+        "http_url": "https://invalid.example/probe",
+        "http_timeout": 1.25,
+        "http_max_bytes": 7,
+        "http_accept": "application/json",
+        "emit_event": {"probe": "event"},
+        "resolve_input": "transient.invalid",
+        "probe_input": "origin.invalid"
+      }
+    }
+  },
+  "opaque_constants": {
+    "research_lab_adapter.py": {
+      "ADAPTER_VERSION": "^sourcing-model-research-lab-adapter:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "sourcing_model/routing/compiler.py": {
+      "COMPILER_VERSION": "^routing-compiler-[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    }
+  },
+  "required_imports": {
+    "sourcing_model/__init__.py": [
+      {"kind": "from", "module": "sourcing_model.core", "level": 0, "name": "qualify", "binding": "qualify"}
+    ],
+    "research_lab_adapter.py": [
+      {"kind": "from", "module": "sourcing_model", "level": 0, "name": "qualify", "binding": "qualify"},
+      {"kind": "import", "module": "sourcing_model.core", "binding": "core"},
+      {"kind": "import", "module": "sourcing_model.orchestrator", "binding": "orchestrator"},
+      {"kind": "import", "module": "sourcing_model.runtime_capabilities", "binding": "runtime_capabilities"},
+      {"kind": "import", "module": "sourcing_model.validation", "binding": "validation"},
+      {"kind": "from", "module": "qualification.scoring.company_fit_decision", "level": 0, "name": "company_fit_decision_contract_identity", "binding": "company_fit_decision_contract_identity"},
+      {"kind": "from", "module": "sourcing_model.routing.defaults", "level": 0, "name": "routing_metadata", "binding": "routing_metadata"},
+      {"kind": "from", "module": "sourcing_model.routing.runtime", "level": 0, "name": "runtime_routing_metadata", "binding": "runtime_routing_metadata"}
+    ],
+    "sourcing_model/clients.py": [
+      {"kind": "import", "module": "urllib.request", "binding": "urllib"}
+    ],
+    "sourcing_model/routing/defaults.py": [
+      {"kind": "from", "module": "compiler", "level": 1, "name": "COMPILER_VERSION", "binding": "COMPILER_VERSION"}
+    ],
+    "sourcing_model/routing/runtime.py": [
+      {"kind": "from", "module": "compiler", "level": 1, "name": "COMPILER_VERSION", "binding": "COMPILER_VERSION"}
+    ]
+  }
+}

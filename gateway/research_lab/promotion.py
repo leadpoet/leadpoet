@@ -37,13 +37,14 @@ from gateway.research_lab.store import (
     create_candidate_promotion_event,
     create_champion_reward_obligation,
     create_private_model_benchmark_bundle,
-    create_private_model_version,
-    create_private_model_version_event,
+    create_private_model_version_event_cas,
     create_private_repo_commit_event,
     create_public_benchmark_report,
     create_scoring_category_result,
     create_scoring_dispatch_event,
     insert_row,
+    ensure_private_model_version_row_exact,
+    private_model_lineage_generation,
     select_all,
     select_many,
     select_one,
@@ -62,6 +63,9 @@ from research_lab.eval.promotion_metric import (
     PromotionImprovementMetric,
     promotion_gate_decision,
     promotion_improvement_metric,
+)
+from research_lab.sourcing_model_contract_check import (
+    semantic_compatibility_policy_identity_v1,
 )
 
 
@@ -92,6 +96,16 @@ PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID_ENV = (
 DEFAULT_REPO_HEAD_MANIFEST_WAIT_SECONDS = 600
 DEFAULT_REPO_HEAD_MANIFEST_POLL_SECONDS = 15
 DEFAULT_REPO_HEAD_GIT_TIMEOUT_SECONDS = 20
+PRIVATE_MODEL_COMPATIBILITY_PREFLIGHT_TIMEOUT_SECONDS = 900
+PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD = "exact_head"
+PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE = "immutable_candidate"
+PRIVATE_MODEL_ACTIVATION_MODE_RECONCILE_SUPERSEDED = (
+    "reconcile_superseded"
+)
+PRIVATE_MODEL_ACTIVATION_PROTOCOL_V1 = (
+    "leadpoet.private-model-activation.v1"
+)
+PRIVATE_MODEL_EXACT_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 PRIVATE_SOURCE_PUSH_FAILED_REASON = "private_source_push_failed"
 SOURCE_PUSHED_MANIFEST_PENDING_REASON = "source_pushed_manifest_pending"
@@ -342,6 +356,45 @@ async def candidate_already_promoted(candidate_id: str) -> dict[str, Any] | None
     return dict(rows[0]) if rows else None
 
 
+async def _active_version_has_pending_candidate_activation(
+    active: ActivePrivateModel,
+    *,
+    candidate_id: str,
+    score_bundle_id: str,
+) -> dict[str, Any] | None:
+    """Recognize the exact crash window after activation but before merge event."""
+
+    row = active.version_row
+    if not isinstance(row, Mapping):
+        return None
+    try:
+        event = await _load_current_private_model_activation_event(row)
+    except RuntimeError:
+        return None
+    active_rows = await _active_private_model_version_rows()
+    if (
+        len(active_rows) != 1
+        or _private_model_lineage_row_generation_identity(active_rows[0])
+        != _private_model_lineage_row_generation_identity(row)
+    ):
+        return None
+    event_doc = event.get("event_doc")
+    generation = event_doc.get("expected_global_lineage_generation")
+    if (
+        event.get("reason")
+        != "research_lab_image_build_candidate_repo_head_manifest_promoted"
+        or event_doc.get("activation_protocol_version")
+        != PRIVATE_MODEL_ACTIVATION_PROTOCOL_V1
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+        or event_doc.get("source_candidate_id") != candidate_id
+        or event_doc.get("source_score_bundle_id") != score_bundle_id
+    ):
+        return None
+    return event
+
+
 class PromotionPausedError(RuntimeError):
     """Fail-closed promotion/lineage error: pause and retry, never fall back.
 
@@ -406,6 +459,18 @@ class RepoHeadManifestNotReadyError(PromotionPausedError):
             f"(repo_head={self.repo_main_sha[:12]}, current_json={self.current_json_git_sha[:12]}); "
             "daily benchmark deferred so it cannot run a stale active artifact"
         )
+
+
+class CandidateSourcePublicationPendingError(PromotionPausedError):
+    """A candidate-owned source publication reached the configured branch."""
+
+    def __init__(self, pending: Mapping[str, str]):
+        self.pending = dict(pending)
+        super().__init__("candidate source publication became pending during activation")
+
+
+class CandidateSourceOwnershipUnavailableError(PromotionPausedError):
+    """The final candidate-source ownership fence could not be read."""
 
 
 @dataclass(frozen=True)
@@ -608,10 +673,13 @@ async def load_active_private_model(
     try:
         lineage_rows = await select_many(
             "research_lab_private_model_version_current",
-            columns="private_model_version_id,current_version_status,current_status_at",
+            columns=(
+                "private_model_version_id,current_version_status,current_status_at,"
+                "current_event_seq,current_event_hash"
+            ),
             filters=(),
             order_by=(("current_status_at", True),),
-            limit=1,
+            limit=2,
         )
     except Exception as exc:
         logger.warning("research_lab_active_model_lineage_unavailable: %s", str(exc)[:200])
@@ -619,7 +687,28 @@ async def load_active_private_model(
             "private model lineage emptiness check failed; promotion paused (retryable), "
             f"not falling back to bootstrap: {_safe_text(str(exc))[:200]}"
         ) from exc
-    if lineage_rows:
+    bootstrap_registration_enabled = bool(
+        register_bootstrap and _env_flag(ALLOW_BOOTSTRAP_REGISTER_ENV)
+    )
+    fresh_orphan_lineage = False
+    if lineage_rows and bootstrap_registration_enabled:
+        try:
+            lineage_generation = await private_model_lineage_generation()
+        except Exception as exc:
+            raise PrivateModelLineageUnavailableError(
+                "private model lineage generation read failed during bootstrap "
+                "recovery; promotion paused (retryable)"
+            ) from exc
+        fresh_orphan_lineage = bool(
+            lineage_generation == 0
+            and all(
+                row.get("current_event_seq") is None
+                and not str(row.get("current_event_hash") or "")
+                and not str(row.get("current_version_status") or "")
+                for row in lineage_rows
+            )
+        )
+    if lineage_rows and not fresh_orphan_lineage:
         raise NoActivePrivateModelVersionError(
             "private model lineage is non-empty but has zero active versions "
             "(supersede/create crash window); run the reconcile-active-lineage admin "
@@ -629,30 +718,40 @@ async def load_active_private_model(
     artifact = _load_valid_artifact(config.private_model_manifest_uri)
     version_row = None
     if register_bootstrap:
-        if not _env_flag(ALLOW_BOOTSTRAP_REGISTER_ENV):
+        if not bootstrap_registration_enabled:
             logger.warning(
                 "research_lab_bootstrap_register_suppressed: lineage is empty but %s is not "
                 "enabled; returning unregistered bootstrap manifest",
                 ALLOW_BOOTSTRAP_REGISTER_ENV,
             )
         else:
-            try:
-                version_row, _event = await create_private_model_version(
-                    artifact_manifest=artifact.to_dict(),
-                    manifest_uri=artifact.manifest_uri,
-                    redacted_version_doc={
-                        "source": "bootstrap_private_model_manifest_uri",
-                        "model_artifact_hash": artifact.model_artifact_hash,
-                        "private_model_manifest_hash": artifact.manifest_hash,
-                        "git_commit_sha": artifact.git_commit_sha,
-                        "component_registry_version": artifact.component_registry_version,
-                        "scoring_adapter_version": artifact.scoring_adapter_version,
-                    },
-                    version_status="active",
-                    reason="bootstrap_private_model_manifest_uri",
-                )
-            except Exception as exc:
-                logger.warning("research_lab_active_model_bootstrap_write_failed: %s", str(exc)[:200])
+            admitted = await _preflight_private_model_activation(
+                config,
+                artifact,
+                pointer_uri=config.private_model_manifest_uri,
+                mode=PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD,
+            )
+            activation = await _activate_private_model_generation(
+                config,
+                admitted,
+                expected_active_row=None,
+                redacted_version_doc={
+                    "source": "bootstrap_private_model_manifest_uri",
+                    "model_artifact_hash": artifact.model_artifact_hash,
+                    "private_model_manifest_hash": artifact.manifest_hash,
+                    "git_commit_sha": artifact.git_commit_sha,
+                    "component_registry_version": (
+                        artifact.component_registry_version
+                    ),
+                    "scoring_adapter_version": artifact.scoring_adapter_version,
+                },
+                activation_reason="bootstrap_private_model_manifest_uri",
+                activation_event_doc={
+                    "source": "bootstrap_private_model_manifest_uri",
+                },
+            )
+            artifact = activation.admission.artifact
+            version_row = activation.version_row
     return ActivePrivateModel(artifact=artifact, version_row=version_row)
 
 
@@ -695,6 +794,707 @@ def _git_sha_matches(left: Any, right: Any) -> bool:
     return False
 
 
+def _private_artifact_compatibility_identity(
+    artifact: PrivateModelArtifactManifest,
+) -> tuple[str, ...]:
+    contract = dict(artifact.compatibility_contract or {})
+    fixtures = dict(artifact.consumer_parity_fixtures or {})
+    return (
+        artifact.model_artifact_hash,
+        artifact.manifest_hash,
+        artifact.git_commit_sha,
+        artifact.image_digest,
+        str(contract.get("contract_id") or ""),
+        str(contract.get("path") or ""),
+        str(contract.get("sha256") or ""),
+        str(fixtures.get("path") or ""),
+        str(fixtures.get("sha256") or ""),
+    )
+
+
+@dataclass(frozen=True)
+class _PrivateModelActivationAdmission:
+    mode: str
+    artifact: PrivateModelArtifactManifest
+    artifact_identity: tuple[str, ...]
+    compatibility_receipt: dict[str, Any]
+    compatibility_receipt_hash: str
+    pointer_uri: str
+    branch_sha: str
+    branch_fence_mode: str
+    generation_hash: str
+
+
+@dataclass(frozen=True)
+class _PrivateModelActivationResult:
+    version_row: dict[str, Any]
+    activation_event: dict[str, Any]
+    superseded_event: dict[str, Any] | None
+    admission: _PrivateModelActivationAdmission
+    lineage_generation_before: int
+    lineage_generation_after: int
+
+
+@dataclass(frozen=True)
+class _PrivateModelLineageSnapshot:
+    generation: int
+    active_rows: tuple[dict[str, Any], ...]
+    target_rows: tuple[dict[str, Any], ...]
+    has_any_row: bool | None
+
+
+def _private_model_activation_generation_doc(
+    admission: _PrivateModelActivationAdmission,
+) -> dict[str, Any]:
+    receipt = admission.compatibility_receipt
+    return {
+        "activation_mode": admission.mode,
+        "activation_generation_hash": admission.generation_hash,
+        "activation_branch_sha": admission.branch_sha,
+        "activation_branch_fence_mode": admission.branch_fence_mode,
+        "compatibility_admission_mode": str(receipt.get("admission_mode") or ""),
+        "compatibility_policy_hash": str(receipt.get("policy_hash") or ""),
+        "compatibility_admission_hash": str(receipt.get("receipt_hash") or ""),
+        "compatibility_combined_receipt_hash": str(
+            receipt.get("combined_receipt_hash") or ""
+        ),
+        "compatibility_full_receipt_hash": admission.compatibility_receipt_hash,
+    }
+
+
+def _private_model_lineage_row_generation_identity(
+    row: Mapping[str, Any],
+) -> tuple[str, ...]:
+    current_event_seq = row.get("current_event_seq")
+    return (
+        str(row.get("private_model_version_id") or ""),
+        str(row.get("current_version_status") or ""),
+        str(current_event_seq if current_event_seq is not None else ""),
+        str(row.get("current_event_hash") or ""),
+        str(row.get("model_artifact_hash") or ""),
+        str(row.get("private_model_manifest_hash") or ""),
+        str(row.get("private_model_manifest_uri") or ""),
+        str(row.get("git_commit_sha") or ""),
+    )
+
+
+def _private_model_lineage_cas_state(
+    row: Mapping[str, Any], *, expected_status: str,
+) -> dict[str, Any]:
+    seq = row.get("current_event_seq")
+    event_hash = str(row.get("current_event_hash") or "")
+    status = str(row.get("current_version_status") or "")
+    if (
+        isinstance(seq, bool)
+        or not isinstance(seq, int)
+        or seq < 0
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", event_hash) is None
+        or status != expected_status
+    ):
+        raise RuntimeError("private model lineage CAS state is incomplete")
+    return {
+        "expected_current_event_seq": seq,
+        "expected_current_event_hash": event_hash,
+        "expected_current_version_status": status,
+    }
+
+
+def _require_lineage_row_artifact_identity(
+    row: Mapping[str, Any], artifact: PrivateModelArtifactManifest,
+) -> None:
+    if (
+        str(row.get("model_artifact_hash") or "") != artifact.model_artifact_hash
+        or str(row.get("private_model_manifest_hash") or "") != artifact.manifest_hash
+        or str(row.get("private_model_manifest_uri") or "") != artifact.manifest_uri
+        or PRIVATE_MODEL_EXACT_GIT_SHA_RE.fullmatch(artifact.git_commit_sha) is None
+        or str(row.get("git_commit_sha") or "") != artifact.git_commit_sha
+    ):
+        raise RuntimeError("private model lineage row differs from its signed artifact")
+
+
+async def _load_current_private_model_activation_event(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    version_id = str(row.get("private_model_version_id") or "")
+    seq = row.get("current_event_seq")
+    event_hash = str(row.get("current_event_hash") or "")
+    if (
+        not version_id
+        or isinstance(seq, bool)
+        or not isinstance(seq, int)
+        or seq < 0
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", event_hash) is None
+        or str(row.get("current_version_status") or "") != "active"
+    ):
+        raise RuntimeError("private model active target event state is invalid")
+    events = await select_many(
+        "research_lab_private_model_version_events",
+        columns=(
+            "event_id,private_model_version_id,seq,event_type,version_status,"
+            "reason,event_doc,anchored_hash"
+        ),
+        filters=(("private_model_version_id", version_id), ("seq", seq)),
+        order_by=(("created_at", True),),
+        limit=2,
+    )
+    event = dict(events[0]) if len(events) == 1 else {}
+    event_doc = event.get("event_doc")
+    payload = {
+        "private_model_version_id": version_id,
+        "seq": seq,
+        "event_type": "active",
+        "version_status": "active",
+        "reason": event.get("reason"),
+        "event_doc": dict(event_doc) if isinstance(event_doc, Mapping) else {},
+    }
+    if (
+        not isinstance(event_doc, Mapping)
+        or any(event.get(key) != value for key, value in payload.items())
+        or event.get("anchored_hash") != event_hash
+        or event_hash != canonical_hash(payload)
+    ):
+        raise RuntimeError("private model active target event is unavailable")
+    return event
+
+
+async def _preflight_private_artifact_compatibility(
+    artifact: PrivateModelArtifactManifest,
+) -> dict[str, Any]:
+    from gateway.research_lab.model_authority_v2 import (
+        preflight_private_model_compatibility_v2,
+    )
+
+    return dict(
+        await preflight_private_model_compatibility_v2(
+            artifact,
+            timeout_seconds=PRIVATE_MODEL_COMPATIBILITY_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+    )
+
+
+async def _preflight_private_model_activation(
+    config: ResearchLabGatewayConfig,
+    artifact: PrivateModelArtifactManifest,
+    *,
+    pointer_uri: str,
+    mode: str,
+    expected_branch_sha: str = "",
+) -> _PrivateModelActivationAdmission:
+    """Admit source, then bind a signed pointer and stable branch snapshot."""
+
+    if mode not in {
+        PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD,
+        PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE,
+        PRIVATE_MODEL_ACTIVATION_MODE_RECONCILE_SUPERSEDED,
+    }:
+        raise ValueError("private model activation mode is invalid")
+    repo_url = str(config.private_repo_url or "").strip()
+    immutable_manifest_only = bool(
+        mode == PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE and not repo_url
+    )
+    if not repo_url and not immutable_manifest_only:
+        raise RuntimeError("private model activation requires a private repo")
+    branch_name = str(config.private_repo_branch or DEFAULT_PRIVATE_REPO_BRANCH)
+    normalized_pointer_uri = str(pointer_uri or "").strip()
+    if not normalized_pointer_uri:
+        raise RuntimeError("private model activation pointer is missing")
+    if PRIVATE_MODEL_EXACT_GIT_SHA_RE.fullmatch(artifact.git_commit_sha) is None:
+        raise RuntimeError("private model activation requires one exact 40-character commit")
+
+    receipt = await _preflight_private_artifact_compatibility(artifact)
+    reread = await asyncio.to_thread(_load_valid_artifact, normalized_pointer_uri)
+    if (
+        _private_artifact_compatibility_identity(reread)
+        != _private_artifact_compatibility_identity(artifact)
+    ):
+        raise RuntimeError("signed current.json changed during compatibility preflight")
+    if (
+        PRIVATE_MODEL_EXACT_GIT_SHA_RE.fullmatch(reread.git_commit_sha)
+        is None
+        or reread.git_commit_sha != artifact.git_commit_sha
+    ):
+        raise RuntimeError("private model activation requires one exact 40-character commit")
+    if immutable_manifest_only:
+        latest_repo_sha = reread.git_commit_sha
+        branch_fence_mode = "immutable_manifest_only"
+    else:
+        latest_repo_sha = await asyncio.to_thread(
+            _resolve_private_repo_head_sha,
+            repo_url=repo_url,
+            branch_name=branch_name,
+        )
+        branch_fence_mode = "remote_branch_stable"
+    expected = str(expected_branch_sha or "").strip()
+    if expected and (
+        PRIVATE_MODEL_EXACT_GIT_SHA_RE.fullmatch(expected) is None
+        or latest_repo_sha != expected
+    ):
+        raise RuntimeError("private source branch changed during compatibility preflight")
+    if (
+        mode == PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD
+        and reread.git_commit_sha != latest_repo_sha
+    ):
+        raise RuntimeError("signed current.json does not match the private source branch")
+    artifact_identity = _private_artifact_compatibility_identity(reread)
+    receipt_hash = sha256_json(receipt)
+    generation_body = {
+        "schema_version": "leadpoet.private-model-activation-generation.v1",
+        "activation_mode": mode,
+        "artifact_identity": list(artifact_identity),
+        "compatibility_receipt_hash": receipt_hash,
+        "pointer_ref_hash": sha256_json({"private_model_pointer_uri": normalized_pointer_uri}),
+        "branch_sha": latest_repo_sha,
+        "branch_fence_mode": branch_fence_mode,
+    }
+    return _PrivateModelActivationAdmission(
+        mode=mode,
+        artifact=reread,
+        artifact_identity=artifact_identity,
+        compatibility_receipt=dict(receipt),
+        compatibility_receipt_hash=receipt_hash,
+        pointer_uri=normalized_pointer_uri,
+        branch_sha=latest_repo_sha,
+        branch_fence_mode=branch_fence_mode,
+        generation_hash=sha256_json(generation_body),
+    )
+
+
+async def _revalidate_private_model_activation(
+    config: ResearchLabGatewayConfig,
+    admitted: _PrivateModelActivationAdmission,
+) -> _PrivateModelActivationAdmission:
+    """Repeat the full gate and require the exact admitted generation."""
+
+    revalidated = await _preflight_private_model_activation(
+        config,
+        admitted.artifact,
+        pointer_uri=admitted.pointer_uri,
+        mode=admitted.mode,
+        expected_branch_sha=admitted.branch_sha,
+    )
+    if (
+        revalidated.artifact_identity != admitted.artifact_identity
+        or revalidated.compatibility_receipt
+        != admitted.compatibility_receipt
+        or revalidated.compatibility_receipt_hash != admitted.compatibility_receipt_hash
+        or revalidated.branch_sha != admitted.branch_sha
+        or revalidated.branch_fence_mode != admitted.branch_fence_mode
+        or revalidated.generation_hash != admitted.generation_hash
+    ):
+        raise RuntimeError("private model activation generation changed before lineage mutation")
+    return revalidated
+
+
+async def _revalidate_private_model_activation_references(
+    config: ResearchLabGatewayConfig,
+    admitted: _PrivateModelActivationAdmission,
+) -> None:
+    """Fence immutable manifest, pointer, policy, and branch without model code."""
+
+    immutable = await asyncio.to_thread(_load_valid_artifact, admitted.artifact.manifest_uri)
+    pointer = await asyncio.to_thread(_load_valid_artifact, admitted.pointer_uri)
+    if (
+        _private_artifact_compatibility_identity(immutable)
+        != admitted.artifact_identity
+        or _private_artifact_compatibility_identity(pointer)
+        != admitted.artifact_identity
+    ):
+        raise RuntimeError("private model artifact or signed pointer changed across activation")
+    _policy, policy_hash = semantic_compatibility_policy_identity_v1()
+    if str(admitted.compatibility_receipt.get("policy_hash") or "") != policy_hash:
+        raise RuntimeError("private model compatibility policy changed across activation")
+    if admitted.branch_fence_mode == "immutable_manifest_only":
+        if (
+            admitted.mode
+            != PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE
+            or str(config.private_repo_url or "").strip()
+        ):
+            raise RuntimeError("private model immutable-manifest branch fence is invalid")
+        branch_sha = pointer.git_commit_sha
+    else:
+        branch_sha = await asyncio.to_thread(
+            _resolve_private_repo_head_sha,
+            repo_url=str(config.private_repo_url or "").strip(),
+            branch_name=str(config.private_repo_branch or DEFAULT_PRIVATE_REPO_BRANCH),
+        )
+    if (
+        PRIVATE_MODEL_EXACT_GIT_SHA_RE.fullmatch(branch_sha) is None
+        or branch_sha != admitted.branch_sha
+    ):
+        raise RuntimeError("private source branch changed across activation")
+    if (
+        admitted.mode == PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD
+        and pointer.git_commit_sha != branch_sha
+    ):
+        raise RuntimeError("signed current.json no longer matches the private source branch")
+
+
+async def _stable_private_model_lineage_snapshot(
+    *, target_artifact_hash: str, probe_any_row: bool = False,
+) -> _PrivateModelLineageSnapshot:
+    generation_before = await private_model_lineage_generation()
+    active_rows = await _active_private_model_version_rows()
+    target_rows = await select_many(
+        "research_lab_private_model_version_current",
+        columns=(
+            "private_model_version_id,model_artifact_hash,"
+            "private_model_manifest_hash,private_model_manifest_uri,"
+            "git_commit_sha,current_version_status,current_status_at,"
+            "current_event_seq,current_event_hash,source_candidate_id,"
+            "source_score_bundle_id,source_benchmark_bundle_id,created_at"
+        ),
+        filters=(("model_artifact_hash", target_artifact_hash),),
+        order_by=(("private_model_version_id", False),),
+        limit=2,
+    )
+    any_rows = (
+        await select_many(
+            "research_lab_private_model_version_current",
+            columns="private_model_version_id",
+            filters=(),
+            order_by=(("private_model_version_id", False),),
+            limit=1,
+        )
+        if probe_any_row
+        else None
+    )
+    generation_after = await private_model_lineage_generation()
+    if generation_before != generation_after:
+        raise RuntimeError("private model lineage changed while reading activation state")
+    return _PrivateModelLineageSnapshot(
+        generation=generation_after,
+        active_rows=tuple(dict(row) for row in active_rows),
+        target_rows=tuple(dict(row) for row in target_rows),
+        has_any_row=(bool(any_rows) if any_rows is not None else None),
+    )
+
+
+def _require_exact_active_target(
+    snapshot: _PrivateModelLineageSnapshot, *, version_id: str,
+    activation_event: Mapping[str, Any],
+) -> None:
+    active_rows = [
+        row
+        for row in snapshot.active_rows
+        if str(row.get("current_version_status") or "") == "active"
+    ]
+    target_rows = list(snapshot.target_rows)
+    event_seq = activation_event.get("seq")
+    current_seq = active_rows[0].get("current_event_seq") if active_rows else None
+    if (
+        isinstance(event_seq, bool)
+        or not isinstance(event_seq, int)
+        or isinstance(current_seq, bool)
+        or not isinstance(current_seq, int)
+        or len(active_rows) != 1
+        or len(target_rows) != 1
+        or str(active_rows[0].get("private_model_version_id") or "")
+        != version_id
+        or _private_model_lineage_row_generation_identity(active_rows[0])
+        != _private_model_lineage_row_generation_identity(target_rows[0])
+        or current_seq != event_seq
+        or str(active_rows[0].get("current_event_hash") or "")
+        != str(activation_event.get("anchored_hash") or "")
+    ):
+        raise RuntimeError("private model activation is no longer the sole exact active target")
+
+
+async def _fence_private_model_activation(
+    config: ResearchLabGatewayConfig,
+    admitted: _PrivateModelActivationAdmission,
+    *,
+    version_id: str,
+    activation_event: Mapping[str, Any],
+    minimum_generation: int,
+    initial_snapshot: _PrivateModelLineageSnapshot | None = None,
+) -> _PrivateModelLineageSnapshot:
+    snapshot = initial_snapshot or await _stable_private_model_lineage_snapshot(
+        target_artifact_hash=admitted.artifact.model_artifact_hash
+    )
+    for final in (False, True):
+        if snapshot.generation < minimum_generation:
+            raise RuntimeError("private model activation generation moved backwards")
+        _require_exact_active_target(
+            snapshot, version_id=version_id, activation_event=activation_event
+        )
+        if final:
+            return snapshot
+        await _revalidate_private_model_activation_references(config, admitted)
+        snapshot = await _stable_private_model_lineage_snapshot(
+            target_artifact_hash=admitted.artifact.model_artifact_hash
+        )
+    raise AssertionError("private model activation fence did not terminate")
+
+
+async def _load_exact_private_model_activation_event(
+    target_row: Mapping[str, Any],
+    admitted: _PrivateModelActivationAdmission,
+    *,
+    activation_reason: str,
+    activation_event_doc: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    event = await _load_current_private_model_activation_event(target_row)
+    event_doc = event.get("event_doc")
+    expected_generation = event_doc.get("expected_global_lineage_generation")
+    if (
+        isinstance(expected_generation, bool)
+        or not isinstance(expected_generation, int)
+        or expected_generation < 0
+    ):
+        raise RuntimeError(
+            "private model active target generation is invalid"
+        )
+    expected_event_doc = {
+        **dict(activation_event_doc or {}),
+        **_private_model_activation_generation_doc(admitted),
+        "activation_protocol_version": PRIVATE_MODEL_ACTIVATION_PROTOCOL_V1,
+        "expected_global_lineage_generation": expected_generation,
+    }
+    if (
+        event.get("reason") != activation_reason
+        or event_doc != expected_event_doc
+    ):
+        raise RuntimeError(
+            "private model active target does not match the requested activation"
+        )
+    return event
+
+
+async def _activate_private_model_generation(
+    config: ResearchLabGatewayConfig,
+    admitted: _PrivateModelActivationAdmission,
+    *,
+    expected_active_row: Mapping[str, Any] | None,
+    source_candidate_id: str | None = None,
+    source_score_bundle_id: str | None = None,
+    source_benchmark_bundle_id: str | None = None,
+    redacted_version_doc: Mapping[str, Any] | None = None,
+    activation_reason: str,
+    activation_event_doc: Mapping[str, Any] | None = None,
+    supersede_reason: str = "",
+    supersede_event_doc: Mapping[str, Any] | None = None,
+    candidate_source_ownership_branch: str = "",
+) -> _PrivateModelActivationResult:
+    """Re-admit, one-shot CAS, and fence one exact activation generation."""
+
+    snapshot = await _stable_private_model_lineage_snapshot(
+        target_artifact_hash=admitted.artifact.model_artifact_hash,
+        probe_any_row=(
+            expected_active_row is None and
+            admitted.mode != PRIVATE_MODEL_ACTIVATION_MODE_RECONCILE_SUPERSEDED
+        ),
+    )
+    generation = snapshot.generation
+    active_rows = list(snapshot.active_rows)
+    if len(active_rows) > 1:
+        raise RuntimeError("private model lineage has duplicate active versions")
+    target_rows = list(snapshot.target_rows)
+    if len(target_rows) > 1:
+        raise RuntimeError("private model target artifact has duplicate rows")
+    target_current = target_rows[0] if target_rows else None
+    if target_current is not None:
+        _require_lineage_row_artifact_identity(target_current, admitted.artifact)
+        requested_provenance = {
+            "source_candidate_id": source_candidate_id,
+            "source_score_bundle_id": source_score_bundle_id,
+            "source_benchmark_bundle_id": source_benchmark_bundle_id,
+        }
+        if any(value is not None for value in requested_provenance.values()) and any(
+            target_current.get(field) != value
+            for field, value in requested_provenance.items()
+        ):
+            raise RuntimeError("private model target artifact has different promotion provenance")
+    target_status = str((target_current or {}).get("current_version_status") or "")
+    resume_active = bool(
+        target_current is not None
+        and target_status == "active"
+        and len(active_rows) == 1
+        and str(active_rows[0].get("private_model_version_id") or "") ==
+        str(target_current.get("private_model_version_id") or "")
+    )
+    if resume_active:
+        if (
+            expected_active_row is None
+            or _private_model_lineage_row_generation_identity(
+                target_current
+            )
+            != _private_model_lineage_row_generation_identity(
+                expected_active_row
+            )
+        ):
+            raise RuntimeError("private model activation resume requires the exact active target")
+        admitted = await _revalidate_private_model_activation(config, admitted)
+        if await private_model_lineage_generation() != generation:
+            raise RuntimeError("private model lineage changed during activation resume preflight")
+        activation_event = await _load_exact_private_model_activation_event(
+            target_current,
+            admitted,
+            activation_reason=activation_reason,
+            activation_event_doc=activation_event_doc,
+        )
+        resumed_snapshot = await _fence_private_model_activation(
+            config,
+            admitted,
+            version_id=str(target_current["private_model_version_id"]),
+            activation_event=activation_event,
+            minimum_generation=generation,
+            initial_snapshot=snapshot,
+        )
+        return _PrivateModelActivationResult(
+            version_row=dict(target_current),
+            activation_event=activation_event,
+            superseded_event=None,
+            admission=admitted,
+            lineage_generation_before=generation,
+            lineage_generation_after=resumed_snapshot.generation,
+        )
+    if expected_active_row is None:
+        if active_rows:
+            raise RuntimeError("private model lineage gained an active version before activation")
+        fresh_zero_event_bootstrap = bool(
+            generation == 0
+            and admitted.mode in {
+                PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD,
+                PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE,
+            }
+            and (
+                target_current is None
+                or (
+                    target_current.get("current_event_seq") is None
+                    and not str(target_current.get("current_event_hash") or "")
+                    and not target_status
+                )
+            )
+        )
+        if (
+            admitted.mode
+            != PRIVATE_MODEL_ACTIVATION_MODE_RECONCILE_SUPERSEDED
+            and snapshot.has_any_row
+            and not fresh_zero_event_bootstrap
+        ):
+            raise RuntimeError("exact-head activation cannot bypass zero-active lineage recovery")
+    elif (
+        len(active_rows) != 1
+        or _private_model_lineage_row_generation_identity(active_rows[0])
+        != _private_model_lineage_row_generation_identity(expected_active_row)
+    ):
+        raise RuntimeError("private model active generation changed before activation")
+
+    if admitted.mode == PRIVATE_MODEL_ACTIVATION_MODE_RECONCILE_SUPERSEDED:
+        if expected_active_row is not None or target_status != "superseded":
+            raise RuntimeError("reconcile activation requires one superseded target and zero active rows")
+    elif target_status not in {"", "superseded"}:
+        raise RuntimeError("private model target row is not eligible for exact-head activation")
+
+    admitted = await _revalidate_private_model_activation(config, admitted)
+    if candidate_source_ownership_branch:
+        if admitted.mode != PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD:
+            raise RuntimeError(
+                "candidate source ownership fence requires exact-head activation"
+            )
+        try:
+            pending_candidate = (
+                await _pending_candidate_source_publication_for_repo_head(
+                    admitted.branch_sha,
+                    branch_name=candidate_source_ownership_branch,
+                )
+            )
+        except Exception as exc:
+            raise CandidateSourceOwnershipUnavailableError(
+                "candidate source ownership could not be reread before activation"
+            ) from exc
+        if pending_candidate is not None:
+            raise CandidateSourcePublicationPendingError(pending_candidate)
+    if await private_model_lineage_generation() != generation:
+        raise RuntimeError("private model lineage changed during final activation preflight")
+
+    if target_current is None:
+        activation_doc = {
+            **dict(redacted_version_doc or {}),
+            **_private_model_activation_generation_doc(admitted),
+            "activation_protocol_version": PRIVATE_MODEL_ACTIVATION_PROTOCOL_V1,
+        }
+        version_row, _created = await ensure_private_model_version_row_exact(
+            artifact_manifest=admitted.artifact.to_dict(),
+            manifest_uri=admitted.artifact.manifest_uri,
+            source_candidate_id=source_candidate_id,
+            source_score_bundle_id=source_score_bundle_id,
+            source_benchmark_bundle_id=source_benchmark_bundle_id,
+            redacted_version_doc=dict(activation_doc),
+        )
+    else:
+        version_row = dict(target_current)
+    version_id = str(version_row.get("private_model_version_id") or "")
+    if not version_id:
+        raise RuntimeError("private model target version identity is missing")
+    if (
+        target_current is not None
+        and str(target_current.get("private_model_version_id") or "") != version_id
+    ):
+        raise RuntimeError("private model target row changed across immutable row admission")
+
+    superseded_event: dict[str, Any] | None = None
+    if expected_active_row is not None:
+        old_version_id = str(expected_active_row.get("private_model_version_id") or "")
+        if not old_version_id or old_version_id == version_id:
+            raise RuntimeError("private model replacement must differ from the active version")
+        superseded_event = await create_private_model_version_event_cas(
+            private_model_version_id=old_version_id,
+            **_private_model_lineage_cas_state(
+                expected_active_row,
+                expected_status="active",
+            ),
+            event_type="superseded",
+            version_status="superseded",
+            reason=supersede_reason or "superseded_by_" + activation_reason,
+            event_doc={
+                **dict(supersede_event_doc or {}),
+                **_private_model_activation_generation_doc(admitted),
+                "activation_protocol_version": PRIVATE_MODEL_ACTIVATION_PROTOCOL_V1,
+                "expected_global_lineage_generation": generation,
+            },
+        )
+
+    expected_active_generation = generation + int(superseded_event is not None)
+    if target_current is None or target_current.get("current_event_seq") is None:
+        target_cas = {
+            "expected_current_event_seq": None,
+            "expected_current_event_hash": "",
+            "expected_current_version_status": "",
+        }
+    else:
+        target_cas = _private_model_lineage_cas_state(target_current, expected_status=target_status)
+    activation_event = await create_private_model_version_event_cas(
+        private_model_version_id=version_id,
+        **target_cas,
+        event_type="active",
+        version_status="active",
+        reason=activation_reason,
+        event_doc={
+            **dict(activation_event_doc or {}),
+            **_private_model_activation_generation_doc(admitted),
+            "activation_protocol_version": PRIVATE_MODEL_ACTIVATION_PROTOCOL_V1,
+            "expected_global_lineage_generation": expected_active_generation,
+        },
+    )
+    generation_after = expected_active_generation + 1
+    final_snapshot = await _fence_private_model_activation(
+        config,
+        admitted,
+        version_id=version_id,
+        activation_event=activation_event,
+        minimum_generation=generation_after,
+    )
+    return _PrivateModelActivationResult(
+        version_row=dict(version_row),
+        activation_event=dict(activation_event),
+        superseded_event=dict(superseded_event) if superseded_event is not None else None,
+        admission=admitted,
+        lineage_generation_before=generation,
+        lineage_generation_after=final_snapshot.generation,
+    )
+
+
 def _resolve_private_repo_head_sha(
     *,
     repo_url: str,
@@ -724,11 +1524,12 @@ async def _active_private_model_version_rows() -> list[dict[str, Any]]:
         columns=(
             "private_model_version_id,model_artifact_hash,private_model_manifest_hash,"
             "private_model_manifest_uri,git_commit_sha,current_version_status,current_status_at,"
+            "current_event_seq,current_event_hash,"
             "source_candidate_id,source_score_bundle_id,source_benchmark_bundle_id,created_at"
         ),
         filters=(("current_version_status", "active"),),
         order_by=(("current_status_at", True),),
-        limit=5,
+        limit=2,
     )
     return [dict(row) for row in rows]
 
@@ -849,6 +1650,8 @@ async def _load_repo_head_current_manifest(
 
 async def _pending_candidate_source_publication_for_repo_head(
     repo_main_sha: str,
+    *,
+    branch_name: str = DEFAULT_PRIVATE_REPO_BRANCH,
 ) -> dict[str, str] | None:
     """Return candidate ownership when repo head has not completed activation.
 
@@ -861,10 +1664,10 @@ async def _pending_candidate_source_publication_for_repo_head(
     commit_rows = await select_all(
         "research_lab_private_repo_commit_events",
         columns=(
-            "commit_event_id,commit_status,git_commit_sha,candidate_id,"
-            "score_bundle_id,created_at"
+            "commit_event_id,commit_status,git_commit_sha,branch_name,candidate_id,"
+            "score_bundle_id,event_doc,created_at"
         ),
-        filters=(("git_commit_sha", repo_main_sha),),
+        filters=(("branch_name", branch_name),),
         order_by=(
             ("created_at", True),
             ("commit_event_id", True),
@@ -872,11 +1675,53 @@ async def _pending_candidate_source_publication_for_repo_head(
         batch_size=1000,
         max_rows=PRIVATE_SOURCE_PUSH_RECONCILE_MAX_EVENT_ROWS,
     )
+    def attempt_key(row: Mapping[str, Any]) -> tuple[str, str, int | None]:
+        event_doc = row.get("event_doc")
+        attempt = (
+            event_doc.get("source_push_attempt")
+            if isinstance(event_doc, Mapping)
+            else None
+        )
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            attempt = None
+        return (
+            str(row.get("candidate_id") or ""),
+            str(row.get("score_bundle_id") or ""),
+            attempt,
+        )
+
+    terminal_attempts = {
+        attempt_key(row)
+        for row in commit_rows
+        if str(row.get("commit_status") or "")
+        in {"committed", "pushed", "failed", "tombstoned"}
+    }
+    unresolved_started = sorted(
+        (
+            row
+            for row in commit_rows
+            if str(row.get("commit_status") or "") == "started"
+            and str(row.get("candidate_id") or "")
+            and attempt_key(row) not in terminal_attempts
+        ),
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            str(row.get("commit_event_id") or ""),
+        ),
+        reverse=True,
+    )
+    ownership_rows = [
+        *unresolved_started,
+        *(
+            row
+            for row in commit_rows
+            if str(row.get("commit_status") or "") in {"committed", "pushed"}
+            and str(row.get("git_commit_sha") or "") == repo_main_sha
+        ),
+    ]
     owners: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for row in commit_rows:
-        if str(row.get("commit_status") or "") not in {"committed", "pushed"}:
-            continue
+    for row in ownership_rows:
         candidate_id = str(row.get("candidate_id") or "")
         score_bundle_id = str(row.get("score_bundle_id") or "")
         if not candidate_id:
@@ -890,7 +1735,7 @@ async def _pending_candidate_source_publication_for_repo_head(
                 "candidate_id": candidate_id,
                 "score_bundle_id": score_bundle_id,
                 "commit_event_id": str(row.get("commit_event_id") or ""),
-                "git_commit_sha": str(row.get("git_commit_sha") or ""),
+                "git_commit_sha": str(row.get("git_commit_sha") or repo_main_sha),
             }
         )
     if not owners:
@@ -1031,6 +1876,29 @@ async def sync_active_model_to_repo_head(
             "error": _safe_text(str(exc))[:200],
         }
 
+    try:
+        admitted = await _preflight_private_model_activation(
+            config,
+            current_artifact,
+            pointer_uri=config.private_model_manifest_uri,
+            mode=PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD,
+            expected_branch_sha=repo_main_sha,
+        )
+        current_artifact = admitted.artifact
+        compatibility_receipt = admitted.compatibility_receipt
+    except Exception as exc:
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "model_compatibility_quarantined",
+            "repo_branch": branch_name,
+            "repo_main_sha": repo_main_sha,
+            "active_is_repo_head": False,
+            "benchmark_blocked_reason": "model_compatibility_quarantined",
+            "error": _safe_text(str(exc))[:200],
+        }
+
     active_rows = await _active_private_model_version_rows()
     if len(active_rows) > 1:
         return {
@@ -1053,7 +1921,9 @@ async def sync_active_model_to_repo_head(
     )
     active_is_repo_head = bool(
         active_row
-        and _git_sha_matches(active_model_git_sha, repo_main_sha)
+        and PRIVATE_MODEL_EXACT_GIT_SHA_RE.fullmatch(active_model_git_sha)
+        is not None
+        and active_model_git_sha == repo_main_sha
         and active_model_manifest_hash == current_artifact.manifest_hash
     )
     planned = {
@@ -1072,6 +1942,15 @@ async def sync_active_model_to_repo_head(
         "active_manifest_uri": str(active_row.get("private_model_manifest_uri") or "") if active_row else "",
         "active_is_repo_head": active_is_repo_head,
         "manifest_status": manifest_status,
+        "compatibility_admission_mode": str(
+            compatibility_receipt.get("admission_mode") or ""
+        ),
+        "compatibility_policy_hash": str(
+            compatibility_receipt.get("policy_hash") or ""
+        ),
+        "compatibility_admission_hash": str(
+            compatibility_receipt.get("receipt_hash") or ""
+        ),
     }
     if active_is_repo_head:
         return {
@@ -1083,7 +1962,8 @@ async def sync_active_model_to_repo_head(
         }
     try:
         pending_candidate = await _pending_candidate_source_publication_for_repo_head(
-            repo_main_sha
+            repo_main_sha,
+            branch_name=branch_name,
         )
     except Exception as exc:
         logger.warning(
@@ -1129,13 +2009,39 @@ async def sync_active_model_to_repo_head(
             **planned,
         }
 
-    if active_row:
-        await create_private_model_version_event(
-            private_model_version_id=str(active_row["private_model_version_id"]),
-            event_type="superseded",
-            version_status="superseded",
-            reason="superseded_by_repo_head_sync",
-            event_doc={
+    try:
+        activation = await _activate_private_model_generation(
+            config,
+            admitted,
+            expected_active_row=active_row,
+            redacted_version_doc=_private_model_version_doc(
+                source="repo_head_sync",
+                actor_ref=actor_ref,
+                repo_branch=branch_name,
+                repo_main_sha=repo_main_sha,
+                current_json_pointer_uri=config.private_model_manifest_uri,
+                current_json_manifest_uri=current_artifact.manifest_uri,
+                previous_active_model_version_id=(
+                    str(active_row.get("private_model_version_id") or "")
+                    if active_row
+                    else ""
+                ),
+                previous_active_git_sha=active_model_git_sha,
+                previous_active_manifest_hash=active_model_manifest_hash,
+                artifact=current_artifact,
+            ),
+            activation_reason="repo_head_sync",
+            activation_event_doc={
+                "source": "repo_head_sync",
+                "actor_ref": actor_ref,
+                "repo_branch": branch_name,
+                "repo_main_sha": repo_main_sha,
+                "current_json_manifest_hash": current_artifact.manifest_hash,
+                "current_json_pointer_uri": config.private_model_manifest_uri,
+                "current_json_manifest_uri": current_artifact.manifest_uri,
+            },
+            supersede_reason="superseded_by_repo_head_sync",
+            supersede_event_doc={
                 "source": "repo_head_sync",
                 "actor_ref": actor_ref,
                 "repo_branch": branch_name,
@@ -1146,49 +2052,32 @@ async def sync_active_model_to_repo_head(
                 "previous_active_git_sha": active_model_git_sha,
                 "previous_active_manifest_hash": active_model_manifest_hash,
             },
+            candidate_source_ownership_branch=branch_name,
         )
-    try:
-        version_row, _event = await create_private_model_version(
-            artifact_manifest=current_artifact.to_dict(),
-            manifest_uri=current_artifact.manifest_uri,
-            redacted_version_doc=_private_model_version_doc(
-                source="repo_head_sync",
-                actor_ref=actor_ref,
-                repo_branch=branch_name,
-                repo_main_sha=repo_main_sha,
-                current_json_pointer_uri=config.private_model_manifest_uri,
-                current_json_manifest_uri=current_artifact.manifest_uri,
-                previous_active_model_version_id=(
-                    str(active_row.get("private_model_version_id") or "") if active_row else ""
-                ),
-                previous_active_git_sha=active_model_git_sha,
-                previous_active_manifest_hash=active_model_manifest_hash,
-                artifact=current_artifact,
-            ),
-            version_status="active",
-            reason="repo_head_sync",
-        )
-    except Exception:
-        if active_row:
-            try:
-                await create_private_model_version_event(
-                    private_model_version_id=str(active_row["private_model_version_id"]),
-                    event_type="active",
-                    version_status="active",
-                    reason="repo_head_sync_create_failed_reactivate_previous",
-                    event_doc={
-                        "source": "repo_head_sync",
-                        "actor_ref": actor_ref,
-                        "repo_branch": branch_name,
-                        "repo_main_sha": repo_main_sha,
-                    },
-                )
-            except Exception:
-                logger.exception(
-                    "research_lab_repo_head_sync_previous_reactivate_failed version=%s",
-                    _short_ref(active_row.get("private_model_version_id")),
-                )
-        raise
+    except CandidateSourcePublicationPendingError as exc:
+        pending_candidate = exc.pending
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "candidate_source_publication_pending",
+            **planned,
+            "benchmark_blocked_reason": "candidate_source_publication_pending",
+            "candidate_id": pending_candidate["candidate_id"],
+            "score_bundle_id": pending_candidate["score_bundle_id"],
+            "source_commit_event_id": pending_candidate["commit_event_id"],
+        }
+    except CandidateSourceOwnershipUnavailableError as exc:
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "candidate_source_ownership_unavailable",
+            **planned,
+            "benchmark_blocked_reason": "candidate_source_ownership_unavailable",
+            "error": _safe_text(str(exc))[:200],
+        }
+    version_row = activation.version_row
     logger.warning(
         "research_lab_repo_head_sync_active_model_synced repo_main=%s old_active=%s new_version=%s new_manifest=%s",
         repo_main_sha[:12],
@@ -1274,6 +2163,7 @@ async def wait_for_current_manifest_git_sha(
 
 
 async def reconcile_active_private_model_lineage(
+    config: ResearchLabGatewayConfig | None = None,
     *,
     actor_ref: str = "maintenance",
     dry_run: bool = True,
@@ -1302,7 +2192,11 @@ async def reconcile_active_private_model_lineage(
         }
     lineage_rows = await select_many(
         "research_lab_private_model_version_current",
-        columns="private_model_version_id,current_version_status,current_status_at,model_artifact_hash",
+        columns=(
+            "private_model_version_id,current_version_status,current_status_at,"
+            "current_event_seq,current_event_hash,model_artifact_hash,"
+            "private_model_manifest_hash,private_model_manifest_uri,git_commit_sha"
+        ),
         filters=(),
         order_by=(("current_status_at", True),),
         limit=50,
@@ -1336,17 +2230,36 @@ async def reconcile_active_private_model_lineage(
             "dry_run": True,
             "planned": planned,
         }
-    await create_private_model_version_event(
-        private_model_version_id=version_id,
-        event_type="active",
-        version_status="active",
-        reason="reconcile_reactivate_newest_superseded_version",
-        event_doc={
+    resolved_config = config or ResearchLabGatewayConfig.from_env()
+    manifest_uri = str(newest.get("private_model_manifest_uri") or "")
+    artifact = await asyncio.to_thread(_load_valid_artifact, manifest_uri)
+    _require_lineage_row_artifact_identity(newest, artifact)
+    admitted = await _preflight_private_model_activation(
+        resolved_config,
+        artifact,
+        pointer_uri=manifest_uri,
+        mode=PRIVATE_MODEL_ACTIVATION_MODE_RECONCILE_SUPERSEDED,
+    )
+    activation = await _activate_private_model_generation(
+        resolved_config,
+        admitted,
+        expected_active_row=None,
+        redacted_version_doc={
+            "source": "research_lab_lineage_reconcile",
+            "actor_ref": actor_ref,
+            "previous_version_status": "superseded",
+        },
+        activation_reason="reconcile_reactivate_newest_superseded_version",
+        activation_event_doc={
             "source": "research_lab_lineage_reconcile",
             "actor_ref": actor_ref,
             "previous_version_status": "superseded",
         },
     )
+    planned.update(
+        _private_model_activation_generation_doc(activation.admission)
+    )
+    planned["lineage_generation"] = activation.lineage_generation_after
     logger.warning(
         "research_lab_lineage_reconcile_reactivated: version=%s actor=%s",
         _short_ref(version_id),
@@ -1429,20 +2342,16 @@ async def reregister_active_manifest(
             "private_model_version_id": version_id,
             "mismatch": mismatch_doc,
         }
-    await create_private_model_version_event(
-        private_model_version_id=version_id,
-        event_type="superseded",
-        version_status="superseded",
-        reason="operator_manifest_reregister",
-        event_doc={
-            "source": "research_lab_operator_manifest_reregister",
-            "actor_ref": actor_ref,
-            **mismatch_doc,
-        },
+    admitted = await _preflight_private_model_activation(
+        config,
+        artifact,
+        pointer_uri=manifest_uri,
+        mode=PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD,
     )
-    version_row, _event = await create_private_model_version(
-        artifact_manifest=artifact.to_dict(),
-        manifest_uri=manifest_uri,
+    activation = await _activate_private_model_generation(
+        config,
+        admitted,
+        expected_active_row=row,
         redacted_version_doc={
             "source": "operator_manifest_reregister",
             "model_artifact_hash": artifact.model_artifact_hash,
@@ -1452,9 +2361,24 @@ async def reregister_active_manifest(
             "scoring_adapter_version": artifact.scoring_adapter_version,
             "superseded_private_model_version_id": version_id,
         },
-        version_status="active",
-        reason="operator_manifest_reregister",
+        activation_reason="operator_manifest_reregister",
+        activation_event_doc={
+            "source": "research_lab_operator_manifest_reregister",
+            "actor_ref": actor_ref,
+            **mismatch_doc,
+        },
+        supersede_reason="operator_manifest_reregister",
+        supersede_event_doc={
+            "source": "research_lab_operator_manifest_reregister",
+            "actor_ref": actor_ref,
+            **mismatch_doc,
+        },
     )
+    artifact = activation.admission.artifact
+    activation_doc = _private_model_activation_generation_doc(
+        activation.admission
+    )
+    version_row = activation.version_row
     new_version_id = str(version_row.get("private_model_version_id") or "")
     logger.warning(
         "research_lab_operator_manifest_reregistered: old=%s new=%s actor=%s",
@@ -1470,6 +2394,7 @@ async def reregister_active_manifest(
         "superseded_private_model_version_id": version_id,
         "private_model_version_id": new_version_id,
         "mismatch": mismatch_doc,
+        **activation_doc,
     }
 
 
@@ -1810,6 +2735,39 @@ class ResearchLabPromotionController:
                 **reward_status,
                 **source_add_reward_status,
             }
+
+        pending_activation = (
+            await _active_version_has_pending_candidate_activation(
+                active,
+                candidate_id=str(candidate["candidate_id"]),
+                score_bundle_id=score_bundle_id,
+            )
+            if candidate_kind == "image_build"
+            else None
+        )
+        if pending_activation is not None:
+            logger.warning(
+                "research_lab_promotion_resuming_after_active_lineage_write "
+                "candidate=%s score_bundle=%s version=%s",
+                _short_ref(candidate["candidate_id"]),
+                _short_ref(score_bundle_id),
+                _short_ref((active.version_row or {}).get(
+                    "private_model_version_id"
+                )),
+            )
+            result = await self._promote_built_image_candidate(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                active=active,
+                active_parent=active_parent,
+                candidate_parent=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold=threshold,
+                resume_activation_event=pending_activation,
+            )
+            return {**result, "activation_resume": True}
 
         gate_decision = promotion_gate_decision(
             score_bundle,
@@ -2186,6 +3144,7 @@ class ResearchLabPromotionController:
         rolling_window_hash: str,
         improvement_points: float,
         threshold: float,
+        resume_activation_event: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         manifest_doc = candidate.get("candidate_model_manifest_doc")
         if not isinstance(manifest_doc, Mapping):
@@ -2207,24 +3166,64 @@ class ResearchLabPromotionController:
         )
         if str(score_bundle.get("candidate_artifact_hash") or "") != new_artifact.model_artifact_hash:
             raise RuntimeError("score bundle candidate artifact does not match built image manifest")
-        private_repo_result = await self._maybe_push_private_repo_candidate(
-            candidate=candidate,
-            score_bundle_row=score_bundle_row,
-            score_bundle=score_bundle,
-            active=active,
-            new_artifact=new_artifact,
-            active_parent=active_parent,
-            candidate_parent=candidate_parent,
-            rolling_window_hash=rolling_window_hash,
-            improvement_points=improvement_points,
-            threshold=threshold,
+        if (
+            PRIVATE_MODEL_EXACT_GIT_SHA_RE.fullmatch(
+                new_artifact.git_commit_sha
+            )
+            is None
+        ):
+            raise RuntimeError(
+                "candidate image activation requires one exact 40-character commit"
+            )
+        # Admission precedes the only private-source mutation.  A signed but
+        # consumer-incompatible candidate must never advance the source branch
+        # or current pointer and then quarantine rebenchmarking behind it.
+        await _preflight_private_artifact_compatibility(new_artifact)
+        resume_doc = (
+            resume_activation_event.get("event_doc")
+            if isinstance(resume_activation_event, Mapping)
+            else None
         )
+        resume_mode = (
+            str(resume_doc.get("activation_mode") or "")
+            if isinstance(resume_doc, Mapping)
+            else ""
+        )
+        if resume_activation_event is not None:
+            if resume_mode == PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD:
+                private_repo_result = {
+                    "status": "already_applied",
+                    "git_commit_sha": active.artifact.git_commit_sha,
+                    "activation_resume": True,
+                }
+            elif resume_mode == PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE:
+                private_repo_result = {
+                    "status": "skipped_activation_resume",
+                    "activation_resume": True,
+                }
+            else:
+                raise RuntimeError(
+                    "pending promotion activation mode is not resumable"
+                )
+        else:
+            private_repo_result = await self._maybe_push_private_repo_candidate(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                active=active,
+                new_artifact=new_artifact,
+                active_parent=active_parent,
+                candidate_parent=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold=threshold,
+            )
         if private_repo_result.get("status") == "failed":
             return private_repo_result
         activation_artifact = new_artifact
-        activation_manifest_uri = new_artifact.manifest_uri
         manifest_wait_status: dict[str, Any] = {"status": "not_required"}
         source_push_status = str(private_repo_result.get("status") or "")
+        pushed_commit_sha = ""
         if source_push_status in {"pushed", "already_applied", "private_source_pushed"}:
             pushed_commit_sha = str(private_repo_result.get("git_commit_sha") or "")
             activation_artifact, manifest_wait_status = await wait_for_current_manifest_git_sha(
@@ -2262,7 +3261,29 @@ class ResearchLabPromotionController:
                     "private_source_status": private_repo_result,
                     "manifest_wait_status": manifest_wait_status,
                 }
-            activation_manifest_uri = activation_artifact.manifest_uri
+        source_was_pushed = source_push_status in {
+            "pushed",
+            "already_applied",
+            "private_source_pushed",
+        }
+        admitted = await _preflight_private_model_activation(
+            self.config,
+            activation_artifact,
+            pointer_uri=(
+                self.config.private_model_manifest_uri
+                if source_was_pushed
+                else activation_artifact.manifest_uri
+            ),
+            mode=(
+                PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD
+                if source_was_pushed
+                else PRIVATE_MODEL_ACTIVATION_MODE_IMMUTABLE_CANDIDATE
+            ),
+            expected_branch_sha=(
+                pushed_commit_sha if source_was_pushed else ""
+            ),
+        )
+        activation_artifact = admitted.artifact
         benchmark_bridge = await self._create_promoted_candidate_benchmark_bridge(
             candidate=candidate,
             score_bundle_row=score_bundle_row,
@@ -2277,59 +3298,49 @@ class ResearchLabPromotionController:
             if isinstance(benchmark_bridge, Mapping)
             else ""
         ) or None
-        # Bug #3 design note: the one-active DB guard (scripts/60) enforces at
-        # most one version whose latest event is 'active', so the order here
-        # must stay supersede -> create (create-first would conflict with the
-        # still-active previous champion). The two writes are adjacent (nothing
-        # slow runs between them); a create failure re-activates the previous
-        # champion below, and a process kill between the writes is repaired by
-        # reconcile_active_private_model_lineage (re-activate newest
-        # superseded) instead of the old silent bootstrap rollback.
-        if active.version_row:
-            await create_private_model_version_event(
-                private_model_version_id=str(active.version_row["private_model_version_id"]),
-                event_type="superseded",
-                version_status="superseded",
-                reason="superseded_by_research_lab_image_build_promotion",
-                event_doc={"source_candidate_id": str(candidate["candidate_id"])},
-            )
-        try:
-            version_row, _version_event = await create_private_model_version(
-                artifact_manifest=activation_artifact.to_dict(),
-                manifest_uri=activation_manifest_uri,
-                source_candidate_id=str(candidate["candidate_id"]),
-                source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
-                source_benchmark_bundle_id=source_benchmark_bundle_id,
-                redacted_version_doc=_private_model_version_doc(
-                    source="gateway_code_edit_image_build_repo_head_manifest",
-                    candidate_source_diff_hash=candidate.get("candidate_source_diff_hash"),
-                    scored_candidate_model_artifact_hash=new_artifact.model_artifact_hash,
-                    scored_candidate_manifest_hash=new_artifact.manifest_hash,
-                    private_source_status=private_repo_result,
-                    manifest_wait_status=manifest_wait_status,
-                    source_benchmark_bundle_id=source_benchmark_bundle_id,
-                    artifact=activation_artifact,
+        activation = await _activate_private_model_generation(
+            self.config,
+            admitted,
+            expected_active_row=active.version_row,
+            source_candidate_id=str(candidate["candidate_id"]),
+            source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
+            source_benchmark_bundle_id=source_benchmark_bundle_id,
+            redacted_version_doc=_private_model_version_doc(
+                source="gateway_code_edit_image_build_repo_head_manifest",
+                candidate_source_diff_hash=candidate.get(
+                    "candidate_source_diff_hash"
                 ),
-                version_status="active",
-                reason="research_lab_image_build_candidate_repo_head_manifest_promoted",
-            )
-        except Exception:
-            if active.version_row:
-                try:
-                    await create_private_model_version_event(
-                        private_model_version_id=str(active.version_row["private_model_version_id"]),
-                        event_type="active",
-                        version_status="active",
-                        reason="promotion_create_failed_reactivate_previous_champion",
-                        event_doc={"source_candidate_id": str(candidate["candidate_id"])},
-                    )
-                except Exception:
-                    logger.exception(
-                        "research_lab_promotion_previous_champion_reactivate_failed: version=%s "
-                        "(zero active versions until reconcile-active-lineage runs)",
-                        _short_ref(active.version_row.get("private_model_version_id")),
-                    )
-            raise
+                scored_candidate_model_artifact_hash=(
+                    new_artifact.model_artifact_hash
+                ),
+                scored_candidate_manifest_hash=new_artifact.manifest_hash,
+                private_source_status=private_repo_result,
+                manifest_wait_status=manifest_wait_status,
+                source_benchmark_bundle_id=source_benchmark_bundle_id,
+                artifact=activation_artifact,
+            ),
+            activation_reason=(
+                "research_lab_image_build_candidate_repo_head_manifest_promoted"
+            ),
+            activation_event_doc={
+                "source_candidate_id": str(candidate["candidate_id"]),
+                "source_score_bundle_id": str(
+                    score_bundle_row["score_bundle_id"]
+                ),
+                "source_benchmark_bundle_id": source_benchmark_bundle_id,
+            },
+            supersede_reason=(
+                "superseded_by_research_lab_image_build_promotion"
+            ),
+            supersede_event_doc={
+                "source_candidate_id": str(candidate["candidate_id"]),
+                "source_score_bundle_id": str(
+                    score_bundle_row["score_bundle_id"]
+                ),
+            },
+        )
+        activation_artifact = activation.admission.artifact
+        version_row = activation.version_row
         await create_candidate_promotion_event(
             candidate_id=str(candidate["candidate_id"]),
             source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),

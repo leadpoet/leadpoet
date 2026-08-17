@@ -241,7 +241,7 @@ def test_oldest_newest_oldest_pointer_transition_remains_exact_and_rollback_safe
         assert result["verified"] is True
 
 
-def test_reviewed_contract_cannot_be_paired_with_other_version_fixtures() -> None:
+def test_known_contract_with_other_fixtures_requires_semantic_admission() -> None:
     snapshots = reviewed_consumer_snapshots()
     v7 = next(item for item in snapshots if item.endswith("v7"))
     v8 = next(item for item in snapshots if item.endswith("v8"))
@@ -254,37 +254,55 @@ def test_reviewed_contract_cannot_be_paired_with_other_version_fixtures() -> Non
     s3 = FakeS3()
     kms = FakeKms()
 
-    with pytest.raises(
-        PrivateModelRuntimeError,
-        match="parity fixtures differ",
-    ):
-        verify_private_artifact_manifest_signature(
-            manifest,
-            s3_client=s3,
-            kms_client=kms,
-        )
+    result = verify_private_artifact_manifest_signature(
+        manifest,
+        s3_client=s3,
+        kms_client=kms,
+    )
 
-    assert s3.calls == []
-    assert kms.calls == []
+    assert result["verified"] is True
+    assert result["consumer_contract_binding_mode"] == "semantic_v1_required"
+    assert len(s3.calls) == 1
+    assert len(kms.calls) == 1
 
 
-@pytest.mark.parametrize(
-    "contract_id",
-    tuple(sorted(reviewed_consumer_snapshots())),
-)
-def test_local_manifest_builder_derives_exact_source_pair(
+def test_local_manifest_builder_derives_semantic_source_pair(
     tmp_path: Path,
-    contract_id: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = tmp_path / contract_id
-    source.mkdir()
-    install_reviewed_consumer_snapshot(source, contract_id=contract_id)
+    import research_lab.sourcing_model_contract_check as compatibility
+    from tests.test_sourcing_model_semantic_compatibility_v1 import (
+        _install_future_tree,
+    )
 
-    manifest = _build_manifest_for_source(source)
-    expected_contract, expected_fixtures = _consumer_manifest_pair(contract_id)
+    source = tmp_path / "semantic-v1"
+    _install_future_tree(source, monkeypatch)
 
-    assert manifest["compatibility_contract"] == expected_contract
-    assert manifest["consumer_parity_fixtures"] == expected_fixtures
+    manifest = build_local_private_artifact_manifest(
+        source_path=source,
+        git_commit_sha="a" * 40,
+        image_digest=(
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/private@sha256:"
+            + "b" * 64
+        ),
+        manifest_uri="s3://private/manifests/model.json",
+        signature_ref="s3://private/manifests/model.sig.b64",
+        component_registry_version="1",
+        scoring_adapter_version="1",
+    )
+    contract_path = source / "sourcing_model/consumer_contract.json"
+    parity_path = source / "sourcing_model/consumer_parity_fixtures.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+
+    assert manifest["compatibility_contract"] == {
+        "contract_id": contract["contract_id"],
+        "path": contract["canonical_path"],
+        "sha256": compatibility._snapshot_sha256(contract_path),
+    }
+    assert manifest["consumer_parity_fixtures"] == {
+        "path": contract["parity_fixture_path"],
+        "sha256": compatibility._snapshot_sha256(parity_path),
+    }
 
 
 def test_local_manifest_builder_rejects_hybrid_source_pair(tmp_path: Path) -> None:
@@ -370,29 +388,6 @@ def test_manifest_payload_must_match_the_signed_hash() -> None:
     with pytest.raises(
         PrivateModelRuntimeError,
         match="manifest hash does not match its payload",
-    ):
-        verify_private_artifact_manifest_signature(
-            manifest,
-            s3_client=s3,
-            kms_client=kms,
-        )
-
-    assert s3.calls == []
-    assert kms.calls == []
-
-
-def test_manifest_rejects_nonidentical_contract_before_kms() -> None:
-    manifest = artifact_mapping()
-    manifest["compatibility_contract"]["sha256"] = "sha256:" + "0" * 64
-    payload = dict(manifest)
-    payload.pop("manifest_hash")
-    manifest["manifest_hash"] = sha256_json(payload)
-    s3 = FakeS3()
-    kms = FakeKms()
-
-    with pytest.raises(
-        PrivateModelRuntimeError,
-        match="compatibility contract differs",
     ):
         verify_private_artifact_manifest_signature(
             manifest,

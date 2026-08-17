@@ -33,6 +33,7 @@ from gateway.tee.source_add_runtime_v2 import (
 )
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
 from research_lab.eval import (
+    compute_private_source_tree_hash,
     PrivateModelRuntimeError,
     PrivateModelArtifactManifest,
     ensure_private_model_outputs,
@@ -40,7 +41,6 @@ from research_lab.eval import (
 )
 from research_lab.eval.private_runtime import (
     _DOCKER_ADAPTER_BOOTSTRAP,
-    _DOCKER_METADATA_BOOTSTRAP,
     _raise_on_empty_provider_error,
     SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS,
     canonicalize_private_model_icp,
@@ -48,6 +48,7 @@ from research_lab.eval.private_runtime import (
     parse_incontainer_trace_lines,
     parse_sourcing_runtime_lines,
     strip_incontainer_trace_lines,
+    validate_sourcing_adapter_metadata,
     validate_sourcing_runtime_receipt,
 )
 from research_lab.eval.provider_evidence_cache import (
@@ -61,6 +62,11 @@ from research_lab.eval.snapshot_store import (
     SnapshotMiss,
     container_replay_env,
     dev_replay_bootstrap,
+)
+from research_lab.sourcing_model_contract_check import (
+    SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+    semantic_compatibility_policy_identity_v1,
+    source_tree_compatibility_admission_v1,
 )
 
 
@@ -79,14 +85,24 @@ DEFAULT_REQUIREMENTS_LOCK_PATH = Path(
 )
 MAX_MODEL_INPUT_BYTES = 16 * 1024 * 1024
 MODEL_SANDBOX_TIMEOUT_SECONDS = 900
+MODEL_SANDBOX_METADATA_TIMEOUT_SECONDS = 120
 MODEL_SANDBOX_TIMEOUT_GRACE_SECONDS = 3
 MAX_MODEL_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_MODEL_METADATA_OUTPUT_BYTES = 1024 * 1024
+MAX_MODEL_METADATA_DIAGNOSTIC_BYTES = 1024 * 1024
+MODEL_SANDBOX_PIPE_CHUNK_BYTES = 64 * 1024
 MAX_PROVIDER_EVIDENCE_CACHE_BYTES = 32 * 1024 * 1024
 MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT = "/app/gateway/_attested_runtime"
 MODEL_SANDBOX_VISIBLE_ROOT = "/leadpoet-model-sandboxes"
 MODEL_SANDBOX_SOURCE_DIRECTORY = "source"
 MODEL_SANDBOX_BROKER_DIRECTORY = "broker"
 MODEL_SANDBOX_SELF_TEST_SCHEMA_VERSION = "leadpoet.model_sandbox_self_test.v2"
+CONSUMER_RUNTIME_PROBE_SCHEMA_VERSION = (
+    "leadpoet.sourcing-model-consumer-runtime-probe.v1"
+)
+CONSUMER_RUNTIME_OBSERVATION_PLAN_SCHEMA_V1 = (
+    "leadpoet.consumer-runtime-observation-plan.v1"
+)
 MODEL_SANDBOX_SELF_TEST_TIMEOUT_SECONDS = 60
 MODEL_SANDBOX_CGROUP_ROOT = Path("/sys/fs/cgroup")
 MODEL_SANDBOX_RUNTIME_CGROUP_NAME = "leadpoet-runtime"
@@ -175,8 +191,7 @@ def _runsc_run_command(
         "--rootless=false",
         "--network=none",
     ]
-    if host_uds:
-        command.append("--host-uds=open")
+    command.append("--host-uds=open" if host_uds else "--host-uds=none")
     return [
         *command,
         "--platform=ptrace",
@@ -186,6 +201,36 @@ def _runsc_run_command(
     ]
 
 
+def _force_delete_runsc_sandbox(
+    *,
+    process_runner: Callable[..., Any],
+    config: "RunscSandboxConfigV2",
+    runsc_root: Path,
+    sandbox_id: str,
+    failure_event: str,
+) -> None:
+    try:
+        process_runner(
+            [
+                str(config.runsc_path),
+                "--root=%s" % runsc_root,
+                "delete",
+                "--force",
+                sandbox_id,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+            check=False,
+        )
+    except Exception as exc:
+        logger.warning(
+            "%s sandbox_id=%s error_type=%s",
+            failure_event,
+            sandbox_id,
+            type(exc).__name__,
+        )
 def _write_cgroup_value(path: Path, value: str) -> None:
     with path.open("w", encoding="ascii") as handle:
         handle.write(value)
@@ -506,6 +551,477 @@ import research_lab.eval.snapshot_store as _lp_trusted_snapshot_store
 """
 
 
+def _runtime_invariant_policy_v1(
+    compatibility_receipt: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    receipt = dict(compatibility_receipt)
+    policy, policy_hash = semantic_compatibility_policy_identity_v1()
+    if (
+        receipt.get("consumer_api_version") != policy["consumer_api_version"]
+        or receipt.get("decision") != SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION
+        or receipt.get("policy_hash") != policy_hash
+    ):
+        raise ModelSandboxV2Error(
+            "consumer runtime receipt differs from compatibility policy"
+        )
+    if receipt.get("admission_mode") == "legacy_exact":
+        return None
+    if receipt.get("admission_mode") != "semantic_v1":
+        raise ModelSandboxV2Error("consumer runtime admission mode is invalid")
+    return dict(policy.get("runtime_invariants") or {})
+
+
+def _runtime_probe_expected_invariants(
+    invariant_policy: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if invariant_policy is None:
+        return {"profile": "legacy_exact"}
+    policy = dict(invariant_policy)
+    company = dict(policy.get("company_fit") or {})
+    capabilities = dict(policy.get("runtime_capabilities") or {})
+    names = sorted(str(item) for item in capabilities.get("names") or ())
+    capability_metadata = {
+        "capability_contract_version": capabilities.get("contract_version"),
+        "capabilities": names,
+        "host_registered": [],
+    }
+    registered_metadata = {
+        **capability_metadata,
+        "host_registered": names,
+    }
+    sentinel = dict(capabilities.get("sentinel") or {})
+    return {
+        "profile": "semantic_v1",
+        "schema_version": policy.get("schema_version"),
+        "adapter_dependencies": {
+            "build_query_returns_string": True,
+            "first_party_industry_run_is_context_manager": True,
+            "flow_mode_is_supported": True,
+        },
+        "company_fit": {
+            "identity": dict(company.get("identity") or {}),
+            "strict_boolean": {
+                str(case["case_id"]): case.get("expected")
+                for case in company.get("strict_boolean_cases") or ()
+            },
+            "reconcile": {
+                str(case["case_id"]): case.get("expected")
+                for case in company.get("reconcile_cases") or ()
+            },
+            "aggregate": {
+                str(case["case_id"]): case.get("expected")
+                for case in company.get("aggregate_cases") or ()
+            },
+        },
+        "runtime_capabilities": {
+            "initial_metadata": capability_metadata,
+            "unknown_registration_rejected": True,
+            "noncallable_registration_rejected": True,
+            "registered_metadata": registered_metadata,
+            "dispatch": {
+                "deadline": sentinel.get("deadline"),
+                "emit_events": [dict(sentinel.get("emit_event") or {})],
+                "http_fetch_result_is_sentinel": True,
+                "http_fetch_calls": [
+                    {
+                        "url": sentinel.get("http_url"),
+                        "timeout": sentinel.get("http_timeout"),
+                        "max_bytes": sentinel.get("http_max_bytes"),
+                        "accept": sentinel.get("http_accept"),
+                    }
+                ],
+                "resolve_calls": [sentinel.get("resolve_input")],
+                "resolve_result": dict(
+                    capabilities.get("host_resolution") or {}
+                ).get("TIMEOUT"),
+                "probe_calls": [sentinel.get("probe_input")],
+                "probe_result": dict(
+                    capabilities.get("origin_reachability") or {}
+                ).get("UNKNOWN"),
+            },
+            "after_reset_metadata": capability_metadata,
+            "defaults": {
+                "deadline_is_none": True,
+                "emit_succeeded": True,
+                "http_fetch_identity": True,
+                "resolve_host_identity": True,
+                "probe_origin_result": dict(
+                    capabilities.get("origin_reachability") or {}
+                ).get("UNKNOWN"),
+                "may_attempt_unknown": True,
+                "timeout_is_terminal": False,
+                "nxdomain_is_terminal": True,
+            },
+        },
+    }
+
+
+def _runtime_probe_observation_plan_v1(
+    compatibility_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": CONSUMER_RUNTIME_OBSERVATION_PLAN_SCHEMA_V1,
+        "runtime_invariants": _runtime_invariant_policy_v1(
+            compatibility_receipt
+        ),
+    }
+
+
+def _consumer_runtime_probe_v1(
+    *,
+    compatibility_receipt: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    expected_module_name: str,
+    expected_callable_name: str,
+    invariants: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": CONSUMER_RUNTIME_PROBE_SCHEMA_VERSION,
+        "compatibility_receipt": dict(compatibility_receipt),
+        "entrypoint": {
+            "module": expected_module_name,
+            "callable": expected_callable_name,
+        },
+        "metadata_identity": {
+            **{
+                name: metadata.get(name)
+                for name in (
+                    "adapter_version",
+                    "capability_contract_version",
+                    "component_registry_version",
+                    "scoring_adapter_version",
+                )
+            },
+            "runtime_capabilities": sorted(
+                str(item) for item in metadata.get("runtime_capabilities") or ()
+            ),
+        },
+        "invariants": dict(invariants),
+    }
+
+
+def validate_consumer_runtime_probe_v1(
+    value: Mapping[str, Any],
+    *,
+    compatibility_receipt: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    expected_source_tree_hash: str,
+    expected_manifest_hash: str,
+    expected_image_digest: str,
+    expected_module_name: str,
+    expected_callable_name: str,
+) -> dict[str, Any]:
+    document = dict(value)
+    receipt = dict(compatibility_receipt)
+    invariant_policy = _runtime_invariant_policy_v1(receipt)
+    expected = _consumer_runtime_probe_v1(
+        compatibility_receipt=receipt,
+        metadata=metadata,
+        expected_module_name=expected_module_name,
+        expected_callable_name=expected_callable_name,
+        invariants=_runtime_probe_expected_invariants(invariant_policy),
+    )
+    if (
+        document != expected
+        or receipt.get("source_tree_hash") != expected_source_tree_hash
+        or receipt.get("manifest_hash") != expected_manifest_hash
+        or receipt.get("image_digest") != expected_image_digest
+    ):
+        raise ModelSandboxV2Error(
+            "consumer runtime probe differs from host admission"
+        )
+    return document
+
+
+def _build_consumer_runtime_probe_from_observation_v1(
+    observation: Mapping[str, Any],
+    *,
+    compatibility_receipt: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    expected_source_tree_hash: str,
+    expected_manifest_hash: str,
+    expected_image_digest: str,
+    expected_module_name: str,
+    expected_callable_name: str,
+) -> dict[str, Any]:
+    raw = dict(observation)
+    if set(raw) != {"invariants"} or not isinstance(
+        raw.get("invariants"), Mapping
+    ):
+        raise ModelSandboxV2Error(
+            "consumer runtime observation fields are invalid"
+        )
+    metadata_document = dict(metadata)
+    probe = _consumer_runtime_probe_v1(
+        compatibility_receipt=compatibility_receipt,
+        metadata=metadata_document,
+        expected_module_name=expected_module_name,
+        expected_callable_name=expected_callable_name,
+        invariants=raw["invariants"],
+    )
+    return validate_consumer_runtime_probe_v1(
+        probe,
+        compatibility_receipt=compatibility_receipt,
+        metadata=metadata_document,
+        expected_source_tree_hash=expected_source_tree_hash,
+        expected_manifest_hash=expected_manifest_hash,
+        expected_image_digest=expected_image_digest,
+        expected_module_name=expected_module_name,
+        expected_callable_name=expected_callable_name,
+    )
+
+
+_MEASURED_METADATA_BOOTSTRAP = r"""
+import importlib as _lp_importlib
+import json as _lp_json
+import os as _lp_os
+import sys as _lp_sys
+from pathlib import Path as _lp_Path
+
+_lp_payload = _lp_json.load(_lp_sys.stdin)
+_lp_plan = _lp_payload.get("observation_plan")
+if (
+    not isinstance(_lp_plan, dict)
+    or set(_lp_plan) != {"schema_version", "runtime_invariants"}
+    or _lp_plan.get("schema_version")
+    != "leadpoet.consumer-runtime-observation-plan.v1"
+):
+    raise RuntimeError("metadata observation plan is invalid")
+_lp_blocked_imports = (
+    "__main__",
+    "gateway.research_lab",
+    "gateway.tee",
+    "research_lab.sourcing_model_contract_check",
+)
+_lp_denied_events = {
+    "ctypes.dlopen", "os.chdir", "os.chmod", "os.chown", "os.link",
+    "os.mkdir", "os.remove", "os.rename", "os.rmdir", "os.symlink",
+    "os.system", "os.truncate", "socket.__new__", "subprocess.Popen",
+}
+def _lp_audit(event, args):
+    if event in _lp_denied_events:
+        raise RuntimeError("metadata observer operation is denied")
+    if event == "open":
+        mode = args[1] if len(args) > 1 else "r"
+        flags = args[2] if len(args) > 2 else 0
+        if (
+            isinstance(mode, str)
+            and any(item in mode for item in ("+", "a", "w", "x"))
+        ) or (isinstance(flags, int) and flags & 0o3301):
+            raise RuntimeError("metadata observer write is denied")
+    if event == "import" and args:
+        name = str(args[0] or "")
+        if any(
+            name == item or name.startswith(item + ".")
+            for item in _lp_blocked_imports
+        ):
+            raise RuntimeError("metadata observer import is denied")
+_lp_sys.addaudithook(_lp_audit)
+
+_lp_entry_module, _lp_callable_name = _lp_sys.argv[1:3]
+_lp_source_root = _lp_Path(
+    _lp_os.environ["LEADPOET_MODEL_SOURCE_ROOT"]
+).resolve(strict=True)
+if not _lp_source_root.is_dir():
+    raise RuntimeError("metadata source root is invalid")
+_lp_sys.path.insert(0, str(_lp_source_root))
+_lp_metadata = getattr(
+    _lp_importlib.import_module(_lp_entry_module), _lp_callable_name
+)()
+
+_lp_invariant_policy = _lp_plan["runtime_invariants"]
+if _lp_invariant_policy is None:
+    _lp_invariants = {"profile": "legacy_exact"}
+else:
+    _lp_company_policy = dict(_lp_invariant_policy.get("company_fit") or {})
+    _lp_capability_policy = dict(
+        _lp_invariant_policy.get("runtime_capabilities") or {}
+    )
+    _lp_company_fit = _lp_importlib.import_module(
+        "qualification.scoring.company_fit_decision"
+    )
+    _lp_discovery = _lp_importlib.import_module("sourcing_model.discovery")
+    _lp_orchestrator = _lp_importlib.import_module("sourcing_model.orchestrator")
+    _lp_validation = _lp_importlib.import_module("sourcing_model.validation")
+    _lp_capabilities = _lp_importlib.import_module(
+        "sourcing_model.runtime_capabilities"
+    )
+    def _lp_capability_metadata():
+        value = dict(_lp_capabilities.capability_metadata())
+        return {
+            "capability_contract_version": value.get(
+                "capability_contract_version"
+            ),
+            "capabilities": sorted(
+                str(item) for item in value.get("capabilities") or ()
+            ),
+            "host_registered": sorted(
+                str(item) for item in value.get("host_registered") or ()
+            ),
+        }
+    _lp_company = {
+        "identity": dict(_lp_company_fit.company_fit_decision_contract_identity()),
+        "strict_boolean": {
+            str(case["case_id"]): _lp_company_fit.strict_company_fit_boolean(
+                case.get("input")
+            )
+            for case in _lp_company_policy.get("strict_boolean_cases") or ()
+        },
+        "reconcile": {
+            str(case["case_id"]): _lp_company_fit.reconcile_company_fit_decisions(
+                list(case.get("decisions") or ())
+            )
+            for case in _lp_company_policy.get("reconcile_cases") or ()
+        },
+        "aggregate": {
+            str(case["case_id"]): _lp_company_fit.aggregate_company_fit_decisions(
+                dict(case.get("decisions") or {}),
+                stage_required=bool(case.get("stage_required")),
+            )
+            for case in _lp_company_policy.get("aggregate_cases") or ()
+        },
+    }
+    _lp_dependency_policy = dict(
+        _lp_invariant_policy.get("adapter_dependencies") or {}
+    )
+    _lp_build_query_probe = dict(
+        _lp_dependency_policy.get("build_query") or {}
+    )
+    _lp_industry_run = _lp_validation.first_party_industry_run()
+    _lp_flow_mode = _lp_orchestrator.flow_mode()
+    _lp_build_query = _lp_discovery.build_query(
+        dict(_lp_build_query_probe.get("icp") or {}),
+        str(_lp_build_query_probe.get("source") or ""),
+    )
+    _lp_adapter_dependencies = {
+        "build_query_returns_string": isinstance(_lp_build_query, str),
+        "first_party_industry_run_is_context_manager": (
+            callable(getattr(_lp_industry_run, "__enter__", None))
+            and callable(getattr(_lp_industry_run, "__exit__", None))
+        ),
+        "flow_mode_is_supported": _lp_flow_mode in set(
+            str(item) for item in _lp_dependency_policy.get("flow_modes") or ()
+        ),
+    }
+    _lp_sentinel = dict(_lp_capability_policy.get("sentinel") or {})
+    _lp_http_token = object()
+    _lp_emit_events = []
+    _lp_http_calls = []
+    _lp_resolve_calls = []
+    _lp_probe_calls = []
+    def _lp_http_fetch(url, **kwargs):
+        _lp_http_calls.append({"url": url, **dict(kwargs)})
+        return _lp_http_token
+    def _lp_resolve(name):
+        _lp_resolve_calls.append(name)
+        return _lp_capabilities.HostResolution.TIMEOUT
+    def _lp_probe(host):
+        _lp_probe_calls.append(host)
+        return _lp_capabilities.OriginReachability.UNKNOWN
+    _lp_initial_metadata = _lp_capability_metadata()
+    _lp_unknown_rejected = False
+    _lp_noncallable_rejected = False
+    _lp_capabilities.reset()
+    try:
+        try:
+            _lp_capabilities.register("__consumer_probe_unknown__", lambda: None)
+        except KeyError:
+            _lp_unknown_rejected = True
+        try:
+            _lp_capabilities.register("emit", None)
+        except TypeError:
+            _lp_noncallable_rejected = True
+        _lp_capabilities.register(
+            "deadline", lambda: _lp_sentinel.get("deadline")
+        )
+        _lp_capabilities.register(
+            "emit", lambda event: _lp_emit_events.append(dict(event))
+        )
+        _lp_capabilities.register("http_fetch", _lp_http_fetch)
+        _lp_capabilities.register("resolve_host", _lp_resolve)
+        _lp_capabilities.register("probe_origin", _lp_probe)
+        _lp_registered_metadata = _lp_capability_metadata()
+        _lp_deadline = _lp_capabilities.deadline()
+        _lp_capabilities.emit(dict(_lp_sentinel.get("emit_event") or {}))
+        _lp_http_result = _lp_capabilities.http_fetch(
+            str(_lp_sentinel.get("http_url") or ""),
+            timeout=_lp_sentinel.get("http_timeout"),
+            max_bytes=_lp_sentinel.get("http_max_bytes"),
+            accept=_lp_sentinel.get("http_accept"),
+        )
+        _lp_resolve_result = _lp_capabilities.resolve_host(
+            str(_lp_sentinel.get("resolve_input") or "")
+        )
+        _lp_probe_result = _lp_capabilities.probe_origin(
+            str(_lp_sentinel.get("probe_input") or "")
+        )
+    finally:
+        _lp_capabilities.reset()
+    _lp_after_reset_metadata = _lp_capability_metadata()
+    _lp_capabilities.default_emit({"consumer_probe": True})
+    _lp_default_probe = _lp_capabilities.default_probe_origin("invalid.example")
+    _lp_invariants = {
+        "profile": "semantic_v1",
+        "schema_version": _lp_invariant_policy.get("schema_version"),
+        "adapter_dependencies": _lp_adapter_dependencies,
+        "company_fit": _lp_company,
+        "runtime_capabilities": {
+            "initial_metadata": _lp_initial_metadata,
+            "unknown_registration_rejected": _lp_unknown_rejected,
+            "noncallable_registration_rejected": _lp_noncallable_rejected,
+            "registered_metadata": _lp_registered_metadata,
+            "dispatch": {
+                "deadline": _lp_deadline,
+                "emit_events": _lp_emit_events,
+                "http_fetch_result_is_sentinel": (
+                    _lp_http_result is _lp_http_token
+                ),
+                "http_fetch_calls": _lp_http_calls,
+                "resolve_calls": _lp_resolve_calls,
+                "resolve_result": getattr(
+                    _lp_resolve_result, "value", _lp_resolve_result
+                ),
+                "probe_calls": _lp_probe_calls,
+                "probe_result": getattr(
+                    _lp_probe_result, "value", _lp_probe_result
+                ),
+            },
+            "after_reset_metadata": _lp_after_reset_metadata,
+            "defaults": {
+                "deadline_is_none": _lp_capabilities.default_deadline() is None,
+                "emit_succeeded": True,
+                "http_fetch_identity": (
+                    _lp_capabilities.capability("http_fetch")
+                    is _lp_capabilities.default_http_fetch
+                ),
+                "resolve_host_identity": (
+                    _lp_capabilities.capability("resolve_host")
+                    is _lp_capabilities.default_resolve_host
+                ),
+                "probe_origin_result": getattr(
+                    _lp_default_probe, "value", _lp_default_probe
+                ),
+                "may_attempt_unknown": _lp_capabilities.may_attempt(
+                    _lp_capabilities.OriginReachability.UNKNOWN
+                ),
+                "timeout_is_terminal": _lp_capabilities.is_terminally_unresolvable(
+                    _lp_capabilities.HostResolution.TIMEOUT
+                ),
+                "nxdomain_is_terminal": _lp_capabilities.is_terminally_unresolvable(
+                    _lp_capabilities.HostResolution.NXDOMAIN
+                ),
+            },
+        },
+    }
+
+_lp_sys.stdout.write(_lp_json.dumps(
+    {"metadata": _lp_metadata, "runtime_observation": {"invariants": _lp_invariants}},
+    sort_keys=True,
+    separators=(",", ":"),
+))
+"""
+
+
 def provider_evidence_tape_input_root(cache_ref: str, cache_hash: str) -> str:
     normalized_ref = str(cache_ref or "").lower()
     normalized_hash = str(cache_hash or "").lower()
@@ -707,6 +1223,8 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
         raise ModelSandboxV2Error(
             "model sandbox environment contains parent-supplied credentials"
         )
+    if value.get("operation") == "metadata" and normalized_environment:
+        raise ModelSandboxV2Error("model metadata environment must be empty")
     evidence_cache = value.get("provider_evidence_cache")
     if not isinstance(evidence_cache, Mapping):
         raise ModelSandboxV2Error("provider evidence cache must be an object")
@@ -721,7 +1239,12 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
         raise ModelSandboxV2Error("provider evidence cache is invalid")
     cache_ref = str(value.get("provider_evidence_cache_ref") or "").lower()
     evidence_mode = str(value.get("provider_evidence_mode") or "").strip().lower()
-    if evidence_mode not in {"live", "cache_live", "record", "frozen"}:
+    if value.get("operation") == "metadata":
+        if evidence_mode:
+            raise ModelSandboxV2Error(
+                "model metadata provider evidence mode must be empty"
+            )
+    elif evidence_mode not in {"live", "cache_live", "record", "frozen"}:
         raise ModelSandboxV2Error("provider evidence mode is invalid")
     if evidence_mode == "frozen" and not normalized_evidence_cache:
         if not value.get("provider_snapshot_bundle"):
@@ -755,14 +1278,19 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
         )
         if cache_ref != expected_cache_ref:
             raise ModelSandboxV2Error("provider evidence cache ref differs from ICP")
-    elif cache_ref:
-        raise ModelSandboxV2Error("metadata request has provider evidence cache ref")
+    elif (
+        value.get("input") != {}
+        or cache_ref
+        or normalized_evidence_cache
+        or normalized_snapshot_bundle
+    ):
+        raise ModelSandboxV2Error(
+            "metadata request has input, provider evidence, or snapshot state"
+        )
     encoded_input = canonical_json(value.get("input")).encode("utf-8")
     if len(encoded_input) > MAX_MODEL_INPUT_BYTES:
         raise ModelSandboxV2Error("model sandbox input exceeds limit")
     scope = str(value.get("provider_cost_scope") or "").lower()
-    if not _HASH_RE.fullmatch(scope):
-        raise ModelSandboxV2Error("provider cost scope is invalid")
     cost_cap_microusd = value.get("provider_cost_cap_microusd")
     provider_call_cap = value.get("provider_call_cap")
     if (
@@ -776,7 +1304,14 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
         or provider_call_cap > 32
     ):
         raise ModelSandboxV2Error("provider tree evaluation caps are invalid")
-    if evidence_mode in {"record", "frozen"}:
+    if value.get("operation") == "metadata":
+        if scope or cost_cap_microusd or provider_call_cap:
+            raise ModelSandboxV2Error(
+                "model metadata provider cost state must be empty"
+            )
+    elif not _HASH_RE.fullmatch(scope):
+        raise ModelSandboxV2Error("provider cost scope is invalid")
+    elif evidence_mode in {"record", "frozen"}:
         if value.get("model_kind") == "candidate":
             if cost_cap_microusd <= 0 or provider_call_cap <= 0:
                 raise ModelSandboxV2Error(
@@ -788,54 +1323,66 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
             )
     elif cost_cap_microusd or provider_call_cap:
         raise ModelSandboxV2Error("provider tree evaluation caps are out of scope")
-    try:
-        provider_runtime_catalog = validate_source_add_runtime_catalog_v2(
-            value.get("provider_runtime_catalog") or {}
-        )
-    except Exception as exc:
-        raise ModelSandboxV2Error(
-            "model sandbox provider runtime catalog is invalid"
-        ) from exc
     catalog_evidence = value.get("provider_catalog_evidence")
-    if not isinstance(catalog_evidence, Mapping) or set(catalog_evidence) != {
+    if value.get("operation") == "metadata":
+        if value.get("provider_runtime_catalog") != {} or catalog_evidence != {}:
+            raise ModelSandboxV2Error(
+                "model metadata provider catalog state must be empty"
+            )
+        provider_runtime_catalog: dict[str, Any] = {}
+        normalized_catalog_evidence: dict[str, Any] = {}
+    else:
+        try:
+            provider_runtime_catalog = validate_source_add_runtime_catalog_v2(
+                value.get("provider_runtime_catalog") or {}
+            )
+        except Exception as exc:
+            raise ModelSandboxV2Error(
+                "model sandbox provider runtime catalog is invalid"
+            ) from exc
+        if not isinstance(catalog_evidence, Mapping) or set(catalog_evidence) != {
         "result",
         "root_receipt_hash",
-    }:
-        raise ModelSandboxV2Error(
-            "model sandbox provider catalog evidence is invalid"
+        }:
+            raise ModelSandboxV2Error(
+                "model sandbox provider catalog evidence is invalid"
+            )
+        catalog_result = catalog_evidence.get("result")
+        root_receipt_hash = str(catalog_evidence.get("root_receipt_hash") or "")
+        provisioned_sources = (
+            catalog_result.get("provisioned_sources")
+            if isinstance(catalog_result, Mapping)
+            else None
         )
-    catalog_result = catalog_evidence.get("result")
-    root_receipt_hash = str(catalog_evidence.get("root_receipt_hash") or "")
-    provisioned_sources = (
-        catalog_result.get("provisioned_sources")
-        if isinstance(catalog_result, Mapping)
-        else None
-    )
-    private_registry_rows = (
-        catalog_result.get("private_registry_rows")
-        if isinstance(catalog_result, Mapping)
-        else None
-    )
-    if (
-        not isinstance(catalog_result, Mapping)
-        or not _HASH_RE.fullmatch(root_receipt_hash)
-        or catalog_result.get("schema_version")
-        != "leadpoet.source_add_catalog_snapshot.v2"
-        or not isinstance(provisioned_sources, list)
-        or any(not isinstance(item, Mapping) for item in provisioned_sources)
-        or not isinstance(private_registry_rows, list)
-        or any(not isinstance(item, Mapping) for item in private_registry_rows)
-        or catalog_result.get("provisioned_sources_hash")
-        != sha256_json([dict(item) for item in provisioned_sources])
-        or catalog_result.get("private_registry_rows_hash")
-        != sha256_json([dict(item) for item in private_registry_rows])
-        or catalog_result.get("runtime_catalog_hash")
-        != provider_runtime_catalog["catalog_hash"]
-        or catalog_result.get("runtime_catalog") != provider_runtime_catalog
-    ):
-        raise ModelSandboxV2Error(
-            "model sandbox provider catalog commitment differs"
+        private_registry_rows = (
+            catalog_result.get("private_registry_rows")
+            if isinstance(catalog_result, Mapping)
+            else None
         )
+        if (
+            not isinstance(catalog_result, Mapping)
+            or not _HASH_RE.fullmatch(root_receipt_hash)
+            or catalog_result.get("schema_version")
+            != "leadpoet.source_add_catalog_snapshot.v2"
+            or not isinstance(provisioned_sources, list)
+            or any(not isinstance(item, Mapping) for item in provisioned_sources)
+            or not isinstance(private_registry_rows, list)
+            or any(not isinstance(item, Mapping) for item in private_registry_rows)
+            or catalog_result.get("provisioned_sources_hash")
+            != sha256_json([dict(item) for item in provisioned_sources])
+            or catalog_result.get("private_registry_rows_hash")
+            != sha256_json([dict(item) for item in private_registry_rows])
+            or catalog_result.get("runtime_catalog_hash")
+            != provider_runtime_catalog["catalog_hash"]
+            or catalog_result.get("runtime_catalog") != provider_runtime_catalog
+        ):
+            raise ModelSandboxV2Error(
+                "model sandbox provider catalog commitment differs"
+            )
+        normalized_catalog_evidence = {
+            "result": dict(catalog_result),
+            "root_receipt_hash": root_receipt_hash,
+        }
     return {
         **dict(value),
         "artifact": dict(value["artifact"]),
@@ -853,10 +1400,7 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
         "provider_cost_cap_microusd": cost_cap_microusd,
         "provider_call_cap": provider_call_cap,
         "provider_runtime_catalog": provider_runtime_catalog,
-        "provider_catalog_evidence": {
-            "result": dict(catalog_result),
-            "root_receipt_hash": root_receipt_hash,
-        },
+        "provider_catalog_evidence": normalized_catalog_evidence,
     }
 
 
@@ -1083,18 +1627,13 @@ def _oci_config(
             "source": "tmpfs",
             "options": ["nosuid", "nodev", "mode=1777", "size=1073741824"],
         },
+        {
+            "destination": "/run",
+            "type": "tmpfs",
+            "source": "tmpfs",
+            "options": ["nosuid", "nodev", "noexec", "mode=755", "size=1048576"],
+        },
     ]
-    if broker_root is not None:
-        # Hide ordinary runtime sockets. The only reachable broker lives under
-        # this job's unpredictable, rootfs-visible workspace.
-        mounts.append(
-            {
-                "destination": "/run",
-                "type": "tmpfs",
-                "source": "tmpfs",
-                "options": ["nosuid", "nodev", "noexec", "mode=755", "size=1048576"],
-            }
-        )
     linux = {
         "namespaces": [
             {"type": "pid"},
@@ -1214,6 +1753,273 @@ def _completed_process_runner(command: list[str], **kwargs: Any):
     return subprocess.run(command, **kwargs)
 
 
+@dataclass
+class _BoundedPipeCapture:
+    limit: int
+    chunks: list[bytes]
+    captured_bytes: int = 0
+
+    def append(self, chunk: bytes) -> bool:
+        remaining = max(0, self.limit - self.captured_bytes)
+        if remaining:
+            bounded = chunk[:remaining]
+            self.chunks.append(bounded)
+            self.captured_bytes += len(bounded)
+        return len(chunk) > remaining
+
+    def value(self) -> bytes:
+        return b"".join(self.chunks)
+
+
+def _drain_bounded_pipe(
+    stream: Any,
+    *,
+    capture: _BoundedPipeCapture,
+    overflow: Event,
+    io_failure: Event,
+) -> None:
+    try:
+        while True:
+            chunk = stream.read(MODEL_SANDBOX_PIPE_CHUNK_BYTES)
+            if not chunk:
+                break
+            raw = chunk.encode("utf-8") if isinstance(chunk, str) else bytes(chunk)
+            if capture.append(raw):
+                overflow.set()
+    except Exception:
+        io_failure.set()
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def _write_process_input(
+    stream: Any,
+    payload: bytes,
+    *,
+    io_failure: Event,
+) -> None:
+    try:
+        stream.write(payload)
+        stream.flush()
+    except BrokenPipeError:
+        pass
+    except Exception:
+        io_failure.set()
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def _stop_bounded_process(process: Any, *, grace_seconds: float) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired as exc:
+        raise ModelSandboxV2Error(
+            "model sandbox process could not be stopped"
+        ) from exc
+
+
+def _run_bounded_metadata_process(
+    command: list[str],
+    *,
+    input_payload: str,
+    timeout_seconds: float,
+    environment: Mapping[str, str],
+    process_factory: Callable[..., Any] = subprocess.Popen,
+    stdout_limit: int = MAX_MODEL_METADATA_OUTPUT_BYTES,
+    stderr_limit: int = MAX_MODEL_METADATA_DIAGNOSTIC_BYTES,
+    termination_grace_seconds: float = MODEL_SANDBOX_TIMEOUT_GRACE_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    """Run metadata while retaining at most the declared output byte caps."""
+
+    if (
+        not math.isfinite(float(timeout_seconds))
+        or float(timeout_seconds) <= 0
+        or stdout_limit <= 0
+        or stderr_limit <= 0
+        or termination_grace_seconds <= 0
+    ):
+        raise ModelSandboxV2Error("model sandbox process bounds are invalid")
+    process = process_factory(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+        env=dict(environment),
+    )
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        _stop_bounded_process(
+            process, grace_seconds=termination_grace_seconds
+        )
+        raise ModelSandboxV2Error("model sandbox process pipes are unavailable")
+
+    stdout_capture = _BoundedPipeCapture(stdout_limit, [])
+    stderr_capture = _BoundedPipeCapture(stderr_limit, [])
+    stdout_overflow = Event()
+    stderr_overflow = Event()
+    io_failure = Event()
+    stdout_thread = Thread(
+        target=_drain_bounded_pipe,
+        kwargs={
+            "stream": process.stdout,
+            "capture": stdout_capture,
+            "overflow": stdout_overflow,
+            "io_failure": io_failure,
+        },
+        daemon=True,
+        name="leadpoet-metadata-stdout",
+    )
+    stderr_thread = Thread(
+        target=_drain_bounded_pipe,
+        kwargs={
+            "stream": process.stderr,
+            "capture": stderr_capture,
+            "overflow": stderr_overflow,
+            "io_failure": io_failure,
+        },
+        daemon=True,
+        name="leadpoet-metadata-stderr",
+    )
+    input_thread = Thread(
+        target=_write_process_input,
+        args=(process.stdin, input_payload.encode("utf-8")),
+        kwargs={"io_failure": io_failure},
+        daemon=True,
+        name="leadpoet-metadata-stdin",
+    )
+    deadline = time.monotonic() + float(timeout_seconds)
+    monitor_wait = Event()
+    timed_out = False
+    stopped_early = False
+    threads = (stdout_thread, stderr_thread, input_thread)
+    started_threads: list[Thread] = []
+    execution_error: BaseException | None = None
+    stop_error: BaseException | None = None
+    try:
+        for thread in threads:
+            thread.start()
+            started_threads.append(thread)
+        while process.poll() is None:
+            if (
+                stdout_overflow.is_set()
+                or stderr_overflow.is_set()
+                or io_failure.is_set()
+            ):
+                stopped_early = True
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                stopped_early = True
+                break
+            monitor_wait.wait(min(0.02, remaining))
+    except BaseException as exc:
+        execution_error = exc
+        stopped_early = True
+    finally:
+        try:
+            if stopped_early:
+                _stop_bounded_process(
+                    process, grace_seconds=termination_grace_seconds
+                )
+            else:
+                process.wait()
+        except BaseException as exc:
+            stop_error = exc
+        for thread in started_threads:
+            thread.join(termination_grace_seconds)
+        live_threads = [thread for thread in started_threads if thread.is_alive()]
+        if live_threads:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            for thread in live_threads:
+                thread.join(termination_grace_seconds)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            try:
+                stream.close()
+            except Exception:
+                pass
+    if any(thread.is_alive() for thread in started_threads):
+        raise ModelSandboxV2Error(
+            "model sandbox process pipes did not close"
+        ) from (stop_error or execution_error)
+    if stop_error is not None:
+        raise stop_error from execution_error
+    if execution_error is not None:
+        raise execution_error
+
+    stdout_bytes = stdout_capture.value()
+    stderr_bytes = stderr_capture.value()
+    if stdout_overflow.is_set():
+        raise ModelSandboxV2Error("model sandbox output exceeds limit")
+    if stderr_overflow.is_set():
+        raise ModelSandboxV2Error(
+            "model sandbox diagnostic output exceeds limit stderr_prefix_hash=%s"
+            % sha256_bytes(stderr_bytes)
+        )
+    if io_failure.is_set():
+        raise ModelSandboxV2Error("model sandbox process pipe failed")
+    if timed_out:
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout_seconds,
+            output=stdout_bytes,
+            stderr=stderr_bytes,
+        )
+    try:
+        stdout = stdout_bytes.decode("utf-8")
+        stderr = stderr_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ModelSandboxV2Error(
+            "model sandbox process output is not valid UTF-8"
+        ) from exc
+    return subprocess.CompletedProcess(
+        command,
+        int(process.returncode),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _bounded_metadata_process_runner(command: list[str], **kwargs: Any):
+    if (
+        kwargs.get("text") is not True
+        or kwargs.get("capture_output") is not True
+        or kwargs.get("check") is not False
+    ):
+        raise ModelSandboxV2Error("metadata process runner contract is invalid")
+    return _run_bounded_metadata_process(
+        command,
+        input_payload=str(kwargs.get("input") or ""),
+        timeout_seconds=float(kwargs["timeout"]),
+        environment=dict(kwargs.get("env") or {}),
+    )
+
+
 class RunscModelSandboxV2:
     def __init__(
         self,
@@ -1222,6 +2028,7 @@ class RunscModelSandboxV2:
         transport: BrokeredProviderTransportV2,
         cgroup_parent: str,
         process_runner: Callable[..., Any] = _completed_process_runner,
+        metadata_process_runner: Optional[Callable[..., Any]] = None,
         utc_day_supplier: Callable[[], str] = lambda: time.strftime(
             "%Y-%m-%d", time.gmtime()
         ),
@@ -1232,6 +2039,9 @@ class RunscModelSandboxV2:
         self.cgroup_parent = cgroup_parent
         self._transport = transport
         self._process_runner = process_runner
+        self._metadata_process_runner = (
+            metadata_process_runner or _bounded_metadata_process_runner
+        )
         self._utc_day_supplier = utc_day_supplier
 
     @staticmethod
@@ -1397,28 +2207,13 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                     "model sandbox self-test timed out"
                 ) from exc
             finally:
-                try:
-                    self._process_runner(
-                        [
-                            str(self.config.runsc_path),
-                            "--root=%s" % runsc_root,
-                            "delete",
-                            "--force",
-                            sandbox_id,
-                        ],
-                        text=True,
-                        capture_output=True,
-                        timeout=30,
-                        env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
-                        check=False,
-                    )
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "model_sandbox_self_test_runsc_cleanup_failed "
-                        "sandbox_id=%s error_type=%s",
-                        sandbox_id,
-                        type(cleanup_exc).__name__,
-                    )
+                _force_delete_runsc_sandbox(
+                    process_runner=self._process_runner,
+                    config=self.config,
+                    runsc_root=runsc_root,
+                    sandbox_id=sandbox_id,
+                    failure_event="model_sandbox_self_test_runsc_cleanup_failed",
+                )
                 listener.close()
                 server_thread.join(timeout=5)
 
@@ -1473,6 +2268,19 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 destination=source_root,
                 expected_source_tree_hash=artifact.model_artifact_hash,
             )
+            try:
+                compatibility_receipt = source_tree_compatibility_admission_v1(
+                    source_root,
+                    manifest=artifact,
+                    source_tree_hash=artifact.model_artifact_hash,
+                    use_cache=True,
+                )
+            except ValueError as exc:
+                raise ModelSandboxV2Error(str(exc)) from exc
+            if compute_private_source_tree_hash(source_root) != artifact.model_artifact_hash:
+                raise ModelSandboxV2Error(
+                    "model source changed during measured compatibility admission"
+                )
             _normalize_source_permissions(source_root)
             provider_snapshot_root: Path | None = None
             provider_snapshot_archive_hash = sha256_json({})
@@ -1504,54 +2312,80 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                     snapshot_evidence["archive_sha256"]
                 )
                 _normalize_source_permissions(provider_snapshot_root)
-            broker_root = visible_root / MODEL_SANDBOX_BROKER_DIRECTORY
-            try:
-                broker_root.mkdir(mode=0o700)
-                os.chown(broker_root, self.config.uid, self.config.gid)
-            except OSError as exc:
-                raise ModelSandboxV2Error(
-                    "model sandbox provider broker identity is unavailable"
-                ) from exc
-            provider_scope = self._create_provider_scope_v2(
-                self._transport,
-                job_id=job_id,
-                purpose=purpose,
-                retry_policy_hashes=retry_policy_hashes,
-                terminal_sink=terminal_sink,
-                artifact_sink=artifact_sink,
-                dynamic_provider_catalog=value["provider_runtime_catalog"],
-            )
-            server = SandboxProviderSocketServerV2(
-                socket_path=broker_root / "provider.sock",
-                transport=self._transport,
-                execution_scope=provider_scope,
-            )
-            server.start()
-            try:
-                try:
-                    os.chown(
-                        server.socket_path,
-                        self.config.uid,
-                        self.config.gid,
-                    )
-                    server.socket_path.chmod(0o600)
-                except OSError as exc:
-                    raise ModelSandboxV2Error(
-                        "model sandbox provider socket identity is unavailable"
-                    ) from exc
-                result, trace_entries = self._run(
+            if value["operation"] == "metadata":
+                result, trace_entries = self._run_metadata_compatibility(
                     value,
                     artifact=artifact,
                     source_root=source_root,
-                    broker_root=broker_root,
                     tmp_root=tmp_root,
                     job_id=job_id,
-                    provider_snapshot_root=provider_snapshot_root,
+                    compatibility_receipt=compatibility_receipt,
                 )
-            finally:
-                server.close()
-            provider_scope.assert_accepted_result_is_complete()
-        output_hash = sha256_json(result)
+            else:
+                broker_root = visible_root / MODEL_SANDBOX_BROKER_DIRECTORY
+                try:
+                    broker_root.mkdir(mode=0o700)
+                    os.chown(broker_root, self.config.uid, self.config.gid)
+                except OSError as exc:
+                    raise ModelSandboxV2Error(
+                        "model sandbox provider broker identity is unavailable"
+                    ) from exc
+                provider_scope = self._create_provider_scope_v2(
+                    self._transport,
+                    job_id=job_id,
+                    purpose=purpose,
+                    retry_policy_hashes=retry_policy_hashes,
+                    terminal_sink=terminal_sink,
+                    artifact_sink=artifact_sink,
+                    dynamic_provider_catalog=value["provider_runtime_catalog"],
+                )
+                server = SandboxProviderSocketServerV2(
+                    socket_path=broker_root / "provider.sock",
+                    transport=self._transport,
+                    execution_scope=provider_scope,
+                )
+                server.start()
+                try:
+                    try:
+                        os.chown(
+                            server.socket_path,
+                            self.config.uid,
+                            self.config.gid,
+                        )
+                        server.socket_path.chmod(0o600)
+                    except OSError as exc:
+                        raise ModelSandboxV2Error(
+                            "model sandbox provider socket identity is unavailable"
+                        ) from exc
+                    result, trace_entries = self._run(
+                        value,
+                        artifact=artifact,
+                        source_root=source_root,
+                        broker_root=broker_root,
+                        tmp_root=tmp_root,
+                        job_id=job_id,
+                        provider_snapshot_root=provider_snapshot_root,
+                        compatibility_receipt=compatibility_receipt,
+                    )
+                finally:
+                    server.close()
+                provider_scope.assert_accepted_result_is_complete()
+        consumer_runtime_probe: dict[str, Any] = {}
+        if value["operation"] == "metadata":
+            if not isinstance(result, Mapping) or set(result) != {
+                "metadata",
+                "consumer_runtime_probe",
+            }:
+                raise ModelSandboxV2Error("model metadata result fields are invalid")
+            if not isinstance(result["metadata"], Mapping) or not isinstance(
+                result["consumer_runtime_probe"], Mapping
+            ):
+                raise ModelSandboxV2Error("model metadata result is invalid")
+            output: Any = dict(result["metadata"])
+            consumer_runtime_probe = dict(result["consumer_runtime_probe"])
+        else:
+            output = result
+        output_hash = sha256_json(output)
         generated_evidence_cache = {}
         if value["operation"] == "run_icp" and value["provider_evidence_mode"] == "record":
             utc_day = str(self._utc_day_supplier() or "")
@@ -1578,6 +2412,10 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             "model_manifest_hash": artifact.manifest_hash,
             "compatibility_image_digest": artifact.image_digest,
             "source_bundle_hash": source_evidence["archive_sha256"],
+            "compatibility_policy_hash": compatibility_receipt["policy_hash"],
+            "compatibility_admission_hash": compatibility_receipt[
+                "receipt_hash"
+            ],
             "runtime_config_hash": sha256_json(self.config.document()),
             "input_hash": sha256_json(value["input"]),
             "provider_evidence_cache_hash": sha256_json(
@@ -1594,17 +2432,29 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             ),
             "provider_cost_cap_microusd": value["provider_cost_cap_microusd"],
             "provider_call_cap": value["provider_call_cap"],
-            "provider_runtime_catalog_hash": value[
-                "provider_runtime_catalog"
-            ]["catalog_hash"],
+            "provider_runtime_catalog_hash": (
+                sha256_json({})
+                if value["operation"] == "metadata"
+                else value["provider_runtime_catalog"]["catalog_hash"]
+            ),
             "generated_provider_evidence_cache_hash": sha256_json(
                 generated_evidence_cache
             ),
             "trace_entries_hash": sha256_json(trace_entries),
             "output_hash": output_hash,
-            "output": result,
+            "output": output,
             "trace_entries": trace_entries,
             "generated_provider_evidence_cache": generated_evidence_cache,
+            **(
+                {
+                    "consumer_runtime_probe": consumer_runtime_probe,
+                    "consumer_runtime_probe_hash": sha256_json(
+                        consumer_runtime_probe
+                    ),
+                }
+                if value["operation"] == "metadata"
+                else {}
+            ),
         }
 
     def execute_dev_replay(
@@ -1905,28 +2755,13 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 check=False,
             )
         finally:
-            try:
-                self._process_runner(
-                    [
-                        str(self.config.runsc_path),
-                        "--root=%s" % runsc_root,
-                        "delete",
-                        "--force",
-                        sandbox_id,
-                    ],
-                    text=True,
-                    capture_output=True,
-                    timeout=30,
-                    env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
-                    check=False,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "research_lab_dev_provider_replay_cleanup_failed "
-                    "sandbox_id=%s error=%s",
-                    sandbox_id,
-                    str(exc)[:240],
-                )
+            _force_delete_runsc_sandbox(
+                process_runner=self._process_runner,
+                config=self.config,
+                runsc_root=runsc_root,
+                sandbox_id=sandbox_id,
+                failure_event="research_lab_dev_provider_replay_cleanup_failed",
+            )
         if int(completed.returncode) != 0:
             stderr = str(completed.stderr or "")
             if EVIDENCE_MISS_SENTINEL in stderr:
@@ -2032,27 +2867,13 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 check=False,
             )
         finally:
-            try:
-                self._process_runner(
-                    [
-                        str(self.config.runsc_path),
-                        "--root=%s" % runsc_root,
-                        "delete",
-                        "--force",
-                        sandbox_id,
-                    ],
-                    text=True,
-                    capture_output=True,
-                    timeout=30,
-                    env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
-                    check=False,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "research_lab_dev_replay_runsc_cleanup_failed sandbox_id=%s error=%s",
-                    sandbox_id,
-                    str(exc)[:240],
-                )
+            _force_delete_runsc_sandbox(
+                process_runner=self._process_runner,
+                config=self.config,
+                runsc_root=runsc_root,
+                sandbox_id=sandbox_id,
+                failure_event="research_lab_dev_replay_runsc_cleanup_failed",
+            )
         if int(completed.returncode) != 0:
             stderr = str(completed.stderr or "")
             if SNAPSHOT_MISS_SENTINEL in stderr:
@@ -2089,6 +2910,134 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             )
         )
 
+    def _run_metadata_compatibility(
+        self,
+        value: Mapping[str, Any],
+        *,
+        artifact: PrivateModelArtifactManifest,
+        source_root: Path,
+        tmp_root: Path,
+        job_id: str,
+        compatibility_receipt: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        stdin_payload = {
+            "observation_plan": _runtime_probe_observation_plan_v1(
+                compatibility_receipt
+            )
+        }
+        bundle = tmp_root / "bundle"
+        bundle.mkdir(mode=0o700)
+        runsc_root = tmp_root / "runsc"
+        runsc_root.mkdir(mode=0o700)
+        sandbox_id = "lp-%s-%s" % (
+            hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16],
+            secrets.token_hex(8),
+        )
+        config_doc = _oci_config(
+            config=self.config,
+            source_root=source_root,
+            broker_root=None,
+            process_args=[
+                self.config.python_path,
+                "-I",
+                "-B",
+                "-c",
+                _MEASURED_METADATA_BOOTSTRAP,
+                value["module_name"],
+                value["callable_name"],
+            ],
+            environment={},
+            cgroups_path=model_sandbox_job_cgroup_path(
+                self.cgroup_parent, sandbox_id
+            ),
+        )
+        (bundle / "config.json").write_text(
+            canonical_json(config_doc), encoding="utf-8"
+        )
+        command = _runsc_run_command(
+            config=self.config,
+            runsc_root=runsc_root,
+            bundle=bundle,
+            sandbox_id=sandbox_id,
+            host_uds=False,
+        )
+        try:
+            completed = self._metadata_process_runner(
+                command,
+                input=canonical_json(stdin_payload),
+                text=True,
+                capture_output=True,
+                timeout=MODEL_SANDBOX_METADATA_TIMEOUT_SECONDS,
+                env={
+                    "HOME": str(tmp_root),
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                },
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ModelSandboxV2Error("model sandbox timed out") from exc
+        finally:
+            _force_delete_runsc_sandbox(
+                process_runner=self._process_runner,
+                config=self.config,
+                runsc_root=runsc_root,
+                sandbox_id=sandbox_id,
+                failure_event="model_sandbox_runsc_cleanup_failed",
+            )
+        if int(completed.returncode) != 0:
+            failure_code, error_hash = _runsc_failure_evidence(
+                str(completed.stderr or "")
+            )
+            raise ModelSandboxV2Error(
+                "model sandbox failed code=%s returncode=%s stderr_hash=%s"
+                % (failure_code, completed.returncode, error_hash)
+            )
+        if (
+            len(str(completed.stdout).encode("utf-8"))
+            > MAX_MODEL_METADATA_OUTPUT_BYTES
+        ):
+            raise ModelSandboxV2Error("model sandbox output exceeds limit")
+        try:
+            decoded = json.loads(str(completed.stdout))
+        except json.JSONDecodeError as exc:
+            raise ModelSandboxV2Error("model sandbox output is invalid JSON") from exc
+        if not isinstance(decoded, Mapping) or set(decoded) != {
+            "metadata",
+            "runtime_observation",
+        }:
+            raise ModelSandboxV2Error("model metadata output fields are invalid")
+        raw_metadata = decoded.get("metadata")
+        raw_observation = decoded.get("runtime_observation")
+        if not isinstance(raw_metadata, Mapping) or not isinstance(
+            raw_observation, Mapping
+        ):
+            raise ModelSandboxV2Error("model metadata output is invalid")
+        try:
+            metadata = validate_sourcing_adapter_metadata(
+                raw_metadata,
+                expected_semantic_bindings=dict(
+                    compatibility_receipt.get("bindings") or {}
+                ),
+                require_company_fit_contract=(
+                    compatibility_receipt.get("admission_mode") == "semantic_v1"
+                ),
+            )
+        except PrivateModelRuntimeError as exc:
+            raise ModelSandboxV2Error(
+                "model metadata differs from measured compatibility admission"
+            ) from exc
+        probe = _build_consumer_runtime_probe_from_observation_v1(
+            raw_observation,
+            compatibility_receipt=compatibility_receipt,
+            metadata=metadata,
+            expected_source_tree_hash=artifact.model_artifact_hash,
+            expected_manifest_hash=artifact.manifest_hash,
+            expected_image_digest=artifact.image_digest,
+            expected_module_name=value["module_name"],
+            expected_callable_name=value["callable_name"],
+        )
+        return {"metadata": metadata, "consumer_runtime_probe": probe}, []
+
     def _run(
         self,
         value: Mapping[str, Any],
@@ -2099,30 +3048,24 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
         tmp_root: Path,
         job_id: str,
         provider_snapshot_root: Path | None,
+        compatibility_receipt: Mapping[str, Any],
     ) -> tuple[Any, list[dict[str, Any]]]:
-        operation = value["operation"]
-        if operation == "run_icp":
-            raw_input = value["input"]
-            if not isinstance(raw_input, Mapping) or set(raw_input) != {"icp", "context"}:
-                raise ModelSandboxV2Error("model run input fields are invalid")
-            stdin_payload = {
-                "icp": canonicalize_private_model_icp(raw_input["icp"]),
-                "context": dict(raw_input["context"]),
-            }
-            bootstrap = (
-                "from gateway.tee.sandbox_http_shim_v2 import install as _lp_install;\n"
-                + trusted_model_sandbox_import_bootstrap()
-                + "_lp_install();\n"
-                + model_source_import_bootstrap()
-                + _DOCKER_ADAPTER_BOOTSTRAP
-            )
-        else:
-            stdin_payload = {}
-            bootstrap = (
-                trusted_model_sandbox_import_bootstrap()
-                + model_source_import_bootstrap()
-                + _DOCKER_METADATA_BOOTSTRAP
-            )
+        if value["operation"] != "run_icp":
+            raise ModelSandboxV2Error("model sandbox run operation is invalid")
+        raw_input = value["input"]
+        if not isinstance(raw_input, Mapping) or set(raw_input) != {"icp", "context"}:
+            raise ModelSandboxV2Error("model run input fields are invalid")
+        stdin_payload = {
+            "icp": canonicalize_private_model_icp(raw_input["icp"]),
+            "context": dict(raw_input["context"]),
+        }
+        bootstrap = (
+            "from gateway.tee.sandbox_http_shim_v2 import install as _lp_install;\n"
+            + trusted_model_sandbox_import_bootstrap()
+            + "_lp_install();\n"
+            + model_source_import_bootstrap()
+            + _DOCKER_ADAPTER_BOOTSTRAP
+        )
         encoded_input = canonical_json(stdin_payload)
         process_timeout_seconds = _model_sandbox_process_timeout_seconds(value)
         bundle = tmp_root / "bundle"
@@ -2222,33 +3165,17 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
         except subprocess.TimeoutExpired as exc:
             raise ModelSandboxV2Error("model sandbox timed out") from exc
         finally:
-            try:
-                self._process_runner(
-                    [
-                        str(self.config.runsc_path),
-                        "--root=%s" % runsc_root,
-                        "delete",
-                        "--force",
-                        sandbox_id,
-                    ],
-                    text=True,
-                    capture_output=True,
-                    timeout=30,
-                    env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
-                    check=False,
-                )
-            except Exception as cleanup_exc:
-                logger.warning(
-                    "model_sandbox_runsc_cleanup_failed "
-                    "sandbox_id=%s error_type=%s",
-                    sandbox_id,
-                    type(cleanup_exc).__name__,
-                )
+            _force_delete_runsc_sandbox(
+                process_runner=self._process_runner,
+                config=self.config,
+                runsc_root=runsc_root,
+                sandbox_id=sandbox_id,
+                failure_event="model_sandbox_runsc_cleanup_failed",
+            )
         if int(completed.returncode) != 0:
-            stripped_stderr = strip_incontainer_trace_lines(
+            failure_code, error_hash = _runsc_failure_evidence(
                 str(completed.stderr or "")
             )
-            failure_code, error_hash = _runsc_failure_evidence(stripped_stderr)
             raise ModelSandboxV2Error(
                 "model sandbox failed code=%s returncode=%s stderr_hash=%s"
                 % (failure_code, completed.returncode, error_hash)
@@ -2259,37 +3186,31 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             decoded = json.loads(str(completed.stdout))
         except json.JSONDecodeError as exc:
             raise ModelSandboxV2Error("model sandbox output is invalid JSON") from exc
-        if operation == "run_icp":
-            stderr = str(completed.stderr or "")
-            raw_input = value.get("input")
-            context = raw_input.get("context") if isinstance(raw_input, Mapping) else None
-            defer_retryable_errors = bool(
-                value.get("model_kind") == "private"
-                and isinstance(context, Mapping)
-                and context.get("mode") == "private_baseline"
-            )
-            try:
-                _raise_on_empty_provider_error(
-                    decoded,
-                    stderr,
-                    context_label="V2 model sandbox",
-                    defer_retryable_errors=defer_retryable_errors,
-                )
-            except PrivateModelRuntimeError as exc:
-                raise ModelSandboxV2Error(str(exc)) from exc
-            output = list(
-                ensure_private_model_outputs(
-                    decoded,
-                    context_label="V2 model sandbox",
-                    require_non_empty=False,
-                )
-            )
-            return output, [
-                *parse_incontainer_trace_lines(stderr),
-                *parse_sourcing_runtime_lines(stderr),
-            ]
-        if not isinstance(decoded, Mapping):
-            raise ModelSandboxV2Error("model metadata output must be an object")
-        return dict(decoded), parse_incontainer_trace_lines(
-            str(completed.stderr or "")
+        stderr = str(completed.stderr or "")
+        raw_input = value.get("input")
+        context = raw_input.get("context") if isinstance(raw_input, Mapping) else None
+        defer_retryable_errors = bool(
+            value.get("model_kind") == "private"
+            and isinstance(context, Mapping)
+            and context.get("mode") == "private_baseline"
         )
+        try:
+            _raise_on_empty_provider_error(
+                decoded,
+                stderr,
+                context_label="V2 model sandbox",
+                defer_retryable_errors=defer_retryable_errors,
+            )
+        except PrivateModelRuntimeError as exc:
+            raise ModelSandboxV2Error(str(exc)) from exc
+        output = list(
+            ensure_private_model_outputs(
+                decoded,
+                context_label="V2 model sandbox",
+                require_non_empty=False,
+            )
+        )
+        return output, [
+            *parse_incontainer_trace_lines(stderr),
+            *parse_sourcing_runtime_lines(stderr),
+        ]

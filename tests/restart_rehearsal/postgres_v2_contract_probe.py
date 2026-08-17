@@ -225,8 +225,17 @@ ATOMIC_CREDIT_RESUME_MIGRATION = (
 COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION = (
     "149-research-lab-compact-weight-settlement-authority.sql"
 )
+FAILURE_FUNNEL_INDEXES_MIGRATION = (
+    "150-research-lab-failure-funnel-indexes.concurrent.sql"
+)
+FAILURE_FUNNEL_REPORTING_MIGRATION = (
+    "151-research-lab-failure-funnel-reporting.sql"
+)
 CANDIDATE_HYBRID_PURPOSES_MIGRATION = (
     "152-research-lab-candidate-hybrid-purposes.sql"
+)
+PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION = (
+    "153-research-lab-private-model-lineage-generation.sql"
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
@@ -279,7 +288,10 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_CATALOG_AUTH_METADATA_MIGRATION,
     ATOMIC_CREDIT_RESUME_MIGRATION,
     COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION,
+    FAILURE_FUNNEL_INDEXES_MIGRATION,
+    FAILURE_FUNNEL_REPORTING_MIGRATION,
     CANDIDATE_HYBRID_PURPOSES_MIGRATION,
+    PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -308,7 +320,10 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_147_source_catalog_auth_metadata_contract_valid",
     "post_148_atomic_credit_resume_contract_valid",
     "post_149_compact_weight_settlement_contract_valid",
+    "post_150_failure_funnel_indexes_valid",
+    "post_151_failure_funnel_reporting_contract_valid",
     "post_152_candidate_hybrid_purpose_contract_valid",
+    "post_153_private_model_lineage_generation_contract_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5249,6 +5264,73 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-149 compact weight settlement contract differs"
             )
+        database.apply_migration(scripts / FAILURE_FUNNEL_INDEXES_MIGRATION)
+        applied.append(FAILURE_FUNNEL_INDEXES_MIGRATION)
+        database.apply_migration(scripts / FAILURE_FUNNEL_REPORTING_MIGRATION)
+        applied.append(FAILURE_FUNNEL_REPORTING_MIGRATION)
+        failure_funnel_reporting_contract = json.loads(
+            database.psql(
+                """
+                WITH expected(index_name) AS (
+                    VALUES
+                        ('idx_research_eval_score_bundles_ticket_created'),
+                        ('idx_research_lab_company_labels_ticket_candidate'),
+                        ('idx_research_lab_scoring_runs_ticket_candidate')
+                ), routine AS (
+                    SELECT p.oid, p.prosecdef
+                      FROM pg_catalog.pg_proc p
+                     WHERE p.oid =
+                        'public.get_research_lab_failure_funnel(uuid,text)'
+                            ::regprocedure
+                )
+                SELECT pg_catalog.jsonb_build_object(
+                    'schema_version',
+                        'leadpoet.failure-funnel-reporting-contract.v1',
+                    'indexes_valid', NOT EXISTS (
+                        SELECT 1
+                          FROM expected
+                         WHERE NOT EXISTS (
+                            SELECT 1
+                              FROM pg_catalog.pg_class c
+                              JOIN pg_catalog.pg_index i
+                                ON i.indexrelid = c.oid
+                              JOIN pg_catalog.pg_namespace n
+                                ON n.oid = c.relnamespace
+                             WHERE n.nspname = 'public'
+                               AND c.relname = expected.index_name
+                               AND c.relkind = 'i'
+                               AND i.indisvalid
+                               AND i.indisready
+                               AND i.indislive
+                         )
+                    ),
+                    'security_invoker', NOT (SELECT prosecdef FROM routine),
+                    'service_role_execute',
+                        pg_catalog.has_function_privilege(
+                            'service_role', (SELECT oid FROM routine), 'EXECUTE'
+                        ),
+                    'untrusted_execute_denied',
+                        NOT pg_catalog.has_function_privilege(
+                            'anon', (SELECT oid FROM routine), 'EXECUTE'
+                        )
+                        AND NOT pg_catalog.has_function_privilege(
+                            'authenticated', (SELECT oid FROM routine), 'EXECUTE'
+                        )
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if failure_funnel_reporting_contract != {
+            "schema_version": "leadpoet.failure-funnel-reporting-contract.v1",
+            "indexes_valid": True,
+            "security_invoker": True,
+            "service_role_execute": True,
+            "untrusted_execute_denied": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-151 failure funnel reporting contract differs"
+            )
         database.apply_migration(scripts / CANDIDATE_HYBRID_PURPOSES_MIGRATION)
         applied.append(CANDIDATE_HYBRID_PURPOSES_MIGRATION)
         candidate_hybrid_purpose_contract = json.loads(
@@ -5290,6 +5372,88 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         ):
             raise PostgresContractProbeError(
                 "post-152 candidate hybrid purpose contract differs"
+            )
+        database.apply_migration(
+            scripts / PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION
+        )
+        applied.append(PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION)
+        private_model_lineage_generation_contract = json.loads(
+            database.psql(
+                """
+                WITH guard AS (
+                    SELECT pg_catalog.pg_get_functiondef(p.oid) AS definition
+                      FROM pg_catalog.pg_proc p
+                     WHERE p.oid =
+                        'public.guard_research_lab_one_active_private_model_version()'
+                            ::regprocedure
+                ), generation AS (
+                    SELECT p.oid, p.prosecdef
+                      FROM pg_catalog.pg_proc p
+                     WHERE p.oid =
+                        'public.research_lab_private_model_lineage_generation()'
+                            ::regprocedure
+                )
+                SELECT pg_catalog.jsonb_build_object(
+                    'schema_version',
+                        'leadpoet.private-model-lineage-generation-contract.v1',
+                    'generation_matches_event_count',
+                        (SELECT value.generation
+                           FROM public.research_lab_private_model_lineage_generation()
+                                value)
+                        = (SELECT pg_catalog.count(*)::BIGINT
+                             FROM public.research_lab_private_model_version_events),
+                    'security_invoker', NOT (SELECT prosecdef FROM generation),
+                    'service_role_execute',
+                        pg_catalog.has_function_privilege(
+                            'service_role', (SELECT oid FROM generation), 'EXECUTE'
+                        ),
+                    'untrusted_execute_denied',
+                        NOT pg_catalog.has_function_privilege(
+                            'anon', (SELECT oid FROM generation), 'EXECUTE'
+                        )
+                        AND NOT pg_catalog.has_function_privilege(
+                            'authenticated', (SELECT oid FROM generation), 'EXECUTE'
+                        ),
+                    'trigger_enabled', EXISTS (
+                        SELECT 1
+                          FROM pg_catalog.pg_trigger
+                         WHERE tgrelid =
+                            'public.research_lab_private_model_version_events'
+                                ::regclass
+                           AND tgname =
+                            'guard_research_lab_one_active_version_insert'
+                           AND NOT tgisinternal
+                           AND tgenabled <> 'D'
+                    ),
+                    'protocol_marker_required',
+                        pg_catalog.position(
+                            'leadpoet.private-model-activation.v1'
+                            IN (SELECT definition FROM guard)
+                        ) > 0,
+                    'global_generation_required',
+                        pg_catalog.position(
+                            'expected_global_lineage_generation'
+                            IN (SELECT definition FROM guard)
+                        ) > 0
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if private_model_lineage_generation_contract != {
+            "schema_version": (
+                "leadpoet.private-model-lineage-generation-contract.v1"
+            ),
+            "generation_matches_event_count": True,
+            "security_invoker": True,
+            "service_role_execute": True,
+            "untrusted_execute_denied": True,
+            "trigger_enabled": True,
+            "protocol_marker_required": True,
+            "global_generation_required": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-153 private model lineage generation contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
@@ -5406,8 +5570,14 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "compact_weight_settlement_contract": (
                 compact_weight_settlement_contract
             ),
+            "failure_funnel_reporting_contract": (
+                failure_funnel_reporting_contract
+            ),
             "candidate_hybrid_purpose_contract": (
                 candidate_hybrid_purpose_contract
+            ),
+            "private_model_lineage_generation_contract": (
+                private_model_lineage_generation_contract
             ),
             "checks": {
                 name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS

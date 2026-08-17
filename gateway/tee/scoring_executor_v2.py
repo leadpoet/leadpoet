@@ -81,6 +81,7 @@ SCORE_PURPOSES_V2 = frozenset(
 )
 
 OP_RUN_MODEL_SANDBOX_V2 = "run_model_sandbox_v2"
+MODEL_COMPATIBILITY_PURPOSE_V2 = "research_lab.model_compatibility.v2"
 OP_DEV_REPLAY_V2 = "run_dev_replay_v2"
 OP_DEV_HYBRID_V2 = "run_dev_hybrid_v2"
 OP_PROVIDER_PREFLIGHT_V2 = "provider_preflight_v2"
@@ -109,6 +110,7 @@ SCORING_OPERATIONS_V2 = {
             "research_lab.private_model_run.v2",
             "research_lab.candidate_model_run.v2",
             "research_lab.candidate_hybrid_discovery.v2",
+            MODEL_COMPATIBILITY_PURPOSE_V2,
         }
     ),
     OP_DEV_REPLAY_V2: frozenset({"research_lab.candidate_test.v2"}),
@@ -253,12 +255,49 @@ class ScoringExecutorV2:
                 raise ValueError("measured model sandbox is unavailable")
             if self._artifact_seal is None:
                 raise ValueError("measured model artifact sealer is unavailable")
-            self._validate_model_provider_catalog_ancestry(payload, context)
-            payload["environment"] = validate_model_sandbox_environment(
-                self._execution_config,
-                payload.get("environment"),
-                provider_cost_scope=str(payload.get("provider_cost_scope") or ""),
+            metadata_compatibility = (
+                context.purpose == MODEL_COMPATIBILITY_PURPOSE_V2
             )
+            if metadata_compatibility:
+                if credential_profile != "default" or credential_refs:
+                    raise ValueError(
+                        "model compatibility metadata credentials must be empty"
+                    )
+                expected_empty_fields = {
+                    "input": {},
+                    "environment": {},
+                    "provider_evidence_cache": {},
+                    "provider_evidence_cache_ref": "",
+                    "provider_evidence_mode": "",
+                    "provider_snapshot_bundle": {},
+                    "provider_snapshot_tree_hash": "",
+                    "provider_snapshot_manifest_hash": "",
+                    "provider_cost_scope": "",
+                    "provider_cost_cap_microusd": 0,
+                    "provider_call_cap": 0,
+                    "provider_runtime_catalog": {},
+                    "provider_catalog_evidence": {},
+                }
+                if payload.get("operation") != "metadata" or any(
+                    payload.get(name) != expected
+                    for name, expected in expected_empty_fields.items()
+                ):
+                    raise ValueError(
+                        "model compatibility metadata authority is not isolated"
+                    )
+            else:
+                if payload.get("operation") == "metadata":
+                    raise ValueError(
+                        "model metadata requires compatibility authority"
+                    )
+                self._validate_model_provider_catalog_ancestry(payload, context)
+                payload["environment"] = validate_model_sandbox_environment(
+                    self._execution_config,
+                    payload.get("environment"),
+                    provider_cost_scope=str(
+                        payload.get("provider_cost_scope") or ""
+                    ),
+                )
             cache_document = payload.get("provider_evidence_cache")
             cache_hash = sha256_json(
                 dict(cache_document) if isinstance(cache_document, Mapping) else {}
@@ -369,6 +408,8 @@ class ScoringExecutorV2:
                     "model_artifact_hash",
                     "model_manifest_hash",
                     "source_bundle_hash",
+                    "compatibility_policy_hash",
+                    "compatibility_admission_hash",
                     "runtime_config_hash",
                     "input_hash",
                     "provider_evidence_cache_hash",

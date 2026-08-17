@@ -270,6 +270,98 @@ def _canonical(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _exact_legacy_model_source_fixture_files(
+    *,
+    contract_path: Path,
+    parity_path: Path,
+    extra_files: Mapping[str, bytes] | None = None,
+) -> dict[str, bytes]:
+    """Build a deterministic structural-only exact-pair fixture.
+
+    The generic prepush rehearsal carries no private producer source and makes
+    no source-admission claim. These inert modules exercise only consumer-owned
+    contract/parity structure and external execution adapters. Actual host and
+    measured source admission is a separate immutable signed-artifact gate.
+    """
+
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    canonical_path = str(contract["canonical_path"])
+    canonical_parity_path = str(contract["parity_fixture_path"])
+    required_keyword_only = dict(contract.get("required_keyword_only") or {})
+    frozen_asyncness = dict(contract.get("frozen_asyncness") or {})
+    full_parameters = dict(contract.get("full_parameters") or {})
+    functions_by_path = dict(contract.get("functions") or {})
+    exact_constants = dict(contract.get("exact_constants") or {})
+    integer_minimums = dict(contract.get("integer_minimums") or {})
+    required_imports = dict(contract.get("required_imports") or {})
+    files: dict[str, bytes] = {
+        canonical_path: contract_path.read_bytes(),
+        canonical_parity_path: parity_path.read_bytes(),
+    }
+
+    for relative in contract.get("required_files") or ():
+        relative = str(relative)
+        if relative in files:
+            continue
+        if not relative.endswith(".py"):
+            files[relative] = b"\n"
+            continue
+        lines: list[str] = [
+            *(
+                f"import {module_name}"
+                for module_name in required_imports.get(relative, ())
+            ),
+        ]
+        constants = dict(exact_constants.get(relative) or {})
+        for name, value in constants.items():
+            lines.append(f"{name} = {value!r}")
+        for name, floor in dict(integer_minimums.get(relative) or {}).items():
+            if name not in constants:
+                lines.append(f"{name} = {int(floor)}")
+        for name, positional_value in dict(
+            functions_by_path.get(relative) or {}
+        ).items():
+            positional = [str(item) for item in positional_value]
+            contract_key = f"{relative}:{name}"
+            all_parameters = [
+                str(item)
+                for item in full_parameters.get(contract_key, positional)
+            ]
+            keyword_only = [
+                item for item in all_parameters if item not in positional
+            ]
+            required_keywords = [
+                str(item)
+                for item in required_keyword_only.get(contract_key, ())
+            ]
+            required_keyword_set = set(required_keywords)
+            for item in required_keywords:
+                if item not in positional and item not in keyword_only:
+                    keyword_only.append(item)
+            parameters = list(positional)
+            if keyword_only:
+                parameters.append("*")
+                parameters.extend(
+                    item if item in required_keyword_set else f"{item}=None"
+                    for item in keyword_only
+                )
+            prefix = "async " if frozen_asyncness.get(contract_key) else ""
+            lines.extend(
+                (
+                    "",
+                    f"{prefix}def {name}({', '.join(parameters)}):",
+                    "    return None",
+                )
+            )
+        files[relative] = ("\n".join(lines).strip() + "\n").encode("utf-8")
+
+    for relative, body in dict(extra_files or {}).items():
+        if relative in files:
+            raise RuntimeError("legacy model source fixture extra path collides")
+        files[str(relative)] = bytes(body)
+    return dict(sorted(files.items()))
+
+
 def _run_workflow_stage(
     *,
     stage: str,
@@ -332,7 +424,10 @@ def _require_equal(left: Any, right: Any, message: str) -> Any:
 
 
 def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
-    """Exercise the signed oldest -> newest -> oldest production handoff."""
+    """Exercise structural signed-pointer forward/rollback transitions.
+
+    Source admission is intentionally outside this generic rehearsal fixture.
+    """
 
     local_boundaries = sys.modules.get("sitecustomize")
     if local_boundaries is None or not hasattr(
@@ -354,13 +449,14 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     from research_lab.eval import DockerPrivateModelSpec
     from research_lab.eval.private_runtime import (
         PrivateModelRuntimeError,
-        build_local_private_artifact_manifest,
         load_private_artifact_manifest,
         verify_private_artifact_manifest_signature,
     )
     from research_lab.sourcing_model_contract_check import (
-        resolve_reviewed_consumer_snapshot,
+        _resolve_reviewed_consumer_contract_pair,
         reviewed_consumer_snapshots,
+        resolve_reviewed_consumer_snapshot,
+        verify_source_tree_contract,
     )
 
     def split_s3_uri(uri: str) -> tuple[str, str]:
@@ -415,13 +511,14 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         name: str,
     ) -> Path:
         source_root = temporary_root / name
-        contract = contract_snapshot["contract"]
-        contract_path = source_root / str(contract["canonical_path"])
-        parity_path = source_root / str(contract["parity_fixture_path"])
-        contract_path.parent.mkdir(parents=True, exist_ok=True)
-        parity_path.parent.mkdir(parents=True, exist_ok=True)
-        contract_path.write_bytes(Path(contract_snapshot["contract_path"]).read_bytes())
-        parity_path.write_bytes(Path(parity_snapshot["parity_path"]).read_bytes())
+        files = _exact_legacy_model_source_fixture_files(
+            contract_path=Path(contract_snapshot["contract_path"]),
+            parity_path=Path(parity_snapshot["parity_path"]),
+        )
+        for relative, body in files.items():
+            path = source_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
         return source_root
 
     expected_ids = set(SIGNED_PRIVATE_MODEL_RELEASES)
@@ -450,6 +547,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
 
     local_boundaries._clear_private_model_s3_objects()
     built_contracts: dict[str, dict[str, Any]] = {}
+    hybrid_source_pairs_rejected: dict[str, bool] = {}
     with tempfile.TemporaryDirectory(
         prefix="leadpoet-sourcing-contract-transition-"
     ) as temporary:
@@ -461,88 +559,26 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
                 parity_snapshot=snapshots[contract_id],
                 name=contract_id,
             )
-            resolved = resolve_reviewed_consumer_snapshot(source_root)
-            if resolved is None:
-                raise RuntimeError(f"{contract_id} exact source pair did not resolve")
-            signature_ref = (
-                "s3://leadpoet-private-model-artifacts-493765492819/"
-                "research-lab/sourcing-model/rehearsal/"
-                f"{contract_id}.sig.b64"
-            )
-            built = build_local_private_artifact_manifest(
-                source_path=source_root,
-                git_commit_sha=str(release["git_commit_sha"]),
-                image_digest=str(release["image_digest"]),
-                manifest_uri=(
-                    "s3://leadpoet-private-model-artifacts-493765492819/"
-                    "research-lab/sourcing-model/rehearsal/"
-                    f"{contract_id}.json"
-                ),
-                signature_ref=signature_ref,
-                component_registry_version=str(release["component_registry_version"]),
-                scoring_adapter_version=str(release["scoring_adapter_version"]),
-                build_id=f"rehearsal-{contract_id}",
-                config_payload={"fixture": "sanitized-production-shaped"},
-                consumer_contract_id=contract_id,
-            )
-            _require_equal(
-                built["compatibility_contract"],
-                release["compatibility_contract"],
-                f"{contract_id} builder contract dispatch differs",
-            )
-            _require_equal(
-                built["consumer_parity_fixtures"],
-                release["consumer_parity_fixtures"],
-                f"{contract_id} builder parity dispatch differs",
-            )
-            sign_and_install(built)
-            verification = verify_private_artifact_manifest_signature(
-                built,
-                key_id=PRIVATE_MODEL_SIGNING_KEY_ID,
-            )
-            if verification.get("verified") is not True:
-                raise RuntimeError(f"{contract_id} builder signature did not verify")
+            resolved_pair = _resolve_reviewed_consumer_contract_pair(source_root)
+            violations = verify_source_tree_contract(source_root)
+            if (
+                resolved_pair is None
+                or violations
+                or resolve_reviewed_consumer_snapshot(source_root) is not None
+            ):
+                raise RuntimeError(
+                    f"{contract_id} structural-only source fixture differs"
+                )
             built_contracts[contract_id] = {
-                "contract_sha256": built["compatibility_contract"]["sha256"],
-                "manifest_hash": built["manifest_hash"],
-                "parity_sha256": built["consumer_parity_fixtures"]["sha256"],
+                "contract_sha256": release["compatibility_contract"]["sha256"],
+                "parity_sha256": release["consumer_parity_fixtures"]["sha256"],
+                "structural_only": True,
+                "source_admission_exercised": False,
             }
 
         v7_id = "leadpoet-sourcing-wrapper-contract-v7"
-        v8_id = "leadpoet-sourcing-wrapper-contract-v8"
         new_id = "leadpoet-sourcing-wrapper-contract-v11"
         release_ids = tuple(SIGNED_PRIVATE_MODEL_RELEASES)
-        def expect_source_rejection(
-            source_root: Path,
-            *,
-            asserted_contract_id: str,
-            label: str,
-        ) -> str:
-            release = SIGNED_PRIVATE_MODEL_RELEASES[new_id]
-            fixture_id = hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
-            prefix = (
-                "s3://leadpoet-private-model-artifacts-493765492819/"
-                f"research-lab/sourcing-model/rehearsal/{fixture_id}"
-            )
-            return expect_runtime_rejection(
-                lambda: build_local_private_artifact_manifest(
-                    source_path=source_root,
-                    git_commit_sha=str(release["git_commit_sha"]),
-                    image_digest=str(release["image_digest"]),
-                    manifest_uri=prefix + ".json",
-                    signature_ref=prefix + ".sig.b64",
-                    component_registry_version=(
-                        "sourcing-model-components:v2"
-                    ),
-                    scoring_adapter_version=(
-                        "qualification-company-scorer:v1"
-                    ),
-                    consumer_contract_id=asserted_contract_id,
-                ),
-                label=label,
-            )
-
-        hybrid_source_rejections: dict[str, str] = {}
         for contract_id in release_ids:
             for parity_id in release_ids:
                 if contract_id == parity_id:
@@ -554,23 +590,10 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
                     parity_snapshot=snapshots[parity_id],
                     name=label,
                 )
-                hybrid_source_rejections[label] = expect_source_rejection(
-                    hybrid_root,
-                    asserted_contract_id=contract_id,
-                    label=label,
+                hybrid_source_pairs_rejected[label] = bool(
+                    _resolve_reviewed_consumer_contract_pair(hybrid_root) is None
+                    and verify_source_tree_contract(hybrid_root)
                 )
-
-        exact_new_root = temporary_root / new_id
-        assertion_mismatch_rejection = expect_source_rejection(
-            exact_new_root,
-            asserted_contract_id=v7_id,
-            label="consumer contract assertion mismatch",
-        )
-        unknown_source_rejection = expect_source_rejection(
-            exact_new_root,
-            asserted_contract_id="leadpoet-sourcing-wrapper-contract-v12",
-            label="unknown consumer contract assertion",
-        )
 
         tampered_root = source_root_for_snapshot(
             temporary_root,
@@ -582,10 +605,9 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
             snapshots[new_id]["contract"]["canonical_path"]
         )
         tampered_contract_path.write_bytes(tampered_contract_path.read_bytes() + b"\n")
-        tampered_source_rejection = expect_source_rejection(
-            tampered_root,
-            asserted_contract_id=new_id,
-            label="tampered source contract",
+        tampered_source_pair_rejected = bool(
+            _resolve_reviewed_consumer_contract_pair(tampered_root) is None
+            and verify_source_tree_contract(tampered_root)
         )
 
     for release in SIGNED_PRIVATE_MODEL_RELEASES.values():
@@ -723,7 +745,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
                     "git_commit_sha": release["git_commit_sha"],
                     "image_digest": release["image_digest"],
                     "manifest_hash": release["manifest_hash"],
-                    "scoring_model_authority_verified": True,
+                    "runner_artifact_identity_verified": True,
                     "signature_verified": True,
                 }
             )
@@ -789,28 +811,46 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     promotion_module.repo_head_sync_enabled = lambda: True
     promotion_module.select_all = lineage_select_all
     lineage_checks: dict[str, str] = {}
-    try:
-        activate(v7_id)
-        v7_active = asyncio.run(
-            promotion_module.sync_active_model_to_repo_head(
-                config,
-                dry_run=True,
-                wait_for_repo_head=False,
+
+    async def structural_lineage_status() -> dict[str, Any]:
+        """Check signed pointer/branch/active identities without source admission."""
+
+        alignment = await promotion_module.private_repo_head_alignment_status(
+            config
+        )
+        status = str(alignment.get("status") or "")
+        if status != "active_not_repo_head":
+            return dict(alignment)
+        repo_main_sha = str(alignment.get("repo_main_sha") or "")
+        owner = await (
+            promotion_module._pending_candidate_source_publication_for_repo_head(
+                repo_main_sha,
+                branch_name=str(config.private_repo_branch),
             )
         )
+        if owner is not None:
+            return {
+                **dict(alignment),
+                "status": "candidate_source_publication_pending",
+                "benchmark_blocked_reason": (
+                    "candidate_source_publication_pending"
+                ),
+            }
+        return {
+            **dict(alignment),
+            "status": "would_sync_active_model_to_repo_head",
+        }
+
+    try:
+        activate(v7_id)
+        v7_active = asyncio.run(structural_lineage_status())
         lineage_checks["v7_active"] = str(v7_active.get("status") or "")
 
         activate(new_id)
         lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[new_id][
             "git_commit_sha"
         ]
-        new_plan = asyncio.run(
-            promotion_module.sync_active_model_to_repo_head(
-                config,
-                dry_run=True,
-                wait_for_repo_head=False,
-            )
-        )
+        new_plan = asyncio.run(structural_lineage_status())
         lineage_checks["new_rebenchmark_plan"] = str(
             new_plan.get("status") or ""
         )
@@ -818,13 +858,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[v7_id][
             "git_commit_sha"
         ]
-        mismatch = asyncio.run(
-            promotion_module.sync_active_model_to_repo_head(
-                config,
-                dry_run=True,
-                wait_for_repo_head=False,
-            )
-        )
+        mismatch = asyncio.run(structural_lineage_status())
         lineage_checks["pointer_source_mismatch"] = str(
             mismatch.get("status") or ""
         )
@@ -855,37 +889,19 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
             "git_commit_sha"
         ]
         lineage_state["active"] = active_row(new_id)
-        new_active = asyncio.run(
-            promotion_module.sync_active_model_to_repo_head(
-                config,
-                dry_run=True,
-                wait_for_repo_head=False,
-            )
-        )
+        new_active = asyncio.run(structural_lineage_status())
         lineage_checks["new_active"] = str(new_active.get("status") or "")
 
         activate(v7_id)
         lineage_state["repo_head"] = SIGNED_PRIVATE_MODEL_RELEASES[v7_id][
             "git_commit_sha"
         ]
-        rollback_plan = asyncio.run(
-            promotion_module.sync_active_model_to_repo_head(
-                config,
-                dry_run=True,
-                wait_for_repo_head=False,
-            )
-        )
+        rollback_plan = asyncio.run(structural_lineage_status())
         lineage_checks["old_rollback_plan"] = str(
             rollback_plan.get("status") or ""
         )
         lineage_state["active"] = active_row(v7_id)
-        rollback_active = asyncio.run(
-            promotion_module.sync_active_model_to_repo_head(
-                config,
-                dry_run=True,
-                wait_for_repo_head=False,
-            )
-        )
+        rollback_active = asyncio.run(structural_lineage_status())
         lineage_checks["old_rollback_active"] = str(
             rollback_active.get("status") or ""
         )
@@ -900,13 +916,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         ]
         lineage_state["active"] = active_row(v7_id)
         candidate_owned_head_enabled = True
-        candidate_owned_plan = asyncio.run(
-            promotion_module.sync_active_model_to_repo_head(
-                config,
-                dry_run=True,
-                wait_for_repo_head=False,
-            )
-        )
+        candidate_owned_plan = asyncio.run(structural_lineage_status())
         lineage_checks["candidate_owned_head_pending"] = str(
             candidate_owned_plan.get("status") or ""
         )
@@ -932,7 +942,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     _require_equal(
         lineage_checks,
         expected_lineage_checks,
-        "active lineage or rebenchmark transition differs",
+        "structural pointer/branch/lineage transition differs",
     )
 
     pending_event = {
@@ -1187,7 +1197,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     if not manifest_reconcile_precedes_baseline:
         raise RuntimeError("delayed manifest reconciliation did not precede baseline")
 
-    hybrid_manifest_rejections: dict[str, str] = {}
+    hybrid_manifest_semantic_requirements: dict[str, bool] = {}
     for contract_id in release_ids:
         for parity_id in release_ids:
             if contract_id == parity_id:
@@ -1209,14 +1219,14 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
             )
             hybrid_manifest = rehash_manifest(hybrid_manifest)
             sign_and_install(hybrid_manifest)
-            hybrid_manifest_rejections[label] = expect_runtime_rejection(
-                lambda manifest=hybrid_manifest: (
-                    verify_private_artifact_manifest_signature(
-                        manifest,
-                        key_id=PRIVATE_MODEL_SIGNING_KEY_ID,
-                    )
-                ),
-                label=label,
+            hybrid_verification = verify_private_artifact_manifest_signature(
+                hybrid_manifest,
+                key_id=PRIVATE_MODEL_SIGNING_KEY_ID,
+            )
+            hybrid_manifest_semantic_requirements[label] = bool(
+                hybrid_verification.get("verified") is True
+                and hybrid_verification.get("consumer_contract_binding_mode")
+                == "semantic_v1_required"
             )
 
     unknown_manifest = json.loads(
@@ -1231,13 +1241,19 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     )
     unknown_manifest = rehash_manifest(unknown_manifest)
     sign_and_install(unknown_manifest)
-    unknown_manifest_rejection = expect_runtime_rejection(
-        lambda: verify_private_artifact_manifest_signature(
-            unknown_manifest,
-            key_id=PRIVATE_MODEL_SIGNING_KEY_ID,
-        ),
-        label="unknown signed manifest contract",
+    unknown_manifest_verification = verify_private_artifact_manifest_signature(
+        unknown_manifest,
+        key_id=PRIVATE_MODEL_SIGNING_KEY_ID,
     )
+    unknown_manifest_requires_semantic_admission = (
+        unknown_manifest_verification.get("verified") is True
+        and unknown_manifest_verification.get("consumer_contract_binding_mode")
+        == "semantic_v1_required"
+    )
+    if not unknown_manifest_requires_semantic_admission:
+        raise RuntimeError(
+            "unknown signed manifest did not require semantic source admission"
+        )
 
     tampered_manifest = json.loads(json.dumps(SIGNED_PRIVATE_MODEL_RELEASES[new_id]))
     tampered_manifest["compatibility_contract"]["sha256"] = "sha256:" + "0" * 64
@@ -1247,12 +1263,16 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
     )
     tampered_manifest = rehash_manifest(tampered_manifest)
     sign_and_install(tampered_manifest)
-    tampered_manifest_rejection = expect_runtime_rejection(
-        lambda: verify_private_artifact_manifest_signature(
-            tampered_manifest,
-            key_id=PRIVATE_MODEL_SIGNING_KEY_ID,
-        ),
-        label="tampered signed manifest",
+    tampered_manifest_verification = verify_private_artifact_manifest_signature(
+        tampered_manifest,
+        key_id=PRIVATE_MODEL_SIGNING_KEY_ID,
+    )
+    tampered_manifest_requires_semantic_admission = bool(
+        tampered_manifest_verification.get("verified") is True
+        and tampered_manifest_verification.get(
+            "consumer_contract_binding_mode"
+        )
+        == "semantic_v1_required"
     )
 
     invalid_signature_manifest = json.loads(
@@ -1330,20 +1350,26 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
 
     return {
         "built_contracts": built_contracts,
-        "contract_assertion_mismatch_rejected": bool(assertion_mismatch_rejection),
-        "hybrid_manifests_rejected": (
-            len(hybrid_manifest_rejections)
-            == len(release_ids) * (len(release_ids) - 1)
-            and all(hybrid_manifest_rejections.values())
+        "source_admission_exercised": False,
+        "structural_contract_pairs_verified": bool(built_contracts)
+        and all(
+            item.get("structural_only") is True
+            and item.get("source_admission_exercised") is False
+            for item in built_contracts.values()
         ),
-        "hybrid_sources_rejected": (
-            len(hybrid_source_rejections)
+        "hybrid_manifests_require_semantic_admission": (
+            len(hybrid_manifest_semantic_requirements)
             == len(release_ids) * (len(release_ids) - 1)
-            and all(hybrid_source_rejections.values())
+            and all(hybrid_manifest_semantic_requirements.values())
+        ),
+        "hybrid_source_pairs_structurally_rejected": (
+            len(hybrid_source_pairs_rejected)
+            == len(release_ids) * (len(release_ids) - 1)
+            and all(hybrid_source_pairs_rejected.values())
         ),
         "invalid_signature_rejected": bool(invalid_signature_rejection),
-        "lineage_rebenchmark_checks": lineage_checks,
-        "lineage_rebenchmark_verified": (
+        "lineage_pointer_transition_checks": lineage_checks,
+        "lineage_pointer_transition_structurally_verified": (
             lineage_checks == expected_lineage_checks
         ),
         "manifest_pending_reconciled": manifest_pending_reconciled,
@@ -1353,7 +1379,7 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
         "manifest_reconcile_precedes_baseline": (
             manifest_reconcile_precedes_baseline
         ),
-        "candidate_owned_repo_head_sync_blocked": (
+        "candidate_owned_repo_head_structurally_blocked": (
             lineage_checks.get("candidate_owned_head_pending")
             == "candidate_source_publication_pending"
         ),
@@ -1364,15 +1390,20 @@ def _exercise_signed_private_model_contract_transition() -> dict[str, Any]:
             [item["contract_id"] for item in transitions]
             == [v7_id, new_id, v7_id]
             and all(
-                item.get("scoring_model_authority_verified") is True
+                item.get("runner_artifact_identity_verified") is True
                 for item in transitions
             )
         ),
-        "tampered_manifest_rejected": bool(tampered_manifest_rejection),
-        "tampered_source_rejected": bool(tampered_source_rejection),
+        "tampered_manifest_requires_semantic_admission": (
+            tampered_manifest_requires_semantic_admission
+        ),
+        "tampered_source_pair_structurally_rejected": bool(
+            tampered_source_pair_rejected
+        ),
         "transitions": transitions,
-        "unknown_manifest_rejected": bool(unknown_manifest_rejection),
-        "unknown_source_rejected": bool(unknown_source_rejection),
+        "unknown_manifest_requires_semantic_admission": (
+            unknown_manifest_requires_semantic_admission
+        ),
     }
 
 
@@ -10370,18 +10401,16 @@ def _exercise_full_rebenchmark_publication_path(
         scorer_breakdown_has_complete_current_company_fit_receipt,
     )
     from research_lab.eval import private_runtime as private_runtime_module
-    from gateway.tee.model_sandbox_v2 import MODEL_SANDBOX_REQUEST_SCHEMA_VERSION
+    from research_lab.eval.private_runtime import publish_attested_receipt_hash
     from gateway.tee.scoring_executor import (
         ScoringExecutionResult,
         execute_scoring_operation,
     )
     from gateway.tee.scoring_executor_v2 import (
         OP_PROVIDER_PREFLIGHT_V2,
-        OP_RUN_MODEL_SANDBOX_V2,
         PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
         ScoringExecutorV2,
     )
-    from gateway.tee.source_bundle_v2 import extract_source_bundle_v2
     from gateway.tee.source_add_runtime_v2 import build_source_add_runtime_catalog_v2
     from gateway.tee.release_manifest_v2 import (
         build_release_manifest,
@@ -10404,7 +10433,10 @@ def _exercise_full_rebenchmark_publication_path(
         merkle_root,
         validate_receipt_graphs,
     )
-    from research_lab.eval.private_runtime import compute_private_source_tree_hash
+    from research_lab.sourcing_model_contract_check import (
+        resolve_reviewed_consumer_snapshot,
+        verify_source_tree_contract,
+    )
     from scripts.run_production_parity_full_host import (
         _contains_dashboard_identity,
         _rebenchmark_identity,
@@ -10830,32 +10862,47 @@ def _exercise_full_rebenchmark_publication_path(
         for role in ("gateway_coordinator", "gateway_scoring")
     }
 
-    # The immutable source tree is produced through the Docker extraction
-    # boundary below.  Derive the signed manifest identity from those exact
-    # bytes so the production source-bundle builder, rather than a harness
-    # substitute, proves the tree/archive commitment.
+    # This consumer-owned fixture exercises only the reviewed legacy contract
+    # document shape. It is deliberately not a signed release source tree and
+    # must never be used to claim source compatibility admission.
     model_source_name = "rehearsal_private_model.py"
     model_source_bytes = (
         b"def run_icp(icp, context):\n"
         b"    raise RuntimeError('strict Nitro boundary owns execution')\n"
     )
-    model_source_tree_hash = sha256_json(
-        [
-            (
-                model_source_name,
-                "sha256:" + hashlib.sha256(model_source_bytes).hexdigest(),
+    legacy_contract_path = (
+        SOURCE_ROOT / "research_lab/sourcing_model_contract_v7.json"
+    )
+    legacy_parity_path = (
+        SOURCE_ROOT / "research_lab/sourcing_model_parity_fixtures_v7.json"
+    )
+    model_source_files = _exact_legacy_model_source_fixture_files(
+        contract_path=legacy_contract_path,
+        parity_path=legacy_parity_path,
+        extra_files={model_source_name: model_source_bytes},
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="rehearsal-structural-contract-only-"
+    ) as structural_tmp:
+        structural_root = Path(structural_tmp)
+        for relative, body in model_source_files.items():
+            path = structural_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        structural_violations = verify_source_tree_contract(structural_root)
+        if structural_violations:
+            raise RuntimeError(
+                "consumer-owned structural contract fixture differs: "
+                + "; ".join(structural_violations)
             )
-        ]
+        if resolve_reviewed_consumer_snapshot(structural_root) is not None:
+            raise RuntimeError(
+                "pair-only structural fixture claimed reviewed source identity"
+            )
+
+    artifact = PrivateModelArtifactManifest.from_mapping(
+        SIGNED_PRIVATE_MODEL_RELEASES["leadpoet-sourcing-wrapper-contract-v7"]
     )
-    artifact_doc = copy.deepcopy(
-        SIGNED_PRIVATE_MODEL_RELEASES["leadpoet-sourcing-wrapper-contract-v11"]
-    )
-    artifact_doc["model_artifact_hash"] = model_source_tree_hash
-    artifact_doc["manifest_hash"] = ""
-    unsigned_artifact_doc = dict(artifact_doc)
-    unsigned_artifact_doc.pop("manifest_hash", None)
-    artifact_doc["manifest_hash"] = sha256_json(unsigned_artifact_doc)
-    artifact = PrivateModelArtifactManifest.from_mapping(artifact_doc)
     checkpoint_location = scoring_worker_module._baseline_progress_s3_location(
         artifact.manifest_uri,
         benchmark_date=fixed_now.date().isoformat(),
@@ -11091,9 +11138,15 @@ def _exercise_full_rebenchmark_publication_path(
     catalog_facade_call_count = 0
     active_assertion_execution_count = 0
     active_assertion_nitro_verification_count = 0
-    source_bundle_validation_count = 0
-    docker_source_extract_count = 0
     provider_preflight_execution_count = 0
+    expected_model_lineage_sync_actor_counts = {
+        "rehearsal-rebenchmark-worker": 1,
+        "rehearsal-rebenchmark-checkpoint-restarted": 1,
+        "rehearsal-rebenchmark-worker-restarted": 1,
+    }
+    model_lineage_sync_actor_counts = {
+        actor_ref: 0 for actor_ref in expected_model_lineage_sync_actor_counts
+    }
     git_head_query_count = 0
     git_head_state = {"sha": artifact.git_commit_sha}
     signing_key = Ed25519PrivateKey.generate()
@@ -11238,24 +11291,6 @@ def _exercise_full_rebenchmark_publication_path(
         "runtime_catalog_hash": runtime_catalog["catalog_hash"],
     }
     catalog_authority_roots: set[str] = set()
-
-    def _strict_extract_parent_image_source(
-        *, image_digest: str, source_dir: Path, timeout_seconds: int
-    ) -> tuple[str, list[str]]:
-        nonlocal docker_source_extract_count
-        if (
-            image_digest != artifact.image_digest
-            or timeout_seconds < 120
-            or source_dir.exists()
-        ):
-            raise RuntimeError("private model Docker extraction shape differs")
-        source_dir.mkdir(parents=True)
-        (source_dir / model_source_name).write_bytes(model_source_bytes)
-        observed = compute_private_source_tree_hash(source_dir)
-        if observed != artifact.model_artifact_hash:
-            raise RuntimeError("private model Docker extraction tree differs")
-        docker_source_extract_count += 1
-        return observed, [model_source_name]
 
     def _strict_nitro_boot_verifier(
         identity: Mapping[str, Any],
@@ -11408,6 +11443,41 @@ def _exercise_full_rebenchmark_publication_path(
             return await _persist_strict_outcome(outcome, operation=operation)
         raise RuntimeError("unknown coordinator Nitro operation")
 
+    async def _strict_model_lineage_sync_boundary(
+        supplied_config: Any,
+        *,
+        actor_ref: str,
+        dry_run: bool,
+        wait_for_repo_head: bool,
+    ) -> dict[str, Any]:
+        """Adapt the source-admission-owned lineage gate without claiming it."""
+
+        if (
+            supplied_config is not config
+            or actor_ref not in expected_model_lineage_sync_actor_counts
+            or model_lineage_sync_actor_counts[actor_ref]
+            >= expected_model_lineage_sync_actor_counts[actor_ref]
+            or dry_run is not False
+            or wait_for_repo_head is not False
+        ):
+            raise RuntimeError("model lineage sync boundary inputs differ")
+        alignment = await promotion_module.private_repo_head_alignment_status(
+            supplied_config
+        )
+        active = await promotion_module.load_active_private_model(
+            supplied_config,
+            register_bootstrap=True,
+        )
+        if (
+            alignment.get("ok") is not True
+            or alignment.get("status") != "active_is_repo_head"
+            or active.artifact != artifact
+            or alignment.get("repo_main_sha") != artifact.git_commit_sha
+        ):
+            raise RuntimeError("model lineage sync boundary identity differs")
+        model_lineage_sync_actor_counts[actor_ref] += 1
+        return dict(alignment)
+
     def _runtime_receipt(runtime_cap_seconds: float) -> dict[str, Any]:
         return {
             "kind": "sourcing_branch_receipt",
@@ -11451,220 +11521,247 @@ def _exercise_full_rebenchmark_publication_path(
             execute=_strict_coordinator_execute,
         )
 
-    async def _strict_model_execute(**kwargs: Any) -> dict[str, Any]:
-        nonlocal source_bundle_validation_count
-        if (
-            kwargs.get("operation") != OP_RUN_MODEL_SANDBOX_V2
-            or kwargs.get("purpose") != "research_lab.private_model_run.v2"
-            or int(kwargs.get("epoch_id") or -1) != 24_600
-            or kwargs.get("provider_credential_profile") != "benchmark_model"
-            or kwargs.get("provider_credential_ref_hashes") != {}
-        ):
-            raise RuntimeError("production model execution authority differs")
-        payload = kwargs.get("payload")
-        if not isinstance(payload, Mapping):
-            raise RuntimeError("production model payload is missing")
-        input_doc = payload.get("input")
-        context = dict(input_doc.get("context") or {}) if isinstance(input_doc, Mapping) else {}
-        icp = dict(input_doc.get("icp") or {}) if isinstance(input_doc, Mapping) else {}
-        item_ref = item_ref_by_icp_id.get(str(icp.get("icp_id") or ""), "")
-        source_bundle = payload.get("source_bundle")
-        if not isinstance(source_bundle, Mapping):
-            raise RuntimeError("production source bundle is missing")
-        if not source_bundle_validation_count:
-            with tempfile.TemporaryDirectory(
-                prefix="rehearsal-source-bundle-validation-"
-            ) as extraction_tmp:
-                extracted_path = Path(extraction_tmp) / "source"
-                extracted = extract_source_bundle_v2(
-                    source_bundle,
-                    destination=extracted_path,
-                    expected_source_tree_hash=artifact.model_artifact_hash,
-                )
-                if (
-                    extracted.get("file_count") != 1
-                    or compute_private_source_tree_hash(extracted_path)
-                    != artifact.model_artifact_hash
-                    or (extracted_path / model_source_name).read_bytes()
-                    != model_source_bytes
-                ):
-                    raise RuntimeError("production source bundle extraction differs")
-            source_bundle_validation_count += 1
-        environment = payload.get("environment")
-        forbidden_environment = (
-            model_authority_v2._CREDENTIAL_ENV_NAMES
-            | model_authority_v2._HOST_ONLY_ENV_NAMES
-        )
-        request_checks = {
-            "schema": payload.get("schema_version")
-            == MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
-            "model_kind": payload.get("model_kind") == "private",
-            "operation": payload.get("operation") == "run_icp",
-            "artifact": payload.get("artifact") == artifact.to_dict(),
-            "source_bundle": source_bundle.get("source_tree_hash")
-            == artifact.model_artifact_hash,
-            "evidence_mode": payload.get("provider_evidence_mode") == "record",
-            "runtime_catalog": payload.get("provider_runtime_catalog")
-            == runtime_catalog,
-            "catalog_evidence": (
-                isinstance(payload.get("provider_catalog_evidence"), Mapping)
-                and payload["provider_catalog_evidence"].get("result")
-                == catalog_result
-                and payload["provider_catalog_evidence"].get(
-                    "root_receipt_hash"
-                )
-                in catalog_authority_roots
-            ),
-            "context_mode": context.get("mode") == "private_baseline",
-            "runtime_options": isinstance(context.get("runtime_options"), Mapping),
-            "icp_identity": bool(item_ref),
-            "environment": isinstance(environment, Mapping),
-            "credential_stripping": not forbidden_environment.intersection(
-                environment if isinstance(environment, Mapping) else {}
-            ),
-            "envelope_builder": callable(
-                kwargs.get("additional_job_credential_envelope_builder")
-            ),
-        }
-        if not all(request_checks.values()):
-            raise RuntimeError(
-                "production model request contract differs: "
-                + ",".join(
-                    name for name, passed in request_checks.items() if not passed
-                )
-            )
-        if kwargs["additional_job_credential_envelope_builder"](
-            "rehearsal-model-job"
-        ) != []:
-            raise RuntimeError("production model credential envelope differs")
-        parent_graphs = tuple(kwargs.get("parent_graphs") or ())
-        parent_roots = {
-            str(item.get("root_receipt_hash") or "") for item in parent_graphs
-        }
-        parent_purposes = {
-            str(receipt.get("purpose") or "")
-            for graph in parent_graphs
-            for receipt in graph.get("receipts") or ()
-            if receipt.get("receipt_hash") == graph.get("root_receipt_hash")
-        }
-        if (
-            len(parent_graphs) != 2
-            or len(parent_roots) != 2
-            or parent_purposes
-            != {
-                "research_lab.active_private_model.v2",
-                "research_lab.source_add_catalog_snapshot.v2",
-            }
-            or not catalog_authority_roots.intersection(parent_roots)
-        ):
-            raise RuntimeError("production model authority lineage differs")
-        input_artifacts = tuple(
-            sorted({str(item) for item in kwargs.get("input_artifact_hashes") or ()})
-        )
-        image_hash = "sha256:" + artifact.image_digest.rsplit("@sha256:", 1)[1]
-        expected_input_artifacts = tuple(
-            sorted(
-                {
-                    artifact.model_artifact_hash,
-                    artifact.manifest_hash,
-                    image_hash,
-                    str(source_bundle["archive_sha256"]),
-                    sha256_json({}),
-                    *catalog_authority_roots,
-                    str(catalog_result["provisioned_sources_hash"]),
-                    str(catalog_result["private_registry_rows_hash"]),
-                    str(catalog_result["runtime_catalog_hash"]),
-                }
-            )
-        )
-        if input_artifacts != expected_input_artifacts:
-            raise RuntimeError("production model input artifact hashes differ")
-        model_input_artifact_sets.append(input_artifacts)
-        model_calls.append(item_ref)
-        label = str(icp["icp_id"])
-        output = [
-            {
-                "company_name": f"Measured Company {label}",
-                "company_website": f"https://{label}.example",
-                "company_linkedin": f"https://linkedin.com/company/{label}",
-            }
-        ]
-        trace_entries = [
-            _runtime_receipt(
-                float(context["runtime_options"]["runtime_cap_seconds"])
-            )
-        ]
-        result = {
-            "schema_version": "leadpoet.model_sandbox_result.v2",
-            "model_kind": "private",
-            "operation": "run_icp",
-            "model_artifact_hash": artifact.model_artifact_hash,
-            "model_manifest_hash": artifact.manifest_hash,
-            "compatibility_image_digest": artifact.image_digest,
-            "source_bundle_hash": source_bundle["archive_sha256"],
-            "runtime_config_hash": sha256_json({"runtime": "strict-adapter"}),
-            "input_hash": sha256_json(dict(input_doc)),
-            "provider_evidence_cache_hash": sha256_json(
-                dict(payload.get("provider_evidence_cache") or {})
-            ),
-            "provider_evidence_cache_ref": str(
-                payload.get("provider_evidence_cache_ref") or ""
-            ),
-            "provider_evidence_mode": "record",
-            "provider_snapshot_archive_hash": sha256_json({}),
-            "provider_snapshot_tree_hash": sha256_json({}),
-            "provider_snapshot_manifest_hash": sha256_json({}),
-            "provider_cost_cap_microusd": 0,
-            "provider_call_cap": 0,
-            "provider_runtime_catalog_hash": runtime_catalog["catalog_hash"],
-            "generated_provider_evidence_cache_hash": sha256_json({}),
-            "trace_entries_hash": sha256_json(trace_entries),
-            "output_hash": sha256_json(output),
-            "output": output,
-            "trace_entries": trace_entries,
-            "generated_provider_evidence_cache": {},
-        }
-        receipt_artifacts = tuple(
-            str(result[field])
-            for field in (
-                "model_artifact_hash",
-                "model_manifest_hash",
-                "source_bundle_hash",
-                "runtime_config_hash",
-                "input_hash",
-                "provider_evidence_cache_hash",
-                "provider_snapshot_archive_hash",
-                "provider_snapshot_tree_hash",
-                "provider_snapshot_manifest_hash",
-                "provider_runtime_catalog_hash",
-                "generated_provider_evidence_cache_hash",
-                "trace_entries_hash",
-                "output_hash",
-            )
-        )
-        outcome = _signed_outcome(
-            role="gateway_scoring",
-            purpose="research_lab.private_model_run.v2",
-            epoch_id=24_600,
-            sequence=int(kwargs.get("sequence") or 0),
-            payload=dict(payload),
-            result=result,
-            parent_graphs=parent_graphs,
-            artifact_hashes=receipt_artifacts,
-        )
-        return await _persist_strict_outcome(outcome)
-
-    real_model_runner_type = model_authority_v2.AttestedPrivateModelRunnerV2
+    strict_external_artifact = artifact
     real_scorer_type = scoring_worker_module.QualificationStyleCompanyScorer
 
-    class _StrictProductionModelRunner(real_model_runner_type):
-        def __init__(self, **kwargs: Any) -> None:
-            super().__init__(
-                **kwargs,
-                execute=_strict_model_execute,
-                catalog_snapshot_loader=_load_catalog,
+    class _StrictExternalPrivateModelExecutionAdapter:
+        """Adapt the complete privileged model-execution boundary.
+
+        Source admission is intentionally outside this joined downstream
+        rehearsal and is never synthesized here. Focused authority tests and
+        the mandatory immutable signed-artifact gate exercise that boundary.
+        """
+
+        def __init__(
+            self,
+            *,
+            artifact: Any,
+            spec: Any,
+            model_kind: str,
+            worker_index: int,
+            epoch_id: int | None = None,
+            parent_graphs: Sequence[Mapping[str, Any]] = (),
+            _shared_state: dict[str, Any] | None = None,
+            **unexpected: Any,
+        ) -> None:
+            if unexpected:
+                raise RuntimeError("external model adapter inputs differ")
+            self.artifact = (
+                artifact
+                if isinstance(artifact, PrivateModelArtifactManifest)
+                else PrivateModelArtifactManifest.from_mapping(artifact)
             )
+            self.spec = spec
+            self.model_kind = str(model_kind)
+            self.worker_index = int(worker_index)
+            self.epoch_id = int(epoch_id) if epoch_id is not None else None
+            self.parent_graphs = tuple(dict(graph) for graph in parent_graphs)
+            if (
+                self.artifact != strict_external_artifact
+                or self.artifact.image_digest != self.spec.image_digest
+                or self.model_kind != "private"
+                or self.epoch_id != 24_600
+            ):
+                raise RuntimeError("external model adapter identity differs")
+            self._shared_state = _shared_state or {
+                "sequence": 0,
+                "receipts": [],
+                "authorities": [],
+                "catalog": None,
+                "catalog_lock": asyncio.Lock(),
+                "lock": threading.Lock(),
+            }
             model_instances.append(self)
+
+        def with_spec(self, spec: Any) -> "_StrictExternalPrivateModelExecutionAdapter":
+            return _StrictExternalPrivateModelExecutionAdapter(
+                artifact=self.artifact,
+                spec=spec,
+                model_kind=self.model_kind,
+                worker_index=self.worker_index,
+                epoch_id=self.epoch_id,
+                parent_graphs=self.parent_graphs,
+                _shared_state=self._shared_state,
+            )
+
+        def with_worker_index(
+            self, worker_index: int
+        ) -> "_StrictExternalPrivateModelExecutionAdapter":
+            return _StrictExternalPrivateModelExecutionAdapter(
+                artifact=self.artifact,
+                spec=self.spec,
+                model_kind=self.model_kind,
+                worker_index=int(worker_index),
+                epoch_id=self.epoch_id,
+                parent_graphs=self.parent_graphs,
+                _shared_state=self._shared_state,
+            )
+
+        def attested_receipts(self) -> list[dict[str, Any]]:
+            with self._shared_state["lock"]:
+                return [dict(item) for item in self._shared_state["receipts"]]
+
+        def attested_authorities(self) -> list[dict[str, Any]]:
+            with self._shared_state["lock"]:
+                return [copy.deepcopy(item) for item in self._shared_state["authorities"]]
+
+        async def _catalog(self) -> Mapping[str, Any]:
+            async with self._shared_state["catalog_lock"]:
+                if self._shared_state["catalog"] is None:
+                    self._shared_state["catalog"] = await _load_catalog(
+                        epoch_id=int(self.epoch_id or 0)
+                    )
+                return self._shared_state["catalog"]
+
+        async def __call__(
+            self,
+            icp: Mapping[str, Any],
+            context: Mapping[str, Any],
+        ) -> list[Mapping[str, Any]]:
+            canonical_icp = model_authority_v2.canonicalize_private_model_icp(icp)
+            input_doc = {
+                "icp": canonical_icp,
+                "context": model_authority_v2.context_with_runtime_options(
+                    context,
+                    outer_timeout_seconds=float(self.spec.timeout_seconds),
+                ),
+            }
+            item_ref = item_ref_by_icp_id.get(
+                str(canonical_icp.get("icp_id") or ""), ""
+            )
+            if (
+                not item_ref
+                or input_doc["context"].get("mode") != "private_baseline"
+                or not isinstance(input_doc["context"].get("runtime_options"), Mapping)
+            ):
+                raise RuntimeError("external model adapter input differs")
+
+            catalog_outcome = await self._catalog()
+            if catalog_outcome.get("result") != catalog_result:
+                raise RuntimeError("external model catalog result differs")
+            candidate_graphs = (
+                *self.parent_graphs,
+                catalog_outcome.get("execution_receipt_graph") or {},
+                catalog_outcome.get("receipt_graph") or {},
+            )
+            parent_graph_by_root = {
+                str(graph.get("root_receipt_hash") or ""): dict(graph)
+                for graph in candidate_graphs
+                if isinstance(graph, Mapping)
+                and str(graph.get("root_receipt_hash") or "")
+            }
+            parent_graphs = tuple(
+                parent_graph_by_root[root] for root in sorted(parent_graph_by_root)
+            )
+            parent_purposes = {
+                str(receipt.get("purpose") or "")
+                for graph in parent_graphs
+                for receipt in graph.get("receipts") or ()
+                if receipt.get("receipt_hash") == graph.get("root_receipt_hash")
+            }
+            if parent_purposes != {
+                "research_lab.active_private_model.v2",
+                "research_lab.source_add_catalog_snapshot.v2",
+            }:
+                raise RuntimeError("external model authority lineage differs")
+
+            image_hash = "sha256:" + self.artifact.image_digest.rsplit(
+                "@sha256:", 1
+            )[1]
+            input_artifacts = tuple(
+                sorted(
+                    {
+                        self.artifact.model_artifact_hash,
+                        self.artifact.manifest_hash,
+                        image_hash,
+                        sha256_json({}),
+                        *parent_graph_by_root,
+                        str(catalog_result["provisioned_sources_hash"]),
+                        str(catalog_result["private_registry_rows_hash"]),
+                        str(catalog_result["runtime_catalog_hash"]),
+                    }
+                )
+            )
+            model_input_artifact_sets.append(input_artifacts)
+            model_calls.append(item_ref)
+            label = str(canonical_icp["icp_id"])
+            output = [
+                {
+                    "company_name": f"Measured Company {label}",
+                    "company_website": f"https://{label}.example",
+                    "company_linkedin": f"https://linkedin.com/company/{label}",
+                }
+            ]
+            trace_entries = [
+                _runtime_receipt(
+                    float(
+                        input_doc["context"]["runtime_options"][
+                            "runtime_cap_seconds"
+                        ]
+                    )
+                )
+            ]
+            payload = {
+                "schema_version": (
+                    "leadpoet.rehearsal_external_private_model_execution.v1"
+                ),
+                "artifact": self.artifact.to_dict(),
+                "model_kind": self.model_kind,
+                "worker_index": self.worker_index,
+                "input": input_doc,
+                "input_artifact_hashes": list(input_artifacts),
+            }
+            result = {
+                "schema_version": (
+                    "leadpoet.rehearsal_external_private_model_result.v1"
+                ),
+                "model_artifact_hash": self.artifact.model_artifact_hash,
+                "model_manifest_hash": self.artifact.manifest_hash,
+                "image_digest": self.artifact.image_digest,
+                "input_hash": sha256_json(input_doc),
+                "runtime_catalog_hash": str(catalog_result["runtime_catalog_hash"]),
+                "trace_entries_hash": sha256_json(trace_entries),
+                "output_hash": sha256_json(output),
+                "output": output,
+                "trace_entries": trace_entries,
+            }
+            with self._shared_state["lock"]:
+                sequence = int(self._shared_state["sequence"])
+                self._shared_state["sequence"] = sequence + 1
+            outcome = await _persist_strict_outcome(
+                _signed_outcome(
+                    role="gateway_scoring",
+                    purpose="research_lab.private_model_run.v2",
+                    epoch_id=int(self.epoch_id or 0),
+                    sequence=sequence,
+                    payload=payload,
+                    result=result,
+                    parent_graphs=parent_graphs,
+                    artifact_hashes=(
+                        *input_artifacts,
+                        str(result["input_hash"]),
+                        str(result["trace_entries_hash"]),
+                        str(result["output_hash"]),
+                    ),
+                )
+            )
+            receipt = outcome.get("execution_receipt")
+            graph = outcome.get("execution_receipt_graph")
+            if (
+                not isinstance(receipt, Mapping)
+                or not isinstance(graph, Mapping)
+                or receipt.get("input_root") != sha256_json(payload)
+                or receipt.get("output_root") != sha256_json(result)
+                or receipt.get("status") != "succeeded"
+                or graph.get("root_receipt_hash") != receipt.get("receipt_hash")
+                or result["output_hash"] != sha256_json(output)
+            ):
+                raise RuntimeError("external model receipt commitment differs")
+            with self._shared_state["lock"]:
+                self._shared_state["receipts"].append(dict(receipt))
+                self._shared_state["authorities"].append(copy.deepcopy(outcome))
+            publish_attested_receipt_hash(str(receipt["receipt_hash"]))
+            return list(output)
 
     class _StrictProductionScorer(real_scorer_type):
         def __init__(self, **kwargs: Any) -> None:
@@ -12028,17 +12125,17 @@ def _exercise_full_rebenchmark_publication_path(
         patch.object(
             scoring_worker_module,
             "AttestedPrivateModelRunnerV2",
-            _StrictProductionModelRunner,
+            _StrictExternalPrivateModelExecutionAdapter,
+        ),
+        patch.object(
+            scoring_worker_module,
+            "sync_active_model_to_repo_head",
+            _strict_model_lineage_sync_boundary,
         ),
         patch.object(
             scoring_worker_module,
             "QualificationStyleCompanyScorer",
             _StrictProductionScorer,
-        ),
-        patch.object(
-            model_authority_v2,
-            "_extract_parent_image_source",
-            _strict_extract_parent_image_source,
         ),
         patch.object(
             attested_coordinator_v2,
@@ -12154,11 +12251,6 @@ def _exercise_full_rebenchmark_publication_path(
                         f"observed={observed_available_memory_mib} "
                         f"events={memory_boundary_event_count}"
                     )
-            with model_authority_v2._SOURCE_BUNDLE_CACHE_LOCK:
-                model_authority_v2._SOURCE_BUNDLE_CACHE.pop(
-                    (artifact.model_artifact_hash, artifact.image_digest),
-                    None,
-                )
             (
                 private_runtime_module
                 ._verify_private_artifact_manifest_signature_cached.cache_clear()
@@ -12250,19 +12342,45 @@ def _exercise_full_rebenchmark_publication_path(
                 if recovered_transition is not None
                 else total_icps
             )
+            checkpoint_attempt_entries = tuple(
+                (checkpoint_doc.get("attempt_ledger") or {}).get("entries", ())
+            )
             if (
                 checkpoint_doc.get("checkpoint_status") != "active"
                 or int(checkpoint_doc.get("completed_icp_count") or 0)
                 != total_icps
                 or len(checkpoint_doc.get("per_icp_results") or ()) != total_icps
-                or len(
-                    (checkpoint_doc.get("attempt_ledger") or {}).get(
-                        "entries", ()
-                    )
-                )
-                != expected_checkpoint_attempts
+                or len(checkpoint_attempt_entries) != expected_checkpoint_attempts
             ):
                 raise RuntimeError("full-bank baseline checkpoint is incomplete")
+            for attempt_entry in checkpoint_attempt_entries:
+                attempt_row = (
+                    attempt_entry.get("result_row")
+                    if isinstance(attempt_entry, Mapping)
+                    else None
+                )
+                if not isinstance(attempt_row, Mapping):
+                    raise RuntimeError("baseline checkpoint attempt row is invalid")
+                if attempt_row.get("_nonempty") is not True:
+                    continue
+                attempt_receipt_roots = tuple(
+                    str(value or "").strip().lower()
+                    for value in attempt_row.get(
+                        "_attested_parent_receipt_hashes", ()
+                    )
+                )
+                if (
+                    len(attempt_receipt_roots) != 2
+                    or len(set(attempt_receipt_roots)) != 2
+                    or any(
+                        not re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+                        for value in attempt_receipt_roots
+                    )
+                ):
+                    raise RuntimeError(
+                        "nonempty baseline ICP does not bind exactly two unique "
+                        "causal receipt roots"
+                    )
             if recovered_transition is not None:
                 observed_terminal_rows_hash = sha256_json(
                     sorted(
@@ -12633,19 +12751,17 @@ def _exercise_full_rebenchmark_publication_path(
                 raise RuntimeError("full rebenchmark downstream persistence is incomplete")
             fresh_model_facades_exact = (
                 recovered_transition is None
-                and catalog_facade_call_count >= 1
-                and docker_source_extract_count == 1
-                and source_bundle_validation_count == 1
+                and catalog_facade_call_count == 1
             )
             recovered_model_facades_exact = (
                 recovered_transition is not None
                 and catalog_facade_call_count == 0
-                and docker_source_extract_count == 0
-                and source_bundle_validation_count == 0
             )
             if (
                 active_assertion_execution_count != 1
                 or active_assertion_nitro_verification_count < 1
+                or model_lineage_sync_actor_counts
+                != expected_model_lineage_sync_actor_counts
                 or not (fresh_model_facades_exact or recovered_model_facades_exact)
                 or icp_postgrest.query_count < 3
                 or checkpoint_s3.manifest_read_count < 1
@@ -12658,9 +12774,8 @@ def _exercise_full_rebenchmark_publication_path(
                     "production rebenchmark facade coverage is incomplete: "
                     f"active_execute={active_assertion_execution_count} "
                     f"active_verify={active_assertion_nitro_verification_count} "
+                    f"lineage_sync={model_lineage_sync_actor_counts} "
                     f"catalog={catalog_facade_call_count} "
-                    f"docker_extract={docker_source_extract_count} "
-                    f"source_validate={source_bundle_validation_count} "
                     f"icp_queries={icp_postgrest.query_count} "
                     f"manifest_reads={checkpoint_s3.manifest_read_count} "
                     f"signature_verifies={checkpoint_s3.signature_verify_count} "
@@ -12687,7 +12802,13 @@ def _exercise_full_rebenchmark_publication_path(
                 "every_configured_icp_positive": True,
                 "configured_icp_identity_exact": True,
                 "candidate_release_identity_exact": True,
-                "production_model_runner_exact": True,
+                "strict_external_model_execution_adapted": True,
+                "active_model_lineage_gate_adapted": True,
+                "model_lineage_sync_actor_counts": dict(
+                    model_lineage_sync_actor_counts
+                ),
+                "source_admission_exercised": False,
+                "pair_only_contract_fixture_structural_only": True,
                 "production_scorer_path_exact": True,
                 "model_attested_outcome_count": len(model_receipt_hashes),
                 "scorer_attested_outcome_count": scorer_attested_outcomes,
@@ -12698,6 +12819,7 @@ def _exercise_full_rebenchmark_publication_path(
                 "model_input_artifact_sets_exact": True,
                 "scorer_input_artifact_sets_exact": True,
                 "baseline_parent_receipt_count": len(baseline_parent_roots),
+                "per_nonempty_icp_two_unique_receipt_roots": True,
                 "baseline_input_artifact_count": len(baseline_input_artifacts),
                 "independent_baseline_authority_exact": True,
                 "category_counts": expected_counts,
@@ -12711,7 +12833,6 @@ def _exercise_full_rebenchmark_publication_path(
                 "production_active_model_assertion_exact": True,
                 "production_repo_head_guard_exact": True,
                 "repo_head_change_rejected": True,
-                "production_source_bundle_exact": True,
                 "production_catalog_loader_exact": True,
                 "production_icp_window_loader_exact": True,
                 "provider_preflight_production_facade_exact": True,
@@ -14800,37 +14921,37 @@ def main() -> int:
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
                 {},
-            ).get("contract_assertion_mismatch_rejected")
+            ).get("source_admission_exercised")
+            is False
+            and behavior_evidence.get(
+                "signed-private-model-contract-transition",
+                {},
+            ).get("structural_contract_pairs_verified")
             is True
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
                 {},
-            ).get("hybrid_sources_rejected")
+            ).get("hybrid_source_pairs_structurally_rejected")
             is True
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
                 {},
-            ).get("hybrid_manifests_rejected")
+            ).get("hybrid_manifests_require_semantic_admission")
             is True
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
                 {},
-            ).get("tampered_source_rejected")
+            ).get("tampered_source_pair_structurally_rejected")
             is True
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
                 {},
-            ).get("tampered_manifest_rejected")
+            ).get("tampered_manifest_requires_semantic_admission")
             is True
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
                 {},
-            ).get("unknown_source_rejected")
-            is True
-            and behavior_evidence.get(
-                "signed-private-model-contract-transition",
-                {},
-            ).get("unknown_manifest_rejected")
+            ).get("unknown_manifest_requires_semantic_admission")
             is True
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
@@ -14840,7 +14961,7 @@ def main() -> int:
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
                 {},
-            ).get("lineage_rebenchmark_verified")
+            ).get("lineage_pointer_transition_structurally_verified")
             is True
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
@@ -14882,7 +15003,7 @@ def main() -> int:
             and behavior_evidence.get(
                 "signed-private-model-contract-transition",
                 {},
-            ).get("candidate_owned_repo_head_sync_blocked")
+            ).get("candidate_owned_repo_head_structurally_blocked")
             is True
         ),
         "model_sandbox_final_provider_cost_scope_bound": (
@@ -15225,7 +15346,31 @@ def main() -> int:
             and behavior_evidence.get(
                 "full-rebenchmark-publication-path",
                 {},
-            ).get("production_model_runner_exact")
+            ).get("strict_external_model_execution_adapted")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("active_model_lineage_gate_adapted")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("model_lineage_sync_actor_counts")
+            == {
+                "rehearsal-rebenchmark-worker": 1,
+                "rehearsal-rebenchmark-checkpoint-restarted": 1,
+                "rehearsal-rebenchmark-worker-restarted": 1,
+            }
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("source_admission_exercised")
+            is False
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
+            ).get("pair_only_contract_fixture_structural_only")
             is True
             and behavior_evidence.get(
                 "full-rebenchmark-publication-path",
@@ -15286,6 +15431,11 @@ def main() -> int:
             and behavior_evidence.get(
                 "full-rebenchmark-publication-path",
                 {},
+            ).get("per_nonempty_icp_two_unique_receipt_roots")
+            is True
+            and behavior_evidence.get(
+                "full-rebenchmark-publication-path",
+                {},
             ).get("baseline_input_artifact_count")
             == 1
             and behavior_evidence.get(
@@ -15319,7 +15469,6 @@ def main() -> int:
                     "production_active_model_assertion_exact",
                     "production_repo_head_guard_exact",
                     "repo_head_change_rejected",
-                    "production_source_bundle_exact",
                     "production_catalog_loader_exact",
                     "production_icp_window_loader_exact",
                     "provider_preflight_production_facade_exact",

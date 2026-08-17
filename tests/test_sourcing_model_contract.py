@@ -32,6 +32,7 @@ from research_lab.sourcing_model_contract_check import (
     PARITY_FIXTURE_V46_PATH,
     PARITY_FIXTURE_V47_PATH,
     PARITY_FIXTURE_V7_PATH,
+    _resolve_reviewed_consumer_contract_pair,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
     reviewed_consumer_snapshots,
@@ -404,12 +405,13 @@ def test_contract_loads_and_declares_frozen_surface() -> None:
     ]
 
 
-def test_exact_v7_and_v8_source_pairs_are_both_reviewed(tmp_path: Path) -> None:
+def test_exact_v7_and_v8_document_pairs_are_both_reviewed(tmp_path: Path) -> None:
     v8_root = tmp_path / "v8"
     _conforming_tree(v8_root)
-    assert resolve_reviewed_consumer_snapshot(v8_root)["contract"][
+    assert _resolve_reviewed_consumer_contract_pair(v8_root)["contract"][
         "contract_id"
     ].endswith("v8")
+    assert resolve_reviewed_consumer_snapshot(v8_root) is None
     assert verify_source_tree_contract(v8_root) == []
 
     v7_root = tmp_path / "v7"
@@ -419,9 +421,10 @@ def test_exact_v7_and_v8_source_pairs_are_both_reviewed(tmp_path: Path) -> None:
         parity_snapshot=PARITY_FIXTURE_V7_PATH,
         runtime_version=6,
     )
-    assert resolve_reviewed_consumer_snapshot(v7_root)["contract"][
+    assert _resolve_reviewed_consumer_contract_pair(v7_root)["contract"][
         "contract_id"
     ].endswith("v7")
+    assert resolve_reviewed_consumer_snapshot(v7_root) is None
     assert verify_source_tree_contract(v7_root) == []
 
 
@@ -434,7 +437,7 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
     contract_path.write_bytes(CONTRACT_V11_PATH.read_bytes())
     parity_path.write_bytes(PARITY_FIXTURE_V11_PATH.read_bytes())
 
-    resolved = resolve_reviewed_consumer_snapshot(root)
+    resolved = _resolve_reviewed_consumer_contract_pair(root)
 
     assert resolved is not None
     assert resolved["contract"]["contract_id"] == (
@@ -474,7 +477,7 @@ def test_exact_v26_contract_pair_and_keyword_only_surface_are_reviewed(
         """,
     )
 
-    resolved = resolve_reviewed_consumer_snapshot(tmp_path)
+    resolved = _resolve_reviewed_consumer_contract_pair(tmp_path)
     violations = verify_source_tree_contract(tmp_path)
 
     assert resolved is not None
@@ -511,7 +514,7 @@ def test_exact_v46_contract_pair_is_reviewed(tmp_path: Path) -> None:
         """,
     )
 
-    resolved = resolve_reviewed_consumer_snapshot(tmp_path)
+    resolved = _resolve_reviewed_consumer_contract_pair(tmp_path)
     violations = verify_source_tree_contract(tmp_path)
 
     assert resolved is not None
@@ -569,13 +572,14 @@ def test_exact_v47_contract_pair_and_intent_outcome_surface_are_reviewed(
         """,
     )
 
-    resolved = resolve_reviewed_consumer_snapshot(tmp_path)
+    resolved = _resolve_reviewed_consumer_contract_pair(tmp_path)
     violations = verify_source_tree_contract(tmp_path)
 
     assert resolved is not None
     assert resolved["contract"]["contract_id"] == (
         "leadpoet-sourcing-wrapper-contract-v47"
     )
+    assert resolve_reviewed_consumer_snapshot(tmp_path) is None
     assert not any(
         "intent_evidence_outcome.py" in item and "parameter drift" in item
         for item in violations
@@ -608,7 +612,7 @@ def test_exact_v12_contact_contract_and_parity_pair_is_reviewed(
     contract_path.write_bytes(CONTRACT_V12_PATH.read_bytes())
     parity_path.write_bytes(PARITY_FIXTURE_V12_PATH.read_bytes())
 
-    resolved = resolve_reviewed_consumer_snapshot(root)
+    resolved = _resolve_reviewed_consumer_contract_pair(root)
 
     assert resolved is not None
     assert resolved["contract"]["contract_id"] == (
@@ -663,7 +667,7 @@ def test_exact_v13_contact_verification_contract_and_parity_pair_is_reviewed(
     contract_path.write_bytes(CONTRACT_V13_PATH.read_bytes())
     parity_path.write_bytes(PARITY_FIXTURE_V13_PATH.read_bytes())
 
-    resolved = resolve_reviewed_consumer_snapshot(root)
+    resolved = _resolve_reviewed_consumer_contract_pair(root)
 
     assert resolved is not None
     assert resolved["contract"]["contract_id"] == (
@@ -686,7 +690,7 @@ def test_exact_v13_contact_verification_contract_and_parity_pair_is_reviewed(
     assert all(decision["contract_id"] == "contact-verification:v1" for decision in decisions)
 
 
-def test_mixed_reviewed_contract_and_parity_versions_fail_closed(
+def test_mixed_release_documents_do_not_bypass_semantic_admission(
     tmp_path: Path,
 ) -> None:
     _conforming_tree(
@@ -697,20 +701,20 @@ def test_mixed_reviewed_contract_and_parity_versions_fail_closed(
     )
 
     assert resolve_reviewed_consumer_snapshot(tmp_path) is None
-    assert (
-        "model-owned compatibility contract/parity pair is not reviewed"
-        in verify_source_tree_contract(tmp_path)
-    )
+    violations = verify_source_tree_contract(tmp_path)
+    assert violations
+    assert any("hard module semantic drift" in item for item in violations)
 
 
-def test_nonidentical_contract_and_parity_snapshots_fail_closed(
+def test_nonidentical_legacy_documents_route_through_semantic_admission(
     tmp_path: Path,
 ) -> None:
     _conforming_tree(tmp_path)
     contract = tmp_path / "sourcing_model" / "consumer_contract.json"
     contract.write_text(contract.read_text() + "\n", encoding="utf-8")
     violations = verify_source_tree_contract(tmp_path)
-    assert any("compatibility contract differs" in item for item in violations)
+    assert violations
+    assert any("hard module semantic drift" in item for item in violations)
 
     _conforming_tree(tmp_path)
     fixtures = (
@@ -718,7 +722,8 @@ def test_nonidentical_contract_and_parity_snapshots_fail_closed(
     )
     fixtures.write_text(fixtures.read_text() + "\n", encoding="utf-8")
     violations = verify_source_tree_contract(tmp_path)
-    assert any("parity fixtures differ" in item for item in violations)
+    assert violations
+    assert any("hard module semantic drift" in item for item in violations)
 
 
 def test_conforming_tree_has_no_violations(tmp_path: Path) -> None:
@@ -1118,7 +1123,10 @@ def test_build_gate_shadow_logs_and_proceeds(tmp_path: Path, monkeypatch, caplog
     )
 
 
-def test_build_gate_enforce_fails_broken_tree(tmp_path: Path, monkeypatch) -> None:
+def test_build_gate_enforce_fails_broken_or_unreviewed_tree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     from gateway.research_lab.code_build import (
         CodeEditPrivateTestError,
         _sourcing_contract_gate,
@@ -1129,9 +1137,11 @@ def test_build_gate_enforce_fails_broken_tree(tmp_path: Path, monkeypatch) -> No
     (tmp_path / "research_lab_adapter.py").unlink()
     with pytest.raises(CodeEditPrivateTestError, match="wrapper contract violation"):
         _sourcing_contract_gate(tmp_path)
-    # a conforming tree passes enforce silently
+    # Exact legacy document conformance is not source admission. This
+    # synthetic tree is not one of the signed rollback identities.
     _conforming_tree(tmp_path)
-    _sourcing_contract_gate(tmp_path)
+    with pytest.raises(CodeEditPrivateTestError, match="wrapper contract violation"):
+        _sourcing_contract_gate(tmp_path)
 
 
 def test_build_gate_disabled_and_enforce_fails_closed(tmp_path: Path, monkeypatch) -> None:
@@ -1142,12 +1152,10 @@ def test_build_gate_disabled_and_enforce_fails_closed(tmp_path: Path, monkeypatc
 
     # Internal verifier failure fails closed in enforce mode.
     monkeypatch.setenv("RESEARCH_LAB_SOURCING_CONTRACT_CHECK", "enforce")
-    import research_lab.sourcing_model_contract_check as check_mod
-
     def _boom(*args, **kwargs):
         raise RuntimeError("contract file unreadable")
 
-    monkeypatch.setattr(check_mod, "verify_source_tree_contract", _boom)
+    monkeypatch.setattr(cb, "source_tree_compatibility_admission_v1", _boom)
     with pytest.raises(cb.CodeEditPrivateTestError, match="failed internally"):
         cb._sourcing_contract_gate(tmp_path)
 

@@ -804,6 +804,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/145-research-lab-source-add-admission-control.sql",
         "research_lab_source_add_admission_control_contract_v1",
     ),
+    (
+        "scripts/153-research-lab-private-model-lineage-generation.sql",
+        "research_lab_private_model_lineage_generation",
+    ),
 )
 
 

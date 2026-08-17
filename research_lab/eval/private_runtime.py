@@ -34,8 +34,11 @@ from research_lab.employee_buckets import (
     normalize_employee_count_buckets,
 )
 from research_lab.sourcing_model_contract_check import (
+    compute_compatibility_source_tree_hash_v1,
     resolve_reviewed_consumer_snapshot,
     reviewed_consumer_snapshots,
+    semantic_compatibility_policy_v1,
+    source_tree_compatibility_admission_v1,
 )
 
 logger = logging.getLogger(__name__)
@@ -819,22 +822,27 @@ def verify_private_artifact_manifest_signature(
         raise PrivateModelRuntimeError(
             "private artifact manifest hash does not match its payload"
         )
-    _verify_consumer_contract_manifest(payload)
+    contract_binding_mode = _verify_consumer_contract_manifest(payload)
     if s3_client is None and kms_client is None:
-        return dict(
+        verification = dict(
             _verify_private_artifact_manifest_signature_cached(
                 manifest_hash,
                 signature_ref,
                 resolved_key_id,
             )
         )
-    return _verify_private_artifact_manifest_signature_uncached(
-        manifest_hash=manifest_hash,
-        signature_ref=signature_ref,
-        key_id=resolved_key_id,
-        s3_client=s3_client,
-        kms_client=kms_client,
-    )
+    else:
+        verification = _verify_private_artifact_manifest_signature_uncached(
+            manifest_hash=manifest_hash,
+            signature_ref=signature_ref,
+            key_id=resolved_key_id,
+            s3_client=s3_client,
+            kms_client=kms_client,
+        )
+    return {
+        **verification,
+        "consumer_contract_binding_mode": contract_binding_mode,
+    }
 
 
 def _private_manifest_field(manifest: Any, field: str) -> str:
@@ -859,24 +867,40 @@ def _private_manifest_hash_payload(manifest: Any) -> dict[str, Any]:
     return payload
 
 
-def _verify_consumer_contract_manifest(payload: Mapping[str, Any]) -> None:
+def _verify_consumer_contract_manifest(payload: Mapping[str, Any]) -> str:
     contract = payload.get("compatibility_contract")
     fixtures = payload.get("consumer_parity_fixtures")
-    matching_contracts = [
-        expected_fixtures
+    if any(
+        contract == expected_contract and fixtures == expected_fixtures
         for expected_contract, expected_fixtures in _REVIEWED_CONSUMER_MANIFEST_PAIRS
-        if contract == expected_contract
-    ]
-    if not matching_contracts:
-        raise PrivateModelRuntimeError(
-            "private artifact compatibility contract differs from the "
-            "reviewed Lab snapshots"
+    ):
+        return "legacy_exact"
+    policy = semantic_compatibility_policy_v1()
+    expected_contract_path = str(policy["canonical_contract_path"])
+    expected_parity_path = str(policy["canonical_parity_path"])
+    if (
+        not isinstance(contract, Mapping)
+        or set(contract) != {"contract_id", "path", "sha256"}
+        or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+            str(contract.get("contract_id") or ""),
         )
-    if fixtures not in matching_contracts:
-        raise PrivateModelRuntimeError(
-            "private artifact parity fixtures differ from the reviewed Lab "
-            "contract pair"
+        or contract.get("path") != expected_contract_path
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(contract.get("sha256") or "")
         )
+        or not isinstance(fixtures, Mapping)
+        or set(fixtures) != {"path", "sha256"}
+        or fixtures.get("path") != expected_parity_path
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(fixtures.get("sha256") or "")
+        )
+    ):
+        raise PrivateModelRuntimeError(
+            "private artifact compatibility contract differs from an exact "
+            "legacy snapshot or valid semantic-v1 source binding"
+        )
+    return "semantic_v1_required"
 
 
 @lru_cache(maxsize=256)
@@ -997,15 +1021,10 @@ def compute_private_source_tree_hash(path: Path | str) -> str:
     root = Path(path).expanduser().resolve()
     if not root.exists():
         raise PrivateModelRuntimeError(f"source path does not exist: {root}")
-    digest_inputs: list[tuple[str, str]] = []
-    for file_path in sorted(root.rglob("*")):
-        if not file_path.is_file():
-            continue
-        rel = file_path.relative_to(root).as_posix()
-        if _excluded_source_path(rel):
-            continue
-        digest_inputs.append((rel, sha256_bytes(file_path.read_bytes())))
-    return sha256_json(digest_inputs)
+    try:
+        return compute_compatibility_source_tree_hash_v1(root)
+    except ValueError as exc:
+        raise PrivateModelRuntimeError(str(exc)) from exc
 
 
 def build_local_private_artifact_manifest(
@@ -1027,28 +1046,44 @@ def build_local_private_artifact_manifest(
     and S3 URI. This helper exists so the CI script and local verification use
     one canonical hash shape.
     """
-    reviewed_snapshots = reviewed_consumer_snapshots()
-    source_snapshot = resolve_reviewed_consumer_snapshot(Path(source_path))
+    source_root = Path(source_path)
     requested_contract_id = str(consumer_contract_id or "").strip()
-    if source_snapshot is None:
+    policy = semantic_compatibility_policy_v1()
+    contract_path = source_root / str(policy["canonical_contract_path"])
+    parity_path = source_root / str(policy["canonical_parity_path"])
+    try:
+        source_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
         raise PrivateModelRuntimeError(
-            "private model source has no reviewed contract/parity pair"
-        )
-    if requested_contract_id and requested_contract_id not in reviewed_snapshots:
-        raise PrivateModelRuntimeError(
-            "private model consumer contract id is not reviewed"
-        )
-    if (
-        requested_contract_id
-        and requested_contract_id
-        != str(source_snapshot["contract"]["contract_id"])
+            "private model semantic compatibility contract is unreadable"
+        ) from exc
+    if requested_contract_id and requested_contract_id != str(
+        source_contract.get("contract_id") or ""
     ):
         raise PrivateModelRuntimeError(
             "private model source contract differs from requested contract id"
         )
+    source_tree_hash = compute_private_source_tree_hash(source_root)
+    source_snapshot = resolve_reviewed_consumer_snapshot(source_root)
+    if source_snapshot is None:
+        try:
+            source_tree_compatibility_admission_v1(
+                source_root,
+                source_tree_hash=source_tree_hash,
+            )
+        except ValueError as exc:
+            raise PrivateModelRuntimeError(
+                "private model source has no reviewed contract/parity pair and "
+                "failed semantic compatibility: " + str(exc)
+            ) from exc
+        source_snapshot = {
+            "contract": source_contract,
+            "contract_sha256": sha256_bytes(contract_path.read_bytes()),
+            "parity_sha256": sha256_bytes(parity_path.read_bytes()),
+        }
     contract = source_snapshot["contract"]
     payload = {
-        "model_artifact_hash": compute_private_source_tree_hash(source_path),
+        "model_artifact_hash": source_tree_hash,
         "git_commit_sha": str(git_commit_sha),
         "image_digest": str(image_digest),
         "config_hash": sha256_json(config_payload or {}),
@@ -1159,11 +1194,34 @@ def context_with_runtime_options(
 
 def validate_sourcing_adapter_metadata(
     metadata: Mapping[str, Any],
+    *,
+    expected_semantic_bindings: Mapping[str, str] | None = None,
+    require_company_fit_contract: bool = False,
 ) -> dict[str, Any]:
-    """Fail closed unless an artifact declares the Lab runtime contract."""
+    """Run the deterministic consumer-owned runtime invariant probe.
+
+    Admitted artifacts execute ``adapter_metadata`` inside the no-network
+    measured sandbox. Both the measured runtime and host bind its result to
+    the exact legacy or semantic source receipt. No model-owned parity
+    expectation is used as admission authority.
+    """
 
     document = dict(metadata)
-    if document.get("adapter_version") not in EXPECTED_SOURCING_ADAPTER_VERSIONS:
+    bindings_provided = expected_semantic_bindings is not None
+    semantic_bindings = dict(expected_semantic_bindings or {})
+    expected_adapter_version = str(
+        semantic_bindings.get("adapter_version") or ""
+    )
+    if bindings_provided:
+        adapter_version_valid = bool(
+            expected_adapter_version
+            and document.get("adapter_version") == expected_adapter_version
+        )
+    else:
+        adapter_version_valid = (
+            document.get("adapter_version") in EXPECTED_SOURCING_ADAPTER_VERSIONS
+        )
+    if not adapter_version_valid:
         raise PrivateModelRuntimeError(
             "private model does not declare a reviewed adapter contract"
         )
@@ -1173,6 +1231,15 @@ def validate_sourcing_adapter_metadata(
     ):
         raise PrivateModelRuntimeError(
             "private model does not declare the supported component registry v2"
+        )
+    if semantic_bindings and (
+        document.get("component_registry_version")
+        != semantic_bindings.get("component_registry_version")
+        or document.get("scoring_adapter_version")
+        != semantic_bindings.get("scoring_adapter_version")
+    ):
+        raise PrivateModelRuntimeError(
+            "private model adapter metadata differs from its admitted source"
         )
     required_capabilities = {
         "deadline",
@@ -1186,6 +1253,12 @@ def validate_sourcing_adapter_metadata(
     ):
         raise PrivateModelRuntimeError(
             "private model does not declare runtime capability contract v2"
+        )
+    if semantic_bindings and document.get(
+        "capability_contract_version"
+    ) != semantic_bindings.get("capability_contract_version"):
+        raise PrivateModelRuntimeError(
+            "private model capability metadata differs from its admitted source"
         )
     capabilities = {
         str(item) for item in document.get("runtime_capabilities") or ()
@@ -1222,7 +1295,19 @@ def validate_sourcing_adapter_metadata(
         raise PrivateModelRuntimeError(
             "private model does not declare model-owned routing metadata"
         )
-    if routing.get("compiler_version") not in EXPECTED_ROUTING_COMPILER_VERSIONS:
+    expected_compiler_version = str(
+        semantic_bindings.get("routing_compiler_version") or ""
+    )
+    if semantic_bindings:
+        compiler_version_valid = bool(
+            expected_compiler_version
+            and routing.get("compiler_version") == expected_compiler_version
+        )
+    else:
+        compiler_version_valid = (
+            routing.get("compiler_version") in EXPECTED_ROUTING_COMPILER_VERSIONS
+        )
+    if not compiler_version_valid:
         raise PrivateModelRuntimeError(
             "private model routing compiler version is unsupported"
         )
@@ -1256,12 +1341,11 @@ def validate_sourcing_adapter_metadata(
         raise PrivateModelRuntimeError(
             "private model does not declare runtime routing metadata"
         )
-    if (
-        runtime_routing.get("compiler_version")
-        not in EXPECTED_ROUTING_COMPILER_VERSIONS
+    if runtime_routing.get("compiler_version") != routing.get(
+        "compiler_version"
     ):
         raise PrivateModelRuntimeError(
-            "private model runtime routing compiler version is unsupported"
+            "private model runtime routing compiler differs from routing metadata"
         )
     for field in ("catalog_sha256", "policy_sha256"):
         if not re.fullmatch(
@@ -1312,6 +1396,24 @@ def validate_sourcing_adapter_metadata(
         raise PrivateModelRuntimeError(
             "private model runtime routing metadata exposes private bindings"
         )
+    if require_company_fit_contract:
+        company_fit = document.get("company_fit_decision")
+        if (
+            not isinstance(company_fit, Mapping)
+            or company_fit.get("contract_id") != "company-fit-decision:v1"
+            or list(company_fit.get("outcomes") or ())
+            != ["match", "mismatch", "unavailable"]
+            or list(company_fit.get("precedence") or ())
+            != ["mismatch", "unavailable", "match"]
+            or company_fit.get("passing_outcome") != "match"
+            or list(company_fit.get("required_dimensions") or ())
+            != ["identity", "employee_size", "industry", "geography"]
+            or list(company_fit.get("conditional_dimensions") or ())
+            != ["stage"]
+        ):
+            raise PrivateModelRuntimeError(
+                "private model company-fit metadata differs from the Lab contract"
+            )
     intent_sources = routing.get("intent_sources")
     if (
         not isinstance(intent_sources, list)
@@ -1980,17 +2082,6 @@ def _employee_count_display(value: Any) -> str:
         buckets = [bucket for bucket in buckets if bucket]
         return " or ".join(buckets)
     return _first_text(value)
-
-
-def _excluded_source_path(rel: str) -> bool:
-    parts = rel.split("/")
-    if any(part in {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "venv"} for part in parts):
-        return True
-    if rel.endswith((".pyc", ".pyo", ".env", ".pem", ".key")):
-        return True
-    if rel == ".env" or rel.startswith(".env."):
-        return True
-    return False
 
 
 def _contains_secret_material(value: Any) -> bool:

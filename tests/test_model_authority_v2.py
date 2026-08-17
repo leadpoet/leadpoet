@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+from copy import deepcopy
 import json
+import shutil
 import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +22,7 @@ from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
 from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 from gateway.tee.model_sandbox_v2 import provider_evidence_tape_input_root
 from gateway.tee.source_add_runtime_v2 import build_source_add_runtime_catalog_v2
-from gateway.tee.source_bundle_v2 import extract_source_bundle_v2
+from gateway.tee.source_bundle_v2 import SourceBundleV2Error, extract_source_bundle_v2
 from leadpoet_canonical.attested_v2 import sha256_json
 from research_lab.eval import DockerPrivateModelSpec, build_local_private_artifact_manifest
 from research_lab.eval.private_runtime import (
@@ -29,17 +33,54 @@ from research_lab.eval.private_runtime import (
     end_attested_receipt_hash_collection,
     end_incontainer_trace_collection,
 )
-from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
+from tests.test_sourcing_model_semantic_compatibility_v1 import (
+    _install_future_tree,
+    _ready_adapter_metadata,
+)
 
 
-def _artifact(tmp_path):
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "research_lab_adapter.py").write_text(
-        "def run_icp(icp, context):\n    return []\n",
-        encoding="utf-8",
+_TEST_COMPATIBILITY_POLICY_HASH = "sha256:" + "6" * 64
+_TEST_COMPATIBILITY_ADMISSION_HASH = "sha256:" + "7" * 64
+_TEST_COMPATIBILITY_BINDINGS = {
+    "adapter_version": "sourcing-model-research-lab-adapter:v3",
+    "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
+    "component_registry_version": "sourcing-model-components:v2",
+    "routing_compiler_version": "routing-compiler-v2",
+    "scoring_adapter_version": "qualification-company-scorer:v1",
+}
+
+
+def _stub_source_bundle_and_compatibility(monkeypatch, source_bundle):
+    compatibility_receipt = {
+        "admission_mode": "legacy_exact",
+        "consumer_api_version": "research-lab-consumer-api:v1",
+        "policy_hash": _TEST_COMPATIBILITY_POLICY_HASH,
+        "receipt_hash": _TEST_COMPATIBILITY_ADMISSION_HASH,
+        "bindings": dict(_TEST_COMPATIBILITY_BINDINGS),
+    }
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_source_bundle_for_artifact",
+        lambda *_args, **_kwargs: dict(source_bundle),
     )
-    install_reviewed_consumer_snapshot(source)
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_source_bundle_and_compatibility_receipt_for_artifact",
+        lambda *_args, **_kwargs: (
+            dict(source_bundle),
+            dict(compatibility_receipt),
+        ),
+    )
+    monkeypatch.setattr(
+        model_authority_v2,
+        "private_model_compatibility_receipt_v2",
+        lambda *_args, **_kwargs: dict(compatibility_receipt),
+    )
+
+
+def _artifact(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    _install_future_tree(source, monkeypatch)
     return build_local_private_artifact_manifest(
         source_path=source,
         git_commit_sha="a" * 40,
@@ -76,12 +117,7 @@ def test_source_bundle_uses_exact_signed_repo_when_image_is_runtime_subset(
     tmp_path, monkeypatch
 ):
     source = tmp_path / "private-repo"
-    source.mkdir()
-    (source / "research_lab_adapter.py").write_text(
-        "def run_icp(icp, context):\n    return []\n",
-        encoding="utf-8",
-    )
-    install_reviewed_consumer_snapshot(source)
+    _install_future_tree(source, monkeypatch)
     (source / "repo-only.txt").write_text("signed full source\n", encoding="utf-8")
     subprocess.run(["git", "init", "--quiet"], cwd=source, check=True)
     subprocess.run(
@@ -137,6 +173,7 @@ def test_source_bundle_uses_exact_signed_repo_when_image_is_runtime_subset(
     )
     monkeypatch.setenv("RESEARCH_LAB_PRIVATE_REPO_URL", str(source))
     model_authority_v2._SOURCE_BUNDLE_CACHE.clear()
+    model_authority_v2._SOURCE_COMPATIBILITY_RECEIPT_CACHE.clear()
 
     bundle = model_authority_v2._source_bundle_for_artifact(
         artifact,
@@ -144,6 +181,20 @@ def test_source_bundle_uses_exact_signed_repo_when_image_is_runtime_subset(
     )
 
     assert bundle["source_tree_hash"] == artifact.model_artifact_hash
+    compatibility_receipt = (
+        model_authority_v2.private_model_compatibility_receipt_v2(
+            artifact,
+            timeout_seconds=120,
+        )
+    )
+    assert compatibility_receipt["admission_mode"] == "semantic_v1"
+    assert compatibility_receipt["consumer_api_version"] == (
+        "research-lab-consumer-api:v1"
+    )
+    assert compatibility_receipt["decision"] == "accepted"
+    assert compatibility_receipt["source_tree_hash"] == artifact.model_artifact_hash
+    assert compatibility_receipt["manifest_hash"] == artifact.manifest_hash
+    assert compatibility_receipt["image_digest"] == artifact.image_digest
     restored = tmp_path / "restored"
     extract_source_bundle_v2(
         bundle,
@@ -153,6 +204,497 @@ def test_source_bundle_uses_exact_signed_repo_when_image_is_runtime_subset(
     assert (restored / "repo-only.txt").read_text(encoding="utf-8") == (
         "signed full source\n"
     )
+
+
+def test_source_bundle_cache_recomputes_source_and_rejects_receipt_mutation(
+    tmp_path, monkeypatch
+):
+    artifact_mapping = _artifact(tmp_path, monkeypatch)
+    artifact = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        artifact_mapping
+    )
+    canonical_source = tmp_path / "source"
+    extraction_calls = []
+
+    def extract_source(*, image_digest, source_dir, timeout_seconds):
+        extraction_calls.append((image_digest, timeout_seconds))
+        shutil.copytree(canonical_source, source_dir)
+        return compute_private_source_tree_hash(source_dir), []
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_extract_parent_image_source",
+        extract_source,
+    )
+    model_authority_v2._SOURCE_BUNDLE_CACHE.clear()
+    model_authority_v2._SOURCE_COMPATIBILITY_RECEIPT_CACHE.clear()
+
+    first = model_authority_v2._source_bundle_for_artifact(
+        artifact,
+        timeout_seconds=120,
+    )
+    cache_key = next(iter(model_authority_v2._SOURCE_BUNDLE_CACHE))
+    corrupted = deepcopy(
+        model_authority_v2._SOURCE_COMPATIBILITY_RECEIPT_CACHE[cache_key]
+    )
+    corrupted["contract_id"] = "poisoned-contract"
+    corrupted["receipt_hash"] = sha256_json(
+        {
+            key: value
+            for key, value in corrupted.items()
+            if key != "receipt_hash"
+        }
+    )
+    model_authority_v2._SOURCE_COMPATIBILITY_RECEIPT_CACHE[cache_key] = corrupted
+
+    second = model_authority_v2._source_bundle_for_artifact(
+        artifact,
+        timeout_seconds=120,
+    )
+
+    assert first == second
+    assert len(extraction_calls) == 2
+    assert (
+        model_authority_v2._SOURCE_COMPATIBILITY_RECEIPT_CACHE[cache_key][
+            "contract_id"
+        ]
+        != "poisoned-contract"
+    )
+
+
+def test_source_bundle_cache_serves_forty_calls_with_one_host_extraction(
+    tmp_path, monkeypatch
+):
+    artifact = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        _artifact(tmp_path, monkeypatch)
+    )
+    canonical_source = tmp_path / "source"
+    extraction_calls = []
+
+    def extract_source(*, image_digest, source_dir, timeout_seconds):
+        extraction_calls.append((image_digest, timeout_seconds))
+        shutil.copytree(canonical_source, source_dir)
+        return compute_private_source_tree_hash(source_dir), []
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_extract_parent_image_source",
+        extract_source,
+    )
+    model_authority_v2._SOURCE_BUNDLE_CACHE.clear()
+    model_authority_v2._SOURCE_COMPATIBILITY_RECEIPT_CACHE.clear()
+
+    first_bundle = model_authority_v2._source_bundle_for_artifact(
+        artifact,
+        timeout_seconds=120,
+    )
+    observed = [
+        model_authority_v2._source_bundle_for_artifact(
+            artifact,
+            timeout_seconds=120,
+        )
+        for _ in range(39)
+    ]
+
+    assert observed == [first_bundle] * 39
+    assert len(extraction_calls) == 1
+
+
+def test_cached_active_artifact_is_not_blocked_by_another_artifact_build(
+    tmp_path, monkeypatch
+):
+    active = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        _artifact(tmp_path / "active", monkeypatch)
+    )
+    candidate_source = tmp_path / "candidate" / "source"
+    _install_future_tree(candidate_source, monkeypatch)
+    (candidate_source / "additive.txt").write_text("candidate\n", encoding="utf-8")
+    candidate = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        build_local_private_artifact_manifest(
+            source_path=candidate_source,
+            git_commit_sha="c" * 40,
+            image_digest="private.invalid/candidate@sha256:" + "d" * 64,
+            manifest_uri="s3://private/candidate.json",
+            signature_ref="kms:candidate",
+            component_registry_version="1",
+            scoring_adapter_version="1",
+        )
+    )
+    active_source = tmp_path / "active" / "source"
+    candidate_started = threading.Event()
+    release_candidate = threading.Event()
+
+    def extract_source(*, image_digest, source_dir, timeout_seconds):
+        del timeout_seconds
+        source = active_source
+        if image_digest == candidate.image_digest:
+            source = candidate_source
+            candidate_started.set()
+            assert release_candidate.wait(timeout=5)
+        shutil.copytree(source, source_dir)
+        return compute_private_source_tree_hash(source_dir), []
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_extract_parent_image_source",
+        extract_source,
+    )
+    model_authority_v2._SOURCE_BUNDLE_CACHE.clear()
+    model_authority_v2._SOURCE_COMPATIBILITY_RECEIPT_CACHE.clear()
+    model_authority_v2._source_bundle_for_artifact(active, timeout_seconds=120)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        candidate_future = pool.submit(
+            model_authority_v2._source_bundle_for_artifact,
+            candidate,
+            timeout_seconds=120,
+        )
+        assert candidate_started.wait(timeout=5)
+        active_future = pool.submit(
+            model_authority_v2._source_bundle_for_artifact,
+            active,
+            timeout_seconds=120,
+        )
+        assert active_future.result(timeout=1)["source_tree_hash"] == (
+            active.model_artifact_hash
+        )
+        release_candidate.set()
+        assert candidate_future.result(timeout=5)["source_tree_hash"] == (
+            candidate.model_artifact_hash
+        )
+
+
+def test_measured_bundle_extraction_rejects_cached_archive_mutation(
+    tmp_path, monkeypatch
+):
+    artifact = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        _artifact(tmp_path, monkeypatch)
+    )
+    canonical_source = tmp_path / "source"
+    extraction_calls = []
+
+    def extract_source(*, image_digest, source_dir, timeout_seconds):
+        extraction_calls.append((image_digest, timeout_seconds))
+        shutil.copytree(canonical_source, source_dir)
+        return compute_private_source_tree_hash(source_dir), []
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_extract_parent_image_source",
+        extract_source,
+    )
+    model_authority_v2._SOURCE_BUNDLE_CACHE.clear()
+    model_authority_v2._SOURCE_COMPATIBILITY_RECEIPT_CACHE.clear()
+    expected = model_authority_v2._source_bundle_for_artifact(
+        artifact,
+        timeout_seconds=120,
+    )
+    cache_key = next(iter(model_authority_v2._SOURCE_BUNDLE_CACHE))
+    model_authority_v2._SOURCE_BUNDLE_CACHE[cache_key]["archive_b64"] = "!"
+
+    observed = model_authority_v2._source_bundle_for_artifact(
+        artifact,
+        timeout_seconds=120,
+    )
+
+    assert observed != expected
+    with pytest.raises(SourceBundleV2Error, match="archive"):
+        extract_source_bundle_v2(
+            observed,
+            destination=tmp_path / "measured-source",
+            expected_source_tree_hash=artifact.model_artifact_hash,
+        )
+    assert len(extraction_calls) == 1
+
+
+def test_source_bundle_build_lock_is_released_after_extraction_failure(
+    tmp_path, monkeypatch
+):
+    artifact = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        _artifact(tmp_path, monkeypatch)
+    )
+    model_authority_v2._SOURCE_BUNDLE_CACHE.clear()
+    model_authority_v2._SOURCE_COMPATIBILITY_RECEIPT_CACHE.clear()
+
+    def fail_extraction(**_kwargs):
+        raise RuntimeError("synthetic extraction failure")
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_extract_parent_image_source",
+        fail_extraction,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic extraction failure"):
+        model_authority_v2._source_bundle_for_artifact(
+            artifact,
+            timeout_seconds=120,
+        )
+    assert model_authority_v2._SOURCE_BUNDLE_BUILD_LOCKS == {}
+
+
+def _measured_preflight_admission(artifact, spec, host_receipt):
+    body = {
+        "schema_version": (
+            model_authority_v2.MEASURED_COMPATIBILITY_ADMISSION_SCHEMA_V1
+        ),
+        "decision": "accepted",
+        "admission_mode": host_receipt["admission_mode"],
+        "consumer_api_version": host_receipt["consumer_api_version"],
+        "compatibility_policy_hash": host_receipt["policy_hash"],
+        "compatibility_admission_hash": host_receipt["receipt_hash"],
+        "source_tree_hash": artifact.model_artifact_hash,
+        "manifest_hash": artifact.manifest_hash,
+        "image_digest": artifact.image_digest,
+        "module_name": spec.module_name,
+        "callable_name": "adapter_metadata",
+        "consumer_runtime_probe_hash": "sha256:" + "1" * 64,
+        "adapter_metadata_hash": "sha256:" + "2" * 64,
+        "execution_receipt_hash": "sha256:" + "3" * 64,
+    }
+    return {**body, "receipt_hash": sha256_json(body)}
+
+
+@pytest.mark.asyncio
+async def test_compatibility_preflight_returns_strict_host_and_measured_proof(
+    tmp_path, monkeypatch
+):
+    artifact = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        _artifact(tmp_path, monkeypatch)
+    )
+    host_receipt = {
+        "admission_mode": "legacy_exact",
+        "consumer_api_version": "research-lab-consumer-api:v1",
+        "policy_hash": "sha256:" + "4" * 64,
+        "receipt_hash": "sha256:" + "5" * 64,
+    }
+    monkeypatch.setattr(
+        model_authority_v2,
+        "private_model_compatibility_receipt_v2",
+        lambda *_args, **_kwargs: dict(host_receipt),
+    )
+    calls = []
+
+    async def execute_preflight(*, artifact, spec, host_receipt):
+        calls.append((artifact, spec, dict(host_receipt)))
+        return _measured_preflight_admission(artifact, spec, host_receipt)
+
+    result = await model_authority_v2.preflight_private_model_compatibility_v2(
+        artifact,
+        timeout_seconds=90,
+        measured_preflight_executor=execute_preflight,
+    )
+
+    measured = result["measured_runtime_admission"]
+    assert calls[0][0] is artifact
+    assert calls[0][1].image_digest == artifact.image_digest
+    assert calls[0][1].env_passthrough == ()
+    assert calls[0][1].extra_env == {}
+    assert calls[0][2] == host_receipt
+    assert result["measured_runtime_decision"] == "accepted"
+    assert result["measured_runtime_probe_hash"] == measured[
+        "consumer_runtime_probe_hash"
+    ]
+    assert result["combined_receipt_hash"] == sha256_json(
+        {
+            "decision": "accepted",
+            "host_compatibility_receipt_hash": host_receipt["receipt_hash"],
+            "measured_runtime_receipt_hash": measured["receipt_hash"],
+            "measured_runtime_probe_hash": measured[
+                "consumer_runtime_probe_hash"
+            ],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_compatibility_preflight_default_executes_and_caches_metadata_probe(
+    tmp_path, monkeypatch
+):
+    artifact = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        _artifact(tmp_path, monkeypatch)
+    )
+    host_receipt = model_authority_v2.source_tree_compatibility_admission_v1(
+        tmp_path / "source",
+        manifest=artifact,
+        source_tree_hash=artifact.model_artifact_hash,
+        use_cache=False,
+    )
+    monkeypatch.setattr(
+        model_authority_v2,
+        "private_model_compatibility_receipt_v2",
+        lambda *_args, **_kwargs: dict(host_receipt),
+    )
+    instances = []
+
+    class FakeMeasuredRunner:
+        def __init__(self, **kwargs):
+            self.artifact = kwargs["artifact"]
+            self.spec = kwargs["spec"]
+            self.metadata_calls = 0
+            instances.append(self)
+
+        def metadata(self):
+            self.metadata_calls += 1
+            return {"ready": True}
+
+        def measured_compatibility_admission(self):
+            assert self.metadata_calls == 1
+            return _measured_preflight_admission(
+                self.artifact,
+                self.spec,
+                host_receipt,
+            )
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "AttestedPrivateModelRunnerV2",
+        FakeMeasuredRunner,
+    )
+    model_authority_v2._MEASURED_COMPATIBILITY_CACHE.clear()
+    model_authority_v2._MEASURED_COMPATIBILITY_FUTURES.clear()
+
+    results = [
+        await model_authority_v2.preflight_private_model_compatibility_v2(
+            artifact,
+            timeout_seconds=90,
+        )
+        for _ in range(40)
+    ]
+
+    assert len(instances) == 1
+    assert instances[0].metadata_calls == 1
+    assert instances[0].spec.env_passthrough == ()
+    assert instances[0].spec.extra_env == {}
+    assert {item["combined_receipt_hash"] for item in results} == {
+        results[0]["combined_receipt_hash"]
+    }
+    cache_key = next(iter(model_authority_v2._MEASURED_COMPATIBILITY_CACHE))
+    model_authority_v2._MEASURED_COMPATIBILITY_CACHE[cache_key][
+        "consumer_runtime_probe_hash"
+    ] = "sha256:" + "9" * 64
+
+    recovered = await model_authority_v2.preflight_private_model_compatibility_v2(
+        artifact,
+        timeout_seconds=90,
+    )
+
+    assert len(instances) == 2
+    assert instances[1].metadata_calls == 1
+    assert recovered["measured_runtime_decision"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_compatibility_preflight_follower_cancellation_is_isolated(
+    tmp_path, monkeypatch
+):
+    artifact = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        _artifact(tmp_path, monkeypatch)
+    )
+    host_receipt = model_authority_v2.source_tree_compatibility_admission_v1(
+        tmp_path / "source",
+        manifest=artifact,
+        source_tree_hash=artifact.model_artifact_hash,
+        use_cache=False,
+    )
+    monkeypatch.setattr(
+        model_authority_v2,
+        "private_model_compatibility_receipt_v2",
+        lambda *_args, **_kwargs: dict(host_receipt),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def execute_preflight(*, artifact, spec, host_receipt):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return _measured_preflight_admission(artifact, spec, host_receipt)
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_execute_measured_compatibility_preflight_v2",
+        execute_preflight,
+    )
+    model_authority_v2._MEASURED_COMPATIBILITY_CACHE.clear()
+    model_authority_v2._MEASURED_COMPATIBILITY_FUTURES.clear()
+
+    leader = asyncio.create_task(
+        model_authority_v2.preflight_private_model_compatibility_v2(
+            artifact, timeout_seconds=90
+        )
+    )
+    await started.wait()
+    cancelled_follower, surviving_follower = (
+        asyncio.create_task(
+            model_authority_v2.preflight_private_model_compatibility_v2(
+                artifact, timeout_seconds=90
+            )
+        )
+        for _ in range(2)
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    cancelled_follower.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_follower
+    assert not next(
+        iter(model_authority_v2._MEASURED_COMPATIBILITY_FUTURES.values())
+    ).cancelled()
+
+    release.set()
+    leader_result, follower_result = await asyncio.gather(
+        leader, surviving_follower
+    )
+
+    assert calls == 1
+    assert leader_result == follower_result
+    assert model_authority_v2._MEASURED_COMPATIBILITY_CACHE
+    assert model_authority_v2._MEASURED_COMPATIBILITY_FUTURES == {}
+
+
+@pytest.mark.asyncio
+async def test_compatibility_preflight_rejects_measured_host_mismatch(
+    tmp_path, monkeypatch
+):
+    artifact = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        _artifact(tmp_path, monkeypatch)
+    )
+    host_receipt = {
+        "admission_mode": "legacy_exact",
+        "consumer_api_version": "research-lab-consumer-api:v1",
+        "policy_hash": "sha256:" + "4" * 64,
+        "receipt_hash": "sha256:" + "5" * 64,
+    }
+    monkeypatch.setattr(
+        model_authority_v2,
+        "private_model_compatibility_receipt_v2",
+        lambda *_args, **_kwargs: dict(host_receipt),
+    )
+
+    async def mismatched(*, artifact, spec, host_receipt):
+        admission = _measured_preflight_admission(artifact, spec, host_receipt)
+        admission["source_tree_hash"] = "sha256:" + "9" * 64
+        admission["receipt_hash"] = sha256_json(
+            {
+                key: value
+                for key, value in admission.items()
+                if key != "receipt_hash"
+            }
+        )
+        return admission
+
+    with pytest.raises(
+        AttestedPrivateModelRunnerV2Error,
+        match="differs from host admission",
+    ):
+        await model_authority_v2.preflight_private_model_compatibility_v2(
+            artifact,
+            timeout_seconds=90,
+            measured_preflight_executor=mismatched,
+        )
 
 
 def _catalog_outcome(rows=()):
@@ -204,8 +746,9 @@ async def _load_empty_catalog(*, epoch_id):
 @pytest.mark.asyncio
 async def test_catalog_snapshot_load_is_singleflight_across_shared_runner_clones(
     tmp_path,
+    monkeypatch,
 ):
-    artifact = _artifact(tmp_path)
+    artifact = _artifact(tmp_path, monkeypatch)
     started = asyncio.Event()
     release = asyncio.Event()
     calls = []
@@ -240,8 +783,8 @@ async def test_catalog_snapshot_load_is_singleflight_across_shared_runner_clones
     assert calls == [24001]
 
 
-def test_worker_index_clone_preserves_shared_attested_state(tmp_path):
-    artifact = _artifact(tmp_path)
+def test_worker_index_clone_preserves_shared_attested_state(tmp_path, monkeypatch):
+    artifact = _artifact(tmp_path, monkeypatch)
     runner = AttestedPrivateModelRunnerV2(
         artifact=artifact,
         spec=DockerPrivateModelSpec(image_digest=artifact["image_digest"]),
@@ -260,8 +803,8 @@ def test_worker_index_clone_preserves_shared_attested_state(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_catalog_snapshot_failed_load_is_not_cached(tmp_path):
-    artifact = _artifact(tmp_path)
+async def test_catalog_snapshot_failed_load_is_not_cached(tmp_path, monkeypatch):
+    artifact = _artifact(tmp_path, monkeypatch)
     calls = []
 
     async def load_catalog(*, epoch_id):
@@ -290,8 +833,9 @@ async def test_catalog_snapshot_failed_load_is_not_cached(tmp_path):
 @pytest.mark.asyncio
 async def test_catalog_snapshot_failed_load_reaches_followers_and_allows_retry(
     tmp_path,
+    monkeypatch,
 ):
-    artifact = _artifact(tmp_path)
+    artifact = _artifact(tmp_path, monkeypatch)
     started = asyncio.Event()
     release = asyncio.Event()
     calls = []
@@ -337,7 +881,7 @@ async def test_catalog_snapshot_failed_load_reaches_followers_and_allows_retry(
 async def test_measured_execution_failure_preserves_private_runner_contract(
     tmp_path, monkeypatch
 ):
-    artifact = _artifact(tmp_path)
+    artifact = _artifact(tmp_path, monkeypatch)
     source_bundle = {
         "schema_version": "leadpoet.private_source_bundle.v2",
         "archive_sha256": "sha256:" + "2" * 64,
@@ -345,11 +889,7 @@ async def test_measured_execution_failure_preserves_private_runner_contract(
         "archive_size_bytes": 1,
         "archive_b64": "AA==",
     }
-    monkeypatch.setattr(
-        model_authority_v2,
-        "_source_bundle_for_artifact",
-        lambda *_args, **_kwargs: dict(source_bundle),
-    )
+    _stub_source_bundle_and_compatibility(monkeypatch, source_bundle)
 
     async def execute(**_kwargs):
         raise AttestedScoringV2Error(
@@ -578,86 +1118,6 @@ def test_measured_model_invocation_budget_covers_attested_persistence():
     )
 
 
-def _ready_adapter_metadata() -> dict:
-    routing_catalog = {"schema_version": 1}
-    routing_policy = {"schema_version": 1}
-    runtime_catalog = {
-        "schema_version": 1,
-        "tools": [
-            {"tool_id": tool_id}
-            for tool_id in (
-                "candidate.backlog",
-                "candidate.registry_feed",
-                "candidate.jobs_feed",
-                "candidate.deepline_firmographic",
-                "candidate.model_semantic",
-                "intent.existing_evidence",
-                "intent.jobs_feed",
-                "intent.company_search",
-                "intent.first_party",
-                "intent.newsroom",
-            )
-        ],
-    }
-    runtime_policy = {"schema_version": 1}
-    return {
-        "adapter_version": "sourcing-model-research-lab-adapter:v3",
-        "component_registry_version": "sourcing-model-components:v2",
-        "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
-        "runtime_capabilities": [
-            "deadline",
-            "emit",
-            "http_fetch",
-            "probe_origin",
-            "resolve_host",
-        ],
-        "resilience_policy_version": "sourcing-model-resilience:v1",
-        "firmographic_discovery": {
-            "firmographic_policy_version": "sourcing-model-firmographic-discovery:v1"
-        },
-        "industry_taxonomy": {
-            "taxonomy_content_hash": "sha256:" + "d" * 64
-        },
-        "routing": {
-            "compiler_version": "routing-compiler-v2",
-            "catalog": routing_catalog,
-            "catalog_sha256": sha256_json(routing_catalog).removeprefix("sha256:"),
-            "policy": routing_policy,
-            "policy_sha256": sha256_json(routing_policy).removeprefix("sha256:"),
-            "intent_sources": ["company_site", "job_listing", "news"],
-            "source_add_requires_manifest_sha256": True,
-            "private_bindings_exposed": False,
-        },
-        "runtime_routing": {
-            "compiler_version": "routing-compiler-v2",
-            "catalog": runtime_catalog,
-            "catalog_sha256": sha256_json(runtime_catalog).removeprefix("sha256:"),
-            "policy": runtime_policy,
-            "policy_sha256": sha256_json(runtime_policy).removeprefix("sha256:"),
-            "candidate_tool_lanes": {
-                "candidate.backlog": "backlog",
-                "candidate.registry_feed": "registry_signal",
-                "candidate.jobs_feed": "jobs_signal",
-                "candidate.deepline_firmographic": "deepline_firmographic",
-                "candidate.model_semantic": "model_semantic",
-            },
-            "intent_tool_tiers": {
-                "intent.existing_evidence": "fused",
-                "intent.jobs_feed": "jobs_feed",
-                "intent.company_search": "company_search",
-                "intent.first_party": "first_party",
-                "intent.newsroom": "newsroom",
-            },
-            "private_bindings_exposed": False,
-        },
-        "component_registry": {
-            "source_router": {
-                "strategy_options": ["company_site", "job_listing", "news"],
-            }
-        },
-    }
-
-
 def _runtime_receipt(runtime_cap_seconds: float) -> dict:
     return {
         "kind": "sourcing_branch_receipt",
@@ -692,7 +1152,7 @@ def _runtime_receipt(runtime_cap_seconds: float) -> dict:
 
 @pytest.mark.asyncio
 async def test_legacy_protocol_cannot_select_host_model_runner(tmp_path, monkeypatch):
-    artifact = _artifact(tmp_path)
+    artifact = _artifact(tmp_path, monkeypatch)
     calls = []
 
     class HostRunner:
@@ -723,7 +1183,7 @@ async def test_legacy_protocol_cannot_select_host_model_runner(tmp_path, monkeyp
 async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_credentials(
     tmp_path, monkeypatch
 ):
-    artifact = _artifact(tmp_path)
+    artifact = _artifact(tmp_path, monkeypatch)
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     icp = {"industry": "Software", "intent_signal": "Hiring"}
@@ -749,11 +1209,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
         "archive_size_bytes": 1,
         "archive_b64": "AA==",
     }
-    monkeypatch.setattr(
-        model_authority_v2,
-        "_source_bundle_for_artifact",
-        lambda *_args, **_kwargs: dict(source_bundle),
-    )
+    _stub_source_bundle_and_compatibility(monkeypatch, source_bundle)
     cache_ref = icp_evidence_cache_key(canonical_icp)
     cache_hash = sha256_json(cache_doc)
     tape_graph = {
@@ -809,6 +1265,10 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
                 "model_manifest_hash": artifact["manifest_hash"],
                 "compatibility_image_digest": artifact["image_digest"],
                 "source_bundle_hash": source_bundle["archive_sha256"],
+                "compatibility_policy_hash": _TEST_COMPATIBILITY_POLICY_HASH,
+                "compatibility_admission_hash": (
+                    _TEST_COMPATIBILITY_ADMISSION_HASH
+                ),
                 "runtime_config_hash": "sha256:" + "3" * 64,
                 "input_hash": sha256_json(payload["input"]),
                 "provider_evidence_cache_hash": sha256_json(cache_doc),
@@ -908,7 +1368,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
 
 
 def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypatch):
-    artifact = _artifact(tmp_path)
+    artifact = _artifact(tmp_path, monkeypatch)
     source_bundle = {
         "schema_version": "leadpoet.private_source_bundle.v2",
         "archive_sha256": "sha256:" + "2" * 64,
@@ -916,13 +1376,45 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
         "archive_size_bytes": 1,
         "archive_b64": "AA==",
     }
+    _stub_source_bundle_and_compatibility(monkeypatch, source_bundle)
+    probe = {"trusted": "runtime-probe"}
+    observed_probe_validation = []
+    observed_metadata_bindings = []
+
+    validate_metadata = model_authority_v2.validate_sourcing_adapter_metadata
+
+    def validate_bound_metadata(value, **kwargs):
+        observed_metadata_bindings.append(kwargs["expected_semantic_bindings"])
+        return validate_metadata(value, **kwargs)
+
     monkeypatch.setattr(
         model_authority_v2,
-        "_source_bundle_for_artifact",
-        lambda *_args, **_kwargs: dict(source_bundle),
+        "validate_sourcing_adapter_metadata",
+        validate_bound_metadata,
     )
 
+    def validate_probe(value, **kwargs):
+        observed_probe_validation.append((dict(value), dict(kwargs)))
+        assert value == probe
+        assert kwargs["expected_source_tree_hash"] == artifact[
+            "model_artifact_hash"
+        ]
+        assert kwargs["expected_manifest_hash"] == artifact["manifest_hash"]
+        assert kwargs["expected_image_digest"] == artifact["image_digest"]
+        assert kwargs["expected_module_name"] == "research_lab_adapter"
+        assert kwargs["expected_callable_name"] == "adapter_metadata"
+        return dict(value)
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "validate_consumer_runtime_probe_v1",
+        validate_probe,
+    )
+    tamper_probe_hash = {"enabled": False}
+    observed = []
+
     async def execute(**kwargs):
+        observed.append(kwargs)
         payload = kwargs["payload"]
         assert payload["operation"] == "metadata"
         assert payload["callable_name"] == "adapter_metadata"
@@ -936,6 +1428,10 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
                 "model_manifest_hash": artifact["manifest_hash"],
                 "compatibility_image_digest": artifact["image_digest"],
                 "source_bundle_hash": source_bundle["archive_sha256"],
+                "compatibility_policy_hash": _TEST_COMPATIBILITY_POLICY_HASH,
+                "compatibility_admission_hash": (
+                    _TEST_COMPATIBILITY_ADMISSION_HASH
+                ),
                 "runtime_config_hash": "sha256:" + "3" * 64,
                 "input_hash": sha256_json(payload["input"]),
                 "provider_evidence_cache_hash": sha256_json({}),
@@ -946,18 +1442,25 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
                 "provider_snapshot_manifest_hash": sha256_json({}),
                 "provider_cost_cap_microusd": 0,
                 "provider_call_cap": 0,
-                "provider_runtime_catalog_hash": payload[
-                    "provider_runtime_catalog"
-                ]["catalog_hash"],
+                "provider_runtime_catalog_hash": sha256_json({}),
                 "generated_provider_evidence_cache_hash": sha256_json({}),
                 "trace_entries_hash": sha256_json([]),
                 "output_hash": sha256_json(output),
                 "output": output,
+                "consumer_runtime_probe": probe,
+                "consumer_runtime_probe_hash": (
+                    "sha256:" + "9" * 64
+                    if tamper_probe_hash["enabled"]
+                    else sha256_json(probe)
+                ),
                 "trace_entries": [],
                 "generated_provider_evidence_cache": {},
             },
             "receipt": {"receipt_hash": "sha256:" + "4" * 64},
         }
+
+    async def reject_catalog_load(**_kwargs):
+        pytest.fail("metadata compatibility must not load SOURCE_ADD catalog")
 
     runner = AttestedPrivateModelRunnerV2(
         artifact=artifact,
@@ -965,16 +1468,68 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
         model_kind="private",
         worker_index=0,
         execute=execute,
-        catalog_snapshot_loader=_load_empty_catalog,
+        catalog_snapshot_loader=reject_catalog_load,
     )
     assert runner.metadata() == _ready_adapter_metadata()
+    metadata_call = observed[0]
+    assert metadata_call["purpose"] == "research_lab.model_compatibility.v2"
+    assert metadata_call["payload"] == {
+        **metadata_call["payload"],
+        "input": {},
+        "environment": {},
+        "provider_evidence_cache": {},
+        "provider_evidence_cache_ref": "",
+        "provider_evidence_mode": "",
+        "provider_snapshot_bundle": {},
+        "provider_snapshot_tree_hash": "",
+        "provider_snapshot_manifest_hash": "",
+        "provider_cost_scope": "",
+        "provider_cost_cap_microusd": 0,
+        "provider_call_cap": 0,
+        "provider_runtime_catalog": {},
+        "provider_catalog_evidence": {},
+    }
+    assert metadata_call["provider_credential_profile"] == "default"
+    assert metadata_call["provider_credential_ref_hashes"] == {}
+    assert metadata_call["additional_job_credential_envelope_builder"] is None
+    assert metadata_call["require_egress_proxy"] is False
+    profile = metadata_call["provider_profile_loader"](
+        "default",
+        execution_role="gateway_scoring",
+        worker_index=0,
+        require_egress_proxy=False,
+    )
+    assert profile["credential_ref_hashes"] == {}
+    assert profile["envelopes"] == []
+    assert len(observed_probe_validation) == 1
+    assert observed_metadata_bindings == [_TEST_COMPATIBILITY_BINDINGS]
+    admission = runner.measured_compatibility_admission()
+    assert admission["decision"] == "accepted"
+    assert admission["compatibility_admission_hash"] == (
+        _TEST_COMPATIBILITY_ADMISSION_HASH
+    )
+    assert admission["consumer_runtime_probe_hash"] == sha256_json(probe)
+    assert admission["adapter_metadata_hash"] == sha256_json(
+        _ready_adapter_metadata()
+    )
+    assert admission["receipt_hash"] == sha256_json(
+        {key: value for key, value in admission.items() if key != "receipt_hash"}
+    )
+
+    tamper_probe_hash["enabled"] = True
+    with pytest.raises(
+        AttestedPrivateModelRunnerV2Error,
+        match="consumer runtime probe commitment differs",
+    ):
+        runner.metadata()
+    assert len(observed_probe_validation) == 1
 
 
 @pytest.mark.asyncio
 async def test_private_baseline_persists_signed_tape_before_atomic_cache_publish(
     tmp_path, monkeypatch
 ):
-    artifact = _artifact(tmp_path)
+    artifact = _artifact(tmp_path, monkeypatch)
     source_bundle = {
         "schema_version": "leadpoet.private_source_bundle.v2",
         "archive_sha256": "sha256:" + "2" * 64,
@@ -982,11 +1537,7 @@ async def test_private_baseline_persists_signed_tape_before_atomic_cache_publish
         "archive_size_bytes": 1,
         "archive_b64": "AA==",
     }
-    monkeypatch.setattr(
-        model_authority_v2,
-        "_source_bundle_for_artifact",
-        lambda *_args, **_kwargs: dict(source_bundle),
-    )
+    _stub_source_bundle_and_compatibility(monkeypatch, source_bundle)
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     monkeypatch.setenv("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR", str(cache_dir))
@@ -1039,6 +1590,10 @@ async def test_private_baseline_persists_signed_tape_before_atomic_cache_publish
                 "model_manifest_hash": artifact["manifest_hash"],
                 "compatibility_image_digest": artifact["image_digest"],
                 "source_bundle_hash": source_bundle["archive_sha256"],
+                "compatibility_policy_hash": _TEST_COMPATIBILITY_POLICY_HASH,
+                "compatibility_admission_hash": (
+                    _TEST_COMPATIBILITY_ADMISSION_HASH
+                ),
                 "runtime_config_hash": "sha256:" + "3" * 64,
                 "input_hash": sha256_json(payload["input"]),
                 "provider_evidence_cache_hash": sha256_json({}),
@@ -1317,7 +1872,7 @@ async def test_provider_tape_link_replay_does_not_mask_other_store_conflicts(
 async def test_candidate_cache_without_exact_tape_graph_fails_before_execution(
     tmp_path, monkeypatch
 ):
-    artifact = _artifact(tmp_path)
+    artifact = _artifact(tmp_path, monkeypatch)
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     icp = {"industry": "Software", "intent_signal": "Hiring"}

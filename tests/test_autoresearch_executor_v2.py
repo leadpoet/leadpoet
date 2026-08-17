@@ -88,12 +88,14 @@ from leadpoet_canonical.attested_v2 import (
 from research_lab.auto_research_prompt import coerce_component_registry
 from research_lab.eval import (
     PrivateModelArtifactManifest,
-    build_local_private_artifact_manifest,
     private_model_artifact_replay_identity_v2,
 )
 from research_lab.code_editing import CodeEditDraft, code_edit_candidate_manifest
 from research_lab.eval.private_runtime import compute_private_source_tree_hash
-from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
+from tests.private_model_artifact_fixtures import (
+    build_private_artifact_with_adapted_source_admission,
+    install_reviewed_consumer_snapshot,
+)
 
 
 class _HostChannel:
@@ -223,7 +225,7 @@ def _source_and_artifact(tmp_path: Path):
     (root / "research_lab_adapter.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     (root / "requirements.txt").write_text("", encoding="utf-8")
     install_reviewed_consumer_snapshot(root)
-    manifest = build_local_private_artifact_manifest(
+    manifest = build_private_artifact_with_adapted_source_admission(
         source_path=root,
         git_commit_sha="a" * 40,
         image_digest=(
@@ -247,7 +249,7 @@ def _valid_image_build_response(tmp_path: Path):
         "VALUE = 2\n", encoding="utf-8"
     )
     candidate = PrivateModelArtifactManifest.from_mapping(
-        build_local_private_artifact_manifest(
+        build_private_artifact_with_adapted_source_admission(
             source_path=child_root,
             git_commit_sha="c" * 40,
             image_digest=(
@@ -1598,7 +1600,7 @@ def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
     child_file = child_root / "sourcing_model" / "runtime.py"
     child_file.write_text("VALUE = 2\n", encoding="utf-8")
     child_artifact = PrivateModelArtifactManifest.from_mapping(
-        build_local_private_artifact_manifest(
+        build_private_artifact_with_adapted_source_admission(
             source_path=child_root,
             git_commit_sha="c" * 40,
             image_digest=(

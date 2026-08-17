@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import sys
@@ -86,8 +87,9 @@ def _prepare_measured_cgroup_boundary(
 class _MeasuredRunscBoundary:
     """Strict adapter for the privileged gVisor execution boundary."""
 
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Any, *, metadata_bootstrap: str) -> None:
         self._config = config
+        self._metadata_bootstrap = str(metadata_bootstrap)
         self._active: dict[str, str] = {}
 
     @staticmethod
@@ -100,12 +102,34 @@ class _MeasuredRunscBoundary:
             values[name] = value
         return values
 
-    def _verify_oci_document(
+    def _verified_source_path(self, source_visible: str) -> Path:
+        visible = Path(source_visible)
+        parts = visible.parts
+        if (
+            not visible.is_absolute()
+            or len(parts) != 4
+            or parts[1] != "leadpoet-model-sandboxes"
+            or re.fullmatch(r"lp-job-[0-9a-f]{16}", parts[2]) is None
+            or parts[3] != "source"
+        ):
+            raise ValueError("model sandbox source path differs")
+        rootfs = Path(self._config.rootfs_path).resolve(strict=True)
+        expected = rootfs.joinpath(*parts[1:])
+        try:
+            source = expected.resolve(strict=True)
+            source.relative_to(rootfs)
+        except (OSError, ValueError) as exc:
+            raise ValueError("model sandbox source path differs") from exc
+        if source != expected or expected.is_symlink() or not source.is_dir():
+            raise ValueError("model sandbox source path differs")
+        return source
+
+    def _verify_common_oci_document(
         self,
         *,
         document: dict[str, Any],
         sandbox_id: str,
-    ) -> tuple[Path, Path]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
         process = document.get("process")
         linux = document.get("linux")
         root = document.get("root")
@@ -128,7 +152,7 @@ class _MeasuredRunscBoundary:
             or not isinstance(mounts, list)
         ):
             raise ValueError("model sandbox OCI document differs")
-        expected_resources = {
+        expected_resources: dict[str, Any] = {
             "memory": {"limit": self._config.memory_limit_bytes},
             "cpu": {
                 "quota": self._config.cpu_quota,
@@ -136,11 +160,10 @@ class _MeasuredRunscBoundary:
             },
             "pids": {"limit": self._config.pids_limit},
         }
-        namespace_types = {
-            str(item.get("type"))
-            for item in linux.get("namespaces") or ()
-            if isinstance(item, dict)
-        }
+        expected_namespaces = [
+            {"type": item}
+            for item in ("pid", "ipc", "uts", "mount", "network", "user")
+        ]
         expected_uid_mapping = [
             {
                 "containerID": 0,
@@ -165,38 +188,153 @@ class _MeasuredRunscBoundary:
                 "size": 1,
             },
         ]
-        capabilities = process.get("capabilities") or {}
+        expected_capabilities = {
+            name: []
+            for name in (
+                "bounding",
+                "effective",
+                "inheritable",
+                "permitted",
+                "ambient",
+            )
+        }
+        expected_mounts = [
+            {"destination": "/proc", "type": "proc", "source": "proc"},
+            {
+                "destination": "/tmp",
+                "type": "tmpfs",
+                "source": "tmpfs",
+                "options": ["nosuid", "nodev", "mode=1777", "size=1073741824"],
+            },
+            {
+                "destination": "/run",
+                "type": "tmpfs",
+                "source": "tmpfs",
+                "options": [
+                    "nosuid",
+                    "nodev",
+                    "noexec",
+                    "mode=755",
+                    "size=1048576",
+                ],
+            },
+        ]
+        expected_masked_paths = [
+            "/dev/log",
+            "/dev/nsm",
+            "/proc/acpi",
+            "/proc/keys",
+            "/proc/kcore",
+            "/proc/latency_stats",
+            "/proc/timer_list",
+            "/proc/timer_stats",
+            "/sys/firmware",
+        ]
+        expected_readonly_paths = [
+            "/proc/asound",
+            "/proc/bus",
+            "/proc/fs",
+            "/proc/irq",
+            "/proc/sys",
+            "/proc/sysrq-trigger",
+        ]
         if (
             root
             != {"path": str(self._config.rootfs_path), "readonly": True}
+            or set(process)
+            != {
+                "args",
+                "capabilities",
+                "cwd",
+                "env",
+                "noNewPrivileges",
+                "rlimits",
+                "terminal",
+                "user",
+            }
+            or set(linux)
+            != {
+                "cgroupsPath",
+                "gidMappings",
+                "maskedPaths",
+                "namespaces",
+                "readonlyPaths",
+                "resources",
+                "seccomp",
+                "uidMappings",
+            }
+            or process.get("terminal") is not False
             or process.get("user")
             != {"uid": self._config.uid, "gid": self._config.gid}
             or process.get("cwd") != "/tmp"
             or process.get("noNewPrivileges") is not True
-            or any(capabilities.get(name) for name in capabilities)
+            or process.get("capabilities") != expected_capabilities
+            or process.get("rlimits")
+            != [
+                {"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 1024},
+                {
+                    "type": "RLIMIT_NPROC",
+                    "hard": self._config.pids_limit,
+                    "soft": self._config.pids_limit,
+                },
+            ]
+            or mounts != expected_mounts
             or linux.get("resources") != expected_resources
             or linux.get("cgroupsPath")
             != "leadpoet-model/" + sandbox_id
-            or namespace_types
-            != {"pid", "ipc", "uts", "mount", "network", "user"}
+            or linux.get("namespaces") != expected_namespaces
             or linux.get("uidMappings") != expected_uid_mapping
             or linux.get("gidMappings") != expected_gid_mapping
+            or linux.get("maskedPaths") != expected_masked_paths
+            or linux.get("readonlyPaths") != expected_readonly_paths
         ):
             raise ValueError("model sandbox OCI isolation differs")
         seccomp = linux.get("seccomp") or {}
-        socket_rules = [
-            item
-            for item in seccomp.get("syscalls") or ()
-            if isinstance(item, dict) and "socket" in (item.get("names") or ())
-        ]
         if (
-            seccomp.get("defaultAction") != "SCMP_ACT_ALLOW"
-            or len(socket_rules) != 1
-            or socket_rules[0].get("action") != "SCMP_ACT_ERRNO"
-            or socket_rules[0].get("args")
-            != [{"index": 0, "value": int(socket.AF_UNIX), "op": "SCMP_CMP_NE"}]
+            set(seccomp) != {"architectures", "defaultAction", "syscalls"}
+            or seccomp.get("defaultAction") != "SCMP_ACT_ALLOW"
+            or seccomp.get("architectures") != ["SCMP_ARCH_X86_64"]
+            or seccomp.get("syscalls")
+            != [
+                {
+                    "names": ["socket"],
+                    "action": "SCMP_ACT_ERRNO",
+                    "errnoRet": 1,
+                    "args": [
+                        {
+                            "index": 0,
+                            "value": int(socket.AF_UNIX),
+                            "op": "SCMP_CMP_NE",
+                        }
+                    ],
+                },
+                {
+                    "names": [
+                        "mount",
+                        "pivot_root",
+                        "ptrace",
+                        "bpf",
+                        "keyctl",
+                        "perf_event_open",
+                    ],
+                    "action": "SCMP_ACT_ERRNO",
+                    "errnoRet": 1,
+                },
+            ]
         ):
             raise ValueError("model sandbox network seccomp differs")
+        return process, mounts, self._environment(document)
+
+    def _verify_oci_document(
+        self,
+        *,
+        document: dict[str, Any],
+        sandbox_id: str,
+    ) -> tuple[Path, Path]:
+        process, mounts, environment = self._verify_common_oci_document(
+            document=document,
+            sandbox_id=sandbox_id,
+        )
 
         by_destination = {
             str(item.get("destination")): item
@@ -204,22 +342,30 @@ class _MeasuredRunscBoundary:
             if isinstance(item, dict)
         }
         run_mount = by_destination.get("/run") or {}
-        environment = self._environment(document)
         source_visible = str(environment.get("LEADPOET_MODEL_SOURCE_ROOT") or "")
         socket_visible = str(
             environment.get("LEADPOET_SANDBOX_PROVIDER_SOCKET") or ""
         )
-        rootfs = Path(str(root.get("path") or ""))
-        source = rootfs / source_visible.lstrip("/")
-        broker = rootfs / socket_visible.lstrip("/")
-        broker = broker.parent
+        rootfs = Path(self._config.rootfs_path)
+        source = self._verified_source_path(source_visible)
+        socket_path = Path(socket_visible)
+        if (
+            socket_path.parts
+            != (*Path(source_visible).parts[:-1], "broker", "provider.sock")
+        ):
+            raise ValueError("model sandbox provider socket path differs")
+        broker_candidate = rootfs.resolve(strict=True).joinpath(
+            *socket_path.parts[1:-1]
+        )
+        try:
+            broker = broker_candidate.resolve(strict=True)
+            broker.relative_to(rootfs.resolve(strict=True))
+        except (OSError, ValueError) as exc:
+            raise ValueError("model sandbox provider socket path differs") from exc
         if (
             run_mount.get("type") != "tmpfs"
             or any(item.get("type") == "bind" for item in mounts)
-            or not source_visible.startswith("/leadpoet-model-sandboxes/lp-job-")
-            or not socket_visible.startswith(source_visible.rsplit("/", 1)[0])
-            or not socket_visible.endswith("/broker/provider.sock")
-            or not source.is_dir()
+            or broker != broker_candidate
             or not broker.is_dir()
             or (source / "self-test-token").read_text(encoding="utf-8")
             != "leadpoet-model-sandbox-self-test-v2\n"
@@ -251,6 +397,48 @@ class _MeasuredRunscBoundary:
             raise ValueError("model sandbox startup self-test differs")
         return source, broker
 
+    def _verify_metadata_oci_document(
+        self,
+        *,
+        document: dict[str, Any],
+        sandbox_id: str,
+    ) -> None:
+        process, _mounts, environment = self._verify_common_oci_document(
+            document=document,
+            sandbox_id=sandbox_id,
+        )
+        source_visible = str(environment.get("LEADPOET_MODEL_SOURCE_ROOT") or "")
+        source = self._verified_source_path(source_visible)
+        expected_environment = {
+            "HOME": "/tmp",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": "0",
+            "PYTHONPATH": (
+                "/app:/app/gateway/_attested_runtime:" + source_visible
+            ),
+            "LEADPOET_MODEL_SOURCE_ROOT": source_visible,
+        }
+        args = process.get("args") or []
+        if (
+            environment != expected_environment
+            or args
+            != [
+                self._config.python_path,
+                "-I",
+                "-B",
+                "-c",
+                self._metadata_bootstrap,
+                *args[5:7],
+            ]
+            or len(args) != 7
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", str(args[5]))
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(args[6]))
+        ):
+            raise ValueError("model sandbox metadata OCI isolation differs")
+
     def __call__(self, command: list[str], **kwargs: Any) -> Any:
         argv = [str(item) for item in command]
         if len(argv) == 5 and argv[2:4] == ["delete", "--force"]:
@@ -267,6 +455,53 @@ class _MeasuredRunscBoundary:
         if len(argv) != 9:
             raise ValueError("model sandbox runsc operation differs")
         root_arg, bundle_arg, sandbox_id = argv[1], argv[7], argv[8]
+        if argv[2:7] == [
+            "--rootless=false",
+            "--network=none",
+            "--host-uds=none",
+            "--platform=ptrace",
+            "run",
+        ]:
+            bundle = Path(bundle_arg.removeprefix("--bundle="))
+            document = json.loads(
+                (bundle / "config.json").read_text(encoding="utf-8")
+            )
+            self._verify_metadata_oci_document(
+                document=document,
+                sandbox_id=sandbox_id,
+            )
+            environment = self._environment(document)
+            process = document.get("process") or {}
+            process_args = process.get("args") or []
+            payload = json.loads(str(kwargs.get("input") or ""))
+            if (
+                argv[0] != str(self._config.runsc_path)
+                or not root_arg.startswith("--root=")
+                or not bundle_arg.startswith("--bundle=")
+                or not sandbox_id.startswith("lp-")
+                or sandbox_id in self._active
+                or kwargs.get("text") is not True
+                or kwargs.get("capture_output") is not True
+                or kwargs.get("check") is not False
+                or int(kwargs.get("timeout") or 0) != 120
+                or set(payload) != {"observation_plan"}
+                or "LEADPOET_SANDBOX_PROVIDER_SOCKET" in environment
+                or "RESEARCH_LAB_PROVIDER_COST_SCOPE" in environment
+                or process_args[1:4] != ["-I", "-B", "-c"]
+                or document.get("root", {}).get("readonly") is not True
+                or not any(
+                    item.get("destination") == "/run"
+                    and item.get("type") == "tmpfs"
+                    for item in document.get("mounts") or ()
+                )
+            ):
+                raise ValueError("model sandbox metadata boundary differs")
+            self._active[sandbox_id] = root_arg
+            return SimpleNamespace(
+                returncode=125,
+                stdout="",
+                stderr="rehearsal_metadata_requires_external_runsc_evidence",
+            )
         if (
             argv[0] != str(self._config.runsc_path)
             or not root_arg.startswith("--root=")
@@ -562,13 +797,15 @@ def _install_measured_runtime_boundary(gateway_root: Path) -> None:
             cgroup_parent: str,
         ) -> None:
             self._rehearsal_runsc_boundary = _MeasuredRunscBoundary(
-                config
+                config,
+                metadata_bootstrap=model_sandbox_v2._MEASURED_METADATA_BOOTSTRAP,
             )
             super().__init__(
                 config=config,
                 transport=transport,
                 cgroup_parent=cgroup_parent,
                 process_runner=self._rehearsal_runsc_boundary,
+                metadata_process_runner=self._rehearsal_runsc_boundary,
             )
 
     # Physical Nitro/gVisor execution is an explicit local boundary. Candidate

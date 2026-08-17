@@ -11,7 +11,10 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 import concurrent.futures
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
+import inspect
 import json
 import logging
 import os
@@ -32,16 +35,23 @@ from gateway.research_lab.v2_authority import load_source_add_catalog_snapshot_v
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.tee.model_sandbox_v2 import (
     MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
+    ModelSandboxV2Error,
     provider_evidence_tape_input_root,
+    validate_consumer_runtime_probe_v1,
 )
-from gateway.tee.scoring_executor_v2 import OP_RUN_MODEL_SANDBOX_V2
+from gateway.tee.scoring_executor_v2 import (
+    MODEL_COMPATIBILITY_PURPOSE_V2,
+    OP_RUN_MODEL_SANDBOX_V2,
+)
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_job_envelope_v2,
     build_source_add_runtime_catalog_v2,
     source_add_runtime_credential_refs_v2,
     validate_source_add_runtime_catalog_v2,
 )
-from gateway.tee.source_bundle_v2 import build_source_bundle_v2
+from gateway.tee.source_bundle_v2 import (
+    build_source_bundle_v2,
+)
 from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from research_lab.eval import (
@@ -64,14 +74,34 @@ from research_lab.eval.private_runtime import (
 )
 from research_lab.eval.provider_costs import summarize_provider_cost_trace_entries
 from research_lab.eval.provider_evidence_cache import icp_evidence_cache_key
+from research_lab.sourcing_model_contract_check import (
+    SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+    semantic_compatibility_policy_identity_v1,
+    source_tree_compatibility_admission_v1,
+    validate_source_tree_compatibility_receipt_v1,
+)
 
 
 _SOURCE_BUNDLE_CACHE_SIZE = 8
-_SOURCE_BUNDLE_CACHE: "OrderedDict[tuple[str, str], dict[str, Any]]" = OrderedDict()
+_SOURCE_BUNDLE_CACHE: "OrderedDict[tuple[str, str, str, str, str, str], dict[str, Any]]" = OrderedDict()
+_SOURCE_COMPATIBILITY_RECEIPT_CACHE: "OrderedDict[tuple[str, str, str, str, str, str], dict[str, Any]]" = OrderedDict()
 _SOURCE_BUNDLE_CACHE_LOCK = threading.Lock()
-_SOURCE_BUNDLE_BUILD_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_SOURCE_BUNDLE_BUILD_LOCKS: dict[
+    tuple[str, str, str, str, str, str], tuple[threading.Lock, int]
+] = {}
+_MEASURED_COMPATIBILITY_CACHE: "OrderedDict[tuple[str, ...], dict[str, Any]]" = (
+    OrderedDict()
+)
+_MEASURED_COMPATIBILITY_FUTURES: dict[
+    tuple[str, ...], concurrent.futures.Future
+] = {}
+_MEASURED_COMPATIBILITY_CACHE_LOCK = threading.Lock()
 _PRIVATE_REPO_URL_ENV = "RESEARCH_LAB_PRIVATE_REPO_URL"
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+MEASURED_COMPATIBILITY_ADMISSION_SCHEMA_V1 = (
+    "leadpoet.measured-model-compatibility-admission.v1"
+)
 logger = logging.getLogger(__name__)
 V2_PROVIDER_PROFILE_ENV = "LEADPOET_V2_PROVIDER_CREDENTIAL_PROFILE"
 PROVIDER_EVIDENCE_TAPE_ARTIFACT_KIND = "provider_evidence_tape_v2"
@@ -348,6 +378,11 @@ class _LegacyPrivateModelRunnerAdapter:
     def attested_authorities(self) -> list[dict[str, Any]]:
         return []
 
+    def measured_compatibility_admission(self) -> dict[str, Any]:
+        raise AttestedPrivateModelRunnerV2Error(
+            "legacy model runtime has no measured compatibility admission"
+        )
+
     async def __call__(
         self,
         icp: Mapping[str, Any],
@@ -359,27 +394,101 @@ class _LegacyPrivateModelRunnerAdapter:
         return self._runner.metadata()
 
 
-def _source_bundle_for_artifact(
+@contextmanager
+def _source_bundle_build_lock(
+    cache_key: tuple[str, str, str, str, str, str],
+) -> Any:
+    with _SOURCE_BUNDLE_CACHE_LOCK:
+        build_lock, users = _SOURCE_BUNDLE_BUILD_LOCKS.get(
+            cache_key,
+            (threading.Lock(), 0),
+        )
+        _SOURCE_BUNDLE_BUILD_LOCKS[cache_key] = (build_lock, users + 1)
+    try:
+        with build_lock:
+            yield
+    finally:
+        with _SOURCE_BUNDLE_CACHE_LOCK:
+            current = _SOURCE_BUNDLE_BUILD_LOCKS.get(cache_key)
+            if current is not None and current[0] is build_lock:
+                if current[1] == 1:
+                    _SOURCE_BUNDLE_BUILD_LOCKS.pop(cache_key, None)
+                else:
+                    _SOURCE_BUNDLE_BUILD_LOCKS[cache_key] = (
+                        build_lock,
+                        current[1] - 1,
+                    )
+
+
+def _validated_cached_source_bundle_and_receipt_v2(
+    cache_key: tuple[str, str, str, str, str, str],
+    *,
+    artifact: PrivateModelArtifactManifest,
+    policy: Mapping[str, Any],
+    policy_hash: str,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Validate immutable cached commitments without repeating tree I/O."""
+
+    with _SOURCE_BUNDLE_CACHE_LOCK:
+        cached_bundle = _SOURCE_BUNDLE_CACHE.get(cache_key)
+        cached_receipt = _SOURCE_COMPATIBILITY_RECEIPT_CACHE.get(cache_key)
+        if cached_bundle is None or cached_receipt is None:
+            if cached_bundle is not None or cached_receipt is not None:
+                _SOURCE_BUNDLE_CACHE.pop(cache_key, None)
+                _SOURCE_COMPATIBILITY_RECEIPT_CACHE.pop(cache_key, None)
+            return None
+        bundle = deepcopy(cached_bundle)
+        receipt = deepcopy(cached_receipt)
+    try:
+        receipt = validate_source_tree_compatibility_receipt_v1(
+            receipt,
+            manifest=artifact,
+            source_tree_hash=artifact.model_artifact_hash,
+            policy=policy,
+            policy_hash=policy_hash,
+        )
+    except ValueError:
+        with _SOURCE_BUNDLE_CACHE_LOCK:
+            _SOURCE_BUNDLE_CACHE.pop(cache_key, None)
+            _SOURCE_COMPATIBILITY_RECEIPT_CACHE.pop(cache_key, None)
+        return None
+    with _SOURCE_BUNDLE_CACHE_LOCK:
+        # Do not return a snapshot that another thread replaced while its
+        # archive was being validated.
+        if (
+            _SOURCE_BUNDLE_CACHE.get(cache_key) != cached_bundle
+            or _SOURCE_COMPATIBILITY_RECEIPT_CACHE.get(cache_key)
+            != cached_receipt
+        ):
+            return None
+        _SOURCE_BUNDLE_CACHE.move_to_end(cache_key)
+        _SOURCE_COMPATIBILITY_RECEIPT_CACHE.move_to_end(cache_key)
+    return bundle, receipt
+
+
+def _source_bundle_and_compatibility_receipt_for_artifact(
     artifact: PrivateModelArtifactManifest,
     *,
     timeout_seconds: int,
-) -> dict[str, Any]:
-    cache_key = (artifact.model_artifact_hash, artifact.image_digest)
-    with _SOURCE_BUNDLE_CACHE_LOCK:
-        cached = _SOURCE_BUNDLE_CACHE.get(cache_key)
-        if cached is not None:
-            _SOURCE_BUNDLE_CACHE.move_to_end(cache_key)
-            return dict(cached)
-        build_lock = _SOURCE_BUNDLE_BUILD_LOCKS.setdefault(
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    policy, policy_hash = semantic_compatibility_policy_identity_v1()
+    cache_key = (
+        artifact.model_artifact_hash,
+        artifact.manifest_hash,
+        artifact.image_digest,
+        policy_hash,
+        str(policy["consumer_api_version"]),
+        SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+    )
+    with _source_bundle_build_lock(cache_key):
+        cached = _validated_cached_source_bundle_and_receipt_v2(
             cache_key,
-            threading.Lock(),
+            artifact=artifact,
+            policy=policy,
+            policy_hash=policy_hash,
         )
-    with build_lock:
-        with _SOURCE_BUNDLE_CACHE_LOCK:
-            cached = _SOURCE_BUNDLE_CACHE.get(cache_key)
-            if cached is not None:
-                _SOURCE_BUNDLE_CACHE.move_to_end(cache_key)
-                return dict(cached)
+        if cached is not None:
+            return cached
         with tempfile.TemporaryDirectory(prefix="research-lab-model-v2-source-") as tmp:
             source_root = Path(tmp) / "app"
             observed_tree_hash, _paths = _extract_parent_image_source(
@@ -403,18 +512,316 @@ def _source_bundle_for_artifact(
                 raise AttestedPrivateModelRunnerV2Error(
                     "exact private model source differs from its signed artifact"
                 )
+            try:
+                compatibility_receipt = source_tree_compatibility_admission_v1(
+                    source_root,
+                    manifest=artifact,
+                    source_tree_hash=observed_tree_hash,
+                    use_cache=True,
+                )
+                compatibility_receipt = (
+                    validate_source_tree_compatibility_receipt_v1(
+                        compatibility_receipt,
+                        manifest=artifact,
+                        source_tree_hash=artifact.model_artifact_hash,
+                        policy=policy,
+                        policy_hash=policy_hash,
+                    )
+                )
+            except ValueError as exc:
+                raise AttestedPrivateModelRunnerV2Error(str(exc)) from exc
+            if compute_private_source_tree_hash(source_root) != observed_tree_hash:
+                raise AttestedPrivateModelRunnerV2Error(
+                    "private model source changed during compatibility admission"
+                )
             bundle = build_source_bundle_v2(source_root)
         if bundle.get("source_tree_hash") != artifact.model_artifact_hash:
             raise AttestedPrivateModelRunnerV2Error(
                 "model source bundle differs from its signed artifact"
             )
         with _SOURCE_BUNDLE_CACHE_LOCK:
-            _SOURCE_BUNDLE_CACHE[cache_key] = dict(bundle)
+            _SOURCE_BUNDLE_CACHE[cache_key] = deepcopy(bundle)
+            _SOURCE_COMPATIBILITY_RECEIPT_CACHE[cache_key] = deepcopy(
+                compatibility_receipt
+            )
             _SOURCE_BUNDLE_CACHE.move_to_end(cache_key)
+            _SOURCE_COMPATIBILITY_RECEIPT_CACHE.move_to_end(cache_key)
             while len(_SOURCE_BUNDLE_CACHE) > _SOURCE_BUNDLE_CACHE_SIZE:
-                _SOURCE_BUNDLE_CACHE.popitem(last=False)
-            _SOURCE_BUNDLE_BUILD_LOCKS.pop(cache_key, None)
-        return dict(bundle)
+                expired_key, _expired_bundle = _SOURCE_BUNDLE_CACHE.popitem(
+                    last=False
+                )
+                _SOURCE_COMPATIBILITY_RECEIPT_CACHE.pop(expired_key, None)
+        return deepcopy(bundle), deepcopy(compatibility_receipt)
+
+
+def _source_bundle_for_artifact(
+    artifact: PrivateModelArtifactManifest,
+    *,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    bundle, _receipt = _source_bundle_and_compatibility_receipt_for_artifact(
+        artifact,
+        timeout_seconds=timeout_seconds,
+    )
+    return bundle
+
+
+def private_model_compatibility_receipt_v2(
+    artifact: PrivateModelArtifactManifest,
+    *,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Return the host-side source admission bound to an immutable artifact."""
+
+    _bundle, receipt = _source_bundle_and_compatibility_receipt_for_artifact(
+        artifact,
+        timeout_seconds=timeout_seconds,
+    )
+    return receipt
+
+
+def _validate_measured_compatibility_admission_v2(
+    admission: Mapping[str, Any],
+    *,
+    artifact: PrivateModelArtifactManifest,
+    spec: DockerPrivateModelSpec,
+    host_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the enclave-observed runtime admission on the host."""
+
+    normalized = dict(admission)
+    expected_fields = {
+        "schema_version",
+        "decision",
+        "admission_mode",
+        "consumer_api_version",
+        "compatibility_policy_hash",
+        "compatibility_admission_hash",
+        "source_tree_hash",
+        "manifest_hash",
+        "image_digest",
+        "module_name",
+        "callable_name",
+        "consumer_runtime_probe_hash",
+        "adapter_metadata_hash",
+        "execution_receipt_hash",
+        "receipt_hash",
+    }
+    body = {
+        key: value for key, value in normalized.items() if key != "receipt_hash"
+    }
+    if (
+        set(normalized) != expected_fields
+        or normalized.get("schema_version")
+        != MEASURED_COMPATIBILITY_ADMISSION_SCHEMA_V1
+        or normalized.get("decision")
+        != SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION
+        or normalized.get("admission_mode") != host_receipt.get("admission_mode")
+        or normalized.get("consumer_api_version")
+        != host_receipt.get("consumer_api_version")
+        or normalized.get("compatibility_policy_hash")
+        != host_receipt.get("policy_hash")
+        or normalized.get("compatibility_admission_hash")
+        != host_receipt.get("receipt_hash")
+        or normalized.get("source_tree_hash") != artifact.model_artifact_hash
+        or normalized.get("manifest_hash") != artifact.manifest_hash
+        or normalized.get("image_digest") != artifact.image_digest
+        or normalized.get("module_name") != spec.module_name
+        or normalized.get("callable_name") != "adapter_metadata"
+        or not _SHA256_RE.fullmatch(
+            str(normalized.get("consumer_runtime_probe_hash") or "")
+        )
+        or not _SHA256_RE.fullmatch(
+            str(normalized.get("adapter_metadata_hash") or "")
+        )
+        or not _SHA256_RE.fullmatch(
+            str(normalized.get("execution_receipt_hash") or "")
+        )
+        or normalized.get("receipt_hash") != sha256_json(body)
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "measured model compatibility admission differs from host admission"
+        )
+    return normalized
+
+
+def _combined_compatibility_proof_v2(
+    *,
+    artifact: PrivateModelArtifactManifest,
+    spec: DockerPrivateModelSpec,
+    host_receipt: Mapping[str, Any],
+    measured_admission: Mapping[str, Any],
+) -> dict[str, Any]:
+    measured = _validate_measured_compatibility_admission_v2(
+        measured_admission,
+        artifact=artifact,
+        spec=spec,
+        host_receipt=host_receipt,
+    )
+    combined_body = {
+        "decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "host_compatibility_receipt_hash": host_receipt["receipt_hash"],
+        "measured_runtime_receipt_hash": measured["receipt_hash"],
+        "measured_runtime_probe_hash": measured[
+            "consumer_runtime_probe_hash"
+        ],
+    }
+    return {
+        **dict(host_receipt),
+        "measured_runtime_admission": measured,
+        "measured_runtime_decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "measured_runtime_probe_hash": measured[
+            "consumer_runtime_probe_hash"
+        ],
+        "combined_receipt_hash": sha256_json(combined_body),
+    }
+
+
+def _measured_compatibility_cache_key_v2(
+    *,
+    artifact: PrivateModelArtifactManifest,
+    spec: DockerPrivateModelSpec,
+    host_receipt: Mapping[str, Any],
+) -> tuple[str, ...]:
+    return (
+        artifact.model_artifact_hash,
+        artifact.manifest_hash,
+        artifact.image_digest,
+        str(host_receipt["policy_hash"]),
+        str(host_receipt["receipt_hash"]),
+        spec.module_name,
+        "adapter_metadata",
+    )
+
+
+async def _execute_measured_compatibility_preflight_v2(
+    *,
+    artifact: PrivateModelArtifactManifest,
+    spec: DockerPrivateModelSpec,
+    host_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Execute one measured metadata admission without a model provider broker."""
+
+    runner = AttestedPrivateModelRunnerV2(
+        artifact=artifact,
+        spec=spec,
+        model_kind="private",
+        worker_index=0,
+        epoch_id=0,
+    )
+    await asyncio.to_thread(runner.metadata)
+    return runner.measured_compatibility_admission()
+
+
+async def preflight_private_model_compatibility_v2(
+    artifact: PrivateModelArtifactManifest,
+    *,
+    timeout_seconds: int,
+    measured_preflight_executor: Any = None,
+) -> dict[str, Any]:
+    """Bind immutable host admission to one measured runtime admission."""
+
+    host_receipt = await asyncio.to_thread(
+        private_model_compatibility_receipt_v2,
+        artifact,
+        timeout_seconds=timeout_seconds,
+    )
+    spec = DockerPrivateModelSpec(
+        image_digest=artifact.image_digest,
+        timeout_seconds=int(timeout_seconds),
+        env_passthrough=(),
+        extra_env={},
+    )
+    executor = (
+        measured_preflight_executor
+        or _execute_measured_compatibility_preflight_v2
+    )
+    cache_enabled = measured_preflight_executor is None
+    cache_key = _measured_compatibility_cache_key_v2(
+        artifact=artifact,
+        spec=spec,
+        host_receipt=host_receipt,
+    )
+    leader_future: concurrent.futures.Future | None = None
+    if cache_enabled:
+        while True:
+            with _MEASURED_COMPATIBILITY_CACHE_LOCK:
+                cached = deepcopy(
+                    _MEASURED_COMPATIBILITY_CACHE.get(cache_key)
+                )
+                pending = _MEASURED_COMPATIBILITY_FUTURES.get(cache_key)
+                if cached is None and pending is None:
+                    pending = concurrent.futures.Future()
+                    _MEASURED_COMPATIBILITY_FUTURES[cache_key] = pending
+                    leader_future = pending
+            if cached is not None:
+                try:
+                    proof = _combined_compatibility_proof_v2(
+                        artifact=artifact,
+                        spec=spec,
+                        host_receipt=host_receipt,
+                        measured_admission=cached,
+                    )
+                except AttestedPrivateModelRunnerV2Error:
+                    with _MEASURED_COMPATIBILITY_CACHE_LOCK:
+                        if _MEASURED_COMPATIBILITY_CACHE.get(cache_key) == cached:
+                            _MEASURED_COMPATIBILITY_CACHE.pop(cache_key, None)
+                    continue
+                with _MEASURED_COMPATIBILITY_CACHE_LOCK:
+                    _MEASURED_COMPATIBILITY_CACHE.move_to_end(cache_key)
+                return proof
+            if leader_future is not None:
+                break
+            shared = await asyncio.shield(asyncio.wrap_future(pending))
+            return _combined_compatibility_proof_v2(
+                artifact=artifact,
+                spec=spec,
+                host_receipt=host_receipt,
+                measured_admission=shared,
+            )
+    try:
+        measured_result = executor(
+            artifact=artifact,
+            spec=spec,
+            host_receipt=host_receipt,
+        )
+        if inspect.isawaitable(measured_result):
+            try:
+                measured_result = await asyncio.wait_for(
+                    measured_result,
+                    timeout=_model_invocation_timeout_seconds(timeout_seconds),
+                )
+            except asyncio.TimeoutError as exc:
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured compatibility preflight timed out"
+                ) from exc
+        if not isinstance(measured_result, Mapping):
+            raise AttestedPrivateModelRunnerV2Error(
+                "measured compatibility preflight result is invalid"
+            )
+        proof = _combined_compatibility_proof_v2(
+            artifact=artifact,
+            spec=spec,
+            host_receipt=host_receipt,
+            measured_admission=measured_result,
+        )
+    except BaseException as exc:
+        if leader_future is not None:
+            with _MEASURED_COMPATIBILITY_CACHE_LOCK:
+                _MEASURED_COMPATIBILITY_FUTURES.pop(cache_key, None)
+            leader_future.set_exception(exc)
+            leader_future.exception()
+        raise
+    if leader_future is not None:
+        with _MEASURED_COMPATIBILITY_CACHE_LOCK:
+            measured_admission = deepcopy(proof["measured_runtime_admission"])
+            _MEASURED_COMPATIBILITY_CACHE[cache_key] = measured_admission
+            _MEASURED_COMPATIBILITY_CACHE.move_to_end(cache_key)
+            while len(_MEASURED_COMPATIBILITY_CACHE) > _SOURCE_BUNDLE_CACHE_SIZE:
+                _MEASURED_COMPATIBILITY_CACHE.popitem(last=False)
+            _MEASURED_COMPATIBILITY_FUTURES.pop(cache_key, None)
+        leader_future.set_result(deepcopy(measured_admission))
+    return proof
 
 
 async def source_bundle_for_artifact_v2(
@@ -672,6 +1079,44 @@ def _measured_environment_for_provider_cost_scope(
     return environment
 
 
+def _empty_model_compatibility_provider_profile(
+    profile: str,
+    *,
+    execution_role: str,
+    worker_index: int,
+    require_egress_proxy: bool,
+) -> dict[str, Any]:
+    """Return the measured metadata profile without reading credential files."""
+
+    if (
+        str(profile or "default") != "default"
+        or execution_role != "gateway_scoring"
+        or int(worker_index) < 0
+        or require_egress_proxy
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model compatibility provider profile is not isolated"
+        )
+    return {
+        "profile": "default",
+        "execution_role": "gateway_scoring",
+        "worker_index": int(worker_index),
+        "egress_proxy_required": False,
+        "credential_ref_hashes": {},
+        "envelopes": [],
+        "profile_hash": sha256_json(
+            {
+                "schema_version": "leadpoet.provider_profile.v2",
+                "profile": "default",
+                "execution_role": "gateway_scoring",
+                "worker_index": int(worker_index),
+                "egress_proxy_required": False,
+                "credential_ref_hashes": {},
+            }
+        ),
+    }
+
+
 class AttestedPrivateModelRunnerV2:
     """The existing model-runner interface with V2 enclave authority."""
 
@@ -726,6 +1171,7 @@ class AttestedPrivateModelRunnerV2:
             "sequence": 0,
             "receipts": [],
             "authorities": [],
+            "compatibility_admissions": [],
             "generated_caches": {},
             "evidence_summaries": {},
             "catalog_snapshot_futures": {},
@@ -765,6 +1211,15 @@ class AttestedPrivateModelRunnerV2:
     def attested_authorities(self) -> list[dict[str, Any]]:
         with self._shared_state["lock"]:
             return [dict(item) for item in self._shared_state["authorities"]]
+
+    def measured_compatibility_admission(self) -> dict[str, Any]:
+        with self._shared_state["lock"]:
+            admissions = self._shared_state.get("compatibility_admissions") or []
+            if not admissions:
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured model compatibility admission is unavailable"
+                )
+            return deepcopy(admissions[-1])
 
     async def _load_catalog_snapshot(self, *, epoch_id: int) -> Mapping[str, Any]:
         """Load one exact measured catalog outcome per shared runner epoch."""
@@ -919,14 +1374,19 @@ class AttestedPrivateModelRunnerV2:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return validate_sourcing_adapter_metadata(
+            # ``_execute_operation`` validates measured metadata against the
+            # exact semantic bindings in the host compatibility receipt before
+            # returning it.  A second legacy-only validation here would reject
+            # compatible future adapter release identities after that stronger
+            # validation already succeeded.
+            return dict(
                 asyncio.run(
                     self._invoke_operation(
                         operation="metadata",
                         input_doc={},
                         provider_evidence_cache={},
                         provider_evidence_cache_ref="",
-                        provider_evidence_mode="live",
+                        provider_evidence_mode="",
                         provider_snapshot_bundle={},
                         provider_snapshot_tree_hash="",
                         provider_snapshot_manifest_hash="",
@@ -992,8 +1452,8 @@ class AttestedPrivateModelRunnerV2:
         publish_provider_evidence_cache: bool,
         additional_parent_graphs: Sequence[Mapping[str, Any]] = (),
     ) -> Any:
-        source_bundle = await asyncio.to_thread(
-            _source_bundle_for_artifact,
+        source_bundle, compatibility_receipt = await asyncio.to_thread(
+            _source_bundle_and_compatibility_receipt_for_artifact,
             self.artifact,
             timeout_seconds=self.spec.timeout_seconds,
         )
@@ -1015,8 +1475,27 @@ class AttestedPrivateModelRunnerV2:
         ).strip()
         if evaluation_scope:
             scope_doc["evaluation_scope"] = evaluation_scope
-        provider_cost_scope = str(provider_cost_scope_override or "") or sha256_json(
-            scope_doc
+        metadata_operation = operation == "metadata"
+        if metadata_operation and (
+            input_doc
+            or provider_evidence_cache
+            or provider_evidence_cache_ref
+            or provider_evidence_mode
+            or provider_snapshot_bundle
+            or provider_snapshot_tree_hash
+            or provider_snapshot_manifest_hash
+            or provider_cost_scope_override
+            or provider_cost_cap_microusd
+            or provider_call_cap
+            or publish_provider_evidence_cache
+        ):
+            raise AttestedPrivateModelRunnerV2Error(
+                "model compatibility metadata inputs are not isolated"
+            )
+        provider_cost_scope = (
+            ""
+            if metadata_operation
+            else str(provider_cost_scope_override or "") or sha256_json(scope_doc)
         )
         cache_hash = sha256_json(dict(provider_evidence_cache))
         image_hash = "sha256:" + self.artifact.image_digest.rsplit("@sha256:", 1)[1]
@@ -1027,98 +1506,155 @@ class AttestedPrivateModelRunnerV2:
                 dict(input_doc.get("context") or {}).get("evaluation_epoch") or 0
             )
         )
-        catalog_outcome = await self._load_catalog_snapshot(
-            epoch_id=int(execution_epoch)
-        )
-        catalog_result = catalog_outcome.get("result")
-        catalog_graph = catalog_outcome.get("receipt_graph")
-        catalog_lineage_receipt = catalog_outcome.get("receipt")
-        catalog_execution_graph = catalog_outcome.get(
-            "execution_receipt_graph"
-        ) or catalog_outcome.get("receipt_graph")
-        catalog_execution_receipt = catalog_outcome.get(
-            "execution_receipt"
-        ) or catalog_outcome.get("receipt")
-        if (
-            not isinstance(catalog_result, Mapping)
-            or not isinstance(catalog_graph, Mapping)
-            or not isinstance(catalog_lineage_receipt, Mapping)
-            or not isinstance(catalog_execution_graph, Mapping)
-            or not isinstance(catalog_execution_receipt, Mapping)
-            or catalog_graph.get("root_receipt_hash")
-            != catalog_lineage_receipt.get("receipt_hash")
-            or catalog_execution_graph.get("root_receipt_hash")
-            != catalog_execution_receipt.get("receipt_hash")
-        ):
-            raise AttestedPrivateModelRunnerV2Error(
-                "measured SOURCE_ADD catalog authority is unavailable"
+        if metadata_operation:
+            runtime_catalog: dict[str, Any] = {}
+            provider_catalog_evidence: dict[str, Any] = {}
+            provisioned_sources: list[Mapping[str, Any]] = []
+            dynamic_provider_refs: dict[str, str] = {}
+            model_environment: dict[str, str] = {}
+            catalog_parent_graphs: tuple[Mapping[str, Any], ...] = ()
+            catalog_input_hashes: tuple[str, ...] = ()
+            purpose = MODEL_COMPATIBILITY_PURPOSE_V2
+            provider_profile = "default"
+            provider_profile_loader = _empty_model_compatibility_provider_profile
+            envelope_builder = None
+            require_egress_proxy = False
+        else:
+            catalog_outcome = await self._load_catalog_snapshot(
+                epoch_id=int(execution_epoch)
             )
-        provisioned_sources = catalog_result.get("provisioned_sources")
-        private_registry_rows = catalog_result.get("private_registry_rows")
-        if (
-            catalog_result.get("schema_version")
-            != "leadpoet.source_add_catalog_snapshot.v2"
-            or not isinstance(provisioned_sources, list)
-            or any(not isinstance(item, Mapping) for item in provisioned_sources)
-            or not isinstance(private_registry_rows, list)
-            or any(not isinstance(item, Mapping) for item in private_registry_rows)
-        ):
-            raise AttestedPrivateModelRunnerV2Error(
-                "measured SOURCE_ADD catalog result is invalid"
+            catalog_result = catalog_outcome.get("result")
+            catalog_graph = catalog_outcome.get("receipt_graph")
+            catalog_lineage_receipt = catalog_outcome.get("receipt")
+            catalog_execution_graph = catalog_outcome.get(
+                "execution_receipt_graph"
+            ) or catalog_outcome.get("receipt_graph")
+            catalog_execution_receipt = catalog_outcome.get(
+                "execution_receipt"
+            ) or catalog_outcome.get("receipt")
+            if (
+                not isinstance(catalog_result, Mapping)
+                or not isinstance(catalog_graph, Mapping)
+                or not isinstance(catalog_lineage_receipt, Mapping)
+                or not isinstance(catalog_execution_graph, Mapping)
+                or not isinstance(catalog_execution_receipt, Mapping)
+                or catalog_graph.get("root_receipt_hash")
+                != catalog_lineage_receipt.get("receipt_hash")
+                or catalog_execution_graph.get("root_receipt_hash")
+                != catalog_execution_receipt.get("receipt_hash")
+            ):
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured SOURCE_ADD catalog authority is unavailable"
+                )
+            provisioned_sources = catalog_result.get("provisioned_sources")
+            private_registry_rows = catalog_result.get("private_registry_rows")
+            if (
+                catalog_result.get("schema_version")
+                != "leadpoet.source_add_catalog_snapshot.v2"
+                or not isinstance(provisioned_sources, list)
+                or any(
+                    not isinstance(item, Mapping)
+                    for item in provisioned_sources
+                )
+                or not isinstance(private_registry_rows, list)
+                or any(
+                    not isinstance(item, Mapping)
+                    for item in private_registry_rows
+                )
+            ):
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured SOURCE_ADD catalog result is invalid"
+                )
+            try:
+                runtime_catalog = validate_source_add_runtime_catalog_v2(
+                    catalog_result.get("runtime_catalog") or {}
+                )
+                derived_runtime_catalog = build_source_add_runtime_catalog_v2(
+                    [dict(item) for item in provisioned_sources]
+                )
+            except Exception as exc:
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured SOURCE_ADD runtime catalog is invalid"
+                ) from exc
+            catalog_root = str(catalog_graph.get("root_receipt_hash") or "")
+            catalog_execution_root = str(
+                catalog_execution_graph.get("root_receipt_hash") or ""
             )
-        try:
-            runtime_catalog = validate_source_add_runtime_catalog_v2(
-                catalog_result.get("runtime_catalog") or {}
+            if (
+                runtime_catalog != derived_runtime_catalog
+                or catalog_result.get("provisioned_sources_hash")
+                != sha256_json([dict(item) for item in provisioned_sources])
+                or catalog_result.get("private_registry_rows_hash")
+                != sha256_json([dict(item) for item in private_registry_rows])
+                or catalog_result.get("runtime_catalog_hash")
+                != runtime_catalog["catalog_hash"]
+                or catalog_execution_receipt.get("role")
+                != "gateway_coordinator"
+                or catalog_execution_receipt.get("purpose")
+                != "research_lab.source_add_catalog_snapshot.v2"
+                or catalog_execution_receipt.get("status") != "succeeded"
+                or catalog_execution_receipt.get("output_root")
+                != sha256_json(dict(catalog_result))
+            ):
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured SOURCE_ADD catalog commitment differs"
+                )
+            dynamic_provider_refs = source_add_runtime_credential_refs_v2(
+                runtime_catalog
             )
-            derived_runtime_catalog = build_source_add_runtime_catalog_v2(
-                [dict(item) for item in provisioned_sources]
+            dynamic_credential_env_names = tuple(
+                str(env_name)
+                for route in runtime_catalog["routes"]
+                for env_name in route["credential_env_refs"]
             )
-        except Exception as exc:
-            raise AttestedPrivateModelRunnerV2Error(
-                "measured SOURCE_ADD runtime catalog is invalid"
-            ) from exc
-        catalog_root = str(catalog_graph.get("root_receipt_hash") or "")
-        catalog_execution_root = str(
-            catalog_execution_graph.get("root_receipt_hash") or ""
-        )
-        if (
-            runtime_catalog != derived_runtime_catalog
-            or catalog_result.get("provisioned_sources_hash")
-            != sha256_json([dict(item) for item in provisioned_sources])
-            or catalog_result.get("private_registry_rows_hash")
-            != sha256_json([dict(item) for item in private_registry_rows])
-            or catalog_result.get("runtime_catalog_hash")
-            != runtime_catalog["catalog_hash"]
-            or catalog_execution_receipt.get("role") != "gateway_coordinator"
-            or catalog_execution_receipt.get("purpose")
-            != "research_lab.source_add_catalog_snapshot.v2"
-            or catalog_execution_receipt.get("status") != "succeeded"
-            or catalog_execution_receipt.get("output_root")
-            != sha256_json(dict(catalog_result))
-        ):
-            raise AttestedPrivateModelRunnerV2Error(
-                "measured SOURCE_ADD catalog commitment differs"
+            model_environment = _measured_environment_for_provider_cost_scope(
+                self.spec,
+                provider_cost_scope=provider_cost_scope,
+                additional_credential_env_names=dynamic_credential_env_names,
             )
-        dynamic_provider_refs = source_add_runtime_credential_refs_v2(
-            runtime_catalog
-        )
-        dynamic_credential_env_names = tuple(
-            str(env_name)
-            for route in runtime_catalog["routes"]
-            for env_name in route["credential_env_refs"]
-        )
-        model_environment = _measured_environment_for_provider_cost_scope(
-            self.spec,
-            provider_cost_scope=provider_cost_scope,
-            additional_credential_env_names=dynamic_credential_env_names,
-        )
-        purpose = (
-            "research_lab.private_model_run.v2"
-            if self.model_kind == "private"
-            else "research_lab.candidate_hybrid_discovery.v2"
-            if provider_evidence_mode == "record"
-            else "research_lab.candidate_model_run.v2"
-        )
+            purpose = (
+                "research_lab.private_model_run.v2"
+                if self.model_kind == "private"
+                else "research_lab.candidate_hybrid_discovery.v2"
+                if provider_evidence_mode == "record"
+                else "research_lab.candidate_model_run.v2"
+            )
+            provider_catalog_evidence = {
+                "result": dict(catalog_result),
+                "root_receipt_hash": catalog_execution_root,
+            }
+            catalog_parent_graphs = (
+                catalog_execution_graph,
+                catalog_graph,
+            )
+            catalog_input_hashes = (
+                catalog_root,
+                catalog_execution_root,
+                str(catalog_result["provisioned_sources_hash"]),
+                str(catalog_result["private_registry_rows_hash"]),
+                str(catalog_result["runtime_catalog_hash"]),
+                *dynamic_provider_refs.values(),
+            )
+            provider_profile = str(
+                dict(self.spec.extra_env or {}).get(
+                    V2_PROVIDER_PROFILE_ENV,
+                    "default",
+                )
+                or "default"
+            )
+            provider_profile_loader = None
+            envelope_builder = lambda job_id: [
+                envelope
+                for source_row in provisioned_sources
+                for envelope in (
+                    build_source_add_job_envelope_v2(
+                        source_row,
+                        job_id=job_id,
+                    ),
+                )
+                if envelope is not None
+            ]
+            require_egress_proxy = None
         with self._shared_state["lock"]:
             sequence = int(self._shared_state["sequence"])
             self._shared_state["sequence"] = sequence + 1
@@ -1127,8 +1663,7 @@ class AttestedPrivateModelRunnerV2:
             for graph in (
                 *self.parent_graphs,
                 *additional_parent_graphs,
-                catalog_execution_graph,
-                catalog_graph,
+                *catalog_parent_graphs,
             )
         }
         if "" in parent_graph_by_root:
@@ -1160,31 +1695,14 @@ class AttestedPrivateModelRunnerV2:
                 "provider_cost_cap_microusd": int(provider_cost_cap_microusd),
                 "provider_call_cap": int(provider_call_cap),
                 "provider_runtime_catalog": runtime_catalog,
-                "provider_catalog_evidence": {
-                    "result": dict(catalog_result),
-                    "root_receipt_hash": catalog_execution_root,
-                },
+                "provider_catalog_evidence": provider_catalog_evidence,
             },
             worker_index=self.worker_index,
-            provider_credential_profile=str(
-                dict(self.spec.extra_env or {}).get(
-                    V2_PROVIDER_PROFILE_ENV,
-                    "default",
-                )
-                or "default"
-            ),
+            provider_credential_profile=provider_profile,
             provider_credential_ref_hashes=dynamic_provider_refs,
-            additional_job_credential_envelope_builder=lambda job_id: [
-                envelope
-                for source_row in provisioned_sources
-                for envelope in (
-                    build_source_add_job_envelope_v2(
-                        source_row,
-                        job_id=job_id,
-                    ),
-                )
-                if envelope is not None
-            ],
+            provider_profile_loader=provider_profile_loader,
+            require_egress_proxy=require_egress_proxy,
+            additional_job_credential_envelope_builder=envelope_builder,
             parent_graphs=tuple(
                 parent_graph_by_root[key] for key in sorted(parent_graph_by_root)
             ),
@@ -1193,6 +1711,8 @@ class AttestedPrivateModelRunnerV2:
                 self.artifact.manifest_hash,
                 image_hash,
                 str(source_bundle["archive_sha256"]),
+                str(compatibility_receipt["policy_hash"]),
+                str(compatibility_receipt["receipt_hash"]),
                 cache_hash,
                 *(
                     (
@@ -1203,12 +1723,7 @@ class AttestedPrivateModelRunnerV2:
                     if provider_snapshot_bundle
                     else ()
                 ),
-                catalog_root,
-                catalog_execution_root,
-                str(catalog_result["provisioned_sources_hash"]),
-                str(catalog_result["private_registry_rows_hash"]),
-                str(catalog_result["runtime_catalog_hash"]),
-                *dynamic_provider_refs.values(),
+                *catalog_input_hashes,
             ),
             timeout_seconds=max(1.0, float(self.spec.timeout_seconds) + 120.0),
         )
@@ -1225,6 +1740,10 @@ class AttestedPrivateModelRunnerV2:
             "model_manifest_hash": self.artifact.manifest_hash,
             "compatibility_image_digest": self.artifact.image_digest,
             "source_bundle_hash": source_bundle["archive_sha256"],
+            "compatibility_policy_hash": compatibility_receipt["policy_hash"],
+            "compatibility_admission_hash": compatibility_receipt[
+                "receipt_hash"
+            ],
             "input_hash": sha256_json(dict(input_doc)),
             "provider_evidence_cache_hash": cache_hash,
             "provider_evidence_cache_ref": provider_evidence_cache_ref,
@@ -1242,12 +1761,56 @@ class AttestedPrivateModelRunnerV2:
             ),
             "provider_cost_cap_microusd": int(provider_cost_cap_microusd),
             "provider_call_cap": int(provider_call_cap),
-            "provider_runtime_catalog_hash": runtime_catalog["catalog_hash"],
+            "provider_runtime_catalog_hash": (
+                sha256_json({})
+                if metadata_operation
+                else runtime_catalog["catalog_hash"]
+            ),
         }
         if any(result.get(name) != value for name, value in expected.items()):
             raise AttestedPrivateModelRunnerV2Error(
                 "measured model result commitments differ"
             )
+        consumer_runtime_probe_hash = ""
+        adapter_metadata_hash = ""
+        if operation == "metadata":
+            probe = result.get("consumer_runtime_probe")
+            probe_hash = str(result.get("consumer_runtime_probe_hash") or "")
+            if (
+                not isinstance(probe, Mapping)
+                or probe_hash != sha256_json(dict(probe))
+                or not isinstance(result.get("output"), Mapping)
+            ):
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured consumer runtime probe commitment differs"
+                )
+            try:
+                measured_metadata = validate_sourcing_adapter_metadata(
+                    result["output"],
+                    expected_semantic_bindings=dict(
+                        compatibility_receipt.get("bindings") or {}
+                    ),
+                    require_company_fit_contract=(
+                        compatibility_receipt.get("admission_mode")
+                        == "semantic_v1"
+                    ),
+                )
+                validate_consumer_runtime_probe_v1(
+                    probe,
+                    compatibility_receipt=compatibility_receipt,
+                    metadata=measured_metadata,
+                    expected_source_tree_hash=self.artifact.model_artifact_hash,
+                    expected_manifest_hash=self.artifact.manifest_hash,
+                    expected_image_digest=self.artifact.image_digest,
+                    expected_module_name=self.spec.module_name,
+                    expected_callable_name="adapter_metadata",
+                )
+            except (ModelSandboxV2Error, PrivateModelRuntimeError) as exc:
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured consumer runtime probe differs from host admission"
+                ) from exc
+            consumer_runtime_probe_hash = probe_hash
+            adapter_metadata_hash = sha256_json(dict(measured_metadata))
         trace_entries = result.get("trace_entries")
         if not isinstance(trace_entries, list) or sha256_json(trace_entries) != result.get(
             "trace_entries_hash"
@@ -1288,6 +1851,32 @@ class AttestedPrivateModelRunnerV2:
             raise AttestedPrivateModelRunnerV2Error(
                 "measured model receipt is missing"
             )
+        measured_compatibility_admission = None
+        if operation == "metadata":
+            measured_admission_body = {
+                "schema_version": MEASURED_COMPATIBILITY_ADMISSION_SCHEMA_V1,
+                "decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+                "admission_mode": compatibility_receipt["admission_mode"],
+                "consumer_api_version": compatibility_receipt[
+                    "consumer_api_version"
+                ],
+                "compatibility_policy_hash": compatibility_receipt["policy_hash"],
+                "compatibility_admission_hash": compatibility_receipt[
+                    "receipt_hash"
+                ],
+                "source_tree_hash": self.artifact.model_artifact_hash,
+                "manifest_hash": self.artifact.manifest_hash,
+                "image_digest": self.artifact.image_digest,
+                "module_name": self.spec.module_name,
+                "callable_name": "adapter_metadata",
+                "consumer_runtime_probe_hash": consumer_runtime_probe_hash,
+                "adapter_metadata_hash": adapter_metadata_hash,
+                "execution_receipt_hash": str(receipt.get("receipt_hash") or ""),
+            }
+            measured_compatibility_admission = {
+                **measured_admission_body,
+                "receipt_hash": sha256_json(measured_admission_body),
+            }
         if generated_cache:
             graph = outcome.get("execution_receipt_graph")
             if not isinstance(graph, Mapping):
@@ -1331,6 +1920,16 @@ class AttestedPrivateModelRunnerV2:
                 for item in authorities
             ):
                 authorities.append(dict(outcome))
+            if measured_compatibility_admission is not None:
+                admissions = self._shared_state.setdefault(
+                    "compatibility_admissions", []
+                )
+                if not any(
+                    item.get("receipt_hash")
+                    == measured_compatibility_admission["receipt_hash"]
+                    for item in admissions
+                ):
+                    admissions.append(deepcopy(measured_compatibility_admission))
         publish_attested_receipt_hash(receipt_hash)
         return result.get("output")
 

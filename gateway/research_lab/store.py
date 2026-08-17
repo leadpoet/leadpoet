@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 from typing import Any, Iterable, Mapping
 from uuid import UUID, uuid4, uuid5, NAMESPACE_URL
 
@@ -1679,17 +1680,15 @@ async def create_private_model_benchmark_event(
     )
 
 
-async def create_private_model_version(
+def _private_model_version_row(
     *,
-    artifact_manifest: dict[str, Any],
-    manifest_uri: str | None = None,
-    source_candidate_id: str | None = None,
-    source_score_bundle_id: str | None = None,
-    source_benchmark_bundle_id: str | None = None,
-    redacted_version_doc: dict[str, Any] | None = None,
-    version_status: str = "active",
-    reason: str = "private_model_version_registered",
-) -> tuple[dict[str, Any], dict[str, Any]]:
+    artifact_manifest: Mapping[str, Any],
+    manifest_uri: str | None,
+    source_candidate_id: str | None,
+    source_score_bundle_id: str | None,
+    source_benchmark_bundle_id: str | None,
+    redacted_version_doc: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     payload = {
         "model_artifact_hash": str(artifact_manifest["model_artifact_hash"]),
         "private_model_manifest_hash": str(artifact_manifest["manifest_hash"]),
@@ -1703,69 +1702,87 @@ async def create_private_model_version(
         "source_benchmark_bundle_id": source_benchmark_bundle_id,
         "signature_ref": str(artifact_manifest["signature_ref"]),
         "build_id": artifact_manifest.get("build_id"),
-        "redacted_version_doc": redacted_version_doc or {},
+        "redacted_version_doc": dict(redacted_version_doc or {}),
     }
     version_hash = canonical_hash(payload)
-    version_id = "private_model_version:" + version_hash
-    existing = await select_one(
-        "research_lab_private_model_versions",
-        filters=(("private_model_version_id", version_id),),
-    )
-    reused_by_artifact_hash = False
-    if not existing:
-        existing = await select_one(
-            "research_lab_private_model_versions",
-            filters=(("model_artifact_hash", payload["model_artifact_hash"]),),
-        )
-        if existing:
-            mismatches = []
-            for field in (
-                "private_model_manifest_hash",
-                "git_commit_sha",
-                "config_hash",
-                "component_registry_version",
-                "scoring_adapter_version",
-                "signature_ref",
-            ):
-                existing_value = str(existing.get(field) or "")
-                payload_value = str(payload.get(field) or "")
-                if existing_value != payload_value:
-                    mismatches.append(field)
-            if mismatches:
-                raise RuntimeError(
-                    "research_lab_private_model_versions: existing model_artifact_hash "
-                    f"{payload['model_artifact_hash']} conflicts on {', '.join(mismatches)}"
-                )
-            reused_by_artifact_hash = True
-    if existing:
-        event = await create_private_model_version_event(
-            private_model_version_id=str(existing["private_model_version_id"]),
-            event_type=version_status,
-            version_status=version_status,
-            reason=reason,
-            event_doc={
-                "version_hash": version_hash,
-                "requested_private_model_version_id": version_id,
-                "reused_existing_model_artifact_hash": reused_by_artifact_hash,
-            },
-        )
-        return existing, event
-    row = {
-        "private_model_version_id": version_id,
+    return {
+        "private_model_version_id": "private_model_version:" + version_hash,
         "schema_version": "1.0",
         **payload,
         "version_hash": version_hash,
         "anchored_hash": version_hash,
     }
-    inserted = await insert_row("research_lab_private_model_versions", row)
-    event = await create_private_model_version_event(
-        private_model_version_id=version_id,
-        event_type=version_status,
-        version_status=version_status,
-        reason=reason,
-        event_doc={"version_hash": version_hash},
+
+
+async def create_private_model_version(
+    *,
+    artifact_manifest: dict[str, Any],
+    manifest_uri: str | None = None,
+    source_candidate_id: str | None = None,
+    source_score_bundle_id: str | None = None,
+    source_benchmark_bundle_id: str | None = None,
+    redacted_version_doc: dict[str, Any] | None = None,
+    version_status: str = "active",
+    reason: str = "private_model_version_registered",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    raise RuntimeError(
+        "create_private_model_version is retired; use the central private "
+        "model activation coordinator"
     )
-    return inserted, event
+
+
+async def ensure_private_model_version_row_exact(
+    *,
+    artifact_manifest: dict[str, Any],
+    manifest_uri: str | None = None,
+    source_candidate_id: str | None = None,
+    source_score_bundle_id: str | None = None,
+    source_benchmark_bundle_id: str | None = None,
+    redacted_version_doc: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    row = _private_model_version_row(
+        artifact_manifest=artifact_manifest,
+        manifest_uri=manifest_uri,
+        source_candidate_id=source_candidate_id,
+        source_score_bundle_id=source_score_bundle_id,
+        source_benchmark_bundle_id=source_benchmark_bundle_id,
+        redacted_version_doc=redacted_version_doc,
+    )
+
+    def _require_exact_identity(existing: Mapping[str, Any]) -> dict[str, Any]:
+        immutable_fields = (
+            "model_artifact_hash",
+            "private_model_manifest_hash",
+            "private_model_manifest_uri",
+            "git_commit_sha",
+            "config_hash",
+            "component_registry_version",
+            "scoring_adapter_version",
+            "source_candidate_id",
+            "source_score_bundle_id",
+            "source_benchmark_bundle_id",
+            "signature_ref",
+            "build_id",
+        )
+        mismatches = [field for field in immutable_fields if existing.get(field) != row[field]]
+        if mismatches:
+            raise RuntimeError(
+                "research_lab_private_model_versions: target artifact row "
+                "identity conflicts on " + ", ".join(mismatches)
+            )
+        return dict(existing)
+
+    filters = (("model_artifact_hash", row["model_artifact_hash"]),)
+    existing = await select_one("research_lab_private_model_versions", filters=filters)
+    if existing is not None:
+        return _require_exact_identity(existing), False
+    try:
+        return await insert_row("research_lab_private_model_versions", row), True
+    except Exception:
+        existing = await select_one("research_lab_private_model_versions", filters=filters)
+        if existing is not None:
+            return _require_exact_identity(existing), False
+        raise
 
 
 async def create_private_model_version_event(
@@ -1776,19 +1793,122 @@ async def create_private_model_version_event(
     reason: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return await append_event_with_seq(
-        "research_lab_private_model_version_events",
-        "private_model_version_id",
-        private_model_version_id,
-        lambda seq: {
-            "private_model_version_id": private_model_version_id,
-            "seq": seq,
-            "event_type": event_type,
-            "version_status": version_status,
-            "reason": reason,
-            "event_doc": event_doc or {},
-        },
+    raise RuntimeError(
+        "create_private_model_version_event is retired; use the central "
+        "private model activation coordinator"
     )
+
+
+async def create_private_model_version_event_cas(
+    *,
+    private_model_version_id: str,
+    expected_current_event_seq: int | None,
+    expected_current_event_hash: str = "",
+    expected_current_version_status: str = "",
+    event_type: str,
+    version_status: str,
+    reason: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One-shot append against the exact observed event; never retry stale CAS."""
+    if expected_current_event_seq is not None and (
+        isinstance(expected_current_event_seq, bool)
+        or not isinstance(expected_current_event_seq, int)
+    ):
+        raise ValueError("private model lineage CAS seq is invalid")
+    expected_seq = expected_current_event_seq
+    expected_hash = str(expected_current_event_hash or "")
+    expected_status = str(expected_current_version_status or "")
+    if (
+        expected_seq is not None
+        and (
+            expected_seq < 0
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_hash) is None
+            or not expected_status
+        )
+    ) or (
+        expected_seq is None and (expected_hash or expected_status)
+    ):
+        raise ValueError("private model lineage CAS expected state is incomplete")
+    current_rows = await select_many(
+        "research_lab_private_model_version_events",
+        columns="seq,anchored_hash,version_status",
+        filters=(("private_model_version_id", private_model_version_id),),
+        order_by=(("seq", True), ("created_at", True)),
+        limit=1,
+    )
+    if expected_seq is None:
+        expected_state_matches = not current_rows
+        next_seq = 0
+    else:
+        current_seq = current_rows[0].get("seq") if current_rows else None
+        expected_state_matches = bool(
+            len(current_rows) == 1
+            and not isinstance(current_seq, bool)
+            and isinstance(current_seq, int)
+            and current_seq == expected_seq
+            and str(current_rows[0].get("anchored_hash") or "")
+            == expected_hash
+            and str(current_rows[0].get("version_status") or "")
+            == expected_status
+        )
+        next_seq = expected_seq + 1
+    if not expected_state_matches:
+        raise RuntimeError("private model lineage expected-state CAS conflict")
+    payload = {
+        "private_model_version_id": private_model_version_id,
+        "seq": next_seq,
+        "event_type": event_type,
+        "version_status": version_status,
+        "reason": reason,
+        "event_doc": event_doc or {},
+    }
+    event_id = deterministic_uuid(
+        "private_model_version_event_cas",
+        private_model_version_id,
+        expected_seq,
+        expected_hash,
+        expected_status,
+        event_type,
+        version_status,
+        reason,
+        canonical_hash(event_doc or {}),
+    )
+    row = {
+        "event_id": event_id,
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    try:
+        return await insert_row("research_lab_private_model_version_events", row)
+    except Exception as exc:
+        existing = await select_one(
+            "research_lab_private_model_version_events",
+            filters=(("event_id", event_id),),
+        )
+        if existing is not None:
+            if all(existing.get(field) == value for field, value in row.items()):
+                return dict(existing)
+            raise RuntimeError("private model lineage deterministic CAS event conflicts") from exc
+        if _is_seq_conflict(exc):
+            raise RuntimeError("private model lineage expected-state CAS conflict") from exc
+        raise
+
+
+async def private_model_lineage_generation() -> int:
+    value = await call_rpc("research_lab_private_model_lineage_generation", {})
+    row: Any = value[0] if isinstance(value, list) and len(value) == 1 else value
+    generation: Any = (
+        row.get("generation") if isinstance(row, Mapping) else row
+    )
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+    ):
+        raise RuntimeError("private model lineage generation RPC returned invalid state")
+    return generation
 
 
 async def create_candidate_promotion_event(

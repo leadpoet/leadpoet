@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any, Optional
 import urllib.request
 
@@ -3004,6 +3005,115 @@ def test_gateway_enclave_service_uses_the_image_import_layout(
     ).resolve() == (gateway_root / "tee/nsm_lib.py").resolve()
 
 
+def _measured_metadata_oci_fixture(tmp_path: Path, monkeypatch):
+    from gateway.tee.model_sandbox_v2 import _oci_config
+
+    monkeypatch.setitem(sys.modules, "sitecustomize", rehearsal_sitecustomize)
+    boundary_module = importlib.import_module(
+        "tests.restart_rehearsal.gateway_enclave_service"
+    )
+    rootfs = tmp_path / "rootfs"
+    visible_root = rootfs / "leadpoet-model-sandboxes"
+    source = visible_root / ("lp-job-" + "a" * 16) / "source"
+    source.mkdir(parents=True)
+    visible_root.chmod(0o711)
+    config = SimpleNamespace(
+        rootfs_path=rootfs,
+        uid=os.getuid(),
+        gid=os.getgid(),
+        memory_limit_bytes=1024 * 1024,
+        cpu_quota=100000,
+        cpu_period=100000,
+        pids_limit=32,
+        python_path="/usr/local/bin/python3",
+    )
+    bootstrap = "print('metadata')"
+    sandbox_id = "lp-test"
+    document = _oci_config(
+        config=config,
+        source_root=source,
+        broker_root=None,
+        process_args=[
+            config.python_path,
+            "-I",
+            "-B",
+            "-c",
+            bootstrap,
+            "research_lab_adapter",
+            "adapter_metadata",
+        ],
+        environment={},
+        cgroups_path="leadpoet-model/" + sandbox_id,
+    )
+    boundary = boundary_module._MeasuredRunscBoundary(
+        config,
+        metadata_bootstrap=bootstrap,
+    )
+    boundary._verify_metadata_oci_document(
+        document=document,
+        sandbox_id=sandbox_id,
+    )
+    return boundary, document, sandbox_id
+
+
+@pytest.mark.parametrize(
+    "nested_path",
+    ("process", "linux", "linux.seccomp"),
+)
+def test_measured_runsc_boundary_rejects_extra_nested_oci_fields(
+    tmp_path,
+    monkeypatch,
+    nested_path,
+) -> None:
+    boundary, document, sandbox_id = _measured_metadata_oci_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    mutated = copy.deepcopy(document)
+    target = mutated
+    for key in nested_path.split("."):
+        target = target[key]
+    target["unexpected"] = True
+
+    with pytest.raises(ValueError, match="differs"):
+        boundary._verify_metadata_oci_document(
+            document=mutated,
+            sandbox_id=sandbox_id,
+        )
+
+
+def test_measured_runsc_boundary_rejects_source_path_traversal(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    boundary, document, sandbox_id = _measured_metadata_oci_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    mutated = copy.deepcopy(document)
+    traversal = (
+        "/leadpoet-model-sandboxes/lp-job-"
+        + "a" * 16
+        + "/../../escape"
+    )
+    environment = dict(
+        item.split("=", 1) for item in mutated["process"]["env"]
+    )
+    environment["LEADPOET_MODEL_SOURCE_ROOT"] = traversal
+    environment["PYTHONPATH"] = (
+        "/app:/app/gateway/_attested_runtime:" + traversal
+    )
+    mutated["process"]["env"] = [
+        "%s=%s" % item for item in sorted(environment.items())
+    ]
+
+    with pytest.raises(ValueError, match="source path"):
+        boundary._verify_metadata_oci_document(
+            document=mutated,
+            sandbox_id=sandbox_id,
+        )
+
+
 def test_gateway_event_signer_uses_local_nitro_boundary(
     monkeypatch,
     tmp_path,
@@ -4430,6 +4540,11 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "verify_runsc_artifact(" in gateway_service
     assert '"measured_runtime_surface"' in gateway_service
     assert (
+        "metadata_process_runner=self._rehearsal_runsc_boundary"
+        in gateway_service
+    )
+    assert "rehearsal_metadata_requires_external_runsc_evidence" in gateway_service
+    assert (
         'os.environ["GATEWAY_ROOT"] = str(gateway_root)'
         in gateway_service
     )
@@ -5799,7 +5914,15 @@ def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
     assert evidence["every_configured_icp_positive"] is True
     assert evidence["configured_icp_identity_exact"] is True
     assert evidence["candidate_release_identity_exact"] is True
-    assert evidence["production_model_runner_exact"] is True
+    assert evidence["strict_external_model_execution_adapted"] is True
+    assert evidence["active_model_lineage_gate_adapted"] is True
+    assert evidence["model_lineage_sync_actor_counts"] == {
+        "rehearsal-rebenchmark-worker": 1,
+        "rehearsal-rebenchmark-checkpoint-restarted": 1,
+        "rehearsal-rebenchmark-worker-restarted": 1,
+    }
+    assert evidence["source_admission_exercised"] is False
+    assert evidence["pair_only_contract_fixture_structural_only"] is True
     assert evidence["production_scorer_path_exact"] is True
     assert evidence["model_attested_outcome_count"] == evidence["configured_icp_count"]
     assert evidence["scorer_attested_outcome_count"] == evidence["configured_icp_count"]
@@ -5812,6 +5935,7 @@ def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
     assert evidence["baseline_parent_receipt_count"] == 2 * evidence[
         "configured_icp_count"
     ]
+    assert evidence["per_nonempty_icp_two_unique_receipt_roots"] is True
     assert evidence["baseline_input_artifact_count"] == 1
     assert evidence["independent_baseline_authority_exact"] is True
     with patched_rebenchmark_launch_environment(rebenchmark_launch_environment()):
@@ -5842,7 +5966,6 @@ def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
     assert evidence["production_active_model_assertion_exact"] is True
     assert evidence["production_repo_head_guard_exact"] is True
     assert evidence["repo_head_change_rejected"] is True
-    assert evidence["production_source_bundle_exact"] is True
     assert evidence["production_catalog_loader_exact"] is True
     assert evidence["production_icp_window_loader_exact"] is True
     assert evidence["provider_preflight_production_facade_exact"] is True

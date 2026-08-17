@@ -936,6 +936,44 @@ def test_required_supabase_v2_schema_names_missing_rpc_migration() -> None:
         )
 
 
+def test_required_supabase_v2_schema_requires_lineage_generation_rpc() -> None:
+    required_function = "research_lab_private_model_lineage_generation"
+
+    def opener(request, *, timeout):
+        del timeout
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in (
+                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+                )
+                if function_name != required_function
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        if (
+            "research_lab_chain_realized_settlement_activation_v1"
+            in request.full_url
+            and "limit=2" in request.full_url
+        ):
+            return _SchemaResponse(body=_chain_realized_activation_response())
+        return _SchemaResponse()
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match=(
+            r"research_lab_private_model_lineage_generation.*"
+            r"153-research-lab-private-model-lineage-generation"
+        ),
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
+
+
 def test_required_supabase_v2_schema_requires_transport_purpose_migration() -> None:
     required_function = (
         "research_lab_attested_transport_purpose_contract_v2"

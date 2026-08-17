@@ -58,6 +58,7 @@ MEASURED_DATA_PATHS = (
     "research_lab/sourcing_model_parity_fixtures_v46.json",
     "research_lab/sourcing_model_parity_fixtures_v47.json",
     "research_lab/sourcing_model_parity_fixtures_v7.json",
+    "research_lab/sourcing_model_semantic_compatibility_v1.json",
     "schemas/evidence_bundle.schema.json",
     "schemas/execution_trace.schema.json",
     "schemas/research_evaluation_score_bundle.schema.json",

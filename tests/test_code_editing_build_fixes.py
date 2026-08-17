@@ -1367,6 +1367,18 @@ def _manifest(git_sha="1234567890abcdef1234567890abcdef12345678"):
     )
 
 
+def _source_admission_receipt(manifest):
+    contract = dict(manifest.compatibility_contract or {})
+    parity = dict(manifest.consumer_parity_fixtures or {})
+    return {
+        "decision": "accepted",
+        "source_tree_hash": manifest.model_artifact_hash,
+        "contract_id": contract.get("contract_id"),
+        "contract_hash": contract.get("sha256"),
+        "parity_hash": parity.get("sha256"),
+    }
+
+
 def test_recorded_sha_prefers_env_then_parent(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_PRIVATE_SOURCE_HEAD_SHA", "feedbeef" * 5)
     sha, source = code_build._resolve_recorded_commit_sha(
@@ -1423,8 +1435,11 @@ def test_built_candidate_artifact_requires_exact_signature_authority(
         "verify_private_artifact_manifest_signature",
         fake_verify,
     )
-
-    assert code_build._verify_built_candidate_artifact(manifest) == {
+    assert code_build._verify_built_candidate_artifact(
+        manifest,
+        source_tree_hash=manifest.model_artifact_hash,
+        source_compatibility_receipt=_source_admission_receipt(manifest),
+    ) == {
         "verified": True
     }
     assert verified == {
@@ -1455,7 +1470,11 @@ def test_built_candidate_artifact_rejects_contract_or_signature_failure(
         code_build.CodeEditImageBuildError,
         match="exact contract/signature verification",
     ) as exc_info:
-        code_build._verify_built_candidate_artifact(_manifest())
+        code_build._verify_built_candidate_artifact(
+            _manifest(),
+            source_tree_hash="sha256:" + "a" * 64,
+            source_compatibility_receipt={},
+        )
     assert isinstance(exc_info.value.__cause__, PrivateModelRuntimeError)
 
 
@@ -1485,7 +1504,102 @@ def test_built_candidate_artifact_classifies_signature_transport_failure(
     )
 
     with pytest.raises(code_build.CodeEditInfraFailureError):
-        code_build._verify_built_candidate_artifact(_manifest())
+        code_build._verify_built_candidate_artifact(
+            _manifest(),
+            source_tree_hash="sha256:" + "a" * 64,
+            source_compatibility_receipt={},
+        )
+
+
+def test_built_candidate_artifact_rejects_signed_manifest_identity_drift(
+    monkeypatch,
+) -> None:
+    manifest = _manifest()
+    monkeypatch.setattr(
+        code_build,
+        "validate_private_model_artifact_manifest",
+        lambda _artifact: [],
+    )
+    monkeypatch.setattr(
+        code_build,
+        "verify_private_artifact_manifest_signature",
+        lambda *_args, **_kwargs: {"verified": True},
+    )
+    with pytest.raises(
+        code_build.CodeEditImageBuildError,
+        match="differs from its admitted source identity",
+    ):
+        code_build._verify_built_candidate_artifact(
+            manifest,
+            source_tree_hash="sha256:" + "b" * 64,
+            source_compatibility_receipt=_source_admission_receipt(manifest),
+        )
+
+
+def test_built_legacy_candidate_requires_the_exact_signed_release_identity(
+    monkeypatch,
+) -> None:
+    from dataclasses import replace
+
+    from research_lab.eval import PrivateModelArtifactManifest
+    from research_lab.sourcing_model_contract_check import (
+        reviewed_consumer_snapshots,
+    )
+
+    snapshot = reviewed_consumer_snapshots()[
+        "leadpoet-sourcing-wrapper-contract-v7"
+    ]
+    release = snapshot["release_identities"][0]
+    contract = snapshot["contract"]
+    manifest = PrivateModelArtifactManifest(
+        model_artifact_hash=release["source_tree_hash"],
+        git_commit_sha=release["git_commit_sha"],
+        image_digest=release["image_digest"],
+        config_hash="sha256:" + "d" * 64,
+        component_registry_version="sourcing-model-components:v2",
+        scoring_adapter_version="qualification-company-scorer:v1",
+        compatibility_contract={
+            "contract_id": contract["contract_id"],
+            "path": contract["canonical_path"],
+            "sha256": snapshot["contract_sha256"],
+        },
+        consumer_parity_fixtures={
+            "path": contract["parity_fixture_path"],
+            "sha256": snapshot["parity_sha256"],
+        },
+        manifest_uri="s3://bucket/legacy.json",
+        manifest_hash=release["manifest_hash"],
+        signature_ref="s3://bucket/legacy.sig.b64",
+    )
+    receipt = {
+        **_source_admission_receipt(manifest),
+        "admission_mode": "legacy_exact",
+    }
+    monkeypatch.setattr(
+        code_build,
+        "validate_private_model_artifact_manifest",
+        lambda _artifact: [],
+    )
+    monkeypatch.setattr(
+        code_build,
+        "verify_private_artifact_manifest_signature",
+        lambda *_args, **_kwargs: {"verified": True},
+    )
+
+    assert code_build._verify_built_candidate_artifact(
+        manifest,
+        source_tree_hash=manifest.model_artifact_hash,
+        source_compatibility_receipt=receipt,
+    ) == {"verified": True}
+    with pytest.raises(
+        code_build.CodeEditImageBuildError,
+        match="reviewed signed release",
+    ):
+        code_build._verify_built_candidate_artifact(
+            replace(manifest, git_commit_sha="f" * 40),
+            source_tree_hash=manifest.model_artifact_hash,
+            source_compatibility_receipt=receipt,
+        )
 
 
 def test_candidate_signature_gate_precedes_build_evidence_and_return() -> None:
@@ -1507,6 +1621,21 @@ def test_candidate_signature_gate_precedes_build_evidence_and_return() -> None:
         for node in ast.walk(build_fn)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
+    source_gate_lines = sorted(
+        node.lineno
+        for node in ast.walk(build_fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_sourcing_contract_gate"
+    )
+    assert len(source_gate_lines) == 2
+    assert (
+        source_gate_lines[0]
+        < call_lines["_run_shell"]
+        < source_gate_lines[1]
+        < call_lines["_run_private_build_under_docker_operation_lock"]
+        < call_lines["_verify_built_candidate_artifact"]
+    )
     assert call_lines["_verify_built_candidate_artifact"] < call_lines[
         "_write_private_code_edit_diff_artifact"
     ]

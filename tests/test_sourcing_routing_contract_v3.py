@@ -19,12 +19,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_private_model_commands_require_reviewed_routing_adapters() -> None:
-    assert "sourcing-model-research-lab-adapter:v3" in DEFAULT_PRIVATE_TEST_CMD
-    assert "sourcing-model-research-lab-adapter:v6" in DEFAULT_PRIVATE_TEST_CMD
-    assert "sourcing-model-research-lab-adapter:v7" in DEFAULT_PRIVATE_TEST_CMD
+    assert "sourcing-model-research-lab-adapter:" in DEFAULT_PRIVATE_TEST_CMD
+    assert "sourcing-model-research-lab-adapter:v3" not in DEFAULT_PRIVATE_TEST_CMD
+    assert "sourcing-model-research-lab-adapter:v6" not in DEFAULT_PRIVATE_TEST_CMD
+    assert "sourcing-model-research-lab-adapter:v7" not in DEFAULT_PRIVATE_TEST_CMD
     assert "sourcing-model-components:v2" in DEFAULT_PRIVATE_TEST_CMD
-    assert "routing-compiler-v2" in DEFAULT_PRIVATE_TEST_CMD
-    assert "routing-compiler-v3" in DEFAULT_PRIVATE_TEST_CMD
+    assert "routing-compiler-" in DEFAULT_PRIVATE_TEST_CMD
+    assert "routing-compiler-v2" not in DEFAULT_PRIVATE_TEST_CMD
+    assert "routing-compiler-v3" not in DEFAULT_PRIVATE_TEST_CMD
+    assert "qualification-company-scorer:v1" in DEFAULT_PRIVATE_TEST_CMD
+    assert "sourcing-model-runtime-capabilities:v2" in DEFAULT_PRIVATE_TEST_CMD
+    assert "source_add_requires_manifest_sha256" in DEFAULT_PRIVATE_TEST_CMD
     assert "SubprocessPrivateModelRunner" in DEFAULT_PRIVATE_BUILD_CMD
     assert "build_local_private_artifact_manifest" in DEFAULT_PRIVATE_BUILD_CMD
     assert "RESEARCH_LAB_RUNTIME_SOURCE_ROOT" in DEFAULT_PRIVATE_BUILD_CMD
@@ -53,7 +58,7 @@ def test_private_model_commands_require_reviewed_routing_adapters() -> None:
     "contract_id",
     tuple(sorted(reviewed_consumer_snapshots())),
 )
-def test_default_builder_emits_exact_reviewed_contract_pair(
+def test_default_builder_rejects_contract_pair_without_source_admission(
     tmp_path: Path,
     contract_id: str,
 ) -> None:
@@ -108,20 +113,9 @@ def test_default_builder_emits_exact_reviewed_contract_pair(
         capture_output=True,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
-
-    manifest = json.loads(output.read_text(encoding="utf-8"))
-    snapshot = reviewed_consumer_snapshots()[contract_id]
-    contract = snapshot["contract"]
-    assert manifest["compatibility_contract"] == {
-        "contract_id": contract_id,
-        "path": str(contract["canonical_path"]),
-        "sha256": str(snapshot["contract_sha256"]),
-    }
-    assert manifest["consumer_parity_fixtures"] == {
-        "path": str(contract["parity_fixture_path"]),
-        "sha256": str(snapshot["parity_sha256"]),
-    }
+    assert result.returncode != 0
+    assert "failed semantic compatibility" in result.stderr
+    assert not output.exists()
 
 
 def test_compact_registry_fallback_matches_current_model_contract() -> None:

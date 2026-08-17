@@ -53,6 +53,38 @@ _REASON_CATEGORIES: list[tuple[str, str]] = [
     ("duplicate", "duplicate_company"),
 ]
 
+# Reporting has its own corrected taxonomy so adding the report cannot change
+# the already-signed public benchmark diagnostics produced by
+# ``build_icp_stats``. Reason text is normalized before matching this table.
+_REPORTING_REASON_CATEGORIES: tuple[tuple[str, str], ...] = (
+    ("employee count mismatch", "employee_count_mismatch"),
+    ("missing employee count", "employee_count_missing"),
+    ("company stage mismatch", "company_stage_mismatch"),
+    ("missing company stage", "company_stage_missing"),
+    ("company verification failed", "company_unverifiable"),
+    ("company verification error", "company_unverifiable"),
+    ("fabricat", "intent_fabricated"),
+    ("llm scoring error", "scoring_error"),
+    ("pre-check", "failed_prechecks"),
+    ("duplicate", "duplicate_company"),
+    ("company fit", "company_fit_not_proven"),
+    ("required attribute", "required_attribute_not_proven"),
+)
+
+_REPORTING_REASON_STAGES: dict[str, str] = {
+    "employee_count_mismatch": "firmographic",
+    "employee_count_missing": "firmographic",
+    "company_stage_mismatch": "firmographic",
+    "company_stage_missing": "firmographic",
+    "company_unverifiable": "verifier",
+    "intent_fabricated": "intent",
+    "scoring_error": "scoring",
+    "failed_prechecks": "identity",
+    "duplicate_company": "uniqueness",
+    "required_attribute_not_proven": "attribute",
+    "company_fit_not_proven": "company_fit",
+}
+
 # Decay multiplier -> human band (mirrors calculate_time_decay_multiplier:
 # 1.0 = <=2mo, 0.5 = <=12mo or undated, 0.25 = >12mo).
 _DECAY_BANDS = {1.0: "fresh_<=2mo", 0.5: "aging_2-12mo_or_undated", 0.25: "stale_>12mo"}
@@ -76,6 +108,85 @@ def _categorize_reason(reason: Any) -> str:
         if needle in r:
             return cat
     return "other"
+
+
+def _categorize_reporting_reason(reason: Any) -> str:
+    if isinstance(reason, Mapping):
+        reason = reason.get("code") or reason.get("reason") or reason.get("category") or ""
+    elif isinstance(reason, (list, tuple)):
+        reason = reason[0] if reason else ""
+    normalized = str(reason or "").strip().lower().replace("_", " ")
+    for needle, category in _REPORTING_REASON_CATEGORIES:
+        if needle in normalized:
+            return category
+    return "other"
+
+
+def _reporting_bool(value: Any, fallback: bool | None) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    normalized = str(value or "").strip().lower()
+    if normalized in {"true", "1", "yes"}:
+        return True
+    if normalized in {"false", "0", "no"}:
+        return False
+    return fallback
+
+
+def normalize_failure_reporting_fields(
+    breakdown: Mapping[str, Any],
+    *,
+    retryable_infrastructure_failure: bool = False,
+) -> dict[str, Any]:
+    """Return stable, counts-safe fields for failure-funnel reporting.
+
+    The scorer has emitted several historical ``failure_reason`` shapes and
+    often omits ``stage_failed`` and pass flags. This helper uses the same
+    reason taxonomy as ``build_icp_stats`` to fill only the missing failure
+    stage. It never invents pass flags for a failed row; an inferred stage
+    identifies where reporting stopped, but does not prove every earlier gate
+    passed. Explicit scorer fields always win. The caller supplies the
+    evaluator's authoritative retryable-infrastructure verdict so transport or
+    provider failures can never be relabeled as lead rejection.
+    """
+    reason = breakdown.get("failure_reason")
+    reason_code = (
+        "infrastructure_failure"
+        if retryable_infrastructure_failure
+        else _categorize_reporting_reason(reason)
+    )
+    try:
+        final_score = float(breakdown.get("final_score") or 0.0)
+    except (TypeError, ValueError):
+        final_score = 0.0
+    has_failure = bool(str(reason or "").strip()) or final_score <= 0.0
+
+    explicit_stage = str(breakdown.get("stage_failed") or "").strip().lower()
+    failure_stage = explicit_stage or None
+    if not failure_stage and has_failure:
+        failure_stage = (
+            "infrastructure"
+            if retryable_infrastructure_failure
+            else _REPORTING_REASON_STAGES.get(reason_code) or "unclassified"
+        )
+
+    fit_default: bool | None = None if has_failure else True
+    attribute_default: bool | None = None if has_failure else True
+    intent_default: bool | None = None if has_failure else True
+
+    return {
+        "failure_stage": failure_stage,
+        "reason_code": reason_code if has_failure else None,
+        "fit_passed": _reporting_bool(breakdown.get("fit_passed"), fit_default),
+        "attribute_passed": _reporting_bool(
+            breakdown.get("attribute_passed"), attribute_default
+        ),
+        "intent_passed": _reporting_bool(
+            breakdown.get("intent_passed"), intent_default
+        ),
+    }
 
 
 def _decay_band(mult: Any) -> str:

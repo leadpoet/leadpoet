@@ -97,6 +97,10 @@ def _block_number(block_hash: str) -> int:
     value = str(block_hash)
     if value == CUTOVER_BLOCK_HASH:
         return CUTOVER_BLOCK
+    if value == _block_hash(CURRENT_BLOCK):
+        return CURRENT_BLOCK
+    if value == _block_hash(CUTOVER_BLOCK - 1):
+        return CUTOVER_BLOCK - 1
     if value in _BLOCK_NUMBERS_BY_HASH:
         return _BLOCK_NUMBERS_BY_HASH[value]
     raise ValueError("local chain block hash is unknown")
@@ -115,6 +119,38 @@ def _subnet_epoch_index_at(block: int) -> int:
     return CUTOVER_EPOCH_INDEX + (
         ((normalized_block - CUTOVER_BLOCK) * transitions) // span
     )
+
+
+def _subnet_epoch_transition_block(epoch_index: int) -> int:
+    normalized_epoch = int(epoch_index)
+    if normalized_epoch < CUTOVER_EPOCH_INDEX:
+        return CUTOVER_BLOCK - (
+            (CUTOVER_EPOCH_INDEX - normalized_epoch) * TEMPO
+        )
+    if normalized_epoch == CUTOVER_EPOCH_INDEX:
+        return CUTOVER_BLOCK
+    if normalized_epoch >= SUBNET_EPOCH_INDEX:
+        return LAST_EPOCH_BLOCK + (
+            (normalized_epoch - SUBNET_EPOCH_INDEX) * TEMPO
+        )
+    span = LAST_EPOCH_BLOCK - CUTOVER_BLOCK
+    transitions = SUBNET_EPOCH_INDEX - CUTOVER_EPOCH_INDEX
+    offset = normalized_epoch - CUTOVER_EPOCH_INDEX
+    return CUTOVER_BLOCK + ((offset * span + transitions - 1) // transitions)
+
+
+def _subnet_epoch_state_at(block: int) -> dict[str, int]:
+    normalized_block = int(block)
+    epoch_index = _subnet_epoch_index_at(normalized_block)
+    last_epoch_block = _subnet_epoch_transition_block(epoch_index)
+    next_epoch_block = _subnet_epoch_transition_block(epoch_index + 1)
+    return {
+        "Tempo": next_epoch_block - last_epoch_block,
+        "LastEpochBlock": last_epoch_block,
+        "PendingEpochAt": next_epoch_block,
+        "SubnetEpochIndex": epoch_index,
+        "BlocksSinceLastStep": normalized_block - last_epoch_block,
+    }
 
 
 def _current_settlement_epoch_id() -> int:
@@ -451,19 +487,15 @@ class _LocalSubstrate:
     def get_block_number(self, block_hash: str) -> int:
         if block_hash == GENESIS_HASH:
             return 0
-        if block_hash == CUTOVER_BLOCK_HASH:
-            return CUTOVER_BLOCK
-        if block_hash == _block_hash(CUTOVER_BLOCK - 1):
-            return CUTOVER_BLOCK - 1
-        for block in range(CURRENT_BLOCK - TEMPO, CURRENT_BLOCK + 1):
-            if _block_hash(block) == block_hash:
-                _event(
-                    "epoch_snapshot",
-                    method="get_block_number",
-                    block=block,
-                )
-                return block
-        raise ValueError("local chain received an unknown block hash")
+        block = _block_number(block_hash)
+        if block < CUTOVER_BLOCK - 1 or block > CURRENT_BLOCK:
+            raise ValueError("local chain received an out-of-range block hash")
+        _event(
+            "epoch_snapshot",
+            method="get_block_number",
+            block=block,
+        )
+        return block
 
     def get_metadata_module(
         self,
@@ -583,45 +615,17 @@ class _LocalSubstrate:
         params: list[Any],
         block_hash: str,
     ) -> _ScaleValue:
-        exact_blocks = {
-            _block_hash(CURRENT_BLOCK): CURRENT_BLOCK,
-            CUTOVER_BLOCK_HASH: CUTOVER_BLOCK,
-            _block_hash(CUTOVER_BLOCK - 1): CUTOVER_BLOCK - 1,
-        }
-        if block_hash not in exact_blocks:
+        exact_block = _block_number(block_hash)
+        if exact_block < CUTOVER_BLOCK - 1 or exact_block > CURRENT_BLOCK:
             raise ValueError(
                 "local chain query was not pinned to a supported exact hash"
             )
-        exact_block = exact_blocks[block_hash]
         if module == "Timestamp" and storage_function == "Now" and params == []:
             value = int(
                 datetime(2026, 7, 25, tzinfo=timezone.utc).timestamp() * 1000
             )
         elif module == "SubtensorModule" and params == [71]:
-            if exact_block == CURRENT_BLOCK:
-                values = {
-                    "Tempo": TEMPO,
-                    "LastEpochBlock": LAST_EPOCH_BLOCK,
-                    "PendingEpochAt": LAST_EPOCH_BLOCK + TEMPO,
-                    "SubnetEpochIndex": SUBNET_EPOCH_INDEX,
-                    "BlocksSinceLastStep": CURRENT_BLOCK - LAST_EPOCH_BLOCK,
-                }
-            elif exact_block == CUTOVER_BLOCK:
-                values = {
-                    "Tempo": TEMPO,
-                    "LastEpochBlock": CUTOVER_BLOCK,
-                    "PendingEpochAt": CUTOVER_BLOCK + TEMPO,
-                    "SubnetEpochIndex": CUTOVER_EPOCH_INDEX,
-                    "BlocksSinceLastStep": 0,
-                }
-            else:
-                values = {
-                    "Tempo": TEMPO,
-                    "LastEpochBlock": CUTOVER_BLOCK - TEMPO,
-                    "PendingEpochAt": CUTOVER_BLOCK,
-                    "SubnetEpochIndex": CUTOVER_EPOCH_INDEX - 1,
-                    "BlocksSinceLastStep": TEMPO - 1,
-                }
+            values = _subnet_epoch_state_at(exact_block)
             if storage_function not in values:
                 raise ValueError("local chain received an unknown storage field")
             value = values[storage_function]

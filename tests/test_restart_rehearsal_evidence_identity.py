@@ -11,9 +11,11 @@ from typing import Optional
 
 import pytest
 
+from Leadpoet.utils.subnet_epoch import read_subnet_epoch_snapshot
 from tests.restart_rehearsal.verify_evidence import (
     _verify_production_identity,
 )
+from tests.restart_rehearsal import sitecustomize as rehearsal_boundary
 
 
 SOURCE_PATH = Path("scripts/gateway_git_deploy.py")
@@ -183,6 +185,74 @@ def test_gateway_provider_adapter_tracks_production_transport_interface() -> Non
     production_keywords = {arg.arg for arg in production_call.args.kwonlyargs}
     rehearsal_keywords = {arg.arg for arg in rehearsal_call.args.kwonlyargs}
     assert production_keywords <= rehearsal_keywords
+
+
+def test_local_chain_adapter_supports_exact_historical_epoch_search(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(rehearsal_boundary, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_boundary,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    substrate = rehearsal_boundary._LocalSubstrate()
+    target_epoch = rehearsal_boundary.CUTOVER_EPOCH_INDEX + 73
+    boundary_block = rehearsal_boundary._subnet_epoch_transition_block(
+        target_epoch
+    )
+
+    for block, expected_epoch in (
+        (
+            rehearsal_boundary.CUTOVER_BLOCK - 1,
+            rehearsal_boundary.CUTOVER_EPOCH_INDEX - 1,
+        ),
+        (boundary_block - 1, target_epoch - 1),
+        (boundary_block, target_epoch),
+        (boundary_block + 1, target_epoch),
+        (
+            rehearsal_boundary.CURRENT_BLOCK,
+            rehearsal_boundary.SUBNET_EPOCH_INDEX,
+        ),
+    ):
+        block_hash = rehearsal_boundary._block_hash(block)
+        assert substrate.get_block_number(block_hash) == block
+        observed = {
+            name: substrate.query(
+                module="SubtensorModule",
+                storage_function=name,
+                params=[71],
+                block_hash=block_hash,
+            ).value
+            for name in (
+                "Tempo",
+                "LastEpochBlock",
+                "PendingEpochAt",
+                "SubnetEpochIndex",
+                "BlocksSinceLastStep",
+            )
+        }
+        assert observed == rehearsal_boundary._subnet_epoch_state_at(block)
+        assert observed["SubnetEpochIndex"] == expected_epoch
+        assert observed["LastEpochBlock"] <= block
+        assert observed["PendingEpochAt"] > block
+        snapshot = read_subnet_epoch_snapshot(
+            rehearsal_boundary._LocalSubtensor(network="finney"),
+            netuid=71,
+            block_number=block,
+        )
+        assert snapshot.current_block == block
+        assert snapshot.subnet_epoch_index == expected_epoch
+        assert snapshot.tempo > 0
+
+    captured_current_hash = rehearsal_boundary._block_hash(
+        rehearsal_boundary.CURRENT_BLOCK
+    )
+    rehearsal_boundary._BLOCK_NUMBERS_BY_HASH.clear()
+    assert substrate.get_block_number(captured_current_hash) == (
+        rehearsal_boundary.CURRENT_BLOCK
+    )
 
 
 @pytest.mark.parametrize(

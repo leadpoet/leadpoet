@@ -963,7 +963,10 @@ PROTECTED_SYMBOLS = {
         "ProviderSemanticsAuthorityV2",
     ),
     "gateway/tee/mtls_identity.py": (
+        "ATTESTED_TLS_CERTIFICATE_LIFETIME",
+        "ATTESTED_TLS_CERTIFICATE_CLOCK_SKEW",
         "_atomic_private_write",
+        "generate_ephemeral_tls_identity",
         "write_identity_to_tmpfs",
         "create_mutual_tls_context",
     ),

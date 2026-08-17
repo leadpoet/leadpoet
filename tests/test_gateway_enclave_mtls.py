@@ -1,13 +1,17 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+import hashlib
 from pathlib import Path
 import ssl
 
 import pytest
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.tee.mtls_identity import (
+    ATTESTED_TLS_CERTIFICATE_LIFETIME,
     MutualAttestationError,
     create_mutual_tls_context,
     generate_ephemeral_tls_identity,
@@ -56,11 +60,16 @@ def _boot(role, transport_pubkey, certificate_hash):
 
 
 def _certificate_der(identity):
-    from cryptography import x509
-
     return x509.load_pem_x509_certificate(identity["certificate_pem"]).public_bytes(
         serialization.Encoding.DER
     )
+
+
+def _certificate_time(certificate, field):
+    aware = getattr(certificate, field + "_utc", None)
+    if aware is not None:
+        return aware
+    return getattr(certificate, field).replace(tzinfo=timezone.utc)
 
 
 def test_tls_certificate_is_bound_to_attested_transport_key_and_role():
@@ -77,6 +86,50 @@ def test_tls_certificate_is_bound_to_attested_transport_key_and_role():
     )
     assert verified["transport_pubkey"] == identity["transport_pubkey"]
     assert verified["certificate_sha256"] == identity["certificate_sha256"]
+
+
+def test_attested_tls_certificate_outlives_long_running_enclave_boot():
+    identity = generate_ephemeral_tls_identity(service_role=SCORING_ROLE)
+    certificate = x509.load_pem_x509_certificate(identity["certificate_pem"])
+    not_before = _certificate_time(certificate, "not_valid_before")
+    not_after = _certificate_time(certificate, "not_valid_after")
+
+    assert not_after - not_before >= ATTESTED_TLS_CERTIFICATE_LIFETIME
+    assert not_after > datetime.now(timezone.utc) + timedelta(days=3650) - timedelta(
+        minutes=2
+    )
+
+
+def test_expired_attested_tls_certificate_still_fails_closed():
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+    now = datetime.now(timezone.utc)
+    subject = x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, SCORING_ROLE)])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(public_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=2))
+        .not_valid_after(now - timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .sign(private_key, algorithm=None)
+    )
+    certificate_der = certificate.public_bytes(serialization.Encoding.DER)
+    certificate_hash = "sha256:" + hashlib.sha256(certificate_der).hexdigest()
+    public_key_hex = public_key.public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    boot = _boot(SCORING_ROLE, public_key_hex, certificate_hash)
+
+    with pytest.raises(MutualAttestationError, match="outside validity window"):
+        verify_peer_certificate_binding(
+            boot_identity=boot,
+            certificate_der=certificate_der,
+            expected_service_role=SCORING_ROLE,
+        )
 
 
 def test_parent_cannot_substitute_a_different_valid_certificate():

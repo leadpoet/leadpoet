@@ -304,7 +304,10 @@ def test_inter_enclave_replay_and_identity_boundaries_are_protected():
         "persist_execution_transport_artifacts_v2",
     } <= set(PROTECTED_SYMBOLS["gateway/research_lab/attested_artifacts_v2.py"])
     assert {
+        "ATTESTED_TLS_CERTIFICATE_LIFETIME",
+        "ATTESTED_TLS_CERTIFICATE_CLOCK_SKEW",
         "_atomic_private_write",
+        "generate_ephemeral_tls_identity",
         "write_identity_to_tmpfs",
         "create_mutual_tls_context",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/mtls_identity.py"])

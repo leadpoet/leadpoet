@@ -28,6 +28,14 @@ class MutualAttestationError(ValueError):
 
 _IDENTITY_WRITE_LOCK = threading.RLock()
 
+# The certificate is not a reusable public-PKI identity: its exact key and
+# certificate hash are bound into one Nitro-attested enclave boot and pinned by
+# every peer.  Its validity therefore needs to cover that boot's operational
+# lifetime.  A 24-hour certificate made healthy long-running enclaves lose all
+# inter-enclave RPC until the next coordinated restart.
+ATTESTED_TLS_CERTIFICATE_LIFETIME = timedelta(days=3650)
+ATTESTED_TLS_CERTIFICATE_CLOCK_SKEW = timedelta(minutes=1)
+
 
 def _atomic_private_write(path: Path, payload: bytes) -> None:
     """Publish one complete private file without exposing a truncated version."""
@@ -82,8 +90,8 @@ def generate_ephemeral_tls_identity(*, service_role: str) -> Dict[str, Any]:
         .issuer_name(subject)
         .public_key(public_key)
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(minutes=1))
-        .not_valid_after(now + timedelta(hours=24))
+        .not_valid_before(now - ATTESTED_TLS_CERTIFICATE_CLOCK_SKEW)
+        .not_valid_after(now + ATTESTED_TLS_CERTIFICATE_LIFETIME)
         .add_extension(
             x509.BasicConstraints(ca=True, path_length=0),
             critical=True,

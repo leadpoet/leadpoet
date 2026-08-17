@@ -14009,6 +14009,7 @@ def _dynamic_docker_collision_evidence_is_complete(evidence: Any) -> bool:
                     "candidate_gateway_emergency_uses_guarded_reclaim",
                     "first_activation_requires_preexisting_disk_reserve",
                     "live_gateway_online_reclaim_terminal_and_exact",
+                    "live_gateway_zero_runtime_reconcile_exact",
                     "exclusive_waited_for_both_shared_holders",
                     "shared_lock_timeout_fail_closed",
                     "daemon_not_ready_fail_closed",

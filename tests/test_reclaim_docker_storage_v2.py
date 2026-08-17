@@ -82,6 +82,7 @@ def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
 
     assert "run_prune_with_retry builder docker builder prune --all --force" in source
     assert "docker_stale_mount_reclaimer_v2.py" in source
+    assert "docker_zero_runtime_reconciler_v2.py" in source
     assert "require_same_online_gateway" in source
     assert "require_same_online_images" in source
     assert 'inventory_empty_online_runtime "pre-stale-reclaim"' in source
@@ -89,6 +90,10 @@ def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
     assert "docker image prune" not in source
     assert "docker system prune" not in source
     assert "docker_live_restore_reconciler_v2.py" not in source
+    assert source.count("--audit-only") == 3
+    assert "--docker-lock-file" in source
+    assert "--docker-admission-lock-file" in source
+    assert "--docker-lock-owner-pid" in source
     assert "systemctl" not in source
     assert "pkill" not in source
     assert "rm -rf" not in source
@@ -163,3 +168,52 @@ def test_live_restore_reconciler_bootstraps_without_validator_dependencies():
 
     assert result.returncode == 0, result.stderr
     assert "Refresh Docker metadata" in result.stdout
+
+
+def test_zero_runtime_reconciler_bootstraps_without_validator_dependencies():
+    helper = Path(
+        "validator_tee/host/docker_zero_runtime_reconciler_v2.py"
+    ).resolve()
+    result = subprocess.run(
+        [sys.executable, "-I", str(helper), "--help"],
+        cwd="/",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "empty-runtime guard" in result.stdout
+
+
+def test_zero_runtime_helper_is_candidate_bound_and_required_by_rehearsal():
+    from tests.restart_rehearsal.dynamic_rebenchmark_workflow import (
+        transition_source_paths_by_commit,
+    )
+
+    old_sha = "1" * 40
+    candidate_sha = "2" * 40
+    inventory = transition_source_paths_by_commit(
+        from_sha=old_sha,
+        candidate_sha=candidate_sha,
+    )
+    helper = "validator_tee/host/docker_zero_runtime_reconciler_v2.py"
+    stale = "validator_tee/host/docker_stale_mount_reclaimer_v2.py"
+    assert helper not in inventory[old_sha]
+    assert helper in inventory[candidate_sha]
+    assert stale in inventory[old_sha]
+    assert stale in inventory[candidate_sha]
+
+    required_flag = "live_gateway_zero_runtime_reconcile_exact"
+    production = Path(
+        "tests/restart_rehearsal/production_workflow_runner.py"
+    ).read_text(encoding="utf-8")
+    completeness = production[
+        production.index("def _dynamic_docker_collision_evidence_is_complete") :
+        production.index("def _dynamic_rebenchmark_evidence_is_complete")
+    ]
+    dynamic = Path(
+        "tests/restart_rehearsal/dynamic_rebenchmark_workflow_v2.py"
+    ).read_text(encoding="utf-8")
+    assert required_flag in completeness
+    assert required_flag in dynamic

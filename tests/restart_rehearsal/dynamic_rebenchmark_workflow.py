@@ -70,8 +70,13 @@ TRANSITION_SOURCE_PATHS = (
     "scripts/run_research_lab_scoring_worker.py",
     "scripts/run_research_lab_scoring_worker_fleet.py",
     "validator_tee/host/docker_operation_guard_v2.py",
+    "validator_tee/host/docker_stale_mount_reclaimer_v2.py",
     "validator_tee/scripts/docker_operation_lock_v2.sh",
     "validator_tee/scripts/reclaim_docker_storage_v2.sh",
+)
+
+_CANDIDATE_ONLY_TRANSITION_SOURCE_PATHS = (
+    "validator_tee/host/docker_zero_runtime_reconciler_v2.py",
 )
 
 
@@ -86,7 +91,11 @@ def transition_source_paths_by_commit(
 
     candidate_paths = tuple(
         dict.fromkeys(
-            (*TRANSITION_SOURCE_PATHS, *shared_docker_operation_source_paths())
+            (
+                *TRANSITION_SOURCE_PATHS,
+                *_CANDIDATE_ONLY_TRANSITION_SOURCE_PATHS,
+                *shared_docker_operation_source_paths(),
+            )
         )
     )
     return {

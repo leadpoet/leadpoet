@@ -503,6 +503,49 @@ require_same_online_images() {
   fi
 }
 
+online_stale_audit_manifest() {
+  python3 -c '
+import json
+import re
+import sys
+
+document = json.load(sys.stdin)
+count_fields = (
+    "active_container_count",
+    "active_image_count",
+    "active_layer_count",
+    "active_mount_count",
+    "active_overlay_dir_count",
+    "mounted_overlay_count",
+    "stale_layer_record_count",
+    "stale_mount_record_count",
+    "stale_overlay_dir_count",
+    "stale_overlay_link_count",
+)
+zero_fields = (
+    "active_container_count",
+    "active_mount_count",
+    "mounted_overlay_count",
+    "stale_layer_record_count",
+    "stale_mount_record_count",
+    "stale_overlay_dir_count",
+    "stale_overlay_link_count",
+)
+if document.get("schema_version") != "leadpoet.docker_stale_mount_audit.v3":
+    raise SystemExit("invalid online Docker audit schema")
+if document.get("status") != "ready" or document.get("docker_root") != "/var/lib/docker":
+    raise SystemExit("invalid online Docker audit identity")
+if any(not isinstance(document.get(field), int) or document[field] < 0 for field in count_fields):
+    raise SystemExit("online Docker audit returned malformed counts")
+if any(document[field] != 0 for field in zero_fields):
+    raise SystemExit("online Docker audit did not observe clean empty-runtime state")
+manifest = document.get("active_manifest_hash")
+if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest) is None:
+    raise SystemExit("online Docker audit returned malformed active identity")
+print(manifest)
+'
+}
+
 if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
   ONLINE_GATEWAY_PID="$HOST_GATEWAY_PID"
   ONLINE_GATEWAY_START_TIME_TICKS="$HOST_GATEWAY_START_TIME_TICKS"
@@ -528,7 +571,8 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
       exit 1
     fi
     printf '%s\n' "$ONLINE_RECLAIM_RESULT"
-    if ! printf '%s' "$ONLINE_RECLAIM_RESULT" | python3 -c '
+    if ! ONLINE_RAW_RECLAIM_PERFORMED="$(
+      printf '%s' "$ONLINE_RECLAIM_RESULT" | python3 -c '
 import json
 import sys
 
@@ -556,9 +600,133 @@ if any(
     raise SystemExit("online Docker reclaim returned malformed counts")
 if document["active_container_count"] != 0 or document["active_mount_count"] != 0:
     raise SystemExit("online Docker reclaim observed a nonempty runtime")
-'; then
+deletion_fields = (
+    "reclaimed_layer_record_count",
+    "reclaimed_mount_count",
+    "reclaimed_mount_record_count",
+    "reclaimed_overlay_dir_count",
+    "reclaimed_overlay_link_count",
+)
+print(int(any(document[field] for field in deletion_fields)))
+'
+    )"; then
       echo "ERROR: validated stale Docker overlay reclaim returned malformed evidence" >&2
       exit 1
+    fi
+    if [ "$ONLINE_RAW_RECLAIM_PERFORMED" -eq 1 ]; then
+      inventory_empty_online_runtime "pre-daemon-reconcile"
+      require_same_online_gateway "pre-daemon-reconcile"
+      require_same_online_docker_root "pre-daemon-reconcile"
+      require_same_online_images "pre-daemon-reconcile"
+      if ! ONLINE_PRE_RECONCILE_AUDIT="$(
+        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+          "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
+          --audit-only
+      )"; then
+        echo "ERROR: post-reclaim Docker audit failed before daemon reconciliation" >&2
+        exit 1
+      fi
+      printf '%s\n' "$ONLINE_PRE_RECONCILE_AUDIT"
+      if ! ONLINE_PRE_RECONCILE_MANIFEST="$(
+        printf '%s' "$ONLINE_PRE_RECONCILE_AUDIT" | online_stale_audit_manifest
+      )"; then
+        echo "ERROR: post-reclaim Docker audit was invalid before daemon reconciliation" >&2
+        exit 1
+      fi
+      PYTHONPATH="$REPO_ROOT" python3 \
+        -m validator_tee.host.docker_operation_guard_v2 \
+        --wait \
+        --timeout-seconds 1800 \
+        --interval-seconds 3 \
+        --proc-root "$PROC_ROOT"
+      echo "Reconciling dockerd metadata under the guarded empty runtime"
+      if ! ONLINE_RECONCILE_RESULT="$(
+        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+          "$REPO_ROOT/validator_tee/host/docker_zero_runtime_reconciler_v2.py" \
+          --docker-lock-file "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
+          --docker-admission-lock-file "$LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE" \
+          --docker-lock-owner-pid "$LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID" \
+          --ready-attempts "$DAEMON_READY_ATTEMPTS" \
+          --timeout-seconds 480
+      )"; then
+        echo "ERROR: guarded empty-runtime dockerd reconciliation failed" >&2
+        exit 1
+      fi
+      printf '%s\n' "$ONLINE_RECONCILE_RESULT"
+      if ! printf '%s' "$ONLINE_RECONCILE_RESULT" | python3 -c '
+import json
+import re
+import sys
+
+document = json.load(sys.stdin)
+if document.get("schema_version") != "leadpoet.docker_zero_runtime_reconcile.v1":
+    raise SystemExit("invalid dockerd reconciliation schema")
+if document.get("status") != "ready" or document.get("restart_performed") is not True:
+    raise SystemExit("dockerd reconciliation did not report ready")
+if document.get("docker_root") != "/var/lib/docker":
+    raise SystemExit("dockerd reconciliation returned an invalid data-root")
+for field in ("container_count", "containerd_container_count", "containerd_task_count", "moby_shim_count"):
+    if document.get(field) != 0:
+        raise SystemExit("dockerd reconciliation returned a nonempty runtime")
+if not isinstance(document.get("image_count"), int) or document["image_count"] < 0:
+    raise SystemExit("dockerd reconciliation returned malformed image count")
+for field in ("root_device", "root_inode"):
+    if not isinstance(document.get(field), int) or document[field] <= 0:
+        raise SystemExit("dockerd reconciliation returned malformed root identity")
+manifest = document.get("image_manifest_hash")
+if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest) is None:
+    raise SystemExit("dockerd reconciliation returned malformed image identity")
+'; then
+        echo "ERROR: guarded empty-runtime dockerd reconciliation returned malformed evidence" >&2
+        exit 1
+      fi
+      inventory_empty_online_runtime "post-daemon-reconcile"
+      require_same_online_gateway "post-daemon-reconcile"
+      require_same_online_docker_root "post-daemon-reconcile"
+      require_same_online_images "post-daemon-reconcile"
+      if ! ONLINE_POST_RECONCILE_AUDIT="$(
+        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+          "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
+          --audit-only
+      )"; then
+        echo "ERROR: Docker audit failed after daemon reconciliation" >&2
+        exit 1
+      fi
+      printf '%s\n' "$ONLINE_POST_RECONCILE_AUDIT"
+      if ! ONLINE_POST_RECONCILE_MANIFEST="$(
+        printf '%s' "$ONLINE_POST_RECONCILE_AUDIT" | online_stale_audit_manifest
+      )"; then
+        echo "ERROR: Docker audit was invalid after daemon reconciliation" >&2
+        exit 1
+      fi
+      if [ "$ONLINE_POST_RECONCILE_MANIFEST" != "$ONLINE_PRE_RECONCILE_MANIFEST" ]; then
+        echo "ERROR: active Docker image/layer identity changed during daemon reconciliation" >&2
+        exit 1
+      fi
+      run_prune_with_retry builder docker builder prune --all --force
+      inventory_empty_online_runtime "post-reconcile-builder-prune"
+      require_same_online_gateway "post-reconcile-builder-prune"
+      require_same_online_docker_root "post-reconcile-builder-prune"
+      require_same_online_images "post-reconcile-builder-prune"
+      if ! ONLINE_POST_PRUNE_AUDIT="$(
+        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+          "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
+          --audit-only
+      )"; then
+        echo "ERROR: Docker audit failed after reconciled builder prune" >&2
+        exit 1
+      fi
+      printf '%s\n' "$ONLINE_POST_PRUNE_AUDIT"
+      if ! ONLINE_POST_PRUNE_MANIFEST="$(
+        printf '%s' "$ONLINE_POST_PRUNE_AUDIT" | online_stale_audit_manifest
+      )"; then
+        echo "ERROR: Docker audit was invalid after reconciled builder prune" >&2
+        exit 1
+      fi
+      if [ "$ONLINE_POST_PRUNE_MANIFEST" != "$ONLINE_PRE_RECONCILE_MANIFEST" ]; then
+        echo "ERROR: active Docker image/layer identity changed during reconciled builder prune" >&2
+        exit 1
+      fi
     fi
   fi
   inventory_empty_online_runtime "post-reclaim"

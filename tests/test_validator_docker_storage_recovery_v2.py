@@ -4,6 +4,8 @@ import subprocess
 import time
 from typing import Optional
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,6 +44,7 @@ def _run_recovery(
     allow_live_host_gateway_prune: bool = False,
     host_gateway_exits_during_live_prune: bool = False,
     host_gateway_start_time_changes_during_live_prune: bool = False,
+    host_gateway_exits_during_daemon_reconcile: bool = False,
     runtime_appears_after_stale_reclaim: bool = False,
     docker_root: str = "/var/lib/docker",
     docker_root_after_builder_prune: Optional[str] = None,
@@ -52,6 +55,11 @@ def _run_recovery(
     nonzero_shim_probe_reports_no_match: bool = False,
     fail_stale_reclaimer: bool = False,
     malformed_stale_reclaimer: bool = False,
+    fail_zero_runtime_reconciler: bool = False,
+    malformed_zero_runtime_reconciler: bool = False,
+    change_audit_manifest_after_reconcile: bool = False,
+    change_audit_manifest_after_post_prune: bool = False,
+    stale_audit_after_reconcile: bool = False,
     fail_umount: bool = False,
     fail_systemctl_stop: bool = False,
     fail_daemon_recovery: bool = False,
@@ -136,6 +144,11 @@ case "${1:-}:${2:-}" in
     ;;
   builder:prune)
     touch "$FAKE_BUILDER_PRUNE_MARKER"
+    prune_count=0
+    if [ -f "$FAKE_BUILDER_PRUNE_STATE" ]; then
+      prune_count="$(cat "$FAKE_BUILDER_PRUNE_STATE")"
+    fi
+    printf '%s\n' "$((prune_count + 1))" > "$FAKE_BUILDER_PRUNE_STATE"
     if [ "$FAKE_HOST_GATEWAY_EXITS_DURING_LIVE_PRUNE" = "1" ]; then
       rm -rf "$LEADPOET_PROC_ROOT/200"
     fi
@@ -257,9 +270,43 @@ case "$command" in
   env)
     printf '%s %s\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
     case "$*" in
+      *docker_zero_runtime_reconciler_v2.py*)
+        if [ "$FAKE_FAIL_ZERO_RUNTIME_RECONCILER" = "1" ]; then
+          exit 1
+        fi
+        touch "$FAKE_DAEMON_RECONCILE_MARKER"
+        if [ "$FAKE_HOST_GATEWAY_EXITS_DURING_DAEMON_RECONCILE" = "1" ]; then
+          rm -rf "$LEADPOET_PROC_ROOT/200"
+        fi
+        if [ "$FAKE_MALFORMED_ZERO_RUNTIME_RECONCILER" = "1" ]; then
+          printf '{}\n'
+          exit 0
+        fi
+        printf '{"container_count":0,"containerd_container_count":0,"containerd_task_count":0,"docker_root":"/var/lib/docker","image_count":%s,"image_manifest_hash":"sha256:%064d","moby_shim_count":0,"restart_performed":true,"root_device":1,"root_inode":2,"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1","status":"ready"}\n' \
+          "$FAKE_IMAGES" 0
+        ;;
       *docker_live_restore_reconciler_v2.py*)
         printf '{"config_changed":true,"container_count":%s,"image_count":%s,"manifest_hash":"sha256:%064d","schema_version":"leadpoet.docker_live_restore_reconcile.v1","status":"ready"}\n' \
           "$FAKE_CONTAINERS" "$FAKE_IMAGES" 0
+        ;;
+      *docker_stale_mount_reclaimer_v2.py*--audit-only*)
+        manifest_digit=0
+        stale_count=0
+        if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_CHANGE_AUDIT_MANIFEST_AFTER_RECONCILE" = "1" ]; then
+          manifest_digit=1
+        fi
+        if [ -f "$FAKE_BUILDER_PRUNE_STATE" ] \
+            && [ "$(cat "$FAKE_BUILDER_PRUNE_STATE")" -ge 2 ] \
+            && [ "$FAKE_CHANGE_AUDIT_MANIFEST_AFTER_POST_PRUNE" = "1" ]; then
+          manifest_digit=1
+        fi
+        if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_STALE_AUDIT_AFTER_RECONCILE" = "1" ]; then
+          stale_count=1
+        fi
+        printf '{"active_container_count":0,"active_image_count":%s,"active_layer_count":%s,"active_manifest_hash":"sha256:%064d","active_mount_count":0,"active_overlay_dir_count":%s,"docker_root":"/var/lib/docker","mounted_overlay_count":0,"schema_version":"leadpoet.docker_stale_mount_audit.v3","stale_layer_record_count":%s,"stale_mount_record_count":0,"stale_overlay_dir_count":0,"stale_overlay_link_count":0,"status":"ready"}\n' \
+          "$FAKE_IMAGES" "$FAKE_LAYERDB_IMAGES" "$manifest_digit" "$FAKE_LAYERDB_IMAGES" "$stale_count"
         ;;
       *docker_stale_mount_reclaimer_v2.py*)
         if [ "$FAKE_FAIL_STALE_RECLAIMER" = "1" ]; then
@@ -499,6 +546,7 @@ exit 0
         "FAKE_STALE_OVERLAY_MOUNTS": str(stale_overlay_mounts),
         "FAKE_STALE_RECLAIM_MARKER": str(tmp_path / "stale-mounts-reclaimed"),
         "FAKE_BUILDER_PRUNE_MARKER": str(tmp_path / "builder-pruned"),
+        "FAKE_BUILDER_PRUNE_STATE": str(tmp_path / "builder-prune-count"),
         "FAKE_IMAGE_PRUNE_MARKER": str(tmp_path / "image-pruned"),
         "FAKE_CONTAINERD_RESET_MARKER": str(tmp_path / "containerd-reset"),
         "FAKE_DAEMONS_STOPPED_MARKER": str(tmp_path / "daemons-stopped"),
@@ -509,6 +557,24 @@ exit 0
         "FAKE_FAIL_STALE_RECLAIMER": "1" if fail_stale_reclaimer else "0",
         "FAKE_MALFORMED_STALE_RECLAIMER": (
             "1" if malformed_stale_reclaimer else "0"
+        ),
+        "FAKE_FAIL_ZERO_RUNTIME_RECONCILER": (
+            "1" if fail_zero_runtime_reconciler else "0"
+        ),
+        "FAKE_MALFORMED_ZERO_RUNTIME_RECONCILER": (
+            "1" if malformed_zero_runtime_reconciler else "0"
+        ),
+        "FAKE_CHANGE_AUDIT_MANIFEST_AFTER_RECONCILE": (
+            "1" if change_audit_manifest_after_reconcile else "0"
+        ),
+        "FAKE_CHANGE_AUDIT_MANIFEST_AFTER_POST_PRUNE": (
+            "1" if change_audit_manifest_after_post_prune else "0"
+        ),
+        "FAKE_STALE_AUDIT_AFTER_RECONCILE": (
+            "1" if stale_audit_after_reconcile else "0"
+        ),
+        "FAKE_DAEMON_RECONCILE_MARKER": str(
+            tmp_path / "daemon-reconciled"
         ),
         "FAKE_FAIL_SYSTEMCTL_STOP": "1" if fail_systemctl_stop else "0",
         "FAKE_FAIL_DAEMON_RECOVERY": "1" if fail_daemon_recovery else "0",
@@ -524,6 +590,9 @@ exit 0
         ),
         "FAKE_HOST_GATEWAY_START_TIME_CHANGES_DURING_LIVE_PRUNE": (
             "1" if host_gateway_start_time_changes_during_live_prune else "0"
+        ),
+        "FAKE_HOST_GATEWAY_EXITS_DURING_DAEMON_RECONCILE": (
+            "1" if host_gateway_exits_during_daemon_reconcile else "0"
         ),
         "FAKE_RUNTIME_APPEARS_AFTER_STALE_RECLAIM": (
             "1" if runtime_appears_after_stale_reclaim else "0"
@@ -825,15 +894,90 @@ def test_live_host_gateway_online_reclaim_preserves_images_and_reaches_floor(
     assert "phase=pre-prune containers=0" in result.stdout
     assert "phase=post-builder-prune containers=0" in result.stdout
     assert "phase=pre-stale-reclaim containers=0" in result.stdout
+    assert "phase=pre-daemon-reconcile containers=0" in result.stdout
+    assert "phase=post-daemon-reconcile containers=0" in result.stdout
+    assert "phase=post-reconcile-builder-prune containers=0" in result.stdout
     assert "phase=post-reclaim containers=0" in result.stdout
     assert "Docker storage ready after bounded online reclaim" in result.stdout
     assert "docker_stale_mount_reclaimer_v2.py" in sudo_log
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
     assert "docker_live_restore_reconciler_v2.py" not in sudo_log
     assert not (tmp_path / "image-pruned").exists()
     assert not (tmp_path / "system-prune-attempts").exists()
     assert "systemctl" not in sudo_log
     assert "rm " not in sudo_log
     assert "pkill" not in sudo_log
+
+
+@pytest.mark.parametrize(
+    ("failure_option", "message"),
+    [
+        ("fail_zero_runtime_reconciler", "dockerd reconciliation failed"),
+        (
+            "malformed_zero_runtime_reconciler",
+            "reconciliation returned malformed evidence",
+        ),
+        (
+            "change_audit_manifest_after_reconcile",
+            "image/layer identity changed during daemon reconciliation",
+        ),
+        (
+            "stale_audit_after_reconcile",
+            "Docker audit was invalid after daemon reconciliation",
+        ),
+        (
+            "change_audit_manifest_after_post_prune",
+            "image/layer identity changed during reconciled builder prune",
+        ),
+    ],
+)
+def test_live_host_gateway_reconciliation_failures_remain_fail_closed(
+    tmp_path: Path,
+    failure_option: str,
+    message: str,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        available_after_stale_reclaim=40_000_000_000,
+        images=4,
+        stale_overlay_mounts=2,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        **{failure_option: True},
+    )
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+    assert "pkill" not in sudo_log
+
+
+def test_live_host_gateway_reconciliation_rejects_gateway_exit(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        available_after_stale_reclaim=40_000_000_000,
+        images=4,
+        stale_overlay_mounts=2,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        host_gateway_exits_during_daemon_reconcile=True,
+    )
+
+    assert result.returncode == 1
+    assert "exact host gateway identity changed" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
 
 
 def test_live_host_gateway_online_reclaim_rejects_malformed_free_space(
@@ -1247,15 +1391,17 @@ def test_live_host_gateway_online_reclaim_rejects_post_reclaim_runtime_race(
         available=15_000_000_000,
         available_after_stale_reclaim=40_000_000_000,
         images=3,
+        stale_overlay_mounts=1,
         host_gateway_live=True,
         allow_live_host_gateway_prune=True,
         runtime_appears_after_stale_reclaim=True,
     )
 
     assert result.returncode == 1
-    assert "phase=post-reclaim" in result.stderr
+    assert "phase=pre-daemon-reconcile" in result.stderr
     assert "refusing online Docker prune unless the exact container runtime is empty" in result.stderr
     assert "docker_stale_mount_reclaimer_v2.py" in sudo_log
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
     assert not (tmp_path / "image-pruned").exists()
     assert "systemctl" not in sudo_log
 

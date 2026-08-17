@@ -1032,9 +1032,20 @@ if [ "${REHEARSAL_ONLINE_RECLAIM:-0}" = "1" ]; then
     "ctr -n moby containers list -q"|"ctr -n moby tasks list -q")
       exit 0
       ;;
+    "env PYTHONSAFEPATH=1 python3 $REHEARSAL_ONLINE_STALE_RECLAIMER --audit-only")
+      printf '%s\\n' '{"active_container_count":0,"active_image_count":2,"active_layer_count":2,"active_manifest_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","active_mount_count":0,"active_overlay_dir_count":2,"docker_root":"/var/lib/docker","mounted_overlay_count":0,"schema_version":"leadpoet.docker_stale_mount_audit.v3","stale_layer_record_count":0,"stale_mount_record_count":0,"stale_overlay_dir_count":0,"stale_overlay_link_count":0,"status":"ready"}'
+      exit 0
+      ;;
     "env PYTHONSAFEPATH=1 python3 $REHEARSAL_ONLINE_STALE_RECLAIMER")
       touch "$REHEARSAL_ONLINE_STALE_MARKER"
       printf '%s\\n' '{"active_container_count":0,"active_image_count":2,"active_layer_count":2,"active_mount_count":0,"mounted_overlay_count":0,"reclaimed_layer_record_count":1,"reclaimed_mount_count":0,"reclaimed_mount_record_count":1,"reclaimed_overlay_dir_count":1,"reclaimed_overlay_link_count":1,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}'
+      exit 0
+      ;;
+    "env PYTHONSAFEPATH=1 python3 $REHEARSAL_ONLINE_ZERO_RUNTIME_RECONCILER "*)
+      touch "$REHEARSAL_ONLINE_DAEMON_MARKER"
+      printf 'systemctl restart docker.service\\n' \
+        >> "$REHEARSAL_ONLINE_DAEMON_ACTION_LOG"
+      printf '%s\\n' '{"container_count":0,"containerd_container_count":0,"containerd_task_count":0,"docker_root":"/var/lib/docker","image_count":2,"image_manifest_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","moby_shim_count":0,"restart_performed":true,"root_device":1,"root_inode":2,"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1","status":"ready"}'
       exit 0
       ;;
   esac
@@ -1211,12 +1222,18 @@ exit 96
         online_command_log = root / "online-reclaim-commands.log"
         online_image_log = root / "online-reclaim-images.log"
         online_stale_marker = root / "online-stale-reclaimed"
+        online_daemon_marker = root / "online-daemon-reconciled"
+        online_daemon_action_log = root / "online-daemon-actions.log"
         reclaim_script = (
             normalized_root / "validator_tee/scripts/reclaim_docker_storage_v2.sh"
         )
         stale_reclaimer = (
             normalized_root
             / "validator_tee/host/docker_stale_mount_reclaimer_v2.py"
+        )
+        zero_runtime_reconciler = (
+            normalized_root
+            / "validator_tee/host/docker_zero_runtime_reconciler_v2.py"
         )
         image_ids = tuple(
             "sha256:" + hashlib.sha256(value.encode("ascii")).hexdigest()
@@ -1238,11 +1255,18 @@ exit 96
                 "REHEARSAL_ONLINE_AVAILABLE_BEFORE": str(live_floor_bytes - 1),
                 "REHEARSAL_ONLINE_AVAILABLE_AFTER": str(available_bytes),
                 "REHEARSAL_ONLINE_STALE_MARKER": str(online_stale_marker),
+                "REHEARSAL_ONLINE_DAEMON_MARKER": str(online_daemon_marker),
+                "REHEARSAL_ONLINE_DAEMON_ACTION_LOG": str(
+                    online_daemon_action_log
+                ),
                 "REHEARSAL_ONLINE_COMMAND_LOG": str(online_command_log),
                 "REHEARSAL_ONLINE_IMAGE_LOG": str(online_image_log),
                 "REHEARSAL_ONLINE_IMAGE_ONE": image_ids[0],
                 "REHEARSAL_ONLINE_IMAGE_TWO": image_ids[1],
                 "REHEARSAL_ONLINE_STALE_RECLAIMER": str(stale_reclaimer),
+                "REHEARSAL_ONLINE_ZERO_RUNTIME_RECONCILER": str(
+                    zero_runtime_reconciler
+                ),
             },
             capture_output=True,
             text=True,
@@ -1250,6 +1274,13 @@ exit 96
             check=False,
         )
         online_commands = online_command_log.read_text(encoding="utf-8").splitlines()
+        stale_reclaim_command = (
+            "sudo env PYTHONSAFEPATH=1 python3 " + str(stale_reclaimer)
+        )
+        stale_audit_command = stale_reclaim_command + " --audit-only"
+        zero_runtime_prefix = (
+            "sudo env PYTHONSAFEPATH=1 python3 " + str(zero_runtime_reconciler)
+        )
         allowed_commands = {
             "docker info",
             "docker info --format {{.DockerRootDir}}",
@@ -1258,25 +1289,73 @@ exit 96
             "docker builder prune --all --force",
             "sudo ctr -n moby containers list -q",
             "sudo ctr -n moby tasks list -q",
-            "sudo env PYTHONSAFEPATH=1 python3 " + str(stale_reclaimer),
+            stale_reclaim_command,
+            stale_audit_command,
         }
-        mutations = [
+        zero_runtime_commands = [
             command
             for command in online_commands
-            if " prune " in command or "docker_stale_mount_reclaimer_v2.py" in command
+            if command.startswith(zero_runtime_prefix + " ")
         ]
+        zero_runtime_tokens = (
+            zero_runtime_commands[0].split()
+            if len(zero_runtime_commands) == 1
+            else []
+        )
+        zero_runtime_arguments_exact = bool(
+            len(zero_runtime_tokens) == 15
+            and zero_runtime_tokens[:5]
+            == [
+                "sudo",
+                "env",
+                "PYTHONSAFEPATH=1",
+                "python3",
+                str(zero_runtime_reconciler),
+            ]
+            and zero_runtime_tokens[5:7]
+            == ["--docker-lock-file", str((root / "release.lock").resolve())]
+            and zero_runtime_tokens[7:9]
+            == [
+                "--docker-admission-lock-file",
+                str((root / "release.lock.admission").resolve()),
+            ]
+            and zero_runtime_tokens[9] == "--docker-lock-owner-pid"
+            and zero_runtime_tokens[10].isdigit()
+            and int(zero_runtime_tokens[10]) > 0
+            and zero_runtime_tokens[11:]
+            == ["--ready-attempts", "30", "--timeout-seconds", "480"]
+        )
+        mutation_kinds: list[str] = []
+        for command in online_commands:
+            if command == "docker builder prune --all --force":
+                mutation_kinds.append("builder_prune")
+            elif command == stale_reclaim_command:
+                mutation_kinds.append("stale_reclaim")
+            elif command.startswith(zero_runtime_prefix + " "):
+                mutation_kinds.append("dockerd_reconcile")
         image_inventories = online_image_log.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        daemon_actions = online_daemon_action_log.read_text(
             encoding="utf-8"
         ).splitlines()
         if (
             online_result.returncode != 0
-            or mutations
+            or mutation_kinds
             != [
-                "docker builder prune --all --force",
-                "sudo env PYTHONSAFEPATH=1 python3 " + str(stale_reclaimer),
+                "builder_prune",
+                "stale_reclaim",
+                "dockerd_reconcile",
+                "builder_prune",
             ]
-            or any(command not in allowed_commands for command in online_commands)
-            or len(image_inventories) < 4
+            or not zero_runtime_arguments_exact
+            or any(
+                command not in allowed_commands
+                and not command.startswith(zero_runtime_prefix + " ")
+                for command in online_commands
+            )
+            or online_commands.count(stale_audit_command) != 3
+            or len(image_inventories) < 7
             or len(set(image_inventories)) != 1
             or any(
                 f"phase={phase} containers=0" not in online_result.stdout
@@ -1284,6 +1363,9 @@ exit 96
                     "pre-prune",
                     "post-builder-prune",
                     "pre-stale-reclaim",
+                    "pre-daemon-reconcile",
+                    "post-daemon-reconcile",
+                    "post-reconcile-builder-prune",
                     "post-reclaim",
                 )
             )
@@ -1291,13 +1373,53 @@ exit 96
             not in online_result.stdout
             or f"free_bytes={available_bytes}" not in online_result.stdout
             or not online_stale_marker.is_file()
+            or not online_daemon_marker.is_file()
+            or daemon_actions != ["systemctl restart docker.service"]
+            or online_result.stdout.count(
+                '"schema_version":"leadpoet.docker_stale_mount_audit.v3"'
+            )
+            != 3
+            or online_result.stdout.count(
+                '"schema_version":"leadpoet.docker_zero_runtime_reconcile.v1"'
+            )
+            != 1
+            or any(
+                forbidden in command
+                for command in online_commands
+                for forbidden in (
+                    "docker image prune",
+                    "docker system prune",
+                    "systemctl start containerd",
+                    "systemctl stop containerd",
+                    "systemctl restart containerd",
+                    "rm -rf",
+                )
+            )
             or gateway_identity
             != tuple(
                 (gateway_proc / name).read_bytes()
                 for name in ("status", "cmdline", "stat")
             )
         ):
-            raise RuntimeError("bounded online host-gateway reclaim contract differs")
+            raise RuntimeError(
+                "bounded online host-gateway reclaim contract differs: "
+                + json.dumps(
+                    {
+                        "commands": online_commands,
+                        "daemon_actions": daemon_actions,
+                        "image_inventory_count": len(image_inventories),
+                        "mutation_kinds": mutation_kinds,
+                        "returncode": online_result.returncode,
+                        "stderr": online_result.stderr[-1000:],
+                        "stdout": online_result.stdout[-2000:],
+                        "zero_runtime_arguments_exact": (
+                            zero_runtime_arguments_exact
+                        ),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
 
     shared_matrix = _candidate_shared_lifecycle_matrix(
         source_root=normalized_root,
@@ -1319,6 +1441,7 @@ exit 96
         "candidate_gateway_emergency_uses_guarded_reclaim": True,
         "first_activation_requires_preexisting_disk_reserve": True,
         "live_gateway_online_reclaim_terminal_and_exact": True,
+        "live_gateway_zero_runtime_reconcile_exact": True,
         "dynamic_docker_collision_exact": True,
     }
 

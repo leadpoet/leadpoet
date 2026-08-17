@@ -553,6 +553,10 @@ def exercise_transition(
             "live_gateway_online_reclaim_terminal_and_exact"
         )
         is not True
+        or docker_collision.get(
+            "live_gateway_zero_runtime_reconcile_exact"
+        )
+        is not True
     ):
         raise RuntimeError("N-1 did not execute exact production paths")
 

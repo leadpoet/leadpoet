@@ -107,8 +107,39 @@ async def test_field_mapping(collector):
     assert isinstance(beta["dedup_key"], str) and beta["dedup_key"]
     gamma = collector.rows[1]
     assert gamma["failure_reason"] == "intent_fabricated"
+    assert gamma["failure_stage"] == "intent"
+    assert gamma["fit_passed"] is None
+    assert gamma["attribute_passed"] is None
     assert gamma["intent_signal"] == 0.1
     assert gamma["intent_passed"] is False
+
+
+async def test_retryable_infrastructure_stage_is_not_rewritten_as_lead_failure(collector):
+    await sw._persist_rejected_companies(
+        context_ref="candidate",
+        icp_ref="icp-1",
+        icp_hash="sha256:abc",
+        is_reference_model=False,
+        outputs=[{"company_name": "InfraCo"}],
+        breakdowns=[
+            {
+                "final_score": 0.0,
+                "failure_reason": "company verification failed",
+                "stage_failed": "verifier",
+                "verifier_gate_receipts": [
+                    {
+                        "contract_id": "company-fit-decision:v1",
+                        "decision": "unavailable",
+                    }
+                ],
+            }
+        ],
+    )
+    row = collector.rows[0]
+    assert row["failure_stage"] == "verifier"
+    assert row["fit_passed"] is None
+    assert row["attribute_passed"] is None
+    assert row["intent_passed"] is None
 
 
 async def test_failure_reason_overrides_positive_score(collector):

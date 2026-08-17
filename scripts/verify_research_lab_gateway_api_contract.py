@@ -169,6 +169,7 @@ def main() -> int:
         "/research-lab/evaluations/latest/{epoch}",
         "/research-lab/allocations/live/{epoch}",
         "/research-lab/reports/shadow/{epoch}",
+        "/research-lab/admin/loops/{ticket_id}/diagnostics",
     }:
         if required not in paths:
             errors.append(f"missing route: {required}")
@@ -178,10 +179,19 @@ def main() -> int:
         "/research-lab/receipts/{receipt_id}",
         "/research-lab/evaluations/score-bundles/{score_bundle_id}",
         "/research-lab/evaluations/latest/{epoch}",
+        "/research-lab/admin/loops/{ticket_id}/diagnostics",
     }:
         endpoint = endpoints.get(protected_path)
         if endpoint is None or "x_leadpoet_internal_key" not in signature(endpoint).parameters:
             errors.append(f"raw read route is missing internal-key guard parameter: {protected_path}")
+    failure_funnel_endpoint = endpoints.get(
+        "/research-lab/admin/loops/{ticket_id}/diagnostics"
+    )
+    if (
+        failure_funnel_endpoint is None
+        or "candidate_id" not in signature(failure_funnel_endpoint).parameters
+    ):
+        errors.append("failure-funnel diagnostics route is missing candidate_id filter")
 
     ticket = ResearchLabTicketCreateRequest(
         miner_hotkey="5FminerHotkey11111111111111111111111111111111",

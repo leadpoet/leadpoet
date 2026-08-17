@@ -98,6 +98,39 @@ def _run_exact_n_minus_one_source_reader(
     child_environment.update(
         {str(key): str(value) for key, value in environment.items()}
     )
+    reader_bin = event_path.parent / "n-minus-reader-bin"
+    reader_bin.mkdir(mode=0o700)
+    _write_executable(
+        reader_bin / "docker",
+        """#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = "info" ]; then
+  printf 'info\n' >> "$REHEARSAL_N_MINUS_READER_DOCKER_READY_LOG"
+  exit 0
+fi
+echo "unexpected N-1 Docker readiness operation" >&2
+exit 97
+""",
+    )
+    reader_lock_path = event_path.parent / "n-minus-reader.lock"
+    reader_ready_log = event_path.parent / "n-minus-reader-docker-ready.log"
+    child_environment.update(
+        {
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(reader_lock_path),
+            "LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE": (
+                f"{reader_lock_path}.admission"
+            ),
+            "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": str(
+                max(1, math.ceil(collision_timeout_seconds))
+            ),
+            "LEADPOET_DOCKER_DAEMON_READY_TIMEOUT_SECONDS": str(
+                max(1, math.ceil(collision_timeout_seconds))
+            ),
+            "REHEARSAL_N_MINUS_READER_DOCKER_READY_LOG": str(reader_ready_log),
+            "PATH": str(reader_bin)
+            + os.pathsep
+            + (child_environment.get("PATH") or os.defpath),
+        }
+    )
     child_environment["PYTHONPATH"] = str(exact_root)
     child = subprocess.Popen(
         [
@@ -1056,6 +1089,13 @@ exit 98
             ),
             label="exact N-1 Docker source reader",
         )
+        reader_ready_calls = (
+            (root / "n-minus-reader-docker-ready.log")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        if reader_ready_calls != ["info"]:
+            raise RuntimeError("N-1 Docker readiness boundary differs")
         reclaim_result = _communicate(
             reclaim,
             timeout_seconds=collision_timeout,

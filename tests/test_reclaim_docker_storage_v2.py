@@ -71,6 +71,30 @@ def test_exact_host_gateway_guard_is_rechecked_at_the_stop_boundary():
     assert SCRIPT.count("protect_exact_host_gateway_runtime") == 3
 
 
+def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
+    inventory = SCRIPT.index("inventory_empty_online_runtime()")
+    lane = SCRIPT.index('if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then', inventory)
+    offline_image_prune = SCRIPT.index(
+        "run_prune_with_retry image docker image prune --all --force",
+        lane,
+    )
+    source = SCRIPT[lane:offline_image_prune]
+
+    assert "run_prune_with_retry builder docker builder prune --all --force" in source
+    assert "docker_stale_mount_reclaimer_v2.py" in source
+    assert "require_same_online_gateway" in source
+    assert "require_same_online_images" in source
+    assert 'inventory_empty_online_runtime "pre-stale-reclaim"' in source
+    assert 'inventory_empty_online_runtime "post-reclaim"' in source
+    assert "docker image prune" not in source
+    assert "docker system prune" not in source
+    assert "docker_live_restore_reconciler_v2.py" not in source
+    assert "systemctl" not in source
+    assert "pkill" not in source
+    assert "rm -rf" not in source
+    assert "exit 0" in source
+
+
 def test_data_root_reset_failure_recovers_daemons_before_exit():
     recovery = SCRIPT.index("recover_docker_daemons_on_exit()")
     arm = SCRIPT.index("trap recover_docker_daemons_on_exit EXIT")
@@ -85,7 +109,7 @@ def test_data_root_reset_failure_recovers_daemons_before_exit():
 
 def test_live_runtime_reclaims_stale_state_before_rechecking_capacity():
     initial_inventory = SCRIPT.index('INITIAL_CONTAINER_COUNT="$(')
-    reclaim = SCRIPT.index("docker_stale_mount_reclaimer_v2")
+    reclaim = SCRIPT.index("docker_stale_mount_reclaimer_v2", initial_inventory)
     repeated_prune = SCRIPT.index(
         "run_prune_with_retry image docker image prune --all --force",
         reclaim,

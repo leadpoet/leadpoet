@@ -6,6 +6,7 @@ set -euo pipefail
 MIN_FREE_BYTES="${VALIDATOR_DOCKER_MIN_FREE_BYTES:-30000000000}"
 LIVE_RUNTIME_MIN_FREE_BYTES="${VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}"
 ALLOW_DATA_ROOT_RESET="${VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET:-0}"
+ALLOW_LIVE_HOST_GATEWAY_PRUNE="${VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE:-0}"
 PRUNE_ATTEMPTS="${VALIDATOR_DOCKER_PRUNE_ATTEMPTS:-5}"
 SETTLE_ATTEMPTS="${VALIDATOR_DOCKER_SETTLE_ATTEMPTS:-30}"
 DAEMON_READY_ATTEMPTS="${VALIDATOR_DOCKER_DAEMON_READY_ATTEMPTS:-30}"
@@ -16,10 +17,30 @@ PROC_ROOT="${LEADPOET_PROC_ROOT:-/proc}"
 ALLOW_NONSTANDARD_PROC_ROOT="${LEADPOET_DOCKER_ALLOW_NONSTANDARD_PROC_ROOT:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+MAX_SHELL_INTEGER="9223372036854775807"
+
+is_bounded_unsigned_shell_integer() {
+  local value="$1"
+  local LC_ALL=C
+
+  if ! [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    return 1
+  fi
+  if [ "${#value}" -gt "${#MAX_SHELL_INTEGER}" ]; then
+    return 1
+  fi
+  if [ "${#value}" -eq "${#MAX_SHELL_INTEGER}" ] \
+      && [[ "$value" > "$MAX_SHELL_INTEGER" ]]; then
+    return 1
+  fi
+  return 0
+}
 
 for setting in PRUNE_ATTEMPTS SETTLE_ATTEMPTS DAEMON_READY_ATTEMPTS DAEMON_PROBE_TIMEOUT_SECONDS DAEMON_CONTROL_TIMEOUT_SECONDS; do
   value="${!setting}"
-  if ! [[ "$value" =~ ^[1-9][0-9]*$ ]] || [ "$value" -gt 300 ]; then
+  if ! is_bounded_unsigned_shell_integer "$value" \
+      || [ "$value" -eq 0 ] \
+      || [ "$value" -gt 300 ]; then
     echo "ERROR: $setting must be between 1 and 300" >&2
     exit 2
   fi
@@ -29,18 +50,24 @@ if [ "$PROC_ROOT" != "/proc" ] \
   echo "ERROR: nonstandard process roots are allowed only in explicit rehearsal" >&2
   exit 2
 fi
-if ! [[ "$DAEMON_COMMAND_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+if ! is_bounded_unsigned_shell_integer "$DAEMON_COMMAND_TIMEOUT_SECONDS" \
+    || [ "$DAEMON_COMMAND_TIMEOUT_SECONDS" -eq 0 ] \
     || [ "$DAEMON_COMMAND_TIMEOUT_SECONDS" -gt 3600 ]; then
   echo "ERROR: DAEMON_COMMAND_TIMEOUT_SECONDS must be between 1 and 3600" >&2
   exit 2
 fi
 for setting in MIN_FREE_BYTES LIVE_RUNTIME_MIN_FREE_BYTES; do
   value="${!setting}"
-  if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: $setting must be a positive integer byte count" >&2
+  if ! is_bounded_unsigned_shell_integer "$value" || [ "$value" -eq 0 ]; then
+    echo "ERROR: $setting must be a positive bounded integer byte count" >&2
     exit 2
   fi
 done
+if [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" != "0" ] \
+    && [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" != "1" ]; then
+  echo "ERROR: VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE must be 0 or 1" >&2
+  exit 2
+fi
 
 . "$SCRIPT_DIR/docker_operation_lock_v2.sh"
 leadpoet_acquire_docker_operation_lock_v2
@@ -52,10 +79,20 @@ PYTHONPATH="$REPO_ROOT" python3 \
   --proc-root "$PROC_ROOT"
 
 available_bytes() {
-  df --output=avail -B1 / | tail -1 | tr -d '[:space:]'
+  local value
+
+  if ! value="$(df --output=avail -B1 / | tail -1 | tr -d '[:space:]')"; then
+    echo "ERROR: filesystem free-space state is unreadable" >&2
+    return 1
+  fi
+  if ! is_bounded_unsigned_shell_integer "$value"; then
+    echo "ERROR: filesystem free-space state is malformed" >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
 }
 
-protect_exact_host_gateway_runtime() {
+inspect_exact_host_gateway_runtime() {
   local phase="$1"
 
   if ! HOST_GATEWAY_REPORT="$(
@@ -68,7 +105,7 @@ protect_exact_host_gateway_runtime() {
     exit 1
   fi
   printf '%s\n' "$HOST_GATEWAY_REPORT"
-  if ! HOST_GATEWAY_LIVE="$(
+  if ! HOST_GATEWAY_STATE="$(
     printf '%s' "$HOST_GATEWAY_REPORT" | python3 -c '
 import json
 import sys
@@ -81,11 +118,11 @@ process = document.get("gateway_process")
 if status == "live":
     if not isinstance(process, dict) or not isinstance(process.get("pid"), int):
         raise SystemExit("invalid live host gateway process report")
-    print(1)
+    print("1 {}".format(process["pid"]))
 elif status == "absent":
     if process is not None:
         raise SystemExit("invalid absent host gateway process report")
-    print(0)
+    print("0 0")
 else:
     raise SystemExit("invalid host gateway process status")
 '
@@ -93,12 +130,62 @@ else:
     echo "ERROR: exact host gateway process report is invalid; refusing Docker maintenance" >&2
     exit 1
   fi
+  read -r HOST_GATEWAY_LIVE HOST_GATEWAY_PID <<< "$HOST_GATEWAY_STATE"
+  if ! is_bounded_unsigned_shell_integer "$HOST_GATEWAY_PID" \
+      || { [ "$HOST_GATEWAY_LIVE" -eq 1 ] && [ "$HOST_GATEWAY_PID" -eq 0 ]; }; then
+    echo "ERROR: exact host gateway process identity is out of range; refusing Docker maintenance" >&2
+    exit 1
+  fi
+  HOST_GATEWAY_START_TIME_TICKS=0
+  if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
+    if ! HOST_GATEWAY_START_TIME_TICKS="$(
+      python3 - "$PROC_ROOT" "$HOST_GATEWAY_PID" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+proc_root = Path(sys.argv[1])
+pid = sys.argv[2]
+if re.fullmatch(r"[1-9][0-9]*", pid) is None:
+    raise SystemExit("invalid host gateway pid")
+raw = (proc_root / pid / "stat").read_text(encoding="utf-8")
+if len(raw) > 4096:
+    raise SystemExit("host gateway stat exceeds its size bound")
+closing = raw.rfind(")")
+if closing < 0:
+    raise SystemExit("host gateway stat is malformed")
+fields = raw[closing + 2 :].split()
+if len(fields) < 20 or re.fullmatch(r"[1-9][0-9]*", fields[19]) is None:
+    raise SystemExit("host gateway start time is malformed")
+print(fields[19])
+PY
+    )"; then
+      echo "ERROR: exact host gateway start identity is unreadable; refusing Docker maintenance" >&2
+      exit 1
+    fi
+    if ! is_bounded_unsigned_shell_integer "$HOST_GATEWAY_START_TIME_TICKS" \
+        || [ "$HOST_GATEWAY_START_TIME_TICKS" -eq 0 ]; then
+      echo "ERROR: exact host gateway start identity is out of range; refusing Docker maintenance" >&2
+      exit 1
+    fi
+  fi
+}
+
+protect_exact_host_gateway_runtime() {
+  local phase="$1"
+
+  inspect_exact_host_gateway_runtime "$phase"
   if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
     AVAILABLE="$(available_bytes)"
     echo "Docker storage requirement: runtime_mode=host-gateway-live phase=$phase required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
     if [ "$AVAILABLE" -ge "$LIVE_RUNTIME_MIN_FREE_BYTES" ]; then
       echo "Docker storage maintenance deferred while the exact host gateway is live: phase=$phase free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
       exit 0
+    fi
+    if [ "$phase" = "entry" ] \
+        && [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" = "1" ]; then
+      echo "Docker storage online prune admitted under the exclusive operation lock: phase=$phase free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
+      return 0
     fi
     echo "ERROR: exact host gateway runtime has only $AVAILABLE free bytes; $LIVE_RUNTIME_MIN_FREE_BYTES are required for an independent release build" >&2
     echo "ERROR: refusing Docker maintenance, daemon stop, or data-root reset while the host gateway is live" >&2
@@ -191,6 +278,10 @@ docker_daemons_ready() {
 }
 
 if ! docker_daemons_ready; then
+  if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
+    echo "ERROR: Docker/containerd is unavailable while the exact host gateway is live; refusing daemon maintenance" >&2
+    exit 1
+  fi
   echo "Docker is unavailable; recovering builder daemons before inventory"
   run_bounded_daemon_control \
     sudo systemctl start containerd.service docker.service
@@ -256,6 +347,233 @@ run_prune_with_retry() {
   echo "ERROR: Docker $label prune failed after $PRUNE_ATTEMPTS attempts" >&2
   return 1
 }
+
+bounded_moby_shim_count() {
+  local count status
+
+  if count="$(
+    run_bounded_daemon_inventory \
+      pgrep -fc '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' \
+      2>/dev/null
+  )"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+    echo "ERROR: moby shim inventory is unreadable" >&2
+    return 1
+  fi
+  if ! is_bounded_unsigned_shell_integer "$count"; then
+    echo "ERROR: moby shim inventory is malformed" >&2
+    return 1
+  fi
+  if [ "$status" -eq 1 ] && [ "$count" -ne 0 ]; then
+    echo "ERROR: moby shim inventory status is inconsistent" >&2
+    return 1
+  fi
+  # procps pgrep reports no matches as status 1, while the strict restart
+  # rehearsal adapter reports the same successful count probe as status 0.
+  # Both zero-count outcomes are readable.  A nonzero count remains valid only
+  # with pgrep's match status 0; status 2+ is unreadable above.
+  printf '%s\n' "$count"
+}
+
+inventory_empty_online_runtime() {
+  local phase="$1"
+  local docker_container_ids containerd_container_ids containerd_task_ids
+  local docker_container_count containerd_container_count containerd_task_count
+  local moby_shim_count
+
+  if ! docker_container_ids="$(
+    run_bounded_daemon_inventory docker ps -aq 2>/dev/null
+  )"; then
+    echo "ERROR: Docker container inventory is unreadable during online prune: phase=$phase" >&2
+    return 1
+  fi
+  if ! containerd_container_ids="$(
+    run_bounded_daemon_inventory sudo ctr -n moby containers list -q 2>/dev/null
+  )"; then
+    echo "ERROR: containerd container inventory is unreadable during online prune: phase=$phase" >&2
+    return 1
+  fi
+  if ! containerd_task_ids="$(
+    run_bounded_daemon_inventory sudo ctr -n moby tasks list -q 2>/dev/null
+  )"; then
+    echo "ERROR: containerd task inventory is unreadable during online prune: phase=$phase" >&2
+    return 1
+  fi
+  docker_container_count="$(
+    printf '%s\n' "$docker_container_ids" \
+      | awk 'NF { count += 1 } END { print count + 0 }'
+  )"
+  containerd_container_count="$(
+    printf '%s\n' "$containerd_container_ids" \
+      | awk 'NF { count += 1 } END { print count + 0 }'
+  )"
+  containerd_task_count="$(
+    printf '%s\n' "$containerd_task_ids" \
+      | awk 'NF { count += 1 } END { print count + 0 }'
+  )"
+  moby_shim_count="$(bounded_moby_shim_count)"
+  echo "Docker online-prune runtime state: phase=$phase containers=$docker_container_count containerd_containers=$containerd_container_count containerd_tasks=$containerd_task_count moby_shims=$moby_shim_count"
+  if [ "$docker_container_count" -ne 0 ] \
+      || [ "$containerd_container_count" -ne 0 ] \
+      || [ "$containerd_task_count" -ne 0 ] \
+      || [ "$moby_shim_count" -ne 0 ]; then
+    echo "ERROR: refusing online Docker prune unless the exact container runtime is empty: phase=$phase" >&2
+    return 1
+  fi
+}
+
+online_image_ids() {
+  local raw_image_ids
+
+  if ! raw_image_ids="$(
+    run_bounded_daemon_inventory docker image ls -aq --no-trunc 2>/dev/null
+  )"; then
+    echo "ERROR: Docker image inventory is unreadable during online prune" >&2
+    return 1
+  fi
+  printf '%s\n' "$raw_image_ids" | python3 -c '
+import re
+import sys
+
+rows = [row.strip() for row in sys.stdin if row.strip()]
+if len(rows) != len(set(rows)):
+    raise SystemExit("Docker image inventory contains duplicate identities")
+if any(re.fullmatch(r"sha256:[0-9a-f]{64}", row) is None for row in rows):
+    raise SystemExit("Docker image inventory contains a malformed identity")
+print("\n".join(sorted(rows)))
+'
+}
+
+online_docker_root() {
+  local observed_root
+
+  if ! observed_root="$(
+    run_bounded_daemon_inventory \
+      docker info --format '{{.DockerRootDir}}' 2>/dev/null
+  )"; then
+    echo "ERROR: Docker data-root is unreadable during online prune" >&2
+    return 1
+  fi
+  if [ "$observed_root" != "/var/lib/docker" ]; then
+    echo "ERROR: refusing online prune for unexpected Docker data-root: $observed_root" >&2
+    return 1
+  fi
+  printf '%s\n' "$observed_root"
+}
+
+require_same_online_gateway() {
+  local phase="$1"
+
+  inspect_exact_host_gateway_runtime "$phase"
+  if [ "$HOST_GATEWAY_LIVE" -ne 1 ] \
+      || [ "$HOST_GATEWAY_PID" -ne "$ONLINE_GATEWAY_PID" ] \
+      || [ "$HOST_GATEWAY_START_TIME_TICKS" -ne "$ONLINE_GATEWAY_START_TIME_TICKS" ]; then
+    echo "ERROR: exact host gateway identity changed during online Docker reclaim: phase=$phase" >&2
+    return 1
+  fi
+}
+
+require_same_online_docker_root() {
+  local phase="$1"
+  local observed_root
+
+  if ! observed_root="$(online_docker_root)"; then
+    return 1
+  fi
+  if [ "$observed_root" != "$ONLINE_DOCKER_ROOT" ]; then
+    echo "ERROR: Docker data-root changed during online reclaim: phase=$phase" >&2
+    return 1
+  fi
+}
+
+require_same_online_images() {
+  local phase="$1"
+  local observed_image_ids
+
+  if ! observed_image_ids="$(online_image_ids)"; then
+    return 1
+  fi
+  if [ "$observed_image_ids" != "$ONLINE_IMAGE_IDS" ]; then
+    echo "ERROR: Docker image identity changed during online reclaim: phase=$phase" >&2
+    return 1
+  fi
+}
+
+if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
+  ONLINE_GATEWAY_PID="$HOST_GATEWAY_PID"
+  ONLINE_GATEWAY_START_TIME_TICKS="$HOST_GATEWAY_START_TIME_TICKS"
+  inventory_empty_online_runtime "pre-prune"
+  ONLINE_DOCKER_ROOT="$(online_docker_root)"
+  ONLINE_IMAGE_IDS="$(online_image_ids)"
+  run_prune_with_retry builder docker builder prune --all --force
+  inventory_empty_online_runtime "post-builder-prune"
+  require_same_online_gateway "post-builder-prune"
+  require_same_online_docker_root "post-builder-prune"
+  require_same_online_images "post-builder-prune"
+  AVAILABLE="$(available_bytes)"
+  if [ "$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES" ]; then
+    inventory_empty_online_runtime "pre-stale-reclaim"
+    require_same_online_gateway "pre-stale-reclaim"
+    require_same_online_docker_root "pre-stale-reclaim"
+    require_same_online_images "pre-stale-reclaim"
+    if ! ONLINE_RECLAIM_RESULT="$(
+      run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+        "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py"
+    )"; then
+      echo "ERROR: validated stale Docker overlay reclaim failed while the exact host gateway is live" >&2
+      exit 1
+    fi
+    printf '%s\n' "$ONLINE_RECLAIM_RESULT"
+    if ! printf '%s' "$ONLINE_RECLAIM_RESULT" | python3 -c '
+import json
+import sys
+
+document = json.load(sys.stdin)
+count_fields = (
+    "active_container_count",
+    "active_image_count",
+    "active_layer_count",
+    "active_mount_count",
+    "mounted_overlay_count",
+    "reclaimed_layer_record_count",
+    "reclaimed_mount_count",
+    "reclaimed_mount_record_count",
+    "reclaimed_overlay_dir_count",
+    "reclaimed_overlay_link_count",
+)
+if document.get("schema_version") != "leadpoet.docker_stale_mount_reclaim.v3":
+    raise SystemExit("invalid online Docker reclaim result schema")
+if document.get("status") != "ready":
+    raise SystemExit("online Docker reclaim did not report ready")
+if any(
+    not isinstance(document.get(field), int) or document[field] < 0
+    for field in count_fields
+):
+    raise SystemExit("online Docker reclaim returned malformed counts")
+if document["active_container_count"] != 0 or document["active_mount_count"] != 0:
+    raise SystemExit("online Docker reclaim observed a nonempty runtime")
+'; then
+      echo "ERROR: validated stale Docker overlay reclaim returned malformed evidence" >&2
+      exit 1
+    fi
+  fi
+  inventory_empty_online_runtime "post-reclaim"
+  require_same_online_gateway "post-reclaim"
+  require_same_online_docker_root "post-reclaim"
+  require_same_online_images "post-reclaim"
+  AVAILABLE="$(available_bytes)"
+  if [ "$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES" ]; then
+    echo "ERROR: bounded online Docker reclaim left only $AVAILABLE free bytes; $LIVE_RUNTIME_MIN_FREE_BYTES are required for an independent release build" >&2
+    echo "ERROR: refusing daemon stop or data-root reset while the exact host gateway is live" >&2
+    exit 1
+  fi
+  echo "Docker storage ready after bounded online reclaim: free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES runtime_mode=host-gateway-live"
+  exit 0
+fi
 
 run_prune_with_retry image docker image prune --all --force
 run_prune_with_retry builder docker builder prune --all --force
@@ -407,9 +725,7 @@ NON_MOBY_NAMESPACE_COUNT="$(
     | wc -l \
     | tr -d '[:space:]'
 )"
-MOBY_SHIM_COUNT="$(
-  pgrep -fc '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' || true
-)"
+MOBY_SHIM_COUNT="$(bounded_moby_shim_count)"
 LAYERDB_IMAGE_COUNT=0
 LAYERDB_MOUNT_COUNT=0
 OVERLAY_DIRECTORY_COUNT=0
@@ -552,9 +868,10 @@ if ! start_docker_daemons_and_wait; then
   exit 1
 fi
 
+POST_RESET_MOBY_SHIM_COUNT="$(bounded_moby_shim_count)"
 if [ "$(run_bounded_daemon_inventory sudo ctr -n moby containers list -q | sed '/^$/d' | wc -l | tr -d '[:space:]')" -ne 0 ] \
     || [ "$(run_bounded_daemon_inventory sudo ctr -n moby tasks list -q | sed '/^$/d' | wc -l | tr -d '[:space:]')" -ne 0 ] \
-    || [ "$(pgrep -fc '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' || true)" -ne 0 ]; then
+    || [ "$POST_RESET_MOBY_SHIM_COUNT" -ne 0 ]; then
   echo "ERROR: Docker/containerd reset left stale moby runtime state" >&2
   exit 1
 fi

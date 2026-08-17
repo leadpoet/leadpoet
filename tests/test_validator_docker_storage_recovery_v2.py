@@ -34,9 +34,24 @@ def _run_recovery(
     live_runtime_min_free_bytes: int = 18_000_000_000,
     stale_overlay_mounts: int = 0,
     available_after_stale_reclaim: Optional[int] = None,
+    available_after_builder_prune: Optional[int] = None,
+    images_after_builder_prune: Optional[int] = None,
     live_restore_enabled: bool = True,
     host_gateway_live: bool = False,
     host_gateway_live_after_inventory: bool = False,
+    allow_live_host_gateway_prune: bool = False,
+    host_gateway_exits_during_live_prune: bool = False,
+    host_gateway_start_time_changes_during_live_prune: bool = False,
+    runtime_appears_after_stale_reclaim: bool = False,
+    docker_root: str = "/var/lib/docker",
+    docker_root_after_builder_prune: Optional[str] = None,
+    fail_shim_probe: bool = False,
+    malformed_shim_probe: bool = False,
+    hang_shim_probe: bool = False,
+    zero_shim_probe_succeeds: bool = False,
+    nonzero_shim_probe_reports_no_match: bool = False,
+    fail_stale_reclaimer: bool = False,
+    malformed_stale_reclaimer: bool = False,
     fail_umount: bool = False,
     fail_systemctl_stop: bool = False,
     fail_daemon_recovery: bool = False,
@@ -44,6 +59,7 @@ def _run_recovery(
     hang_ctr_probe: bool = False,
     hang_systemctl_start: bool = False,
     hang_systemctl_stop: bool = False,
+    prune_attempts: Optional[int] = None,
     daemon_ready_attempts: int = 3,
     daemon_probe_timeout_seconds: int = 1,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
@@ -62,6 +78,10 @@ def _run_recovery(
             b"/home/ec2-user/venv311/bin/python3\0"
             b"-u\0-m\0gateway.main\0"
         )
+        (gateway_proc / "stat").write_text(
+            "200 (python3) " + " ".join(["S", *(["0"] * 18), "12345"]) + "\n",
+            encoding="utf-8",
+        )
     sudo_log = tmp_path / "sudo.log"
 
     _write_executable(
@@ -70,6 +90,8 @@ def _run_recovery(
 available="$FAKE_AVAILABLE"
 if [ -f "$FAKE_STALE_RECLAIM_MARKER" ]; then
   available="$FAKE_AVAILABLE_AFTER_STALE_RECLAIM"
+elif [ -f "$FAKE_BUILDER_PRUNE_MARKER" ]; then
+  available="$FAKE_AVAILABLE_AFTER_BUILDER_PRUNE"
 fi
 printf 'Avail\\n%s\\n' "$available"
 """,
@@ -82,6 +104,14 @@ emit_rows() {
   local index=0
   while [ "$index" -lt "$count" ]; do
     printf 'row-%s\\n' "$index"
+    index=$((index + 1))
+  done
+}
+emit_image_rows() {
+  local count="$1"
+  local index=0
+  while [ "$index" -lt "$count" ]; do
+    printf 'sha256:%064x\n' "$((index + 1))"
     index=$((index + 1))
   done
 }
@@ -100,7 +130,19 @@ case "${1:-}:${2:-}" in
   info:)
     exit 0
     ;;
-  image:prune|builder:prune)
+  image:prune)
+    touch "$FAKE_IMAGE_PRUNE_MARKER"
+    exit 0
+    ;;
+  builder:prune)
+    touch "$FAKE_BUILDER_PRUNE_MARKER"
+    if [ "$FAKE_HOST_GATEWAY_EXITS_DURING_LIVE_PRUNE" = "1" ]; then
+      rm -rf "$LEADPOET_PROC_ROOT/200"
+    fi
+    if [ "$FAKE_HOST_GATEWAY_START_TIME_CHANGES_DURING_LIVE_PRUNE" = "1" ]; then
+      printf '200 (python3) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 54321\n' \
+        > "$LEADPOET_PROC_ROOT/200/stat"
+    fi
     exit 0
     ;;
   system:prune)
@@ -116,7 +158,12 @@ case "${1:-}:${2:-}" in
     exit 0
     ;;
   ps:-aq)
-    emit_rows "$FAKE_CONTAINERS"
+    container_count="$FAKE_CONTAINERS"
+    if [ -f "$FAKE_STALE_RECLAIM_MARKER" ] \
+        && [ "$FAKE_RUNTIME_APPEARS_AFTER_STALE_RECLAIM" = "1" ]; then
+      container_count=1
+    fi
+    emit_rows "$container_count"
     exit 0
     ;;
   inspect:--format)
@@ -128,7 +175,12 @@ case "${1:-}:${2:-}" in
     exit 0
     ;;
   image:ls)
-    emit_rows "$FAKE_IMAGES"
+    image_count="$FAKE_IMAGES"
+    if [ -f "$FAKE_BUILDER_PRUNE_MARKER" ] \
+        && [ "$FAKE_IMAGES_AFTER_BUILDER_PRUNE" -ge 0 ]; then
+      image_count="$FAKE_IMAGES_AFTER_BUILDER_PRUNE"
+    fi
+    emit_image_rows "$image_count"
     exit 0
     ;;
   volume:ls)
@@ -138,7 +190,13 @@ case "${1:-}:${2:-}" in
   info:--format)
     case "${3:-}" in
       *LiveRestoreEnabled*) printf '%s\\n' "$FAKE_LIVE_RESTORE_ENABLED" ;;
-      *) printf '/var/lib/docker\\n' ;;
+      *)
+        docker_root="$FAKE_DOCKER_ROOT"
+        if [ -f "$FAKE_BUILDER_PRUNE_MARKER" ]; then
+          docker_root="$FAKE_DOCKER_ROOT_AFTER_BUILDER_PRUNE"
+        fi
+        printf '%s\\n' "$docker_root"
+        ;;
     esac
     exit 0
     ;;
@@ -204,9 +262,16 @@ case "$command" in
           "$FAKE_CONTAINERS" "$FAKE_IMAGES" 0
         ;;
       *docker_stale_mount_reclaimer_v2.py*)
+        if [ "$FAKE_FAIL_STALE_RECLAIMER" = "1" ]; then
+          exit 1
+        fi
         touch "$FAKE_STALE_RECLAIM_MARKER"
-        printf '{"active_mount_count":%s,"mounted_overlay_count":%s,"reclaimed_layer_record_count":0,"reclaimed_mount_count":%s,"reclaimed_mount_record_count":0,"reclaimed_overlay_dir_count":0,"reclaimed_overlay_link_count":0,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}\n' \
-          "$FAKE_CONTAINERS" "$((FAKE_CONTAINERS + FAKE_STALE_OVERLAY_MOUNTS))" "$FAKE_STALE_OVERLAY_MOUNTS"
+        if [ "$FAKE_MALFORMED_STALE_RECLAIMER" = "1" ]; then
+          printf '{}\n'
+          exit 0
+        fi
+        printf '{"active_container_count":%s,"active_image_count":%s,"active_layer_count":%s,"active_mount_count":%s,"mounted_overlay_count":%s,"reclaimed_layer_record_count":0,"reclaimed_mount_count":%s,"reclaimed_mount_record_count":0,"reclaimed_overlay_dir_count":0,"reclaimed_overlay_link_count":0,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}\n' \
+          "$FAKE_CONTAINERS" "$FAKE_IMAGES" "$FAKE_LAYERDB_IMAGES" "$FAKE_CONTAINERS" "$((FAKE_CONTAINERS + FAKE_STALE_OVERLAY_MOUNTS))" "$FAKE_STALE_OVERLAY_MOUNTS"
         ;;
       *) exit 2 ;;
     esac
@@ -241,11 +306,21 @@ case "$command" in
     fi
     case "${3:-}:${4:-}" in
       containers:list)
-        emit_rows "$FAKE_CONTAINERD_CONTAINERS"
+        container_count="$FAKE_CONTAINERD_CONTAINERS"
+        if [ -f "$FAKE_STALE_RECLAIM_MARKER" ] \
+            && [ "$FAKE_RUNTIME_APPEARS_AFTER_STALE_RECLAIM" = "1" ]; then
+          container_count=1
+        fi
+        emit_rows "$container_count"
         ;;
       tasks:list)
         if [ "${5:-}" = "-q" ]; then
-          emit_rows "$FAKE_CONTAINERD_TASKS"
+          task_count="$FAKE_CONTAINERD_TASKS"
+          if [ -f "$FAKE_STALE_RECLAIM_MARKER" ] \
+              && [ "$FAKE_RUNTIME_APPEARS_AFTER_STALE_RECLAIM" = "1" ]; then
+            task_count=1
+          fi
+          emit_rows "$task_count"
         else
           probe=0
           if [ -f "$FAKE_RUNNING_TASK_PROBE_STATE" ]; then
@@ -319,6 +394,16 @@ esac
     _write_executable(
         bin_dir / "pgrep",
         """#!/bin/bash
+if [ "$FAKE_HANG_SHIM_PROBE" = "1" ]; then
+  exec /bin/sleep 60
+fi
+if [ "$FAKE_FAIL_SHIM_PROBE" = "1" ]; then
+  exit 2
+fi
+if [ "$FAKE_MALFORMED_SHIM_PROBE" = "1" ]; then
+  printf 'not-a-number\\n'
+  exit 0
+fi
 if [ "$FAKE_HOST_GATEWAY_LIVE_AFTER_INVENTORY" = "1" ] \
     && [ ! -f "$FAKE_LATE_HOST_GATEWAY_MARKER" ]; then
   mkdir -p "$LEADPOET_PROC_ROOT/201"
@@ -326,13 +411,28 @@ if [ "$FAKE_HOST_GATEWAY_LIVE_AFTER_INVENTORY" = "1" ] \
     > "$LEADPOET_PROC_ROOT/201/status"
   printf '/home/ec2-user/venv311/bin/python3\\0-u\\0-m\\0gateway.main\\0' \
     > "$LEADPOET_PROC_ROOT/201/cmdline"
+  printf '201 (python3) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 67890\n' \
+    > "$LEADPOET_PROC_ROOT/201/stat"
   touch "$FAKE_LATE_HOST_GATEWAY_MARKER"
 fi
+shim_count="$FAKE_MOBY_SHIMS"
 if [ -f "$FAKE_CONTAINERD_RESET_MARKER" ]; then
-  printf '0\\n'
-else
-  printf '%s\\n' "$FAKE_MOBY_SHIMS"
+  shim_count=0
+elif [ -f "$FAKE_STALE_RECLAIM_MARKER" ] \
+    && [ "$FAKE_RUNTIME_APPEARS_AFTER_STALE_RECLAIM" = "1" ]; then
+  shim_count=1
 fi
+printf '%s\\n' "$shim_count"
+if [ "$shim_count" -eq 0 ]; then
+  if [ "$FAKE_ZERO_SHIM_PROBE_SUCCEEDS" = "1" ]; then
+    exit 0
+  fi
+  exit 1
+fi
+if [ "$FAKE_NONZERO_SHIM_PROBE_REPORTS_NO_MATCH" = "1" ]; then
+  exit 1
+fi
+exit 0
 """,
     )
 
@@ -340,6 +440,9 @@ fi
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET": "1",
+        "VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE": (
+            "1" if allow_live_host_gateway_prune else "0"
+        ),
         "VALIDATOR_DOCKER_MIN_FREE_BYTES": "30000000000",
         "VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES": str(
             live_runtime_min_free_bytes
@@ -355,11 +458,21 @@ fi
             if available_after_stale_reclaim is None
             else available_after_stale_reclaim
         ),
+        "FAKE_AVAILABLE_AFTER_BUILDER_PRUNE": str(
+            available
+            if available_after_builder_prune is None
+            else available_after_builder_prune
+        ),
         "FAKE_LIVE_RESTORE_ENABLED": (
             "true" if live_restore_enabled else "false"
         ),
         "FAKE_CONTAINERS": str(containers),
         "FAKE_IMAGES": str(images),
+        "FAKE_IMAGES_AFTER_BUILDER_PRUNE": str(
+            -1
+            if images_after_builder_prune is None
+            else images_after_builder_prune
+        ),
         "FAKE_VOLUMES": str(volumes),
         "FAKE_LAYERDB_IMAGES": str(layerdb_images),
         "FAKE_LAYERDB_MOUNTS": str(layerdb_mounts),
@@ -374,14 +487,29 @@ fi
         "FAKE_SYSTEM_PRUNE_STATE": str(tmp_path / "system-prune-attempts"),
         "FAKE_NON_MOBY_NAMESPACES": str(non_moby_namespaces),
         "FAKE_MOBY_SHIMS": str(moby_shims),
+        "FAKE_FAIL_SHIM_PROBE": "1" if fail_shim_probe else "0",
+        "FAKE_MALFORMED_SHIM_PROBE": "1" if malformed_shim_probe else "0",
+        "FAKE_HANG_SHIM_PROBE": "1" if hang_shim_probe else "0",
+        "FAKE_ZERO_SHIM_PROBE_SUCCEEDS": (
+            "1" if zero_shim_probe_succeeds else "0"
+        ),
+        "FAKE_NONZERO_SHIM_PROBE_REPORTS_NO_MATCH": (
+            "1" if nonzero_shim_probe_reports_no_match else "0"
+        ),
         "FAKE_STALE_OVERLAY_MOUNTS": str(stale_overlay_mounts),
         "FAKE_STALE_RECLAIM_MARKER": str(tmp_path / "stale-mounts-reclaimed"),
+        "FAKE_BUILDER_PRUNE_MARKER": str(tmp_path / "builder-pruned"),
+        "FAKE_IMAGE_PRUNE_MARKER": str(tmp_path / "image-pruned"),
         "FAKE_CONTAINERD_RESET_MARKER": str(tmp_path / "containerd-reset"),
         "FAKE_DAEMONS_STOPPED_MARKER": str(tmp_path / "daemons-stopped"),
         "FAKE_DAEMON_READY_PROBE_STATE": str(
             tmp_path / "daemon-ready-probes"
         ),
         "FAKE_FAIL_UMOUNT": "1" if fail_umount else "0",
+        "FAKE_FAIL_STALE_RECLAIMER": "1" if fail_stale_reclaimer else "0",
+        "FAKE_MALFORMED_STALE_RECLAIMER": (
+            "1" if malformed_stale_reclaimer else "0"
+        ),
         "FAKE_FAIL_SYSTEMCTL_STOP": "1" if fail_systemctl_stop else "0",
         "FAKE_FAIL_DAEMON_RECOVERY": "1" if fail_daemon_recovery else "0",
         "FAKE_HANG_DAEMON_PROBE": "1" if hang_daemon_probe else "0",
@@ -391,12 +519,31 @@ fi
         "FAKE_HOST_GATEWAY_LIVE_AFTER_INVENTORY": (
             "1" if host_gateway_live_after_inventory else "0"
         ),
+        "FAKE_HOST_GATEWAY_EXITS_DURING_LIVE_PRUNE": (
+            "1" if host_gateway_exits_during_live_prune else "0"
+        ),
+        "FAKE_HOST_GATEWAY_START_TIME_CHANGES_DURING_LIVE_PRUNE": (
+            "1" if host_gateway_start_time_changes_during_live_prune else "0"
+        ),
+        "FAKE_RUNTIME_APPEARS_AFTER_STALE_RECLAIM": (
+            "1" if runtime_appears_after_stale_reclaim else "0"
+        ),
+        "FAKE_DOCKER_ROOT": docker_root,
+        "FAKE_DOCKER_ROOT_AFTER_BUILDER_PRUNE": (
+            docker_root
+            if docker_root_after_builder_prune is None
+            else docker_root_after_builder_prune
+        ),
         "FAKE_LATE_HOST_GATEWAY_MARKER": str(
             tmp_path / "late-host-gateway"
         ),
         "FAKE_DOCKER_ROOT_BYTES": "229720371200",
         "FAKE_SUDO_LOG": str(sudo_log),
-        "VALIDATOR_DOCKER_PRUNE_ATTEMPTS": str(system_prune_failures + 1),
+        "VALIDATOR_DOCKER_PRUNE_ATTEMPTS": str(
+            system_prune_failures + 1
+            if prune_attempts is None
+            else prune_attempts
+        ),
         "VALIDATOR_DOCKER_DAEMON_READY_ATTEMPTS": str(
             daemon_ready_attempts
         ),
@@ -655,6 +802,481 @@ def test_validator_docker_recovery_fails_closed_for_low_space_host_gateway(
     assert not (tmp_path / "system-prune-attempts").exists()
     assert "systemctl stop" not in sudo_log
     assert "rm -rf" not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_preserves_images_and_reaches_floor(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        available_after_stale_reclaim=40_000_000_000,
+        images=9,
+        layerdb_images=1_562,
+        layerdb_mounts=133,
+        overlay_directories=1_834,
+        stale_overlay_mounts=133,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "online prune admitted under the exclusive operation lock" in result.stdout
+    assert "phase=pre-prune containers=0" in result.stdout
+    assert "phase=post-builder-prune containers=0" in result.stdout
+    assert "phase=pre-stale-reclaim containers=0" in result.stdout
+    assert "phase=post-reclaim containers=0" in result.stdout
+    assert "Docker storage ready after bounded online reclaim" in result.stdout
+    assert "docker_stale_mount_reclaimer_v2.py" in sudo_log
+    assert "docker_live_restore_reconciler_v2.py" not in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+    assert "pkill" not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_malformed_free_space(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available="not-a-number",  # type: ignore[arg-type]
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 1
+    assert "filesystem free-space state is malformed" in result.stderr
+    assert "integer expression expected" not in result.stderr
+    assert not (tmp_path / "builder-pruned").exists()
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_overflowing_free_space(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available="999999999999999999999999999999",  # type: ignore[arg-type]
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 1
+    assert "filesystem free-space state is malformed" in result.stderr
+    assert "integer expression expected" not in result.stderr
+    assert not (tmp_path / "builder-pruned").exists()
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_overflowing_floor(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        live_runtime_min_free_bytes=999_999_999_999_999_999_999_999,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 2
+    assert "positive bounded integer byte count" in result.stderr
+    assert "integer expression expected" not in result.stderr
+    assert not (tmp_path / "builder-pruned").exists()
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_overflowing_retry_bound(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        prune_attempts=999_999_999_999_999_999_999_999,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 2
+    assert "PRUNE_ATTEMPTS must be between 1 and 300" in result.stderr
+    assert "integer expression expected" not in result.stderr
+    assert not (tmp_path / "builder-pruned").exists()
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_builder_prune_can_reach_floor_without_raw_reclaim(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=17_500_000_000,
+        available_after_builder_prune=19_000_000_000,
+        images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Docker storage ready after bounded online reclaim" in result.stdout
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+
+
+def test_live_host_gateway_online_reclaim_accepts_zero_count_success_status(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=17_500_000_000,
+        available_after_builder_prune=19_000_000_000,
+        images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        zero_shim_probe_succeeds=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "moby_shims=0" in result.stdout
+    assert "Docker storage ready after bounded online reclaim" in result.stdout
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+
+
+def test_live_host_gateway_online_reclaim_fails_if_floor_remains_unmet(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        available_after_stale_reclaim=17_999_999_999,
+        images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 1
+    assert "bounded online Docker reclaim left only 17999999999" in result.stderr
+    assert "refusing daemon stop or data-root reset" in result.stderr
+    assert "docker_stale_mount_reclaimer_v2.py" in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_refuses_nonempty_runtime(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        containers=1,
+        containerd_containers=1,
+        containerd_tasks=1,
+        moby_shims=1,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 1
+    assert (
+        "refusing online Docker prune unless the exact container runtime is empty"
+        in result.stderr
+    )
+    assert not (tmp_path / "builder-pruned").exists()
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "systemctl" not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_refuses_nonzero_no_match_status(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        moby_shims=1,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        nonzero_shim_probe_reports_no_match=True,
+    )
+
+    assert result.returncode == 1
+    assert "moby shim inventory status is inconsistent" in result.stderr
+    assert not (tmp_path / "builder-pruned").exists()
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "systemctl" not in sudo_log
+
+
+def test_offline_recovery_rejects_nonzero_no_match_shim_status(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        moby_shims=1,
+        nonzero_shim_probe_reports_no_match=True,
+    )
+
+    assert result.returncode == 1
+    assert "moby shim inventory status is inconsistent" in result.stderr
+    assert "systemctl" not in sudo_log
+    assert "pkill" not in sudo_log
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_failed_shim_inventory(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        fail_shim_probe=True,
+    )
+
+    assert result.returncode == 1
+    assert "moby shim inventory is unreadable" in result.stderr
+    assert not (tmp_path / "builder-pruned").exists()
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_malformed_shim_inventory(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        malformed_shim_probe=True,
+    )
+
+    assert result.returncode == 1
+    assert "moby shim inventory is malformed" in result.stderr
+    assert "integer expression expected" not in result.stderr
+    assert not (tmp_path / "builder-pruned").exists()
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_bounds_hung_shim_inventory(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        hang_shim_probe=True,
+        daemon_probe_timeout_seconds=1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 1
+    assert elapsed < 8
+    assert "moby shim inventory is unreadable" in result.stderr
+    assert not (tmp_path / "builder-pruned").exists()
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_refuses_gateway_identity_change(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        host_gateway_exits_during_live_prune=True,
+    )
+
+    assert result.returncode == 1
+    assert "exact host gateway identity changed during online Docker reclaim" in result.stderr
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert "systemctl" not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_refuses_image_identity_change(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        images=3,
+        images_after_builder_prune=2,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 1
+    assert "Docker image identity changed during online reclaim" in result.stderr
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert "systemctl" not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_never_recovers_unreadable_daemon(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        hang_ctr_probe=True,
+        daemon_ready_attempts=1,
+        daemon_probe_timeout_seconds=1,
+    )
+
+    assert result.returncode == 1
+    assert "refusing daemon maintenance" in result.stderr
+    assert "systemctl" not in sudo_log
+    assert not (tmp_path / "builder-pruned").exists()
+
+
+def test_live_host_gateway_online_reclaim_rejects_unexpected_docker_root(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        docker_root="/srv/docker",
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 1
+    assert "refusing online prune for unexpected Docker data-root" in result.stderr
+    assert not (tmp_path / "builder-pruned").exists()
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_docker_root_change(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        docker_root_after_builder_prune="/srv/docker",
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+    )
+
+    assert result.returncode == 1
+    assert "refusing online prune for unexpected Docker data-root" in result.stderr
+    assert (tmp_path / "builder-pruned").exists()
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert "rm " not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_fails_closed_on_helper_error(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        fail_stale_reclaimer=True,
+    )
+
+    assert result.returncode == 1
+    assert "validated stale Docker overlay reclaim failed" in result.stderr
+    assert "docker_stale_mount_reclaimer_v2.py" in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_pid_reuse_identity(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        host_gateway_start_time_changes_during_live_prune=True,
+    )
+
+    assert result.returncode == 1
+    assert "exact host gateway identity changed during online Docker reclaim" in result.stderr
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "systemctl" not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_post_reclaim_runtime_race(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        available_after_stale_reclaim=40_000_000_000,
+        images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        runtime_appears_after_stale_reclaim=True,
+    )
+
+    assert result.returncode == 1
+    assert "phase=post-reclaim" in result.stderr
+    assert "refusing online Docker prune unless the exact container runtime is empty" in result.stderr
+    assert "docker_stale_mount_reclaimer_v2.py" in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert "systemctl" not in sudo_log
+
+
+def test_live_host_gateway_online_reclaim_rejects_malformed_helper_evidence(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=15_000_000_000,
+        images=3,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        malformed_stale_reclaimer=True,
+    )
+
+    assert result.returncode == 1
+    assert "returned malformed evidence" in result.stderr
+    assert "docker_stale_mount_reclaimer_v2.py" in sudo_log
+    assert not (tmp_path / "image-pruned").exists()
+    assert "systemctl" not in sudo_log
 
 
 def test_validator_docker_recovery_rechecks_gateway_immediately_before_stop(

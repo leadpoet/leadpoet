@@ -13,6 +13,7 @@ def test_release_workflow_reclaims_all_unreferenced_docker_state():
     assert source.count("docker image prune --all --force") == 2
     assert source.count("docker builder prune --all --force") == 2
     assert source.count("validator_tee/scripts/reclaim_docker_storage_v2.sh") == 4
+    assert source.count("VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1") == 2
     assert source.count(
         'sudo rm -rf -- \\\n            "$RUNNER_TEMP/offline-artifacts"'
     ) == 4

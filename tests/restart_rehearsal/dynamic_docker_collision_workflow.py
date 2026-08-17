@@ -929,6 +929,10 @@ def exercise_dynamic_docker_collision(
         (gateway_proc / "cmdline").write_bytes(
             os.fsencode(sys.executable) + b"\0-u\0-m\0gateway.main\0"
         )
+        (gateway_proc / "stat").write_text(
+            f"{gateway_pid} (python) " + " ".join(["S", *(["0"] * 18), "12345"]) + "\n",
+            encoding="utf-8",
+        )
 
         event_path = root / "events.log"
         guard_ready = root / "guard-ready"
@@ -975,12 +979,46 @@ os.execv(real, [real, *args])
         _write_executable(
             fake_bin / "df",
             """#!/bin/sh
+if [ "${REHEARSAL_ONLINE_RECLAIM:-0}" = "1" ]; then
+  available="$REHEARSAL_ONLINE_AVAILABLE_BEFORE"
+  if [ -f "$REHEARSAL_ONLINE_STALE_MARKER" ]; then
+    available="$REHEARSAL_ONLINE_AVAILABLE_AFTER"
+  fi
+  printf 'Avail\\n%s\\n' "$available"
+  exit 0
+fi
 printf 'Avail\\n%s\\n' "$REHEARSAL_AVAILABLE_BYTES"
 """,
         )
         _write_executable(
             fake_bin / "docker",
             """#!/bin/sh
+if [ "${REHEARSAL_ONLINE_RECLAIM:-0}" = "1" ]; then
+  printf 'docker %s\\n' "$*" >> "$REHEARSAL_ONLINE_COMMAND_LOG"
+  case "$*" in
+    "info"|"ps -aq")
+      exit 0
+      ;;
+    "info --format {{.DockerRootDir}}")
+      printf '/var/lib/docker\\n'
+      exit 0
+      ;;
+    "image ls -aq --no-trunc")
+      printf '%s\\n%s\\n' \
+        "$REHEARSAL_ONLINE_IMAGE_ONE" \
+        "$REHEARSAL_ONLINE_IMAGE_TWO"
+      printf '%s,%s\\n' \
+        "$REHEARSAL_ONLINE_IMAGE_ONE" \
+        "$REHEARSAL_ONLINE_IMAGE_TWO" \
+        >> "$REHEARSAL_ONLINE_IMAGE_LOG"
+      exit 0
+      ;;
+    "builder prune --all --force")
+      exit 0
+      ;;
+  esac
+  exit 97
+fi
 printf '%s\\n' "$*" >> "$REHEARSAL_CANDIDATE_DOCKER_LOG"
 exit 97
 """,
@@ -988,8 +1026,33 @@ exit 97
         _write_executable(
             fake_bin / "sudo",
             """#!/bin/sh
+if [ "${REHEARSAL_ONLINE_RECLAIM:-0}" = "1" ]; then
+  printf 'sudo %s\\n' "$*" >> "$REHEARSAL_ONLINE_COMMAND_LOG"
+  case "$*" in
+    "ctr -n moby containers list -q"|"ctr -n moby tasks list -q")
+      exit 0
+      ;;
+    "env PYTHONSAFEPATH=1 python3 $REHEARSAL_ONLINE_STALE_RECLAIMER")
+      touch "$REHEARSAL_ONLINE_STALE_MARKER"
+      printf '%s\\n' '{"active_container_count":0,"active_image_count":2,"active_layer_count":2,"active_mount_count":0,"mounted_overlay_count":0,"reclaimed_layer_record_count":1,"reclaimed_mount_count":0,"reclaimed_mount_record_count":1,"reclaimed_overlay_dir_count":1,"reclaimed_overlay_link_count":1,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}'
+      exit 0
+      ;;
+  esac
+  exit 98
+fi
 printf '%s\\n' "$*" >> "$REHEARSAL_CANDIDATE_SUDO_LOG"
 exit 98
+""",
+        )
+        _write_executable(
+            fake_bin / "pgrep",
+            """#!/bin/sh
+if [ "${REHEARSAL_ONLINE_RECLAIM:-0}" = "1" ] \
+    && [ "$*" = "-fc ^/usr/bin/containerd-shim-runc-v2 -namespace moby " ]; then
+  printf '0\\n'
+  exit 1
+fi
+exit 96
 """,
         )
 
@@ -1145,6 +1208,97 @@ exit 98
         ):
             raise RuntimeError("host-live collision did not preserve the N-1 reader")
 
+        online_command_log = root / "online-reclaim-commands.log"
+        online_image_log = root / "online-reclaim-images.log"
+        online_stale_marker = root / "online-stale-reclaimed"
+        reclaim_script = (
+            normalized_root / "validator_tee/scripts/reclaim_docker_storage_v2.sh"
+        )
+        stale_reclaimer = (
+            normalized_root
+            / "validator_tee/host/docker_stale_mount_reclaimer_v2.py"
+        )
+        image_ids = tuple(
+            "sha256:" + hashlib.sha256(value.encode("ascii")).hexdigest()
+            for value in (from_sha, candidate_sha)
+        )
+        gateway_identity = tuple(
+            (gateway_proc / name).read_bytes()
+            for name in ("status", "cmdline", "stat")
+        )
+        online_result = subprocess.run(
+            ["bash", str(reclaim_script)],
+            cwd=normalized_root,
+            env={
+                **reclaim_environment,
+                "VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET": "1",
+                "VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE": "1",
+                "VALIDATOR_DOCKER_PRUNE_ATTEMPTS": "1",
+                "REHEARSAL_ONLINE_RECLAIM": "1",
+                "REHEARSAL_ONLINE_AVAILABLE_BEFORE": str(live_floor_bytes - 1),
+                "REHEARSAL_ONLINE_AVAILABLE_AFTER": str(available_bytes),
+                "REHEARSAL_ONLINE_STALE_MARKER": str(online_stale_marker),
+                "REHEARSAL_ONLINE_COMMAND_LOG": str(online_command_log),
+                "REHEARSAL_ONLINE_IMAGE_LOG": str(online_image_log),
+                "REHEARSAL_ONLINE_IMAGE_ONE": image_ids[0],
+                "REHEARSAL_ONLINE_IMAGE_TWO": image_ids[1],
+                "REHEARSAL_ONLINE_STALE_RECLAIMER": str(stale_reclaimer),
+            },
+            capture_output=True,
+            text=True,
+            timeout=collision_timeout,
+            check=False,
+        )
+        online_commands = online_command_log.read_text(encoding="utf-8").splitlines()
+        allowed_commands = {
+            "docker info",
+            "docker info --format {{.DockerRootDir}}",
+            "docker ps -aq",
+            "docker image ls -aq --no-trunc",
+            "docker builder prune --all --force",
+            "sudo ctr -n moby containers list -q",
+            "sudo ctr -n moby tasks list -q",
+            "sudo env PYTHONSAFEPATH=1 python3 " + str(stale_reclaimer),
+        }
+        mutations = [
+            command
+            for command in online_commands
+            if " prune " in command or "docker_stale_mount_reclaimer_v2.py" in command
+        ]
+        image_inventories = online_image_log.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if (
+            online_result.returncode != 0
+            or mutations
+            != [
+                "docker builder prune --all --force",
+                "sudo env PYTHONSAFEPATH=1 python3 " + str(stale_reclaimer),
+            ]
+            or any(command not in allowed_commands for command in online_commands)
+            or len(image_inventories) < 4
+            or len(set(image_inventories)) != 1
+            or any(
+                f"phase={phase} containers=0" not in online_result.stdout
+                for phase in (
+                    "pre-prune",
+                    "post-builder-prune",
+                    "pre-stale-reclaim",
+                    "post-reclaim",
+                )
+            )
+            or "Docker storage ready after bounded online reclaim"
+            not in online_result.stdout
+            or f"free_bytes={available_bytes}" not in online_result.stdout
+            or not online_stale_marker.is_file()
+            or gateway_identity
+            != tuple(
+                (gateway_proc / name).read_bytes()
+                for name in ("status", "cmdline", "stat")
+            )
+        ):
+            raise RuntimeError("bounded online host-gateway reclaim contract differs")
+
     shared_matrix = _candidate_shared_lifecycle_matrix(
         source_root=normalized_root,
         timeout_seconds=model_timeout_seconds,
@@ -1164,6 +1318,7 @@ exit 98
         "host_live_prevented_docker_stop_or_reset": True,
         "candidate_gateway_emergency_uses_guarded_reclaim": True,
         "first_activation_requires_preexisting_disk_reserve": True,
+        "live_gateway_online_reclaim_terminal_and_exact": True,
         "dynamic_docker_collision_exact": True,
     }
 

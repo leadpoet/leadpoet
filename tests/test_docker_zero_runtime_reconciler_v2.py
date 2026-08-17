@@ -11,6 +11,8 @@ import pytest
 
 from validator_tee.host.docker_zero_runtime_reconciler_v2 import (
     DockerZeroRuntimeReconcilerV2Error,
+    _RootIdentity,
+    _require_parent_fd_lock,
     reconcile_zero_runtime_docker_daemon_v2,
     verify_docker_operation_locks_v2,
 )
@@ -146,6 +148,48 @@ class _LockVerifier:
         self.calls += 1
         if self.fail_on_call and self.calls >= self.fail_on_call:
             raise DockerZeroRuntimeReconcilerV2Error("operation locks were lost")
+
+
+def _fdinfo_payload(path: Path, *, owner_pid: int = 0, include_lock: bool = True) -> str:
+    metadata = path.stat()
+    payload = (
+        "pos:\t0\n"
+        "flags:\t0100002\n"
+        "mnt_id:\t1\n"
+        f"ino:\t{metadata.st_ino}\n"
+    )
+    if include_lock:
+        payload += (
+            "lock:\t1: FLOCK  ADVISORY  WRITE "
+            f"{owner_pid} {os.major(metadata.st_dev):02x}:"
+            f"{os.minor(metadata.st_dev):02x}:{metadata.st_ino} 0 EOF\n"
+        )
+    return payload
+
+
+def _write_synthetic_proc_owner(
+    proc_root: Path,
+    *,
+    owner_pid: int,
+    resource: Path,
+    admission: Path,
+    include_locks: bool = True,
+) -> None:
+    owner_root = proc_root / str(owner_pid)
+    fd_root = owner_root / "fd"
+    fdinfo_root = owner_root / "fdinfo"
+    fd_root.mkdir(parents=True)
+    fdinfo_root.mkdir()
+    (fd_root / "7").symlink_to(resource)
+    (fd_root / "8").symlink_to(admission)
+    (fdinfo_root / "7").write_text(
+        _fdinfo_payload(resource, include_lock=include_locks),
+        encoding="ascii",
+    )
+    (fdinfo_root / "8").write_text(
+        _fdinfo_payload(admission, include_lock=include_locks),
+        encoding="ascii",
+    )
 
 
 def _reconcile(
@@ -356,8 +400,10 @@ def test_exact_parent_resource_and_admission_locks_are_required(
                 "import fcntl, os, sys; "
                 "a=os.open(sys.argv[1], os.O_RDWR); "
                 "b=os.open(sys.argv[2], os.O_RDWR); "
-                "fcntl.flock(a, fcntl.LOCK_EX); "
-                "fcntl.flock(b, fcntl.LOCK_EX); "
+                "os.dup2(a, 7); os.dup2(b, 8); "
+                "os.close(a); os.close(b); "
+                "fcntl.flock(7, fcntl.LOCK_EX); "
+                "fcntl.flock(8, fcntl.LOCK_EX); "
                 "print('ready', flush=True); sys.stdin.read(1)"
             ),
             str(resource),
@@ -370,10 +416,12 @@ def test_exact_parent_resource_and_admission_locks_are_required(
     assert holder.stdout is not None
     assert holder.stdout.readline().strip() == "ready"
     proc_root = tmp_path / "proc"
-    fd_root = proc_root / str(holder.pid) / "fd"
-    fd_root.mkdir(parents=True)
-    (fd_root / "7").symlink_to(resource)
-    (fd_root / "8").symlink_to(admission)
+    _write_synthetic_proc_owner(
+        proc_root,
+        owner_pid=holder.pid,
+        resource=resource,
+        admission=admission,
+    )
     wrong_admission = tmp_path / "wrong-admission.lock"
     wrong_admission.touch(mode=0o600)
     try:
@@ -406,3 +454,193 @@ def test_exact_parent_resource_and_admission_locks_are_required(
             owner_pid=holder.pid,
             proc_root=proc_root,
         )
+
+
+def test_different_process_lock_does_not_authorize_an_unlocked_parent(
+    tmp_path: Path,
+) -> None:
+    resource = tmp_path / "operation.lock"
+    admission = tmp_path / "admission.lock"
+    resource.touch(mode=0o600)
+    admission.touch(mode=0o600)
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, sys; "
+                "a=os.open(sys.argv[1], os.O_RDWR); "
+                "b=os.open(sys.argv[2], os.O_RDWR); "
+                "fcntl.flock(a, fcntl.LOCK_EX); "
+                "fcntl.flock(b, fcntl.LOCK_EX); "
+                "print('ready', flush=True); sys.stdin.read(1)"
+            ),
+            str(resource),
+            str(admission),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    owner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os, sys; "
+                "a=os.open(sys.argv[1], os.O_RDWR); "
+                "b=os.open(sys.argv[2], os.O_RDWR); "
+                "os.dup2(a, 7); os.dup2(b, 8); "
+                "os.close(a); os.close(b); "
+                "print('ready', flush=True); sys.stdin.read(1)"
+            ),
+            str(resource),
+            str(admission),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None
+    assert owner.stdout is not None
+    assert holder.stdout.readline().strip() == "ready"
+    assert owner.stdout.readline().strip() == "ready"
+    proc_root = tmp_path / "proc"
+    _write_synthetic_proc_owner(
+        proc_root,
+        owner_pid=owner.pid,
+        resource=resource,
+        admission=admission,
+        include_locks=False,
+    )
+    try:
+        with pytest.raises(
+            DockerZeroRuntimeReconcilerV2Error,
+            match="does not prove an exclusive whole-file FLOCK",
+        ):
+            verify_docker_operation_locks_v2(
+                lock_file=resource,
+                admission_lock_file=admission,
+                owner_pid=owner.pid,
+                proc_root=proc_root,
+            )
+    finally:
+        for process in (owner, holder):
+            if process.stdin is not None:
+                process.stdin.write("x")
+                process.stdin.flush()
+            process.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing",
+        "duplicate",
+        "shared",
+        "wrong_type",
+        "wrong_pid",
+        "wrong_device",
+        "wrong_fdinfo_inode",
+        "wrong_lock_inode",
+        "partial_range",
+        "malformed",
+        "oversized",
+    ],
+)
+def test_parent_fdinfo_lock_proof_rejects_malformed_or_mismatched_records(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    lock_file = tmp_path / "operation.lock"
+    lock_file.touch(mode=0o600)
+    metadata = lock_file.stat()
+    owner_pid = 123
+    payload = _fdinfo_payload(lock_file)
+    if case == "missing":
+        payload = _fdinfo_payload(lock_file, include_lock=False)
+    elif case == "duplicate":
+        payload += next(
+            line + "\n" for line in payload.splitlines() if line.startswith("lock:")
+        )
+    elif case == "shared":
+        payload = payload.replace("WRITE", "READ")
+    elif case == "wrong_type":
+        payload = payload.replace("FLOCK", "POSIX")
+    elif case == "wrong_pid":
+        payload = payload.replace("WRITE 0 ", "WRITE 9999 ")
+    elif case == "wrong_device":
+        payload = payload.replace(
+            f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:",
+            f"{os.major(metadata.st_dev) + 1:02x}:{os.minor(metadata.st_dev):02x}:",
+        )
+    elif case == "wrong_fdinfo_inode":
+        payload = payload.replace(
+            f"ino:\t{metadata.st_ino}\n",
+            f"ino:\t{metadata.st_ino + 1}\n",
+        )
+    elif case == "wrong_lock_inode":
+        payload = payload.replace(
+            f":{metadata.st_ino} 0 EOF",
+            f":{metadata.st_ino + 1} 0 EOF",
+        )
+    elif case == "partial_range":
+        payload = payload.replace(" 0 EOF\n", " 1 EOF\n")
+    elif case == "malformed":
+        payload = payload.replace("lock:\t1:", "lock: 1:")
+    elif case == "oversized":
+        payload += "padding:\t" + ("x" * (64 * 1024)) + "\n"
+    fdinfo = tmp_path / "proc" / str(owner_pid) / "fdinfo"
+    fdinfo.mkdir(parents=True)
+    (fdinfo / "7").write_text(payload, encoding="ascii")
+
+    with pytest.raises(DockerZeroRuntimeReconcilerV2Error, match="fdinfo"):
+        _require_parent_fd_lock(
+            proc_root=tmp_path / "proc",
+            owner_pid=owner_pid,
+            descriptor=7,
+            identity=_RootIdentity(
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+            ),
+            label="Docker operation lock",
+        )
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc fdinfo contract")
+def test_real_linux_shell_flock_is_bound_to_exact_parent_fdinfo(
+    tmp_path: Path,
+) -> None:
+    resource = tmp_path / "operation.lock"
+    admission = tmp_path / "admission.lock"
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            (
+                "set -euo pipefail; "
+                "exec 7>>\"$1\"; exec 8>>\"$2\"; "
+                "flock -x 7; flock -x 8; "
+                "printf 'ready\\n'; IFS= read -r _"
+            ),
+            "bash",
+            str(resource),
+            str(admission),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "ready"
+    try:
+        verify_docker_operation_locks_v2(
+            lock_file=resource,
+            admission_lock_file=admission,
+            owner_pid=holder.pid,
+        )
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.write("x\n")
+            holder.stdin.flush()
+        holder.wait(timeout=5)

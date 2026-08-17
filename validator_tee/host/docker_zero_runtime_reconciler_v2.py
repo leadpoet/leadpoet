@@ -28,6 +28,14 @@ Clock = Callable[[], float]
 _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _INVOCATION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_FDINFO_FIELD_RE = re.compile(r"^([a-z][a-z0-9_-]*):\t([ -~]*)$")
+_FDINFO_LOCK_RE = re.compile(
+    r"^([1-9][0-9]*):[ \t]+FLOCK[ \t]+ADVISORY[ \t]+WRITE[ \t]+"
+    r"(0|[1-9][0-9]*)[ \t]+([0-9a-f]+):([0-9a-f]+):"
+    r"(0|[1-9][0-9]*)[ \t]+0[ \t]+EOF$"
+)
+_MAX_FDINFO_BYTES = 64 * 1024
+_MAX_FDINFO_LINES = 64
 
 
 @dataclass(frozen=True)
@@ -330,7 +338,7 @@ def _empty_runtime_snapshot(
     )
 
 
-def _canonical_lock_path(path: Path, *, label: str) -> Path:
+def _canonical_lock_path(path: Path, *, label: str) -> tuple[Path, _RootIdentity]:
     if not path.is_absolute() or path.is_symlink():
         raise DockerZeroRuntimeReconcilerV2Error(f"{label} path is invalid")
     try:
@@ -341,10 +349,18 @@ def _canonical_lock_path(path: Path, *, label: str) -> Path:
         ) from exc
     if not stat.S_ISREG(metadata.st_mode):
         raise DockerZeroRuntimeReconcilerV2Error(f"{label} path is invalid")
-    return Path(os.path.realpath(path))
+    return (
+        Path(os.path.realpath(path)),
+        _RootIdentity(device=metadata.st_dev, inode=metadata.st_ino),
+    )
 
 
-def _require_exclusively_locked(path: Path, *, label: str) -> None:
+def _require_exclusively_locked(
+    path: Path,
+    *,
+    identity: _RootIdentity,
+    label: str,
+) -> None:
     flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -353,6 +369,14 @@ def _require_exclusively_locked(path: Path, *, label: str) -> None:
             f"{label} cannot be inspected"
         ) from exc
     try:
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != (
+            identity.device,
+            identity.inode,
+        ):
+            raise DockerZeroRuntimeReconcilerV2Error(
+                f"{label} identity changed during inspection"
+            )
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -361,6 +385,109 @@ def _require_exclusively_locked(path: Path, *, label: str) -> None:
         raise DockerZeroRuntimeReconcilerV2Error(f"{label} is not held")
     finally:
         os.close(descriptor)
+
+
+def _read_fdinfo(path: Path, *, label: str) -> dict[str, str]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise DockerZeroRuntimeReconcilerV2Error(
+            f"{label} fdinfo is unreadable"
+        ) from exc
+    try:
+        chunks: list[bytes] = []
+        remaining = _MAX_FDINFO_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(4096, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as exc:
+        raise DockerZeroRuntimeReconcilerV2Error(
+            f"{label} fdinfo is unreadable"
+        ) from exc
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks)
+    if (
+        not raw
+        or len(raw) > _MAX_FDINFO_BYTES
+        or not raw.endswith(b"\n")
+        or any(value < 32 and value not in {9, 10} for value in raw)
+    ):
+        raise DockerZeroRuntimeReconcilerV2Error(
+            f"{label} fdinfo is malformed"
+        )
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise DockerZeroRuntimeReconcilerV2Error(
+            f"{label} fdinfo is malformed"
+        ) from exc
+    if not lines or len(lines) > _MAX_FDINFO_LINES:
+        raise DockerZeroRuntimeReconcilerV2Error(
+            f"{label} fdinfo is malformed"
+        )
+    fields: dict[str, str] = {}
+    for line in lines:
+        match = _FDINFO_FIELD_RE.fullmatch(line)
+        if match is None or match.group(1) in fields:
+            raise DockerZeroRuntimeReconcilerV2Error(
+                f"{label} fdinfo is malformed"
+            )
+        fields[match.group(1)] = match.group(2)
+    for field, pattern in (
+        ("pos", r"0|[1-9][0-9]*"),
+        ("flags", r"0[0-7]+"),
+        ("mnt_id", r"0|[1-9][0-9]*"),
+        ("ino", r"0|[1-9][0-9]*"),
+    ):
+        if re.fullmatch(pattern, fields.get(field, "")) is None:
+            raise DockerZeroRuntimeReconcilerV2Error(
+                f"{label} fdinfo is malformed"
+            )
+    return fields
+
+
+def _require_parent_fd_lock(
+    *,
+    proc_root: Path,
+    owner_pid: int,
+    descriptor: int,
+    identity: _RootIdentity,
+    label: str,
+) -> None:
+    fields = _read_fdinfo(
+        proc_root / str(owner_pid) / "fdinfo" / str(descriptor),
+        label=label,
+    )
+    if int(fields["ino"]) != identity.inode:
+        raise DockerZeroRuntimeReconcilerV2Error(
+            f"{label} fdinfo inode differs from the lock file"
+        )
+    lock = _FDINFO_LOCK_RE.fullmatch(fields.get("lock", ""))
+    if lock is None:
+        raise DockerZeroRuntimeReconcilerV2Error(
+            f"{label} fdinfo does not prove an exclusive whole-file FLOCK"
+        )
+    lock_pid = int(lock.group(2))
+    # util-linux acquires the lock in a short-lived child against the shell's
+    # inherited open-file description. Linux reports PID 0 after that child
+    # exits; a direct flock(2) by the parent reports the parent PID.
+    if lock_pid not in {0, owner_pid}:
+        raise DockerZeroRuntimeReconcilerV2Error(
+            f"{label} fdinfo lock owner is invalid"
+        )
+    if (
+        int(lock.group(3), 16) != os.major(identity.device)
+        or int(lock.group(4), 16) != os.minor(identity.device)
+        or int(lock.group(5)) != identity.inode
+    ):
+        raise DockerZeroRuntimeReconcilerV2Error(
+            f"{label} fdinfo lock identity differs from the lock file"
+        )
 
 
 def verify_docker_operation_locks_v2(
@@ -372,8 +499,11 @@ def verify_docker_operation_locks_v2(
 ) -> None:
     """Require the exact parent shell to own both exclusive Docker locks."""
 
-    lock_path = _canonical_lock_path(lock_file, label="Docker operation lock")
-    admission_path = _canonical_lock_path(
+    lock_path, lock_identity = _canonical_lock_path(
+        lock_file,
+        label="Docker operation lock",
+    )
+    admission_path, admission_identity = _canonical_lock_path(
         admission_lock_file,
         label="Docker operation admission lock",
     )
@@ -385,12 +515,14 @@ def verify_docker_operation_locks_v2(
         raise DockerZeroRuntimeReconcilerV2Error(
             "Docker operation lock owner is invalid"
         )
-    for descriptor, expected, label in (
-        (7, lock_path, "Docker operation lock"),
-        (8, admission_path, "Docker operation admission lock"),
+    for descriptor, expected, identity, label in (
+        (7, lock_path, lock_identity, "Docker operation lock"),
+        (8, admission_path, admission_identity, "Docker operation admission lock"),
     ):
+        descriptor_path = proc_root / str(owner_pid) / "fd" / str(descriptor)
         try:
-            raw_target = os.readlink(proc_root / str(owner_pid) / "fd" / str(descriptor))
+            raw_target = os.readlink(descriptor_path)
+            descriptor_metadata = descriptor_path.stat()
         except OSError as exc:
             raise DockerZeroRuntimeReconcilerV2Error(
                 f"{label} owner descriptor is unreadable"
@@ -404,7 +536,25 @@ def verify_docker_operation_locks_v2(
             raise DockerZeroRuntimeReconcilerV2Error(
                 f"{label} is not owned by the declared parent"
             )
-        _require_exclusively_locked(expected, label=label)
+        if (descriptor_metadata.st_dev, descriptor_metadata.st_ino) != (
+            identity.device,
+            identity.inode,
+        ):
+            raise DockerZeroRuntimeReconcilerV2Error(
+                f"{label} descriptor identity differs from the lock file"
+            )
+        _require_parent_fd_lock(
+            proc_root=proc_root,
+            owner_pid=owner_pid,
+            descriptor=descriptor,
+            identity=identity,
+            label=label,
+        )
+        _require_exclusively_locked(
+            expected,
+            identity=identity,
+            label=label,
+        )
 
 
 def _recover_docker_service(

@@ -261,6 +261,13 @@ def test_chain_realized_receipt_allowlist_matches_canonical_contract_exactly():
             expected_at_126.discard(
                 "research_lab.allocation_settlement_frontier_bootstrap.v2"
             )
+        if role == "gateway_scoring":
+            expected_at_126.difference_update(
+                {
+                    "research_lab.candidate_hybrid_test.v2",
+                    "research_lab.candidate_hybrid_discovery.v2",
+                }
+            )
         assert migrated_purposes == expected_at_126, role
 
 
@@ -443,6 +450,13 @@ def test_migration_99_allowlist_matches_canonical_contract_before_migration_101(
             )
             expected_at_99.discard(
                 "research_lab.chain_weight_observation.v1"
+            )
+        if role == "gateway_scoring":
+            expected_at_99.difference_update(
+                {
+                    "research_lab.candidate_hybrid_test.v2",
+                    "research_lab.candidate_hybrid_discovery.v2",
+                }
             )
         if role == "validator_weights":
             expected_at_99.discard("validator.subnet_epoch_snapshot.v2")

@@ -253,6 +253,13 @@ def test_migration_96_receipt_allowlist_matches_pre_stateful_epoch_contract():
             expected_at_96.discard(
                 "research_lab.chain_realized_obligation_credit.v1"
             )
+        if role == "gateway_scoring":
+            expected_at_96.difference_update(
+                {
+                    "research_lab.candidate_hybrid_test.v2",
+                    "research_lab.candidate_hybrid_discovery.v2",
+                }
+            )
         if role == "validator_weights":
             expected_at_96.discard("validator.subnet_epoch_snapshot.v2")
         assert migrated_purposes == expected_at_96, role

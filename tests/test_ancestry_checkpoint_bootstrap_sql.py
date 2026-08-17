@@ -43,7 +43,11 @@ def test_bootstrap_purpose_migration_matches_canonical_allowlist_exactly() -> No
     later_purposes = {
         "gateway_coordinator": {
             "research_lab.allocation_settlement_frontier_bootstrap.v2"
-        }
+        },
+        "gateway_scoring": {
+            "research_lab.candidate_hybrid_test.v2",
+            "research_lab.candidate_hybrid_discovery.v2",
+        },
     }
     for role, expected_purposes in ROLE_PURPOSES.items():
         match = re.search(

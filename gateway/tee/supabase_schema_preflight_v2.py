@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any, Dict, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
 
 
 REQUIRED_SUPABASE_V2_SCHEMA = (
@@ -746,6 +749,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_compact_weight_settlement_contract_v1",
     ),
     (
+        "scripts/152-research-lab-candidate-hybrid-purposes.sql",
+        "research_lab_candidate_hybrid_purpose_contract_v1",
+    ),
+    (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
         "research_lab_source_add_admit",
     ),
@@ -865,6 +872,116 @@ def _verify_compact_weight_settlement_contract_v1(
             "compact weight settlement schema contract differs"
         )
     return dict(contract)
+
+
+def _role_purpose_pairs_from_constraint_v1(
+    definition: str,
+) -> Dict[str, frozenset[str]]:
+    if not isinstance(definition, str) or not definition.startswith("CHECK ("):
+        raise SupabaseSchemaPreflightV2Error(
+            "candidate hybrid purpose constraint definition is invalid"
+        )
+    clauses = re.findall(
+        r"\(role = '([^']+)'::text\)\s+AND\s+"
+        r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
+        definition,
+        flags=re.DOTALL,
+    )
+    parsed: Dict[str, frozenset[str]] = {}
+    for role, encoded_purposes in clauses:
+        if role in parsed:
+            raise SupabaseSchemaPreflightV2Error(
+                "candidate hybrid purpose constraint repeats a role"
+            )
+        purposes = re.findall(r"'([^']+)'::text", encoded_purposes)
+        if not purposes or len(purposes) != len(set(purposes)):
+            raise SupabaseSchemaPreflightV2Error(
+                "candidate hybrid purpose constraint has invalid purposes"
+            )
+        parsed[role] = frozenset(purposes)
+    expected = {
+        str(role): frozenset(str(purpose) for purpose in purposes)
+        for role, purposes in ROLE_PURPOSES.items()
+    }
+    if parsed != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "candidate hybrid purpose constraint differs from canonical roles"
+        )
+    return parsed
+
+
+def _verify_candidate_hybrid_purpose_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_candidate_hybrid_purpose_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "candidate hybrid purpose schema contract is unavailable; apply "
+            "scripts/152-research-lab-candidate-hybrid-purposes.sql before "
+            f"restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "candidate hybrid purpose schema contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "candidate hybrid purpose schema contract is unavailable; apply "
+            "scripts/152-research-lab-candidate-hybrid-purposes.sql before "
+            f"restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "candidate hybrid purpose schema contract response is invalid"
+        ) from exc
+    if not isinstance(contract, Mapping) or set(contract) != {
+        "schema_version",
+        "constraint_name",
+        "constraint_valid",
+        "constraint_definition",
+    }:
+        raise SupabaseSchemaPreflightV2Error(
+            "candidate hybrid purpose schema contract response is invalid"
+        )
+    if (
+        contract.get("schema_version")
+        != "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
+        or contract.get("constraint_name")
+        != "research_lab_attested_execution_receipts_v2_role_purpose_check"
+        or contract.get("constraint_valid") is not True
+    ):
+        raise SupabaseSchemaPreflightV2Error(
+            "candidate hybrid purpose schema contract differs"
+        )
+    definition = contract.get("constraint_definition")
+    pairs = _role_purpose_pairs_from_constraint_v1(definition)
+    return {
+        "schema_version": contract["schema_version"],
+        "constraint_name": contract["constraint_name"],
+        "constraint_valid": True,
+        "role_count": len(pairs),
+        "role_purpose_pair_count": sum(len(value) for value in pairs.values()),
+        "constraint_definition_sha256": "sha256:"
+        + hashlib.sha256(definition.encode("utf-8")).hexdigest(),
+    }
 
 
 def _verify_chain_realized_activation_v1(
@@ -1082,18 +1199,29 @@ def verify_required_supabase_v2_schema(
             timeout_seconds=timeout_seconds,
         )
     )
+    candidate_hybrid_purpose_contract = (
+        _verify_candidate_hybrid_purpose_contract_v1(
+            headers=headers,
+            supabase_url=supabase_url,
+            opener=opener,
+            timeout_seconds=timeout_seconds,
+        )
+    )
     return {
         "status": "ready",
         "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA)
         + len(REQUIRED_SUPABASE_V2_RPCS)
-        + 2,
+        + 3,
         "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
         "rpc_probe_count": len(REQUIRED_SUPABASE_V2_RPCS),
-        "data_probe_count": 2,
+        "data_probe_count": 3,
         "schema_document_probe_count": 1,
         "chain_realized_settlement_activation": activation,
         "compact_weight_settlement_contract": (
             compact_weight_settlement_contract
+        ),
+        "candidate_hybrid_purpose_contract": (
+            candidate_hybrid_purpose_contract
         ),
         "migration_files": sorted(migrations),
     }

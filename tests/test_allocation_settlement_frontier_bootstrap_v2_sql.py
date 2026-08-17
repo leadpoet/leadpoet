@@ -199,8 +199,16 @@ def test_migration_is_additive_private_and_declares_current_contract() -> None:
             re.DOTALL,
         )
         assert match is not None, role
-        assert set(re.findall(r"'([^']+)'", match.group(1))) == set(
-            expected_purposes
+        historical_purposes = set(expected_purposes)
+        if role == "gateway_scoring":
+            historical_purposes.difference_update(
+                {
+                    "research_lab.candidate_hybrid_test.v2",
+                    "research_lab.candidate_hybrid_discovery.v2",
+                }
+            )
+        assert set(re.findall(r"'([^']+)'", match.group(1))) == (
+            historical_purposes
         )
 
     pair_clause = SOURCE_CATALOG_REPLAY_SQL.split(

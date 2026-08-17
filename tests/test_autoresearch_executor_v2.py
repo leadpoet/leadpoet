@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from copy import deepcopy
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -61,6 +62,7 @@ from gateway.tee.autoresearch_executor_v2 import (
     _candidate_document,
     _raise_code_edit_host_operation_failure,
     _source_context,
+    _validate_build_result,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.host_operation_channel_v2 import HostOperationV2Error
@@ -89,7 +91,7 @@ from research_lab.eval import (
     build_local_private_artifact_manifest,
     private_model_artifact_replay_identity_v2,
 )
-from research_lab.code_editing import CodeEditDraft
+from research_lab.code_editing import CodeEditDraft, code_edit_candidate_manifest
 from research_lab.eval.private_runtime import compute_private_source_tree_hash
 from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
@@ -234,6 +236,132 @@ def _source_and_artifact(tmp_path: Path):
         scoring_adapter_version="1",
     )
     return build_source_bundle_v2(root), manifest
+
+
+def _valid_image_build_response(tmp_path: Path):
+    _, parent_doc = _source_and_artifact(tmp_path)
+    parent = PrivateModelArtifactManifest.from_mapping(parent_doc)
+    child_root = tmp_path / "candidate-source"
+    shutil.copytree(tmp_path / "private-source", child_root)
+    (child_root / "sourcing_model" / "runtime.py").write_text(
+        "VALUE = 2\n", encoding="utf-8"
+    )
+    candidate = PrivateModelArtifactManifest.from_mapping(
+        build_local_private_artifact_manifest(
+            source_path=child_root,
+            git_commit_sha="c" * 40,
+            image_digest=(
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/private@sha256:"
+                + "d" * 64
+            ),
+            manifest_uri="s3://private/manifests/candidate.json",
+            signature_ref="kms:candidate-signature",
+            component_registry_version="1",
+            scoring_adapter_version="1",
+        )
+    )
+    draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase the source runtime value",
+        expected_improvement="recover more valid companies",
+        risk="bounded runtime increase",
+        lane="query_construction",
+        target_files=("sourcing_model/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+            "--- a/sourcing_model/runtime.py\n"
+            "+++ b/sourcing_model/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="increase a bounded sourcing runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    build_payload = {
+        "schema_version": "1.1",
+        "candidate_kind": "image_build",
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "candidate_model_artifact_hash": candidate.model_artifact_hash,
+        "candidate_model_manifest_hash": candidate.manifest_hash,
+        "source_diff_hash": source_diff_hash,
+    }
+    build_doc = {
+        **build_payload,
+        "build_doc_hash": sha256_json(build_payload),
+    }
+    code_edit_manifest = code_edit_candidate_manifest(
+        draft=draft,
+        parent_artifact_hash=parent.model_artifact_hash,
+        candidate_artifact_hash=candidate.model_artifact_hash,
+        candidate_model_manifest_hash=candidate.manifest_hash,
+        source_diff_hash=source_diff_hash,
+        build_doc_hash=build_doc["build_doc_hash"],
+    )
+    response = {
+        "candidate_model_manifest": candidate.to_dict(),
+        "code_edit_manifest": code_edit_manifest,
+        "source_diff_hash": source_diff_hash,
+        "build_doc": build_doc,
+    }
+    return response, draft, parent, candidate
+
+
+def test_v2_build_result_accepts_canonical_image_build_manifest(tmp_path):
+    response, draft, parent, candidate = _valid_image_build_response(tmp_path)
+
+    result = _validate_build_result(
+        response,
+        draft=draft,
+        parent_artifact=parent,
+        expected_candidate_artifact_hash=candidate.model_artifact_hash,
+    )
+
+    assert result.candidate_model_manifest == candidate
+    assert result.code_edit_manifest == response["code_edit_manifest"]
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("patch_type",), "PROMPT_EDIT"),
+        (("parent_artifact_hash",), "sha256:" + "e" * 64),
+        (("candidate_model_manifest_hash",), "sha256:" + "e" * 64),
+        (("candidate_source_diff_hash",), "sha256:" + "e" * 64),
+        (("candidate_build_doc_hash",), "sha256:" + "e" * 64),
+        (("patch_doc", "target_files"), ["sourcing_model/other.py"]),
+    ],
+)
+def test_v2_build_result_rejects_self_consistent_forged_image_build_manifest(
+    tmp_path,
+    path,
+    replacement,
+):
+    response, draft, parent, candidate = _valid_image_build_response(tmp_path)
+    forged = deepcopy(response)
+    target = forged["code_edit_manifest"]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = replacement
+    payload = {
+        key: value
+        for key, value in forged["code_edit_manifest"].items()
+        if key != "manifest_hash"
+    }
+    forged["code_edit_manifest"]["manifest_hash"] = sha256_json(payload)
+
+    with pytest.raises(
+        AutoresearchExecutorV2Error,
+        match="candidate code-edit manifest differs from measured build inputs",
+    ):
+        _validate_build_result(
+            forged,
+            draft=draft,
+            parent_artifact=parent,
+            expected_candidate_artifact_hash=candidate.model_artifact_hash,
+        )
 
 
 def _payload(tmp_path: Path):

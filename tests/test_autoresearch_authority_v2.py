@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from copy import deepcopy
 import io
 import shutil
 from pathlib import Path
@@ -37,7 +38,9 @@ from gateway.research_lab.git_tree_models import (
     derive_tree_id,
 )
 from gateway.research_lab.git_tree_repository import GitTreeRepository
+from gateway.tee.autoresearch_executor_v2 import _candidate_document
 from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
+from research_lab.code_editing import code_edit_candidate_manifest
 
 
 MINER_HOTKEY = "miner-hotkey"
@@ -344,6 +347,115 @@ def _artifact(tmp_path: Path):
             scoring_adapter_version="1",
         )
     )
+
+
+def _canonical_image_build_candidate(tmp_path: Path):
+    parent = _artifact(tmp_path)
+    candidate_source = tmp_path / "candidate-source"
+    shutil.copytree(tmp_path / "source", candidate_source)
+    (candidate_source / "research_lab_adapter.py").write_text(
+        "def run():\n    return 2\n",
+        encoding="utf-8",
+    )
+    candidate_manifest = authority.PrivateModelArtifactManifest.from_mapping(
+        build_local_private_artifact_manifest(
+            source_path=candidate_source,
+            git_commit_sha="c" * 40,
+            image_digest=(
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/private@sha256:"
+                + "d" * 64
+            ),
+            manifest_uri="s3://private/manifests/candidate.json",
+            signature_ref="kms:candidate-signature",
+            component_registry_version="1",
+            scoring_adapter_version="1",
+        )
+    )
+    draft = authority.CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase the source runtime value",
+        expected_improvement="recover more valid companies",
+        risk="bounded runtime increase",
+        lane="query_construction",
+        target_files=("research_lab_adapter.py",),
+        unified_diff=(
+            "diff --git a/research_lab_adapter.py b/research_lab_adapter.py\n"
+            "--- a/research_lab_adapter.py\n"
+            "+++ b/research_lab_adapter.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def run():\n"
+            "-    return 1\n"
+            "+    return 2\n"
+        ),
+        redacted_summary="increase a bounded sourcing runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    build_payload = {
+        "schema_version": "1.1",
+        "candidate_kind": "image_build",
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "candidate_model_artifact_hash": candidate_manifest.model_artifact_hash,
+        "candidate_model_manifest_hash": candidate_manifest.manifest_hash,
+        "source_diff_hash": source_diff_hash,
+    }
+    build_doc = {
+        **build_payload,
+        "build_doc_hash": sha256_json(build_payload),
+    }
+    code_edit_manifest = code_edit_candidate_manifest(
+        draft=draft,
+        parent_artifact_hash=parent.model_artifact_hash,
+        candidate_artifact_hash=candidate_manifest.model_artifact_hash,
+        candidate_model_manifest_hash=candidate_manifest.manifest_hash,
+        source_diff_hash=source_diff_hash,
+        build_doc_hash=build_doc["build_doc_hash"],
+    )
+    build = authority.CodeEditBuildResult(
+        candidate_model_manifest=candidate_manifest,
+        code_edit_manifest=code_edit_manifest,
+        source_diff_hash=source_diff_hash,
+        build_doc=build_doc,
+    )
+    candidate = authority.BuiltCodeEditCandidate(
+        draft=draft,
+        build=build,
+        node_id="tree-node:" + "1" * 64,
+        iteration=1,
+        tree_parent_artifact_hash=parent.model_artifact_hash,
+    )
+    return _candidate_document(candidate), candidate
+
+
+def test_candidate_accepts_measured_image_build_round_trip(tmp_path):
+    document, candidate = _canonical_image_build_candidate(tmp_path)
+
+    parsed = authority._candidate(document)
+
+    assert parsed.draft == candidate.draft
+    assert parsed.build == candidate.build
+    assert parsed.tree_parent_artifact_hash == candidate.tree_parent_artifact_hash
+
+
+def test_candidate_rejects_self_consistent_forged_image_build_manifest(tmp_path):
+    document, _candidate_value = _canonical_image_build_candidate(tmp_path)
+    forged = deepcopy(document)
+    forged["build"]["code_edit_manifest"]["patch_doc"]["target_files"] = [
+        "sourcing_model/other.py"
+    ]
+    payload = {
+        key: value
+        for key, value in forged["build"]["code_edit_manifest"].items()
+        if key != "manifest_hash"
+    }
+    forged["build"]["code_edit_manifest"]["manifest_hash"] = sha256_json(payload)
+
+    with pytest.raises(
+        authority.AutoresearchAuthorityV2Error,
+        match="code-edit manifest differs from measured build inputs",
+    ):
+        authority._candidate(forged)
 
 
 def test_guard_bridge_provisions_both_envelopes_and_releases_job(monkeypatch):

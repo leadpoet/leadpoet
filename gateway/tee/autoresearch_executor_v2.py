@@ -111,15 +111,14 @@ from research_lab.code_editing import (
     CodeEditDraft,
     CodeEditSourceInspectionRequest,
     build_code_edit_repair_messages,
+    code_edit_candidate_manifest,
     extract_unified_diff_paths,
     git_diff_structural_metadata,
     parse_code_edit_repair_response,
 )
 from research_lab.eval import (
-    CandidatePatchManifest,
     PrivateModelArtifactManifest,
     private_model_artifact_replay_identity_v2,
-    validate_candidate_patch_manifest,
     validate_private_model_artifact_manifest,
 )
 from research_lab.eval.private_runtime import compute_private_source_tree_hash
@@ -391,19 +390,6 @@ def _validate_build_result(
     source_diff_hash = _hash(value["source_diff_hash"], "source_diff_hash")
     if source_diff_hash != sha256_json({"unified_diff": draft.unified_diff}):
         raise AutoresearchExecutorV2Error("candidate source diff commitment differs")
-    patch = CandidatePatchManifest.from_mapping(
-        _mapping(value["code_edit_manifest"], "code_edit_manifest")
-    )
-    patch_errors = validate_candidate_patch_manifest(
-        patch,
-        expected_parent_artifact_hash=parent_artifact.model_artifact_hash,
-    )
-    if patch_errors:
-        raise AutoresearchExecutorV2Error(
-            "candidate patch manifest is invalid: " + "; ".join(patch_errors)
-        )
-    if patch.candidate_artifact_hash != candidate.model_artifact_hash:
-        raise AutoresearchExecutorV2Error("candidate manifest ancestry differs")
     if candidate.model_artifact_hash != expected_candidate_artifact_hash:
         raise AutoresearchExecutorV2Error(
             "candidate model source differs from the measured patch result"
@@ -414,9 +400,26 @@ def _validate_build_result(
         {key: item for key, item in build_doc.items() if key != "build_doc_hash"}
     ):
         raise AutoresearchExecutorV2Error("candidate build document hash differs")
+    code_edit_manifest = _mapping(
+        value["code_edit_manifest"], "code_edit_manifest"
+    )
+    expected_code_edit_manifest = code_edit_candidate_manifest(
+        draft=draft,
+        parent_artifact_hash=parent_artifact.model_artifact_hash,
+        candidate_artifact_hash=candidate.model_artifact_hash,
+        candidate_model_manifest_hash=candidate.manifest_hash,
+        source_diff_hash=source_diff_hash,
+        build_doc_hash=declared_build_hash,
+    )
+    if canonical_json(code_edit_manifest) != canonical_json(
+        expected_code_edit_manifest
+    ):
+        raise AutoresearchExecutorV2Error(
+            "candidate code-edit manifest differs from measured build inputs"
+        )
     return CodeEditBuildResult(
         candidate_model_manifest=candidate,
-        code_edit_manifest=dict(value["code_edit_manifest"]),
+        code_edit_manifest=code_edit_manifest,
         source_diff_hash=source_diff_hash,
         build_doc=build_doc,
     )

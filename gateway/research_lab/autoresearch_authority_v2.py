@@ -81,12 +81,10 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_receipt_graph,
 )
-from research_lab.code_editing import CodeEditDraft
+from research_lab.code_editing import CodeEditDraft, code_edit_candidate_manifest
 from research_lab.eval import (
-    CandidatePatchManifest,
     PrivateModelArtifactManifest,
     private_model_artifact_replay_identity_v2,
-    validate_candidate_patch_manifest,
     validate_private_model_artifact_manifest,
 )
 from gateway.research_lab.code_build import CodeEditBuildResult
@@ -822,7 +820,19 @@ def _draft(value: Mapping[str, Any]) -> CodeEditDraft:
     return CodeEditDraft(**kwargs)
 
 
-def _build_result(value: Mapping[str, Any]) -> CodeEditBuildResult:
+def _sha256_hash(value: Any, field: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
+        raise AutoresearchAuthorityV2Error(f"{field} is invalid")
+    return normalized
+
+
+def _build_result(
+    value: Mapping[str, Any],
+    *,
+    draft: CodeEditDraft,
+    parent_artifact_hash: str,
+) -> CodeEditBuildResult:
     if set(value) != {
         "candidate_model_manifest",
         "code_edit_manifest",
@@ -831,24 +841,55 @@ def _build_result(value: Mapping[str, Any]) -> CodeEditBuildResult:
     }:
         raise AutoresearchAuthorityV2Error("V2 build result fields are invalid")
     manifest = PrivateModelArtifactManifest.from_mapping(
-        value["candidate_model_manifest"]
+        _mapping(value["candidate_model_manifest"], "candidate_model_manifest")
     )
     manifest_errors = validate_private_model_artifact_manifest(manifest)
     if manifest_errors:
         raise AutoresearchAuthorityV2Error(
             "V2 candidate manifest is invalid: " + "; ".join(manifest_errors)
         )
-    patch = CandidatePatchManifest.from_mapping(value["code_edit_manifest"])
-    patch_errors = validate_candidate_patch_manifest(patch)
-    if patch_errors:
+    normalized_parent_artifact_hash = _sha256_hash(
+        parent_artifact_hash, "V2 candidate parent artifact hash"
+    )
+    source_diff_hash = _sha256_hash(
+        value["source_diff_hash"], "V2 candidate source diff hash"
+    )
+    if source_diff_hash != sha256_json({"unified_diff": draft.unified_diff}):
         raise AutoresearchAuthorityV2Error(
-            "V2 candidate patch is invalid: " + "; ".join(patch_errors)
+            "V2 candidate source diff commitment differs"
+        )
+    build_doc = _mapping(value["build_doc"], "build_doc")
+    declared_build_hash = _sha256_hash(
+        build_doc.get("build_doc_hash"), "V2 candidate build document hash"
+    )
+    if declared_build_hash != sha256_json(
+        {key: item for key, item in build_doc.items() if key != "build_doc_hash"}
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "V2 candidate build document hash differs"
+        )
+    code_edit_manifest = _mapping(
+        value["code_edit_manifest"], "code_edit_manifest"
+    )
+    expected_code_edit_manifest = code_edit_candidate_manifest(
+        draft=draft,
+        parent_artifact_hash=normalized_parent_artifact_hash,
+        candidate_artifact_hash=manifest.model_artifact_hash,
+        candidate_model_manifest_hash=manifest.manifest_hash,
+        source_diff_hash=source_diff_hash,
+        build_doc_hash=declared_build_hash,
+    )
+    if canonical_json(code_edit_manifest) != canonical_json(
+        expected_code_edit_manifest
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "V2 candidate code-edit manifest differs from measured build inputs"
         )
     return CodeEditBuildResult(
         candidate_model_manifest=manifest,
-        code_edit_manifest=dict(value["code_edit_manifest"]),
-        source_diff_hash=str(value["source_diff_hash"]),
-        build_doc=dict(value["build_doc"]),
+        code_edit_manifest=code_edit_manifest,
+        source_diff_hash=source_diff_hash,
+        build_doc=build_doc,
     )
 
 
@@ -894,9 +935,18 @@ def _candidate(value: Mapping[str, Any]) -> BuiltCodeEditCandidate:
         raise AutoresearchAuthorityV2Error(
             "V2 selected candidate settled cost is invalid"
         )
+    draft = _draft(_mapping(value["draft"], "draft"))
+    parent_artifact_hash = _sha256_hash(
+        value["tree_parent_artifact_hash"],
+        "V2 selected candidate parent artifact hash",
+    )
     return BuiltCodeEditCandidate(
-        draft=_draft(value["draft"]),
-        build=_build_result(value["build"]),
+        draft=draft,
+        build=_build_result(
+            _mapping(value["build"], "build"),
+            draft=draft,
+            parent_artifact_hash=parent_artifact_hash,
+        ),
         node_id=str(value["node_id"]),
         iteration=int(value["iteration"]),
         rehydration_artifact_uri=str(value["rehydration_artifact_uri"] or ""),

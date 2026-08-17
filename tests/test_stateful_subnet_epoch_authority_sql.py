@@ -105,6 +105,13 @@ def test_receipt_allowlist_retains_canonical_contract_and_adds_epoch_authorities
             expected_purposes.discard(
                 "research_lab.chain_realized_obligation_credit.v1"
             )
+        if role == "gateway_scoring":
+            expected_purposes.difference_update(
+                {
+                    "research_lab.candidate_hybrid_test.v2",
+                    "research_lab.candidate_hybrid_discovery.v2",
+                }
+            )
         if role == "validator_weights":
             expected_purposes.add("validator.subnet_epoch_snapshot.v2")
         assert migrated_purposes == expected_purposes, role

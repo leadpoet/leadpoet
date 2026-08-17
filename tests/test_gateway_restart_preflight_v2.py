@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -425,6 +426,34 @@ def _compact_weight_settlement_contract_response() -> bytes:
     ).encode()
 
 
+def _candidate_hybrid_constraint_definition() -> str:
+    clauses = []
+    for role, purposes in schema_preflight.ROLE_PURPOSES.items():
+        encoded_purposes = ", ".join(
+            "'%s'::text" % purpose for purpose in sorted(purposes)
+        )
+        clauses.append(
+            "((role = '%s'::text) AND (purpose = ANY (ARRAY[%s])))"
+            % (role, encoded_purposes)
+        )
+    return "CHECK (%s)" % " OR ".join(clauses)
+
+
+def _candidate_hybrid_purpose_contract_response() -> bytes:
+    return json.dumps(
+        {
+            "schema_version": (
+                "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
+            ),
+            "constraint_name": (
+                "research_lab_attested_execution_receipts_v2_role_purpose_check"
+            ),
+            "constraint_valid": True,
+            "constraint_definition": _candidate_hybrid_constraint_definition(),
+        }
+    ).encode()
+
+
 def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     requests = []
 
@@ -448,6 +477,12 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
             return _SchemaResponse(
                 body=_compact_weight_settlement_contract_response()
             )
+        if request.full_url.endswith(
+            "/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_candidate_hybrid_purpose_contract_response()
+            )
         return _SchemaResponse()
 
     result = schema_preflight.verify_required_supabase_v2_schema(
@@ -461,14 +496,14 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["status"] == "ready"
     assert result["probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
-    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 2
+    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 3
     assert result["table_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
     )
     assert result["rpc_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_RPCS
     )
-    assert result["data_probe_count"] == 2
+    assert result["data_probe_count"] == 3
     assert result["schema_document_probe_count"] == 1
     assert result["chain_realized_settlement_activation"] == {
         "netuid": 71,
@@ -479,7 +514,25 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["compact_weight_settlement_contract"] == json.loads(
         _compact_weight_settlement_contract_response()
     )
-    assert len(requests) == result["table_probe_count"] + 3
+    assert result["candidate_hybrid_purpose_contract"] == {
+        "schema_version": (
+            "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
+        ),
+        "constraint_name": (
+            "research_lab_attested_execution_receipts_v2_role_purpose_check"
+        ),
+        "constraint_valid": True,
+        "role_count": len(schema_preflight.ROLE_PURPOSES),
+        "role_purpose_pair_count": sum(
+            len(purposes)
+            for purposes in schema_preflight.ROLE_PURPOSES.values()
+        ),
+        "constraint_definition_sha256": "sha256:"
+        + hashlib.sha256(
+            _candidate_hybrid_constraint_definition().encode("utf-8")
+        ).hexdigest(),
+    }
+    assert len(requests) == result["table_probe_count"] + 4
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
     table_requests = [
         request
@@ -505,17 +558,26 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
             "/rpc/research_lab_compact_weight_settlement_contract_v1"
         )
     ]
+    hybrid_contract_requests = [
+        request
+        for request in table_requests
+        if request.full_url.endswith(
+            "/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
+        )
+    ]
     schema_table_requests = [
         request
         for request in table_requests
         if request not in activation_requests
         and request not in contract_requests
+        and request not in hybrid_contract_requests
     ]
     assert all(
         "limit=0" in request.full_url for request in schema_table_requests
     )
     assert len(activation_requests) == 1
     assert len(contract_requests) == 1
+    assert len(hybrid_contract_requests) == 1
     assert len(schema_requests) == 1
     assert schema_requests[0].headers["Accept"] == "application/openapi+json"
     assert {
@@ -540,8 +602,34 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/146-research-lab-private-benchmark-schema-v11.sql",
         "scripts/148-research-lab-atomic-credit-resume.sql",
         "scripts/149-research-lab-compact-weight-settlement-authority.sql",
+        "scripts/152-research-lab-candidate-hybrid-purposes.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
+
+
+def test_candidate_hybrid_purpose_contract_rejects_scope_drift() -> None:
+    contract = json.loads(_candidate_hybrid_purpose_contract_response())
+    contract["constraint_definition"] = contract[
+        "constraint_definition"
+    ].replace(
+        "'research_lab.candidate_hybrid_discovery.v2'::text, ",
+        "",
+    )
+
+    def opener(_request, *, timeout):
+        assert timeout == 10.0
+        return _SchemaResponse(body=json.dumps(contract).encode())
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="differs from canonical roles",
+    ):
+        schema_preflight._verify_candidate_hybrid_purpose_contract_v1(
+            headers={},
+            supabase_url="https://project.supabase.co",
+            opener=opener,
+            timeout_seconds=10.0,
+        )
 
 
 def test_required_supabase_v2_schema_covers_git_tree_runtime_contract() -> None:

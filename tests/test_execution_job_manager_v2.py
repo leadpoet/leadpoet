@@ -1559,6 +1559,55 @@ def test_v1_purpose_and_unknown_operation_fail_closed():
         manager.submit(_manifest(payload, operation="blind_sign"))
 
 
+@pytest.mark.parametrize(
+    ("operation", "purpose"),
+    (
+        (
+            "run_dev_hybrid_v2",
+            "research_lab.candidate_hybrid_test.v2",
+        ),
+        (
+            "run_model_sandbox_v2",
+            "research_lab.candidate_hybrid_discovery.v2",
+        ),
+    ),
+)
+def test_scoring_role_authorizes_exact_hybrid_candidate_purposes(
+    operation,
+    purpose,
+):
+    payload = _payload()
+    operations = {operation: {purpose}}
+    manager, _ = _manager(
+        lambda _operation, value, _ctx: value,
+        operations=operations,
+    )
+    submitted = manager.submit(
+        _manifest(
+            payload,
+            operation=operation,
+            purpose=purpose,
+            job_id="hybrid-job-1",
+        )
+    )
+    assert submitted["state"] == "uploading"
+
+    wrong_role_manager, _ = _manager(
+        lambda _operation, value, _ctx: value,
+        role="gateway_autoresearch",
+        operations=operations,
+    )
+    with pytest.raises(ExecutionJobV2Error, match="not authorized"):
+        wrong_role_manager.submit(
+            _manifest(
+                payload,
+                operation=operation,
+                purpose=purpose,
+                job_id="wrong-role-hybrid-job-1",
+            )
+        )
+
+
 def test_autoresearch_job_binds_signed_host_operation_ledger():
     key = Ed25519PrivateKey.generate()
     pubkey = key.public_key().public_bytes(

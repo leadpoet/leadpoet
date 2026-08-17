@@ -241,7 +241,16 @@ def test_direct_autocommit_runner_resumes_partial_indexes_idempotently():
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
             ready = subprocess.run(
-                [str(DOCKER), "exec", container, "pg_isready", "-U", "postgres"],
+                [
+                    str(DOCKER),
+                    "exec",
+                    container,
+                    "pg_isready",
+                    "-h",
+                    "127.0.0.1",
+                    "-U",
+                    "postgres",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=5,

@@ -542,7 +542,7 @@
       "symbol": "DEFAULT_PRIVATE_BUILD_CMD"
     },
     {
-      "ast_sha256": "sha256:db44652a5d88244b881f1c2840e2d2428d9d4d5ef8f2b7bacd895e4fe9952349",
+      "ast_sha256": "sha256:1d8a3e81ed3efc5c5fbe5183a6c741f0a7d06b26e3cddade62031d7187b392ac",
       "path": "gateway/research_lab/config.py",
       "symbol": "DEFAULT_PRIVATE_TEST_CMD"
     },
@@ -3807,9 +3807,9 @@
       "symbol": "DockerPrivateModelRunner._run_json"
     },
     {
-      "ast_sha256": "sha256:48946b3e3ad9bdcd86fafe88ac5b06c70c423f9f53532f1b04730ce0d2090eda",
+      "ast_sha256": "sha256:85af71d2f9e70e2ee26b518bb9a1862434db0f978c1169b59cbc1916878ca3e0",
       "path": "research_lab/eval/private_runtime.py",
-      "symbol": "EXPECTED_ROUTING_COMPILER_VERSION"
+      "symbol": "EXPECTED_ROUTING_COMPILER_VERSIONS"
     },
     {
       "ast_sha256": "sha256:bd3116d5da7a7b7d9b70a6cce5db1d0142c64d3a98634831a8273018e8be824e",
@@ -3872,7 +3872,7 @@
       "symbol": "build_local_private_artifact_manifest"
     },
     {
-      "ast_sha256": "sha256:d061a3c38907d22ba209e179a41b5f78662fbc4f1cc2a04c2ab2d5d927e358f0",
+      "ast_sha256": "sha256:d6b4da6ea26f708feb872d37cf7eb0d7f0e30bf6949d0c8f6198665a370ccbd7",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "validate_sourcing_adapter_metadata"
     },
@@ -3987,7 +3987,7 @@
       "symbol": "validate_source_add_reward_record"
     },
     {
-      "ast_sha256": "sha256:cf5d43b3447c91e00c631b5f05088c60f72464f8f3bc9107b543e4624248edee",
+      "ast_sha256": "sha256:1f4a6267355995814882eb7ee34e436cf6b910a6e6afcf6e5464e04fceaf85e0",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "REVIEWED_CONSUMER_SNAPSHOT_SPECS"
     },
@@ -4007,12 +4007,12 @@
       "symbol": "resolve_reviewed_consumer_snapshot"
     },
     {
-      "ast_sha256": "sha256:c50443fdb3ab475b5d9d793f4a464114c96ddc834d615ac6d00f0d6f4059eda4",
+      "ast_sha256": "sha256:3167c97bd8a4f4888918bded32c9f149614e066b39b686aa8e3de66db70ac236",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "reviewed_consumer_snapshots"
     },
     {
-      "ast_sha256": "sha256:e45535d006aa839564ca448535fad6245a1eb521e37ca83e5a59212db5e1d45a",
+      "ast_sha256": "sha256:a5a9e25076fa055ea1a0222e569e052b2aa2c3cc4cdaa8e655e6c95ba2c485f0",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "verify_source_tree_contract"
     },
@@ -4177,7 +4177,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:716048869fbe9b756b1b02925d98b21cc23e8f601d570f5699366c4023e66d83",
-  "protected_source_commit": "0f042e5a08ccc1aa4ba119958e302f67b259993d",
+  "manifest_hash": "sha256:fe5d43cbcf6e6f894b1bb0da84821bae0ff30b7eb8deef66735bfb489dc7afbe",
+  "protected_source_commit": "7cb672701975db38c878f3a2482940101f48cc8f",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

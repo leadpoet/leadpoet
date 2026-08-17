@@ -111,6 +111,9 @@ ALLOCATION_SCORING_AUDIT_MIGRATION = (
 ALLOCATION_PROMOTION_MIGRATION = (
     "37-research-lab-promotion-and-public-benchmarks.sql"
 )
+ONE_ACTIVE_PRIVATE_MODEL_MIGRATION = (
+    "60-research-lab-one-active-version-guard.sql"
+)
 ATOMIC_CLAIM_GUARDS_MIGRATION = (
     "42-research-lab-atomic-claim-guards.sql"
 )
@@ -248,6 +251,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     PAUSED_CAPACITY_AGING_MIGRATION,
     ALLOCATION_IMAGE_BUILD_MIGRATIONS[2],
     RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
+    ONE_ACTIVE_PRIVATE_MODEL_MIGRATION,
     HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
     *SOURCE_ADD_PRE_V2_MIGRATIONS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX[0],
@@ -4279,6 +4283,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             PAUSED_CAPACITY_AGING_MIGRATION,
             ALLOCATION_IMAGE_BUILD_MIGRATIONS[2],
             RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
+            ONE_ACTIVE_PRIVATE_MODEL_MIGRATION,
             HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
         ):
             database.apply_migration(scripts / name)

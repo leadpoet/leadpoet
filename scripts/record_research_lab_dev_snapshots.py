@@ -47,6 +47,7 @@ import json
 import math
 import os
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import sys
@@ -206,6 +207,15 @@ def snapshot_export_bank_size(path: str) -> int:
     ):
         raise ValueError("source ICP export bank size differs from its items")
     return bank_size
+
+
+def _terminate_snapshot_recorder_on_signal(
+    signal_number: int,
+    _frame: Any,
+) -> None:
+    """Turn host SIGTERM into stack unwinding and named Docker cleanup."""
+
+    raise SystemExit(128 + int(signal_number))
 
 
 def _provider_key_presence() -> dict[str, bool]:
@@ -823,6 +833,7 @@ def _resolve_snapshot_provider_model_ids(
 
 
 def main() -> int:
+    signal.signal(signal.SIGTERM, _terminate_snapshot_recorder_on_signal)
     parser = argparse.ArgumentParser(
         description="Record a frozen provider snapshot set for the L1 dev-eval rung"
     )

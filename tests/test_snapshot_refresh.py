@@ -114,9 +114,9 @@ def test_run_command_timeout_reaps_its_process_group(monkeypatch, tmp_path):
 
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
-        snapshot_refresh._run_command(command, dict(os.environ), 0.2)
+        snapshot_refresh._run_command(command, dict(os.environ), 2.0)
 
-    assert time.monotonic() - started < 3.0
+    assert time.monotonic() - started < 5.0
     pid = int(pid_path.read_text(encoding="utf-8"))
     assert not _pid_alive(pid)
 
@@ -164,6 +164,110 @@ def test_run_command_kills_term_ignoring_descendant_that_closed_pipes(
 
     descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
     assert not _pid_alive(descendant_pid)
+
+
+def test_run_command_immediately_reaps_descendant_that_retained_pipes(
+    monkeypatch, tmp_path
+):
+    descendant_pid_path = tmp_path / "pipe-holder.pid"
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "COMMAND_TERMINATION_GRACE_SECONDS",
+        0.1,
+    )
+    monkeypatch.setattr(snapshot_refresh, "COMMAND_KILL_WAIT_SECONDS", 3.0)
+    descendant_code = (
+        "import os, pathlib, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "while True: time.sleep(1)\n"
+    )
+    launcher_code = (
+        "import pathlib, subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]])\n"
+        "deadline = time.monotonic() + 2\n"
+        "while not pathlib.Path(sys.argv[1]).is_file():\n"
+        "    if time.monotonic() >= deadline: raise SystemExit(2)\n"
+        "    time.sleep(0.01)\n"
+    )
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="left a live descendant process"):
+        snapshot_refresh._run_command(
+            [
+                sys.executable,
+                "-c",
+                launcher_code,
+                str(descendant_pid_path),
+                descendant_code,
+            ],
+            dict(os.environ),
+            60,
+        )
+
+    assert time.monotonic() - started < 3.0
+    descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
+    assert not _pid_alive(descendant_pid)
+
+
+def test_run_command_confirms_transient_group_exit_after_communicate(
+    monkeypatch,
+):
+    observations = iter((True, False))
+    observed_calls = 0
+
+    def transient_group(_process_group_id: int) -> bool:
+        nonlocal observed_calls
+        observed_calls += 1
+        return next(observations)
+
+    monkeypatch.setattr(snapshot_refresh, "_process_group_alive", transient_group)
+
+    assert snapshot_refresh._run_command(
+        [sys.executable, "-c", "print('completed')"],
+        dict(os.environ),
+        2,
+    ) == "completed\n"
+    assert observed_calls == 2
+
+
+def test_cancellation_does_not_mask_command_teardown_failure(monkeypatch):
+    started = threading.Event()
+
+    def broken_runner(
+        _command,
+        _env,
+        _timeout,
+        *,
+        cancellation_event=None,
+    ):
+        started.set()
+        assert cancellation_event is not None
+        assert cancellation_event.wait(timeout=5)
+        raise RuntimeError("snapshot command teardown failed")
+
+    monkeypatch.setattr(snapshot_refresh, "_run_command", broken_runner)
+
+    async def scenario() -> None:
+        command = asyncio.create_task(
+            snapshot_refresh._await_command_completion(
+                snapshot_refresh._run_command,
+                [sys.executable, "-c", "pass"],
+                os.environ,
+                60,
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 5
+        while not started.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("command teardown probe did not start")
+            await asyncio.sleep(0.01)
+        command.cancel()
+        with pytest.raises(RuntimeError, match="command teardown failed"):
+            await command
+
+    asyncio.run(scenario())
 
 
 def test_published_snapshot_uri_requires_one_content_addressed_target():
@@ -332,6 +436,9 @@ def test_auto_refresh_defaults_on_and_explicit_false_disables(monkeypatch):
 
 def test_command_timeout_environment_is_finitely_capped(monkeypatch):
     assert snapshot_refresh.MAX_COMMAND_TIMEOUT_SECONDS == 2_622_300
+    assert snapshot_refresh.COMMAND_TERMINATION_GRACE_SECONDS == (
+        snapshot_refresh.SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS + 5.0
+    )
     monkeypatch.setenv(
         snapshot_refresh.COMMAND_TIMEOUT_ENV,
         str(snapshot_refresh.MAX_COMMAND_TIMEOUT_SECONDS + 1),

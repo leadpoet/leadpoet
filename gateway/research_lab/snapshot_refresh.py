@@ -33,6 +33,7 @@ from gateway.research_lab.promotion import load_active_private_model
 from research_lab.eval.snapshot_store import POINTER_NAME, SNAPSHOT_URI_ENV
 from scripts.record_research_lab_dev_snapshots import (
     DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+    SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS,
     snapshot_export_bank_size,
     snapshot_record_workflow_timeout_seconds,
 )
@@ -61,9 +62,12 @@ MAX_COMMAND_TIMEOUT_SECONDS = snapshot_record_workflow_timeout_seconds(
     item_count=MAX_DEV_SNAPSHOT_BANK_ICP_COUNT,
 )
 COMMAND_POLL_INTERVAL_SECONDS = 0.1
-COMMAND_TERMINATION_GRACE_SECONDS = 5.0
+COMMAND_TERMINATION_GRACE_SECONDS = (
+    SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS + 5.0
+)
 COMMAND_KILL_WAIT_SECONDS = 5.0
 COMMAND_PIPE_DRAIN_TIMEOUT_SECONDS = 5.0
+COMMAND_GROUP_EXIT_CONFIRMATION_SECONDS = 2.0
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _IMMUTABLE_SNAPSHOT_SUFFIX_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_REASON_RE = re.compile(r"^[a-z0-9_.:-]{1,120}$")
@@ -309,6 +313,11 @@ def _run_command(
                 timeout=min(COMMAND_POLL_INTERVAL_SECONDS, remaining)
             )
         except subprocess.TimeoutExpired:
+            if process.poll() is not None:
+                _terminate_process_group(process)
+                raise RuntimeError(
+                    "snapshot pipeline command left a live descendant process"
+                )
             continue
         if cancellation.is_set():
             if _process_group_alive(process.pid):
@@ -316,7 +325,19 @@ def _run_command(
             raise _CommandCancellationRequested(
                 "snapshot pipeline command was cancelled"
             )
-        if _process_group_alive(process.pid):
+        group_alive = _process_group_alive(process.pid)
+        if group_alive:
+            group_alive = not _wait_for_process_group_exit(
+                process,
+                timeout_seconds=COMMAND_GROUP_EXIT_CONFIRMATION_SECONDS,
+            )
+        if cancellation.is_set():
+            if group_alive:
+                _terminate_process_group(process)
+            raise _CommandCancellationRequested(
+                "snapshot pipeline command was cancelled"
+            )
+        if group_alive:
             _terminate_process_group(process)
             raise RuntimeError(
                 "snapshot pipeline command left a live descendant process"
@@ -365,7 +386,7 @@ async def _await_command_completion(
         break
     try:
         result = command_task.result()
-    except BaseException:
+    except _CommandCancellationRequested:
         if cancellation is not None:
             raise cancellation
         raise

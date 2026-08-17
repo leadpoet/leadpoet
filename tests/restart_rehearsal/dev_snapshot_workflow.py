@@ -17,12 +17,18 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 from typing import Any, Mapping
+
+from scripts.record_research_lab_dev_snapshots import (
+    SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS,
+)
 
 
 SCENARIO_NAME = "dev-snapshot-downstream-publication"
@@ -38,6 +44,27 @@ _PROVIDER_MODEL_ID = "openai/rehearsal-model"
 _SELECTION_SEED = "exact-rehearsal-snapshot"
 _ARGV_CONTRACT_SCHEMA = "leadpoet.rehearsal_dev_snapshot_argv.v1"
 _NEGATIVE_PROBE_ENV = "REHEARSAL_DEV_SNAPSHOT_NEGATIVE_PROBE"
+_BOUNDARY_STATE_ENV = "REHEARSAL_DEV_SNAPSHOT_BOUNDARY_STATE"
+_PROCESS_GROUP_REGISTRY_SCHEMA = (
+    "leadpoet.rehearsal_dev_snapshot_process_group.v1"
+)
+_PROCESS_GROUP_SPAWN_SCHEMA = (
+    "leadpoet.rehearsal_dev_snapshot_process_group_spawn.v1"
+)
+_PROCESS_GROUP_REGISTRY_DIR = "active-process-groups"
+_PROCESS_GROUP_SPAWN_DIR = "process-group-spawns"
+_PROCESS_GROUP_SPAWN_RESOLUTION_SECONDS = 2.0
+_PROCESS_GROUP_STOP_CONFIRMATION_SECONDS = 2.0
+_PRODUCTION_SPAWN_GATE_ARGUMENT = "--leadpoet-production-spawn-gate"
+_NESTED_PROCESS_GROUP_TERMINATION_SECONDS = (
+    SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS + 5.0
+)
+_PRODUCTION_PHASE_COMMAND_NAMES = {
+    "export": "export_research_lab_dev_icp_inputs.py",
+    "record": "record_research_lab_dev_snapshots.py",
+    "publish_immutable": "publish_research_lab_dev_snapshot.py",
+    "publish_pointer": "publish_research_lab_dev_snapshot.py",
+}
 
 
 class DevSnapshotWorkflowTimeout(RuntimeError):
@@ -163,6 +190,533 @@ def _signal_process_group(process: subprocess.Popen[str], signum: int) -> bool:
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # Darwin reports EPERM for a group whose only member is the reaped
+        # leader. A still-running same-owner leader must remain fatal.
+        if process.poll() is not None:
+            return False
+        raise
+
+
+def _process_group_id_alive(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _registered_process_group_id_alive(process_group_id: int) -> bool:
+    """Classify an exact durable PGID, including all-zombie groups."""
+
+    permission_denied = False
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        permission_denied = True
+    return _process_table_has_live_group_members(
+        process_group_id,
+        missing_group_is_live=permission_denied,
+    )
+
+
+def _process_table_has_live_group_members(
+    requested_process_group_id: int,
+    *,
+    missing_group_is_live: bool,
+) -> bool:
+    """Return false only for an absent or exact all-zombie process group."""
+
+    try:
+        completed = subprocess.run(
+            ["ps", "-ww", "-axo", "pid=,ppid=,pgid=,state="],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if completed.returncode != 0:
+        return True
+    group_member_seen = False
+    group_leader_seen = False
+    for raw_line in completed.stdout.splitlines():
+        fields = raw_line.strip().split()
+        if not fields:
+            continue
+        if len(fields) != 4:
+            return True
+        try:
+            pid, parent_pid, row_process_group_id = map(int, fields[:3])
+        except ValueError:
+            return True
+        state = fields[3]
+        if pid <= 0 or parent_pid < 0 or row_process_group_id <= 0 or not state:
+            return True
+        if row_process_group_id != requested_process_group_id:
+            continue
+        group_member_seen = True
+        group_leader_seen = (
+            group_leader_seen or pid == requested_process_group_id
+        )
+        if not state.startswith("Z"):
+            return True
+    if not group_member_seen:
+        return missing_group_is_live
+    # A malformed/incomplete view remains live. Only an exact group with its
+    # leader present and every member in zombie state is safe to classify gone.
+    return not group_leader_seen
+
+
+def _wait_for_controller_stop(process: subprocess.Popen[str]) -> bool:
+    """Confirm SIGSTOP reached the direct controller before inspecting children."""
+
+    deadline = time.monotonic() + _PROCESS_GROUP_STOP_CONFIRMATION_SECONDS
+    while True:
+        try:
+            waited_pid, status = os.waitpid(
+                process.pid,
+                os.WUNTRACED | os.WNOHANG,
+            )
+        except ChildProcessError:
+            return process.poll() is None
+        if waited_pid == process.pid:
+            if os.WIFSTOPPED(status):
+                return True
+            if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                process.returncode = os.waitstatus_to_exitcode(status)
+                return False
+        if process.poll() is not None:
+            return False
+        if time.monotonic() >= deadline:
+            raise RuntimeError("dev-snapshot controller did not stop for spawn cleanup")
+        time.sleep(0.01)
+
+
+def _remove_process_group_row(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    directory_descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+
+
+def _boundary_process_group_state(
+    env: Mapping[str, str],
+) -> tuple[Path, Path, Mapping[str, Any]] | None:
+    raw = str(env.get(_BOUNDARY_STATE_ENV) or "").strip()
+    if not raw:
+        return None
+    state_path = Path(raw).expanduser().resolve()
+    decoded = json.loads(state_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(decoded, Mapping)
+        or decoded.get("schema_version") != BOUNDARY_SCHEMA
+    ):
+        raise RuntimeError("dev-snapshot process-group boundary state is invalid")
+    root = Path(str(decoded.get("root") or "")).resolve()
+    source_root = Path(str(decoded.get("source_root") or "")).resolve()
+    if (
+        state_path.parent != root
+        or not root.is_dir()
+        or not source_root.is_dir()
+    ):
+        raise RuntimeError("dev-snapshot process-group boundary root differs")
+    expected_hashes = decoded.get("expected_cli_argv_contract_hashes")
+    if (
+        not isinstance(expected_hashes, Mapping)
+        or dict(expected_hashes) != expected_cli_argv_contract_hashes()
+    ):
+        raise RuntimeError("dev-snapshot process-group command hashes differ")
+    return root, source_root, decoded
+
+
+def _load_process_group_rows(
+    directory: Path,
+    *,
+    schema: str,
+    state: Mapping[str, Any],
+    source_root: Path,
+    outer_process_group_id: int,
+) -> list[tuple[Path, dict[str, Any]]]:
+    if not directory.exists():
+        return []
+    if not directory.is_dir() or directory.is_symlink():
+        raise RuntimeError("dev-snapshot process-group registry is invalid")
+    expected_hashes = dict(state["expected_cli_argv_contract_hashes"])
+    expected_keys = {
+        "schema_version",
+        "status",
+        "pid",
+        "pgid",
+        "owner_pid",
+        "owner_pgid",
+        "spawn_nonce",
+        "phase",
+        "command_name",
+        "python_executable",
+        "script_path",
+        "argv_contract_hash",
+    }
+    rows: list[tuple[Path, dict[str, Any]]] = []
+    for path in sorted(directory.iterdir()):
+        if path.name.startswith(".") and path.name.endswith(".tmp"):
+            # Atomic-write staging is protected by the preceding durable
+            # spawn marker (or precedes any actual spawn).
+            continue
+        if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+            raise RuntimeError("dev-snapshot process-group registry entry differs")
+        try:
+            decoded = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # The observed owner completed and durably removed this row after
+            # the directory snapshot but before the read.
+            continue
+        if not isinstance(decoded, Mapping) or set(decoded) != expected_keys:
+            raise RuntimeError("dev-snapshot process-group registry row differs")
+        row = dict(decoded)
+        phase = str(row.get("phase") or "")
+        command_name = _PRODUCTION_PHASE_COMMAND_NAMES.get(phase)
+        expected_script = (
+            source_root / "scripts" / str(command_name or "")
+        ).resolve()
+        owner_pid = row.get("owner_pid")
+        owner_pgid = row.get("owner_pgid")
+        if (
+            row.get("schema_version") != schema
+            or command_name is None
+            or row.get("command_name") != command_name
+            or Path(str(row.get("python_executable") or "")).resolve()
+            != Path(sys.executable).resolve()
+            or Path(str(row.get("script_path") or "")).resolve()
+            != expected_script
+            or row.get("argv_contract_hash") != expected_hashes.get(phase)
+            or not isinstance(owner_pid, int)
+            or owner_pid <= 0
+            or owner_pid != outer_process_group_id
+            or owner_pgid != outer_process_group_id
+            or re.fullmatch(r"[0-9a-f]{32}", str(row.get("spawn_nonce") or ""))
+            is None
+        ):
+            raise RuntimeError("dev-snapshot registered command identity differs")
+        rows.append((path, row))
+    return rows
+
+
+def _scan_unresolved_spawn(
+    row: Mapping[str, Any],
+    *,
+    source_root: Path,
+) -> int | None:
+    """Resolve the only safe fallback after the controller group is stopped."""
+
+    completed = subprocess.run(
+        ["ps", "-ww", "-axo", "pid=,ppid=,pgid=,command="],
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=2,
+    )
+    owner_pid = int(row["owner_pid"])
+    expected_gate = (
+        source_root
+        / "tests"
+        / "restart_rehearsal"
+        / "dev_snapshot_boundary"
+        / "sitecustomize.py"
+    ).resolve()
+    expected_nonce = str(row["spawn_nonce"])
+    matches: list[int] = []
+    unknown_children: list[int] = []
+    for raw_line in completed.stdout.splitlines():
+        fields = raw_line.strip().split(None, 3)
+        if len(fields) != 4:
+            continue
+        try:
+            pid, parent_pid, process_group_id = map(int, fields[:3])
+        except ValueError:
+            continue
+        if parent_pid != owner_pid:
+            continue
+        try:
+            argv = shlex.split(fields[3])
+        except ValueError:
+            argv = []
+        if (
+            process_group_id == pid
+            and len(argv) == 6
+            and Path(argv[0]).name.lower() in {"python", "python3"}
+            and argv[1] == "-S"
+            and Path(argv[2]).resolve() == expected_gate
+            and argv[3] == _PRODUCTION_SPAWN_GATE_ARGUMENT
+            and argv[4].isdigit()
+            and argv[5] == expected_nonce
+        ):
+            matches.append(pid)
+        else:
+            unknown_children.append(pid)
+    if unknown_children or len(matches) > 1:
+        raise RuntimeError(
+            "dev-snapshot unresolved spawn could not be identified safely"
+        )
+    return matches[0] if matches else None
+
+
+def _cleanup_registered_process_groups(
+    process: subprocess.Popen[str],
+    *,
+    env: Mapping[str, str],
+    term_grace_seconds: float,
+) -> bool:
+    """Stop every exact nested session and report outer TERM ownership."""
+
+    context = _boundary_process_group_state(env)
+    if context is None:
+        return False
+    root, source_root, state = context
+    registry_dir = root / _PROCESS_GROUP_REGISTRY_DIR
+    spawn_dir = root / _PROCESS_GROUP_SPAWN_DIR
+    deadline = time.monotonic() + _PROCESS_GROUP_SPAWN_RESOLUTION_SECONDS
+    spawn_rows: list[tuple[Path, dict[str, Any]]] = []
+    while True:
+        spawn_rows = _load_process_group_rows(
+            spawn_dir,
+            schema=_PROCESS_GROUP_SPAWN_SCHEMA,
+            state=state,
+            source_root=source_root,
+            outer_process_group_id=process.pid,
+        )
+        unresolved = [row for _path, row in spawn_rows if row["status"] == "spawning"]
+        if not spawn_rows or not unresolved:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+
+    outer_stopped = False
+    if process.poll() is None:
+        if _signal_process_group(process, signal.SIGSTOP):
+            # No private group may be created after the final durable-row
+            # snapshot. If the leader exits while this stop is arriving, its
+            # same-group descendants may still need the paired SIGCONT below.
+            outer_stopped = True
+        elif process.poll() is None:
+            raise RuntimeError("dev-snapshot controller could not be stopped")
+        if outer_stopped:
+            _wait_for_controller_stop(process)
+
+    owner_stable = outer_stopped or process.poll() is not None
+    if not owner_stable:
+        raise RuntimeError("dev-snapshot controller state could not be stabilized")
+    # The owner is now stopped or exited, so this is the final stable view of
+    # all private groups it could have spawned.
+    spawn_rows = _load_process_group_rows(
+        spawn_dir,
+        schema=_PROCESS_GROUP_SPAWN_SCHEMA,
+        state=state,
+        source_root=source_root,
+        outer_process_group_id=process.pid,
+    )
+
+    target_paths: dict[int, set[Path]] = {}
+    for path, row in _load_process_group_rows(
+        registry_dir,
+        schema=_PROCESS_GROUP_REGISTRY_SCHEMA,
+        state=state,
+        source_root=source_root,
+        outer_process_group_id=process.pid,
+    ):
+        if row["status"] != "active":
+            raise RuntimeError("dev-snapshot process-group registry status differs")
+        pid = row.get("pid")
+        if (
+            not isinstance(pid, int)
+            or row.get("pgid") != pid
+            or pid <= 0
+            or path.name != f"{pid}.json"
+        ):
+            raise RuntimeError("dev-snapshot process-group registry PID differs")
+        target_paths.setdefault(pid, set()).add(path)
+
+    for path, row in spawn_rows:
+        status = row.get("status")
+        if path.name != f"{row['owner_pid']}-{row['phase']}.json":
+            raise RuntimeError("dev-snapshot spawn marker path differs")
+        if status == "spawned":
+            pid = row.get("pid")
+            if not isinstance(pid, int) or row.get("pgid") != pid or pid <= 0:
+                raise RuntimeError("dev-snapshot spawn marker PID differs")
+            target_paths.setdefault(pid, set()).add(path)
+        elif status == "spawning" and owner_stable:
+            scanned_pid = _scan_unresolved_spawn(
+                row,
+                source_root=source_root,
+            )
+            if scanned_pid is not None:
+                target_paths.setdefault(scanned_pid, set()).add(path)
+        else:
+            raise RuntimeError("dev-snapshot spawn marker status differs")
+
+    live_targets: set[int] = set()
+    for process_group_id, paths in target_paths.items():
+        if not _registered_process_group_id_alive(process_group_id):
+            for path in paths:
+                _remove_process_group_row(path)
+            continue
+        live_targets.add(process_group_id)
+
+    for process_group_id in tuple(live_targets):
+        try:
+            os.killpg(process_group_id, signal.SIGTERM)
+        except ProcessLookupError:
+            live_targets.discard(process_group_id)
+            for path in target_paths[process_group_id]:
+                _remove_process_group_row(path)
+        except PermissionError:
+            if _registered_process_group_id_alive(process_group_id):
+                raise
+            live_targets.discard(process_group_id)
+            for path in target_paths[process_group_id]:
+                _remove_process_group_row(path)
+    outer_termination_sent = False
+    if outer_stopped:
+        # Queue termination while the owner is still stopped. SIGCONT may then
+        # let it reap a killed gate, but it cannot advance to a new command.
+        outer_termination_sent = _signal_process_group(process, signal.SIGTERM)
+        _signal_process_group(process, signal.SIGCONT)
+        outer_stopped = False
+    term_deadline = time.monotonic() + max(0.05, float(term_grace_seconds))
+    while live_targets and time.monotonic() < term_deadline:
+        live_targets = {
+            process_group_id
+            for process_group_id in live_targets
+            if _process_group_id_alive(process_group_id)
+        }
+        if live_targets:
+            time.sleep(0.02)
+    for process_group_id in live_targets:
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    kill_deadline = time.monotonic() + 2.0
+    while live_targets and time.monotonic() < kill_deadline:
+        live_targets = {
+            process_group_id
+            for process_group_id in live_targets
+            if _process_group_id_alive(process_group_id)
+        }
+        if live_targets:
+            time.sleep(0.02)
+    if live_targets:
+        raise RuntimeError("dev-snapshot registered process group survived SIGKILL")
+    for paths in target_paths.values():
+        for path in paths:
+            _remove_process_group_row(path)
+    return outer_termination_sent
+
+
+def _prune_completed_process_group_rows(
+    process: subprocess.Popen[str],
+    *,
+    env: Mapping[str, str],
+) -> None:
+    context = _boundary_process_group_state(env)
+    if context is None:
+        return
+    root, source_root, state = context
+    definitions = (
+        (
+            root / _PROCESS_GROUP_REGISTRY_DIR,
+            _PROCESS_GROUP_REGISTRY_SCHEMA,
+            "active",
+        ),
+        (
+            root / _PROCESS_GROUP_SPAWN_DIR,
+            _PROCESS_GROUP_SPAWN_SCHEMA,
+            None,
+        ),
+    )
+    for directory, schema, required_status in definitions:
+        for path, row in _load_process_group_rows(
+            directory,
+            schema=schema,
+            state=state,
+            source_root=source_root,
+            outer_process_group_id=process.pid,
+        ):
+            status = row.get("status")
+            if required_status is not None and status != required_status:
+                raise RuntimeError("dev-snapshot process-group registry status differs")
+            if status not in {"active", "spawning", "spawned"}:
+                raise RuntimeError("dev-snapshot process-group row status differs")
+            pid = row.get("pid")
+            if pid is None and status == "spawning":
+                _remove_process_group_row(path)
+                continue
+            if (
+                not isinstance(pid, int)
+                or pid <= 0
+                or row.get("pgid") != pid
+            ):
+                raise RuntimeError("dev-snapshot process-group row PID differs")
+            if _registered_process_group_id_alive(pid):
+                raise RuntimeError(
+                    "dev-snapshot registered process group survived outer teardown"
+                )
+            _remove_process_group_row(path)
+        if directory.is_dir():
+            for path in tuple(directory.iterdir()):
+                if path.name.startswith(".") and path.name.endswith(".tmp"):
+                    _remove_process_group_row(path)
+
+
+def _process_group_registry_empty(env: Mapping[str, str]) -> bool:
+    context = _boundary_process_group_state(env)
+    if context is None:
+        return True
+    root, _source_root_path, _state = context
+    return all(
+        not directory.exists() or not any(directory.iterdir())
+        for directory in (
+            root / _PROCESS_GROUP_REGISTRY_DIR,
+            root / _PROCESS_GROUP_SPAWN_DIR,
+        )
+    )
+
+
+def _terminate_unexpected_outer_descendants(
+    process: subprocess.Popen[str],
+    *,
+    term_grace_seconds: float,
+) -> bool:
+    """Remove a same-session descendant after the command leader exits."""
+
+    if not _process_group_id_alive(process.pid):
+        return False
+    _signal_process_group(process, signal.SIGTERM)
+    term_deadline = time.monotonic() + max(0.05, float(term_grace_seconds))
+    while _process_group_id_alive(process.pid) and time.monotonic() < term_deadline:
+        time.sleep(0.02)
+    if _process_group_id_alive(process.pid):
+        _signal_process_group(process, signal.SIGKILL)
+    kill_deadline = time.monotonic() + 2.0
+    while _process_group_id_alive(process.pid) and time.monotonic() < kill_deadline:
+        time.sleep(0.02)
+    if _process_group_id_alive(process.pid):
+        raise RuntimeError(
+            "dev-snapshot outer process group survived descendant teardown"
+        )
+    return True
 
 
 def _run_in_new_process_group(
@@ -171,7 +725,7 @@ def _run_in_new_process_group(
     env: Mapping[str, str],
     timeout_seconds: float,
     label: str,
-    term_grace_seconds: float = 2.0,
+    term_grace_seconds: float = _NESTED_PROCESS_GROUP_TERMINATION_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     """Run one bounded process tree and reap it after TERM/KILL on timeout."""
 
@@ -186,7 +740,21 @@ def _run_in_new_process_group(
     try:
         stdout, stderr = process.communicate(timeout=float(timeout_seconds))
     except subprocess.TimeoutExpired as exc:
-        term_sent = _signal_process_group(process, signal.SIGTERM)
+        nested_cleanup_error: BaseException | None = None
+        try:
+            outer_termination_sent = _cleanup_registered_process_groups(
+                process,
+                env=env,
+                term_grace_seconds=term_grace_seconds,
+            )
+        except BaseException as cleanup_exc:
+            nested_cleanup_error = cleanup_exc
+            outer_termination_sent = False
+        term_sent = outer_termination_sent or _signal_process_group(
+            process, signal.SIGTERM
+        )
+        if nested_cleanup_error is not None:
+            _signal_process_group(process, signal.SIGCONT)
         kill_sent = False
         try:
             stdout, stderr = process.communicate(
@@ -200,6 +768,11 @@ def _run_in_new_process_group(
             # pipes. Kill any remaining member of the isolated group.
             kill_sent = _signal_process_group(process, signal.SIGKILL)
         process.wait()
+        _prune_completed_process_group_rows(process, env=env)
+        if nested_cleanup_error is not None:
+            raise RuntimeError(
+                "dev-snapshot nested process-group cleanup failed"
+            ) from nested_cleanup_error
         raise DevSnapshotWorkflowTimeout(
             label,
             timeout_seconds=float(timeout_seconds),
@@ -208,14 +781,60 @@ def _run_in_new_process_group(
             returncode=process.returncode,
         ) from exc
     except BaseException:
-        _signal_process_group(process, signal.SIGTERM)
+        nested_cleanup_error = None
+        try:
+            outer_termination_sent = _cleanup_registered_process_groups(
+                process,
+                env=env,
+                term_grace_seconds=term_grace_seconds,
+            )
+        except BaseException as cleanup_exc:
+            nested_cleanup_error = cleanup_exc
+            outer_termination_sent = False
+        if not outer_termination_sent:
+            _signal_process_group(process, signal.SIGTERM)
+        if nested_cleanup_error is not None:
+            _signal_process_group(process, signal.SIGCONT)
         try:
             process.communicate(timeout=max(0.05, float(term_grace_seconds)))
         except subprocess.TimeoutExpired:
             _signal_process_group(process, signal.SIGKILL)
             process.communicate()
         process.wait()
+        _prune_completed_process_group_rows(process, env=env)
+        if nested_cleanup_error is not None:
+            raise RuntimeError(
+                "dev-snapshot nested process-group cleanup failed"
+            ) from nested_cleanup_error
         raise
+    registered_survivor = not _process_group_registry_empty(env)
+    registered_cleanup_error: BaseException | None = None
+    if registered_survivor:
+        try:
+            _cleanup_registered_process_groups(
+                process,
+                env=env,
+                term_grace_seconds=term_grace_seconds,
+            )
+            _prune_completed_process_group_rows(process, env=env)
+        except BaseException as exc:
+            registered_cleanup_error = exc
+    outer_survivor = _terminate_unexpected_outer_descendants(
+        process,
+        term_grace_seconds=term_grace_seconds,
+    )
+    if registered_cleanup_error is not None:
+        raise RuntimeError(
+            "dev-snapshot registered process-group cleanup failed"
+        ) from registered_cleanup_error
+    if registered_survivor:
+        raise RuntimeError(
+            "dev-snapshot child exited with a registered process group"
+        )
+    if outer_survivor:
+        raise RuntimeError(
+            "dev-snapshot child exited with a live process-group descendant"
+        )
     return subprocess.CompletedProcess(
         list(command), int(process.returncode or 0), stdout, stderr
     )
@@ -248,7 +867,7 @@ async def _exercise_production_command_lifecycle(root: Path) -> dict[str, bool]:
         _run_command(
             [sys.executable, "-c", timeout_source],
             os.environ,
-            0.2,
+            2.0,
         )
     except subprocess.TimeoutExpired:
         timeout_raised = True
@@ -258,7 +877,10 @@ async def _exercise_production_command_lifecycle(root: Path) -> dict[str, bool]:
     cancellation_pid_path = root / "production-cancellation.pid"
     cancellation_source = (
         "import os, pathlib, signal, time\n"
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "def terminate(_signal_number, _frame):\n"
+        "    time.sleep(0.5)\n"
+        "    raise SystemExit(143)\n"
+        "signal.signal(signal.SIGTERM, terminate)\n"
         f"pathlib.Path({str(cancellation_pid_path)!r}).write_text(str(os.getpid()))\n"
         "os.close(1)\n"
         "os.close(2)\n"
@@ -665,6 +1287,10 @@ def _run_negative_boundary_probes(env: Mapping[str, str]) -> None:
             "import subprocess; subprocess.run(['/dev-snapshot-undeclared'])",
             "dev-snapshot subprocess operation is not allowlisted",
         ),
+        "popen": (
+            "import subprocess; subprocess.Popen(['/dev-snapshot-undeclared-popen'])",
+            "dev-snapshot Popen operation is not allowlisted",
+        ),
         "docker_argv": (
             "import os, subprocess; "
             "subprocess.run(['docker', 'info', '--format', 'bad'], "
@@ -948,6 +1574,9 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             _exercise_production_command_lifecycle(root)
         )
         _run_negative_boundary_probes(child_env)
+        process_group_registry_cleanup_exact = _process_group_registry_empty(
+            child_env
+        )
         events = _load_events(root / "events.jsonl")
         readiness = dict(child.get("readiness") or {})
 
@@ -989,6 +1618,13 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             len(command_events) == len(expected_phases)
             and all(
                 event.get("process_group_isolated") is True
+                for event in command_events
+            )
+        )
+        production_command_spawn_gates_exact = (
+            len(command_events) == len(expected_phases)
+            and all(
+                event.get("spawn_gate_registered_before_exec") is True
                 for event in command_events
             )
         )
@@ -1223,11 +1859,18 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
         )
         unknown_subprocess_rejected = (
             explicit_subprocess_probe_ids
-            == Counter({"subprocess": 1, "docker_argv": 1})
+            == Counter({"subprocess": 1, "popen": 1, "docker_argv": 1})
             and any(
                 event.get("probe_id") == "subprocess"
                 and event.get("command_class") == "other"
                 and event.get("command_name") == "dev-snapshot-undeclared"
+                for event in explicit_subprocess_rejections
+            )
+            and any(
+                event.get("probe_id") == "popen"
+                and event.get("command_class") == "other"
+                and event.get("command_name")
+                == "dev-snapshot-undeclared-popen"
                 for event in explicit_subprocess_rejections
             )
             and any(
@@ -1237,7 +1880,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
                 for event in explicit_subprocess_rejections
             )
             and production_git_discovery_fail_closed
-            and len(subprocess_rejections) == 4
+            and len(subprocess_rejections) == 5
         )
         aws_rejections = [
             event
@@ -1258,6 +1901,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
                 "httpx_async": 1,
                 "aiohttp": 1,
                 "subprocess": 1,
+                "popen": 1,
                 "docker_argv": 1,
                 "aws_service": 1,
             }
@@ -1287,6 +1931,12 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             "production_commands_exact": production_commands_exact,
             "production_command_process_groups_isolated": (
                 production_command_process_groups_isolated
+            ),
+            "production_command_spawn_gates_exact": (
+                production_command_spawn_gates_exact
+            ),
+            "process_group_registry_cleanup_exact": (
+                process_group_registry_cleanup_exact
             ),
             "production_cli_argv_contracts_exact": (
                 production_cli_argv_contracts_exact

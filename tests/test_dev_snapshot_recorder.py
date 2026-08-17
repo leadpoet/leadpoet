@@ -210,6 +210,40 @@ def test_named_docker_is_removed_when_host_run_is_interrupted(
     assert calls[1][1]["timeout"] == (
         recorder.SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS
     )
+def test_recorder_sigterm_unwinds_through_named_docker_cleanup(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    def run(command, **kwargs):
+        if list(command)[-1:] == ["info"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        calls.append((list(command), dict(kwargs)))
+        if len(calls) == 1:
+            recorder._terminate_snapshot_recorder_on_signal(
+                recorder.signal.SIGTERM,
+                None,
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        str(tmp_path / "docker-operation.lock"),
+    )
+    monkeypatch.setattr(recorder.subprocess, "run", run)
+
+    with pytest.raises(SystemExit) as exc_info:
+        recorder._run_named_docker(
+            ["docker", "run", "--name", "snapshot-test", "image"],
+            container_name="snapshot-test",
+            input_text="{}",
+            timeout_seconds=5,
+            environment={"PATH": "/usr/bin"},
+        )
+
+    assert exc_info.value.code == 128 + int(recorder.signal.SIGTERM)
+    assert calls[1][0] == ["docker", "rm", "-f", "snapshot-test"]
 
 
 @pytest.mark.parametrize("reuse_existing", [False, True])

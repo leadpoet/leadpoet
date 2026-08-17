@@ -2668,7 +2668,18 @@ def controller_env(store: FakeStore, monkeypatch: pytest.MonkeyPatch) -> dict[st
     async def _fake_load_active(config: Any, *, register_bootstrap: bool = False) -> ActivePrivateModel:
         return ActivePrivateModel(artifact=artifact, version_row=_active_row(artifact))
 
+    async def _no_pending_activation(
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        return None
+
     monkeypatch.setattr(promotion, "load_active_private_model", _fake_load_active)
+    monkeypatch.setattr(
+        promotion,
+        "_active_version_has_pending_candidate_activation",
+        _no_pending_activation,
+    )
 
     async def _fake_compare_metric(
         *,
@@ -2775,6 +2786,29 @@ async def test_pending_exact_activation_resumes_before_stale_parent_gate(
         event.get("event_type") == "stale_parent_detected"
         for event in controller_env["store"].promotion_event_writes
     )
+
+
+async def test_pending_activation_with_invalid_event_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _invalid_event(_row: Mapping[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("private model active target event is unavailable")
+
+    monkeypatch.setattr(
+        promotion,
+        "_load_current_private_model_activation_event",
+        _invalid_event,
+    )
+
+    with pytest.raises(
+        promotion.PromotionPausedError,
+        match="pending activation evidence is unavailable",
+    ):
+        await promotion._active_version_has_pending_candidate_activation(
+            SimpleNamespace(version_row={"private_model_version_id": "version:bad"}),
+            candidate_id="candidate:bad",
+            score_bundle_id="score-bundle:bad",
+        )
 
 
 async def test_baseline_health_gate_failed_does_not_hold(controller_env, monkeypatch):

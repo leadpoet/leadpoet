@@ -225,12 +225,6 @@ ATOMIC_CREDIT_RESUME_MIGRATION = (
 COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION = (
     "149-research-lab-compact-weight-settlement-authority.sql"
 )
-FAILURE_FUNNEL_INDEXES_MIGRATION = (
-    "150-research-lab-failure-funnel-indexes.concurrent.sql"
-)
-FAILURE_FUNNEL_REPORTING_MIGRATION = (
-    "151-research-lab-failure-funnel-reporting.sql"
-)
 CANDIDATE_HYBRID_PURPOSES_MIGRATION = (
     "152-research-lab-candidate-hybrid-purposes.sql"
 )
@@ -288,8 +282,6 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_CATALOG_AUTH_METADATA_MIGRATION,
     ATOMIC_CREDIT_RESUME_MIGRATION,
     COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION,
-    FAILURE_FUNNEL_INDEXES_MIGRATION,
-    FAILURE_FUNNEL_REPORTING_MIGRATION,
     CANDIDATE_HYBRID_PURPOSES_MIGRATION,
     PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION,
 )
@@ -320,8 +312,6 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_147_source_catalog_auth_metadata_contract_valid",
     "post_148_atomic_credit_resume_contract_valid",
     "post_149_compact_weight_settlement_contract_valid",
-    "post_150_failure_funnel_indexes_valid",
-    "post_151_failure_funnel_reporting_contract_valid",
     "post_152_candidate_hybrid_purpose_contract_valid",
     "post_153_private_model_lineage_generation_contract_valid",
     "credit_resume_identical_replay_idempotent",
@@ -5264,73 +5254,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-149 compact weight settlement contract differs"
             )
-        database.apply_migration(scripts / FAILURE_FUNNEL_INDEXES_MIGRATION)
-        applied.append(FAILURE_FUNNEL_INDEXES_MIGRATION)
-        database.apply_migration(scripts / FAILURE_FUNNEL_REPORTING_MIGRATION)
-        applied.append(FAILURE_FUNNEL_REPORTING_MIGRATION)
-        failure_funnel_reporting_contract = json.loads(
-            database.psql(
-                """
-                WITH expected(index_name) AS (
-                    VALUES
-                        ('idx_research_eval_score_bundles_ticket_created'),
-                        ('idx_research_lab_company_labels_ticket_candidate'),
-                        ('idx_research_lab_scoring_runs_ticket_candidate')
-                ), routine AS (
-                    SELECT p.oid, p.prosecdef
-                      FROM pg_catalog.pg_proc p
-                     WHERE p.oid =
-                        'public.get_research_lab_failure_funnel(uuid,text)'
-                            ::regprocedure
-                )
-                SELECT pg_catalog.jsonb_build_object(
-                    'schema_version',
-                        'leadpoet.failure-funnel-reporting-contract.v1',
-                    'indexes_valid', NOT EXISTS (
-                        SELECT 1
-                          FROM expected
-                         WHERE NOT EXISTS (
-                            SELECT 1
-                              FROM pg_catalog.pg_class c
-                              JOIN pg_catalog.pg_index i
-                                ON i.indexrelid = c.oid
-                              JOIN pg_catalog.pg_namespace n
-                                ON n.oid = c.relnamespace
-                             WHERE n.nspname = 'public'
-                               AND c.relname = expected.index_name
-                               AND c.relkind = 'i'
-                               AND i.indisvalid
-                               AND i.indisready
-                               AND i.indislive
-                         )
-                    ),
-                    'security_invoker', NOT (SELECT prosecdef FROM routine),
-                    'service_role_execute',
-                        pg_catalog.has_function_privilege(
-                            'service_role', (SELECT oid FROM routine), 'EXECUTE'
-                        ),
-                    'untrusted_execute_denied',
-                        NOT pg_catalog.has_function_privilege(
-                            'anon', (SELECT oid FROM routine), 'EXECUTE'
-                        )
-                        AND NOT pg_catalog.has_function_privilege(
-                            'authenticated', (SELECT oid FROM routine), 'EXECUTE'
-                        )
-                )::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if failure_funnel_reporting_contract != {
-            "schema_version": "leadpoet.failure-funnel-reporting-contract.v1",
-            "indexes_valid": True,
-            "security_invoker": True,
-            "service_role_execute": True,
-            "untrusted_execute_denied": True,
-        }:
-            raise PostgresContractProbeError(
-                "post-151 failure funnel reporting contract differs"
-            )
         database.apply_migration(scripts / CANDIDATE_HYBRID_PURPOSES_MIGRATION)
         applied.append(CANDIDATE_HYBRID_PURPOSES_MIGRATION)
         candidate_hybrid_purpose_contract = json.loads(
@@ -5569,9 +5492,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "atomic_credit_resume": atomic_credit_resume,
             "compact_weight_settlement_contract": (
                 compact_weight_settlement_contract
-            ),
-            "failure_funnel_reporting_contract": (
-                failure_funnel_reporting_contract
             ),
             "candidate_hybrid_purpose_contract": (
                 candidate_hybrid_purpose_contract

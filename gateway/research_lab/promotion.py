@@ -369,8 +369,17 @@ async def _active_version_has_pending_candidate_activation(
         return None
     try:
         event = await _load_current_private_model_activation_event(row)
-    except RuntimeError:
-        return None
+    except RuntimeError as exc:
+        logger.error(
+            "research_lab_pending_activation_evidence_unavailable "
+            "candidate=%s score_bundle=%s",
+            _short_ref(candidate_id),
+            _short_ref(score_bundle_id),
+            exc_info=True,
+        )
+        raise PromotionPausedError(
+            "private model pending activation evidence is unavailable"
+        ) from exc
     active_rows = await _active_private_model_version_rows()
     if (
         len(active_rows) != 1

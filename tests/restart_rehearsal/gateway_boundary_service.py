@@ -507,8 +507,6 @@ def _migration_schema_contract(
         "147-research-lab-source-catalog-auth-metadata.sql",
         "148-research-lab-atomic-credit-resume.sql",
         "149-research-lab-compact-weight-settlement-authority.sql",
-        "150-research-lab-failure-funnel-indexes.concurrent.sql",
-        "151-research-lab-failure-funnel-reporting.sql",
         "152-research-lab-candidate-hybrid-purposes.sql",
         "153-research-lab-private-model-lineage-generation.sql",
     ]

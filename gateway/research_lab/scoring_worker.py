@@ -3365,6 +3365,7 @@ async def _persist_company_label_examples(
     run_id: str | None = None,
     ticket_id: str | None = None,
     score_bundle_id: str | None = None,
+    scoring_run_id: str | None = None,
 ) -> int:
     """Best-effort positive/negative company-label capture for offline corpus use.
 
@@ -3374,6 +3375,23 @@ async def _persist_company_label_examples(
     """
     if not _company_label_examples_capture_enabled() or not breakdowns:
         return 0
+    output_rows = list(outputs or ())
+    breakdown_rows = list(breakdowns or ())
+    identity_alignment_proven = len(output_rows) == len(breakdown_rows)
+    if not identity_alignment_proven:
+        # The scorer may prefilter an early company or stop at its scoring
+        # cap, so positional zip would attach a later verdict to the wrong
+        # company. Preserve outcome counts but withhold identity unless the
+        # one-to-one association is provable.
+        logger.warning(
+            "research_lab_company_label_identity_alignment_unavailable "
+            "context=%s icp_ref=%s outputs=%d breakdowns=%d",
+            compact_ref(str(context_ref)),
+            compact_ref(str(icp_ref)),
+            len(output_rows),
+            len(breakdown_rows),
+        )
+        output_rows = [{} for _ in breakdown_rows]
     now = datetime.now(timezone.utc).isoformat()
     model_side = _model_side_for_label(
         is_reference_model=bool(is_reference_model),
@@ -3391,31 +3409,40 @@ async def _persist_company_label_examples(
         }
     ] if scorer_trace_ref or scorer_trace_sha256 else []
     written = 0
-    for index, (output, breakdown) in enumerate(zip(outputs or (), breakdowns or ())):
+    for index, (output, breakdown) in enumerate(zip(output_rows, breakdown_rows)):
         if not isinstance(output, Mapping) or not isinstance(breakdown, Mapping):
             continue
         identity = _scorer_trace_company_identity(output)
         company_key = _company_identity_key(identity)
         failure_reason = str(breakdown.get("failure_reason") or "").strip()
-        reporting_fields = normalize_failure_reporting_fields(breakdown)
+        reporting_fields = normalize_failure_reporting_fields(
+            breakdown,
+            retryable_infrastructure_failure=(
+                scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+            ),
+        )
         intent_doc = output.get("intent") if isinstance(output.get("intent"), Mapping) else {}
         attr_doc = (
             output.get("required_attribute")
             if isinstance(output.get("required_attribute"), Mapping)
             else {}
         )
-        dedup_key = sha256_json(
-            {
-                "context_ref": str(context_ref),
-                "icp_hash": str(icp_hash or ""),
-                "icp_ref": str(icp_ref),
-                "model_side": model_side,
-                "candidate_id": str(candidate_id or ""),
-                "company": company_key,
-                "failure_reason": failure_reason,
-                "index": index if not company_key else None,
-            }
-        )
+        dedup_payload = {
+            "context_ref": str(context_ref),
+            "icp_hash": str(icp_hash or ""),
+            "icp_ref": str(icp_ref),
+            "model_side": model_side,
+            "candidate_id": str(candidate_id or ""),
+            "company": company_key,
+            "failure_reason": failure_reason,
+            "index": index if not company_key else None,
+        }
+        # Preserve the exact historical idempotency key for baseline, champion,
+        # and telemetry-disabled captures. Telemetry-backed candidate attempts
+        # get an attempt-specific key so a later retry cannot reuse stale rows.
+        if scoring_run_id:
+            dedup_payload["scoring_run_id"] = str(scoring_run_id)
+        dedup_key = sha256_json(dedup_payload)
         row = {
             "label_id": deterministic_uuid("research_lab_company_label", dedup_key),
             "context_ref": str(context_ref),
@@ -3461,6 +3488,14 @@ async def _persist_company_label_examples(
                 "capture_kind": "scorer_company_label",
                 "source": "score_with_breakdowns",
                 "company_identity_present": bool(company_key),
+                "identity_alignment_proven": identity_alignment_proven,
+                # Binds the observational label to the append-only scoring
+                # telemetry attempt. Missing legacy IDs remain report-partial.
+                "scoring_run_id": str(scoring_run_id) if scoring_run_id else None,
+                "retryable_infrastructure_failure": (
+                    reporting_fields.get("reason_code")
+                    == "infrastructure_failure"
+                ),
             },
             "captured_at": now,
             "dedup_key": dedup_key,
@@ -3505,17 +3540,34 @@ async def _persist_rejected_companies(
     """
     if not _rejected_companies_capture_enabled() or not breakdowns:
         return 0
+    output_rows = list(outputs or ())
+    breakdown_rows = list(breakdowns or ())
+    if len(output_rows) != len(breakdown_rows):
+        logger.warning(
+            "research_lab_rejected_company_identity_alignment_unavailable "
+            "context=%s icp_ref=%s outputs=%d breakdowns=%d",
+            compact_ref(str(context_ref)),
+            compact_ref(str(icp_ref)),
+            len(output_rows),
+            len(breakdown_rows),
+        )
+        return 0
     written = 0
     now = datetime.now(timezone.utc).isoformat()
     try:
-        for output, breakdown in zip(outputs or (), breakdowns or ()):
+        for output, breakdown in zip(output_rows, breakdown_rows):
             if not isinstance(breakdown, Mapping):
                 continue
             final_score = float(breakdown.get("final_score", 0.0) or 0.0)
             failure_reason = str(breakdown.get("failure_reason") or "").strip()
             if final_score > 0.0 and not failure_reason:
                 continue  # accepted / scored — not a rejection
-            reporting_fields = normalize_failure_reporting_fields(breakdown)
+            reporting_fields = normalize_failure_reporting_fields(
+                breakdown,
+                retryable_infrastructure_failure=(
+                    scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+                ),
+            )
             identity = _scorer_trace_company_identity(output)
             # Dedup identity: SAME company + SAME error + SAME icp -> one row
             # (regardless of baseline vs candidate). Key on the company NAME,
@@ -3860,6 +3912,7 @@ class _TraceCapturingCompanyScorer:
         candidate_model_manifest_hash: str | None = None,
         run_id: str | None = None,
         ticket_id: str | None = None,
+        scoring_run_id: str | None = None,
         attested_epoch_id: int | None = None,
         attested_purpose: str = "",
         attested_provider_profile: str = "default",
@@ -3882,6 +3935,7 @@ class _TraceCapturingCompanyScorer:
         )
         self._run_id = str(run_id) if run_id else None
         self._ticket_id = str(ticket_id) if ticket_id else None
+        self._scoring_run_id = str(scoring_run_id) if scoring_run_id else None
         self._pointer_map = pointer_map
         # Per-ICP funnel counts (sourced -> fit -> verified -> intent -> scored)
         # for the candidate model, keyed by icp_ref. Read back onto each per-ICP
@@ -3981,6 +4035,7 @@ class _TraceCapturingCompanyScorer:
                 model_manifest_hash=getattr(self, "_candidate_model_manifest_hash", None),
                 run_id=getattr(self, "_run_id", None),
                 ticket_id=getattr(self, "_ticket_id", None),
+                scoring_run_id=getattr(self, "_scoring_run_id", None),
             )
             await _persist_rejected_companies(
                 context_ref=self._context_ref,
@@ -8158,6 +8213,12 @@ class ResearchLabGatewayScoringWorker:
                 candidate_model_manifest_hash=getattr(artifact, "manifest_hash", None),
                 run_id=str(candidate.get("run_id") or ""),
                 ticket_id=str(candidate.get("ticket_id") or ""),
+                scoring_run_id=(
+                    telemetry_session.run.scoring_run_id
+                    if telemetry_session is not None
+                    and telemetry_session.run is not None
+                    else None
+                ),
                 attested_epoch_id=evaluation_epoch,
                 attested_purpose="research_lab.candidate_score.v1",
             )

@@ -605,6 +605,13 @@ async def test_candidate_sink_persists_costs_without_trace_prefix(monkeypatch):
 
 async def test_trace_capturing_scorer_delegates_and_captures(fake_s3, monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_SCORER_TRACE_S3_PREFIX", "s3://trace-bucket/lab")
+    label_calls: list[dict[str, Any]] = []
+
+    async def capture_labels(**kwargs: Any) -> int:
+        label_calls.append(dict(kwargs))
+        return 0
+
+    monkeypatch.setattr(sw, "_persist_company_label_examples", capture_labels)
     recorder = _recorder()
     pointers: dict[str, dict[str, str]] = {}
     item = _benchmark_item("a")
@@ -615,6 +622,7 @@ async def test_trace_capturing_scorer_delegates_and_captures(fake_s3, monkeypatc
         benchmark_items=[item],
         pointer_map=pointers,
         inner=FakeBreakdownScorer(),
+        scoring_run_id="33333333-3333-4333-8333-333333333333",
     )
     scores = await wrapper(COMPANIES, item["icp"], False)
     recorder.flush()
@@ -626,6 +634,9 @@ async def test_trace_capturing_scorer_delegates_and_captures(fake_s3, monkeypatc
     assert doc["icp_hash"] == "hash-a"
     assert doc["is_reference_model"] is False
     assert doc["score_breakdowns"][0]["reasoning"] == "strong hiring signal on the careers page"
+    assert label_calls[0]["scoring_run_id"] == (
+        "33333333-3333-4333-8333-333333333333"
+    )
 
 
 async def test_trace_capturing_scorer_capture_error_contained(monkeypatch):
@@ -686,6 +697,7 @@ async def test_company_label_examples_capture_positive_negative_sanitized(monkey
         run_id="11111111-1111-4111-8111-111111111111",
         ticket_id="22222222-2222-4222-8222-222222222222",
         score_bundle_id="score_bundle:abc",
+        scoring_run_id="33333333-3333-4333-8333-333333333333",
     )
 
     assert written == 2
@@ -700,9 +712,9 @@ async def test_company_label_examples_capture_positive_negative_sanitized(monkey
     assert inserted[1]["final_score"] == 0.0
     assert inserted[1]["failure_reason"] == "intent_fabricated"
     assert inserted[1]["failure_stage"] == "intent"
-    assert inserted[1]["fit_passed"] is True
-    assert inserted[1]["attribute_passed"] is True
-    assert inserted[1]["intent_passed"] is False
+    assert inserted[1]["fit_passed"] is None
+    assert inserted[1]["attribute_passed"] is None
+    assert inserted[1]["intent_passed"] is None
     assert inserted[0]["intent_evidence_url"] == "https://example.com/jobs"
     assert inserted[0]["attribute_evidence_url"] == "https://example.com/about"
     assert inserted[0]["raw_trace_refs"] == [
@@ -712,10 +724,110 @@ async def test_company_label_examples_capture_positive_negative_sanitized(monkey
             "sha256": "sha256:abc",
         }
     ]
+    assert inserted[0]["capture_doc"]["scoring_run_id"] == (
+        "33333333-3333-4333-8333-333333333333"
+    )
     serialized = json.dumps(inserted)
     assert "RAW-PAGE-EVIDENCE-MUST-NOT-PERSIST" not in serialized
     assert "token=secret" not in serialized
     assert "user:pass" not in serialized
+
+
+async def test_company_label_examples_preserve_retryable_infrastructure(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_COMPANY_LABEL_EXAMPLES_CAPTURE", "true")
+    inserted: list[dict[str, Any]] = []
+
+    async def capture_insert(_table: str, row: dict[str, Any]) -> dict[str, Any]:
+        inserted.append(dict(row))
+        return row
+
+    monkeypatch.setattr(sw, "insert_row", capture_insert)
+    await sw._persist_company_label_examples(
+        context_ref="candidate:cand-1",
+        icp_ref="icp:a",
+        icp_hash="hash-a",
+        is_reference_model=False,
+        outputs=[COMPANIES[0]],
+        breakdowns=[
+            {
+                "final_score": 0.0,
+                "failure_reason": "company verification failed",
+                "stage_failed": "verifier",
+                "verifier_gate_receipts": [
+                    {
+                        "contract_id": "company-fit-decision:v1",
+                        "decision": "unavailable",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert inserted[0]["failure_stage"] == "verifier"
+    assert inserted[0]["fit_passed"] is None
+    assert inserted[0]["attribute_passed"] is None
+    assert inserted[0]["intent_passed"] is None
+    assert inserted[0]["capture_doc"]["retryable_infrastructure_failure"] is True
+    legacy_identity = sw._scorer_trace_company_identity(COMPANIES[0])
+    legacy_dedup = sw.sha256_json(
+        {
+            "context_ref": "candidate:cand-1",
+            "icp_hash": "hash-a",
+            "icp_ref": "icp:a",
+            "model_side": "candidate",
+            "candidate_id": "",
+            "company": sw._company_identity_key(legacy_identity),
+            "failure_reason": "company verification failed",
+            "index": None,
+        }
+    )
+    assert inserted[0]["label_id"] == sw.deterministic_uuid(
+        "research_lab_company_label", legacy_dedup
+    )
+
+
+async def test_company_label_capture_withholds_identity_when_scorer_prefilters(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv("RESEARCH_LAB_COMPANY_LABEL_EXAMPLES_CAPTURE", "true")
+    inserted: list[dict[str, Any]] = []
+
+    async def capture_insert(_table: str, row: dict[str, Any]) -> dict[str, Any]:
+        inserted.append(dict(row))
+        return row
+
+    monkeypatch.setattr(sw, "insert_row", capture_insert)
+    with caplog.at_level(logging.WARNING, logger="gateway.research_lab.scoring_worker"):
+        written = await sw._persist_company_label_examples(
+            context_ref="candidate:cand-1",
+            icp_ref="icp:a",
+            icp_hash="hash-a",
+            is_reference_model=False,
+            # The real scorer can skip this first invalid employee bucket and
+            # return only the second company's breakdown.
+            outputs=[
+                {"company_name": "Skipped First", "employee_count": "1-10"},
+                {"company_name": "Actually Scored", "employee_count": "11-50"},
+            ],
+            breakdowns=[
+                {
+                    "final_score": 27.0,
+                    "failure_reason": "",
+                    "intent_signal_final": 27.0,
+                }
+            ],
+        )
+
+    assert written == 1
+    assert inserted[0]["company_name"] is None
+    assert inserted[0]["final_score"] == 27.0
+    assert inserted[0]["capture_doc"]["company_identity_present"] is False
+    assert inserted[0]["capture_doc"]["identity_alignment_proven"] is False
+    assert any(
+        "research_lab_company_label_identity_alignment_unavailable"
+        in record.getMessage()
+        for record in caplog.records
+    )
 
 
 async def test_company_label_examples_insert_failure_logs_and_continues(monkeypatch, caplog):

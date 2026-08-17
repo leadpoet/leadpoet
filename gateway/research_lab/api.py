@@ -42,7 +42,10 @@ from .allocations import build_research_lab_allocation_bundle
 from .arweave_audit import latest_arweave_anchor
 from .bundles import build_research_lab_audit_bundle, build_shadow_report_bundle, contains_secret_material
 from .candidate_generation_report import fetch_candidate_generation_failure_report
-from .failure_funnel import build_ticket_failure_funnel
+from .failure_funnel import (
+    build_ticket_failure_funnel,
+    miner_failure_funnel_projection,
+)
 from .config import (
     DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS,
     HOSTED_PROXY_PREFIXES,
@@ -1679,10 +1682,17 @@ async def get_research_lab_loop_diagnostics(payload: ResearchLabLoopDiagnosticsR
     run_summaries = await _build_ticket_run_summaries(str(payload.ticket_id))
     if not diagnostics and not run_summaries:
         raise HTTPException(status_code=404, detail="no terminal diagnostics for this ticket yet")
+    full_failure_funnel = await build_ticket_failure_funnel(
+        str(payload.ticket_id), payload.candidate_id
+    )
+    failure_funnel = miner_failure_funnel_projection(full_failure_funnel)
     return {
         "ticket_id": str(payload.ticket_id),
         "diagnostics": diagnostics,
         "run_summaries": run_summaries,
+        # Whole-pool counts only. The miner projection strips model revisions
+        # and coarsens provider/runtime categories.
+        "failure_funnel": failure_funnel,
     }
 
 
@@ -1707,13 +1717,15 @@ async def get_research_lab_admin_loop_diagnostics(
     _require_internal_key(config, x_leadpoet_internal_key)
 
     try:
-        detail, diagnostics, failure_funnel = await asyncio.gather(
-            fetch_public_loop_detail(ticket_id),
-            _build_ticket_candidate_diagnostics(ticket_id, candidate_id),
-            build_ticket_failure_funnel(ticket_id, candidate_id),
+        detail = await fetch_public_loop_detail(ticket_id)
+        diagnostics = await _build_ticket_candidate_diagnostics(
+            ticket_id, candidate_id
         )
     except Exception as exc:
         _raise_storage_error(exc)
+    # The new optional RPC stays outside the existing diagnostics read path:
+    # it must not change Supabase concurrency, cancellation, or error handling.
+    failure_funnel = await build_ticket_failure_funnel(ticket_id, candidate_id)
     if not detail and not diagnostics and failure_funnel.get("telemetry", {}).get("status") == "missing":
         raise HTTPException(status_code=404, detail="Research Lab loop not found")
     return {

@@ -2164,6 +2164,100 @@ def _retryable_measurement_checkpoint_row(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _provider_recovery_checkpoint_row(row: Mapping[str, Any]) -> bool:
+    """Identify provider outages without reopening cost-accounting outcomes."""
+
+    if row.get("provider_cost_cap_blocked") or row.get("provider_cost_tracking_failed"):
+        return False
+    reasons = {
+        token.strip()
+        for token in str(row.get("failure_reason") or "").split(";")
+        if token.strip()
+    }
+    return bool(
+        row.get("provider_excluded")
+        or any(
+            reason.startswith("reference_model_runtime_")
+            or "provider_error" in reason
+            or "timeout" in reason
+            for reason in reasons
+        )
+    )
+
+
+def _candidate_progress_needs_recovery_marker(
+    rows: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+    *,
+    conditional_refs: set[str],
+) -> bool:
+    """Avoid a new storage dependency for already-refreshed conditional rows."""
+
+    return any(
+        _provider_recovery_checkpoint_row(row)
+        and _benchmark_item_ref_for_progress(row) not in conditional_refs
+        for row in rows or ()
+    )
+
+
+def _reusable_candidate_progress_rows(
+    rows: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+    *,
+    conditional_refs: set[str],
+    provider_recovery_refresh: bool,
+) -> list[dict[str, Any]]:
+    """Keep ordinary crash-resume behavior while refreshing recovery rows.
+
+    Conditional retryable measurements have always been refreshed. An
+    explicit provider-recovery rescore additionally refreshes provider-outage
+    public and private rows, without reopening cost-accounting, valid, or
+    model-quality checkpoints.
+    """
+
+    return [
+        dict(row)
+        for row in rows or ()
+        if not (
+            (
+                _retryable_measurement_checkpoint_row(row)
+                and _benchmark_item_ref_for_progress(row) in conditional_refs
+            )
+            or (
+                provider_recovery_refresh
+                and _provider_recovery_checkpoint_row(row)
+            )
+        )
+    ]
+
+
+async def _candidate_has_provider_recovery_rescore(candidate_id: str) -> bool:
+    """Read the durable recovery marker; storage uncertainty fails closed."""
+
+    row = await select_one(
+        "research_lab_candidate_evaluation_events",
+        columns="event_id",
+        filters=(
+            ("candidate_id", candidate_id),
+            ("event_type", "queued"),
+            ("reason", "provider_recovery_rescore"),
+        ),
+    )
+    return row is not None
+
+
+def _candidate_scoring_terminal_action(
+    *,
+    private_holdout_rejected: bool,
+    scoring_health_gate: Mapping[str, Any],
+) -> str:
+    """Choose the terminal action without masking unhealthy measurements."""
+
+    if str(scoring_health_gate.get("decision") or "") == "quarantine":
+        return "scoring_health_quarantined"
+    if private_holdout_rejected:
+        return "public_holdout_rejected"
+    return "promotion"
+
+
 def _baseline_summary_nonempty(row: Mapping[str, Any]) -> bool:
     for key in ("company_count", "sourced_count", "model_output_count"):
         try:
@@ -6189,19 +6283,23 @@ class ResearchLabGatewayScoringWorker:
                 str(gate_result.get("decision") or "")
                 == "rejected_before_private_holdout"
             )
-            if private_holdout_rejected:
-                promotion_result = await self._record_public_holdout_rejected(
-                    candidate=candidate,
-                    score_bundle_row=bundle,
-                    score_bundle=score_bundle,
-                    gate_result=gate_result,
-                )
-            elif scoring_health_gate.get("decision") == "quarantine":
+            terminal_action = _candidate_scoring_terminal_action(
+                private_holdout_rejected=private_holdout_rejected,
+                scoring_health_gate=scoring_health_gate,
+            )
+            if terminal_action == "scoring_health_quarantined":
                 promotion_result = await self._record_scoring_health_quarantined(
                     candidate=candidate,
                     score_bundle_row=bundle,
                     score_bundle=score_bundle,
                     scoring_health_gate=scoring_health_gate,
+                )
+            elif terminal_action == "public_holdout_rejected":
+                promotion_result = await self._record_public_holdout_rejected(
+                    candidate=candidate,
+                    score_bundle_row=bundle,
+                    score_bundle=score_bundle,
+                    gate_result=gate_result,
                 )
             else:
                 promotion_result = await self._maybe_promote_scored_candidate(
@@ -8365,15 +8463,19 @@ class ResearchLabGatewayScoringWorker:
                     for ref in (private_holdout_gate.get("conditional_icp_refs") or ())
                     if str(ref)
                 }
-                progress_rows = [
-                    dict(row)
-                    for row in resume_results or []
-                    if not (
-                        str(row.get("icp_ref") or row.get("icp_hash") or "")
-                        in conditional_refs
-                        and _retryable_measurement_checkpoint_row(row)
+                provider_recovery_refresh = False
+                if _candidate_progress_needs_recovery_marker(
+                    resume_results,
+                    conditional_refs=conditional_refs,
+                ):
+                    provider_recovery_refresh = (
+                        await _candidate_has_provider_recovery_rescore(candidate_id)
                     )
-                ]
+                progress_rows = _reusable_candidate_progress_rows(
+                    resume_results,
+                    conditional_refs=conditional_refs,
+                    provider_recovery_refresh=provider_recovery_refresh,
+                )
                 resume_results = list(progress_rows)
 
                 public_refs = {
@@ -8725,6 +8827,10 @@ class ResearchLabGatewayScoringWorker:
                 and str(gate_result.get("decision") or "") == "rejected_before_private_holdout"
             )
             scoring_health_gate = self._scoring_health_gate_result(score_bundle)
+            terminal_action = _candidate_scoring_terminal_action(
+                private_holdout_rejected=private_holdout_rejected,
+                scoring_health_gate=scoring_health_gate,
+            )
             unsigned_hash = str(score_bundle["score_bundle_hash"])
             signature_ref = await asyncio.to_thread(
                 sign_digest_with_kms,
@@ -8835,28 +8941,28 @@ class ResearchLabGatewayScoringWorker:
                 event_doc={
                     "outcome": (
                         "public_gate_rejected"
-                        if private_holdout_rejected
+                        if terminal_action == "public_holdout_rejected"
                         else (
                             "scoring_health_quarantined"
-                            if scoring_health_gate.get("decision") == "quarantine"
+                            if terminal_action == "scoring_health_quarantined"
                             else "scored"
                         )
                     )
                 },
             )
-            if private_holdout_rejected:
-                promotion_result = await self._record_public_holdout_rejected(
-                    candidate=candidate,
-                    score_bundle_row=bundle,
-                    score_bundle=score_bundle,
-                    gate_result=gate_result,
-                )
-            elif scoring_health_gate.get("decision") == "quarantine":
+            if terminal_action == "scoring_health_quarantined":
                 promotion_result = await self._record_scoring_health_quarantined(
                     candidate=candidate,
                     score_bundle_row=bundle,
                     score_bundle=score_bundle,
                     scoring_health_gate=scoring_health_gate,
+                )
+            elif terminal_action == "public_holdout_rejected":
+                promotion_result = await self._record_public_holdout_rejected(
+                    candidate=candidate,
+                    score_bundle_row=bundle,
+                    score_bundle=score_bundle,
+                    gate_result=gate_result,
                 )
             else:
                 promotion_result = await self._maybe_promote_scored_candidate(
@@ -9673,6 +9779,10 @@ class ResearchLabGatewayScoringWorker:
             and str(gate_result.get("decision") or "") == "rejected_before_private_holdout"
         )
         scoring_health_gate = self._scoring_health_gate_result(score_bundle)
+        terminal_action = _candidate_scoring_terminal_action(
+            private_holdout_rejected=private_holdout_rejected,
+            scoring_health_gate=scoring_health_gate,
+        )
         if isinstance(gate_result, Mapping):
             await _persist_conditional_finalization_events(
                 gate_result,
@@ -9754,19 +9864,19 @@ class ResearchLabGatewayScoringWorker:
                 },
             )
             await self._require_reusable_bundle_current(bundle_row)
-            if private_holdout_rejected:
-                promotion_result = await self._record_public_holdout_rejected(
-                    candidate=candidate,
-                    score_bundle_row=bundle_row,
-                    score_bundle=score_bundle,
-                    gate_result=gate_result,
-                )
-            elif scoring_health_gate.get("decision") == "quarantine":
+            if terminal_action == "scoring_health_quarantined":
                 promotion_result = await self._record_scoring_health_quarantined(
                     candidate=candidate,
                     score_bundle_row=bundle_row,
                     score_bundle=score_bundle,
                     scoring_health_gate=scoring_health_gate,
+                )
+            elif terminal_action == "public_holdout_rejected":
+                promotion_result = await self._record_public_holdout_rejected(
+                    candidate=candidate,
+                    score_bundle_row=bundle_row,
+                    score_bundle=score_bundle,
+                    gate_result=gate_result,
                 )
             else:
                 promotion_result = await self._maybe_promote_scored_candidate(

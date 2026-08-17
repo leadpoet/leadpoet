@@ -13164,6 +13164,7 @@ _GATEWAY_STARTUP_TRANSITION_EVIDENCE_FIELDS = (
     "gateway_restart_v2_authority_retries_after_liveness",
     "gateway_restart_v2_authority_seconds_deadline_fail_closed",
     "gateway_worker_health_read_off_event_loop",
+    "gateway_pcr0_warming_after_worker_authority",
     "gateway_worker_supervisor_cancellation_serialized",
     "gateway_worker_supervisor_start_event_loop_safe",
     "restart_invocation_epoch_mismatch_rejected",
@@ -13290,6 +13291,29 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
         and isinstance(node.args[0].func, ast.Name)
         and node.args[0].func.id == "_start_research_lab_worker_services"
     ]
+    worker_service_definitions = [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_start_research_lab_worker_services"
+    ]
+    pcr0_starts = [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "start_pcr0_builder"
+    ]
+    pcr0_warming_after_worker_authority = (
+        len(worker_service_definitions) == 1
+        and len(offloaded_starts) == 1
+        and len(pcr0_starts) == 1
+        and pcr0_starts[0].lineno > offloaded_starts[0].lineno
+        and any(
+            pcr0_starts[0] is node
+            for node in ast.walk(worker_service_definitions[0])
+        )
+    )
     lifespan_yields = [
         node for node in ast.walk(lifespan) if isinstance(node, ast.Yield)
     ]
@@ -13326,6 +13350,7 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
         or len(lifespan_yields) != 1
         or background_starts[0].lineno >= lifespan_yields[0].lineno
         or direct_starts
+        or not pcr0_warming_after_worker_authority
         or "_gateway_worker_startup_ready" not in main_function_names
         or "require_worker_authority_after_liveness" not in main_function_names
         or len(cleanup_gathers) != 1
@@ -13763,6 +13788,7 @@ GATEWAY_RESTART_TIMING_FILE="$ledger"
         "gateway_restart_v2_authority_retries_after_liveness": True,
         "gateway_restart_v2_authority_seconds_deadline_fail_closed": True,
         "gateway_worker_health_read_off_event_loop": True,
+        "gateway_pcr0_warming_after_worker_authority": True,
         "gateway_worker_supervisor_cancellation_serialized": True,
         "gateway_worker_supervisor_start_event_loop_safe": True,
         "restart_invocation_epoch_mismatch_rejected": True,
@@ -15394,7 +15420,12 @@ def main() -> int:
             ).get(name)
             is True
             for name in (
+                "production_command_timeout_teardown_exact",
+                "production_command_cancellation_teardown_exact",
                 "production_commands_exact",
+                "production_command_process_groups_isolated",
+                "production_command_spawn_gates_exact",
+                "process_group_registry_cleanup_exact",
                 "configured_baseline_complete",
                 "supabase_export_exact",
                 "provider_record_replay_exact",

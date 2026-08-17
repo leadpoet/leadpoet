@@ -646,13 +646,16 @@ def test_every_validator_and_research_worker_launch_has_epoch_guard() -> None:
     assert "break" not in fulfillment_section
     assert "validate_worker_epoch_authority" in deploy
     assert "validate_validator_shared_epoch_file(" in deploy
+    assert "WORKER_EPOCH_AUTHORITY_BATCH_SIZE=4" in deploy
+    assert "wait_worker_epoch_authority_batch" in deploy
+    assert "queue_worker_epoch_authority" in deploy
     assert "from neurons.validator" not in deploy
     for container in (
         "leadpoet-validator-worker-$i",
         "leadpoet-qual-worker-$i",
         "leadpoet-ff-worker-$i",
     ):
-        assert f'validate_worker_epoch_authority "{container}"' in deploy
+        assert f'queue_worker_epoch_authority "{container}"' in deploy
 
     for script_name in (
         "run_research_lab_hosted_worker.py",

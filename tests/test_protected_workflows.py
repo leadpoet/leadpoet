@@ -92,8 +92,60 @@ def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
             "validator_tee/host/docker_operation_guard_v2.py"
         ]
     )
-    assert {"_run_named_docker"} <= set(
+    assert {
+        "MAX_SNAPSHOT_CLOSURE_ROUNDS",
+        "MAX_SNAPSHOT_RECORD_ATTEMPTS",
+        "SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS",
+        "DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS",
+        "SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS",
+        "SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS",
+        "SNAPSHOT_RECORD_CANCELLED_EXIT_CODE",
+        "SnapshotRecordingCancelled",
+        "_raise_if_snapshot_record_cancelled",
+        "_load_json_file",
+        "_load_source_export",
+        "snapshot_export_bank_size",
+        "snapshot_record_workflow_timeout_seconds",
+        "_terminate_snapshot_recorder_on_signal",
+        "_provider_key_presence",
+        "_subprocess_env",
+        "_snapshot_runtime_context",
+        "_run_named_docker",
+        "_record_icp_with_docker",
+        "_record_icp_with_retries",
+        "_close_snapshot_request_set",
+        "_replay_icp_with_docker",
+        "_recording_failure_summary",
+        "_recording_is_complete",
+        "_recorded_provider_model_ids",
+        "_resolve_provider_model_ids",
+        "_resolve_snapshot_provider_model_ids",
+        "main",
+    } <= set(
         PROTECTED_SYMBOLS["scripts/record_research_lab_dev_snapshots.py"]
+    )
+    assert {
+        "COMMAND_TIMEOUT_ENV",
+        "DEFAULT_COMMAND_TIMEOUT_SECONDS",
+        "MAX_COMMAND_TIMEOUT_SECONDS",
+        "COMMAND_POLL_INTERVAL_SECONDS",
+        "COMMAND_TERMINATION_GRACE_SECONDS",
+        "COMMAND_KILL_WAIT_SECONDS",
+        "COMMAND_PIPE_DRAIN_TIMEOUT_SECONDS",
+        "_CommandCancellationRequested",
+        "_positive_env_int",
+        "_process_group_alive",
+        "_signal_process_group",
+        "_wait_for_process_group_exit",
+        "_terminate_process_group",
+        "_run_command",
+        "_await_command_completion",
+        "maybe_refresh_dev_snapshot",
+    } <= set(
+        PROTECTED_SYMBOLS["gateway/research_lab/snapshot_refresh.py"]
+    )
+    assert {"MAX_DEV_SNAPSHOT_BANK_ICP_COUNT"} <= set(
+        PROTECTED_SYMBOLS["gateway/research_lab/dev_eval_runner.py"]
     )
     assert {
         "_DOCKER_OPERATION_LOCK_DEFAULT_TIMEOUT_SECONDS",

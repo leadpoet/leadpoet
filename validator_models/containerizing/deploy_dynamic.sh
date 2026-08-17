@@ -135,6 +135,9 @@ destination.chmod(0o600)
 PY
 cleanup_inherited_env() {
     rm -f "$INHERITED_ENV_FILE"
+    if [ -n "${WORKER_EPOCH_AUTHORITY_TMP:-}" ]; then
+        rm -rf -- "$WORKER_EPOCH_AUTHORITY_TMP"
+    fi
 }
 trap cleanup_inherited_env EXIT
 
@@ -1088,16 +1091,57 @@ PY
     echo "✅ $container_name official epoch authority verified"
 }
 
+WORKER_EPOCH_AUTHORITY_BATCH_SIZE=4
+WORKER_EPOCH_AUTHORITY_TMP="$(
+    mktemp -d /tmp/leadpoet-worker-epoch-authority.XXXXXX
+)"
+worker_epoch_authority_pids=()
+worker_epoch_authority_logs=()
+
+wait_worker_epoch_authority_batch() {
+    local index
+    local failed=0
+
+    for index in "${!worker_epoch_authority_pids[@]}"; do
+        if ! wait "${worker_epoch_authority_pids[$index]}"; then
+            failed=1
+        fi
+        cat "${worker_epoch_authority_logs[$index]}"
+    done
+    worker_epoch_authority_pids=()
+    worker_epoch_authority_logs=()
+    if [ "$failed" != "0" ]; then
+        echo "❌ ERROR: one or more validator worker epoch authorities failed" >&2
+        return 1
+    fi
+}
+
+queue_worker_epoch_authority() {
+    local container_name="$1"
+    local worker_log="$WORKER_EPOCH_AUTHORITY_TMP/$container_name.log"
+
+    validate_worker_epoch_authority "$container_name" >"$worker_log" 2>&1 &
+    worker_epoch_authority_pids+=("$!")
+    worker_epoch_authority_logs+=("$worker_log")
+    if [ "${#worker_epoch_authority_pids[@]}" -ge \
+        "$WORKER_EPOCH_AUTHORITY_BATCH_SIZE" ]; then
+        wait_worker_epoch_authority_batch
+    fi
+}
+
 echo "🔐 Verifying official epoch authority in every validator worker..."
 for i in $(seq 1 "$PROXY_COUNT"); do
-    validate_worker_epoch_authority "leadpoet-validator-worker-$i"
+    queue_worker_epoch_authority "leadpoet-validator-worker-$i"
 done
 for i in $(seq 1 "$QUAL_PROXY_COUNT"); do
-    validate_worker_epoch_authority "leadpoet-qual-worker-$i"
+    queue_worker_epoch_authority "leadpoet-qual-worker-$i"
 done
 for i in "${FF_WORKER_IDS[@]}"; do
-    validate_worker_epoch_authority "leadpoet-ff-worker-$i"
+    queue_worker_epoch_authority "leadpoet-ff-worker-$i"
 done
+if [ "${#worker_epoch_authority_pids[@]}" -gt 0 ]; then
+    wait_worker_epoch_authority_batch
+fi
 echo "✅ All validator worker epoch authorities verified"
 echo ""
 

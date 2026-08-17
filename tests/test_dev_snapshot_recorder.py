@@ -138,6 +138,41 @@ def test_snapshot_runtime_context_finishes_before_host_timeout():
     assert options["runtime_cap_seconds"] <= 300 - 30
 
 
+def test_full_bank_recording_timeout_covers_every_bounded_sequential_stage():
+    assert recorder.snapshot_record_workflow_timeout_seconds(
+        item_count=40,
+        item_timeout_seconds=recorder.DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+    ) == 1_049_100
+
+    for invalid in (0, -1, True):
+        with pytest.raises(ValueError):
+            recorder.snapshot_record_workflow_timeout_seconds(
+                item_count=invalid,
+                item_timeout_seconds=recorder.DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+            )
+    with pytest.raises(ValueError):
+        recorder.snapshot_record_workflow_timeout_seconds(
+            item_count=40,
+            item_timeout_seconds=0,
+        )
+
+
+def test_snapshot_export_bank_size_matches_full_exported_items(tmp_path):
+    source = tmp_path / "source_icps.json"
+    document = {
+        "schema_version": "research_lab.dev_icp_export.v2",
+        "items": [{"icp_ref": f"icp-{index}"} for index in range(40)],
+        "daily_bank_manifest": {"bank_size": 40},
+    }
+    source.write_text(json.dumps(document), encoding="utf-8")
+    assert recorder.snapshot_export_bank_size(str(source)) == 40
+
+    document["daily_bank_manifest"]["bank_size"] = 5
+    source.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ValueError, match="bank size differs"):
+        recorder.snapshot_export_bank_size(str(source))
+
+
 def test_named_docker_is_removed_when_host_run_is_interrupted(
     monkeypatch,
     tmp_path,
@@ -172,7 +207,43 @@ def test_named_docker_is_removed_when_host_run_is_interrupted(
         raise AssertionError("the host timeout must propagate")
 
     assert calls[1][0] == ["docker", "rm", "-f", "snapshot-test"]
-    assert calls[1][1]["timeout"] == 30
+    assert calls[1][1]["timeout"] == (
+        recorder.SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS
+    )
+def test_recorder_sigterm_unwinds_through_named_docker_cleanup(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    def run(command, **kwargs):
+        if list(command)[-1:] == ["info"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        calls.append((list(command), dict(kwargs)))
+        if len(calls) == 1:
+            recorder._terminate_snapshot_recorder_on_signal(
+                recorder.signal.SIGTERM,
+                None,
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        str(tmp_path / "docker-operation.lock"),
+    )
+    monkeypatch.setattr(recorder.subprocess, "run", run)
+
+    with pytest.raises(SystemExit) as exc_info:
+        recorder._run_named_docker(
+            ["docker", "run", "--name", "snapshot-test", "image"],
+            container_name="snapshot-test",
+            input_text="{}",
+            timeout_seconds=5,
+            environment={"PATH": "/usr/bin"},
+        )
+
+    assert exc_info.value.code == 128 + int(recorder.signal.SIGTERM)
+    assert calls[1][0] == ["docker", "rm", "-f", "snapshot-test"]
 
 
 @pytest.mark.parametrize("reuse_existing", [False, True])
@@ -277,6 +348,84 @@ def test_snapshot_record_retry_remains_bounded_and_fail_closed(
 
     assert [call["reuse_existing"] for call in calls] == [False, True, True]
     assert delays == [5.0, 15.0]
+
+
+def test_snapshot_record_retry_stops_at_boundary_when_superseded(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    cancel_file = tmp_path / "cancel-recording"
+    calls = []
+    delays = []
+
+    def fail_after_model_change(**kwargs):
+        calls.append(dict(kwargs))
+        cancel_file.write_text("active_private_model_changed\n", encoding="utf-8")
+        raise RuntimeError("transient provider failure")
+
+    monkeypatch.setattr(
+        recorder,
+        "_record_icp_with_docker",
+        fail_after_model_change,
+    )
+    monkeypatch.setattr(recorder.time, "sleep", delays.append)
+
+    with pytest.raises(
+        recorder.SnapshotRecordingCancelled,
+        match="active_private_model_changed",
+    ):
+        recorder._record_icp_with_retries(
+            image_digest="example.invalid/model@sha256:" + "1" * 64,
+            module_name="research_lab_adapter",
+            callable_name="run_icp",
+            icp={"industry": "Software"},
+            icp_ref="icp-a",
+            snapshot_dir="/tmp/snapshot-test",
+            timeout_seconds=300,
+            reuse_existing=False,
+            item_index=1,
+            item_count=5,
+            cancel_file=cancel_file,
+        )
+
+    assert len(calls) == 1
+    assert delays == []
+
+
+def test_snapshot_closure_stops_before_next_icp_when_superseded(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    cancel_file = tmp_path / "cancel-recording"
+    calls = []
+
+    class Store:
+        def snapshot_count(self):
+            return 10
+
+    def record(**kwargs):
+        calls.append(kwargs["icp_ref"])
+        cancel_file.write_text("active_private_model_changed\n", encoding="utf-8")
+        return []
+
+    monkeypatch.setattr(recorder, "_record_icp_with_docker", record)
+
+    with pytest.raises(recorder.SnapshotRecordingCancelled):
+        recorder._close_snapshot_request_set(
+            items=[
+                {"icp_ref": "icp-a", "icp": {"industry": "Software"}},
+                {"icp_ref": "icp-b", "icp": {"industry": "Healthcare"}},
+            ],
+            store=Store(),
+            image_digest="example.invalid/model@sha256:" + "1" * 64,
+            module_name="research_lab_adapter",
+            callable_name="run_icp",
+            snapshot_dir="/tmp/snapshot-test",
+            timeout_seconds=300,
+            cancel_file=cancel_file,
+        )
+
+    assert calls == ["icp-a"]
 
 
 def test_snapshot_closure_replays_only_icps_that_expose_new_requests(monkeypatch):

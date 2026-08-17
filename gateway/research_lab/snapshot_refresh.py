@@ -11,10 +11,12 @@ import logging
 import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Awaitable, Callable, Iterator, Mapping, Sequence
 
@@ -22,10 +24,19 @@ from gateway.research_lab.config import (
     DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
     RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD,
 )
-from gateway.research_lab.dev_eval_runner import snapshot_readiness
+from gateway.research_lab.dev_eval_runner import (
+    MAX_DEV_SNAPSHOT_BANK_ICP_COUNT,
+    snapshot_readiness,
+)
 from gateway.research_lab.git_tree_models import TreePolicy
 from gateway.research_lab.promotion import load_active_private_model
 from research_lab.eval.snapshot_store import POINTER_NAME, SNAPSHOT_URI_ENV
+from scripts.record_research_lab_dev_snapshots import (
+    DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+    SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS,
+    snapshot_export_bank_size,
+    snapshot_record_workflow_timeout_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +57,17 @@ DEFAULT_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_REFRESH_INTERVAL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_RETRY_INTERVAL_SECONDS = 60 * 60
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 3 * 60 * 60
+ACTIVE_MODEL_GUARD_INTERVAL_SECONDS = 15.0
+MAX_COMMAND_TIMEOUT_SECONDS = snapshot_record_workflow_timeout_seconds(
+    item_count=MAX_DEV_SNAPSHOT_BANK_ICP_COUNT,
+)
+COMMAND_POLL_INTERVAL_SECONDS = 0.1
+COMMAND_TERMINATION_GRACE_SECONDS = (
+    SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS + 5.0
+)
+COMMAND_KILL_WAIT_SECONDS = 5.0
+COMMAND_PIPE_DRAIN_TIMEOUT_SECONDS = 5.0
+COMMAND_GROUP_EXIT_CONFIRMATION_SECONDS = 2.0
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _IMMUTABLE_SNAPSHOT_SUFFIX_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_REASON_RE = re.compile(r"^[a-z0-9_.:-]{1,120}$")
@@ -55,17 +77,28 @@ ReadinessLoader = Callable[..., Mapping[str, Any]]
 ActiveLoader = Callable[..., Awaitable[Any]]
 
 
+class SnapshotRefreshSupersededError(RuntimeError):
+    """The signed active model changed while its snapshot was being recorded."""
+
+
 def snapshot_auto_refresh_enabled() -> bool:
     configured = str(os.getenv(AUTO_REFRESH_ENABLED_ENV) or "").strip().lower()
     return not configured or configured in _TRUTHY
 
 
-def _positive_env_int(name: str, default: int, *, minimum: int = 1) -> int:
+def _positive_env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int:
     try:
         value = int(str(os.getenv(name) or default).strip())
     except (TypeError, ValueError):
         value = default
-    return max(minimum, value)
+    bounded = max(minimum, value)
+    return min(maximum, bounded) if maximum is not None else bounded
 
 
 def _state_path() -> Path:
@@ -97,6 +130,13 @@ def _write_state(path: Path, state: Mapping[str, Any]) -> None:
         json.dumps(dict(state), sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
+    os.chmod(staging, 0o600)
+    os.replace(staging, path)
+
+
+def _write_record_cancel_marker(path: Path) -> None:
+    staging = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    staging.write_text("active_private_model_changed\n", encoding="utf-8")
     os.chmod(staging, 0o600)
     os.replace(staging, path)
 
@@ -167,22 +207,192 @@ def _runtime_script(source_root: Path, name: str) -> str:
     return str(script)
 
 
-def _run_command(command: Sequence[str], env: Mapping[str, str], timeout_seconds: int) -> str:
-    completed = subprocess.run(
+class _CommandCancellationRequested(RuntimeError):
+    """Internal handoff from async cancellation to the command-owner thread."""
+
+
+def _process_group_alive(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _signal_process_group(process_group_id: int, signal_number: int) -> None:
+    try:
+        os.killpg(process_group_id, signal_number)
+    except ProcessLookupError:
+        return
+
+
+def _wait_for_process_group_exit(
+    process: subprocess.Popen[str],
+    *,
+    timeout_seconds: float,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        process.poll()
+        if not _process_group_alive(process.pid):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(COMMAND_POLL_INTERVAL_SECONDS, remaining))
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[str],
+) -> tuple[str, str]:
+    """Boundedly stop and reap one command's complete private process group."""
+
+    if _process_group_alive(process.pid):
+        _signal_process_group(process.pid, signal.SIGTERM)
+    group_exited = _wait_for_process_group_exit(
+        process,
+        timeout_seconds=COMMAND_TERMINATION_GRACE_SECONDS,
+    )
+    if not group_exited:
+        _signal_process_group(process.pid, signal.SIGKILL)
+        group_exited = _wait_for_process_group_exit(
+            process,
+            timeout_seconds=COMMAND_KILL_WAIT_SECONDS,
+        )
+    try:
+        stdout, stderr = process.communicate(
+            timeout=COMMAND_PIPE_DRAIN_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "snapshot pipeline process pipes remained open after group teardown"
+        ) from exc
+    if not group_exited or _process_group_alive(process.pid):
+        raise RuntimeError("snapshot pipeline process group survived SIGKILL")
+    return str(stdout or ""), str(stderr or "")
+
+
+def _run_command(
+    command: Sequence[str],
+    env: Mapping[str, str],
+    timeout_seconds: int,
+    *,
+    cancellation_event: threading.Event | None = None,
+) -> str:
+    cancellation = cancellation_event or threading.Event()
+    if cancellation.is_set():
+        raise _CommandCancellationRequested("snapshot pipeline command was cancelled")
+    process = subprocess.Popen(
         list(command),
         text=True,
-        capture_output=True,
-        check=False,
-        timeout=timeout_seconds,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
         env=dict(env),
     )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "")[-1600:]
-        raise RuntimeError(
-            f"snapshot pipeline command failed ({Path(command[1]).name}, "
-            f"exit={completed.returncode}): {detail}"
-        )
-    return str(completed.stdout or "")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if cancellation.is_set():
+            _terminate_process_group(process)
+            raise _CommandCancellationRequested(
+                "snapshot pipeline command was cancelled"
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            stdout, stderr = _terminate_process_group(process)
+            raise subprocess.TimeoutExpired(
+                list(command),
+                timeout_seconds,
+                output=stdout,
+                stderr=stderr,
+            )
+        try:
+            stdout, stderr = process.communicate(
+                timeout=min(COMMAND_POLL_INTERVAL_SECONDS, remaining)
+            )
+        except subprocess.TimeoutExpired:
+            if process.poll() is not None:
+                _terminate_process_group(process)
+                raise RuntimeError(
+                    "snapshot pipeline command left a live descendant process"
+                )
+            continue
+        if cancellation.is_set():
+            if _process_group_alive(process.pid):
+                _terminate_process_group(process)
+            raise _CommandCancellationRequested(
+                "snapshot pipeline command was cancelled"
+            )
+        group_alive = _process_group_alive(process.pid)
+        if group_alive:
+            group_alive = not _wait_for_process_group_exit(
+                process,
+                timeout_seconds=COMMAND_GROUP_EXIT_CONFIRMATION_SECONDS,
+            )
+        if cancellation.is_set():
+            if group_alive:
+                _terminate_process_group(process)
+            raise _CommandCancellationRequested(
+                "snapshot pipeline command was cancelled"
+            )
+        if group_alive:
+            _terminate_process_group(process)
+            raise RuntimeError(
+                "snapshot pipeline command left a live descendant process"
+            )
+        if process.returncode != 0:
+            detail = (stderr or stdout or "")[-1600:]
+            raise RuntimeError(
+                f"snapshot pipeline command failed ({Path(command[1]).name}, "
+                f"exit={process.returncode}): {detail}"
+            )
+        return str(stdout or "")
+
+
+async def _await_command_completion(
+    command_runner: CommandRunner,
+    command: Sequence[str],
+    env: Mapping[str, str],
+    timeout_seconds: int,
+) -> str:
+    """Defer cancellation until the command-owning thread has fully stopped."""
+
+    cancellation_event = threading.Event()
+
+    def invoke() -> str:
+        if command_runner is _run_command:
+            return _run_command(
+                command,
+                env,
+                timeout_seconds,
+                cancellation_event=cancellation_event,
+            )
+        return command_runner(command, env, timeout_seconds)
+
+    command_task = asyncio.create_task(asyncio.to_thread(invoke))
+    cancellation: asyncio.CancelledError | None = None
+    while not command_task.done():
+        try:
+            await asyncio.shield(command_task)
+        except asyncio.CancelledError as exc:
+            cancellation_event.set()
+            if cancellation is None:
+                cancellation = exc
+            continue
+        except BaseException:
+            break
+        break
+    try:
+        result = command_task.result()
+    except _CommandCancellationRequested:
+        if cancellation is not None:
+            raise cancellation
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 def _artifact_identity(active: Any) -> tuple[str, str, str, str]:
@@ -193,6 +403,76 @@ def _artifact_identity(active: Any) -> tuple[str, str, str, str]:
         str(artifact.config_hash or ""),
         str(artifact.manifest_hash or ""),
     )
+
+
+async def _run_record_command_with_active_guard(
+    *,
+    config: Any,
+    command_runner: CommandRunner,
+    command: Sequence[str],
+    env: Mapping[str, str],
+    timeout_seconds: int,
+    active_loader: ActiveLoader,
+    expected_identity: tuple[str, str, str, str],
+    cancel_file: Path,
+) -> str:
+    """Record while polling model authority; cancel only at recorder boundaries."""
+
+    task = asyncio.create_task(
+        _await_command_completion(
+            command_runner,
+            command,
+            env,
+            timeout_seconds,
+        )
+    )
+    superseded = False
+    try:
+        while not task.done():
+            done, _pending = await asyncio.wait(
+                {task}, timeout=ACTIVE_MODEL_GUARD_INTERVAL_SECONDS
+            )
+            if task in done:
+                break
+            try:
+                active = await active_loader(config, register_bootstrap=False)
+            except Exception as exc:  # final authority read still fails closed
+                logger.warning(
+                    "research_lab_dev_snapshot_active_model_guard_failed error=%s",
+                    _safe_error(exc),
+                )
+                continue
+            if _artifact_identity(active) != expected_identity:
+                _write_record_cancel_marker(cancel_file)
+                superseded = True
+                logger.info(
+                    "research_lab_dev_snapshot_record_superseded source_commit=%s",
+                    expected_identity[1][:12],
+                )
+                break
+
+        try:
+            output = await task
+        except Exception as exc:
+            if not superseded:
+                raise
+            raise SnapshotRefreshSupersededError(
+                "active private model changed during snapshot recording"
+            ) from exc
+        active_after_record = await active_loader(config, register_bootstrap=False)
+        if superseded or _artifact_identity(active_after_record) != expected_identity:
+            _write_record_cancel_marker(cancel_file)
+            raise SnapshotRefreshSupersededError(
+                "active private model changed during snapshot recording"
+            )
+        return output
+    except asyncio.CancelledError:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        raise
 
 
 def _state_artifact_identity(
@@ -397,7 +677,10 @@ async def maybe_refresh_dev_snapshot(
             base_uri = _s3_base_uri(pointer_uri)
             seed = str(os.getenv(SELECTION_SEED_ENV) or "research-lab-dev-v1").strip()
             timeout_seconds = _positive_env_int(
-                COMMAND_TIMEOUT_ENV, DEFAULT_COMMAND_TIMEOUT_SECONDS, minimum=300
+                COMMAND_TIMEOUT_ENV,
+                DEFAULT_COMMAND_TIMEOUT_SECONDS,
+                minimum=300,
+                maximum=MAX_COMMAND_TIMEOUT_SECONDS,
             )
             work_root = _work_root()
             work_root.mkdir(parents=True, exist_ok=True)
@@ -409,12 +692,13 @@ async def maybe_refresh_dev_snapshot(
             os.chmod(work_dir, 0o700)
             inputs_dir = work_dir / "inputs"
             snapshot_dir = work_dir / "snapshot"
+            cancel_file = work_dir / "cancel-recording"
             env = dict(os.environ)
             env[
                 RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD["live_max_icps_per_node"]
             ] = str(tree_policy.live_max_icps_per_node)
             try:
-                await asyncio.to_thread(
+                await _await_command_completion(
                     command_runner,
                     (
                         sys.executable,
@@ -428,6 +712,18 @@ async def maybe_refresh_dev_snapshot(
                     ),
                     env,
                     timeout_seconds,
+                )
+                bank_size = snapshot_export_bank_size(
+                    str(inputs_dir / "source_icps.json")
+                )
+                if bank_size > MAX_DEV_SNAPSHOT_BANK_ICP_COUNT:
+                    raise RuntimeError("snapshot exporter bank size exceeds the safety cap")
+                record_timeout_seconds = max(
+                    timeout_seconds,
+                    snapshot_record_workflow_timeout_seconds(
+                        item_count=bank_size,
+                        item_timeout_seconds=DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+                    ),
                 )
                 record_command: list[str] = [
                     sys.executable,
@@ -444,6 +740,10 @@ async def maybe_refresh_dev_snapshot(
                     identity_before[2],
                     "--private-model-manifest-hash",
                     identity_before[3],
+                    "--timeout-seconds",
+                    str(DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS),
+                    "--cancel-file",
+                    str(cancel_file),
                     "--record",
                 ]
                 # Optional declarations constrain the recorder. The recorder
@@ -452,8 +752,15 @@ async def maybe_refresh_dev_snapshot(
                 # restart-environment update.
                 for model_id in provider_model_ids:
                     record_command.extend(("--provider-model-id", model_id))
-                await asyncio.to_thread(
-                    command_runner, tuple(record_command), env, timeout_seconds
+                await _run_record_command_with_active_guard(
+                    config=config,
+                    command_runner=command_runner,
+                    command=tuple(record_command),
+                    env=env,
+                    timeout_seconds=record_timeout_seconds,
+                    active_loader=active_loader,
+                    expected_identity=identity_before,
+                    cancel_file=cancel_file,
                 )
 
                 publish_base = [
@@ -466,7 +773,7 @@ async def maybe_refresh_dev_snapshot(
                     "--kms-key-id",
                     kms_key_id,
                 ]
-                immutable_publish_output = await asyncio.to_thread(
+                immutable_publish_output = await _await_command_completion(
                     command_runner,
                     tuple([*publish_base, "--skip-current-pointer"]),
                     env,
@@ -499,7 +806,7 @@ async def maybe_refresh_dev_snapshot(
                     raise RuntimeError(
                         "active private model changed before snapshot pointer promotion"
                     )
-                await asyncio.to_thread(
+                await _await_command_completion(
                     command_runner, tuple(publish_base), env, timeout_seconds
                 )
             finally:
@@ -534,6 +841,23 @@ async def maybe_refresh_dev_snapshot(
                 completed["snapshot_manifest_hash"][:24],
             )
             return completed
+        except asyncio.CancelledError:
+            failure = {
+                **failure_base,
+                "schema_version": "research_lab.dev_snapshot_refresh_state.v1",
+                "status": "failed",
+                "last_check_unix": timestamp,
+                "last_check_at": datetime.fromtimestamp(
+                    timestamp, tz=timezone.utc
+                ).isoformat(),
+                "last_error": "CancelledError:snapshot refresh cancelled",
+            }
+            _write_state(state_path, failure)
+            logger.warning(
+                "research_lab_dev_snapshot_refresh_failed error=%s",
+                failure["last_error"],
+            )
+            raise
         except Exception as exc:
             failure = {
                 **failure_base,

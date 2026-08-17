@@ -262,3 +262,7 @@ def test_deployer_pins_release_identity_in_every_validator_launch_path() -> None
         deploy.index("echo \"🔐 Verifying official epoch authority")
     ]
     assert 'validate_container_release_identity "$container_name"' in worker_preflight
+    assert "WORKER_EPOCH_AUTHORITY_BATCH_SIZE=4" in worker_preflight
+    assert 'if ! wait "${worker_epoch_authority_pids[$index]}"' in worker_preflight
+    assert 'cat "${worker_epoch_authority_logs[$index]}"' in worker_preflight
+    assert "one or more validator worker epoch authorities failed" in worker_preflight

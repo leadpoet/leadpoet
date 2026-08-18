@@ -9,10 +9,12 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -81,10 +83,30 @@ OPENROUTER_MANAGEMENT_CREDENTIAL_REFS = (
 EARLY_BOOT_MARKER = Path(
     "/run/leadpoet-production-parity/early-boot-isolated"
 )
+FULL_WORK_ROOT = Path("/opt/leadpoet-production-parity")
+MAX_FULL_TIMEOUT_SECONDS = 72_000
 
 
 class FullParityError(RuntimeError):
     """The full disposable workflow did not reach every required stage."""
+
+
+def _full_deadline(*, started: float, timeout_seconds: int) -> float:
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or timeout_seconds <= 0
+        or timeout_seconds > MAX_FULL_TIMEOUT_SECONDS
+    ):
+        raise FullParityError("full parity timeout is invalid")
+    return started + timeout_seconds
+
+
+def _remaining_full_timeout(*, deadline: float, stage: str) -> int:
+    remaining = math.ceil(deadline - time.monotonic())
+    if remaining <= 0:
+        raise FullParityError(f"full parity budget exhausted before {stage}")
+    return min(remaining, MAX_FULL_TIMEOUT_SECONDS)
 
 
 def _run(
@@ -1176,9 +1198,13 @@ def run_full(
         raise FullParityError(
             "transient host early production-service isolation differs"
         )
-    work = Path("/run/leadpoet-production-parity") / run_id
+    started = time.monotonic()
+    deadline = _full_deadline(
+        started=started,
+        timeout_seconds=timeout_seconds,
+    )
+    work = FULL_WORK_ROOT / run_id / "runtime"
     work.mkdir(parents=True, mode=0o700, exist_ok=False)
-    secrets_client = boto3.client("secretsmanager", region_name=region)
     runtime_config = work / "runtime-config.json"
     contract_path = work / "contract.json"
     archive_path = work / "production.dump"
@@ -1187,14 +1213,9 @@ def run_full(
     gateway_log = work / "gateway-restart.log"
     allocation_override = work / "production-allocation.json"
     artifact_policy = work / "v2-config" / "encrypted-artifact-policy.json"
+    secrets_client: Any | None = None
+    database: _DockerDatabase | None = None
     secret_created = False
-    database = _DockerDatabase(
-        candidate_sha=candidate_sha,
-        postgres_image=postgres_image,
-        postgrest_image=postgrest_image,
-        postgres_publish="127.0.0.1::5432",
-        postgrest_publish="0.0.0.0:3000",
-    )
     evidence: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -1202,8 +1223,15 @@ def run_full(
         "base_sha": base_sha,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
-    started = time.monotonic()
     try:
+        secrets_client = boto3.client("secretsmanager", region_name=region)
+        database = _DockerDatabase(
+            candidate_sha=candidate_sha,
+            postgres_image=postgres_image,
+            postgrest_image=postgrest_image,
+            postgres_publish="127.0.0.1::5432",
+            postgrest_publish="0.0.0.0:3000",
+        )
         capture(
             client=secrets_client,
             secret_id=production_gateway_secret_id,
@@ -1236,6 +1264,10 @@ def run_full(
             expected_production_host=production_host,
             ttl_hours=24,
             source_sha=base_sha,
+            timeout_seconds=_remaining_full_timeout(
+                deadline=deadline,
+                stage="full production snapshot capture",
+            ),
         )
         if manifest["capture_mode"] != "full":
             raise FullParityError("authoritative parity requires a full production clone")
@@ -1247,6 +1279,10 @@ def run_full(
             archive_path=archive_path,
             target_dsn=database.target_dsn,
             production_host=production_host,
+            timeout_seconds=_remaining_full_timeout(
+                deadline=deadline,
+                stage="full production snapshot restore",
+            ),
         )
         _local_url, service_role_key = database.start_postgrest()
         _wait_https_origin(supabase_origin)
@@ -1303,7 +1339,13 @@ def run_full(
         )
         restart = _run(
             ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha],
-            timeout=min(timeout_seconds, 10800),
+            timeout=min(
+                _remaining_full_timeout(
+                    deadline=deadline,
+                    stage="exact gateway restart",
+                ),
+                10800,
+            ),
             env=env,
             log_path=gateway_log,
         )
@@ -1324,7 +1366,10 @@ def run_full(
             rebenchmark = _wait_rebenchmark(
                 candidate_sha=candidate_sha,
                 secret_id=secret_state["secret_id"],
-                timeout_seconds=max(600, timeout_seconds - int(time.monotonic() - started)),
+                timeout_seconds=_remaining_full_timeout(
+                    deadline=deadline,
+                    stage="full rebenchmark publication",
+                ),
             )
 
         parsed_env = _parse_gateway_environment_file(gateway_env_file)
@@ -1338,7 +1383,13 @@ def run_full(
                 "--http-timeout-seconds",
                 "360",
             ],
-            timeout=1800,
+            timeout=min(
+                _remaining_full_timeout(
+                    deadline=deadline,
+                    stage="real gateway weight readiness",
+                ),
+                1800,
+            ),
             env={**env, **parsed_env, "GATEWAY_ENV_FILE": str(gateway_env_file)},
         )
         readiness_output = _require(readiness, stage="real gateway weight readiness")
@@ -1426,34 +1477,32 @@ def run_full(
         )
     finally:
         cleanup: dict[str, Any] = {}
-        try:
-            cleanup["database"] = database.cleanup()
-        except Exception as exc:  # noqa: BLE001 - cleanup evidence must survive
-            cleanup["database_error"] = type(exc).__name__
-        if secret_created:
+        if database is not None:
+            try:
+                cleanup["database"] = database.cleanup()
+            except Exception as exc:  # noqa: BLE001 - cleanup evidence must survive
+                cleanup["database_error"] = type(exc).__name__
+        if secret_created and secrets_client is not None:
             try:
                 cleanup["secret"] = delete_gateway_secret(
                     client=secrets_client, run_id=run_id
                 )
             except Exception as exc:  # noqa: BLE001
                 cleanup["secret_error"] = type(exc).__name__
-        for path in (
-            archive_path,
-            runtime_config,
-            gateway_env_file,
-            allocation_override,
-        ):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                cleanup.setdefault("file_cleanup_errors", []).append(path.name)
+        try:
+            shutil.rmtree(work)
+            cleanup["work"] = "removed"
+        except FileNotFoundError:
+            cleanup["work"] = "already_absent"
+        except OSError as exc:
+            cleanup["work_error"] = type(exc).__name__
         evidence["cleanup"] = cleanup
         evidence["duration_seconds"] = round(time.monotonic() - started, 3)
         evidence["finished_at"] = datetime.now(timezone.utc).isoformat()
         if evidence.get("status") == "passed" and (
             "database_error" in cleanup
             or "secret_error" in cleanup
-            or cleanup.get("file_cleanup_errors")
+            or "work_error" in cleanup
         ):
             evidence["status"] = "failed"
             evidence["failure"] = "run-scoped cleanup was incomplete"
@@ -1495,7 +1544,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--postgres-image", required=True)
     parser.add_argument("--postgrest-image", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--timeout-seconds", type=int, default=43200)
+    parser.add_argument(
+        "--timeout-seconds", type=int, default=MAX_FULL_TIMEOUT_SECONDS
+    )
     args = parser.parse_args(argv)
     try:
         result = run_full(

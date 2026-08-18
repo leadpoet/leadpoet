@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta, timezone
+import inspect
 import json
 from pathlib import Path
 import re
@@ -23,6 +24,16 @@ from leadpoet_canonical.production_parity import (
 )
 from scripts.materialize_production_parity_secrets import (
     build_gateway_environment,
+)
+from scripts import run_production_parity_full_host as full_host
+from scripts.production_parity_snapshot import (
+    DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
+    FULL_SNAPSHOT_DISK_RESERVE_BYTES,
+    MAX_SNAPSHOT_IO_TIMEOUT_SECONDS,
+    _require_full_snapshot_disk_headroom,
+    _snapshot_io_timeout_seconds,
+    capture_snapshot,
+    restore_snapshot,
 )
 from scripts.run_production_parity_full_host import (
     FullParityError,
@@ -186,6 +197,149 @@ def test_schema_only_snapshot_is_explicit_and_cannot_claim_full_data():
             mismatched,
             now=datetime(2026, 8, 15, 12, 30, tzinfo=timezone.utc),
         )
+
+
+def test_snapshot_io_defaults_stay_short_and_explicit():
+    assert DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS == 900
+    assert (
+        inspect.signature(capture_snapshot)
+        .parameters["timeout_seconds"]
+        .default
+        == 900
+    )
+    assert (
+        inspect.signature(restore_snapshot)
+        .parameters["timeout_seconds"]
+        .default
+        == 900
+    )
+    assert (
+        _snapshot_io_timeout_seconds(MAX_SNAPSHOT_IO_TIMEOUT_SECONDS)
+        == MAX_SNAPSHOT_IO_TIMEOUT_SECONDS
+    )
+    for invalid in (True, 0, MAX_SNAPSHOT_IO_TIMEOUT_SECONDS + 1):
+        with pytest.raises(ProductionParityError, match="timeout is invalid"):
+            _snapshot_io_timeout_seconds(invalid)
+
+
+def test_full_deadline_accepts_twenty_hours_and_rejects_larger_budget():
+    maximum = full_host.MAX_FULL_TIMEOUT_SECONDS
+    assert maximum == 20 * 60 * 60
+    assert full_host._full_deadline(started=10.0, timeout_seconds=maximum) == (
+        10.0 + maximum
+    )
+    for invalid in (True, 0, maximum + 1):
+        with pytest.raises(FullParityError, match="timeout is invalid"):
+            full_host._full_deadline(started=10.0, timeout_seconds=invalid)
+
+
+def test_full_snapshot_disk_headroom_fits_512_gib_and_fails_closed(
+    monkeypatch,
+    tmp_path: Path,
+):
+    source_bytes = 174_400_000_000
+    capture_required = source_bytes * 2 + FULL_SNAPSHOT_DISK_RESERVE_BYTES
+    assert capture_required < 512 * 1024**3
+
+    monkeypatch.setattr(
+        "scripts.production_parity_snapshot.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=capture_required),
+    )
+    assert _require_full_snapshot_disk_headroom(
+        tmp_path,
+        total_relation_bytes=source_bytes,
+        simultaneous_copies=2,
+    ) == {
+        "required_free_bytes": capture_required,
+        "available_free_bytes": capture_required,
+    }
+
+    monkeypatch.setattr(
+        "scripts.production_parity_snapshot.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=capture_required - 1),
+    )
+    with pytest.raises(ProductionParityError, match="headroom is insufficient"):
+        _require_full_snapshot_disk_headroom(
+            tmp_path,
+            total_relation_bytes=source_bytes,
+            simultaneous_copies=2,
+        )
+
+
+def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
+    monkeypatch,
+    tmp_path: Path,
+):
+    marker = tmp_path / "early-boot-isolated"
+    marker.write_text("isolated\n", encoding="utf-8")
+    work_root = tmp_path / "encrypted-root-volume"
+    output = tmp_path / "evidence" / "full.json"
+    observed: dict[str, int] = {}
+    monotonic_values = iter((100.0, 110.2, 250.1, 251.0))
+
+    class Database:
+        target_dsn = "postgresql://postgres:x@127.0.0.1/leadpoet_parity_test"
+
+        @staticmethod
+        def start():
+            return None
+
+        @staticmethod
+        def cleanup():
+            return {"status": "removed"}
+
+    def fake_capture_snapshot(**kwargs):
+        observed["capture"] = kwargs["timeout_seconds"]
+        return {
+            "capture_mode": "full",
+            "database": {"target_rebenchmark_date": "2026-08-19"},
+        }
+
+    def fake_restore_snapshot(**kwargs):
+        observed["restore"] = kwargs["timeout_seconds"]
+        raise FullParityError("stop after restore")
+
+    monkeypatch.setattr(full_host, "EARLY_BOOT_MARKER", marker)
+    monkeypatch.setattr(full_host, "FULL_WORK_ROOT", work_root)
+    monkeypatch.setattr(full_host, "_checkout_identity", lambda _sha: None)
+    monkeypatch.setattr(full_host.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(full_host.boto3, "client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(full_host, "_DockerDatabase", lambda **_kwargs: Database())
+    monkeypatch.setattr(full_host, "capture", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        full_host,
+        "build_contract",
+        lambda **_kwargs: {"candidate_sha": "b" * 40, "contract_hash": HASH},
+    )
+    monkeypatch.setattr(
+        full_host,
+        "_secret_value",
+        lambda *_args, **_kwargs: "postgresql://reader:x@db.example/postgres",
+    )
+    monkeypatch.setattr(full_host, "capture_snapshot", fake_capture_snapshot)
+    monkeypatch.setattr(full_host, "restore_snapshot", fake_restore_snapshot)
+
+    with pytest.raises(FullParityError, match="stop after restore"):
+        full_host.run_full(
+            region="us-east-1",
+            run_id="pp-test-1",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            production_gateway_secret_id="gateway-secret",
+            readonly_dsn_secret_id="readonly-secret",
+            miner_intake_secret_id="miner-secret",
+            supabase_origin="https://parity.example",
+            artifact_bucket="parity-artifacts",
+            postgres_image="postgres@sha256:" + "c" * 64,
+            postgrest_image="postgrest@sha256:" + "d" * 64,
+            output=output,
+            timeout_seconds=1_000,
+        )
+
+    assert observed == {"capture": 990, "restore": 850}
+    assert not (work_root / "pp-test-1" / "runtime").exists()
+    cleanup = json.loads(output.read_text(encoding="utf-8"))["cleanup"]
+    assert cleanup["work"] == "removed"
 
 
 @pytest.mark.parametrize(

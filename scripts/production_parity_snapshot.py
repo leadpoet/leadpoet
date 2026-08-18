@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from typing import Any, Mapping, Sequence
@@ -37,6 +38,54 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS = 900
+MAX_SNAPSHOT_IO_TIMEOUT_SECONDS = 72_000
+FULL_SNAPSHOT_DISK_RESERVE_BYTES = 64 * 1024**3
+
+
+def _snapshot_io_timeout_seconds(value: int) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value <= 0
+        or value > MAX_SNAPSHOT_IO_TIMEOUT_SECONDS
+    ):
+        raise ProductionParityError("production snapshot timeout is invalid")
+    return value
+
+
+def _require_full_snapshot_disk_headroom(
+    path: Path,
+    *,
+    total_relation_bytes: int,
+    simultaneous_copies: int,
+) -> dict[str, int]:
+    if (
+        not isinstance(total_relation_bytes, int)
+        or isinstance(total_relation_bytes, bool)
+        or total_relation_bytes <= 0
+        or simultaneous_copies not in {1, 2}
+    ):
+        raise ProductionParityError("full snapshot disk estimate is invalid")
+    required = (
+        total_relation_bytes * simultaneous_copies
+        + FULL_SNAPSHOT_DISK_RESERVE_BYTES
+    )
+    try:
+        available = shutil.disk_usage(path).free
+    except OSError as exc:
+        raise ProductionParityError(
+            "full snapshot disk headroom is unavailable"
+        ) from exc
+    if available < required:
+        raise ProductionParityError(
+            "full snapshot disk headroom is insufficient: "
+            f"required_bytes={required} available_bytes={available}"
+        )
+    return {
+        "required_free_bytes": required,
+        "available_free_bytes": available,
+    }
 
 
 def _load_json(path: Path, *, description: str) -> dict[str, Any]:
@@ -278,7 +327,9 @@ def capture_snapshot(
     ttl_hours: int,
     source_sha: str,
     capture_mode: str = "full",
+    timeout_seconds: int = DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    timeout_seconds = _snapshot_io_timeout_seconds(timeout_seconds)
     contract = validate_contract(_load_json(contract_path, description="parity contract"))
     env, observed_host = _postgres_env(dsn, read_only=True)
     if observed_host != str(expected_production_host or "").strip().lower():
@@ -320,6 +371,12 @@ def capture_snapshot(
     )
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
+    if capture_mode == "full":
+        _require_full_snapshot_disk_headroom(
+            archive_path.parent,
+            total_relation_bytes=int(stats.get("total_relation_bytes") or 0),
+            simultaneous_copies=2,
+        )
     dump_command = [
             "pg_dump",
             "--format=custom",
@@ -333,10 +390,16 @@ def capture_snapshot(
         ]
     if capture_mode == "schema-only":
         dump_command.insert(4, "--schema-only")
+    dump_env = dict(env)
+    dump_env["PGOPTIONS"] = (
+        "-c default_transaction_read_only=on "
+        f"-c statement_timeout={timeout_seconds * 1000} "
+        "-c lock_timeout=5000"
+    )
     result = _run(
         dump_command,
-        env=env,
-        timeout=900,
+        env=dump_env,
+        timeout=timeout_seconds,
     )
     _require_success(result, stage="read-only production snapshot capture")
     post_stats = _database_stats(env)
@@ -461,7 +524,9 @@ def restore_snapshot(
     archive_path: Path,
     target_dsn: str,
     production_host: str,
+    timeout_seconds: int = DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    timeout_seconds = _snapshot_io_timeout_seconds(timeout_seconds)
     evidence = verify_snapshot(
         contract_path=contract_path,
         manifest_path=manifest_path,
@@ -470,6 +535,15 @@ def restore_snapshot(
     )
     safe_database_target(target_dsn, production_host=production_host)
     env, _ = _postgres_env(target_dsn, read_only=False)
+    manifest = validate_snapshot_manifest(
+        _load_json(manifest_path, description="snapshot manifest")
+    )
+    if manifest["capture_mode"] == "full":
+        _require_full_snapshot_disk_headroom(
+            archive_path.parent,
+            total_relation_bytes=manifest["database"]["total_relation_bytes"],
+            simultaneous_copies=1,
+        )
     _require_success(
         _run(
             [
@@ -485,7 +559,7 @@ def restore_snapshot(
                 str(archive_path),
             ],
             env=env,
-            timeout=900,
+            timeout=timeout_seconds,
         ),
         stage="isolated production snapshot restore",
     )
@@ -521,6 +595,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     capture.add_argument(
         "--mode", choices=("full", "schema-only"), default="full"
     )
+    capture.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
+    )
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--contract", type=Path, required=True)
@@ -534,6 +613,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     restore.add_argument("--archive", type=Path, required=True)
     restore.add_argument("--target-dsn-env", default="LEADPOET_PARITY_TARGET_DSN")
     restore.add_argument("--production-host-env", default="LEADPOET_PARITY_PRODUCTION_DB_HOST")
+    restore.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
+    )
 
     args = parser.parse_args(argv)
     try:
@@ -551,6 +635,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ttl_hours=args.ttl_hours,
                 source_sha=args.source_sha,
                 capture_mode=args.mode,
+                timeout_seconds=args.timeout_seconds,
             )
         elif args.command == "verify":
             result = verify_snapshot(
@@ -570,6 +655,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 archive_path=args.archive,
                 target_dsn=target_dsn,
                 production_host=production_host,
+                timeout_seconds=args.timeout_seconds,
             )
     except (OSError, ValueError, ProductionParityError, subprocess.TimeoutExpired) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

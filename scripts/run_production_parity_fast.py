@@ -407,8 +407,23 @@ class _DockerDatabase:
         )
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
+            # The image initializes through a socket-only temporary postmaster.
+            # TCP readiness proves the final postmaster has replaced it.
             ready = _run(
-                ["docker", "exec", self.postgres, "pg_isready", "-U", "postgres"],
+                [
+                    "docker",
+                    "exec",
+                    self.postgres,
+                    "pg_isready",
+                    "-h",
+                    "127.0.0.1",
+                    "-p",
+                    "5432",
+                    "-U",
+                    "postgres",
+                    "-d",
+                    self.database,
+                ],
                 timeout=10,
             )
             if ready.returncode == 0:

@@ -364,6 +364,62 @@ def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
     assert "net.http" not in bootstrap
 
 
+def test_disposable_clone_waits_for_final_tcp_postmaster(monkeypatch):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+    postmaster_states = iter(
+        ("bootstrap-ready", "bootstrap-shutdown", "final-ready")
+    )
+    observed_states: list[str] = []
+    readiness_commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        command = list(command)
+        if command[:4] == ["docker", "exec", database.postgres, "pg_isready"]:
+            state = next(postmaster_states)
+            observed_states.append(state)
+            readiness_commands.append(command)
+            # The image bootstrap postmaster is socket-only. An old socket probe
+            # would accept its first ready state; TCP becomes ready only after the
+            # bootstrap shutdown and the final postmaster exec.
+            tcp_probe = (
+                "-h" in command
+                and command[command.index("-h") + 1] == "127.0.0.1"
+            )
+            return SimpleNamespace(
+                returncode=0 if tcp_probe and state == "final-ready" else 1,
+                stdout="",
+                stderr="",
+            )
+        if command[:3] == ["docker", "port", database.postgres]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="127.0.0.1:32768\n",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(fast_parity, "_run", fake_run)
+    monkeypatch.setattr(fast_parity.time, "sleep", lambda _seconds: None)
+
+    database.start()
+
+    assert observed_states == [
+        "bootstrap-ready",
+        "bootstrap-shutdown",
+        "final-ready",
+    ]
+    assert all("-h" in command for command in readiness_commands)
+    assert all(
+        command[command.index("-d") + 1] == database.database
+        for command in readiness_commands
+    )
+    assert database.target_dsn.endswith(":32768/" + database.database)
+
+
 def test_disposable_clone_proves_restored_deterministic_uuid(monkeypatch):
     database = fast_parity._DockerDatabase(
         candidate_sha=SHA,

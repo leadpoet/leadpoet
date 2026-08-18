@@ -724,29 +724,26 @@ def _pcr0_cache_build_record(
 
 def _pcr0_cache_git_identity(build_root: Path) -> str:
     try:
-        top_level = subprocess.run(
-            ["/usr/bin/git", "-C", str(build_root), "rev-parse", "--show-toplevel"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout.strip()
-        commit = subprocess.run(
+        identity = subprocess.run(
             [
                 "/usr/bin/git",
                 "-C",
                 str(build_root),
                 "rev-parse",
+                "--show-toplevel",
                 "--verify",
                 "HEAD^{commit}",
             ],
             check=True,
             capture_output=True,
             text=True,
-            timeout=10,
-        ).stdout.strip()
+            timeout=30,
+        ).stdout.splitlines()
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError("validator PCR0 cache Git identity is unavailable") from exc
+    if len(identity) != 2:
+        raise ValueError("validator PCR0 cache Git identity is invalid")
+    top_level, commit = (value.strip() for value in identity)
     if Path(top_level).resolve() != build_root:
         raise ValueError("validator PCR0 cache build is outside its Git root")
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:

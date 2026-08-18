@@ -126,6 +126,48 @@ def _build_argv(tag: str) -> list[str]:
     ]
 
 
+def test_pcr0_cache_git_identity_is_one_atomic_bounded_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_root = tmp_path / "pcr0-builder"
+    parent, candidate = _two_commit_repository(build_root)
+    adapter = _load_adapter(
+        monkeypatch=monkeypatch,
+        state_root=tmp_path / "state",
+        build_root=build_root,
+        candidate=candidate,
+    )
+    calls: list[tuple[list[str], dict]] = []
+    real_run = adapter.subprocess.run
+
+    def counted_run(argv, **kwargs):
+        calls.append((list(argv), dict(kwargs)))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(adapter.subprocess, "run", counted_run)
+    assert adapter._pcr0_cache_git_identity(build_root.resolve()) == parent
+    assert calls == [
+        (
+            [
+                "/usr/bin/git",
+                "-C",
+                str(build_root.resolve()),
+                "rev-parse",
+                "--show-toplevel",
+                "--verify",
+                "HEAD^{commit}",
+            ],
+            {
+                "check": True,
+                "capture_output": True,
+                "text": True,
+                "timeout": 30,
+            },
+        )
+    ]
+
+
 def test_pcr0_cache_adapter_preserves_checked_out_n_minus_one_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

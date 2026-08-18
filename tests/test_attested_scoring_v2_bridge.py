@@ -744,10 +744,13 @@ async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
     release = _release()
     client = _Client(
         release,
-        executor=lambda _operation, payload, _context: {
-            "schema_version": "test.model_compatibility.v1",
-            "payload_hash": sha256_json(payload),
-        },
+        executor=lambda _operation, payload, _context: ExecutionResultV2(
+            output={
+                "schema_version": "test.model_compatibility.v1",
+                "payload_hash": sha256_json(payload),
+            },
+            artifact_hashes=(_hash("9"),),
+        ),
     )
     durable_row = None
     durable_graph = None
@@ -849,7 +852,7 @@ async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
     assert second["receipt"] == first["receipt"]
     assert second["receipt_graph"] == durable_graph
     assert second["result"] == first["result"]
-    assert second["artifact_hashes"] == [_hash("8")]
+    assert second["artifact_hashes"] == [_hash("8"), _hash("9")]
 
     valid_graph = durable_graph
     durable_graph = {

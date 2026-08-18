@@ -2027,7 +2027,7 @@ async def execute_scoring_v2(
             or len(graph["boot_identities"]) != 1
             or transport_attempts
             or host_operations
-            or sorted(job_artifact_hashes) != artifact_hashes
+            or not set(artifact_hashes).issubset(job_artifact_hashes)
             or transitions
             or sealed_model_artifacts
             or expected_artifact_hashes

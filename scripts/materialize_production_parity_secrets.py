@@ -196,6 +196,9 @@ _FORCED_KEYS = {
     "LEADPOET_PRODUCTION_PARITY_SUPABASE_ORIGIN",
     "LEADPOET_PRODUCTION_PARITY_BENCHMARK_DATE",
     "RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET",
+    "RESEARCH_LAB_RAW_TRACE_S3_PREFIX",
+    "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX",
+    "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
     "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED",
     "ENABLE_FULFILLMENT",
     "RESEARCH_LAB_AUTO_START_WORKERS",
@@ -211,6 +214,23 @@ _FORCED_KEYS = {
 
 class SecretMaterializationError(RuntimeError):
     """A source secret or run-scoped replacement is incomplete or unsafe."""
+
+
+def production_parity_trace_prefixes(
+    *, artifact_bucket: str, run_id: str
+) -> dict[str, str]:
+    """Return the only trace destinations permitted inside a parity run."""
+
+    if not RUN_RE.fullmatch(run_id):
+        raise SecretMaterializationError("parity run identity is invalid")
+    if not re.fullmatch(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", artifact_bucket):
+        raise SecretMaterializationError("parity artifact bucket is invalid")
+    root = f"s3://{artifact_bucket}/production-parity/runs/{run_id}/traces"
+    return {
+        "RESEARCH_LAB_RAW_TRACE_S3_PREFIX": f"{root}/raw",
+        "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX": f"{root}/scorer",
+        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX": f"{root}/incontainer",
+    }
 
 
 def is_process_control_environment_key(key: str) -> bool:
@@ -373,6 +393,10 @@ def build_gateway_environment(
         "LEADPOET_PARITY_CANDIDATE_SHA": candidate_sha,
         **boundary_environment,
         "RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET": artifact_bucket,
+        **production_parity_trace_prefixes(
+            artifact_bucket=artifact_bucket,
+            run_id=run_id,
+        ),
         "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
         "LEADPOET_SENTRY_ENABLED": "0",
         "GATEWAY_OTEL_ENABLED": "0",

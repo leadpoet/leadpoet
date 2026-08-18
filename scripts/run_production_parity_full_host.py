@@ -54,10 +54,12 @@ from leadpoet_canonical.production_parity_boundary_v2 import (  # noqa: E402
 from scripts.build_production_parity_contract import build_contract  # noqa: E402
 from scripts.capture_production_parity_runtime_config import capture  # noqa: E402
 from scripts.materialize_production_parity_secrets import (  # noqa: E402
+    SecretMaterializationError,
     _parse_environment_document,
     create as create_gateway_secret,
     delete as delete_gateway_secret,
     is_process_control_environment_key,
+    production_parity_trace_prefixes,
 )
 from scripts.production_parity_snapshot import (  # noqa: E402
     capture_snapshot,
@@ -856,6 +858,15 @@ def _validated_clone_environment(
         "AWS_SHARED_CREDENTIALS_FILE",
         "BOTO_CONFIG",
     }
+    try:
+        expected_trace_prefixes = production_parity_trace_prefixes(
+            artifact_bucket=str(
+                values.get("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET") or ""
+            ),
+            run_id=run_id,
+        )
+    except SecretMaterializationError as exc:
+        raise FullParityError("clone trace boundary identity differs") from exc
     if (
         boundary.get("mode") != "production-parity"
         or boundary.get("run_id") != run_id
@@ -867,6 +878,10 @@ def _validated_clone_environment(
         or not str(values.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
         or str(values.get("DISABLE_BACKGROUND_TASKS") or "").lower()
         != "true"
+        or any(
+            values.get(name) != expected
+            for name, expected in expected_trace_prefixes.items()
+        )
         or any(str(values.get(name) or "").strip() for name in forbidden_aws_environment)
     ):
         raise FullParityError("clone gateway boundary identity differs")
@@ -1573,6 +1588,8 @@ async def _run_miner_intake_child_validated(
     from gateway.research_lab.maintenance import (
         get_autoresearch_maintenance_state,
         get_scoring_maintenance_state,
+        set_autoresearch_maintenance_paused,
+        set_scoring_maintenance_paused,
     )
     from gateway.research_lab.source_add_workflow import source_add_control_state
     from gateway.research_lab.store import call_rpc, select_many, select_one
@@ -1938,32 +1955,51 @@ async def _run_miner_intake_child_validated(
     finally:
         research_lab_api.chain_is_hotkey_registered = original_chain_registration
         try:
-            if source_controls.get("source_add_paused"):
-                await call_rpc(
-                    "research_lab_source_add_set_paused",
-                    {
-                        "p_paused": True,
-                        "p_reason": "production_parity_miner_intake_complete",
-                        "p_actor_ref": "system:production-parity",
-                    },
-                )
-            if source_controls.get("autoresearch_paused"):
-                await set_autoresearch_maintenance_paused(
-                    paused=True,
-                    reason="production_parity_miner_intake_complete",
-                    actor_ref="system:production-parity",
-                    event_doc={"production_parity": True},
-                )
-            if source_controls.get("scoring_paused"):
-                await set_scoring_maintenance_paused(
-                    paused=True,
-                    reason="production_parity_miner_intake_complete",
-                    actor_ref="system:production-parity",
-                    event_doc={"production_parity": True},
-                )
+            await _restore_miner_intake_controls(
+                source_controls,
+                call_rpc=call_rpc,
+                set_autoresearch_maintenance_paused=(
+                    set_autoresearch_maintenance_paused
+                ),
+                set_scoring_maintenance_paused=set_scoring_maintenance_paused,
+            )
         finally:
             request = {}
             runtime_credential = management_credential = builtwith_credential = ""
+
+
+async def _restore_miner_intake_controls(
+    source_controls: Mapping[str, Any],
+    *,
+    call_rpc: Any,
+    set_autoresearch_maintenance_paused: Any,
+    set_scoring_maintenance_paused: Any,
+) -> None:
+    """Restore every clone-local maintenance state changed for miner intake."""
+
+    if source_controls.get("source_add_paused"):
+        await call_rpc(
+            "research_lab_source_add_set_paused",
+            {
+                "p_paused": True,
+                "p_reason": "production_parity_miner_intake_complete",
+                "p_actor_ref": "system:production-parity",
+            },
+        )
+    if source_controls.get("autoresearch_paused"):
+        await set_autoresearch_maintenance_paused(
+            paused=True,
+            reason="production_parity_miner_intake_complete",
+            actor_ref="system:production-parity",
+            event_doc={"production_parity": True},
+        )
+    if source_controls.get("scoring_paused"):
+        await set_scoring_maintenance_paused(
+            paused=True,
+            reason="production_parity_miner_intake_complete",
+            actor_ref="system:production-parity",
+            event_doc={"production_parity": True},
+        )
 
 
 def _wait_rebenchmark(

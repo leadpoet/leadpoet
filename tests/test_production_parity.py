@@ -36,6 +36,7 @@ from leadpoet_canonical.production_parity import (
 from scripts.materialize_production_parity_secrets import (
     build_gateway_environment,
     is_process_control_environment_key,
+    production_parity_trace_prefixes,
 )
 from scripts import production_parity_snapshot as parity_snapshot
 from scripts import check_production_parity_rebenchmark as parity_readiness
@@ -2070,6 +2071,11 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
             "WALLET_PRIVATE_KEY": "must-drop",
             "SUPABASE_URL": "https://qplwoislplkcegvdmbim.supabase.co",
             "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED": "true",
+            "RESEARCH_LAB_RAW_TRACE_S3_PREFIX": "s3://production/raw",
+            "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX": "s3://production/scorer",
+            "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX": (
+                "s3://production/incontainer"
+            ),
             "PATH": "/production/poison",
             "PYTHONPATH": "/production/import-poison",
             "HTTP_PROXY": "http://production-proxy.invalid",
@@ -2112,6 +2118,16 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert (
         environment["RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET"]
         == artifact_bucket
+    )
+    assert {
+        name: environment[name]
+        for name in production_parity_trace_prefixes(
+            artifact_bucket=artifact_bucket,
+            run_id="pp-1-1",
+        )
+    } == production_parity_trace_prefixes(
+        artifact_bucket=artifact_bucket,
+        run_id="pp-1-1",
     )
     for key in (
         "PATH",
@@ -2159,6 +2175,54 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["DISABLE_BACKGROUND_TASKS"] == "true"
     assert environment["GATEWAY_STATEFUL_CUTOVER_CEREMONY"] == "0"
     assert environment["GATEWAY_TEE_TOPOLOGY_MODE"] == "full"
+
+
+def test_full_clone_environment_rejects_tampered_trace_destination(
+    monkeypatch, tmp_path: Path
+):
+    run_id = "pp-1-1"
+    artifact_bucket = "leadpoet-parity-493765492819-" + "f" * 16
+    environment = build_gateway_environment(
+        {},
+        run_id=run_id,
+        candidate_sha=SHA,
+        supabase_origin=ORIGIN,
+        artifact_bucket=artifact_bucket,
+        benchmark_date="2026-08-19",
+        jwt_secret="j" * 48,
+    )
+    monkeypatch.setattr(full_host, "FULL_WORK_ROOT", tmp_path)
+    gateway_env_file = tmp_path / run_id / "runtime" / "gateway.env"
+    gateway_env_file.parent.mkdir(parents=True)
+
+    def write_environment(values):
+        gateway_env_file.write_text(
+            "".join(f"{key}={value}\n" for key, value in sorted(values.items())),
+            encoding="utf-8",
+        )
+        gateway_env_file.chmod(0o600)
+
+    write_environment(environment)
+    assert full_host._validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=SHA,
+        run_id=run_id,
+        supabase_origin=ORIGIN,
+    )["RESEARCH_LAB_RAW_TRACE_S3_PREFIX"].endswith("/traces/raw")
+
+    write_environment(
+        {
+            **environment,
+            "RESEARCH_LAB_RAW_TRACE_S3_PREFIX": "s3://production-private/raw",
+        }
+    )
+    with pytest.raises(FullParityError, match="clone gateway boundary identity"):
+        full_host._validated_clone_environment(
+            gateway_env_file,
+            candidate_sha=SHA,
+            run_id=run_id,
+            supabase_origin=ORIGIN,
+        )
 
 
 def test_full_gateway_restart_reasserts_run_owned_path_authority():
@@ -2499,6 +2563,44 @@ def test_miner_intake_secret_resolution_is_strict_and_value_opaque():
     )
     with pytest.raises(FullParityError, match="credential is unavailable"):
         _required_secret_from_environment({}, ("FIRST",), field="credential")
+
+
+@pytest.mark.asyncio
+async def test_miner_intake_restores_every_preexisting_clone_pause():
+    observed: list[tuple[str, object]] = []
+
+    async def call_rpc(name, payload):
+        observed.append((name, dict(payload)))
+
+    async def set_autoresearch(**payload):
+        observed.append(("autoresearch", dict(payload)))
+
+    async def set_scoring(**payload):
+        observed.append(("scoring", dict(payload)))
+
+    await full_host._restore_miner_intake_controls(
+        {
+            "source_add_paused": True,
+            "autoresearch_paused": True,
+            "scoring_paused": True,
+        },
+        call_rpc=call_rpc,
+        set_autoresearch_maintenance_paused=set_autoresearch,
+        set_scoring_maintenance_paused=set_scoring,
+    )
+
+    assert [name for name, _payload in observed] == [
+        "research_lab_source_add_set_paused",
+        "autoresearch",
+        "scoring",
+    ]
+    assert all(payload["p_paused"] is True for name, payload in observed[:1])
+    assert all(payload["paused"] is True for name, payload in observed[1:])
+    assert all(
+        payload.get("p_reason", payload.get("reason"))
+        == "production_parity_miner_intake_complete"
+        for _name, payload in observed
+    )
 
 
 def test_full_clone_final_evidence_uses_run_scoped_gateway_token():

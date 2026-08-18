@@ -814,6 +814,28 @@ def test_oidc_provider_creation_and_retry_preserve_tagless_shared_shape():
     }]
 
 
+def test_inert_trust_has_valid_explicit_deny_and_no_allow():
+    trust = setup._inert_trust()
+    assert trust == {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Deny",
+            "Principal": {
+                "AWS": f"arn:aws:iam::{setup.EXPECTED_ACCOUNT_ID}:root",
+            },
+            "Action": "sts:AssumeRole",
+        }],
+    }
+    assert all(
+        statement.get("Effect") != "Allow"
+        for statement in trust["Statement"]
+    )
+    assert all(
+        statement.get("Principal") != "*"
+        for statement in trust["Statement"]
+    )
+
+
 def test_controller_trust_is_exactly_bound_to_unique_main_workflows():
     oidc = (
         f"arn:aws:iam::{ACCOUNT}:oidc-provider/"

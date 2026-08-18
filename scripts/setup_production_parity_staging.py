@@ -746,11 +746,16 @@ def _ensure_managed_policy(
 
 
 def _inert_trust() -> dict[str, Any]:
+    # IAM role trust policies reject a bare wildcard principal.  Explicitly
+    # deny the production account; with no Allow statement, every other
+    # principal remains implicitly denied as well.
     return {
         "Version": "2012-10-17",
         "Statement": [{
             "Effect": "Deny",
-            "Principal": "*",
+            "Principal": {
+                "AWS": f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:root",
+            },
             "Action": "sts:AssumeRole",
         }],
     }

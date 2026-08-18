@@ -1931,8 +1931,14 @@ def test_full_workflow_derives_temp_before_use_and_cleans_safe_exact_path():
         assert "${RUNNER_TEMP:-}" in cleanup
         assert "${GITHUB_RUN_ID:-}" in cleanup
         assert "${GITHUB_RUN_ATTEMPT:-}" in cleanup
-        assert 'expected="$RUNNER_TEMP/production-parity-' in cleanup
-        assert 'parity_temp="${PARITY_TEMP:-$expected}"' in cleanup
+        assert (
+            'expected="$RUNNER_TEMP/production-parity-' in cleanup
+            or 'expected="$runner_temp/production-parity-' in cleanup
+        )
+        assert (
+            'parity_temp="${PARITY_TEMP:-$expected}"' in cleanup
+            or 'parity_temp="${explicit_temp:-$expected}"' in cleanup
+        )
         assert 'owner_token="${PARITY_OWNER_TOKEN:-}"' in cleanup
         assert ".leadpoet-production-parity-owner" in cleanup
         assert '"$parity_temp"' in cleanup
@@ -1943,6 +1949,34 @@ def test_full_workflow_derives_temp_before_use_and_cleans_safe_exact_path():
         "${{ runner.temp }}/production-parity-${{ github.run_id }}-"
         "${{ github.run_attempt }}/full-evidence.json"
     )
+
+
+def _dirty_disposable_git_checkout(root: Path) -> tuple[Path, Path, Path]:
+    checkout = root / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "parity-test@example.invalid"],
+        cwd=checkout,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Parity Test"],
+        cwd=checkout,
+        check=True,
+    )
+    tracked = checkout / "tracked.txt"
+    tracked.write_text("committed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
+        cwd=checkout,
+        check=True,
+    )
+    tracked.write_text("dirty\n", encoding="utf-8")
+    untracked = checkout / "untracked.txt"
+    untracked.write_text("remove me\n", encoding="utf-8")
+    return checkout, tracked, untracked
 
 
 def test_full_workflow_never_scrubs_a_preexisting_temp_collision(tmp_path):
@@ -1981,10 +2015,11 @@ def test_full_workflow_never_scrubs_a_preexisting_temp_collision(tmp_path):
         "GITHUB_ENV": str(github_env),
         "GITHUB_OUTPUT": str(github_output),
     }
+    checkout, tracked, untracked = _dirty_disposable_git_checkout(tmp_path)
 
     prepared = subprocess.run(
         ["bash", "-c", prepare],
-        cwd=tmp_path,
+        cwd=checkout,
         env=env,
         check=False,
         capture_output=True,
@@ -2000,7 +2035,7 @@ def test_full_workflow_never_scrubs_a_preexisting_temp_collision(tmp_path):
 
     validated = subprocess.run(
         ["bash", "-c", evidence],
-        cwd=tmp_path,
+        cwd=checkout,
         env={**env, **exported},
         check=False,
         capture_output=True,
@@ -2011,7 +2046,7 @@ def test_full_workflow_never_scrubs_a_preexisting_temp_collision(tmp_path):
 
     scrubbed = subprocess.run(
         ["bash", "-c", scrub],
-        cwd=tmp_path,
+        cwd=checkout,
         env={**env, **exported},
         check=False,
         capture_output=True,
@@ -2019,6 +2054,8 @@ def test_full_workflow_never_scrubs_a_preexisting_temp_collision(tmp_path):
     )
     assert scrubbed.returncode != 0
     assert sentinel.read_text(encoding="utf-8") == "preexisting\n"
+    assert tracked.read_text(encoding="utf-8") == "committed\n"
+    assert not untracked.exists()
 
 
 def test_full_workflow_scrubs_only_its_owned_temp_after_later_failure(tmp_path):
@@ -2030,6 +2067,7 @@ def test_full_workflow_scrubs_only_its_owned_temp_after_later_failure(tmp_path):
     steps = workflow["jobs"]["validate"]["steps"]
     by_name = {step.get("name"): step for step in steps}
     prepare = by_name["Prepare isolated self-hosted controller workspace"]["run"]
+    destroy = by_name["Destroy every run-scoped resource"]["run"]
     scrub = by_name["Scrub self-hosted controller workspace"]["run"]
 
     runner_temp = tmp_path / "runner-temp"
@@ -2042,10 +2080,12 @@ def test_full_workflow_scrubs_only_its_owned_temp_after_later_failure(tmp_path):
         "GITHUB_RUN_ID": "67890",
         "GITHUB_RUN_ATTEMPT": "3",
         "GITHUB_ENV": str(github_env),
+        "AWS_REGION": "us-east-1",
     }
+    checkout, tracked, untracked = _dirty_disposable_git_checkout(tmp_path)
     subprocess.run(
         ["bash", "-c", prepare],
-        cwd=tmp_path,
+        cwd=checkout,
         env=env,
         check=True,
         capture_output=True,
@@ -2058,15 +2098,29 @@ def test_full_workflow_scrubs_only_its_owned_temp_after_later_failure(tmp_path):
     owned = Path(exported["PARITY_TEMP"])
     assert owned.is_dir()
 
-    subprocess.run(
-        ["bash", "-c", scrub],
-        cwd=tmp_path,
+    destroyed = subprocess.run(
+        ["bash", "-c", destroy],
+        cwd=checkout,
         env={**env, **exported},
         check=False,
         capture_output=True,
         text=True,
     )
+    assert destroyed.returncode == 0
     assert not owned.exists()
+
+    scrubbed = subprocess.run(
+        ["bash", "-c", scrub],
+        cwd=checkout,
+        env={**env, **exported},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert scrubbed.returncode == 0
+    assert not owned.exists()
+    assert tracked.read_text(encoding="utf-8") == "committed\n"
+    assert not untracked.exists()
 
 
 def test_fast_and_cleanup_pin_account_and_reject_stale_cleanup_code():

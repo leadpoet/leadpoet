@@ -600,28 +600,42 @@ jobs:
         shell: bash
         run: |
           set +e
-          if [ -z "${RUNNER_TEMP:-}" ] || [ -z "${GITHUB_RUN_ID:-}" ] || \
-             [ -z "${GITHUB_RUN_ATTEMPT:-}" ]; then
-            exit 1
-          fi
-          expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          parity_temp="${PARITY_TEMP:-$expected}"
+          cleanup_status=0
+          runner_temp="${RUNNER_TEMP:-}"
+          run_id="${GITHUB_RUN_ID:-}"
+          run_attempt="${GITHUB_RUN_ATTEMPT:-}"
+          explicit_temp="${PARITY_TEMP:-}"
           owner_token="${PARITY_OWNER_TOKEN:-}"
-          owner_marker="$parity_temp/.leadpoet-production-parity-owner"
-          if [ -z "$parity_temp" ] || [ "$parity_temp" != "$expected" ]; then
-            exit 1
+          if [ -z "$runner_temp" ] || [ -z "$run_id" ] || \
+             [ -z "$run_attempt" ]; then
+            cleanup_status=1
+          else
+            expected="$runner_temp/production-parity-$run_id-$run_attempt"
+            parity_temp="${explicit_temp:-$expected}"
+            owner_marker="$parity_temp/.leadpoet-production-parity-owner"
+            if [ -z "$parity_temp" ] || [ "$parity_temp" != "$expected" ] || \
+               [ "${#owner_token}" -ne 64 ] || \
+               ! printf '%s' "$owner_token" | grep -Eq '^[0-9a-f]{64}$'; then
+              cleanup_status=1
+            elif [ ! -e "$parity_temp" ] && [ ! -L "$parity_temp" ]; then
+              if [ -z "$explicit_temp" ]; then
+                cleanup_status=1
+              fi
+            elif [ ! -d "$parity_temp" ] || [ -L "$parity_temp" ] || \
+                 [ ! -f "$owner_marker" ] || [ -L "$owner_marker" ] || \
+                 [ "$(wc -c < "$owner_marker")" -ne 65 ] || \
+                 [ "$(tr -d '\n' < "$owner_marker")" != "$owner_token" ]; then
+              cleanup_status=1
+            else
+              rm -rf -- "$parity_temp" || cleanup_status=$?
+            fi
           fi
-          if [ ! -e "$parity_temp" ]; then
-            exit 0
-          fi
-          if [ "${#owner_token}" -ne 64 ] || \
-             ! printf '%s' "$owner_token" | grep -Eq '^[0-9a-f]{64}$' || \
-             [ ! -d "$parity_temp" ] || [ -L "$parity_temp" ] || \
-             [ ! -f "$owner_marker" ] || [ -L "$owner_marker" ] || \
-             [ "$(wc -c < "$owner_marker")" -ne 65 ] || \
-             [ "$(tr -d '\n' < "$owner_marker")" != "$owner_token" ]; then
-            exit 1
-          fi
-          rm -rf -- "$parity_temp"
-          git reset --hard HEAD >/dev/null 2>&1
-          git clean -ffdx >/dev/null 2>&1
+          git reset --hard HEAD >/dev/null 2>&1 || {
+            status=$?
+            if [ "$cleanup_status" -eq 0 ]; then cleanup_status=$status; fi
+          }
+          git clean -ffdx >/dev/null 2>&1 || {
+            status=$?
+            if [ "$cleanup_status" -eq 0 ]; then cleanup_status=$status; fi
+          }
+          exit "$cleanup_status"

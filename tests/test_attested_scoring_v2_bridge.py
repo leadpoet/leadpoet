@@ -41,7 +41,11 @@ from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
     build_release_manifest,
 )
-from gateway.tee.scoring_executor_v2 import SCORING_OPERATIONS_V2
+from gateway.tee.scoring_executor_v2 import (
+    MODEL_COMPATIBILITY_PURPOSE_V2,
+    OP_RUN_MODEL_SANDBOX_V2,
+    SCORING_OPERATIONS_V2,
+)
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
 )
@@ -731,6 +735,152 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
     assert result["execution_receipt"] == result["receipt"]
     assert result["execution_receipt_graph"] == result["receipt_graph"]
     assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
+    monkeypatch,
+):
+    release = _release()
+    client = _Client(
+        release,
+        executor=lambda _operation, payload, _context: {
+            "schema_version": "test.model_compatibility.v1",
+            "payload_hash": sha256_json(payload),
+        },
+    )
+    durable_row = None
+    durable_graph = None
+    durable_proof = None
+    persisted_graphs = []
+    observed_current_receipts = []
+
+    async def select_many(_table, **_kwargs):
+        return [dict(durable_row)] if durable_row is not None else []
+
+    async def load_checkpointed(root_hash, **_kwargs):
+        assert durable_graph is not None
+        assert root_hash == durable_graph["root_receipt_hash"]
+        return dict(durable_graph)
+
+    async def load_proofs(roots, **_kwargs):
+        if durable_proof is None:
+            return {}
+        assert tuple(roots) == (durable_graph["root_receipt_hash"],)
+        return {durable_graph["root_receipt_hash"]: dict(durable_proof)}
+
+    async def persist_graph(graph, **_kwargs):
+        persisted_graphs.append(dict(graph))
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def persist_checkpoint(proof, *, checkpointed_graph, **_kwargs):
+        assert checkpointed_graph["root_receipt_hash"] == (
+            proof["certificate"]["claim"]["output_root_receipt_hash"]
+        )
+        return {
+            "root_receipt_hash": checkpointed_graph["root_receipt_hash"],
+            "proof_hash": proof["proof_hash"],
+            "root_activated": True,
+        }
+
+    real_selector = (
+        attested_v2_store.load_compatible_model_compatibility_receipt_v2
+    )
+
+    async def capture_selector(receipt):
+        observed_current_receipts.append(dict(receipt))
+        return await real_selector(receipt)
+
+    monkeypatch.setattr(attested_v2_store, "select_many", select_many)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_checkpointed_receipt_graph_v2",
+        load_checkpointed,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_compatible_model_compatibility_receipt_v2",
+        capture_selector,
+    )
+    common = {
+        "operation": OP_RUN_MODEL_SANDBOX_V2,
+        "purpose": MODEL_COMPATIBILITY_PURPOSE_V2,
+        "epoch_id": 0,
+        "sequence": 0,
+        "payload": {"operation": "metadata"},
+        "worker_index": 0,
+        "input_artifact_hashes": (_hash("8"),),
+        "release_manifest": release,
+        "client": client,
+        "persist_graph": persist_graph,
+        "load_ancestry_proofs": load_proofs,
+        "persist_ancestry_checkpoint": persist_checkpoint,
+        "boot_verifier": lambda identity: identity,
+        "poll_seconds": 0.001,
+    }
+
+    first = await execute_scoring_v2(**common)
+    durable_row = attested_v2_store.receipt_storage_row(first["receipt"])
+    durable_graph = compact_checkpointed_receipt_graph(
+        first["receipt_graph"],
+        boot_attestation_verifier=lambda identity: identity,
+        require_boot_attestation_verification=True,
+    )
+    durable_proof = dict(first["ancestry_compact_proof"])
+    original_clock = client.manager._clock
+    with client.manager._lock:
+        client.manager._jobs.clear()
+        client.manager._clock = lambda: original_clock() + 10.0
+
+    second = await execute_scoring_v2(**common)
+
+    assert len(observed_current_receipts) == 2
+    assert observed_current_receipts[0]["receipt_hash"] != (
+        observed_current_receipts[1]["receipt_hash"]
+    )
+    assert observed_current_receipts[0]["issued_at"] != (
+        observed_current_receipts[1]["issued_at"]
+    )
+    assert observed_current_receipts[0]["enclave_signature"] != (
+        observed_current_receipts[1]["enclave_signature"]
+    )
+    assert len(persisted_graphs) == 1
+    assert second["replay_status"] == "durable_model_compatibility_exact"
+    assert second["receipt"] == first["receipt"]
+    assert second["receipt_graph"] == durable_graph
+    assert second["result"] == first["result"]
+    assert second["artifact_hashes"] == [_hash("8")]
+
+    valid_graph = durable_graph
+    durable_graph = {
+        **valid_graph,
+        "receipts": [*valid_graph["receipts"], dict(first["receipt"])],
+    }
+    with pytest.raises(
+        AttestedScoringV2Error,
+        match="checkpointed receipt differs",
+    ):
+        await attested_scoring_v2._load_model_compatibility_replay_v2(
+            expected_receipt=observed_current_receipts[1],
+            expected_lineage_id=attested_scoring_v2._gateway_ancestry_lineage_id(),
+            boot_attestation_verifier=lambda identity: identity,
+            trusted_parent_authorities={},
+            load_ancestry_proofs=load_proofs,
+            persist_ancestry_checkpoint=persist_checkpoint,
+        )
+    durable_graph = valid_graph
+    valid_proof = durable_proof
+    durable_proof = {**valid_proof, "proof_hash": _hash("0")}
+    with pytest.raises(Exception, match="proof"):
+        await attested_scoring_v2._load_model_compatibility_replay_v2(
+            expected_receipt=observed_current_receipts[1],
+            expected_lineage_id=attested_scoring_v2._gateway_ancestry_lineage_id(),
+            boot_attestation_verifier=lambda identity: identity,
+            trusted_parent_authorities={},
+            load_ancestry_proofs=load_proofs,
+            persist_ancestry_checkpoint=persist_checkpoint,
+        )
+    durable_proof = valid_proof
 
 
 @pytest.mark.asyncio

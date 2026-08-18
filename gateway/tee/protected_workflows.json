@@ -2882,7 +2882,7 @@
       "symbol": "SCORING_OPERATIONS_V2"
     },
     {
-      "ast_sha256": "sha256:8d2af05d57131bb2ad19459b0ca542eab03dbc225dbf65b86bc26b6a11ac030e",
+      "ast_sha256": "sha256:ee8799b457dab62d889c4d8a89af4668d7f2aaaa9179035d978cd458413eea2d",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -4847,7 +4847,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:095d6c992c7945597f9bd2d4bd8c0aec98764211bf1a064758985aa230f6049d",
-  "protected_source_commit": "3498ab173c9bb17bd1e75311123948957a4efa52",
+  "manifest_hash": "sha256:f0a310d5fc4d10a5dcfd283df2fe5c9199a06bfe12f3597d1497009986aab0eb",
+  "protected_source_commit": "4a3f419ee346b5ccc339d0af9d04a1a3e30d107a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

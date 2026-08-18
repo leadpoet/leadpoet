@@ -138,72 +138,69 @@ ownership tags after hard cancellation.
 
 ## One-time prerequisites
 
-There is no GitHub Environment and no testnet setup. The operator creates one
-dedicated read-only PostgreSQL role in Supabase. One idempotent helper then
-verifies that role and creates only:
+There is no GitHub Environment and no testnet setup. Commissioning is one
+exact-commit operation and remains disabled until every prerequisite has been
+read back. It creates only:
 
 - one Secrets Manager record containing that DSN;
 - one separate read-only-to-the-runner secret containing the BuiltWith key;
 - a GitHub OIDC controller role;
 - one restricted EC2 runner role and instance profile; and
-- repository variables for existing production resources and immutable
-  PostgreSQL/PostgREST image digests.
+- the exact repository-variable inventory for fixed production resources and
+  freshly resolved official PostgreSQL/PostgREST image digests.
 
-Generate a unique hexadecimal password locally, replace the placeholder below,
-and run the SQL once in the production project's Supabase SQL editor:
-
-```sql
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_roles WHERE rolname = 'leadpoet_parity_reader'
-  ) THEN
-    CREATE ROLE leadpoet_parity_reader LOGIN;
-  END IF;
-END
-$$;
-
-ALTER ROLE leadpoet_parity_reader WITH
-  LOGIN
-  PASSWORD 'REPLACE_WITH_UNIQUE_HEX_PASSWORD'
-  BYPASSRLS
-  NOSUPERUSER
-  NOCREATEDB
-  NOCREATEROLE
-  NOREPLICATION
-  CONNECTION LIMIT 2;
-ALTER ROLE leadpoet_parity_reader SET default_transaction_read_only = on;
-ALTER ROLE leadpoet_parity_reader SET idle_in_transaction_session_timeout = '5min';
-
-GRANT CONNECT ON DATABASE postgres TO leadpoet_parity_reader;
-GRANT USAGE ON SCHEMA public TO leadpoet_parity_reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO leadpoet_parity_reader;
-GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO leadpoet_parity_reader;
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-  GRANT SELECT ON TABLES TO leadpoet_parity_reader;
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-  GRANT SELECT ON SEQUENCES TO leadpoet_parity_reader;
-```
-
-Use the Supabase session-pooler URI for that role with `sslmode=require`. Do
-not paste the URI into a terminal command: the helper reads it through a
-hidden prompt and stores it directly in Secrets Manager.
-
-Run:
+Migration `156-production-parity-readonly-role.sql` is never pasted into an SQL
+editor and the repository bootstrap does not apply arbitrary SQL. During an
+explicitly authorized overnight rebenchmark run, the Keychain-backed skill
+helper applies the exact numbered migration only after its path, current
+`origin/main` commit, and SHA-256 are verified:
 
 ```bash
-python3 scripts/setup_production_parity_staging.py apply \
-  --production-gateway-url https://gateway.subnet71.com \
-  --enable
+LEADPOET_OVERNIGHT_REBENCHMARK_AUTHORIZED=1 \
+python3 ~/.codex/skills/overnight-rebenchmark-validation/scripts/apply_supabase_migration.py \
+  --apply <canonical-repo>/scripts/156-production-parity-readonly-role.sql \
+  --commit <current-origin-main-full-sha> \
+  --expected-sha256 <verified-migration-sha256>
 ```
 
-The helper prompts first for the DSN and then for the BuiltWith key without
-echoing either value. It verifies the role and live gateway, resolves immutable
-container digests, creates or updates the IAM objects idempotently, and
-configures repository variables with `gh`. Secret values are never printed or
-stored in GitHub. The production OpenRouter pair is read directly from the
-already-authorized production gateway secret only inside the transient runner;
-no additional copy is created.
+The agent then runs the exact committed commissioning orchestrator from the
+synchronized canonical checkout:
+
+```bash
+python3 scripts/bootstrap_production_parity_staging.py \
+  --commit <current-origin-main-full-sha> \
+  --migration-sha256 <verified-migration-sha256>
+```
+
+Before any write, the orchestrator fetches `origin/main`, requires
+`HEAD == origin/main == --commit`, requires a clean tracked tree, and compares
+its own bytes plus the migration, IAM setup, and static installer bytes with
+that commit. It sets `LEADPOET_PARITY_ENABLED=false` first. IAM-capable AWS
+credentials are selected by exact name from the pinned gateway cache and stay
+in gateway process memory; the CloudWatch instance role is not widened. The
+validator's BuiltWith value is selected by exact name from the running
+container. The read-only DSN and all request/response payloads containing it
+move only through inherited pipes or encrypted in-memory SSH transport; secret
+values never enter argv, environment variables, regular files, command output,
+or GitHub.
+
+Migration 156 creates the NOLOGIN reader and a fixed postgres-only password
+binder. The orchestrator verifies the live migration contract, stages the
+immutable static secret, invokes only the fixed parameterized binder, and then
+proves a direct login starts with transaction read-only enabled and has no
+effective table, sequence, schema-create, or membership write path. The
+temporary validator bootstrap role is trusted for about 15 minutes, has the
+same absolute cutoff in its identity policy, and is deleted and read back in
+an outer `finally`. GitHub is enabled only after that cleanup and complete
+variable readback; any failure re-reads `ENABLED=false`.
+
+The Full controller runs on the existing self-hosted gateway builder, while
+the measured workload remains on one disposable Nitro instance with an exact
+512-GiB encrypted gp3 volume. The host workload is capped at 20 hours inside a
+21.5-hour SSM/controller envelope, with fresh bounded OIDC sessions for each
+poll window and cleanup. The production OpenRouter pair is read directly from
+the already-authorized production gateway secret only inside the transient
+runner; no additional copy is created.
 
 ## Safety contract
 

@@ -604,6 +604,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/149-research-lab-compact-weight-settlement-authority.sql",
         "scripts/154-research-lab-model-compatibility-purpose.sql",
         "scripts/155-research-lab-ancestry-disclosure-root-fast-path.sql",
+        "scripts/156-production-parity-readonly-role.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 

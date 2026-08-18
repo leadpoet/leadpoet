@@ -511,6 +511,7 @@ def _migration_schema_contract(
         "153-research-lab-private-model-lineage-generation.sql",
         "154-research-lab-model-compatibility-purpose.sql",
         "155-research-lab-ancestry-disclosure-root-fast-path.sql",
+        "156-production-parity-readonly-role.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -608,6 +609,7 @@ def _migration_schema_contract(
         "research_lab_champion_lifetime_credit_contract_v1",
         "persist_research_lab_ancestry_checkpoint_v2",
         "research_lab_ancestry_disclosure_lookup_contract_v1",
+        "leadpoet_production_parity_reader_contract_v1",
         "persist_research_lab_allocation_settlement_frontier_v2",
         "persist_research_lab_allocation_frontier_bootstrap_v2",
         "research_lab_ancestry_checkpoint_bootstrap_contract_v2",

@@ -72,21 +72,31 @@ def test_setup_keeps_readonly_database_password_out_of_process_arguments(
     monkeypatch,
 ):
     observed = {}
+    credential = "c" * 64
 
     def fake_run(argv, **kwargs):
         observed["argv"] = argv
         observed["env"] = kwargs["env"]
+        observed["input"] = kwargs["input"]
+        observed["start_new_session"] = kwargs["start_new_session"]
         return SimpleNamespace(
             returncode=0,
             stderr="",
             stdout=json.dumps(
                 {
+                    "role_name": "leadpoet_parity_reader",
                     "read_only": True,
                     "superuser": False,
                     "bypass_rls": True,
+                    "createdb": False,
+                    "createrole": False,
+                    "inherit": False,
                     "replication": False,
                     "connection_limit": 2,
                     "table_write_capable": False,
+                    "sequence_write_capable": False,
+                    "schema_create_capable": False,
+                    "membership_count": 0,
                     "public_relation_count": 1,
                 }
             ),
@@ -97,14 +107,20 @@ def test_setup_keeps_readonly_database_password_out_of_process_arguments(
         fake_run,
     )
     _verify_readonly_dsn(
-        "postgresql://parity:secret%2Bvalue@db.example:5432/postgres"
-        "?sslmode=require&connect_timeout=20"
+        "postgresql://leadpoet_parity_reader.qplwoislplkcegvdmbim:"
+        + credential
+        + "@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+        "?sslmode=require"
     )
 
-    assert all("secret" not in item for item in observed["argv"])
-    assert observed["env"]["PGPASSWORD"] == "secret+value"
+    assert all(credential not in item for item in observed["argv"])
+    assert credential not in json.dumps(observed["env"])
+    assert "PGPASSWORD" not in observed["env"]
+    assert "PGPASSFILE" not in observed["env"]
+    assert observed["input"] == credential + "\n"
+    assert observed["start_new_session"] is True
     assert observed["env"]["PGSSLMODE"] == "require"
-    assert observed["env"]["PGCONNECT_TIMEOUT"] == "20"
+    assert observed["env"]["PGCONNECT_TIMEOUT"] == "15"
 
 
 def _snapshot(*, bypass_rls: bool = True, capture_mode: str = "full") -> dict:
@@ -670,6 +686,9 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
         region="us-east-1",
         production_secret_id="leadpoet/prod/gateway/env",
         readonly_secret_id="leadpoet/staging/production-parity/readonly-dsn",
+        miner_intake_secret_id=(
+            "leadpoet/staging/production-parity-miner-intake"
+        ),
         runner_arn="arn:aws:iam::493765492819:role/runner",
     )
     runner = _runner_policy(
@@ -701,7 +720,9 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
             else [statement["Action"]]
         )
     )
-    assert write_statement["Resource"].endswith("production-parity/*")
+    assert write_statement["Resource"].endswith(
+        "production-parity/runs/pp-*/gateway-??????"
+    )
     assert "production-parity-miner-intake" not in write_statement["Resource"]
 
 

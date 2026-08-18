@@ -240,6 +240,9 @@ MODEL_COMPATIBILITY_PURPOSE_MIGRATION = (
 ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION = (
     "155-research-lab-ancestry-disclosure-root-fast-path.sql"
 )
+PRODUCTION_PARITY_READER_MIGRATION = (
+    "156-production-parity-readonly-role.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -296,6 +299,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION,
     MODEL_COMPATIBILITY_PURPOSE_MIGRATION,
     ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION,
+    PRODUCTION_PARITY_READER_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -328,6 +332,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_153_private_model_lineage_generation_contract_valid",
     "post_154_model_compatibility_purpose_contract_valid",
     "post_155_ancestry_disclosure_lookup_contract_valid",
+    "post_156_production_parity_reader_contract_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5459,6 +5464,40 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-155 ancestry disclosure lookup contract differs"
+            )
+        database.apply_migration(scripts / PRODUCTION_PARITY_READER_MIGRATION)
+        applied.append(PRODUCTION_PARITY_READER_MIGRATION)
+        parity_reader_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.leadpoet_production_parity_reader_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            parity_reader_contract.get("schema_version")
+            != "leadpoet.production-parity-reader-contract.v1"
+            or parity_reader_contract.get("database_name")
+            != "leadpoet_rehearsal"
+            or parity_reader_contract.get("reader_role")
+            != "leadpoet_parity_reader"
+            or parity_reader_contract.get("superuser") is not False
+            or parity_reader_contract.get("bypass_rls") is not True
+            or parity_reader_contract.get("createdb") is not False
+            or parity_reader_contract.get("createrole") is not False
+            or parity_reader_contract.get("inherit") is not False
+            or parity_reader_contract.get("replication") is not False
+            or parity_reader_contract.get("connection_limit") != 2
+            or parity_reader_contract.get("default_read_only") is not True
+            or parity_reader_contract.get("membership_count") != 0
+            or parity_reader_contract.get("schema_create_capable") is not False
+            or parity_reader_contract.get("table_write_capable") is not False
+            or parity_reader_contract.get("sequence_write_capable") is not False
+        ):
+            raise PostgresContractProbeError(
+                "post-156 production parity reader contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(

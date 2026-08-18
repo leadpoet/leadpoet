@@ -721,6 +721,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_ancestry_disclosure_lookup_contract_v1",
     ),
     (
+        "scripts/156-production-parity-readonly-role.sql",
+        "leadpoet_production_parity_reader_contract_v1",
+    ),
+    (
         "scripts/137-research-lab-allocation-settlement-frontier.sql",
         "persist_research_lab_allocation_settlement_frontier_v2",
     ),

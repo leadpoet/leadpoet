@@ -19,6 +19,7 @@ from research_lab.routing_experiments import (
     PinnedSourcingModelRoutingAdapter,
     ReceiptExecutionMode,
     RoutingAdmissionPlanAdapter,
+    RoutingPlanStepBudget,
     RoutingEvaluationGates,
     RoutingExperimentError,
     RoutingExperimentSpec,
@@ -30,6 +31,7 @@ from research_lab.routing_experiments import (
     promote_routing_profile_to_lab,
     provider_receipt_key,
     validate_provider_receipt,
+    validate_routing_evaluation_receipt,
     validate_routing_experiment_spec,
     validate_sourcing_model_artifact_identity,
     verify_lab_routing_artifact_lineage,
@@ -153,11 +155,53 @@ class FakeRoutingAdmissionPlanAdapter:
     def plan_hash(self, plan):
         return sha256_json({"payload": plan.payload, "steps": plan.steps, "dormant": plan.dormant}).split(":", 1)[1]
 
+    def plan_step_budgets(self, plan):
+        return tuple(
+            RoutingPlanStepBudget(
+                tool_id=tool_id,
+                execution_mode="invoke",
+                max_calls=1,
+                timeout_seconds=1.0,
+                credit_microunits=10,
+            )
+            for tool_id in plan.steps
+        )
+
+    def intent_release_policy_hash(self):
+        return HASH_E
+
 
 class ConfirmationUnavailableAdapter(FakeRoutingAdmissionPlanAdapter):
     def compile_confirmation(self, *args, **kwargs):
         del args, kwargs
         raise ValueError("confirmation unavailable")
+
+
+class OverBudgetAdapter(FakeRoutingAdmissionPlanAdapter):
+    def plan_step_budgets(self, plan):
+        return tuple(
+            RoutingPlanStepBudget(
+                tool_id=tool_id,
+                execution_mode="invoke",
+                max_calls=1,
+                timeout_seconds=1.0,
+                credit_microunits=6_000_000,
+            )
+            for tool_id in plan.steps
+        )
+
+
+class ConfirmationOverBudgetAdapter(OverBudgetAdapter):
+    def __init__(self):
+        self.confirmation_compiles = 0
+
+    def compile_confirmation(self, *args, **kwargs):
+        self.confirmation_compiles += 1
+        return super().compile_confirmation(*args, **kwargs)
+
+
+class NoReleasePolicyAdapter(FakeRoutingAdmissionPlanAdapter):
+    intent_release_policy_hash = None
 
 
 ADAPTER: RoutingAdmissionPlanAdapter = FakeRoutingAdmissionPlanAdapter()
@@ -330,6 +374,23 @@ def _receipt(binding: ProviderBindingIdentity, unit_ref: str, outcome: ProviderO
     return ProviderReceipt(receipt_ref="provider_receipt:" + sha256_json(payload).split(":", 1)[1][:16], **payload)
 
 
+def _receipt_with_credit(
+    binding: ProviderBindingIdentity,
+    unit_ref: str,
+    outcome: ProviderOutcome,
+    credit_microunits: int,
+    *,
+    execution_mode: str = ReceiptExecutionMode.FIXTURE.value,
+) -> ProviderReceipt:
+    receipt = _receipt(binding, unit_ref, outcome, execution_mode=execution_mode)
+    payload = {**receipt.to_dict(), "credit_microunits": credit_microunits}
+    payload.pop("receipt_ref")
+    return ProviderReceipt(
+        receipt_ref="provider_receipt:" + sha256_json(payload).split(":", 1)[1][:16],
+        **payload,
+    )
+
+
 def test_hash_boundary_is_explicit_and_reversible() -> None:
     raw = "a" * 64
     assert lab_hash_to_model(model_hash_to_lab(raw)) == raw
@@ -453,6 +514,10 @@ def test_actual_pinned_model_profile_feature_and_admission_contract() -> None:
     assert plan.profile_version == "v1"
     assert plan.feature_set_sha256 == feature_set.sha256()
     assert plan.conditional_tool_ids == ("intent.company_search",)
+    assert adapter.intent_release_policy_hash().startswith("sha256:")
+    assert [item.tool_id for item in adapter.plan_step_budgets(plan)] == [
+        "intent.source_add.bloomberry_jobs"
+    ]
     confirmation = adapter.compile_confirmation(
         plan,
         profile=profile,
@@ -597,6 +662,76 @@ def test_confirmation_provider_failure_is_retained_as_typed_evidence() -> None:
     )
 
 
+def test_pre_call_ledger_rejects_challenger_before_provider_call() -> None:
+    spec, labels = _spec()
+    candidate = spec.variants[1]
+    bounded = replace(spec, variants=(candidate,), baseline_profile_id=candidate.profile_payload["profile_id"])
+    calls = []
+
+    def runner(binding, unit_ref):
+        calls.append((binding.tool_id, unit_ref))
+        return _receipt_with_credit(binding, unit_ref, ProviderOutcome.SOURCE_MISS, 6_000_000)
+
+    with pytest.raises(RoutingExperimentError, match="exceeds_remaining_unit_credit"):
+        evaluate_routing_experiment(
+            bounded,
+            gold_labels=labels,
+            runner=runner,
+            adapter=OverBudgetAdapter(),
+        )
+    assert calls == [("intent.jobs.bloomberry", "unit:cal-1")]
+
+
+def test_pre_call_ledger_applies_remaining_budget_to_confirmation() -> None:
+    spec, labels = _confirmation_spec()
+    calls = []
+    adapter = ConfirmationOverBudgetAdapter()
+
+    def runner(binding, unit_ref):
+        calls.append((binding.tool_id, unit_ref))
+        return _receipt_with_credit(binding, unit_ref, ProviderOutcome.VERIFIED, 6_000_000)
+
+    with pytest.raises(RoutingExperimentError, match="exceeds_remaining_unit_credit"):
+        evaluate_routing_experiment(
+            spec,
+            gold_labels=labels,
+            runner=runner,
+            adapter=adapter,
+        )
+    assert adapter.confirmation_compiles == 1
+    assert calls == [("intent.jobs.bloomberry", "unit:cal-1")]
+
+
+def test_pre_call_ledger_rejects_provider_ceiling_before_runner(tmp_path) -> None:
+    spec, labels = _spec()
+    live = replace(
+        spec,
+        allow_live_credit_spend=True,
+        credit_budget=ExperimentCreditBudget(100, {"binding:sd": 100, "binding:bb": 5}),
+    )
+    calls = []
+
+    def runner(binding, unit_ref):
+        calls.append((binding.tool_id, unit_ref))
+        return _receipt(
+            binding,
+            unit_ref,
+            ProviderOutcome.SOURCE_MISS,
+            execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+        )
+
+    store = ProviderReceiptStore(JsonlProviderReceiptRepository(tmp_path / "ceiling.jsonl"))
+    with pytest.raises(RoutingExperimentError, match="provider_credit_cap_would_be_exceeded"):
+        evaluate_routing_experiment(
+            live,
+            gold_labels=labels,
+            runner=runner,
+            adapter=ADAPTER,
+            receipt_store=store,
+        )
+    assert calls and all(tool_id == "intent.jobs.scrapingdog" for tool_id, _unit_ref in calls)
+
+
 def test_artifact_and_model_payload_are_exact_branch_bound() -> None:
     spec, _ = _spec()
     assert validate_sourcing_model_artifact_identity(_artifact()) == []
@@ -607,6 +742,17 @@ def test_artifact_and_model_payload_are_exact_branch_bound() -> None:
     assert "model_route_tool_not_bound" in validate_routing_experiment_spec(tampered, adapter=ADAPTER)
 
 
+def test_mapping_spec_cannot_silently_default_promotion_gates() -> None:
+    spec, _ = _spec()
+    payload = spec.to_dict()
+    payload["gates"] = dict(payload["gates"])
+    payload["gates"].pop("intent_release_policy_hash")
+    assert "evaluation_gates_must_be_explicit" in validate_routing_experiment_spec(
+        payload,
+        adapter=ADAPTER,
+    )
+
+
 def test_feature_ids_keep_model_namespace_and_hash_unchanged() -> None:
     spec, _ = _spec()
     bad_features = replace(spec.frozen_input, features=("country.us",))
@@ -614,7 +760,7 @@ def test_feature_ids_keep_model_namespace_and_hash_unchanged() -> None:
     assert spec.frozen_input.feature_set_hash == FEATURE_SET_HASH
 
 
-def test_live_measured_lab_requires_explicit_budget_and_rollup() -> None:
+def test_live_measured_lab_requires_explicit_durable_store_budget_and_rollup(tmp_path) -> None:
     spec, labels = _spec()
     live = replace(spec, allow_live_credit_spend=True, credit_budget=ExperimentCreditBudget(1000, {"binding:sd": 500, "binding:bb": 500}))
     assert validate_routing_experiment_spec(live, adapter=ADAPTER) == []
@@ -622,10 +768,19 @@ def test_live_measured_lab_requires_explicit_budget_and_rollup() -> None:
     def runner(binding, unit_ref):
         return _receipt(binding, unit_ref, ProviderOutcome.SOURCE_MISS, execution_mode=ReceiptExecutionMode.MEASURED_LAB.value)
 
-    with pytest.raises(RoutingExperimentError, match="authoritative_billing_rollup"):
+    with pytest.raises(RoutingExperimentError, match="explicit_durable_receipt_repository"):
         evaluate_routing_experiment(live, gold_labels=labels, runner=runner, adapter=ADAPTER)
 
-    store = ProviderReceiptStore()
+    with pytest.raises(RoutingExperimentError, match="requires_durable_receipt_repository"):
+        evaluate_routing_experiment(
+            live,
+            gold_labels=labels,
+            runner=runner,
+            adapter=ADAPTER,
+            receipt_store=ProviderReceiptStore(),
+        )
+
+    store = ProviderReceiptStore(JsonlProviderReceiptRepository(tmp_path / "measured-receipts.jsonl"))
     evaluation = evaluate_routing_experiment(
         live,
         gold_labels=labels,
@@ -714,6 +869,42 @@ def test_promotion_preserves_exact_model_hash_and_artifact_lineage() -> None:
     assert promotion.target_branch == "leadpoet-lab" and promotion.production_activation is False
     assert promotion.profile_hash.startswith("sha256:")
     assert verify_lab_routing_artifact_lineage(spec=spec, promotion=promotion) == []
+
+
+def test_evaluation_receipt_identity_is_recomputed_before_promotion() -> None:
+    spec, labels = _spec()
+
+    def runner(binding, unit_ref):
+        positive = binding.tool_id == "intent.jobs.bloomberry" and unit_ref == "unit:hold-1"
+        if binding.tool_id == "intent.jobs.scrapingdog" and unit_ref == "unit:cal-1":
+            positive = True
+        return _receipt(binding, unit_ref, ProviderOutcome.VERIFIED if positive else ProviderOutcome.SOURCE_MISS)
+
+    evaluation = evaluate_routing_experiment(spec, gold_labels=labels, runner=runner, adapter=ADAPTER)
+    assert validate_routing_evaluation_receipt(evaluation, spec, adapter=ADAPTER) == []
+    tampered = replace(evaluation, feature_set_hash=HASH_A)
+    assert "evaluation_receipt_id_mismatch" in validate_routing_evaluation_receipt(
+        tampered,
+        spec,
+        adapter=ADAPTER,
+    )
+    with pytest.raises(RoutingExperimentError, match="invalid evaluation receipt"):
+        promote_routing_profile_to_lab(spec, tampered, adapter=ADAPTER)
+
+
+def test_promotion_fails_closed_without_actual_release_policy_identity() -> None:
+    spec, labels = _spec()
+
+    def runner(binding, unit_ref):
+        positive = binding.tool_id == "intent.jobs.bloomberry" and unit_ref == "unit:hold-1"
+        if binding.tool_id == "intent.jobs.scrapingdog" and unit_ref == "unit:cal-1":
+            positive = True
+        return _receipt(binding, unit_ref, ProviderOutcome.VERIFIED if positive else ProviderOutcome.SOURCE_MISS)
+
+    adapter = NoReleasePolicyAdapter()
+    evaluation = evaluate_routing_experiment(spec, gold_labels=labels, runner=runner, adapter=adapter)
+    with pytest.raises(RoutingExperimentError, match="intent_release_policy_identity_unavailable"):
+        promote_routing_profile_to_lab(spec, evaluation, adapter=adapter)
 
 
 def test_adapter_failure_is_not_a_negative_signal() -> None:

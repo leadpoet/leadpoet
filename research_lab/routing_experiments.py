@@ -30,6 +30,8 @@ from pathlib import Path
 import sys
 import re
 import subprocess
+import threading
+import time
 import types
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
@@ -53,6 +55,7 @@ _RAW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}$")
 _SAFE_FEATURE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
 _SAFE_PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
+_MODEL_EXECUTION_MODES = frozenset({"invoke", "observe", "virtual"})
 _FORBIDDEN_MARKERS = (
     "api_key",
     "access_token",
@@ -89,6 +92,35 @@ class ReceiptExecutionMode(str, Enum):
     FIXTURE = "fixture"
     REPLAY = "replay"
     MEASURED_LAB = "measured_lab"
+
+
+@dataclass(frozen=True)
+class RoutingPlanStepBudget:
+    """Model-owned route-step budget projected for Lab accounting only.
+
+    The Lab does not use this value to choose or order tools.  The adapter
+    projects the exact model plan into this summary so the Lab can reserve
+    worst-case calls, time, and credits before invoking a provider.
+    """
+
+    tool_id: str
+    execution_mode: str
+    max_calls: int
+    timeout_seconds: float
+    credit_microunits: int
+
+    def __post_init__(self) -> None:
+        _ensure_safe_ref(self.tool_id, "route_step_tool_id")
+        if self.execution_mode not in _MODEL_EXECUTION_MODES:
+            raise RoutingExperimentError("route_step_execution_mode_is_invalid")
+        _bounded_int(self.max_calls, "route_step_max_calls", minimum=0, maximum=MAX_TOOLS_PER_VARIANT)
+        _bounded_float(self.timeout_seconds, "route_step_timeout_seconds", minimum=0.0, maximum=MAX_LATENCY_MS / 1000)
+        _bounded_int(
+            self.credit_microunits,
+            "route_step_credit_microunits",
+            minimum=0,
+            maximum=MAX_CREDIT_MICROUNITS_PER_VARIANT,
+        )
 
 
 class ProfileLifecycle(str, Enum):
@@ -503,6 +535,10 @@ class RoutingAdmissionPlanAdapter(Protocol):
 
     def plan_hash(self, plan: Any) -> str: ...
 
+    def plan_step_budgets(self, plan: Any) -> Sequence[RoutingPlanStepBudget]: ...
+
+    def intent_release_policy_hash(self) -> str: ...
+
 
 _MODEL_TREE_EXCLUDED_PARTS = {
     ".git",
@@ -886,6 +922,46 @@ class PinnedSourcingModelRoutingAdapter:
     def plan_hash(self, plan: Any) -> str:
         return plan.sha256()
 
+    def plan_step_budgets(self, plan: Any) -> Sequence[RoutingPlanStepBudget]:
+        return tuple(
+            RoutingPlanStepBudget(
+                tool_id=step.tool_id,
+                execution_mode=step.execution_mode,
+                max_calls=step.max_calls,
+                timeout_seconds=step.timeout_seconds,
+                credit_microunits=int(math.ceil(step.credit_cap * 1_000_000)),
+            )
+            for step in plan.route.steps
+        )
+
+    def intent_release_policy_hash(self) -> str:
+        try:
+            release_policy = importlib.import_module("sourcing_model.intent_release_benchmark")
+            raw_hash = getattr(release_policy, "INTENT_RELEASE_POLICY_V1_SHA256", "")
+            return model_hash_to_lab(raw_hash, "intent_release_policy_hash")
+        except Exception as exc:
+            raise RoutingExperimentError(
+                "intent_release_policy_identity_unavailable"
+            ) from exc
+
+
+def _adapter_intent_release_policy_hash(
+    adapter: RoutingAdmissionPlanAdapter,
+    *,
+    required: bool = False,
+) -> str | None:
+    getter = getattr(adapter, "intent_release_policy_hash", None)
+    if not callable(getter):
+        if required:
+            raise RoutingExperimentError("intent_release_policy_identity_unavailable")
+        return None
+    try:
+        return _ensure_hash(getter(), "intent_release_policy_hash")
+    except RoutingExperimentError:
+        raise
+    except Exception as exc:
+        raise RoutingExperimentError("intent_release_policy_identity_unavailable") from exc
+
 
 @dataclass(frozen=True)
 class LabRoutingProfile:
@@ -985,9 +1061,21 @@ class RoutingEvaluationGates:
     max_holdout_no_signal_credit_microunits: int = MAX_CREDIT_MICROUNITS_PER_VARIANT
     min_marginal_verified_positives_per_credit: float = 0.0
     intent_release_policy_hash: str = ""
+    # This is contract metadata, not an evaluation parameter.  It is omitted
+    # from the identity payload so missing mapping fields cannot silently
+    # become promotion gates.
+    explicit: bool = True
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "RoutingEvaluationGates":
+        required = {
+            "min_calibration_precision",
+            "min_holdout_precision",
+            "min_holdout_recall",
+            "max_holdout_no_signal_credit_microunits",
+            "min_marginal_verified_positives_per_credit",
+            "intent_release_policy_hash",
+        }
         return cls(
             min_calibration_precision=float(data.get("min_calibration_precision", 0.80)),
             min_holdout_precision=float(data.get("min_holdout_precision", 0.80)),
@@ -999,10 +1087,18 @@ class RoutingEvaluationGates:
                 data.get("min_marginal_verified_positives_per_credit", 0.0)
             ),
             intent_release_policy_hash=str(data.get("intent_release_policy_hash") or ""),
+            explicit=required.issubset(data),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "min_calibration_precision": self.min_calibration_precision,
+            "min_holdout_precision": self.min_holdout_precision,
+            "min_holdout_recall": self.min_holdout_recall,
+            "max_holdout_no_signal_credit_microunits": self.max_holdout_no_signal_credit_microunits,
+            "min_marginal_verified_positives_per_credit": self.min_marginal_verified_positives_per_credit,
+            "intent_release_policy_hash": self.intent_release_policy_hash,
+        }
 
 
 def validate_routing_evaluation_gates(
@@ -1011,6 +1107,8 @@ def validate_routing_evaluation_gates(
     if not isinstance(gates, RoutingEvaluationGates):
         gates = RoutingEvaluationGates.from_mapping(gates)
     errors: list[str] = []
+    if not gates.explicit:
+        errors.append("evaluation_gates_must_be_explicit")
     for field_name in (
         "min_calibration_precision",
         "min_holdout_precision",
@@ -1259,10 +1357,20 @@ def validate_routing_experiment_spec(
     )
     if spec.allow_live_credit_spend and spec.credit_budget.total_credit_microunits <= 0:
         errors.append("measured_lab_requires_total_credit_cap")
+    if spec.allow_live_credit_spend:
+        missing_ceilings = {
+            item.binding_id for item in spec.provider_bindings
+            if item.binding_id not in spec.credit_budget.provider_credit_ceilings
+        }
+        errors.extend(
+            f"measured_lab_requires_provider_credit_ceiling:{binding_id}"
+            for binding_id in sorted(missing_ceilings)
+        )
     try:
         errors.extend(validate_routing_evaluation_gates(spec.gates))
-        if spec.gates.intent_release_policy_hash != spec.artifact.routing_policy_hash:
-            errors.append("evaluation_gates_policy_hash_mismatch")
+        release_policy_hash = _adapter_intent_release_policy_hash(adapter)
+        if release_policy_hash is not None and spec.gates.intent_release_policy_hash != release_policy_hash:
+            errors.append("evaluation_gates_release_policy_hash_mismatch")
         _ensure_no_secret_material(spec.to_dict(), field_name="routing_experiment")
     except RoutingExperimentError as exc:
         errors.append(str(exc))
@@ -1411,16 +1519,18 @@ def provider_receipt_key(
     tool_id: str,
     binding_version: str,
     request_fingerprint: str,
-    # Accepted for call-site readability, deliberately excluded from the key.
+    # Accepted for call-site readability.  The canonical request fingerprint
+    # supplied by the caller remains the source of request identity.
     binding_id: str = "",
     source_lineage_id: str = "",
     unit_ref: str = "",
 ) -> str:
     """Key one paid request by exact tool/binding version and input fingerprint.
 
-    Unit labels and source-lineage labels are evaluation metadata.  They are
-    not part of request identity, so an identical paid request can be reused
-    by another unit or route variant.
+    The current Lab request builder includes ``unit_ref`` in the fingerprint,
+    so receipts are intentionally not reused across units.  A future shared
+    request builder may prove safe cross-unit reuse; this key function must
+    not infer that equivalence by dropping metadata on its own.
     """
 
     del binding_id, source_lineage_id, unit_ref
@@ -1521,60 +1631,89 @@ class JsonlProviderReceiptRepository:
 
     Every line is a complete, redacted receipt record.  Existing lines are
     loaded once and conflicting content-addressed keys fail closed.  The
-    repository never truncates or rewrites prior records.
+    repository never truncates or rewrites prior records.  Its lock protects
+    repository instances in one Python process only; it is not a cross-process
+    locking guarantee.
     """
 
+    _lock_guard = threading.Lock()
+    _locks: dict[str, threading.RLock] = {}
+
     def __init__(self, path: str | os.PathLike[str]) -> None:
-        self.path = Path(path)
+        self.path = Path(path).resolve()
         self._rows: dict[str, ProviderReceipt] = {}
-        if self.path.exists():
-            with self.path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    record = json.loads(line)
-                    key = str(record.get("key") or "")
-                    receipt = ProviderReceipt.from_mapping(record.get("receipt") or {})
-                    if not key:
-                        raise RoutingExperimentError("provider receipt repository key is empty")
-                    validate_errors = validate_provider_receipt(receipt)
-                    if validate_errors:
-                        raise RoutingExperimentError(
-                            "provider receipt repository record invalid: " + "; ".join(validate_errors)
-                        )
-                    existing = self._rows.get(key)
-                    if existing is not None and existing.to_dict() != receipt.to_dict():
-                        raise RoutingExperimentError("provider receipt key collision")
-                    self._rows[key] = receipt
+        with self._lock_guard:
+            self._lock = self._locks.setdefault(str(self.path), threading.RLock())
+        with self._lock:
+            self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        with self.path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                key = str(record.get("key") or "")
+                receipt = ProviderReceipt.from_mapping(record.get("receipt") or {})
+                if not key:
+                    raise RoutingExperimentError("provider receipt repository key is empty")
+                validate_errors = validate_provider_receipt(receipt)
+                if validate_errors:
+                    raise RoutingExperimentError(
+                        "provider receipt repository record invalid: " + "; ".join(validate_errors)
+                    )
+                expected_key = provider_receipt_key(
+                    tool_id=receipt.tool_id,
+                    binding_version=receipt.binding_version,
+                    request_fingerprint=receipt.request_fingerprint,
+                )
+                if key != expected_key:
+                    raise RoutingExperimentError("provider receipt repository key mismatch")
+                existing = self._rows.get(key)
+                if existing is not None and existing.to_dict() != receipt.to_dict():
+                    raise RoutingExperimentError("provider receipt key collision")
+                self._rows[key] = receipt
 
     def get(self, key: str) -> ProviderReceipt | None:
-        return self._rows.get(str(key))
+        with self._lock:
+            return self._rows.get(str(key))
 
     def append(self, key: str, receipt: ProviderReceipt) -> ProviderReceipt:
-        key = str(key)
-        existing = self._rows.get(key)
-        if existing is not None:
-            if existing.to_dict() != receipt.to_dict():
-                raise RoutingExperimentError("provider receipt key collision")
-            return existing
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        record = {"key": key, "receipt": receipt.to_dict()}
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        self._rows[key] = receipt
-        return receipt
+        with self._lock:
+            key = str(key)
+            expected_key = provider_receipt_key(
+                tool_id=receipt.tool_id,
+                binding_version=receipt.binding_version,
+                request_fingerprint=receipt.request_fingerprint,
+            )
+            if key != expected_key:
+                raise RoutingExperimentError("provider receipt repository key mismatch")
+            existing = self._rows.get(key)
+            if existing is not None:
+                if existing.to_dict() != receipt.to_dict():
+                    raise RoutingExperimentError("provider receipt key collision")
+                return existing
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"key": key, "receipt": receipt.to_dict()}
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._rows[key] = receipt
+            return receipt
 
     def keys(self) -> Iterable[str]:
-        return tuple(self._rows)
+        with self._lock:
+            return tuple(self._rows)
 
 
 class ProviderReceiptStore:
     """Append-only, content-addressed receipt store over the Lab repository seam."""
 
     def __init__(self, repository: ProviderReceiptRepository | None = None) -> None:
-        self.repository = repository or InMemoryProviderReceiptRepository()
+        self.repository = repository if repository is not None else InMemoryProviderReceiptRepository()
         self.cache_hits = 0
         self.cache_misses = 0
 
@@ -1591,6 +1730,13 @@ class ProviderReceiptStore:
         errors = validate_provider_receipt(normalized)
         if errors:
             raise RoutingExperimentError("provider receipt invalid: " + "; ".join(errors))
+        expected_key = provider_receipt_key(
+            tool_id=normalized.tool_id,
+            binding_version=normalized.binding_version,
+            request_fingerprint=normalized.request_fingerprint,
+        )
+        if str(key) != expected_key:
+            raise RoutingExperimentError("provider receipt key mismatch")
         return self.repository.append(str(key), normalized)
 
     def refs(self) -> tuple[str, ...]:
@@ -1704,6 +1850,149 @@ class RoutingEvaluationReceipt:
         }
 
 
+def validate_routing_evaluation_receipt(
+    evaluation: RoutingEvaluationReceipt | Mapping[str, Any],
+    spec: RoutingExperimentSpec,
+    *,
+    adapter: RoutingAdmissionPlanAdapter,
+    receipt_store: ProviderReceiptStore | None = None,
+) -> list[str]:
+    """Recompute the immutable evaluation identity before promotion.
+
+    The evaluation receipt stores references, not provider payloads.  When a
+    repository is supplied, each reference is additionally resolved and
+    validated against the typed receipt.  Promotion calls this validator with
+    no repository because its immutable receipt hash is the persisted
+    evidence boundary; the Lab must retain the repository alongside that
+    receipt when it needs to audit provider contents.
+    """
+
+    if not isinstance(evaluation, RoutingEvaluationReceipt):
+        return ["evaluation_receipt_must_be_typed"]
+    if not isinstance(spec, RoutingExperimentSpec):
+        return ["evaluation_spec_must_be_typed"]
+    errors: list[str] = []
+    if evaluation.contract_version != ROUTING_EVALUATION_RECEIPT_VERSION:
+        errors.append("evaluation_receipt_contract_version_mismatch")
+    if not evaluation.immutable:
+        errors.append("evaluation_receipt_must_be_immutable")
+    receipt_id = str(evaluation.receipt_id or "")
+    if not _SAFE_REF_RE.fullmatch(receipt_id) or not re.fullmatch(
+        r"routing_evaluation:[0-9a-f]{16}", receipt_id
+    ):
+        errors.append("evaluation_receipt_id_is_invalid")
+    else:
+        pending = replace(evaluation, receipt_id="routing_evaluation:pending")
+        expected_id = "routing_evaluation:" + sha256_json(pending.to_dict()).split(":", 1)[1][:16]
+        if evaluation.receipt_id != expected_id:
+            errors.append("evaluation_receipt_id_mismatch")
+    for field_name, value in (
+        ("experiment_hash", evaluation.experiment_hash),
+        ("artifact_hash", evaluation.artifact_hash),
+        ("manifest_hash", evaluation.manifest_hash),
+        ("feature_set_hash", evaluation.feature_set_hash),
+    ):
+        try:
+            _ensure_hash(value, field_name)
+        except RoutingExperimentError as exc:
+            errors.append(str(exc))
+    if evaluation.experiment_id != spec.experiment_id:
+        errors.append("evaluation_receipt_experiment_id_mismatch")
+    if evaluation.experiment_hash != spec.experiment_hash():
+        errors.append("evaluation_receipt_experiment_hash_mismatch")
+    if evaluation.artifact_hash != spec.artifact.model_artifact_hash:
+        errors.append("evaluation_receipt_artifact_hash_mismatch")
+    if evaluation.manifest_hash != spec.artifact.manifest_hash:
+        errors.append("evaluation_receipt_manifest_hash_mismatch")
+    if evaluation.feature_set_hash != spec.frozen_input.feature_set_hash:
+        errors.append("evaluation_receipt_feature_set_hash_mismatch")
+    if evaluation.calibration_unit_count != len(spec.frozen_input.calibration_unit_refs):
+        errors.append("evaluation_receipt_calibration_unit_count_mismatch")
+    if evaluation.holdout_unit_count != len(spec.frozen_input.holdout_unit_refs):
+        errors.append("evaluation_receipt_holdout_unit_count_mismatch")
+    if evaluation.baseline_profile_id != spec.baseline_profile_id:
+        errors.append("evaluation_receipt_baseline_profile_id_mismatch")
+    if evaluation.provider_cache_hits < 0 or evaluation.provider_cache_misses < 0:
+        errors.append("evaluation_receipt_cache_counts_are_invalid")
+    if evaluation.live_credit_spend:
+        if not evaluation.billing_rollup_id:
+            errors.append("evaluation_receipt_billing_rollup_id_missing")
+        try:
+            _ensure_hash(evaluation.billing_rollup_hash, "billing_rollup_hash")
+        except RoutingExperimentError as exc:
+            errors.append(str(exc))
+        if evaluation.billing_rollup_total_credit_microunits < 0:
+            errors.append("evaluation_receipt_billing_total_is_invalid")
+    elif evaluation.billing_rollup_id or evaluation.billing_rollup_hash or evaluation.billing_rollup_total_credit_microunits:
+        errors.append("fixture_evaluation_must_not_contain_billing_rollup")
+
+    expected_variant_ids: set[str] = set()
+    try:
+        expected_variant_ids = {_profile_id(item, adapter) for item in spec.variants}
+    except RoutingExperimentError as exc:
+        errors.append(str(exc))
+    actual_variant_ids = [item.variant_id for item in evaluation.variants]
+    if len(actual_variant_ids) != len(set(actual_variant_ids)):
+        errors.append("evaluation_variant_ids_must_be_unique")
+    if set(actual_variant_ids) != expected_variant_ids:
+        errors.append("evaluation_variant_ids_do_not_match_spec")
+    if evaluation.baseline_profile_id not in actual_variant_ids:
+        errors.append("evaluation_baseline_variant_is_missing")
+    if evaluation.selected_profile_id:
+        selected = next(
+            (item for item in evaluation.variants if item.variant_id == evaluation.selected_profile_id),
+            None,
+        )
+        if selected is None:
+            errors.append("evaluation_selected_profile_is_missing")
+        elif not selected.passed:
+            errors.append("evaluation_selected_profile_did_not_pass")
+
+    top_refs = tuple(evaluation.provider_receipt_refs)
+    if top_refs != tuple(sorted(set(top_refs))):
+        errors.append("evaluation_provider_receipt_refs_must_be_sorted_unique")
+    all_variant_refs: set[str] = set()
+    for item in evaluation.variants:
+        try:
+            _ensure_safe_ref(item.variant_id, "evaluation_variant_id")
+        except RoutingExperimentError as exc:
+            errors.append(str(exc))
+        if tuple(item.receipt_refs) != tuple(sorted(set(item.receipt_refs))):
+            errors.append(f"evaluation_variant_receipt_refs_must_be_sorted_unique:{item.variant_id}")
+        if not set(item.receipt_refs).issubset(set(top_refs)):
+            errors.append(f"evaluation_variant_receipt_refs_not_in_top_level:{item.variant_id}")
+        all_variant_refs.update(item.receipt_refs)
+        for ref in item.receipt_refs:
+            if not re.fullmatch(r"provider_receipt:[0-9a-f]{16}", ref):
+                errors.append("evaluation_provider_receipt_ref_is_invalid")
+        for metrics in (item.calibration, item.holdout):
+            if metrics.split not in {"calibration", "holdout"} or metrics.unit_count < 0:
+                errors.append(f"evaluation_metrics_are_invalid:{item.variant_id}")
+            if metrics.total_credit_microunits < 0 or metrics.no_signal_credit_microunits < 0:
+                errors.append(f"evaluation_metrics_credit_is_invalid:{item.variant_id}")
+    for ref in top_refs:
+        if not re.fullmatch(r"provider_receipt:[0-9a-f]{16}", ref):
+            errors.append("evaluation_provider_receipt_ref_is_invalid")
+    if all_variant_refs != set(top_refs):
+        errors.append("evaluation_provider_receipt_refs_do_not_match_variants")
+    if receipt_store is not None:
+        for key in receipt_store.repository.keys():
+            receipt = receipt_store.repository.get(key)
+            if receipt is None:
+                continue
+            if receipt.receipt_ref not in set(top_refs):
+                errors.append("evaluation_repository_contains_unreferenced_receipt")
+            errors.extend(validate_provider_receipt(receipt))
+        repository_refs = {
+            receipt.receipt_ref
+            for key in receipt_store.repository.keys()
+            if (receipt := receipt_store.repository.get(key)) is not None
+        }
+        if repository_refs != set(top_refs):
+            errors.append("evaluation_receipt_refs_do_not_match_repository")
+    return sorted(set(errors))
+
+
 def _validate_gold_labels(frozen: FrozenRoutingInput, gold_labels: Mapping[str, bool]) -> list[str]:
     all_units = set(frozen.calibration_unit_refs).union(frozen.holdout_unit_refs)
     if set(gold_labels) != all_units:
@@ -1739,6 +2028,197 @@ def _receipt_for_runner_result(
     return receipt
 
 
+class _ExperimentBudgetLedger:
+    """Reserve measured-Lab spend before a model plan can invoke a provider."""
+
+    def __init__(
+        self,
+        spec: RoutingExperimentSpec,
+        receipt_store: ProviderReceiptStore,
+        bindings: Mapping[str, ProviderBindingIdentity],
+    ) -> None:
+        self.enabled = bool(spec.allow_live_credit_spend)
+        self.spec = spec
+        self.receipt_store = receipt_store
+        self.bindings = bindings
+        self.reserved_total = 0
+        self.reserved_by_binding: dict[str, int] = {}
+
+    def _actual_spend(self) -> tuple[int, dict[str, int]]:
+        total = 0
+        by_binding: dict[str, int] = {}
+        for key in self.receipt_store.repository.keys():
+            receipt = self.receipt_store.repository.get(key)
+            if receipt is None:
+                continue
+            total += receipt.credit_microunits
+            by_binding[receipt.binding_id] = by_binding.get(receipt.binding_id, 0) + receipt.credit_microunits
+        return total, by_binding
+
+    def reserve(self, budgets: Sequence[RoutingPlanStepBudget]) -> dict[str, int]:
+        if not self.enabled:
+            return {}
+        requested_by_binding: dict[str, int] = {}
+        for budget in budgets:
+            if budget.execution_mode != "invoke" or budget.max_calls <= 0:
+                continue
+            binding = self.bindings.get(budget.tool_id)
+            if binding is None:
+                raise RoutingExperimentError(f"model plan references unbound tool:{budget.tool_id}")
+            requested_by_binding[binding.binding_id] = (
+                requested_by_binding.get(binding.binding_id, 0) + budget.credit_microunits
+            )
+        requested_total = sum(requested_by_binding.values())
+        actual_total, actual_by_binding = self._actual_spend()
+        if actual_total + self.reserved_total + requested_total > self.spec.credit_budget.total_credit_microunits:
+            raise RoutingExperimentError("measured_lab_total_credit_cap_would_be_exceeded")
+        for binding_id, requested in requested_by_binding.items():
+            ceiling = self.spec.credit_budget.provider_credit_ceilings.get(binding_id)
+            if ceiling is None:
+                raise RoutingExperimentError(f"measured_lab_provider_credit_ceiling_missing:{binding_id}")
+            if actual_by_binding.get(binding_id, 0) + self.reserved_by_binding.get(binding_id, 0) + requested > ceiling:
+                raise RoutingExperimentError(
+                    f"measured_lab_provider_credit_cap_would_be_exceeded:{binding_id}"
+                )
+        self.reserved_total += requested_total
+        for binding_id, requested in requested_by_binding.items():
+            self.reserved_by_binding[binding_id] = self.reserved_by_binding.get(binding_id, 0) + requested
+        return requested_by_binding
+
+    def release(self, reservation: Mapping[str, int]) -> None:
+        if not self.enabled:
+            return
+        total = sum(reservation.values())
+        self.reserved_total -= total
+        if self.reserved_total < 0:
+            raise RoutingExperimentError("measured_lab_budget_ledger_underflow")
+        for binding_id, amount in reservation.items():
+            current = self.reserved_by_binding.get(binding_id, 0) - amount
+            if current < 0:
+                raise RoutingExperimentError("measured_lab_provider_ledger_underflow")
+            if current:
+                self.reserved_by_binding[binding_id] = current
+            else:
+                self.reserved_by_binding.pop(binding_id, None)
+
+
+class _UnitBudgetLedger:
+    """Cumulative per-unit budget with pre-call route-step reservations."""
+
+    def __init__(self, experiment_ledger: _ExperimentBudgetLedger) -> None:
+        self.experiment_ledger = experiment_ledger
+        self.started_at = time.monotonic()
+        self.spent_calls = 0
+        self.spent_credit_microunits = 0
+        self.spent_latency_ms = 0
+        self.reserved_calls = 0
+        self.reserved_credit_microunits = 0
+        self.reserved_seconds = 0.0
+        self.active_calls_by_tool: dict[str, int] = {}
+        self.active_credit_by_tool: dict[str, int] = {}
+
+    def remaining_seconds(self) -> float:
+        elapsed = max(time.monotonic() - self.started_at, self.spent_latency_ms / 1000)
+        return max(0.0, 60.0 - elapsed - self.reserved_seconds)
+
+    def remaining_calls(self) -> int:
+        return max(0, MAX_TOOLS_PER_VARIANT - self.spent_calls - self.reserved_calls)
+
+    def remaining_credit(self) -> float:
+        remaining = (
+            MAX_CREDIT_MICROUNITS_PER_VARIANT
+            - self.spent_credit_microunits
+            - self.reserved_credit_microunits
+        )
+        return max(0, remaining) / 1_000_000
+
+    def reserve(
+        self,
+        plan: Any,
+        *,
+        adapter: RoutingAdmissionPlanAdapter,
+        bindings: Mapping[str, ProviderBindingIdentity],
+    ) -> dict[str, Any]:
+        try:
+            raw_budgets = adapter.plan_step_budgets(plan)
+        except AttributeError as exc:
+            raise RoutingExperimentError("model_adapter_missing_plan_step_budgets") from exc
+        try:
+            budgets = tuple(
+                item if isinstance(item, RoutingPlanStepBudget) else RoutingPlanStepBudget(**dict(item))
+                for item in raw_budgets
+            )
+        except Exception as exc:
+            raise RoutingExperimentError(f"model_plan_step_budget_invalid:{exc}") from exc
+        calls = sum(
+            item.max_calls for item in budgets if item.execution_mode == "invoke"
+        )
+        credits = sum(
+            item.credit_microunits for item in budgets if item.execution_mode == "invoke"
+        )
+        seconds = sum(
+            item.timeout_seconds for item in budgets if item.execution_mode == "invoke"
+        )
+        if calls > self.remaining_calls():
+            raise RoutingExperimentError("route_step_budget_exceeds_remaining_unit_calls")
+        if credits > MAX_CREDIT_MICROUNITS_PER_VARIANT - self.spent_credit_microunits - self.reserved_credit_microunits:
+            raise RoutingExperimentError("route_step_budget_exceeds_remaining_unit_credit")
+        if seconds > self.remaining_seconds():
+            raise RoutingExperimentError("route_step_budget_exceeds_remaining_unit_seconds")
+        for item in budgets:
+            if item.execution_mode == "invoke" and item.max_calls > 0 and item.tool_id not in bindings:
+                raise RoutingExperimentError(f"model plan references unbound tool:{item.tool_id}")
+        reservation = self.experiment_ledger.reserve(budgets)
+        self.reserved_calls += calls
+        self.reserved_credit_microunits += credits
+        self.reserved_seconds += seconds
+        for item in budgets:
+            if item.execution_mode != "invoke" or item.max_calls <= 0:
+                continue
+            self.active_calls_by_tool[item.tool_id] = self.active_calls_by_tool.get(item.tool_id, 0) + item.max_calls
+            self.active_credit_by_tool[item.tool_id] = self.active_credit_by_tool.get(item.tool_id, 0) + item.credit_microunits
+        return {
+            "calls": calls,
+            "credits": credits,
+            "seconds": seconds,
+            "budgets": budgets,
+            "experiment": reservation,
+        }
+
+    def before_provider_call(self, tool_id: str) -> None:
+        remaining = self.active_calls_by_tool.get(tool_id, 0)
+        if remaining <= 0:
+            raise RoutingExperimentError(f"provider_call_not_reserved:{tool_id}")
+        self.active_calls_by_tool[tool_id] = remaining - 1
+
+    def record_provider_receipt(self, receipt: ProviderReceipt) -> None:
+        reserved_credit = self.active_credit_by_tool.get(receipt.tool_id, 0)
+        if receipt.credit_microunits > reserved_credit:
+            raise RoutingExperimentError(
+                f"provider_receipt_credit_exceeds_reserved_step:{receipt.tool_id}"
+            )
+        self.active_credit_by_tool[receipt.tool_id] = reserved_credit - receipt.credit_microunits
+        self.spent_calls += 1
+        self.spent_credit_microunits += receipt.credit_microunits
+        self.spent_latency_ms += receipt.latency_ms
+
+    def release(self, reservation: Mapping[str, Any]) -> None:
+        self.reserved_calls -= int(reservation["calls"])
+        self.reserved_credit_microunits -= int(reservation["credits"])
+        self.reserved_seconds -= float(reservation["seconds"])
+        if min(self.reserved_calls, self.reserved_credit_microunits) < 0 or self.reserved_seconds < -1e-9:
+            raise RoutingExperimentError("unit_budget_ledger_underflow")
+        for item in reservation["budgets"]:
+            if item.execution_mode != "invoke" or item.max_calls <= 0:
+                continue
+            # The reservation may have been partially consumed by provider
+            # calls.  Release the remaining per-tool reservation as a whole;
+            # subtracting the original worst-case amount would underflow.
+            self.active_calls_by_tool.pop(item.tool_id, None)
+            self.active_credit_by_tool.pop(item.tool_id, None)
+        self.experiment_ledger.release(reservation["experiment"])
+
+
 def _run_variant_unit(
     spec: RoutingExperimentSpec,
     variant: LabRoutingProfile,
@@ -1748,18 +2228,20 @@ def _run_variant_unit(
     bindings: Mapping[str, ProviderBindingIdentity],
     receipt_store: ProviderReceiptStore,
     runner: Callable[[ProviderBindingIdentity, str], ProviderReceipt | Mapping[str, Any]],
+    experiment_ledger: _ExperimentBudgetLedger,
 ) -> tuple[list[ProviderReceipt], bool]:
     profile = _model_profile(variant, adapter)
     feature_set = _model_feature_set(spec.frozen_input, adapter)
     available_tools = {item.tool_id: True for item in spec.provider_bindings}
+    ledger = _UnitBudgetLedger(experiment_ledger)
     plan = adapter.compile_initial(
         profile,
         signal_type=spec.signal_type,
         feature_set=feature_set,
         available_tools=available_tools,
-        remaining_seconds=60.0,
-        remaining_calls=MAX_TOOLS_PER_VARIANT,
-        credit_cap=MAX_CREDIT_MICROUNITS_PER_VARIANT / 1_000_000,
+        remaining_seconds=ledger.remaining_seconds(),
+        remaining_calls=ledger.remaining_calls(),
+        credit_cap=ledger.remaining_credit(),
     )
     _validate_compiled_admission_plan(
         plan,
@@ -1787,6 +2269,7 @@ def _run_variant_unit(
         )
         receipt = receipt_store.get(key)
         if receipt is None:
+            ledger.before_provider_call(tool_id)
             receipt = _receipt_for_runner_result(
                 runner(binding, unit_ref),
                 binding=binding,
@@ -1798,11 +2281,25 @@ def _run_variant_unit(
             expected_ref = "provider_receipt:" + sha256_json(identity_payload).split(":", 1)[1][:16]
             if receipt.receipt_ref != expected_ref:
                 raise RoutingExperimentError("runner receipt_ref is not content addressed")
+            ledger.record_provider_receipt(receipt)
             receipt_store.put(key, receipt)
+        else:
+            ledger.before_provider_call(tool_id)
         receipts.append(receipt)
         return receipt
 
-    _initial_results, predicted = adapter.execute_plan(plan, invoke)
+    def execute_reserved(current_plan: Any) -> tuple[Sequence[Any], bool]:
+        reservation = ledger.reserve(
+            current_plan,
+            adapter=adapter,
+            bindings=bindings_by_tool,
+        )
+        try:
+            return adapter.execute_plan(current_plan, invoke)
+        finally:
+            ledger.release(reservation)
+
+    _initial_results, predicted = execute_reserved(plan)
     if predicted:
         if adapter.has_conditional_confirmation(plan):
             try:
@@ -1811,9 +2308,9 @@ def _run_variant_unit(
                     profile=profile,
                     feature_set=feature_set,
                     available_tools=available_tools,
-                    remaining_seconds=60.0,
-                    remaining_calls=MAX_TOOLS_PER_VARIANT,
-                    credit_cap=MAX_CREDIT_MICROUNITS_PER_VARIANT / 1_000_000,
+                    remaining_seconds=ledger.remaining_seconds(),
+                    remaining_calls=ledger.remaining_calls(),
+                    credit_cap=ledger.remaining_credit(),
                 )
             except Exception as exc:
                 # A primary hit must not silently skip a model-admitted
@@ -1833,7 +2330,7 @@ def _run_variant_unit(
             # its typed receipts are already appended by invoke().  The
             # primary verification remains the route prediction, while a
             # confirmation adapter failure is retained as explicit evidence.
-            adapter.execute_plan(confirmation, invoke)
+            execute_reserved(confirmation)
         return receipts, True
     try:
         challenger = adapter.compile_challenger(
@@ -1843,9 +2340,9 @@ def _run_variant_unit(
             available_tools=available_tools,
             attempted_tool_ids=tuple(item.tool_id for item in receipts),
             attempted_source_lineages=tuple(item.source_lineage_id for item in receipts),
-            remaining_seconds=60.0,
-            remaining_calls=MAX_TOOLS_PER_VARIANT,
-            credit_cap=MAX_CREDIT_MICROUNITS_PER_VARIANT / 1_000_000,
+            remaining_seconds=ledger.remaining_seconds(),
+            remaining_calls=ledger.remaining_calls(),
+            credit_cap=ledger.remaining_credit(),
         )
     except Exception as exc:
         if "no distinct dormant challenger remains" in str(exc):
@@ -1858,7 +2355,7 @@ def _run_variant_unit(
         adapter=adapter,
         feature_set_hash=spec.frozen_input.feature_set_hash,
     )
-    _challenger_results, challenger_predicted = adapter.execute_plan(challenger, invoke)
+    _challenger_results, challenger_predicted = execute_reserved(challenger)
     return receipts, bool(challenger_predicted)
 
 
@@ -1897,6 +2394,7 @@ def _metrics_for_split(
     runner: Callable[[ProviderBindingIdentity, str], ProviderReceipt | Mapping[str, Any]],
     baseline_positive_units: set[str],
     receipt_refs: list[str],
+    experiment_ledger: _ExperimentBudgetLedger,
 ) -> RoutingEvaluationMetrics:
     predicted_positive_count = 0
     true_positive_count = 0
@@ -1922,6 +2420,7 @@ def _metrics_for_split(
             bindings=bindings,
             receipt_store=receipt_store,
             runner=runner,
+            experiment_ledger=experiment_ledger,
         )
         receipt_refs.extend(item.receipt_ref for item in receipts)
         lineages = [item.source_lineage_id for item in receipts]
@@ -1990,6 +2489,7 @@ def _evaluate_variant(
     receipt_store: ProviderReceiptStore,
     runner: Callable[[ProviderBindingIdentity, str], ProviderReceipt | Mapping[str, Any]],
     baseline_positive_by_split: Mapping[str, set[str]],
+    experiment_ledger: _ExperimentBudgetLedger,
 ) -> VariantEvaluation:
     bindings = {item.tool_id: item for item in spec.provider_bindings}
     receipt_refs: list[str] = []
@@ -2005,6 +2505,7 @@ def _evaluate_variant(
         runner=runner,
         baseline_positive_units=baseline_positive_by_split.get("calibration", set()),
         receipt_refs=receipt_refs,
+        experiment_ledger=experiment_ledger,
     )
     holdout = _metrics_for_split(
         spec=spec,
@@ -2018,6 +2519,7 @@ def _evaluate_variant(
         runner=runner,
         baseline_positive_units=baseline_positive_by_split.get("holdout", set()),
         receipt_refs=receipt_refs,
+        experiment_ledger=experiment_ledger,
     )
     gates = spec.gates
     passed_precision = calibration.precision >= gates.min_calibration_precision and holdout.precision >= gates.min_holdout_precision
@@ -2081,14 +2583,24 @@ def evaluate_routing_experiment(
     label_errors = _validate_gold_labels(spec.frozen_input, gold_labels)
     if label_errors:
         raise RoutingExperimentError("invalid gold labels: " + "; ".join(label_errors))
-    # An empty durable store is intentionally false-y via ``__len__``.  Keep
-    # the caller's repository when it is supplied so confirmation receipts and
-    # cross-variant reuse remain observable in the same persistence seam.
+    if spec.allow_live_credit_spend:
+        if receipt_store is None:
+            raise RoutingExperimentError(
+                "measured_lab_requires_explicit_durable_receipt_repository"
+            )
+        if isinstance(receipt_store.repository, InMemoryProviderReceiptRepository):
+            raise RoutingExperimentError(
+                "measured_lab_requires_durable_receipt_repository"
+            )
+    # Fixture and replay tests may use the in-memory repository.  Measured Lab
+    # runs are rejected above unless the caller binds an explicit durable
+    # implementation of the existing receipt seam.
     store = receipt_store if receipt_store is not None else ProviderReceiptStore()
     baseline = next(
         item for item in spec.variants if _profile_id(item, adapter) == spec.baseline_profile_id
     )
     bindings = {item.tool_id: item for item in spec.provider_bindings}
+    experiment_ledger = _ExperimentBudgetLedger(spec, store, bindings)
     baseline_positive_by_split: dict[str, set[str]] = {"calibration": set(), "holdout": set()}
     for split, refs in (
         ("calibration", spec.frozen_input.calibration_unit_refs),
@@ -2103,6 +2615,7 @@ def evaluate_routing_experiment(
                 bindings=bindings,
                 receipt_store=store,
                 runner=runner,
+                experiment_ledger=experiment_ledger,
             )
             if predicted:
                 baseline_positive_by_split[split].add(unit_ref)
@@ -2115,6 +2628,7 @@ def evaluate_routing_experiment(
             receipt_store=store,
             runner=runner,
             baseline_positive_by_split=baseline_positive_by_split,
+            experiment_ledger=experiment_ledger,
         )
         for variant in spec.variants
     )
@@ -2221,6 +2735,18 @@ def promote_routing_profile_to_lab(
         raise RoutingExperimentError("invalid routing experiment: " + "; ".join(errors))
     if not isinstance(evaluation, RoutingEvaluationReceipt):
         raise RoutingExperimentError("evaluation mapping must be parsed by the caller")
+    receipt_errors = validate_routing_evaluation_receipt(
+        evaluation,
+        spec,
+        adapter=adapter,
+    )
+    if receipt_errors:
+        raise RoutingExperimentError(
+            "invalid evaluation receipt: " + "; ".join(receipt_errors)
+        )
+    release_policy_hash = _adapter_intent_release_policy_hash(adapter, required=True)
+    if spec.gates.intent_release_policy_hash != release_policy_hash:
+        raise RoutingExperimentError("evaluation_gates_release_policy_hash_mismatch")
     if evaluation.live_credit_spend or not evaluation.immutable:
         raise RoutingExperimentError("evaluation receipt is not immutable Lab evidence")
     if evaluation.experiment_id != spec.experiment_id or evaluation.experiment_hash != spec.experiment_hash():
@@ -2306,6 +2832,7 @@ __all__ = [
     "RoutingExperimentSpec",
     "LabRoutingProfile",
     "RoutingAdmissionPlanAdapter",
+    "RoutingPlanStepBudget",
     "PinnedSourcingModelRoutingAdapter",
     "RoutingPromotionReceipt",
     "FrozenRoutingInput",
@@ -2322,6 +2849,7 @@ __all__ = [
     "validate_model_routing_profile",
     "validate_provider_binding_identity",
     "validate_provider_receipt",
+    "validate_routing_evaluation_receipt",
     "validate_routing_evaluation_gates",
     "validate_routing_experiment_spec",
     "validate_experiment_credit_budget",

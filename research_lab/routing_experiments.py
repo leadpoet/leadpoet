@@ -744,8 +744,14 @@ class PinnedSourcingModelRoutingAdapter:
                     "pinned_sourcing_model_module_already_loaded_from_other_root"
                 )
         root_text = str(root)
-        if root_text not in sys.path:
-            sys.path.insert(0, root_text)
+        # The model checkout is a complete repository and can contain a
+        # top-level ``gateway`` package.  Keep its root first only while the
+        # pure model modules are imported; leaving it on the host path would
+        # shadow this repository's credentialed ``gateway.research_lab``
+        # package for every later test or Lab operation.
+        host_sys_path = list(sys.path)
+        sys.path[:] = [item for item in sys.path if item != root_text]
+        sys.path.insert(0, root_text)
         # Do not replace already-loaded site packages.  If this process has
         # imported a different ``gateway``/``qualification`` dependency tree,
         # the model must be loaded in an isolated worker instead of allowing a
@@ -761,17 +767,20 @@ class PinnedSourcingModelRoutingAdapter:
             package.__path__ = [str(root / "sourcing_model")]
             package.__package__ = "sourcing_model"
             sys.modules["sourcing_model"] = package
-        importlib.invalidate_caches()
         try:
-            runtime = importlib.import_module("sourcing_model.routing.runtime")
-            profiles = importlib.import_module("sourcing_model.routing.profiles")
-            features = importlib.import_module("sourcing_model.routing.features")
+            importlib.invalidate_caches()
             try:
-                candidate_profiles = importlib.import_module("sourcing_model.routing.candidate_profiles")
-            except Exception:
-                candidate_profiles = None
-        except Exception as exc:
-            raise RoutingExperimentError(f"pinned_sourcing_model_import_failed:{exc}") from exc
+                runtime = importlib.import_module("sourcing_model.routing.runtime")
+                profiles = importlib.import_module("sourcing_model.routing.profiles")
+                features = importlib.import_module("sourcing_model.routing.features")
+                try:
+                    candidate_profiles = importlib.import_module("sourcing_model.routing.candidate_profiles")
+                except Exception:
+                    candidate_profiles = None
+            except Exception as exc:
+                raise RoutingExperimentError(f"pinned_sourcing_model_import_failed:{exc}") from exc
+        finally:
+            sys.path[:] = host_sys_path
         return cls(
             runtime=runtime,
             profiles=profiles,

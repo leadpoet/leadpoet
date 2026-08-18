@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import os
+from pathlib import Path
+import sys
 
 import pytest
 
@@ -550,6 +552,21 @@ def test_actual_pinned_model_profile_feature_and_admission_contract() -> None:
     )
     assert challenger.challenge_index == 1
     assert challenger.active_tool_ids == ("intent.jobs_feed",)
+
+
+def test_exact_model_load_then_source_add_import_stays_host_owned() -> None:
+    """Loading a full model checkout must not shadow the host gateway package."""
+
+    model_root = os.getenv("LEADPOET_PINNED_SOURCING_MODEL_ROOT", "").strip()
+    if not model_root:
+        pytest.skip("set LEADPOET_PINNED_SOURCING_MODEL_ROOT for exact model integration")
+    host_sys_path = list(sys.path)
+    PinnedSourcingModelRoutingAdapter.from_model_root(model_root)
+    assert sys.path == host_sys_path
+    from gateway.research_lab import provider_capabilities
+
+    host_gateway_root = Path(__file__).resolve().parents[1] / "gateway"
+    assert Path(provider_capabilities.__file__).resolve().is_relative_to(host_gateway_root)
 
 
 def test_primary_hit_runs_model_confirmation_and_retains_typed_receipts() -> None:

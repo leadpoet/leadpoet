@@ -81,6 +81,7 @@ from gateway.tee.release_manifest_v2 import (  # noqa: E402
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RUN_RE = re.compile(r"^[a-z0-9-]{6,40}$")
+ARTIFACT_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 PINNED_IMAGE_RE = re.compile(r"^[A-Za-z0-9._/:@-]+@sha256:[0-9a-f]{64}$")
 SCHEMA_VERSION = "leadpoet.production_parity_full.v3"
 OPENROUTER_RUNTIME_CREDENTIAL_REFS = (
@@ -829,6 +830,7 @@ def _validated_clone_environment(
     candidate_sha: str,
     run_id: str,
     supabase_origin: str,
+    artifact_bucket: str,
 ) -> dict[str, str]:
     expected_path = FULL_WORK_ROOT / run_id / "runtime" / "gateway.env"
     try:
@@ -853,6 +855,8 @@ def _validated_clone_environment(
     except (TypeError, ValueError) as exc:
         raise FullParityError("clone gateway boundary is invalid") from exc
     normalized_origin = supabase_origin.rstrip("/")
+    if not ARTIFACT_BUCKET_RE.fullmatch(artifact_bucket):
+        raise FullParityError("clone gateway boundary identity differs")
     forbidden_aws_environment = {
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
@@ -875,9 +879,7 @@ def _validated_clone_environment(
     }
     try:
         expected_trace_prefixes = production_parity_trace_prefixes(
-            artifact_bucket=str(
-                values.get("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET") or ""
-            ),
+            artifact_bucket=artifact_bucket,
             run_id=run_id,
         )
     except SecretMaterializationError as exc:
@@ -894,8 +896,9 @@ def _validated_clone_environment(
         or str(values.get("DISABLE_BACKGROUND_TASKS") or "").lower()
         != "true"
         or str(values.get("LANGFUSE_ENABLED") or "").lower() != "false"
-        or values.get("AWS_S3_BUCKET")
-        != values.get("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET")
+        or values.get("AWS_S3_BUCKET") != artifact_bucket
+        or values.get("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET")
+        != artifact_bucket
         or str(values.get("RESEARCH_LAB_CORPUS_EXPORT_ENABLED") or "").lower()
         != "false"
         or bool(values.get("RESEARCH_LAB_CORPUS_EXPORT_S3_PREFIX"))
@@ -1054,10 +1057,14 @@ async def _run_clone_controls_child(request: Mapping[str, Any]) -> dict[str, Any
         != "leadpoet.production_parity_clone_controls_request.v1"
         or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
         or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
+        or not ARTIFACT_BUCKET_RE.fullmatch(
+            str(request.get("artifact_bucket") or "")
+        )
     ):
         raise FullParityError("clone controls request is invalid")
     candidate_sha = str(request["candidate_sha"])
     run_id = str(request["run_id"])
+    artifact_bucket = str(request["artifact_bucket"])
     supabase_origin = str(request.get("supabase_origin") or "")
     gateway_env_file = Path(str(request.get("gateway_env_file") or ""))
     values = _validated_clone_environment(
@@ -1065,6 +1072,7 @@ async def _run_clone_controls_child(request: Mapping[str, Any]) -> dict[str, Any
         candidate_sha=candidate_sha,
         run_id=run_id,
         supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
     )
     with _applied_clone_environment(values, gateway_env_file):
         from gateway.research_lab.maintenance import (
@@ -1095,6 +1103,7 @@ async def _run_clone_controls_child(request: Mapping[str, Any]) -> dict[str, Any
         "schema_version": "leadpoet.production_parity_clone_controls_evidence.v1",
         "candidate_sha": candidate_sha,
         "run_id": run_id,
+        "artifact_bucket": artifact_bucket,
         "scoring_event_id": scoring_event_id,
         "autoresearch_event_id": autoresearch_event_id,
         "scoring_paused": False,
@@ -1108,17 +1117,20 @@ def _run_clone_controls(
     run_id: str,
     supabase_origin: str,
     gateway_env_file: Path,
+    artifact_bucket: str,
 ) -> dict[str, Any]:
     _validated_clone_environment(
         gateway_env_file,
         candidate_sha=candidate_sha,
         run_id=run_id,
         supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
     )
     request = {
         "schema_version": "leadpoet.production_parity_clone_controls_request.v1",
         "candidate_sha": candidate_sha,
         "run_id": run_id,
+        "artifact_bucket": artifact_bucket,
         "supabase_origin": supabase_origin,
         "gateway_env_file": str(gateway_env_file),
     }
@@ -1138,6 +1150,7 @@ def _run_clone_controls(
         != "leadpoet.production_parity_clone_controls_evidence.v1"
         or evidence.get("candidate_sha") != candidate_sha
         or evidence.get("run_id") != run_id
+        or evidence.get("artifact_bucket") != artifact_bucket
         or evidence.get("scoring_paused") is not False
         or evidence.get("autoresearch_paused") is not True
         or not str(evidence.get("scoring_event_id") or "")
@@ -1473,6 +1486,7 @@ def _run_miner_intake_path(
     run_id: str,
     supabase_origin: str,
     gateway_env_file: Path,
+    artifact_bucket: str,
     production_gateway_environment: Mapping[str, str],
     miner_intake_secret: str,
 ) -> dict[str, Any]:
@@ -1492,6 +1506,7 @@ def _run_miner_intake_path(
         candidate_sha=candidate_sha,
         run_id=run_id,
         supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
     )
     child_env = {
         **_clone_child_environment(region=region),
@@ -1501,6 +1516,7 @@ def _run_miner_intake_path(
         "schema_version": "leadpoet.production_parity_miner_intake_request.v1",
         "candidate_sha": candidate_sha,
         "run_id": run_id,
+        "artifact_bucket": artifact_bucket,
         "region": region,
         "supabase_origin": supabase_origin,
         "gateway_env_file": str(gateway_env_file),
@@ -1536,6 +1552,7 @@ def _run_miner_intake_path(
         != "leadpoet.production_parity_miner_intake_evidence.v1"
         or evidence.get("candidate_sha") != candidate_sha
         or evidence.get("run_id") != run_id
+        or evidence.get("artifact_bucket") != artifact_bucket
         or evidence.get("status") != "passed"
         or evidence.get("production_database_mutated") is not False
         or evidence.get("production_chain_mutated") is not False
@@ -1600,6 +1617,9 @@ async def _run_miner_intake_child(request: Mapping[str, Any]) -> dict[str, Any]:
         != "leadpoet.production_parity_miner_intake_request.v1"
         or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
         or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
+        or not ARTIFACT_BUCKET_RE.fullmatch(
+            str(request.get("artifact_bucket") or "")
+        )
         or request.get("region") != "us-east-1"
         or os.getenv("AWS_REGION") != "us-east-1"
         or os.getenv("AWS_DEFAULT_REGION") != "us-east-1"
@@ -1607,6 +1627,7 @@ async def _run_miner_intake_child(request: Mapping[str, Any]) -> dict[str, Any]:
         raise FullParityError("miner-intake child identity differs")
     candidate_sha = str(request["candidate_sha"])
     run_id = str(request["run_id"])
+    artifact_bucket = str(request["artifact_bucket"])
     supabase_origin = _validated_public_origin(
         str(request.get("supabase_origin") or "")
     )
@@ -1616,6 +1637,7 @@ async def _run_miner_intake_child(request: Mapping[str, Any]) -> dict[str, Any]:
         candidate_sha=candidate_sha,
         run_id=run_id,
         supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
     )
     with _applied_clone_environment(
         values,
@@ -1659,6 +1681,9 @@ async def _run_miner_intake_child_validated(
         != "leadpoet.production_parity_miner_intake_request.v1"
         or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
         or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
+        or not ARTIFACT_BUCKET_RE.fullmatch(
+            str(request.get("artifact_bucket") or "")
+        )
         or os.getenv("LEADPOET_PARITY_CANDIDATE_SHA")
         != request.get("candidate_sha")
     ):
@@ -1972,6 +1997,7 @@ async def _run_miner_intake_child_validated(
             "status": "passed",
             "candidate_sha": candidate_sha,
             "run_id": run_id,
+            "artifact_bucket": str(request["artifact_bucket"]),
             "chain_registration_boundary": "strict-ephemeral-hotkey",
             "production_database_mutated": False,
             "production_chain_mutated": False,
@@ -2059,6 +2085,7 @@ def _wait_rebenchmark(
     region: str,
     run_id: str,
     supabase_origin: str,
+    artifact_bucket: str,
     timeout_seconds: int,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
@@ -2082,6 +2109,8 @@ def _wait_rebenchmark(
                     run_id,
                     "--supabase-origin",
                     supabase_origin,
+                    "--artifact-bucket",
+                    artifact_bucket,
                 ],
                 timeout=min(remaining, 300),
                 env=_clone_child_environment(region=region),
@@ -2103,6 +2132,7 @@ def _wait_rebenchmark(
             last.get("schema_version")
             != "leadpoet.production_parity_rebenchmark_readiness.v1"
             or last.get("candidate_sha") != candidate_sha
+            or last.get("artifact_bucket") != artifact_bucket
         ):
             raise FullParityError("clone readiness child identity differs")
         if result.returncode == 0 and last.get("available") is True:
@@ -2195,6 +2225,9 @@ def _run_clone_handoff_child(request: Mapping[str, Any]) -> dict[str, Any]:
         != "leadpoet.production_parity_clone_handoff_request.v1"
         or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
         or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
+        or not ARTIFACT_BUCKET_RE.fullmatch(
+            str(request.get("artifact_bucket") or "")
+        )
         or not isinstance(request.get("epoch"), int)
         or isinstance(request.get("epoch"), bool)
         or int(request.get("epoch") or 0) <= 0
@@ -2202,6 +2235,7 @@ def _run_clone_handoff_child(request: Mapping[str, Any]) -> dict[str, Any]:
         raise FullParityError("clone allocation handoff request is invalid")
     candidate_sha = str(request["candidate_sha"])
     run_id = str(request["run_id"])
+    artifact_bucket = str(request["artifact_bucket"])
     epoch = int(request["epoch"])
     supabase_origin = str(request.get("supabase_origin") or "")
     gateway_env_file = Path(str(request.get("gateway_env_file") or ""))
@@ -2210,6 +2244,7 @@ def _run_clone_handoff_child(request: Mapping[str, Any]) -> dict[str, Any]:
         candidate_sha=candidate_sha,
         run_id=run_id,
         supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
     )
     with _applied_clone_environment(values, gateway_env_file):
         handoff, allocation_input = _validate_real_handoff(
@@ -2220,6 +2255,7 @@ def _run_clone_handoff_child(request: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": "leadpoet.production_parity_clone_handoff_evidence.v1",
         "candidate_sha": candidate_sha,
         "run_id": run_id,
+        "artifact_bucket": artifact_bucket,
         "epoch": epoch,
         "handoff": handoff,
         "allocation_input": allocation_input,
@@ -2233,17 +2269,20 @@ def _run_clone_handoff(
     run_id: str,
     supabase_origin: str,
     gateway_env_file: Path,
+    artifact_bucket: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _validated_clone_environment(
         gateway_env_file,
         candidate_sha=candidate_sha,
         run_id=run_id,
         supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
     )
     request = {
         "schema_version": "leadpoet.production_parity_clone_handoff_request.v1",
         "candidate_sha": candidate_sha,
         "run_id": run_id,
+        "artifact_bucket": artifact_bucket,
         "epoch": epoch,
         "supabase_origin": supabase_origin,
         "gateway_env_file": str(gateway_env_file),
@@ -2266,6 +2305,7 @@ def _run_clone_handoff(
         != "leadpoet.production_parity_clone_handoff_evidence.v1"
         or evidence.get("candidate_sha") != candidate_sha
         or evidence.get("run_id") != run_id
+        or evidence.get("artifact_bucket") != artifact_bucket
         or evidence.get("epoch") != epoch
         or not isinstance(handoff, Mapping)
         or not isinstance(allocation_input, Mapping)
@@ -2375,7 +2415,7 @@ def run_full(
         or base_sha == candidate_sha
         or not PINNED_IMAGE_RE.fullmatch(postgres_image)
         or not PINNED_IMAGE_RE.fullmatch(postgrest_image)
-        or not re.fullmatch(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", artifact_bucket)
+        or not ARTIFACT_BUCKET_RE.fullmatch(artifact_bucket)
     ):
         raise FullParityError("full parity inputs are invalid")
     supabase_origin = _validated_public_origin(supabase_origin)
@@ -2616,6 +2656,7 @@ def run_full(
             run_id=run_id,
             supabase_origin=supabase_origin,
             gateway_env_file=gateway_env_file,
+            artifact_bucket=artifact_bucket,
         )
         failure_stage = "rebenchmark-publication"
         rebenchmark = _wait_rebenchmark(
@@ -2624,6 +2665,7 @@ def run_full(
             region=region,
             run_id=run_id,
             supabase_origin=supabase_origin,
+            artifact_bucket=artifact_bucket,
             timeout_seconds=_remaining_full_timeout(
                 deadline=deadline,
                 stage="full rebenchmark publication",
@@ -2635,6 +2677,7 @@ def run_full(
             candidate_sha=candidate_sha,
             run_id=run_id,
             supabase_origin=supabase_origin,
+            artifact_bucket=artifact_bucket,
         )
         failure_stage = "weight-readiness"
         readiness = _run(
@@ -2669,6 +2712,7 @@ def run_full(
             run_id=run_id,
             supabase_origin=supabase_origin,
             gateway_env_file=gateway_env_file,
+            artifact_bucket=artifact_bucket,
         )
         allocation_override.write_text(
             json.dumps(allocation_input, sort_keys=True, separators=(",", ":"))
@@ -2704,6 +2748,7 @@ def run_full(
             run_id=run_id,
             supabase_origin=supabase_origin,
             gateway_env_file=gateway_env_file,
+            artifact_bucket=artifact_bucket,
             production_gateway_environment=production_gateway_environment,
             miner_intake_secret=_secret_value(
                 secrets_client,

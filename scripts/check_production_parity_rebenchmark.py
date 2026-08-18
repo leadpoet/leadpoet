@@ -29,6 +29,7 @@ SECRET_RE = re.compile(
 ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RUN_RE = re.compile(r"^pp-[1-9][0-9]*-[1-9][0-9]*$")
+ARTIFACT_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 
 
 class RebenchmarkReadinessError(RuntimeError):
@@ -68,10 +69,12 @@ def _secret_environment(
     region: str,
     run_id: str,
     supabase_origin: str,
+    artifact_bucket: str,
 ) -> dict[str, str]:
     if (
         not SECRET_RE.fullmatch(secret_id)
         or not RUN_RE.fullmatch(run_id)
+        or not ARTIFACT_BUCKET_RE.fullmatch(artifact_bucket)
         or secret_id
         != f"leadpoet/staging/production-parity/runs/{run_id}/gateway"
     ):
@@ -118,6 +121,9 @@ def _secret_environment(
         or boundary.get("supabase_origin") != normalized_origin
         or str(environment.get("SUPABASE_URL") or "").rstrip("/")
         != normalized_origin
+        or environment.get("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET")
+        != artifact_bucket
+        or environment.get("AWS_S3_BUCKET") != artifact_bucket
     ):
         raise RebenchmarkReadinessError(
             "gateway readiness probe is not bound to disposable state"
@@ -143,7 +149,9 @@ def _patched_environment(values: Mapping[str, str]) -> Iterator[None]:
                 os.environ[key] = old_value
 
 
-def _sanitize(value: Mapping[str, Any], *, candidate_sha: str) -> dict[str, Any]:
+def _sanitize(
+    value: Mapping[str, Any], *, candidate_sha: str, artifact_bucket: str
+) -> dict[str, Any]:
     available = value.get("available") is True
     reason = str(value.get("reason") or "")
     benchmark_date = str(value.get("benchmark_date") or "")
@@ -203,6 +211,7 @@ def _sanitize(value: Mapping[str, Any], *, candidate_sha: str) -> dict[str, Any]
         return {
             "schema_version": SCHEMA_VERSION,
             "candidate_sha": candidate_sha,
+            "artifact_bucket": artifact_bucket,
             "available": False,
             "reason": reason or "daily_baseline_not_published",
             "benchmark_date": benchmark_date,
@@ -210,6 +219,7 @@ def _sanitize(value: Mapping[str, Any], *, candidate_sha: str) -> dict[str, Any]
     return {
         "schema_version": SCHEMA_VERSION,
         "candidate_sha": candidate_sha,
+        "artifact_bucket": artifact_bucket,
         "available": True,
         "reason": reason,
         "benchmark_date": benchmark_date,
@@ -243,6 +253,7 @@ async def check(
     region: str,
     run_id: str,
     supabase_origin: str,
+    artifact_bucket: str,
 ) -> dict[str, Any]:
     if not SHA_RE.fullmatch(candidate_sha):
         raise RebenchmarkReadinessError("candidate SHA is invalid")
@@ -256,6 +267,7 @@ async def check(
         region=region,
         run_id=run_id,
         supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
     )
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -269,7 +281,11 @@ async def check(
             ResearchLabGatewayConfig.from_env(),
             include_commitments=True,
         )
-    return _sanitize(readiness, candidate_sha=candidate_sha)
+    return _sanitize(
+        readiness,
+        candidate_sha=candidate_sha,
+        artifact_bucket=artifact_bucket,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -279,6 +295,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--region", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--supabase-origin", required=True)
+    parser.add_argument("--artifact-bucket", required=True)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
@@ -291,6 +308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 region=str(args.region),
                 run_id=str(args.run_id),
                 supabase_origin=str(args.supabase_origin),
+                artifact_bucket=str(args.artifact_bucket),
             )
         )
     except (OSError, ValueError, BotoCoreError, ClientError, RebenchmarkReadinessError):

@@ -2265,6 +2265,7 @@ def test_full_clone_environment_rejects_tampered_trace_destination(
         candidate_sha=SHA,
         run_id=run_id,
         supabase_origin=ORIGIN,
+        artifact_bucket=artifact_bucket,
     )["RESEARCH_LAB_RAW_TRACE_S3_PREFIX"].endswith("/traces/raw")
 
     write_environment(
@@ -2279,6 +2280,28 @@ def test_full_clone_environment_rejects_tampered_trace_destination(
             candidate_sha=SHA,
             run_id=run_id,
             supabase_origin=ORIGIN,
+            artifact_bucket=artifact_bucket,
+        )
+
+    substituted_bucket = "leadpoet-parity-493765492819-" + "e" * 16
+    write_environment(
+        {
+            **environment,
+            "AWS_S3_BUCKET": substituted_bucket,
+            "RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET": substituted_bucket,
+            **production_parity_trace_prefixes(
+                artifact_bucket=substituted_bucket,
+                run_id=run_id,
+            ),
+        }
+    )
+    with pytest.raises(FullParityError, match="clone gateway boundary identity"):
+        full_host._validated_clone_environment(
+            gateway_env_file,
+            candidate_sha=SHA,
+            run_id=run_id,
+            supabase_origin=ORIGIN,
+            artifact_bucket=artifact_bucket,
         )
 
     for poison in (
@@ -2320,6 +2343,7 @@ def test_full_clone_environment_rejects_tampered_trace_destination(
                 candidate_sha=SHA,
                 run_id=run_id,
                 supabase_origin=ORIGIN,
+                artifact_bucket=artifact_bucket,
             )
 
 
@@ -2645,6 +2669,9 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
                     ),
                     "candidate_sha": SHA,
                     "run_id": "pp-1-1",
+                    "artifact_bucket": (
+                        "leadpoet-parity-493765492819-" + "f" * 16
+                    ),
                     "status": "passed",
                     "production_database_mutated": False,
                     "production_chain_mutated": False,
@@ -2663,6 +2690,7 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
         run_id="pp-1-1",
         supabase_origin=ORIGIN,
         gateway_env_file=tmp_path / "gateway.env",
+        artifact_bucket="leadpoet-parity-493765492819-" + "f" * 16,
         production_gateway_environment={
             "OPENROUTER_API_KEY": "runtime-credential",
             "OPENROUTER_MANAGEMENT_KEY": "management-credential",
@@ -2871,6 +2899,9 @@ def test_rebenchmark_readiness_uses_explicit_region_and_filters_secret_poison(
         region="us-east-1",
         run_id="pp-1-1",
         supabase_origin=ORIGIN,
+        artifact_bucket=(
+            "leadpoet-parity-493765492819-" + "d" * 16
+        ),
     )
     assert observed == {"service": "secretsmanager", "region": "us-east-1"}
     assert filtered["SUPABASE_URL"] == ORIGIN
@@ -2885,6 +2916,20 @@ def test_rebenchmark_readiness_uses_explicit_region_and_filters_secret_poison(
         "AWS_SECRET_ACCESS_KEY",
     ):
         assert key not in filtered
+    with pytest.raises(
+        parity_readiness.RebenchmarkReadinessError,
+        match="not bound to disposable state",
+    ):
+        parity_readiness._secret_environment(
+            "leadpoet/staging/production-parity/runs/pp-1-1/gateway",
+            SHA,
+            region="us-east-1",
+            run_id="pp-1-1",
+            supabase_origin=ORIGIN,
+            artifact_bucket=(
+                "leadpoet-parity-493765492819-" + "e" * 16
+            ),
+        )
 
 
 def test_full_rebenchmark_child_receives_exact_region_run_and_origin(monkeypatch):
@@ -2902,6 +2947,9 @@ def test_full_rebenchmark_child_receives_exact_region_run_and_origin(monkeypatch
                         "leadpoet.production_parity_rebenchmark_readiness.v1"
                     ),
                     "candidate_sha": SHA,
+                    "artifact_bucket": (
+                        "leadpoet-parity-493765492819-" + "d" * 16
+                    ),
                     "available": True,
                 }
             ),
@@ -2917,6 +2965,7 @@ def test_full_rebenchmark_child_receives_exact_region_run_and_origin(monkeypatch
         region="us-east-1",
         run_id="pp-1-1",
         supabase_origin=ORIGIN,
+        artifact_bucket="leadpoet-parity-493765492819-" + "d" * 16,
         timeout_seconds=30,
     )
     assert result["available"] is True
@@ -2924,6 +2973,9 @@ def test_full_rebenchmark_child_receives_exact_region_run_and_origin(monkeypatch
     assert command[command.index("--region") + 1] == "us-east-1"
     assert command[command.index("--run-id") + 1] == "pp-1-1"
     assert command[command.index("--supabase-origin") + 1] == ORIGIN
+    assert command[command.index("--artifact-bucket") + 1] == (
+        "leadpoet-parity-493765492819-" + "d" * 16
+    )
     child_env = observed["env"]
     assert child_env["AWS_REGION"] == "us-east-1"
     assert child_env["AWS_DEFAULT_REGION"] == "us-east-1"

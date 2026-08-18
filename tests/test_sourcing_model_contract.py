@@ -23,6 +23,7 @@ from research_lab.sourcing_model_contract_check import (
     CONTRACT_V26_PATH,
     CONTRACT_V46_PATH,
     CONTRACT_V47_PATH,
+    CONTRACT_V52_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
     PARITY_FIXTURE_V11_PATH,
@@ -31,6 +32,7 @@ from research_lab.sourcing_model_contract_check import (
     PARITY_FIXTURE_V26_PATH,
     PARITY_FIXTURE_V46_PATH,
     PARITY_FIXTURE_V47_PATH,
+    PARITY_FIXTURE_V52_PATH,
     PARITY_FIXTURE_V7_PATH,
     _resolve_reviewed_consumer_contract_pair,
     load_wrapper_contract,
@@ -452,6 +454,7 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
         "leadpoet-sourcing-wrapper-contract-v26",
         "leadpoet-sourcing-wrapper-contract-v46",
         "leadpoet-sourcing-wrapper-contract-v47",
+        "leadpoet-sourcing-wrapper-contract-v52",
     }
 
 
@@ -598,6 +601,51 @@ def test_exact_v47_contract_pair_and_intent_outcome_surface_are_reviewed(
         and "parameter drift" in item
         for item in violations
     )
+
+
+def test_exact_v52_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
+    contract = json.loads(CONTRACT_V52_PATH.read_text(encoding="utf-8"))
+    contract_path = tmp_path / contract["canonical_path"]
+    parity_path = tmp_path / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V52_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V52_PATH.read_bytes())
+
+    resolved = _resolve_reviewed_consumer_contract_pair(tmp_path)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v52"
+    )
+    assert resolved["contract_sha256"] == (
+        "sha256:48609451a69cf41a6a7615224e628417df4a27040a1b54c9958460cc76a48fc9"
+    )
+    assert resolved["parity_sha256"] == (
+        "sha256:1e06b5bbe638356661494054363fbba8b8cba0181260b3396ce259f129d90e5d"
+    )
+
+    runtime_capabilities = tmp_path / "sourcing_model/runtime_capabilities.py"
+    runtime_capabilities.write_text(
+        'CAPABILITY_CONTRACT_VERSION = "sourcing-model-runtime-capabilities:v3"\n',
+        encoding="utf-8",
+    )
+    violations = verify_source_tree_contract(tmp_path)
+    assert not any("CAPABILITY_CONTRACT_VERSION" in item for item in violations)
+
+    runtime_capabilities.write_text(
+        'CAPABILITY_CONTRACT_VERSION = "sourcing-model-runtime-capabilities:v4"\n',
+        encoding="utf-8",
+    )
+    violations = verify_source_tree_contract(tmp_path)
+    assert any(
+        "reviewed source constant drift "
+        "sourcing_model/runtime_capabilities.py:CAPABILITY_CONTRACT_VERSION"
+        in item
+        for item in violations
+    )
+
+    parity_path.write_text("{}\n", encoding="utf-8")
+    assert _resolve_reviewed_consumer_contract_pair(tmp_path) is None
 
 
 def test_exact_v12_contact_contract_and_parity_pair_is_reviewed(

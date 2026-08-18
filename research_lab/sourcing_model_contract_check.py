@@ -67,6 +67,10 @@ CONTRACT_V47_PATH = Path(__file__).with_name("sourcing_model_contract_v47.json")
 PARITY_FIXTURE_V47_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v47.json"
 )
+CONTRACT_V52_PATH = Path(__file__).with_name("sourcing_model_contract_v52.json")
+PARITY_FIXTURE_V52_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v52.json"
+)
 SEMANTIC_COMPATIBILITY_POLICY_V1_PATH = Path(__file__).with_name(
     "sourcing_model_semantic_compatibility_v1.json"
 )
@@ -103,6 +107,32 @@ _SEMANTIC_COMPATIBILITY_CACHE_SIZE = 256
 _SEMANTIC_COMPATIBILITY_CACHE: "OrderedDict[tuple[str, str, str, str, str, str, str], Dict[str, Any]]" = OrderedDict()
 _SEMANTIC_COMPATIBILITY_CACHE_LOCK = threading.Lock()
 REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v52",
+        "contract_path": CONTRACT_V52_PATH,
+        "contract_sha256": (
+            "sha256:48609451a69cf41a6a7615224e628417df4a27040a1b54c9958460cc76a48fc9"
+        ),
+        "parity_path": PARITY_FIXTURE_V52_PATH,
+        "parity_sha256": (
+            "sha256:1e06b5bbe638356661494054363fbba8b8cba0181260b3396ce259f129d90e5d"
+        ),
+        "required_source_constants": {
+            "sourcing_model/runtime_capabilities.py": {
+                "CAPABILITY_CONTRACT_VERSION": (
+                    "sourcing-model-runtime-capabilities:v3"
+                ),
+            },
+        },
+        "positional_exact_signatures": True,
+        "variadic_parameters": {
+            "sourcing_model/corporate_filing_contract.py:"
+            "build_corporate_filing_envelope": {
+                "vararg": None,
+                "kwarg": "payload",
+            },
+        },
+    },
     {
         "contract_id": "leadpoet-sourcing-wrapper-contract-v47",
         "contract_path": CONTRACT_V47_PATH,
@@ -412,6 +442,15 @@ def reviewed_consumer_snapshots() -> Dict[str, Dict[str, Any]]:
             "variadic_parameters": dict(
                 spec.get("variadic_parameters") or {}
             ),
+            "required_source_constants": {
+                str(relative): {
+                    str(name): value
+                    for name, value in dict(expected_values).items()
+                }
+                for relative, expected_values in dict(
+                    spec.get("required_source_constants") or {}
+                ).items()
+            },
         }
     return snapshots
 
@@ -2311,6 +2350,26 @@ def _verify_source_tree_contract_document(
                     f"{None if actual is missing else actual!r}"
                 )
 
+    for relative, expected_values in (
+        reviewed_snapshot.get("required_source_constants") or {}
+    ).items():
+        tree = _tree(relative)
+        if tree is None:
+            continue
+        constants = _literal_module_constants(
+            tree,
+            names={str(name) for name in expected_values},
+        )
+        missing = object()
+        for name, expected in expected_values.items():
+            actual = constants.get(name, missing)
+            if actual is missing or not _same_literal(actual, expected):
+                violations.append(
+                    f"reviewed source constant drift {relative}:{name}: expected "
+                    f"{expected!r}, found "
+                    f"{None if actual is missing else actual!r}"
+                )
+
     return violations
 
 
@@ -2462,6 +2521,12 @@ def source_tree_compatibility_admission_v1(
         compiler_constants = dict(
             exact_constants.get("sourcing_model/routing/compiler.py") or {}
         )
+        reviewed_runtime_constants = dict(
+            dict(snapshot.get("required_source_constants") or {}).get(
+                "sourcing_model/runtime_capabilities.py"
+            )
+            or {}
+        )
         bindings = {
             "adapter_version": str(adapter_constants.get("ADAPTER_VERSION") or ""),
             "capability_contract_version": str(
@@ -2469,6 +2534,7 @@ def source_tree_compatibility_admission_v1(
                     exact_constants.get("sourcing_model/runtime_capabilities.py")
                     or {}
                 ).get("CAPABILITY_CONTRACT_VERSION")
+                or reviewed_runtime_constants.get("CAPABILITY_CONTRACT_VERSION")
                 or "sourcing-model-runtime-capabilities:v2"
             ),
             "component_registry_version": str(

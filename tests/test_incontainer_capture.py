@@ -361,6 +361,44 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
     reviewed_v7["routing"]["compiler_version"] = "routing-compiler-v3"
     reviewed_v7["runtime_routing"]["compiler_version"] = "routing-compiler-v3"
     assert private_runtime.validate_sourcing_adapter_metadata(reviewed_v7) == reviewed_v7
+    reviewed_v52 = copy.deepcopy(reviewed_v7)
+    reviewed_v52["capability_contract_version"] = (
+        "sourcing-model-runtime-capabilities:v3"
+    )
+    reviewed_v52["runtime_capabilities"].append(
+        "remaining_non_cleanup_physical_exchanges"
+    )
+    reviewed_v52["routing"]["compiler_version"] = "routing-compiler-v4"
+    reviewed_v52["runtime_routing"]["compiler_version"] = "routing-compiler-v4"
+    reviewed_v52["scoring_adapter_version"] = "qualification-company-scorer:v1"
+    v52_bindings = {
+        "adapter_version": "sourcing-model-research-lab-adapter:v7",
+        "capability_contract_version": "sourcing-model-runtime-capabilities:v3",
+        "component_registry_version": "sourcing-model-components:v2",
+        "routing_compiler_version": "routing-compiler-v4",
+        "scoring_adapter_version": "qualification-company-scorer:v1",
+    }
+    assert private_runtime.validate_sourcing_adapter_metadata(
+        reviewed_v52,
+        expected_semantic_bindings=v52_bindings,
+    ) == reviewed_v52
+
+    broken_v52 = copy.deepcopy(reviewed_v52)
+    broken_v52["runtime_capabilities"].remove(
+        "remaining_non_cleanup_physical_exchanges"
+    )
+    with pytest.raises(PrivateModelRuntimeError, match="capability set"):
+        private_runtime.validate_sourcing_adapter_metadata(
+            broken_v52,
+            expected_semantic_bindings=v52_bindings,
+        )
+
+    unknown_contract = copy.deepcopy(reviewed_v52)
+    unknown_contract["capability_contract_version"] = (
+        "sourcing-model-runtime-capabilities:v4"
+    )
+    with pytest.raises(PrivateModelRuntimeError, match="supported runtime capability"):
+        private_runtime.validate_sourcing_adapter_metadata(unknown_contract)
     broken = dict(ready)
     broken.pop("industry_taxonomy")
     with pytest.raises(PrivateModelRuntimeError, match="taxonomy hash"):

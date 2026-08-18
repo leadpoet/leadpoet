@@ -209,10 +209,19 @@ assert re.fullmatch(
 )
 assert metadata.get("component_registry_version") == "sourcing-model-components:v2"
 assert metadata.get("scoring_adapter_version") == "qualification-company-scorer:v1"
-assert metadata.get("capability_contract_version") == "sourcing-model-runtime-capabilities:v2"
-assert set(metadata.get("runtime_capabilities") or ()) == {
-    "deadline", "emit", "http_fetch", "probe_origin", "resolve_host"
+capability_contract_version = metadata.get("capability_contract_version")
+expected_runtime_capabilities = {
+    "sourcing-model-runtime-capabilities:v2": {
+        "deadline", "emit", "http_fetch", "probe_origin", "resolve_host"
+    },
+    "sourcing-model-runtime-capabilities:v3": {
+        "deadline", "emit", "http_fetch", "probe_origin",
+        "remaining_non_cleanup_physical_exchanges", "resolve_host"
+    },
 }
+assert set(metadata.get("runtime_capabilities") or ()) == (
+    expected_runtime_capabilities[capability_contract_version]
+)
 compiler_version = str(metadata.get("routing", {}).get("compiler_version") or "")
 assert re.fullmatch(r"routing-compiler-[A-Za-z0-9][A-Za-z0-9._-]{0,63}", compiler_version)
 assert metadata.get("runtime_routing", {}).get("compiler_version") == compiler_version

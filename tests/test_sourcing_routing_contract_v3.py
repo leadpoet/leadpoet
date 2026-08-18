@@ -29,6 +29,8 @@ def test_private_model_commands_require_reviewed_routing_adapters() -> None:
     assert "routing-compiler-v3" not in DEFAULT_PRIVATE_TEST_CMD
     assert "qualification-company-scorer:v1" in DEFAULT_PRIVATE_TEST_CMD
     assert "sourcing-model-runtime-capabilities:v2" in DEFAULT_PRIVATE_TEST_CMD
+    assert "sourcing-model-runtime-capabilities:v3" in DEFAULT_PRIVATE_TEST_CMD
+    assert "remaining_non_cleanup_physical_exchanges" in DEFAULT_PRIVATE_TEST_CMD
     assert "source_add_requires_manifest_sha256" in DEFAULT_PRIVATE_TEST_CMD
     assert "SubprocessPrivateModelRunner" in DEFAULT_PRIVATE_BUILD_CMD
     assert "build_local_private_artifact_manifest" in DEFAULT_PRIVATE_BUILD_CMD

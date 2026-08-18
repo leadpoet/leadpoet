@@ -102,6 +102,21 @@ EXPECTED_SOURCING_ADAPTER_VERSIONS = frozenset(
     for snapshot in reviewed_consumer_snapshots().values()
 )
 EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
+EXPECTED_RUNTIME_CAPABILITIES_BY_CONTRACT_VERSION = {
+    "sourcing-model-runtime-capabilities:v2": frozenset(
+        {"deadline", "emit", "http_fetch", "probe_origin", "resolve_host"}
+    ),
+    "sourcing-model-runtime-capabilities:v3": frozenset(
+        {
+            "deadline",
+            "emit",
+            "http_fetch",
+            "probe_origin",
+            "remaining_non_cleanup_physical_exchanges",
+            "resolve_host",
+        }
+    ),
+}
 EXPECTED_ROUTING_COMPILER_VERSIONS = frozenset(
     str(
         snapshot["contract"]["exact_constants"]
@@ -1241,22 +1256,19 @@ def validate_sourcing_adapter_metadata(
         raise PrivateModelRuntimeError(
             "private model adapter metadata differs from its admitted source"
         )
-    required_capabilities = {
-        "deadline",
-        "emit",
-        "http_fetch",
-        "probe_origin",
-        "resolve_host",
-    }
-    if document.get("capability_contract_version") != (
-        "sourcing-model-runtime-capabilities:v2"
-    ):
+    capability_contract_version = str(
+        document.get("capability_contract_version") or ""
+    )
+    required_capabilities = EXPECTED_RUNTIME_CAPABILITIES_BY_CONTRACT_VERSION.get(
+        capability_contract_version
+    )
+    if required_capabilities is None:
         raise PrivateModelRuntimeError(
-            "private model does not declare runtime capability contract v2"
+            "private model does not declare a supported runtime capability contract"
         )
-    if semantic_bindings and document.get(
+    if semantic_bindings and capability_contract_version != semantic_bindings.get(
         "capability_contract_version"
-    ) != semantic_bindings.get("capability_contract_version"):
+    ):
         raise PrivateModelRuntimeError(
             "private model capability metadata differs from its admitted source"
         )

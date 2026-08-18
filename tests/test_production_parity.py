@@ -318,6 +318,7 @@ def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     assert production_env["PGSSLMODE"] == "require"
     assert observed["command"][0] == "pg_restore"
     assert observed["env"]["PGSSLMODE"] == "disable"
+    assert observed["env"]["PGOPTIONS"] == "-c check_function_bodies=off"
 
 
 def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
@@ -337,7 +338,6 @@ def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
         "pgcrypto_extension",
         "auth_role_function",
         "auth_jwt_function",
-        "auth_uid_function",
     }
     observed: list[str] = []
 
@@ -357,10 +357,32 @@ def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
     assert "CREATE SCHEMA IF NOT EXISTS auth" in bootstrap
     assert "CREATE SCHEMA IF NOT EXISTS extensions" in bootstrap
     assert "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions" in bootstrap
-    for function in ("auth.role()", "auth.jwt()", "auth.uid()"):
+    for function in ("auth.role()", "auth.jwt()"):
         assert f"FUNCTION {function}" in bootstrap
     assert "auth.users" not in bootstrap
+    assert "auth.uid" not in bootstrap
     assert "net.http" not in bootstrap
+
+
+def test_disposable_clone_proves_restored_deterministic_uuid(monkeypatch):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+    observed: list[str] = []
+
+    def fake_psql(sql: str, *, timeout: int = 120) -> str:
+        assert timeout == 120
+        observed.append(sql)
+        return json.dumps({"deterministic_uuid_repeatable": True})
+
+    monkeypatch.setattr(database, "_psql", fake_psql)
+
+    assert database.verify_snapshot_restore() == {
+        "deterministic_uuid_repeatable": True
+    }
+    assert "research_lab_deterministic_uuid" in observed[0]
 
 
 def test_database_lane_retains_primary_failure_and_cleanup_evidence(
@@ -382,6 +404,10 @@ def test_database_lane_retains_primary_failure_and_cleanup_evidence(
         @staticmethod
         def prepare_snapshot_restore():
             return {"verified": True}
+
+        @staticmethod
+        def verify_snapshot_restore():
+            return {"deterministic_uuid_repeatable": True}
 
         @staticmethod
         def cleanup():

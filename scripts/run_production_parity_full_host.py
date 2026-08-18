@@ -1285,7 +1285,12 @@ def run_full(
                 stage="full production snapshot restore",
             ),
         )
-        restore = {**restore, "clone_prerequisites": prerequisites}
+        restore_contract = database.verify_snapshot_restore()
+        restore = {
+            **restore,
+            "clone_prerequisites": prerequisites,
+            "clone_restore_contract": restore_contract,
+        }
         _local_url, service_role_key = database.start_postgrest()
         _wait_https_origin(supabase_origin)
         secret_state = create_gateway_secret(

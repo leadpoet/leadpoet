@@ -483,16 +483,6 @@ AS $$
     NULLIF(current_setting('request.jwt.claims', true), '')
   )::jsonb
 $$;
-CREATE OR REPLACE FUNCTION auth.uid()
-RETURNS uuid
-LANGUAGE sql
-STABLE
-AS $$
-  SELECT COALESCE(
-    NULLIF(current_setting('request.jwt.claim.sub', true), ''),
-    NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'
-  )::uuid
-$$;
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO anon, authenticated, service_role;
 """
@@ -527,8 +517,7 @@ SELECT json_build_object(
     WHERE e.extname = 'pgcrypto' AND n.nspname = 'extensions'
   ),
   'auth_role_function', to_regprocedure('auth.role()') IS NOT NULL,
-  'auth_jwt_function', to_regprocedure('auth.jwt()') IS NOT NULL,
-  'auth_uid_function', to_regprocedure('auth.uid()') IS NOT NULL
+  'auth_jwt_function', to_regprocedure('auth.jwt()') IS NOT NULL
 )::text;
 """
         ).strip()
@@ -547,7 +536,6 @@ SELECT json_build_object(
             "pgcrypto_extension",
             "auth_role_function",
             "auth_jwt_function",
-            "auth_uid_function",
         }
         if (
             not isinstance(evidence, dict)
@@ -558,6 +546,29 @@ SELECT json_build_object(
                 "snapshot restore prerequisites did not verify"
             )
         return {name: True for name in sorted(expected)}
+
+    def verify_snapshot_restore(self) -> dict[str, bool]:
+        raw = self._psql(
+            """
+SELECT json_build_object(
+  'deterministic_uuid_repeatable',
+  public.research_lab_deterministic_uuid('production-parity-restore-probe') IS NOT NULL
+  AND public.research_lab_deterministic_uuid('production-parity-restore-probe')
+      = public.research_lab_deterministic_uuid('production-parity-restore-probe')
+)::text;
+"""
+        ).strip()
+        try:
+            evidence = json.loads(raw)
+        except ValueError as exc:
+            raise ProductionParityError(
+                "snapshot restore contract readback is invalid"
+            ) from exc
+        if evidence != {"deterministic_uuid_repeatable": True}:
+            raise ProductionParityError(
+                "snapshot restore contract did not verify"
+            )
+        return {"deterministic_uuid_repeatable": True}
 
     def start_postgrest(self) -> tuple[str, str]:
         self.prepare_snapshot_restore()
@@ -894,6 +905,7 @@ def _run_database_lane(
             target_dsn=database.target_dsn,
             production_host=production_host,
         )
+        restore_contract = database.verify_snapshot_restore()
         supabase_url, service_role_key = database.start_postgrest()
         schema = verify_required_supabase_v2_schema(
             {
@@ -920,7 +932,11 @@ def _run_database_lane(
             provider=live_provider,
         )
         result = {
-            "restore": {**restore, "clone_prerequisites": prerequisites},
+            "restore": {
+                **restore,
+                "clone_prerequisites": prerequisites,
+                "clone_restore_contract": restore_contract,
+            },
             "schema": schema,
             "shape": shape,
             "weight_input_scale": weight_input_scale,

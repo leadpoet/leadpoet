@@ -536,6 +536,8 @@ def restore_snapshot(
     safe_database_target(target_dsn, production_host=production_host)
     env, _ = _postgres_env(target_dsn, read_only=False)
     env["PGSSLMODE"] = "disable"
+    restore_env = dict(env)
+    restore_env["PGOPTIONS"] = "-c check_function_bodies=off"
     manifest = validate_snapshot_manifest(
         _load_json(manifest_path, description="snapshot manifest")
     )
@@ -559,7 +561,7 @@ def restore_snapshot(
                 "--jobs=4",
                 str(archive_path),
             ],
-            env=env,
+            env=restore_env,
             timeout=timeout_seconds,
         ),
         stage="isolated production snapshot restore",

@@ -1003,6 +1003,7 @@ def _verify_chain_realized_activation_v1(
     supabase_url: str,
     opener: Any,
     timeout_seconds: float,
+    activation_authority: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     try:
         netuid = int(parent_environment.get("BITTENSOR_NETUID") or 71)
@@ -1018,47 +1019,50 @@ def _verify_chain_realized_activation_v1(
         "netuid,schema_version,first_epoch_id,source_bundle_hash,"
         "source_bundle_epoch_id,source_finalized_block"
     )
-    query = urlencode(
-        {
-            "select": columns,
-            "netuid": f"eq.{netuid}",
-            "limit": "2",
-        }
-    )
-    request = Request(
-        (
-            f"{supabase_url}/rest/v1/"
-            "research_lab_chain_realized_settlement_activation_v1"
-            f"?{query}"
-        ),
-        headers=dict(headers),
-    )
-    try:
-        with opener(request, timeout=timeout_seconds) as response:
-            status = int(response.getcode())
-            encoded = response.read()
-    except HTTPError as exc:
-        raise SupabaseSchemaPreflightV2Error(
-            "chain-realized settlement activation is unavailable; apply "
-            "scripts/126-research-lab-chain-realized-settlement.sql after "
-            f"at least one finalized V2 bundle exists (HTTP {exc.code})"
-        ) from exc
-    except Exception as exc:
-        raise SupabaseSchemaPreflightV2Error(
-            "chain-realized settlement activation probe failed"
-        ) from exc
-    if status < 200 or status >= 300:
-        raise SupabaseSchemaPreflightV2Error(
-            "chain-realized settlement activation is unavailable; apply "
-            "scripts/126-research-lab-chain-realized-settlement.sql after "
-            f"at least one finalized V2 bundle exists (HTTP {status})"
+    if activation_authority is None:
+        query = urlencode(
+            {
+                "select": columns,
+                "netuid": f"eq.{netuid}",
+                "limit": "2",
+            }
         )
-    try:
-        rows = json.loads(encoded.decode("utf-8"))
-    except (TypeError, ValueError, UnicodeDecodeError) as exc:
-        raise SupabaseSchemaPreflightV2Error(
-            "chain-realized settlement activation response is invalid"
-        ) from exc
+        request = Request(
+            (
+                f"{supabase_url}/rest/v1/"
+                "research_lab_chain_realized_settlement_activation_v1"
+                f"?{query}"
+            ),
+            headers=dict(headers),
+        )
+        try:
+            with opener(request, timeout=timeout_seconds) as response:
+                status = int(response.getcode())
+                encoded = response.read()
+        except HTTPError as exc:
+            raise SupabaseSchemaPreflightV2Error(
+                "chain-realized settlement activation is unavailable; apply "
+                "scripts/126-research-lab-chain-realized-settlement.sql after "
+                f"at least one finalized V2 bundle exists (HTTP {exc.code})"
+            ) from exc
+        except Exception as exc:
+            raise SupabaseSchemaPreflightV2Error(
+                "chain-realized settlement activation probe failed"
+            ) from exc
+        if status < 200 or status >= 300:
+            raise SupabaseSchemaPreflightV2Error(
+                "chain-realized settlement activation is unavailable; apply "
+                "scripts/126-research-lab-chain-realized-settlement.sql after "
+                f"at least one finalized V2 bundle exists (HTTP {status})"
+            )
+        try:
+            rows = json.loads(encoded.decode("utf-8"))
+        except (TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise SupabaseSchemaPreflightV2Error(
+                "chain-realized settlement activation response is invalid"
+            ) from exc
+    else:
+        rows = [activation_authority]
     if not isinstance(rows, list) or len(rows) != 1:
         raise SupabaseSchemaPreflightV2Error(
             "chain-realized settlement activation is missing or ambiguous; "
@@ -1108,7 +1112,13 @@ def verify_required_supabase_v2_schema(
     *,
     opener: Any = urlopen,
     timeout_seconds: float = 10.0,
+    chain_realized_activation_authority: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    activation_source = (
+        "postgrest"
+        if chain_realized_activation_authority is None
+        else "provided-authority"
+    )
     for migration, function_name in REQUIRED_SUPABASE_V2_RPCS:
         if len(function_name.encode("utf-8")) > POSTGRES_IDENTIFIER_MAX_BYTES:
             raise SupabaseSchemaPreflightV2Error(
@@ -1159,6 +1169,7 @@ def verify_required_supabase_v2_schema(
         supabase_url=supabase_url,
         opener=opener,
         timeout_seconds=timeout_seconds,
+        activation_authority=chain_realized_activation_authority,
     )
     migrations.add(
         "scripts/126-research-lab-chain-realized-settlement.sql"
@@ -1228,6 +1239,10 @@ def verify_required_supabase_v2_schema(
         "rpc_probe_count": len(REQUIRED_SUPABASE_V2_RPCS),
         "data_probe_count": 3,
         "schema_document_probe_count": 1,
+        "chain_realized_settlement_activation_http_probe_count": (
+            1 if activation_source == "postgrest" else 0
+        ),
+        "chain_realized_settlement_activation_source": activation_source,
         "chain_realized_settlement_activation": activation,
         "compact_weight_settlement_contract": (
             compact_weight_settlement_contract

@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.tee.supabase_schema_preflight_v2 import (  # noqa: E402
+    REQUIRED_SUPABASE_V2_SCHEMA,
     verify_required_supabase_v2_schema,
 )
 from gateway.tee.supabase_source_v2 import (  # noqa: E402
@@ -53,6 +54,8 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
     verify_contract_checkout,
 )
 from scripts.production_parity_snapshot import (  # noqa: E402
+    DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
+    DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
     restore_snapshot,
     verify_snapshot,
 )
@@ -89,6 +92,37 @@ CHAIN_REALIZED_ACTIVATION_COLUMNS = (
     "source_bundle_epoch_id",
     "source_finalized_block",
 )
+FAST_REHEARSAL_TIMEOUT_SECONDS = 600
+FAST_SCHEMA_PREFLIGHT_TIMEOUT_SECONDS = 20
+# Fast validates every schema table plus OpenAPI and two contract RPCs. The
+# activation value is validated from the strict live read instead of another
+# disposable-clone data request.
+FAST_SCHEMA_PREFLIGHT_NETWORK_PROBE_COUNT = len(REQUIRED_SUPABASE_V2_SCHEMA) + 3
+FAST_SCHEMA_PREFLIGHT_HEADROOM_SECONDS = (
+    FAST_SCHEMA_PREFLIGHT_NETWORK_PROBE_COUNT
+    * FAST_SCHEMA_PREFLIGHT_TIMEOUT_SECONDS
+)
+FAST_CANDIDATE_MIGRATION_HEADROOM_COUNT = 2
+FAST_CANDIDATE_MIGRATION_HEADROOM_SECONDS = (
+    FAST_CANDIDATE_MIGRATION_HEADROOM_COUNT
+    * DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS
+)
+FAST_DOCKER_STARTUP_AND_CLEANUP_HEADROOM_SECONDS = 420
+FAST_PRODUCTION_DATA_READ_HEADROOM_SECONDS = 480
+FAST_JOB_SETUP_HEADROOM_SECONDS = 300
+FAST_JOB_FIXED_TIMEOUT_SECONDS = (
+    2 * DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS
+    + FAST_REHEARSAL_TIMEOUT_SECONDS
+    + FAST_SCHEMA_PREFLIGHT_HEADROOM_SECONDS
+    + FAST_DOCKER_STARTUP_AND_CLEANUP_HEADROOM_SECONDS
+    + FAST_PRODUCTION_DATA_READ_HEADROOM_SECONDS
+    + FAST_JOB_SETUP_HEADROOM_SECONDS
+)
+FAST_JOB_MINIMUM_TIMEOUT_SECONDS = (
+    FAST_JOB_FIXED_TIMEOUT_SECONDS + FAST_CANDIDATE_MIGRATION_HEADROOM_SECONDS
+)
+FAST_JOB_OUTER_TIMEOUT_SECONDS = 100 * 60
+FAST_AWS_ROLE_DURATION_SECONDS = 7200
 SAFE_REHEARSAL_ERROR_TYPES = frozenset(
     {
         "AssertionError",
@@ -569,6 +603,19 @@ def _run(
     )
 
 
+def _fast_job_minimum_timeout_seconds(candidate_migration_count: int) -> int:
+    if (
+        type(candidate_migration_count) is not int
+        or candidate_migration_count < 0
+    ):
+        raise ProductionParityError("candidate migration count is invalid")
+    return (
+        FAST_JOB_FIXED_TIMEOUT_SECONDS
+        + candidate_migration_count
+        * DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS
+    )
+
+
 def _require_success(result: subprocess.CompletedProcess[str], *, stage: str) -> str:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-1000:]
@@ -838,96 +885,6 @@ SELECT json_build_object(
         if evidence != {"deterministic_uuid_repeatable": True}:
             raise ProductionParityError("snapshot restore contract did not verify")
         return {"deterministic_uuid_repeatable": True}
-
-    def seed_chain_realized_activation(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        expected_netuid = row.get("netuid")
-        if type(expected_netuid) is not int:
-            raise ProductionParityError(
-                "production chain-realized activation row is invalid"
-            )
-        expected = _validated_chain_realized_activation(
-            row, expected_netuid=expected_netuid
-        )
-        existing = self._psql(
-            "SELECT COUNT(*)::text FROM public." f"{CHAIN_REALIZED_ACTIVATION_TABLE};"
-        ).strip()
-        if not existing.isdigit() or int(existing) != 0:
-            raise ProductionParityError(
-                "disposable clone activation table is not empty"
-            )
-        self._psql(
-            """
-INSERT INTO public.research_lab_chain_realized_settlement_activation_v1 (
-  netuid,
-  schema_version,
-  first_epoch_id,
-  source_bundle_hash,
-  source_bundle_epoch_id,
-  source_finalized_block
-) VALUES (
-  {netuid},
-  '{schema_version}',
-  {first_epoch_id},
-  '{source_bundle_hash}',
-  {source_bundle_epoch_id},
-  {source_finalized_block}
-);
-""".format(
-                **expected
-            )
-        )
-        encoded = self._psql(
-            """
-SELECT json_build_object(
-  'row_count', COUNT(*),
-  'rows', COALESCE(
-    json_agg(
-      json_build_object(
-        'netuid', netuid,
-        'schema_version', schema_version,
-        'first_epoch_id', first_epoch_id,
-        'source_bundle_hash', source_bundle_hash,
-        'source_bundle_epoch_id', source_bundle_epoch_id,
-        'source_finalized_block', source_finalized_block
-      ) ORDER BY netuid
-    ),
-    '[]'::json
-  )
-)::text
-FROM public.research_lab_chain_realized_settlement_activation_v1;
-"""
-        ).strip()
-        try:
-            readback = json.loads(encoded)
-        except (TypeError, ValueError) as exc:
-            raise ProductionParityError(
-                "disposable clone activation readback is invalid"
-            ) from exc
-        if (
-            not isinstance(readback, Mapping)
-            or set(readback) != {"row_count", "rows"}
-            or type(readback.get("row_count")) is not int
-            or readback.get("row_count") != 1
-            or not isinstance(readback.get("rows"), list)
-            or len(readback["rows"]) != 1
-        ):
-            raise ProductionParityError(
-                "disposable clone activation readback is invalid"
-            )
-        actual = _validated_chain_realized_activation(
-            readback["rows"][0], expected_netuid=expected["netuid"]
-        )
-        if actual != expected:
-            raise ProductionParityError("disposable clone activation identity differs")
-        return {
-            "row_count": 1,
-            "netuid": actual["netuid"],
-            "first_epoch_id": actual["first_epoch_id"],
-            "source_bundle_epoch_id": actual["source_bundle_epoch_id"],
-            "source_finalized_block": actual["source_finalized_block"],
-            "source_bundle_hash": actual["source_bundle_hash"],
-            "activation_row_hash": sha256_json(actual),
-        }
 
     def start_postgrest(self) -> tuple[str, str]:
         self.prepare_snapshot_restore()
@@ -1428,7 +1385,7 @@ def _run_rehearsal(*, base_sha: str, candidate_sha: str) -> dict[str, Any]:
                 "--profile",
                 "prepush",
             ],
-            timeout=600,
+            timeout=FAST_REHEARSAL_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
         raise ProductionParityError(
@@ -1506,9 +1463,6 @@ def _run_database_lane(
                 netuid=netuid,
             )
         )
-        activation_clone_evidence = database.seed_chain_realized_activation(
-            activation_row
-        )
         supabase_url, service_role_key = database.start_postgrest()
         schema = verify_required_supabase_v2_schema(
             {
@@ -1517,7 +1471,8 @@ def _run_database_lane(
                 "BITTENSOR_NETUID": os.environ.get("BITTENSOR_NETUID", "71"),
             },
             opener=_StandalonePostgrestSchemaOpener(supabase_url),
-            timeout_seconds=20,
+            timeout_seconds=FAST_SCHEMA_PREFLIGHT_TIMEOUT_SECONDS,
+            chain_realized_activation_authority=activation_row,
         )
         manifest = validate_snapshot_manifest(
             _load_json(manifest_path, description="snapshot manifest")
@@ -1537,8 +1492,7 @@ def _run_database_lane(
                 **restore,
                 "clone_prerequisites": prerequisites,
                 "clone_restore_contract": restore_contract,
-                "production_activation": activation_live_evidence,
-                "clone_activation": activation_clone_evidence,
+                "production_activation_authority": activation_live_evidence,
             },
             "schema": schema,
             "shape": shape,
@@ -1643,8 +1597,21 @@ def run_fast_lane(
                 raise ProductionParityError(
                     f"production snapshot {label} lineage differs from the candidate"
                 )
+        candidate_migration_count = len(snapshot_evidence["migration_delta"])
+        required_timeout_seconds = _fast_job_minimum_timeout_seconds(
+            candidate_migration_count
+        )
+        if required_timeout_seconds >= FAST_JOB_OUTER_TIMEOUT_SECONDS:
+            raise ProductionParityError(
+                "production parity Fast workflow timeout does not exceed its "
+                "configured serial inner bounds"
+            )
         snapshot_evidence["source_is_candidate_ancestor"] = True
         snapshot_evidence["capture_is_candidate_ancestor"] = True
+        snapshot_evidence["candidate_migration_count"] = candidate_migration_count
+        snapshot_evidence["minimum_workflow_budget_seconds"] = (
+            required_timeout_seconds
+        )
     except Exception as exc:
         ledger.record(
             "production-snapshot",

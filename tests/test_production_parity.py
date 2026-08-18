@@ -12,6 +12,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from gateway.research_lab import daily_baseline_readiness
 from gateway.research_lab import scoring_worker
@@ -33,6 +34,7 @@ from scripts import production_parity_snapshot as parity_snapshot
 from scripts import run_production_parity_fast as fast_parity
 from scripts import run_production_parity_full_host as full_host
 from scripts.production_parity_snapshot import (
+    DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
     DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
     FULL_SNAPSHOT_DISK_RESERVE_BYTES,
     MAX_SNAPSHOT_IO_TIMEOUT_SECONDS,
@@ -538,7 +540,7 @@ def test_fast_ledger_records_cleanup_independently_of_database_failure(
     monkeypatch.setattr(
         fast_parity,
         "verify_snapshot",
-        lambda **_kwargs: {"snapshot": "verified"},
+        lambda **_kwargs: {"snapshot": "verified", "migration_delta": []},
     )
     monkeypatch.setattr(
         fast_parity,
@@ -1022,54 +1024,6 @@ def test_fast_rejects_duplicate_live_activation_fields():
         )
 
 
-def test_disposable_clone_seeds_and_reads_back_only_exact_activation(monkeypatch):
-    database = fast_parity._DockerDatabase(
-        candidate_sha=SHA,
-        postgres_image="postgres@sha256:" + "c" * 64,
-        postgrest_image="postgrest@sha256:" + "d" * 64,
-    )
-    row = _chain_realized_activation_row()
-    responses = iter(("0", "INSERT 0 1", json.dumps({"row_count": 1, "rows": [row]})))
-    statements: list[str] = []
-
-    def fake_psql(sql: str, *, timeout: int = 120):
-        assert timeout == 120
-        statements.append(sql)
-        return next(responses)
-
-    monkeypatch.setattr(database, "_psql", fake_psql)
-    evidence = database.seed_chain_realized_activation(row)
-
-    assert len(statements) == 3
-    assert "SELECT COUNT(*)" in statements[0]
-    assert (
-        "INSERT INTO public.research_lab_chain_realized_settlement_activation_v1"
-        in statements[1]
-    )
-    assert row["source_bundle_hash"] in statements[1]
-    assert "json_agg" in statements[2]
-    assert evidence == {
-        "row_count": 1,
-        "netuid": row["netuid"],
-        "first_epoch_id": row["first_epoch_id"],
-        "source_bundle_epoch_id": row["source_bundle_epoch_id"],
-        "source_finalized_block": row["source_finalized_block"],
-        "source_bundle_hash": row["source_bundle_hash"],
-        "activation_row_hash": sha256_json(row),
-    }
-
-
-def test_disposable_clone_refuses_to_overlay_existing_activation(monkeypatch):
-    database = fast_parity._DockerDatabase(
-        candidate_sha=SHA,
-        postgres_image="postgres@sha256:" + "c" * 64,
-        postgrest_image="postgrest@sha256:" + "d" * 64,
-    )
-    monkeypatch.setattr(database, "_psql", lambda *_args, **_kwargs: "1")
-    with pytest.raises(ProductionParityError, match="table is not empty"):
-        database.seed_chain_realized_activation(_chain_realized_activation_row())
-
-
 def test_weight_scale_evidence_excludes_prior_activation_read(monkeypatch):
     database = fast_parity._DockerDatabase(
         candidate_sha=SHA,
@@ -1217,7 +1171,13 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
         database._psql("\n".join(statements))
 
         activation = _chain_realized_activation_row()
-        seed = database.seed_chain_realized_activation(activation)
+        assert (
+            database._psql(
+                "SELECT COUNT(*)::text FROM public."
+                "research_lab_chain_realized_settlement_activation_v1;"
+            ).strip()
+            == "0"
+        )
         supabase_url, service_role_key = database.start_postgrest()
         result = schema_preflight.verify_required_supabase_v2_schema(
             {
@@ -1227,10 +1187,24 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             },
             opener=fast_parity._StandalonePostgrestSchemaOpener(supabase_url),
             timeout_seconds=20,
+            chain_realized_activation_authority=activation,
         )
 
-        assert seed["activation_row_hash"] == sha256_json(activation)
+        assert (
+            database._psql(
+                "SELECT COUNT(*)::text FROM public."
+                "research_lab_chain_realized_settlement_activation_v1;"
+            ).strip()
+            == "0"
+        )
         assert result["status"] == "ready"
+        assert result["data_probe_count"] == 3
+        assert (
+            result["chain_realized_settlement_activation_http_probe_count"] == 0
+        )
+        assert result["chain_realized_settlement_activation_source"] == (
+            "provided-authority"
+        )
         assert result["chain_realized_settlement_activation"] == {
             "netuid": 71,
             "first_epoch_id": activation["first_epoch_id"],
@@ -1339,11 +1313,40 @@ def test_rehearsal_failure_diagnostics_are_bounded_and_redacted(
 
 
 def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():
-    workflow = (ROOT / ".github/workflows/production-parity-fast.yml").read_text(
-        encoding="utf-8"
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/production-parity-fast.yml").read_text(
+            encoding="utf-8"
+        )
     )
-    assert "timeout-minutes: 20" in workflow
-    assert "timeout-minutes: 10" not in workflow
+    outer_seconds = int(workflow["jobs"]["validate"]["timeout-minutes"]) * 60
+    role_step = next(
+        step
+        for step in workflow["jobs"]["validate"]["steps"]
+        if step.get("name") == "Configure read-only parity role"
+    )
+    role_duration_seconds = int(role_step["with"]["role-duration-seconds"])
+    expected_minimum = (
+        2 * DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS
+        + fast_parity.FAST_CANDIDATE_MIGRATION_HEADROOM_COUNT
+        * DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS
+        + fast_parity.FAST_REHEARSAL_TIMEOUT_SECONDS
+        + fast_parity.FAST_SCHEMA_PREFLIGHT_NETWORK_PROBE_COUNT
+        * fast_parity.FAST_SCHEMA_PREFLIGHT_TIMEOUT_SECONDS
+        + fast_parity.FAST_DOCKER_STARTUP_AND_CLEANUP_HEADROOM_SECONDS
+        + fast_parity.FAST_PRODUCTION_DATA_READ_HEADROOM_SECONDS
+        + fast_parity.FAST_JOB_SETUP_HEADROOM_SECONDS
+    )
+    assert fast_parity.FAST_SCHEMA_PREFLIGHT_NETWORK_PROBE_COUNT == (
+        len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 3
+    )
+    assert fast_parity.FAST_CANDIDATE_MIGRATION_HEADROOM_COUNT == 2
+    assert fast_parity._fast_job_minimum_timeout_seconds(2) == expected_minimum
+    assert fast_parity.FAST_JOB_MINIMUM_TIMEOUT_SECONDS == expected_minimum
+    assert outer_seconds == fast_parity.FAST_JOB_OUTER_TIMEOUT_SECONDS
+    assert outer_seconds - expected_minimum >= 10 * 60
+    assert fast_parity._fast_job_minimum_timeout_seconds(5) >= outer_seconds
+    assert role_duration_seconds == fast_parity.FAST_AWS_ROLE_DURATION_SECONDS
+    assert role_duration_seconds - outer_seconds >= 20 * 60
 
 
 def test_fast_live_boundary_executes_get_without_disclosing_credential():

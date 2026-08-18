@@ -39,6 +39,7 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS = 900
+DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS = 300
 MAX_SNAPSHOT_IO_TIMEOUT_SECONDS = 72_000
 FULL_SNAPSHOT_DISK_RESERVE_BYTES = 64 * 1024**3
 
@@ -576,7 +577,7 @@ def restore_snapshot(
             _run(
                 ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-f", str(path)],
                 env=env,
-                timeout=300,
+                timeout=DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
             ),
             stage=f"candidate migration {migration['path']}",
         )

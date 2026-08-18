@@ -505,6 +505,8 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     )
     assert result["data_probe_count"] == 3
     assert result["schema_document_probe_count"] == 1
+    assert result["chain_realized_settlement_activation_http_probe_count"] == 1
+    assert result["chain_realized_settlement_activation_source"] == "postgrest"
     assert result["chain_realized_settlement_activation"] == {
         "netuid": 71,
         "first_epoch_id": 24196,
@@ -607,6 +609,71 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/156-production-parity-readonly-role.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
+
+
+def test_schema_preflight_provided_activation_avoids_data_request() -> None:
+    requests = []
+    activation = json.loads(_chain_realized_activation_response())[0]
+
+    def opener(request, *, timeout):
+        requests.append((request, timeout))
+        if (
+            "research_lab_chain_realized_settlement_activation_v1"
+            in request.full_url
+            and "limit=2" in request.full_url
+        ):
+            raise AssertionError("provided activation must not query clone rows")
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in (
+                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+                )
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        if request.full_url.endswith(
+            "/rpc/research_lab_compact_weight_settlement_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_compact_weight_settlement_contract_response()
+            )
+        if request.full_url.endswith(
+            "/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_candidate_hybrid_purpose_contract_response()
+            )
+        return _SchemaResponse()
+
+    result = schema_preflight.verify_required_supabase_v2_schema(
+        {
+            "SUPABASE_URL": "http://127.0.0.1:3000",
+            "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            "BITTENSOR_NETUID": "71",
+        },
+        opener=opener,
+        chain_realized_activation_authority=activation,
+    )
+
+    assert result["status"] == "ready"
+    assert result["data_probe_count"] == 3
+    assert result["chain_realized_settlement_activation_http_probe_count"] == 0
+    assert result["chain_realized_settlement_activation_source"] == (
+        "provided-authority"
+    )
+    assert result["chain_realized_settlement_activation"] == {
+        "netuid": 71,
+        "first_epoch_id": 24196,
+        "source_bundle_hash": "sha256:" + "a" * 64,
+        "source_finalized_block": 8715224,
+    }
+    assert not any(
+        "research_lab_chain_realized_settlement_activation_v1"
+        in request.full_url
+        and "limit=2" in request.full_url
+        for request, _timeout in requests
+    )
+    assert len(requests) == len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 3
 
 
 def test_candidate_hybrid_purpose_contract_rejects_scope_drift() -> None:

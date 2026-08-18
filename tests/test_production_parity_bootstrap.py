@@ -211,8 +211,20 @@ def test_oidc_provider_creation_and_retry_preserve_tagless_shared_shape():
     }]
 
 
-def test_existing_role_converges_and_reads_back_inert_trust_before_return():
-    role_name = setup.CONTROLLER_ROLE
+@pytest.mark.parametrize(
+    ("role_name", "expected_attached"),
+    (
+        (setup.CONTROLLER_ROLE, set()),
+        (
+            setup.RUNNER_ROLE,
+            {"arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"},
+        ),
+    ),
+    ids=("partial-controller", "partial-runner"),
+)
+def test_partial_owned_role_converges_and_reads_back_inert_trust_before_return(
+    role_name, expected_attached
+):
     active = {
         "Version": "2012-10-17",
         "Statement": [{
@@ -243,7 +255,9 @@ def test_existing_role_converges_and_reads_back_inert_trust_before_return():
             }]}
 
         def list_role_policies(self, **kwargs):
-            return {"PolicyNames": ["ExpectedPolicy"]}
+            # Simulate response loss immediately after create_role, before
+            # put_role_policy/attach_role_policy completed.
+            return {"PolicyNames": []}
 
         def list_attached_role_policies(self, **kwargs):
             return {"AttachedPolicies": []}
@@ -264,7 +278,7 @@ def test_existing_role_converges_and_reads_back_inert_trust_before_return():
         name=role_name,
         trust=inert,
         expected_inline_policies={"ExpectedPolicy"},
-        expected_attached_policies=set(),
+        expected_attached_policies=expected_attached,
         max_session_duration=43200,
     )
     assert arn == f"arn:aws:iam::{ACCOUNT}:role/{role_name}"
@@ -273,6 +287,42 @@ def test_existing_role_converges_and_reads_back_inert_trust_before_return():
     ]
     assert iam.trust == inert
     assert iam.duration == 43200
+
+
+def test_owned_role_with_unexpected_policy_fails_before_trust_mutation():
+    class IAM:
+        def get_role(self, **kwargs):
+            return {"Role": {
+                "Arn": (
+                    f"arn:aws:iam::{ACCOUNT}:role/{setup.CONTROLLER_ROLE}"
+                ),
+                "Path": "/",
+            }}
+
+        def list_role_tags(self, **kwargs):
+            return {"Tags": [{
+                "Key": "leadpoet:purpose",
+                "Value": "production-parity",
+            }]}
+
+        def list_role_policies(self, **kwargs):
+            return {"PolicyNames": ["UnexpectedPolicy"]}
+
+        def list_attached_role_policies(self, **kwargs):
+            return {"AttachedPolicies": []}
+
+        def update_assume_role_policy(self, **kwargs):
+            pytest.fail("unexpected-policy role trust was mutated")
+
+    with pytest.raises(setup.SetupError, match="policy inventory differs"):
+        setup._ensure_role(
+            IAM(),
+            account_id=ACCOUNT,
+            name=setup.CONTROLLER_ROLE,
+            trust=setup._inert_trust(),
+            expected_inline_policies={"ExpectedPolicy"},
+            expected_attached_policies=set(),
+        )
 
 
 def test_gateway_iam_cache_rejects_session_key_without_token(

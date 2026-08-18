@@ -349,8 +349,8 @@ def _ensure_role(
             )
         }
         if (
-            inline != expected_inline_policies
-            or attached != expected_attached_policies
+            not inline.issubset(expected_inline_policies)
+            or not attached.issubset(expected_attached_policies)
         ):
             raise SetupError(f"existing IAM role {name} policy inventory differs")
         iam.update_assume_role_policy(

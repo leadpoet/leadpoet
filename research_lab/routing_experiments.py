@@ -1216,6 +1216,26 @@ class PinnedSourcingModelRoutingAdapter:
             expected_profile_version=payload.version,
         )
 
+    def considered_tool_ids(self, plan: Any, *, stage: str) -> Sequence[str]:
+        """Project considered model tools, including typed route exclusions."""
+
+        if stage not in {
+            self.runtime.STAGE_INTENT_EVIDENCE,
+            self.runtime.STAGE_CANDIDATE_ACQUISITION,
+        }:
+            raise RoutingExperimentError("v2_considered_tool_stage_is_invalid")
+        route = getattr(plan, "route", plan)
+        entries = (
+            tuple(getattr(route, "steps", ()) or ())
+            + tuple(getattr(route, "exclusions", ()) or ())
+        )
+        considered: list[str] = []
+        for entry in entries:
+            tool_id = str(getattr(entry, "tool_id", "") or "").strip()
+            if tool_id and tool_id not in considered:
+                considered.append(_ensure_safe_ref(tool_id, "v2_considered_tool_id"))
+        return tuple(considered)
+
     def plan_decision_projection(self, plan: Any) -> Mapping[str, Any]:
         steps = getattr(getattr(plan, "route", None), "steps", ())
         attempted = tuple(str(getattr(step, "tool_id", "")) for step in steps if str(getattr(step, "execution_mode", "")) == self.runtime.EXECUTION_INVOKE)
@@ -3416,6 +3436,7 @@ class RoutingExperimentV2Adapter(Protocol):
     def plan_hash(self, plan: Any) -> str: ...
     def route_hash(self, plan: Any) -> str: ...
     def plan_step_budgets(self, plan: Any) -> Sequence[RoutingPlanStepBudget]: ...
+    def considered_tool_ids(self, plan: Any, *, stage: str) -> Sequence[str]: ...
     def plan_decision_projection(self, plan: Any) -> Mapping[str, Any]: ...
 
 
@@ -3898,6 +3919,8 @@ def validate_routing_experiment_v2_spec(
                     )
                     if candidate_identity == baseline_identity:
                         errors.append(f"v2_tool_and_route_routing_identity_must_differ:{variant.variant_id}")
+                elif variant.change_kind == "route_only" and candidate_identity == baseline_identity:
+                    errors.append(f"v2_route_only_routing_identity_must_differ:{variant.variant_id}")
             except Exception as exc:
                 errors.append(f"v2_variant_routing_identity_comparison_failed:{variant.variant_id}:{type(exc).__name__}")
     return sorted(set(errors))
@@ -4232,7 +4255,7 @@ def _v2_run_unit(
             raise RoutingExperimentError(f"v2_model_plan_max_calls_exceeded:{tool_id}")
         if sum(attempt_by_tool.values()) >= planned_call_cap:
             raise RoutingExperimentError("v2_model_plan_total_call_cap_exceeded")
-        if planned_seconds_cap > 0 and consumed_latency_ms[0] >= int(math.ceil(planned_seconds_cap * 1000)):
+        if planned_seconds_cap <= 0 or consumed_latency_ms[0] >= int(math.ceil(planned_seconds_cap * 1000)):
             raise RoutingExperimentError("v2_model_plan_total_time_cap_exceeded")
         attempt_by_tool[tool_id] = attempt + 1
         attempt_order.append(tool_id)
@@ -4387,10 +4410,26 @@ def _v2_run_unit(
         projection = adapter.plan_decision_projection(plan)
     except Exception as exc:
         raise RoutingExperimentError("v2_model_plan_decision_projection_failed") from exc
+    try:
+        considered_tool_ids = tuple(
+            _ensure_safe_ref(item, "v2_considered_tool_id")
+            for item in adapter.considered_tool_ids(plan, stage=variant.stage)
+        )
+    except Exception as exc:
+        raise RoutingExperimentError("v2_model_plan_considered_tools_failed") from exc
+    considered_tool_set = set(considered_tool_ids)
+    unbound_considered = considered_tool_set.difference(variant_bindings)
+    if unbound_considered:
+        raise RoutingExperimentError(
+            "v2_model_plan_considered_tool_is_unbound:" + ",".join(sorted(unbound_considered))
+        )
     attempted = tuple(_ensure_safe_ref(item, "v2_attempted_tool_id") for item in attempt_order)
-    planned_tools = tuple(item.tool_id for item in step_budgets if item.execution_mode == "invoke")
-    skipped_projection = dict(projection.get("skipped_tool_reasons") or {})
-    for tool_id in planned_tools:
+    skipped_projection = {
+        tool_id: reason
+        for tool_id, reason in dict(projection.get("skipped_tool_reasons") or {}).items()
+        if tool_id in considered_tool_set and tool_id in variant_bindings and tool_id not in attempt_by_tool
+    }
+    for tool_id in considered_tool_ids:
         if tool_id not in attempt_by_tool:
             skipped_projection.setdefault(tool_id, "runtime_unavailable" if not available_tools.get(tool_id, True) else "model_route_stopped")
     skipped = _v2_projection_pairs(skipped_projection, "skipped_tool_reasons")

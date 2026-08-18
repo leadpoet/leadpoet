@@ -193,6 +193,10 @@ class FakeV2Adapter:
     def plan_step_budgets(self, plan):
         return tuple(RoutingPlanStepBudget(tool_id=tool, execution_mode="invoke", max_calls=2, timeout_seconds=1, credit_microunits=10) for tool in plan.tools)
 
+    def considered_tool_ids(self, plan, *, stage):
+        del stage
+        return tuple(dict.fromkeys((*plan.tools, *plan.payload.get("considered", ()))))
+
     def plan_decision_projection(self, plan):
         return {"attempted_tool_ids": plan.tools, "skipped_tool_reasons": plan.payload.get("skipped", {}), "outcome_reasons": {}}
 
@@ -257,6 +261,8 @@ def _spec(stage: str = "intent_evidence", *, with_source_add: bool = False, two_
         "signal_type": "HIRING" if stage == "intent_evidence" else "",
         "route_change_class": "custom",
     }
+    if not with_source_add:
+        payload["route_variant"] = "candidate-route"
     if with_source_add:
         payload["skipped"] = {tool: "combined_route_change"}
     candidate_artifact_for_variant = candidate_artifact if (with_source_add or two_artifacts) else artifact
@@ -395,6 +401,39 @@ def test_v2_change_kind_requires_baseline_artifact_and_model_owned_route_class(s
         adapters={"baseline": adapters["baseline"], "bad-route-only": adapters["candidate"]},
     )
     assert any("route_only_artifact_must_match_baseline" in error for error in errors)
+
+
+@pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
+def test_v2_route_only_requires_an_exact_model_route_change(stage):
+    spec, adapters, _labels, _tool, _source_tool = _spec(stage)
+    changed_payload = dict(spec.variants[1].routing_payload)
+    changed_payload["route_profile_revision"] = "route-change-v2"
+    changed = replace(
+        spec.variants[1],
+        variant_id="changed-route",
+        routing_payload=changed_payload,
+        artifact=spec.variants[0].artifact,
+        source_add_provenance=(),
+        new_tool_ids=(),
+        change_kind="route_only",
+    )
+    changed_spec = replace(spec, experiment_id=f"{spec.experiment_id}-changed-route", variants=(spec.variants[0], changed))
+    assert validate_routing_experiment_v2_spec(
+        changed_spec,
+        adapters={"baseline": adapters["baseline"], "changed-route": adapters["candidate"]},
+    ) == []
+
+    unchanged = replace(
+        changed,
+        variant_id="unchanged-route",
+        routing_payload=dict(spec.variants[0].routing_payload),
+    )
+    unchanged_spec = replace(spec, experiment_id=f"{spec.experiment_id}-unchanged-route", variants=(spec.variants[0], unchanged))
+    errors = validate_routing_experiment_v2_spec(
+        unchanged_spec,
+        adapters={"baseline": adapters["baseline"], "unchanged-route": adapters["candidate"]},
+    )
+    assert any("route_only_routing_identity_must_differ" in error for error in errors)
 
 
 @pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
@@ -577,7 +616,10 @@ def test_v2_decision_outcomes_ignore_adversarial_model_projection():
         def plan_decision_projection(self, plan):
             del plan
             return {
-                "skipped_tool_reasons": {"intent.unattempted": "model_skip"},
+                "skipped_tool_reasons": {
+                    "intent.baseline": "fabricated_skip",
+                    "intent.unattempted": "model_skip",
+                },
                 "outcome_reasons": {
                     "intent.baseline": "invented_success",
                     "intent.unattempted": "invented_verified",
@@ -601,6 +643,50 @@ def test_v2_decision_outcomes_ignore_adversarial_model_projection():
     assert all("invented_success" not in dict(item) for item in outcomes)
     assert all("intent.unattempted" not in dict(item) for item in outcomes)
     assert all(set(dict(item)) <= {"intent.baseline"} for item in outcomes)
+    skips = [item.skipped_tool_reasons for item in decisions.values()]
+    assert all("intent.unattempted" not in dict(item) for item in skips)
+    assert all("fabricated_skip" not in dict(item).values() for item in skips)
+
+
+def test_v2_preserves_bound_model_exclusions_and_drops_unconsidered_projection_tools():
+    spec, adapters, labels, tool, _source_tool = _spec("intent_evidence")
+
+    class ExclusionAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del payload, kwargs
+            return Plan(
+                {
+                    "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                    "steps": [],
+                    "considered": [tool],
+                    "skipped": {
+                        tool: "model_exclusion",
+                        "intent.unconsidered": "fabricated_unbound",
+                    },
+                },
+                (),
+            )
+
+        def plan_step_budgets(self, plan):
+            del plan
+            return ()
+
+    decisions = RoutingDecisionReceiptStore()
+    evaluate_routing_experiment_v2(
+        spec,
+        gold_labels=labels,
+        runner=_runner,
+        adapters={
+            "baseline": ExclusionAdapter(adapters["baseline"].manifests),
+            "candidate": adapters["candidate"],
+        },
+        decision_store=decisions,
+        require_isolation=False,
+    )
+    baseline_decisions = [item for item in decisions.values() if item.variant_id == "baseline"]
+    assert baseline_decisions
+    assert all(dict(item.skipped_tool_reasons).get(tool) == "model_exclusion" for item in baseline_decisions)
+    assert all("intent.unconsidered" not in dict(item.skipped_tool_reasons) for item in baseline_decisions)
 
 
 def test_v2_enforces_compiled_plan_availability_calls_time_and_credit_caps():
@@ -630,6 +716,24 @@ def test_v2_enforces_compiled_plan_availability_calls_time_and_credit_caps():
             require_isolation=False,
         )
     assert unplanned_calls == []
+
+    class ZeroTimeAdapter(FakeV2Adapter):
+        def plan_step_budgets(self, plan):
+            return tuple(
+                RoutingPlanStepBudget(item, "invoke", 1, 0.0, 10)
+                for item in plan.tools
+            )
+
+    zero_time_calls = []
+    with pytest.raises(RoutingExperimentError, match="total_time_cap_exceeded"):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=lambda *args: zero_time_calls.append(args),
+            adapters={"baseline": ZeroTimeAdapter({tool: H("4")}), "candidate": adapters["candidate"]},
+            require_isolation=False,
+        )
+    assert zero_time_calls == []
 
     class UnavailableAdapter(FakeV2Adapter):
         def compile_variant(self, payload, **kwargs):

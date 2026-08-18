@@ -900,6 +900,8 @@ def _validated_clone_environment(
         != "false"
         or bool(values.get("RESEARCH_LAB_CORPUS_EXPORT_S3_PREFIX"))
         or bool(values.get("RESEARCH_LAB_EVIDENCE_PROXY_URL"))
+        or bool(values.get("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR"))
+        or bool(values.get("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH"))
         or bool(values.get("RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"))
         or bool(values.get("RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX"))
         or values.get("RESEARCH_LAB_SCORING_CACHE_DIR")

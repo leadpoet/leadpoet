@@ -2121,6 +2121,12 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
             "RESEARCH_LAB_CORPUS_EXPORT_ENABLED": "true",
             "RESEARCH_LAB_CORPUS_EXPORT_S3_PREFIX": "s3://production/corpus",
             "RESEARCH_LAB_EVIDENCE_PROXY_URL": "http://production-proxy:8765",
+            "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR": (
+                "/production/provider-evidence-cache"
+            ),
+            "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH": (
+                "/production/provider-evidence.jsonl"
+            ),
             "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH": (
                 "/production/provider-outcomes.jsonl"
             ),
@@ -2208,6 +2214,8 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["RESEARCH_LAB_CORPUS_EXPORT_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_CORPUS_EXPORT_S3_PREFIX"] == ""
     assert environment["RESEARCH_LAB_EVIDENCE_PROXY_URL"] == ""
+    assert environment["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR"] == ""
+    assert environment["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH"] == ""
     assert environment["RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"] == ""
     assert environment["RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX"] == ""
     assert environment["RESEARCH_LAB_SCORING_CACHE_DIR"] == (
@@ -2281,6 +2289,16 @@ def test_full_clone_environment_rejects_tampered_trace_destination(
         {"RESEARCH_LAB_CORPUS_EXPORT_ENABLED": "true"},
         {"RESEARCH_LAB_CORPUS_EXPORT_S3_PREFIX": "s3://production/corpus"},
         {"RESEARCH_LAB_EVIDENCE_PROXY_URL": "http://production-proxy:8765"},
+        {
+            "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR": (
+                "/production/provider-evidence-cache"
+            )
+        },
+        {
+            "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH": (
+                "/production/provider-evidence.jsonl"
+            )
+        },
         {
             "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH": (
                 "/production/provider-outcomes.jsonl"

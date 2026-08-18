@@ -27,8 +27,8 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        (github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'main'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 780
+    runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
+    timeout-minutes: 1430
     env:
       AWS_REGION: ${{ vars.LEADPOET_PARITY_AWS_REGION }}
       CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.event.workflow_run.head_sha }}
@@ -40,22 +40,61 @@ jobs:
       RUNNER_INSTANCE_PROFILE: ${{ vars.LEADPOET_PARITY_RUNNER_INSTANCE_PROFILE }}
       POSTGRES_IMAGE: ${{ vars.LEADPOET_PARITY_POSTGRES_IMAGE }}
       POSTGREST_IMAGE: ${{ vars.LEADPOET_PARITY_POSTGREST_IMAGE }}
-      PARITY_INSTANCE_TYPE: ${{ vars.LEADPOET_PARITY_INSTANCE_TYPE }}
       PARITY_VOLUME_GIB: ${{ vars.LEADPOET_PARITY_VOLUME_GIB }}
+      FULL_TIMEOUT_SECONDS: "72000"
+      SSM_TIMEOUT_SECONDS: "77400"
+      PARITY_TEMP: ${{ runner.temp }}/production-parity-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Prepare isolated self-hosted controller workspace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test -n "$PARITY_TEMP" && test "$PARITY_TEMP" = "$expected"
+          test ! -e "$PARITY_TEMP"
+          mkdir -m 700 "$PARITY_TEMP"
+
       - name: Check out exact attested candidate
         uses: actions/checkout@v4
         with:
           ref: ${{ env.CANDIDATE_SHA }}
           fetch-depth: 0
+          clean: true
 
       - name: Require exact current main candidate before credentials
+        id: provenance
         shell: bash
         run: |
           set -Eeuo pipefail
           git fetch --no-tags origin \
             refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test "$CANDIDATE_SHA" = "$(git rev-parse origin/main)"
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            test "${{ github.event.workflow_run.name }}" = "Attested V2 Release"
+            test "${{ github.event.workflow_run.conclusion }}" = "success"
+            test "${{ github.event.workflow_run.head_sha }}" = "$CANDIDATE_SHA"
+          else
+            GH_TOKEN="${{ github.token }}" gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow attested-v2-release.yml \
+              --commit "$CANDIDATE_SHA" --limit 20 \
+              --json conclusion,headSha > "$PARITY_TEMP/attested-runs.json"
+            python3 - "$PARITY_TEMP/attested-runs.json" "$CANDIDATE_SHA" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          runs = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if not any(
+              run.get("headSha") == sys.argv[2]
+              and run.get("conclusion") == "success"
+              for run in runs
+          ):
+              raise SystemExit("exact candidate has no successful attested release")
+          PY
+            rm -f "$PARITY_TEMP/attested-runs.json"
+          fi
+          echo 'verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Set up exact candidate controller
         uses: ./.github/actions/setup-production-parity-controller
@@ -65,6 +104,9 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "493765492819"
+          role-duration-seconds: 21600
+          unset-current-credentials: true
 
       - name: Freeze candidate and source inputs
         id: inputs
@@ -79,11 +121,15 @@ jobs:
             PRODUCTION_GATEWAY_SECRET_ID READONLY_DSN_SECRET_ID \
             MINER_INTAKE_SECRET_ID \
             RUNNER_INSTANCE_PROFILE POSTGRES_IMAGE \
-            POSTGREST_IMAGE; do
+            POSTGREST_IMAGE PARITY_VOLUME_GIB FULL_TIMEOUT_SECONDS \
+            SSM_TIMEOUT_SECONDS; do
             test -n "$(printenv "$name")"
           done
           printf '%s' "$POSTGRES_IMAGE" | grep -Eq '@sha256:[0-9a-f]{64}$'
           printf '%s' "$POSTGREST_IMAGE" | grep -Eq '@sha256:[0-9a-f]{64}$'
+          test "$PARITY_VOLUME_GIB" = "512"
+          test "$FULL_TIMEOUT_SECONDS" = "72000"
+          test "$SSM_TIMEOUT_SECONDS" = "77400"
           base="$(python3 scripts/resolve_production_parity_deployed_sha.py \
             --gateway-url "$PRODUCTION_GATEWAY_URL" \
             --candidate-sha "$CANDIDATE_SHA" \
@@ -106,14 +152,11 @@ jobs:
             --candidate-sha "$CANDIDATE_SHA"
             --production-gateway-ip "$PRODUCTION_GATEWAY_IP"
             --instance-profile-name "$RUNNER_INSTANCE_PROFILE"
-            --volume-gib "${PARITY_VOLUME_GIB:-200}"
-            --state "$RUNNER_TEMP/parity-stack.json"
+            --volume-gib "$PARITY_VOLUME_GIB"
+            --state "$PARITY_TEMP/parity-stack.json"
           )
-          if [ -n "${PARITY_INSTANCE_TYPE:-}" ]; then
-            args+=(--instance-type "$PARITY_INSTANCE_TYPE")
-          fi
           python3 scripts/provision_production_parity_staging.py "${args[@]}"
-          python3 - "$RUNNER_TEMP/parity-stack.json" "$GITHUB_OUTPUT" <<'PY'
+          python3 - "$PARITY_TEMP/parity-stack.json" "$GITHUB_OUTPUT" <<'PY'
           import json
           from pathlib import Path
           import sys
@@ -131,19 +174,19 @@ jobs:
         run: |
           set -Eeuo pipefail
           umask 077
-          git bundle create "$RUNNER_TEMP/candidate.bundle" --all
-          git bundle verify "$RUNNER_TEMP/candidate.bundle"
-          aws s3 cp "$RUNNER_TEMP/candidate.bundle" \
+          git bundle create "$PARITY_TEMP/candidate.bundle" --all
+          git bundle verify "$PARITY_TEMP/candidate.bundle"
+          aws s3 cp "$PARITY_TEMP/candidate.bundle" \
             "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/candidate.bundle" \
             --only-show-errors
 
-      - name: Execute candidate production paths
+      - name: Start candidate production paths
         id: execute
         shell: bash
         run: |
           set -Eeuo pipefail
           umask 077
-          python3 - "$RUNNER_TEMP/ssm-parameters.json" <<'PY'
+          python3 - "$PARITY_TEMP/ssm-parameters.json" <<'PY'
           import json
           import os
           from pathlib import Path
@@ -153,7 +196,8 @@ jobs:
               "AWS_REGION", "CANDIDATE_SHA", "PRODUCTION_GATEWAY_SECRET_ID",
               "READONLY_DSN_SECRET_ID",
               "MINER_INTAKE_SECRET_ID",
-              "POSTGRES_IMAGE", "POSTGREST_IMAGE",
+              "POSTGRES_IMAGE", "POSTGREST_IMAGE", "FULL_TIMEOUT_SECONDS",
+              "SSM_TIMEOUT_SECONDS",
           )}
           run_id = "${{ steps.inputs.outputs.run_id }}"
           base = "${{ steps.inputs.outputs.base }}"
@@ -186,7 +230,7 @@ jobs:
             --postgres-image {q(required['POSTGRES_IMAGE'])} \
             --postgrest-image {q(required['POSTGREST_IMAGE'])} \
             --output {q(root + "/full-evidence.json")} \
-            --timeout-seconds 43200 >{q(root + "/runner.log")} 2>&1 || status=$?
+            --timeout-seconds {q(required['FULL_TIMEOUT_SECONDS'])} >{q(root + "/runner.log")} 2>&1 || status=$?
           if [ -f {q(root + "/full-evidence.json")} ]; then
             aws s3 cp {q(root + "/full-evidence.json")} {q(f"s3://{artifact_bucket}/{prefix}/full-evidence.json")} --region {q(required['AWS_REGION'])} --only-show-errors
           fi
@@ -194,37 +238,137 @@ jobs:
           exit "$status"
           """
           Path(sys.argv[1]).write_text(
-              json.dumps({"commands": [command], "executionTimeout": ["43200"]}),
+              json.dumps({
+                  "commands": [command],
+                  "executionTimeout": [required["SSM_TIMEOUT_SECONDS"]],
+              }),
               encoding="utf-8",
           )
           PY
           command_id="$(aws ssm send-command \
             --instance-ids "${{ steps.stack.outputs.instance_id }}" \
             --document-name AWS-RunShellScript \
-            --timeout-seconds 43200 \
-            --parameters "file://$RUNNER_TEMP/ssm-parameters.json" \
+            --timeout-seconds "$SSM_TIMEOUT_SECONDS" \
+            --parameters "file://$PARITY_TEMP/ssm-parameters.json" \
             --query 'Command.CommandId' --output text)"
           printf 'command_id=%s\n' "$command_id" >> "$GITHUB_OUTPUT"
-          status="Pending"
-          for _ in $(seq 1 1440); do
-            status="$(aws ssm get-command-invocation \
-              --command-id "$command_id" \
-              --instance-id "${{ steps.stack.outputs.instance_id }}" \
-              --query Status --output text 2>/dev/null || true)"
-            case "$status" in
-              Success) break ;;
-              Failed|Cancelled|TimedOut|Cancelling)
-                aws ssm get-command-invocation \
-                  --command-id "$command_id" \
-                  --instance-id "${{ steps.stack.outputs.instance_id }}" \
-                  --query '{Status:Status,ResponseCode:ResponseCode,Error:StandardErrorContent}' \
-                  --output json || true
-                exit 1
-                ;;
-            esac
-            sleep 30
-          done
-          test "$status" = "Success"
+
+      - name: Refresh parity AWS role for poll window 1
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "493765492819"
+          role-duration-seconds: 21600
+          unset-current-credentials: true
+
+      - name: Poll candidate window 1
+        id: poll1
+        shell: bash
+        run: |
+          python3 scripts/poll_production_parity_ssm.py \
+            --region "$AWS_REGION" \
+            --command-id "${{ steps.execute.outputs.command_id }}" \
+            --instance-id "${{ steps.stack.outputs.instance_id }}" \
+            --max-wait-seconds 16200 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Refresh parity AWS role for poll window 2
+        if: steps.poll1.outputs.status == 'pending'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "493765492819"
+          role-duration-seconds: 21600
+          unset-current-credentials: true
+
+      - name: Poll candidate window 2
+        if: steps.poll1.outputs.status == 'pending'
+        id: poll2
+        shell: bash
+        run: |
+          python3 scripts/poll_production_parity_ssm.py \
+            --region "$AWS_REGION" \
+            --command-id "${{ steps.execute.outputs.command_id }}" \
+            --instance-id "${{ steps.stack.outputs.instance_id }}" \
+            --max-wait-seconds 16200 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Refresh parity AWS role for poll window 3
+        if: steps.poll2.outputs.status == 'pending'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "493765492819"
+          role-duration-seconds: 21600
+          unset-current-credentials: true
+
+      - name: Poll candidate window 3
+        if: steps.poll2.outputs.status == 'pending'
+        id: poll3
+        shell: bash
+        run: |
+          python3 scripts/poll_production_parity_ssm.py \
+            --region "$AWS_REGION" \
+            --command-id "${{ steps.execute.outputs.command_id }}" \
+            --instance-id "${{ steps.stack.outputs.instance_id }}" \
+            --max-wait-seconds 16200 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Refresh parity AWS role for poll window 4
+        if: steps.poll3.outputs.status == 'pending'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "493765492819"
+          role-duration-seconds: 21600
+          unset-current-credentials: true
+
+      - name: Poll candidate window 4
+        if: steps.poll3.outputs.status == 'pending'
+        id: poll4
+        shell: bash
+        run: |
+          python3 scripts/poll_production_parity_ssm.py \
+            --region "$AWS_REGION" \
+            --command-id "${{ steps.execute.outputs.command_id }}" \
+            --instance-id "${{ steps.stack.outputs.instance_id }}" \
+            --max-wait-seconds 16200 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Refresh parity AWS role for poll window 5
+        if: steps.poll4.outputs.status == 'pending'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "493765492819"
+          role-duration-seconds: 21600
+          unset-current-credentials: true
+
+      - name: Poll candidate window 5
+        if: steps.poll4.outputs.status == 'pending'
+        id: poll5
+        shell: bash
+        run: |
+          python3 scripts/poll_production_parity_ssm.py \
+            --region "$AWS_REGION" \
+            --command-id "${{ steps.execute.outputs.command_id }}" \
+            --instance-id "${{ steps.stack.outputs.instance_id }}" \
+            --max-wait-seconds 12600 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Require terminal SSM success within the full deadline
+        shell: bash
+        run: |
+          test "${{ steps.poll1.outputs.status }}" = "success" || \
+            test "${{ steps.poll2.outputs.status }}" = "success" || \
+            test "${{ steps.poll3.outputs.status }}" = "success" || \
+            test "${{ steps.poll4.outputs.status }}" = "success" || \
+            test "${{ steps.poll5.outputs.status }}" = "success"
 
       - name: Verify redacted full evidence
         shell: bash
@@ -232,8 +376,8 @@ jobs:
           set -Eeuo pipefail
           aws s3 cp \
             "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/full-evidence.json" \
-            "$RUNNER_TEMP/full-evidence.json" --only-show-errors
-          python3 - "$RUNNER_TEMP/full-evidence.json" "$CANDIDATE_SHA" <<'PY'
+            "$PARITY_TEMP/full-evidence.json" --only-show-errors
+          python3 - "$PARITY_TEMP/full-evidence.json" "$CANDIDATE_SHA" <<'PY'
           import json
           from pathlib import Path
           import sys
@@ -285,25 +429,72 @@ jobs:
               raise SystemExit("full production-parity evidence is incomplete")
           PY
 
-      - name: Upload redacted evidence
+      - name: Validate redacted evidence upload path
         if: always()
+        id: evidence_path
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test -n "$PARITY_TEMP" && test "$PARITY_TEMP" = "$expected"
+          if [ -e "$PARITY_TEMP/full-evidence.json" ]; then
+            test -f "$PARITY_TEMP/full-evidence.json"
+            test ! -L "$PARITY_TEMP/full-evidence.json"
+          fi
+          echo 'verified=true' >> "$GITHUB_OUTPUT"
+
+      - name: Upload redacted evidence
+        if: >-
+          always() && steps.evidence_path.outputs.verified == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: production-parity-full-${{ env.CANDIDATE_SHA }}
           retention-days: 14
           if-no-files-found: ignore
-          path: ${{ runner.temp }}/full-evidence.json
+          path: ${{ env.PARITY_TEMP }}/full-evidence.json
+
+      - name: Refresh parity AWS role for cleanup
+        if: >-
+          always() && steps.provenance.outputs.verified == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "493765492819"
+          role-duration-seconds: 21600
+          unset-current-credentials: true
 
       - name: Destroy every run-scoped resource
+        if: >-
+          always() && steps.provenance.outputs.verified == 'true'
+        shell: bash
+        run: |
+          set +e
+          expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [ -z "$PARITY_TEMP" ] || [ "$PARITY_TEMP" != "$expected" ]; then
+            exit 1
+          fi
+          cleanup_status=0
+          if [ -s "$PARITY_TEMP/parity-stack.json" ]; then
+            python3 scripts/provision_production_parity_staging.py \
+              --region "$AWS_REGION" delete \
+              --state "$PARITY_TEMP/parity-stack.json" || cleanup_status=$?
+          fi
+          shred -u "$PARITY_TEMP/candidate.bundle" 2>/dev/null || \
+            rm -f "$PARITY_TEMP/candidate.bundle"
+          rm -f "$PARITY_TEMP/ssm-parameters.json"
+          rm -rf -- "$PARITY_TEMP"
+          exit "$cleanup_status"
+
+      - name: Scrub self-hosted controller workspace
         if: always()
         shell: bash
         run: |
           set +e
-          if [ -s "$RUNNER_TEMP/parity-stack.json" ]; then
-            python3 scripts/provision_production_parity_staging.py \
-              --region "$AWS_REGION" delete \
-              --state "$RUNNER_TEMP/parity-stack.json"
+          expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [ -z "$PARITY_TEMP" ] || [ "$PARITY_TEMP" != "$expected" ]; then
+            exit 1
           fi
-          shred -u "$RUNNER_TEMP/candidate.bundle" 2>/dev/null || \
-            rm -f "$RUNNER_TEMP/candidate.bundle"
-          rm -f "$RUNNER_TEMP/ssm-parameters.json"
+          rm -rf -- "$PARITY_TEMP"
+          git reset --hard HEAD >/dev/null 2>&1
+          git clean -ffdx >/dev/null 2>&1

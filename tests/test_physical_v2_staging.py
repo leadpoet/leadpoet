@@ -226,7 +226,7 @@ def test_transient_stack_is_one_encrypted_nitro_host_with_tls_viewer_boundary(mo
         production_gateway_ip="52.91.135.79",
         instance_profile_name="leadpoet-production-parity-runner",
         instance_type=None,
-        volume_gib=200,
+        volume_gib=512,
     )
     assert state["instance_id"] == "i-parity"
     assert state["supabase_origin"] == "https://parity.cloudfront.net"
@@ -247,6 +247,8 @@ def test_transient_stack_is_one_encrypted_nitro_host_with_tls_viewer_boundary(mo
     root = ec2.launch["BlockDeviceMappings"][0]["Ebs"]
     assert root["Encrypted"] is True
     assert root["DeleteOnTermination"] is True
+    assert root["VolumeType"] == "gp3"
+    assert root["VolumeSize"] == 512
     permission = ec2.ingress["IpPermissions"][0]
     assert permission["FromPort"] == permission["ToPort"] == 3000
     assert permission["PrefixListIds"] == [{"PrefixListId": "pl-cloudfront"}]
@@ -275,7 +277,7 @@ def test_partial_provisioning_failure_immediately_rolls_back_costly_resources():
             production_gateway_ip="52.91.135.79",
             instance_profile_name="leadpoet-production-parity-runner",
             instance_type=None,
-            volume_gib=200,
+            volume_gib=512,
         )
     assert ec2.terminated == ["i-parity"]
     assert ec2.deleted_groups == ["sg-parity"]

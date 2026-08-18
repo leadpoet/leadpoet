@@ -36,10 +36,11 @@ from leadpoet_canonical.production_parity_boundary_v2 import (  # noqa: E402
 
 
 RUN_RE = re.compile(r"^[a-z0-9-]{6,40}$")
+RUN_SECRET_RE = re.compile(r"^pp-[1-9][0-9]*-[1-9][0-9]*$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-SECRET_PREFIX = "leadpoet/staging/production-parity"
+SECRET_PREFIX = "leadpoet/staging/production-parity/runs"
 
 _DROP_EXACT = {
     "AWS_ACCESS_KEY_ID",
@@ -193,7 +194,7 @@ def _secret_string(client: Any, secret_id: str) -> str:
 
 
 def secret_name(run_id: str) -> str:
-    if not RUN_RE.fullmatch(run_id):
+    if not RUN_SECRET_RE.fullmatch(run_id):
         raise SecretMaterializationError("parity run identity is invalid")
     return f"{SECRET_PREFIX}/{run_id}/gateway"
 

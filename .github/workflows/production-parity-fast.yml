@@ -57,6 +57,8 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "493765492819"
+          unset-current-credentials: true
 
       - name: Install PostgreSQL client
         run: |

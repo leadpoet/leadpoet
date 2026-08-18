@@ -22,6 +22,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
+
+      - name: Require exact current main before credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 
       - uses: ./.github/actions/setup-production-parity-controller
 
@@ -29,6 +38,8 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ vars.LEADPOET_PARITY_AWS_REGION }}
+          allowed-account-ids: "493765492819"
+          unset-current-credentials: true
 
       - name: Remove only stale tagged resources
         run: |

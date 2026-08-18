@@ -17,8 +17,13 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 RUN_RE = re.compile(r"^[a-z0-9-]{6,40}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-SECRET_RE = re.compile(
-    r"^leadpoet/staging/production-parity/(?P<run>[a-z0-9-]{6,40})/gateway$"
+NEW_SECRET_RE = re.compile(
+    r"^leadpoet/staging/production-parity/runs/"
+    r"(?P<run>[a-z0-9-]{6,40})/gateway$"
+)
+LEGACY_SECRET_RE = re.compile(
+    r"^leadpoet/staging/production-parity/"
+    r"(?P<run>[a-z0-9-]{6,40})/gateway$"
 )
 BUCKET_RE = re.compile(r"^leadpoet-parity-[0-9]{12}-[0-9a-f]{16}$")
 TAG_RUN = "leadpoet:parity-run"
@@ -128,21 +133,29 @@ def cleanup_stale(
             raise StagingCleanupError("CloudFront pagination is invalid")
 
     paginator = secretsmanager.get_paginator("list_secrets")
-    for page in paginator.paginate(
-        Filters=[{"Key": "name", "Values": ["leadpoet/staging/production-parity/"]}],
-        IncludePlannedDeletion=False,
+    observed_secret_names: set[str] = set()
+    for prefix, pattern in (
+        ("leadpoet/staging/production-parity/runs/pp-", NEW_SECRET_RE),
+        ("leadpoet/staging/production-parity/pp-", LEGACY_SECRET_RE),
     ):
-        for item in page.get("SecretList", []):
-            name = str(item.get("Name") or "")
-            match = SECRET_RE.fullmatch(name)
-            run_id = _owned_run(item.get("Tags"))
-            if (
-                match is not None
-                and run_id == match.group("run")
-                and _utc(item.get("CreatedDate")) <= cutoff
-            ):
-                stale_runs.add(run_id)
-                secrets.append(name)
+        for page in paginator.paginate(
+            Filters=[{"Key": "name", "Values": [prefix]}],
+            IncludePlannedDeletion=False,
+        ):
+            for item in page.get("SecretList", []):
+                name = str(item.get("Name") or "")
+                if name in observed_secret_names:
+                    continue
+                observed_secret_names.add(name)
+                match = pattern.fullmatch(name)
+                run_id = _owned_run(item.get("Tags"))
+                if (
+                    match is not None
+                    and run_id == match.group("run")
+                    and _utc(item.get("CreatedDate")) <= cutoff
+                ):
+                    stale_runs.add(run_id)
+                    secrets.append(name)
 
     for item in s3.list_buckets().get("Buckets", []):
         name = str(item.get("Name") or "")

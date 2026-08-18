@@ -258,8 +258,7 @@ def _create_stack_resources(
         not RUN_RE.fullmatch(run_id)
         or not SHA_RE.fullmatch(candidate_sha)
         or not instance_profile_name
-        or volume_gib < 100
-        or volume_gib > 1024
+        or volume_gib != 512
     ):
         raise ProvisioningError("ephemeral stack inputs are invalid")
     reference = _single_production_instance(ec2, production_gateway_ip)
@@ -616,7 +615,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     create_parser.add_argument("--production-gateway-ip", required=True)
     create_parser.add_argument("--instance-profile-name", required=True)
     create_parser.add_argument("--instance-type")
-    create_parser.add_argument("--volume-gib", type=int, default=200)
+    create_parser.add_argument("--volume-gib", type=int, default=512)
     create_parser.add_argument("--state", type=Path, required=True)
     delete_parser = subparsers.add_parser("delete")
     delete_parser.add_argument("--state", type=Path, required=True)

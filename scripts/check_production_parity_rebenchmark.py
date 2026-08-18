@@ -23,7 +23,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 SCHEMA_VERSION = "leadpoet.production_parity_rebenchmark_readiness.v1"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SECRET_RE = re.compile(
-    r"^leadpoet/staging/production-parity/[a-z0-9-]{6,40}/gateway$"
+    r"^leadpoet/staging/production-parity/runs/"
+    r"pp-[1-9][0-9]*-[1-9][0-9]*/gateway$"
 )
 ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

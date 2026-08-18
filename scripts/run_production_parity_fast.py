@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -15,11 +14,18 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError
-from urllib.parse import urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.request import (
+    HTTPRedirectHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+    urlopen,
+)
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -71,6 +77,48 @@ CRITICAL_STAGES = (
     "cleanup",
 )
 PINNED_IMAGE_RE = re.compile(r"^[A-Za-z0-9._/:@-]+@sha256:[0-9a-f]{64}$")
+CHAIN_REALIZED_ACTIVATION_TABLE = "research_lab_chain_realized_settlement_activation_v1"
+CHAIN_REALIZED_ACTIVATION_SCHEMA_VERSION = (
+    "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+)
+CHAIN_REALIZED_ACTIVATION_COLUMNS = (
+    "netuid",
+    "schema_version",
+    "first_epoch_id",
+    "source_bundle_hash",
+    "source_bundle_epoch_id",
+    "source_finalized_block",
+)
+SAFE_REHEARSAL_ERROR_TYPES = frozenset(
+    {
+        "AssertionError",
+        "CalledProcessError",
+        "FileNotFoundError",
+        "OSError",
+        "PermissionError",
+        "RehearsalTimeBudgetExceeded",
+        "RuntimeError",
+        "SystemExit",
+        "TimeoutExpired",
+        "TypeError",
+        "ValueError",
+    }
+)
+SAFE_REHEARSAL_STAGE_PATTERNS = (
+    r"python37-finalization",
+    r"drand-artifact-[0-9a-f]{12}",
+    r"fixture-seed-[0-9a-f]{12}",
+    r"fixture-orchestration",
+    r"fixture-cleanup",
+    r"(?:gateway|validator)-(?:forward|rollback)-[1-3]",
+    r"workflow-(?:prepush|release)",
+    r"evidence-join-(?:prepush|release)",
+    r"time-budget",
+)
+SECRET_LIKE_DIAGNOSTIC_RE = re.compile(
+    r"(?i)(?:authorization|bearer|api[_-]?key|secret|password|token|"
+    r"credential|private[_ -]?key|-----begin|://[^/\s]+:[^@\s]+@)"
+)
 
 
 class _CloneSupabaseProvider:
@@ -167,6 +215,75 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+class _StandalonePostgrestSchemaOpener:
+    """Map Supabase API paths only onto one loopback PostgREST origin."""
+
+    def __init__(self, origin: str) -> None:
+        parsed = urlsplit(str(origin or "").rstrip("/"))
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ProductionParityError(
+                "standalone PostgREST origin is invalid"
+            ) from exc
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ProductionParityError(
+                "standalone PostgREST origin is not exact loopback"
+            )
+        self._origin = parsed
+        self._opener = build_opener(ProxyHandler({}), _NoRedirect)
+
+    def __call__(self, request: Request, *, timeout: float):
+        if not isinstance(request, Request):
+            raise ProductionParityError(
+                "standalone PostgREST schema request is invalid"
+            )
+        parsed = urlsplit(request.full_url)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ProductionParityError(
+                "standalone PostgREST schema request is invalid"
+            ) from exc
+        if (
+            parsed.scheme != self._origin.scheme
+            or parsed.hostname != self._origin.hostname
+            or port != self._origin.port
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or (parsed.path != "/rest/v1" and not parsed.path.startswith("/rest/v1/"))
+        ):
+            raise ProductionParityError(
+                "standalone PostgREST schema request escaped the clone"
+            )
+        standalone_path = parsed.path[len("/rest/v1") :] or "/"
+        outbound = Request(
+            urlunsplit(
+                (
+                    self._origin.scheme,
+                    self._origin.netloc,
+                    standalone_path,
+                    parsed.query,
+                    "",
+                )
+            ),
+            data=request.data,
+            headers=dict(request.header_items()),
+            method=request.get_method(),
+        )
+        return self._opener.open(outbound, timeout=timeout)
+
+
 class _ProductionReadOnlySupabaseProvider:
     """Execute only candidate-generated GETs against the exact live origin."""
 
@@ -179,7 +296,9 @@ class _ProductionReadOnlySupabaseProvider:
                 "production PostgREST origin differs from the measured origin"
             )
         if not str(service_role_key or "").strip():
-            raise ProductionParityError("production PostgREST read credential is missing")
+            raise ProductionParityError(
+                "production PostgREST read credential is missing"
+            )
         self.origin = normalized
         self.service_role_key = str(service_role_key)
         self.pages: list[dict[str, Any]] = []
@@ -270,9 +389,11 @@ def _load_production_supabase_read(
     *, region: str, secret_id: str
 ) -> _ProductionReadOnlySupabaseProvider:
     try:
-        raw = boto3.client("secretsmanager", region_name=region).get_secret_value(
-            SecretId=secret_id
-        ).get("SecretString")
+        raw = (
+            boto3.client("secretsmanager", region_name=region)
+            .get_secret_value(SecretId=secret_id)
+            .get("SecretString")
+        )
         values = _parse_environment_document(
             str(raw or ""), field="production gateway environment"
         )
@@ -284,6 +405,139 @@ def _load_production_supabase_read(
         origin=str(values.get("SUPABASE_URL") or ""),
         service_role_key=str(values.get("SUPABASE_SERVICE_ROLE_KEY") or ""),
     )
+
+
+def _validated_chain_realized_activation(
+    value: Any, *, expected_netuid: int
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(
+        CHAIN_REALIZED_ACTIVATION_COLUMNS
+    ):
+        raise ProductionParityError(
+            "production chain-realized activation row is invalid"
+        )
+    integer_fields = (
+        "netuid",
+        "first_epoch_id",
+        "source_bundle_epoch_id",
+        "source_finalized_block",
+    )
+    if (
+        any(type(value.get(name)) is not int for name in integer_fields)
+        or type(value.get("schema_version")) is not str
+        or type(value.get("source_bundle_hash")) is not str
+    ):
+        raise ProductionParityError(
+            "production chain-realized activation row is invalid"
+        )
+    row = {name: value[name] for name in CHAIN_REALIZED_ACTIVATION_COLUMNS}
+    if (
+        type(expected_netuid) is not int
+        or expected_netuid <= 0
+        or row["netuid"] != expected_netuid
+        or row["schema_version"] != CHAIN_REALIZED_ACTIVATION_SCHEMA_VERSION
+        or row["first_epoch_id"] < 0
+        or row["source_bundle_epoch_id"] != row["first_epoch_id"]
+        or row["source_finalized_block"] < 0
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(row["source_bundle_hash"])) is None
+    ):
+        raise ProductionParityError(
+            "production chain-realized activation row is invalid"
+        )
+    return row
+
+
+def _read_production_chain_realized_activation(
+    *, provider: _ProductionReadOnlySupabaseProvider, netuid: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if type(netuid) is not int or netuid <= 0:
+        raise ProductionParityError(
+            "production chain-realized activation netuid is invalid"
+        )
+    query = urlencode(
+        {
+            "select": ",".join(CHAIN_REALIZED_ACTIVATION_COLUMNS),
+            "netuid": f"eq.{netuid}",
+            "limit": "2",
+        }
+    )
+    result = provider(
+        {
+            "provider_id": "supabase",
+            "method": "GET",
+            "url": (
+                f"{SUPABASE_WEIGHT_SOURCE_ORIGIN}/rest/v1/"
+                f"{CHAIN_REALIZED_ACTIVATION_TABLE}?{query}"
+            ),
+            "headers": {"Accept": "application/json"},
+            "body_b64": "",
+            "timeout_ms": 20_000,
+            "logical_operation_id": ("production-parity-chain-realized-activation-v1"),
+        }
+    )
+    attempt = result.get("transport_attempt") if isinstance(result, Mapping) else None
+    if (
+        not isinstance(result, Mapping)
+        or result.get("terminal_status") != "authenticated_response"
+        or type(result.get("http_status")) is not int
+        or result.get("http_status") != 200
+        or not isinstance(attempt, Mapping)
+        or attempt.get("terminal_status") != "authenticated_response"
+        or type(attempt.get("http_status")) is not int
+        or attempt.get("http_status") != 200
+        or attempt.get("adapter") != _ProductionReadOnlySupabaseProvider.adapter_name
+        or not isinstance(result.get("body_b64"), str)
+    ):
+        raise ProductionParityError("production chain-realized activation read failed")
+    response_hash = str(attempt.get("response_hash") or "")
+    request_hash = str(attempt.get("request_artifact_hash") or "")
+    if any(
+        re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+        for value in (response_hash, request_hash)
+    ):
+        raise ProductionParityError(
+            "production chain-realized activation evidence is invalid"
+        )
+    try:
+        encoded = base64.b64decode(str(result.get("body_b64") or ""), validate=True)
+        if not encoded or len(encoded) > 4096:
+            raise ValueError("activation response size is invalid")
+        if (
+            "sha256:" + hashlib.sha256(encoded).hexdigest() != response_hash
+            or attempt.get("response_artifact_hash") != response_hash
+        ):
+            raise ValueError("activation response hash differs")
+
+        def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            decoded: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in decoded:
+                    raise ValueError("activation response repeats a field")
+                decoded[key] = value
+            return decoded
+
+        rows = json.loads(encoded.decode("utf-8"), object_pairs_hook=unique_object)
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise ProductionParityError(
+            "production chain-realized activation response is invalid"
+        ) from exc
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise ProductionParityError(
+            "production chain-realized activation is missing or ambiguous"
+        )
+    row = _validated_chain_realized_activation(rows[0], expected_netuid=netuid)
+    return row, {
+        "netuid": row["netuid"],
+        "first_epoch_id": row["first_epoch_id"],
+        "source_bundle_epoch_id": row["source_bundle_epoch_id"],
+        "source_finalized_block": row["source_finalized_block"],
+        "source_bundle_hash": row["source_bundle_hash"],
+        "schema_version_hash": "sha256:"
+        + hashlib.sha256(row["schema_version"].encode("utf-8")).hexdigest(),
+        "activation_row_hash": sha256_json(row),
+        "response_hash": response_hash,
+        "request_artifact_hash": request_hash,
+    }
 
 
 def _load_json(path: Path, *, description: str) -> dict[str, Any]:
@@ -431,10 +685,14 @@ class _DockerDatabase:
             time.sleep(1)
         else:
             raise ProductionParityError("parity PostgreSQL did not become ready")
-        port = _require_success(
-            _run(["docker", "port", self.postgres, "5432/tcp"], timeout=10),
-            stage="parity PostgreSQL port discovery",
-        ).strip().rsplit(":", 1)[-1]
+        port = (
+            _require_success(
+                _run(["docker", "port", self.postgres, "5432/tcp"], timeout=10),
+                stage="parity PostgreSQL port discovery",
+            )
+            .strip()
+            .rsplit(":", 1)[-1]
+        )
         self.target_dsn = (
             f"postgresql://postgres:{self.password}@127.0.0.1:{port}/{self.database}"
         )
@@ -557,9 +815,7 @@ SELECT json_build_object(
             or set(evidence) != expected
             or any(evidence.get(name) is not True for name in expected)
         ):
-            raise ProductionParityError(
-                "snapshot restore prerequisites did not verify"
-            )
+            raise ProductionParityError("snapshot restore prerequisites did not verify")
         return {name: True for name in sorted(expected)}
 
     def verify_snapshot_restore(self) -> dict[str, bool]:
@@ -580,10 +836,98 @@ SELECT json_build_object(
                 "snapshot restore contract readback is invalid"
             ) from exc
         if evidence != {"deterministic_uuid_repeatable": True}:
-            raise ProductionParityError(
-                "snapshot restore contract did not verify"
-            )
+            raise ProductionParityError("snapshot restore contract did not verify")
         return {"deterministic_uuid_repeatable": True}
+
+    def seed_chain_realized_activation(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        expected_netuid = row.get("netuid")
+        if type(expected_netuid) is not int:
+            raise ProductionParityError(
+                "production chain-realized activation row is invalid"
+            )
+        expected = _validated_chain_realized_activation(
+            row, expected_netuid=expected_netuid
+        )
+        existing = self._psql(
+            "SELECT COUNT(*)::text FROM public." f"{CHAIN_REALIZED_ACTIVATION_TABLE};"
+        ).strip()
+        if not existing.isdigit() or int(existing) != 0:
+            raise ProductionParityError(
+                "disposable clone activation table is not empty"
+            )
+        self._psql(
+            """
+INSERT INTO public.research_lab_chain_realized_settlement_activation_v1 (
+  netuid,
+  schema_version,
+  first_epoch_id,
+  source_bundle_hash,
+  source_bundle_epoch_id,
+  source_finalized_block
+) VALUES (
+  {netuid},
+  '{schema_version}',
+  {first_epoch_id},
+  '{source_bundle_hash}',
+  {source_bundle_epoch_id},
+  {source_finalized_block}
+);
+""".format(
+                **expected
+            )
+        )
+        encoded = self._psql(
+            """
+SELECT json_build_object(
+  'row_count', COUNT(*),
+  'rows', COALESCE(
+    json_agg(
+      json_build_object(
+        'netuid', netuid,
+        'schema_version', schema_version,
+        'first_epoch_id', first_epoch_id,
+        'source_bundle_hash', source_bundle_hash,
+        'source_bundle_epoch_id', source_bundle_epoch_id,
+        'source_finalized_block', source_finalized_block
+      ) ORDER BY netuid
+    ),
+    '[]'::json
+  )
+)::text
+FROM public.research_lab_chain_realized_settlement_activation_v1;
+"""
+        ).strip()
+        try:
+            readback = json.loads(encoded)
+        except (TypeError, ValueError) as exc:
+            raise ProductionParityError(
+                "disposable clone activation readback is invalid"
+            ) from exc
+        if (
+            not isinstance(readback, Mapping)
+            or set(readback) != {"row_count", "rows"}
+            or type(readback.get("row_count")) is not int
+            or readback.get("row_count") != 1
+            or not isinstance(readback.get("rows"), list)
+            or len(readback["rows"]) != 1
+        ):
+            raise ProductionParityError(
+                "disposable clone activation readback is invalid"
+            )
+        actual = _validated_chain_realized_activation(
+            readback["rows"][0], expected_netuid=expected["netuid"]
+        )
+        if actual != expected:
+            raise ProductionParityError("disposable clone activation identity differs")
+        return {
+            "row_count": 1,
+            "netuid": actual["netuid"],
+            "first_epoch_id": actual["first_epoch_id"],
+            "source_bundle_epoch_id": actual["source_bundle_epoch_id"],
+            "source_finalized_block": actual["source_finalized_block"],
+            "source_bundle_hash": actual["source_bundle_hash"],
+            "activation_row_hash": sha256_json(actual),
+        }
 
     def start_postgrest(self) -> tuple[str, str]:
         self.prepare_snapshot_restore()
@@ -633,10 +977,14 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_
             ),
             stage="parity PostgREST start",
         )
-        port = _require_success(
-            _run(["docker", "port", self.postgrest, "3000/tcp"], timeout=10),
-            stage="parity PostgREST port discovery",
-        ).strip().rsplit(":", 1)[-1]
+        port = (
+            _require_success(
+                _run(["docker", "port", self.postgrest, "3000/tcp"], timeout=10),
+                stage="parity PostgREST port discovery",
+            )
+            .strip()
+            .rsplit(":", 1)[-1]
+        )
         self.supabase_url = f"http://127.0.0.1:{port}"
         token = _service_role_token(self.jwt_secret)
         deadline = time.monotonic() + 60
@@ -784,6 +1132,7 @@ LIMIT 1;
         adapter = provider or _CloneSupabaseProvider(
             clone_url=self.supabase_url, service_role_key=service_role_key
         )
+        page_offset = len(adapter.pages)
         attempts: list[dict[str, Any]] = []
         artifacts: list[str] = []
         reader = SupabaseSourceReaderV2(
@@ -807,18 +1156,19 @@ LIMIT 1;
             raise ProductionParityError(
                 "candidate measured source did not reproduce the complete production history"
             )
-        page_bytes = [int(item["response_bytes"]) for item in adapter.pages]
-        if not page_bytes or len(attempts) != len(adapter.pages):
+        measured_pages = adapter.pages[page_offset:]
+        page_bytes = [int(item["response_bytes"]) for item in measured_pages]
+        if not page_bytes or len(attempts) != len(measured_pages):
             raise ProductionParityError(
                 "candidate measured source did not produce complete page evidence"
             )
         return {
             **scope,
             "read_rows": len(rows),
-            "page_count": len(adapter.pages),
+            "page_count": len(measured_pages),
             "total_response_bytes": sum(page_bytes),
             "max_page_bytes": max(page_bytes),
-            "response_hashes": [item["response_hash"] for item in adapter.pages],
+            "response_hashes": [item["response_hash"] for item in measured_pages],
             "artifact_count": len(artifacts),
             "adapter": getattr(
                 adapter,
@@ -858,26 +1208,244 @@ def _rehearsal_evidence_path(candidate_sha: str) -> Path:
     return Path("/tmp") / f"leadpoet-restart-rehearsal-{candidate_sha}-prepush.json"
 
 
+def _safe_rehearsal_stage(stage: str) -> bool:
+    return any(
+        re.fullmatch(pattern, stage) for pattern in SAFE_REHEARSAL_STAGE_PATTERNS
+    )
+
+
+def _rehearsal_error_category(line: str) -> str | None:
+    lowered = line.lower()
+    categories = (
+        ("resource_oom", ("out of memory", "oom", "cannot allocate memory")),
+        ("resource_disk", ("no space left", "disk", "free bytes", "storage")),
+        ("permission", ("permission denied", "operation not permitted")),
+        ("timeout", ("timed out", "timeout", "exceeded its")),
+        ("database_shutting_down", ("database system is shutting down",)),
+        ("connection_refused", ("connection refused",)),
+        ("postgrest", ("postgrest",)),
+        ("schema", ("schema",)),
+        ("gateway_launcher", ("gateway launcher failed",)),
+        ("validator_launcher", ("validator launcher failed",)),
+        ("docker_unavailable", ("docker daemon", "docker/containerd")),
+    )
+    for category, markers in categories:
+        if any(marker in lowered for marker in markers):
+            return category
+    return None
+
+
+def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    contract_kinds = {
+        "adapter",
+        "aws",
+        "ctr",
+        "curl",
+        "docker",
+        "getconf",
+        "nitro",
+        "nsenter",
+        "pip",
+        "python",
+        "python-inline",
+        "python-module",
+        "sudo",
+        "systemctl",
+    }
+    for raw_line in output_tail.splitlines():
+        if len(diagnostics) >= 12:
+            break
+        line = raw_line.strip()
+        if not line or len(line) > 2048 or SECRET_LIKE_DIAGNOSTIC_RE.search(line):
+            continue
+        projected: dict[str, Any] | None = None
+        match = re.fullmatch(
+            r"REHEARSAL_FAILURE_DIAGNOSTICS "
+            r"component=(gateway|validator|workflow) status=([0-9]{1,3})",
+            line,
+        )
+        if match and 0 <= int(match.group(2)) <= 255:
+            projected = {
+                "marker": "component_failure",
+                "component": match.group(1),
+                "status": int(match.group(2)),
+            }
+        if projected is None:
+            match = re.fullmatch(
+                r"REHEARSAL_HTTP_DIAGNOSTIC "
+                r"endpoint=(/research-lab/status|/attest) "
+                r"status=(curl_failed|[1-5][0-9]{2})",
+                line,
+            )
+            if match:
+                projected = {
+                    "marker": "http",
+                    "endpoint": match.group(1),
+                    "status": match.group(2),
+                }
+        if projected is None and line.startswith("REHEARSAL_STAGE_FAILED_CONTINUING "):
+            stage_match = re.search(r"(?:^| )stage=([a-z0-9-]+)(?: |$)", line)
+            error_match = re.search(r"(?:^| )error_type=([A-Za-z0-9_]+)(?: |$)", line)
+            duration_match = re.search(
+                r"(?:^| )duration_seconds=([0-9]+(?:\.[0-9]+)?)(?: |$)",
+                line,
+            )
+            if (
+                stage_match
+                and _safe_rehearsal_stage(stage_match.group(1))
+                and error_match
+                and error_match.group(1) in SAFE_REHEARSAL_ERROR_TYPES
+            ):
+                projected = {
+                    "marker": "stage_failure",
+                    "stage": stage_match.group(1),
+                    "error_type": error_match.group(1),
+                }
+                if duration_match and float(duration_match.group(1)) <= 3600:
+                    projected["duration_seconds"] = round(
+                        float(duration_match.group(1)), 3
+                    )
+        if projected is None:
+            match = re.match(r"REHEARSAL CONTRACT ERROR \[([a-z-]+)\]:", line)
+            if match and match.group(1) in contract_kinds:
+                projected = {
+                    "marker": "contract_error",
+                    "kind": match.group(1),
+                }
+        if projected is None and line.startswith("ERROR:"):
+            projected = {"marker": "error"}
+            category = _rehearsal_error_category(line)
+            if category is not None:
+                projected["category"] = category
+        if projected is not None and projected not in diagnostics:
+            diagnostics.append(projected)
+    return diagnostics
+
+
+def _rehearsal_failure_diagnostics(
+    result: subprocess.CompletedProcess[str], *, candidate_sha: str
+) -> dict[str, Any]:
+    projection: dict[str, Any] = {
+        "returncode": int(result.returncode),
+        "failure_summary_available": False,
+    }
+    output_tail = "\n".join(
+        (str(result.stdout or "")[-8192:], str(result.stderr or "")[-8192:])
+    )
+    output_diagnostics = _rehearsal_output_diagnostics(output_tail)
+    if output_diagnostics:
+        projection["output_markers"] = output_diagnostics
+    matches = re.findall(
+        r"(?:^|\n)REHEARSAL_BATCH_FAILURE_EVIDENCE ([^\s]+)",
+        output_tail,
+    )
+    if not matches or re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+        return projection
+    try:
+        durable_root = Path(matches[-1]).resolve(strict=True)
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        expected_prefix = f"leadpoet-rehearsal-failure-{candidate_sha[:12]}-full-path-"
+        if (
+            durable_root.parent != temp_root
+            or not durable_root.name.startswith(expected_prefix)
+            or not durable_root.is_dir()
+        ):
+            return projection
+        summary_path = (durable_root / "failure-summary.json").resolve(strict=True)
+        if summary_path.parent != durable_root or not summary_path.is_file():
+            return projection
+        if summary_path.stat().st_size > 131_072:
+            return projection
+        encoded = summary_path.read_bytes()
+        if not encoded or len(encoded) > 131_072:
+            return projection
+        document = json.loads(encoded.decode("utf-8"))
+        if (
+            not isinstance(document, Mapping)
+            or document.get("candidate_sha") != candidate_sha
+            or document.get("status") != "failed"
+            or not isinstance(document.get("stages"), list)
+            or len(document["stages"]) > 64
+        ):
+            return projection
+        stages: list[dict[str, Any]] = []
+        for item in document["stages"]:
+            if not isinstance(item, Mapping) or item.get("status") not in {
+                "failed",
+                "unexercised",
+            }:
+                continue
+            stage = str(item.get("stage") or "")
+            if not _safe_rehearsal_stage(stage):
+                continue
+            sanitized: dict[str, Any] = {
+                "stage": stage,
+                "status": item["status"],
+            }
+            error_type = str(item.get("error_type") or "")
+            if error_type in SAFE_REHEARSAL_ERROR_TYPES:
+                sanitized["error_type"] = error_type
+            returncode = item.get("returncode")
+            if type(returncode) is int and -255 <= returncode <= 255:
+                sanitized["returncode"] = returncode
+            duration = item.get("duration_seconds")
+            if type(duration) in {int, float} and 0 <= float(duration) <= 3600:
+                sanitized["duration_seconds"] = round(float(duration), 3)
+            stages.append(sanitized)
+        projection.update(
+            {
+                "failure_summary_available": True,
+                "failure_summary_hash": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+                "failed_stage_count": sum(
+                    item["status"] == "failed" for item in stages
+                ),
+                "unexercised_stage_count": sum(
+                    item["status"] == "unexercised" for item in stages
+                ),
+                "stages": stages,
+            }
+        )
+    except (OSError, TypeError, ValueError, UnicodeDecodeError):
+        return projection
+    return projection
+
+
 def _run_rehearsal(*, base_sha: str, candidate_sha: str) -> dict[str, Any]:
     evidence_path = _rehearsal_evidence_path(candidate_sha)
     evidence_path.unlink(missing_ok=True)
-    result = _run(
-        [
-            sys.executable,
-            "scripts/run_local_restart_rehearsal.py",
-            "--from-sha",
-            base_sha,
-            "--candidate-sha",
-            candidate_sha,
-            "--transition",
-            "forward",
-            "--profile",
-            "prepush",
-        ],
-        timeout=600,
+    try:
+        result = _run(
+            [
+                sys.executable,
+                "scripts/run_local_restart_rehearsal.py",
+                "--from-sha",
+                base_sha,
+                "--candidate-sha",
+                candidate_sha,
+                "--transition",
+                "forward",
+                "--profile",
+                "prepush",
+            ],
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ProductionParityError(
+            "candidate-derived N-1 rehearsal timed out after "
+            f"{int(exc.timeout)} seconds"
+        ) from None
+    if result.returncode != 0:
+        diagnostics = _rehearsal_failure_diagnostics(
+            result, candidate_sha=candidate_sha
+        )
+        raise ProductionParityError(
+            "candidate-derived N-1 rehearsal failed: "
+            + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
+        )
+    evidence = _load_json(
+        evidence_path, description="joined restart rehearsal evidence"
     )
-    _require_success(result, stage="candidate-derived N-1 rehearsal")
-    evidence = _load_json(evidence_path, description="joined restart rehearsal evidence")
     if (
         evidence.get("status") != "passed"
         or evidence.get("release_sha") != candidate_sha
@@ -899,7 +1467,9 @@ def _run_database_lane(
     region: str,
     production_gateway_secret_id: str,
 ) -> dict[str, Any]:
-    contract = validate_contract(_load_json(contract_path, description="parity contract"))
+    contract = validate_contract(
+        _load_json(contract_path, description="parity contract")
+    )
     database = _DockerDatabase(
         candidate_sha=contract["candidate_sha"],
         postgres_image=postgres_image,
@@ -921,6 +1491,24 @@ def _run_database_lane(
             production_host=production_host,
         )
         restore_contract = database.verify_snapshot_restore()
+        try:
+            netuid = int(os.environ.get("BITTENSOR_NETUID", "71"))
+        except (TypeError, ValueError) as exc:
+            raise ProductionParityError(
+                "production parity BITTENSOR_NETUID is invalid"
+            ) from exc
+        live_provider = _load_production_supabase_read(
+            region=region, secret_id=production_gateway_secret_id
+        )
+        activation_row, activation_live_evidence = (
+            _read_production_chain_realized_activation(
+                provider=live_provider,
+                netuid=netuid,
+            )
+        )
+        activation_clone_evidence = database.seed_chain_realized_activation(
+            activation_row
+        )
         supabase_url, service_role_key = database.start_postgrest()
         schema = verify_required_supabase_v2_schema(
             {
@@ -928,6 +1516,7 @@ def _run_database_lane(
                 "SUPABASE_SERVICE_ROLE_KEY": service_role_key,
                 "BITTENSOR_NETUID": os.environ.get("BITTENSOR_NETUID", "71"),
             },
+            opener=_StandalonePostgrestSchemaOpener(supabase_url),
             timeout_seconds=20,
         )
         manifest = validate_snapshot_manifest(
@@ -937,9 +1526,6 @@ def _run_database_lane(
             service_role_key=service_role_key,
             expected_shape=manifest["database"],
             capture_mode=manifest["capture_mode"],
-        )
-        live_provider = _load_production_supabase_read(
-            region=region, secret_id=production_gateway_secret_id
         )
         weight_input_scale = database.weight_input_scale_evidence(
             service_role_key=service_role_key,
@@ -951,6 +1537,8 @@ def _run_database_lane(
                 **restore,
                 "clone_prerequisites": prerequisites,
                 "clone_restore_contract": restore_contract,
+                "production_activation": activation_live_evidence,
+                "clone_activation": activation_clone_evidence,
             },
             "schema": schema,
             "shape": shape,
@@ -998,10 +1586,9 @@ def run_fast_lane(
         )
     )
     oracle_stages = set(required_oracle_stage_ids(oracle, lane="fast"))
-    if (
-        sha256_json(oracle) != contract["historical_oracle_hash"]
-        or not oracle_stages.issubset(CRITICAL_STAGES)
-    ):
+    if sha256_json(oracle) != contract[
+        "historical_oracle_hash"
+    ] or not oracle_stages.issubset(CRITICAL_STAGES):
         raise ProductionParityError(
             "fast lane does not cover the historical production behavior oracle"
         )
@@ -1076,33 +1663,40 @@ def run_fast_lane(
 
     results: dict[str, Any] = {}
     failures: dict[str, Exception] = {}
-    actions: dict[str, Callable[[], dict[str, Any]]] = {
-        "rehearsal": lambda: _run_rehearsal(
-            base_sha=contract["base_sha"], candidate_sha=contract["candidate_sha"]
-        ),
-    }
+    started: dict[str, float] = {}
+    durations: dict[str, float] = {}
     if snapshot_evidence is not None:
-        actions["database"] = lambda: _run_database_lane(
-            contract_path=contract_path,
-            manifest_path=manifest_path,
-            archive_path=archive_path,
-            production_host=production_host,
-            postgres_image=postgres_image,
-            postgrest_image=postgrest_image,
-            region=region,
-            production_gateway_secret_id=production_gateway_secret_id,
-        )
-    started = {name: time.monotonic() for name in actions}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(actions)) as pool:
-        futures = {pool.submit(action): name for name, action in actions.items()}
-        for future in concurrent.futures.as_completed(futures):
-            name = futures[future]
-            try:
-                results[name] = future.result()
-            except Exception as exc:
-                failures[name] = exc
+        started["database"] = time.monotonic()
+        try:
+            results["database"] = _run_database_lane(
+                contract_path=contract_path,
+                manifest_path=manifest_path,
+                archive_path=archive_path,
+                production_host=production_host,
+                postgres_image=postgres_image,
+                postgrest_image=postgrest_image,
+                region=region,
+                production_gateway_secret_id=production_gateway_secret_id,
+            )
+        except Exception as exc:
+            failures["database"] = exc
+        finally:
+            durations["database"] = time.monotonic() - started["database"]
 
-    database_duration = time.monotonic() - started.get("database", time.monotonic())
+    # The database lane owns its cleanup in a finally block. Keep its
+    # containers off the bounded hosted runner before the N-1 rehearsal starts,
+    # while still exercising the independent rehearsal after a database failure.
+    started["rehearsal"] = time.monotonic()
+    try:
+        results["rehearsal"] = _run_rehearsal(
+            base_sha=contract["base_sha"], candidate_sha=contract["candidate_sha"]
+        )
+    except Exception as exc:
+        failures["rehearsal"] = exc
+    finally:
+        durations["rehearsal"] = time.monotonic() - started["rehearsal"]
+
+    database_duration = durations.get("database", 0.0)
     database_outcome = results.get("database")
     database = (
         database_outcome.get("result")
@@ -1143,9 +1737,11 @@ def run_fast_lane(
         reason = (
             f"{type(database_primary_error).__name__}: {database_primary_error}"
             if isinstance(database_primary_error, Exception)
-            else f"{type(failures['database']).__name__}: {failures['database']}"
-            if "database" in failures
-            else "production snapshot was unavailable"
+            else (
+                f"{type(failures['database']).__name__}: {failures['database']}"
+                if "database" in failures
+                else "production snapshot was unavailable"
+            )
         )
         for stage in (
             "snapshot-restore-and-migrations",
@@ -1153,12 +1749,20 @@ def run_fast_lane(
             "production-weight-input-scale",
             "supabase-schema-and-rpc",
         ):
-            ledger.record(stage, status="failed", duration_seconds=database_duration, reason=reason)
+            ledger.record(
+                stage,
+                status="failed",
+                duration_seconds=database_duration,
+                reason=reason,
+            )
 
-    rehearsal_duration = time.monotonic() - started["rehearsal"]
+    rehearsal_duration = durations["rehearsal"]
     if "rehearsal" in results:
         rehearsal = results["rehearsal"]
-        if rehearsal.get("behavior_contract_hash") != contract["behavior_contract_hash"]:
+        if (
+            rehearsal.get("behavior_contract_hash")
+            != contract["behavior_contract_hash"]
+        ):
             failures["rehearsal"] = ProductionParityError(
                 "rehearsal behavior contract differs from parity contract"
             )
@@ -1172,7 +1776,10 @@ def run_fast_lane(
                 "exact-n-minus-one-launchers",
                 status="passed",
                 duration_seconds=rehearsal_duration,
-                evidence={**common, "restart_invariants": rehearsal["restart_invariants"]},
+                evidence={
+                    **common,
+                    "restart_invariants": rehearsal["restart_invariants"],
+                },
             )
             ledger.record(
                 "protected-v2-workflows",
@@ -1218,7 +1825,12 @@ def run_fast_lane(
             "sign-finalize-readback",
         ):
             if not any(item["stage_id"] == stage for item in ledger.stages):
-                ledger.record(stage, status="failed", duration_seconds=rehearsal_duration, reason=reason)
+                ledger.record(
+                    stage,
+                    status="failed",
+                    duration_seconds=rehearsal_duration,
+                    reason=reason,
+                )
 
     cleanup = (
         database_outcome.get("cleanup")
@@ -1239,9 +1851,11 @@ def run_fast_lane(
         reason=(
             ""
             if cleanup_ok
-            else f"{type(cleanup_error).__name__}: {cleanup_error}"
-            if isinstance(cleanup_error, Exception)
-            else "database lane did not prove run-scoped cleanup"
+            else (
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+                if isinstance(cleanup_error, Exception)
+                else "database lane did not prove run-scoped cleanup"
+            )
         ),
     )
     final = ledger.finalize()
@@ -1276,7 +1890,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             region=args.region,
             production_gateway_secret_id=args.production_gateway_secret_id,
         )
-    except (OSError, ValueError, ProductionParityError, subprocess.TimeoutExpired) as exc:
+    except (
+        OSError,
+        ValueError,
+        ProductionParityError,
+        subprocess.TimeoutExpired,
+    ) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))

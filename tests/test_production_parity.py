@@ -4,8 +4,10 @@ import base64
 from datetime import datetime, timedelta, timezone
 import inspect
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import sys
 from types import SimpleNamespace
 
@@ -13,6 +15,7 @@ import pytest
 
 from gateway.research_lab import daily_baseline_readiness
 from gateway.research_lab import scoring_worker
+from gateway.tee import supabase_schema_preflight_v2 as schema_preflight
 
 from leadpoet_canonical.production_parity import (
     SNAPSHOT_SCHEMA_VERSION,
@@ -240,16 +243,10 @@ def test_schema_only_snapshot_is_explicit_and_cannot_claim_full_data():
 def test_snapshot_io_defaults_stay_short_and_explicit():
     assert DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS == 900
     assert (
-        inspect.signature(capture_snapshot)
-        .parameters["timeout_seconds"]
-        .default
-        == 900
+        inspect.signature(capture_snapshot).parameters["timeout_seconds"].default == 900
     )
     assert (
-        inspect.signature(restore_snapshot)
-        .parameters["timeout_seconds"]
-        .default
-        == 900
+        inspect.signature(restore_snapshot).parameters["timeout_seconds"].default == 900
     )
     assert (
         _snapshot_io_timeout_seconds(MAX_SNAPSHOT_IO_TIMEOUT_SECONDS)
@@ -309,9 +306,7 @@ def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
         contract_path=tmp_path / "contract.json",
         manifest_path=tmp_path / "manifest.json",
         archive_path=tmp_path / "snapshot.dump",
-        target_dsn=(
-            "postgresql://postgres:x@127.0.0.1:32768/leadpoet_parity_test"
-        ),
+        target_dsn=("postgresql://postgres:x@127.0.0.1:32768/leadpoet_parity_test"),
         production_host="db.production.example",
     )
 
@@ -370,9 +365,7 @@ def test_disposable_clone_waits_for_final_tcp_postmaster(monkeypatch):
         postgres_image="postgres@sha256:" + "c" * 64,
         postgrest_image="postgrest@sha256:" + "d" * 64,
     )
-    postmaster_states = iter(
-        ("bootstrap-ready", "bootstrap-shutdown", "final-ready")
-    )
+    postmaster_states = iter(("bootstrap-ready", "bootstrap-shutdown", "final-ready"))
     observed_states: list[str] = []
     readiness_commands: list[list[str]] = []
 
@@ -386,8 +379,7 @@ def test_disposable_clone_waits_for_final_tcp_postmaster(monkeypatch):
             # would accept its first ready state; TCP becomes ready only after the
             # bootstrap shutdown and the final postmaster exec.
             tcp_probe = (
-                "-h" in command
-                and command[command.index("-h") + 1] == "127.0.0.1"
+                "-h" in command and command[command.index("-h") + 1] == "127.0.0.1"
             )
             return SimpleNamespace(
                 returncode=0 if tcp_probe and state == "final-ready" else 1,
@@ -435,9 +427,7 @@ def test_disposable_clone_proves_restored_deterministic_uuid(monkeypatch):
 
     monkeypatch.setattr(database, "_psql", fake_psql)
 
-    assert database.verify_snapshot_restore() == {
-        "deterministic_uuid_repeatable": True
-    }
+    assert database.verify_snapshot_restore() == {"deterministic_uuid_repeatable": True}
     assert "research_lab_deterministic_uuid" in observed[0]
 
 
@@ -522,6 +512,8 @@ def test_fast_ledger_records_cleanup_independently_of_database_failure(
         "containers_removed": ["postgres", "postgrest"],
         "network_removed": "network",
     }
+    events: list[str] = []
+    clock = [100.0]
 
     monkeypatch.setattr(fast_parity, "_load_json", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -539,7 +531,9 @@ def test_fast_ledger_records_cleanup_independently_of_database_failure(
         "validate_historical_oracle",
         lambda _value: oracle,
     )
-    monkeypatch.setattr(fast_parity, "required_oracle_stage_ids", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        fast_parity, "required_oracle_stage_ids", lambda *_args, **_kwargs: ()
+    )
     monkeypatch.setattr(
         fast_parity,
         "verify_snapshot",
@@ -550,18 +544,23 @@ def test_fast_ledger_records_cleanup_independently_of_database_failure(
         "_run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
     )
-    monkeypatch.setattr(
-        fast_parity,
-        "_run_database_lane",
-        lambda **_kwargs: {
+    monkeypatch.setattr(fast_parity.time, "monotonic", lambda: clock[0])
+
+    def failed_database_lane(**_kwargs):
+        clock[0] += 5.0
+        events.append("database-cleanup-complete")
+        return {
             "result": None,
             "primary_error": ProductionParityError("isolated restore failed"),
             "cleanup": cleanup,
             "cleanup_error": None,
-        },
-    )
+        }
+
+    monkeypatch.setattr(fast_parity, "_run_database_lane", failed_database_lane)
 
     def fail_rehearsal(**_kwargs):
+        clock[0] += 11.0
+        events.append("rehearsal")
         raise ProductionParityError("rehearsal failed")
 
     monkeypatch.setattr(fast_parity, "_run_rehearsal", fail_rehearsal)
@@ -579,9 +578,14 @@ def test_fast_ledger_records_cleanup_independently_of_database_failure(
     stages = {item["stage_id"]: item for item in result["stages"]}
 
     assert stages["snapshot-restore-and-migrations"]["status"] == "failed"
-    assert "isolated restore failed" in stages["snapshot-restore-and-migrations"]["reason"]
+    assert (
+        "isolated restore failed" in stages["snapshot-restore-and-migrations"]["reason"]
+    )
     assert stages["cleanup"]["status"] == "passed"
     assert stages["cleanup"]["evidence"] == cleanup
+    assert stages["snapshot-restore-and-migrations"]["duration_seconds"] == 5.0
+    assert stages["exact-n-minus-one-launchers"]["duration_seconds"] == 11.0
+    assert events == ["database-cleanup-complete", "rehearsal"]
 
 
 def test_full_deadline_accepts_twenty_hours_and_rejects_larger_budget():
@@ -769,6 +773,568 @@ def test_fast_live_boundary_rejects_every_non_get_or_foreign_request():
         provider({**base, "body_b64": "eA=="})
 
 
+def test_standalone_postgrest_schema_opener_rewrites_exact_supabase_prefix(
+    monkeypatch,
+):
+    observed: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Opener:
+        @staticmethod
+        def open(request, *, timeout):
+            observed["url"] = request.full_url
+            observed["headers"] = dict(request.header_items())
+            observed["method"] = request.get_method()
+            observed["data"] = request.data
+            observed["timeout"] = timeout
+            return Response()
+
+    monkeypatch.setattr(fast_parity, "build_opener", lambda *_handlers: Opener())
+    opener = fast_parity._StandalonePostgrestSchemaOpener("http://127.0.0.1:32768")
+    request = fast_parity.Request(
+        "http://127.0.0.1:32768/rest/v1/rpc/schema_probe?value=one",
+        data=b'{"probe":true}',
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer clone-token",
+            "apikey": "clone-token",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with opener(request, timeout=20) as response:
+        assert isinstance(response, Response)
+
+    assert observed == {
+        "url": "http://127.0.0.1:32768/rpc/schema_probe?value=one",
+        "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer clone-token",
+            "Apikey": "clone-token",
+            "Content-type": "application/json",
+        },
+        "method": "POST",
+        "data": b'{"probe":true}',
+        "timeout": 20,
+    }
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://127.0.0.1:32768/rest/v1/table",
+        "http://localhost:32768/rest/v1/table",
+        "http://127.0.0.1:32769/rest/v1/table",
+        "http://user@127.0.0.1:32768/rest/v1/table",
+        "http://127.0.0.1:32768/other/table",
+        "http://127.0.0.1:32768/rest/v10/table",
+        "http://127.0.0.1:32768/rest/v1/table#fragment",
+    ),
+)
+def test_standalone_postgrest_schema_opener_rejects_nonclone_requests(url):
+    opener = fast_parity._StandalonePostgrestSchemaOpener("http://127.0.0.1:32768")
+    with pytest.raises(ProductionParityError, match="escaped the clone"):
+        opener(fast_parity.Request(url), timeout=20)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "https://127.0.0.1:32768",
+        "http://localhost:32768",
+        "http://127.0.0.1",
+        "http://user@127.0.0.1:32768",
+        "http://127.0.0.1:32768/rest/v1",
+    ),
+)
+def test_standalone_postgrest_schema_opener_rejects_nonloopback_origin(origin):
+    with pytest.raises(ProductionParityError, match="not exact loopback"):
+        fast_parity._StandalonePostgrestSchemaOpener(origin)
+
+
+def _chain_realized_activation_row(**overrides):
+    row = {
+        "netuid": 71,
+        "schema_version": fast_parity.CHAIN_REALIZED_ACTIVATION_SCHEMA_VERSION,
+        "first_epoch_id": 24196,
+        "source_bundle_hash": "sha256:" + "a" * 64,
+        "source_bundle_epoch_id": 24196,
+        "source_finalized_block": 8715224,
+    }
+    row.update(overrides)
+    return row
+
+
+def _activation_provider_result(payload: bytes, *, status: int = 200):
+    return {
+        "terminal_status": "authenticated_response",
+        "http_status": status,
+        "body_b64": base64.b64encode(payload).decode("ascii"),
+        "transport_attempt": {
+            "terminal_status": "authenticated_response",
+            "http_status": status,
+            "response_hash": "sha256:"
+            + fast_parity.hashlib.sha256(payload).hexdigest(),
+            "request_artifact_hash": "sha256:" + "c" * 64,
+            "response_artifact_hash": "sha256:"
+            + fast_parity.hashlib.sha256(payload).hexdigest(),
+            "adapter": "strict-read-only-production-postgrest",
+        },
+    }
+
+
+def test_fast_reads_one_exact_live_activation_without_exposing_payload():
+    observed = {}
+    expected = _chain_realized_activation_row()
+
+    def provider(request):
+        observed.update(request)
+        return _activation_provider_result(json.dumps([expected]).encode())
+
+    row, evidence = fast_parity._read_production_chain_realized_activation(
+        provider=provider,
+        netuid=71,
+    )
+
+    query = fast_parity.urlencode(
+        {
+            "select": ",".join(fast_parity.CHAIN_REALIZED_ACTIVATION_COLUMNS),
+            "netuid": "eq.71",
+            "limit": "2",
+        }
+    )
+    assert observed == {
+        "provider_id": "supabase",
+        "method": "GET",
+        "url": (
+            f"{fast_parity.SUPABASE_WEIGHT_SOURCE_ORIGIN}/rest/v1/"
+            f"{fast_parity.CHAIN_REALIZED_ACTIVATION_TABLE}?{query}"
+        ),
+        "headers": {"Accept": "application/json"},
+        "body_b64": "",
+        "timeout_ms": 20_000,
+        "logical_operation_id": ("production-parity-chain-realized-activation-v1"),
+    }
+    assert row == expected
+    assert evidence["netuid"] == 71
+    assert evidence["first_epoch_id"] == expected["first_epoch_id"]
+    assert evidence["source_bundle_epoch_id"] == expected["source_bundle_epoch_id"]
+    assert evidence["source_finalized_block"] == expected["source_finalized_block"]
+    assert all(
+        type(value) is int or re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+        for value in evidence.values()
+    )
+    assert fast_parity.CHAIN_REALIZED_ACTIVATION_SCHEMA_VERSION not in json.dumps(
+        evidence
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        (b"[]", "missing or ambiguous"),
+        (
+            json.dumps(
+                [
+                    _chain_realized_activation_row(),
+                    _chain_realized_activation_row(),
+                ]
+            ).encode(),
+            "missing or ambiguous",
+        ),
+        (
+            json.dumps(
+                [
+                    _chain_realized_activation_row(
+                        schema_version="unexpected.activation.v1"
+                    )
+                ]
+            ).encode(),
+            "row is invalid",
+        ),
+        (
+            json.dumps(
+                [_chain_realized_activation_row(first_epoch_id="24196")]
+            ).encode(),
+            "row is invalid",
+        ),
+        (
+            json.dumps(
+                [_chain_realized_activation_row(source_bundle_epoch_id=24197)]
+            ).encode(),
+            "row is invalid",
+        ),
+        (
+            json.dumps(
+                [_chain_realized_activation_row(source_bundle_hash="not-a-hash")]
+            ).encode(),
+            "row is invalid",
+        ),
+        (
+            json.dumps(
+                [_chain_realized_activation_row(unexpected_field="value")]
+            ).encode(),
+            "row is invalid",
+        ),
+    ),
+)
+def test_fast_rejects_missing_ambiguous_or_malformed_live_activation(
+    payload,
+    message,
+):
+    with pytest.raises(ProductionParityError, match=message):
+        fast_parity._read_production_chain_realized_activation(
+            provider=lambda _request: _activation_provider_result(payload),
+            netuid=71,
+        )
+
+
+def test_fast_rejects_duplicate_live_activation_fields():
+    payload = (
+        b'[{"netuid":71,"netuid":71,"schema_version":"'
+        + fast_parity.CHAIN_REALIZED_ACTIVATION_SCHEMA_VERSION.encode()
+        + b'","first_epoch_id":24196,"source_bundle_hash":"sha256:'
+        + b"a" * 64
+        + b'","source_bundle_epoch_id":24196,"source_finalized_block":8715224}]'
+    )
+    with pytest.raises(ProductionParityError, match="response is invalid"):
+        fast_parity._read_production_chain_realized_activation(
+            provider=lambda _request: _activation_provider_result(payload),
+            netuid=71,
+        )
+
+
+def test_disposable_clone_seeds_and_reads_back_only_exact_activation(monkeypatch):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+    row = _chain_realized_activation_row()
+    responses = iter(("0", "INSERT 0 1", json.dumps({"row_count": 1, "rows": [row]})))
+    statements: list[str] = []
+
+    def fake_psql(sql: str, *, timeout: int = 120):
+        assert timeout == 120
+        statements.append(sql)
+        return next(responses)
+
+    monkeypatch.setattr(database, "_psql", fake_psql)
+    evidence = database.seed_chain_realized_activation(row)
+
+    assert len(statements) == 3
+    assert "SELECT COUNT(*)" in statements[0]
+    assert (
+        "INSERT INTO public.research_lab_chain_realized_settlement_activation_v1"
+        in statements[1]
+    )
+    assert row["source_bundle_hash"] in statements[1]
+    assert "json_agg" in statements[2]
+    assert evidence == {
+        "row_count": 1,
+        "netuid": row["netuid"],
+        "first_epoch_id": row["first_epoch_id"],
+        "source_bundle_epoch_id": row["source_bundle_epoch_id"],
+        "source_finalized_block": row["source_finalized_block"],
+        "source_bundle_hash": row["source_bundle_hash"],
+        "activation_row_hash": sha256_json(row),
+    }
+
+
+def test_disposable_clone_refuses_to_overlay_existing_activation(monkeypatch):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+    monkeypatch.setattr(database, "_psql", lambda *_args, **_kwargs: "1")
+    with pytest.raises(ProductionParityError, match="table is not empty"):
+        database.seed_chain_realized_activation(_chain_realized_activation_row())
+
+
+def test_weight_scale_evidence_excludes_prior_activation_read(monkeypatch):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+
+    class Provider:
+        adapter_name = "strict-read-only-production-postgrest"
+
+        def __init__(self):
+            self.pages = [
+                {
+                    "response_bytes": 400,
+                    "response_hash": "sha256:" + "1" * 64,
+                }
+            ]
+
+    provider = Provider()
+
+    class Reader:
+        def __init__(self, *, execute_provider, **_kwargs):
+            self.provider = execute_provider
+
+        def read(self, *, record_transport, record_artifact, **_kwargs):
+            self.provider.pages.append(
+                {
+                    "response_bytes": 200,
+                    "response_hash": "sha256:" + "2" * 64,
+                }
+            )
+            record_transport({"terminal_status": "authenticated_response"})
+            record_artifact("sha256:" + "3" * 64)
+            return [{"epoch_id": 24570}]
+
+    monkeypatch.setattr(fast_parity, "SupabaseSourceReaderV2", Reader)
+    evidence = database.weight_input_scale_evidence(
+        service_role_key="clone-service-role",
+        scope={
+            "netuid": 71,
+            "start_epoch": 24570,
+            "end_epoch": 24570,
+            "expected_rows": 1,
+        },
+        provider=provider,
+    )
+
+    assert evidence["page_count"] == 1
+    assert evidence["total_response_bytes"] == 200
+    assert evidence["response_hashes"] == ["sha256:" + "2" * 64]
+
+
+def test_disposable_postgrest_progresses_through_activation_openapi_and_rpcs():
+    postgres_image = os.environ.get("LEADPOET_PARITY_POSTGRES_IMAGE") or os.environ.get(
+        "POSTGRES_IMAGE"
+    )
+    postgrest_image = os.environ.get(
+        "LEADPOET_PARITY_POSTGREST_IMAGE"
+    ) or os.environ.get("POSTGREST_IMAGE")
+    if shutil.which("docker") is None or not postgres_image or not postgrest_image:
+        pytest.skip("pinned disposable parity images are unavailable")
+
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image=postgres_image,
+        postgrest_image=postgrest_image,
+    )
+    try:
+        database.start()
+        database.prepare_snapshot_restore()
+        tables: dict[str, set[str]] = {}
+        for _migration, table, columns in schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA:
+            tables.setdefault(table, set()).update(columns)
+        statements = []
+        for table, columns in sorted(tables.items()):
+            assert re.fullmatch(r"[a-z_][a-z0-9_]*", table)
+            assert all(re.fullmatch(r"[a-z_][a-z0-9_]*", column) for column in columns)
+            if table == fast_parity.CHAIN_REALIZED_ACTIVATION_TABLE:
+                statements.append(
+                    """
+CREATE TABLE public.research_lab_chain_realized_settlement_activation_v1 (
+  netuid integer PRIMARY KEY CHECK (netuid > 0),
+  schema_version text NOT NULL,
+  first_epoch_id integer NOT NULL CHECK (first_epoch_id >= 0),
+  source_bundle_hash text NOT NULL,
+  source_bundle_epoch_id integer NOT NULL,
+  source_finalized_block bigint NOT NULL CHECK (source_finalized_block >= 0),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
+  ENABLE ROW LEVEL SECURITY;
+"""
+                )
+                continue
+            definitions = ", ".join(f'"{column}" text' for column in sorted(columns))
+            statements.append(f'CREATE TABLE public."{table}" ({definitions});')
+
+        clauses = []
+        for role, purposes in schema_preflight.ROLE_PURPOSES.items():
+            encoded_purposes = ", ".join(
+                f"'{purpose}'::text" for purpose in sorted(purposes)
+            )
+            clauses.append(
+                f"((role = '{role}'::text) AND "
+                f"(purpose = ANY (ARRAY[{encoded_purposes}])))"
+            )
+        purpose_definition = "CHECK (" + " OR ".join(clauses) + ")"
+        compact_contract = {
+            "schema_version": (
+                "leadpoet.research_lab_compact_weight_settlement_contract.v1"
+            ),
+            "max_authority_bytes": 8_388_608,
+            "size_constraint_valid": True,
+            "append_only_trigger_enabled": True,
+            "identity_unique_constraint_enabled": True,
+            "row_level_security_enabled": True,
+            "finalized_stage_supported": True,
+        }
+        purpose_contract = {
+            "schema_version": (
+                "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
+            ),
+            "constraint_name": (
+                "research_lab_attested_execution_receipts_v2_role_purpose_check"
+            ),
+            "constraint_valid": True,
+            "constraint_definition": purpose_definition,
+        }
+        contract_functions = {
+            "research_lab_compact_weight_settlement_contract_v1": compact_contract,
+            "research_lab_candidate_hybrid_purpose_contract_v1": purpose_contract,
+        }
+        for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS:
+            assert re.fullmatch(r"[a-z_][a-z0-9_]*", function_name)
+            payload = json.dumps(
+                contract_functions.get(function_name, {}),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            statements.append(
+                f'CREATE FUNCTION public."{function_name}"() RETURNS jsonb '
+                "LANGUAGE sql STABLE AS $function$ "
+                f"SELECT $json${payload}$json$::jsonb $function$;"
+            )
+        database._psql("\n".join(statements))
+
+        activation = _chain_realized_activation_row()
+        seed = database.seed_chain_realized_activation(activation)
+        supabase_url, service_role_key = database.start_postgrest()
+        result = schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": supabase_url,
+                "SUPABASE_SERVICE_ROLE_KEY": service_role_key,
+                "BITTENSOR_NETUID": "71",
+            },
+            opener=fast_parity._StandalonePostgrestSchemaOpener(supabase_url),
+            timeout_seconds=20,
+        )
+
+        assert seed["activation_row_hash"] == sha256_json(activation)
+        assert result["status"] == "ready"
+        assert result["chain_realized_settlement_activation"] == {
+            "netuid": 71,
+            "first_epoch_id": activation["first_epoch_id"],
+            "source_bundle_hash": activation["source_bundle_hash"],
+            "source_finalized_block": activation["source_finalized_block"],
+        }
+        assert result["compact_weight_settlement_contract"] == compact_contract
+        assert result["candidate_hybrid_purpose_contract"]["constraint_valid"] is True
+        assert result["rpc_probe_count"] == len(
+            schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+        )
+    finally:
+        database.cleanup()
+
+
+def test_rehearsal_failure_diagnostics_are_bounded_and_redacted(
+    monkeypatch,
+    tmp_path: Path,
+):
+    candidate_sha = "d" * 40
+    durable_root = tmp_path / (
+        f"leadpoet-rehearsal-failure-{candidate_sha[:12]}-full-path-test"
+    )
+    durable_root.mkdir()
+    secret = "must-not-escape-diagnostic"
+    summary = {
+        "candidate_sha": candidate_sha,
+        "status": "failed",
+        "stages": [
+            {
+                "stage": "gateway-forward-1",
+                "status": "failed",
+                "error_type": "CalledProcessError",
+                "returncode": 1,
+                "duration_seconds": 12.3456,
+                "error": secret,
+                "command": ["gateway", "--credential", secret],
+            },
+            {
+                "stage": "evidence-join-prepush",
+                "status": "unexercised",
+                "blocked_by": ["gateway-forward-1"],
+            },
+        ],
+    }
+    (durable_root / "failure-summary.json").write_text(
+        json.dumps(summary), encoding="utf-8"
+    )
+    monkeypatch.setattr(fast_parity.tempfile, "gettempdir", lambda: str(tmp_path))
+    result = fast_parity.subprocess.CompletedProcess(
+        args=["rehearsal"],
+        returncode=1,
+        stdout="",
+        stderr=(
+            "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=137\n"
+            "REHEARSAL_HTTP_DIAGNOSTIC endpoint=/attest status=503\n"
+            "REHEARSAL_STAGE_FAILED_CONTINUING stage=gateway-forward-1 "
+            "error_type=CalledProcessError duration_seconds=12.3456 "
+            "error='launcher failed'\n"
+            "REHEARSAL CONTRACT ERROR [docker]: unknown operation: ['docker']\n"
+            "ERROR: process terminated out of memory\n"
+            f"ERROR: bearer token={secret} permission denied\n"
+            f"raw={secret}\nREHEARSAL_BATCH_FAILURE_EVIDENCE {durable_root}\n"
+        ),
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result, candidate_sha=candidate_sha
+    )
+    encoded = json.dumps(diagnostics, sort_keys=True)
+    assert diagnostics["failure_summary_available"] is True
+    assert diagnostics["failed_stage_count"] == 1
+    assert diagnostics["unexercised_stage_count"] == 1
+    assert diagnostics["output_markers"] == [
+        {"marker": "component_failure", "component": "gateway", "status": 137},
+        {"marker": "http", "endpoint": "/attest", "status": "503"},
+        {
+            "marker": "stage_failure",
+            "stage": "gateway-forward-1",
+            "error_type": "CalledProcessError",
+            "duration_seconds": 12.346,
+        },
+        {"marker": "contract_error", "kind": "docker"},
+        {"marker": "error", "category": "resource_oom"},
+    ]
+    assert diagnostics["stages"] == [
+        {
+            "stage": "gateway-forward-1",
+            "status": "failed",
+            "error_type": "CalledProcessError",
+            "returncode": 1,
+            "duration_seconds": 12.346,
+        },
+        {
+            "stage": "evidence-join-prepush",
+            "status": "unexercised",
+        },
+    ]
+    assert secret not in encoded
+    assert "command" not in encoded
+    assert '"error":' not in encoded
+    assert "launcher failed" not in encoded
+    assert "permission" not in encoded
+    assert "unknown operation" not in encoded
+    assert len(encoded) < 4096
+
+
+def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():
+    workflow = (ROOT / ".github/workflows/production-parity-fast.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "timeout-minutes: 20" in workflow
+    assert "timeout-minutes: 10" not in workflow
+
+
 def test_fast_live_boundary_executes_get_without_disclosing_credential():
     credential = "production-read-credential"
     provider = _ProductionReadOnlySupabaseProvider(
@@ -830,9 +1396,7 @@ def test_fast_live_boundary_executes_get_without_disclosing_credential():
 
 @pytest.mark.asyncio
 async def test_parity_date_controls_baseline_rollover_and_readiness(monkeypatch):
-    target_date = (
-        datetime.now(timezone.utc).date() + timedelta(days=1)
-    ).isoformat()
+    target_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
     parity_environment = {
         "LEADPOET_PRODUCTION_PARITY_MODE": "enabled",
         "LEADPOET_PRODUCTION_PARITY_RUN_ID": "parity-date-check",
@@ -971,16 +1535,22 @@ def test_full_runner_accepts_json_secret_and_strict_env_file(tmp_path: Path):
 
 
 def test_miner_intake_secret_resolution_is_strict_and_value_opaque():
-    assert _builtwith_key_from_secret(
-        json.dumps({"builtwith_api_key": "provider-value-for-test"})
-    ) == "provider-value-for-test"
+    assert (
+        _builtwith_key_from_secret(
+            json.dumps({"builtwith_api_key": "provider-value-for-test"})
+        )
+        == "provider-value-for-test"
+    )
     with pytest.raises(FullParityError, match="miner-intake secret is invalid"):
         _builtwith_key_from_secret(json.dumps({"builtwith_api_key": "bad value"}))
-    assert _required_secret_from_environment(
-        {"FIRST": "", "SECOND": "credential-value"},
-        ("FIRST", "SECOND"),
-        field="credential",
-    ) == "credential-value"
+    assert (
+        _required_secret_from_environment(
+            {"FIRST": "", "SECOND": "credential-value"},
+            ("FIRST", "SECOND"),
+            field="credential",
+        )
+        == "credential-value"
+    )
     with pytest.raises(FullParityError, match="credential is unavailable"):
         _required_secret_from_environment({}, ("FIRST",), field="credential")
 
@@ -1007,9 +1577,7 @@ def test_builtwith_live_probe_keeps_credential_out_of_url(monkeypatch):
         observed["timeout"] = timeout
         return Response()
 
-    monkeypatch.setattr(
-        "scripts.run_production_parity_full_host.urlopen", fake_urlopen
-    )
+    monkeypatch.setattr("scripts.run_production_parity_full_host.urlopen", fake_urlopen)
     credential = "provider-credential-for-test"
     assert _verify_builtwith_credential_live(credential) == {
         "http_status": 200,
@@ -1036,9 +1604,7 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
         region="us-east-1",
         production_secret_id="leadpoet/prod/gateway/env",
         readonly_secret_id="leadpoet/staging/production-parity/readonly-dsn",
-        miner_intake_secret_id=(
-            "leadpoet/staging/production-parity-miner-intake"
-        ),
+        miner_intake_secret_id=("leadpoet/staging/production-parity-miner-intake"),
         runner_arn="arn:aws:iam::493765492819:role/runner",
     )
     runner = _runner_policy(
@@ -1046,9 +1612,7 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
         region="us-east-1",
         production_secret_id="leadpoet/prod/gateway/env",
         readonly_secret_id="leadpoet/staging/production-parity/readonly-dsn",
-        miner_intake_secret_id=(
-            "leadpoet/staging/production-parity-miner-intake"
-        ),
+        miner_intake_secret_id=("leadpoet/staging/production-parity-miner-intake"),
     )
     encoded = json.dumps({"controller": controller, "runner": runner})
     assert "iam:PassRole" in encoded

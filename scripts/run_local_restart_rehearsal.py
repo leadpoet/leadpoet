@@ -619,6 +619,11 @@ def _normalize_evidence_ownership(
             "ALL",
             "--cap-add",
             "CHOWN",
+            # TemporaryDirectory is mode 0700 and owned by the host runner.
+            # After dropping all capabilities, container root cannot traverse
+            # that bind mount without this read/search-only DAC override.
+            "--cap-add",
+            "DAC_READ_SEARCH",
             "--read-only",
             "--mount",
             f"type=bind,src={evidence_root},dst=/evidence",

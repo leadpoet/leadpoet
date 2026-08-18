@@ -224,13 +224,16 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
     controller = _load_controller()
     commands: list[list[str]] = []
     monkeypatch.setattr(controller, "_run", lambda command: commands.append(command))
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
 
     controller._normalize_evidence_ownership(
         "rehearsal-image",
-        evidence_root=tmp_path / "evidence",
+        evidence_root=evidence_root,
         docker_platform="linux/arm64",
     )
 
+    assert evidence_root.stat().st_mode & 0o777 == 0o700
     assert commands == [[
         "docker",
         "run",
@@ -251,9 +254,11 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
         "ALL",
         "--cap-add",
         "CHOWN",
+        "--cap-add",
+        "DAC_READ_SEARCH",
         "--read-only",
         "--mount",
-        f"type=bind,src={tmp_path / 'evidence'},dst=/evidence",
+        f"type=bind,src={evidence_root},dst=/evidence",
         "--entrypoint",
         "/usr/bin/chown",
         "rehearsal-image",

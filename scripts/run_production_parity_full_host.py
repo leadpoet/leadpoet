@@ -59,6 +59,7 @@ from scripts.materialize_production_parity_secrets import (  # noqa: E402
     create as create_gateway_secret,
     delete as delete_gateway_secret,
     is_process_control_environment_key,
+    production_parity_scoring_cache_dir,
     production_parity_trace_prefixes,
 )
 from scripts.production_parity_snapshot import (  # noqa: E402
@@ -901,6 +902,8 @@ def _validated_clone_environment(
         or bool(values.get("RESEARCH_LAB_EVIDENCE_PROXY_URL"))
         or bool(values.get("RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"))
         or bool(values.get("RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX"))
+        or values.get("RESEARCH_LAB_SCORING_CACHE_DIR")
+        != production_parity_scoring_cache_dir(run_id=run_id)
         or any(
             values.get(name) != expected
             for name, expected in expected_trace_prefixes.items()
@@ -2393,6 +2396,8 @@ def run_full(
     )
     work = FULL_WORK_ROOT / run_id / "runtime"
     work.mkdir(parents=True, mode=0o700, exist_ok=False)
+    scoring_cache = work / "scoring-cache"
+    scoring_cache.mkdir(mode=0o700)
     runtime_config = work / "runtime-config.json"
     contract_path = work / "contract.json"
     archive_path = work / "production.dump"

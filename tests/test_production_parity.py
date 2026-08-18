@@ -36,6 +36,7 @@ from leadpoet_canonical.production_parity import (
 from scripts.materialize_production_parity_secrets import (
     build_gateway_environment,
     is_process_control_environment_key,
+    production_parity_scoring_cache_dir,
     production_parity_trace_prefixes,
 )
 from scripts import production_parity_snapshot as parity_snapshot
@@ -2126,6 +2127,7 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
             "RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX": (
                 "s3://production/signatures"
             ),
+            "RESEARCH_LAB_SCORING_CACHE_DIR": "/production/scoring-cache",
         },
         run_id="pp-1-1",
         candidate_sha=SHA,
@@ -2208,6 +2210,9 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["RESEARCH_LAB_EVIDENCE_PROXY_URL"] == ""
     assert environment["RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"] == ""
     assert environment["RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX"] == ""
+    assert environment["RESEARCH_LAB_SCORING_CACHE_DIR"] == (
+        production_parity_scoring_cache_dir(run_id="pp-1-1")
+    )
     for key in (
         "LANGFUSE_PUBLIC_KEY",
         "LANGFUSE_SECRET_KEY",
@@ -2286,6 +2291,7 @@ def test_full_clone_environment_rejects_tampered_trace_destination(
                 "s3://production/signatures"
             )
         },
+        {"RESEARCH_LAB_SCORING_CACHE_DIR": "/production/scoring-cache"},
     ):
         write_environment({**environment, **poison})
         with pytest.raises(

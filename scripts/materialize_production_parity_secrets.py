@@ -212,6 +212,7 @@ _FORCED_KEYS = {
     "RESEARCH_LAB_EVIDENCE_PROXY_URL",
     "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH",
     "RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX",
+    "RESEARCH_LAB_SCORING_CACHE_DIR",
     "RESEARCH_LAB_RAW_TRACE_S3_PREFIX",
     "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX",
     "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
@@ -247,6 +248,14 @@ def production_parity_trace_prefixes(
         "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX": f"{root}/scorer",
         "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX": f"{root}/incontainer",
     }
+
+
+def production_parity_scoring_cache_dir(*, run_id: str) -> str:
+    """Return the disposable local scoring cache owned by one parity run."""
+
+    if not RUN_RE.fullmatch(run_id):
+        raise SecretMaterializationError("parity run identity is invalid")
+    return f"/opt/leadpoet-production-parity/{run_id}/runtime/scoring-cache"
 
 
 def is_process_control_environment_key(key: str) -> bool:
@@ -416,6 +425,9 @@ def build_gateway_environment(
         "RESEARCH_LAB_EVIDENCE_PROXY_URL": "",
         "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH": "",
         "RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX": "",
+        "RESEARCH_LAB_SCORING_CACHE_DIR": production_parity_scoring_cache_dir(
+            run_id=run_id
+        ),
         **production_parity_trace_prefixes(
             artifact_bucket=artifact_bucket,
             run_id=run_id,

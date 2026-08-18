@@ -113,6 +113,9 @@ PRODUCTION_V2_CONFIG_DIR = Path("/home/ec2-user/.config/leadpoet/v2")
 PRODUCTION_GATEWAY_PRIVATE_KEY_PATH = Path(
     "/home/ec2-user/gateway/secrets/gateway_private_key.pem"
 )
+PRODUCTION_ARWEAVE_KEYFILE_PATH = Path(
+    "/home/ec2-user/gateway/secrets/arweave_keyfile.json"
+)
 PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER = (1000, 1000)
 ATTESTED_V2_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 ATTESTED_V2_RELEASE_PREFIX = "attested-v2/releases"
@@ -920,15 +923,14 @@ def _validated_clone_environment(
     return values
 
 
-def _validated_baked_gateway_private_key_path() -> str:
-    """Return the AMI-baked gateway key path without reading its contents."""
+def _validated_baked_secret_path(path: Path, *, field: str) -> str:
+    """Return an AMI-baked secret path without reading its contents."""
 
-    path = PRODUCTION_GATEWAY_PRIVATE_KEY_PATH
     try:
         metadata = path.lstat()
         resolved = path.resolve(strict=True)
     except OSError as exc:
-        raise FullParityError("baked gateway private-key path is unavailable") from exc
+        raise FullParityError(f"baked {field} path is unavailable") from exc
     if (
         resolved != path
         or path.is_symlink()
@@ -937,8 +939,22 @@ def _validated_baked_gateway_private_key_path() -> str:
         or (metadata.st_uid, metadata.st_gid)
         != PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER
     ):
-        raise FullParityError("baked gateway private-key path identity differs")
+        raise FullParityError(f"baked {field} path identity differs")
     return str(path)
+
+
+def _validated_baked_gateway_private_key_path() -> str:
+    return _validated_baked_secret_path(
+        PRODUCTION_GATEWAY_PRIVATE_KEY_PATH,
+        field="gateway private-key",
+    )
+
+
+def _validated_baked_arweave_keyfile_path() -> str:
+    return _validated_baked_secret_path(
+        PRODUCTION_ARWEAVE_KEYFILE_PATH,
+        field="Arweave keyfile",
+    )
 
 
 @contextmanager
@@ -2431,6 +2447,7 @@ def run_full(
             "transient host early production-service isolation differs"
         )
     gateway_private_key_path = _validated_baked_gateway_private_key_path()
+    arweave_keyfile_path = _validated_baked_arweave_keyfile_path()
     started = time.monotonic()
     deadline = _full_deadline(
         started=started,
@@ -2603,6 +2620,7 @@ def run_full(
                 "GATEWAY_LOG_ROOT": str(work / "gateway"),
                 "GATEWAY_LOG_FILE": str(work / "gateway" / "gateway.log"),
                 "GATEWAY_PRIVATE_KEY_PATH": gateway_private_key_path,
+                "ARWEAVE_KEYFILE_PATH": arweave_keyfile_path,
                 "GATEWAY_RESTART_CONTROLLER_ROOT": str(work / "restart-controller"),
                 "GATEWAY_DEPLOYMENT_DIR": str(work / "deployments"),
                 "GATEWAY_HOST_RESTART_SCRIPT": str(ROOT / "gw_restart.sh"),

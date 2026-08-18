@@ -1050,6 +1050,11 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
         "_validated_baked_gateway_private_key_path",
         lambda: "/home/ec2-user/gateway/secrets/gateway_private_key.pem",
     )
+    monkeypatch.setattr(
+        full_host,
+        "_validated_baked_arweave_keyfile_path",
+        lambda: "/home/ec2-user/gateway/secrets/arweave_keyfile.json",
+    )
     monkeypatch.setattr(full_host, "_checkout_identity", lambda _sha: None)
     monkeypatch.setattr(full_host.time, "monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr(full_host.boto3, "client", lambda *_args, **_kwargs: object())
@@ -2091,6 +2096,7 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
             "AWS_SECRET_ACCESS_KEY": "must-drop",
             "GATEWAY_ENV_FILE": "/production/gateway.env",
             "GATEWAY_PRIVATE_KEY_PATH": "/production/gateway-private-key.pem",
+            "ARWEAVE_KEYFILE_PATH": "/production/arweave-keyfile.json",
             "GATEWAY_PYTHON_BIN": "/production/python",
             "GATEWAY_RESTART_LOCK_FILE": "/production/restart.lock",
             "GATEWAY_TEE_EIF_ROOT": "/production/tee",
@@ -2172,6 +2178,7 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
         "AWS_SECRET_ACCESS_KEY",
         "GATEWAY_ENV_FILE",
         "GATEWAY_PRIVATE_KEY_PATH",
+        "ARWEAVE_KEYFILE_PATH",
         "GATEWAY_PYTHON_BIN",
         "GATEWAY_RESTART_LOCK_FILE",
         "GATEWAY_TEE_EIF_ROOT",
@@ -2379,11 +2386,35 @@ def test_full_baked_gateway_private_key_path_is_exact_and_metadata_only(
         full_host._validated_baked_gateway_private_key_path()
 
 
+def test_full_baked_arweave_keyfile_path_is_exact_and_metadata_only(
+    monkeypatch, tmp_path: Path
+):
+    keyfile_path = tmp_path / "arweave_keyfile.json"
+    keyfile_path.write_bytes(b"not-read-by-validator")
+    keyfile_path.chmod(0o600)
+    monkeypatch.setattr(
+        full_host, "PRODUCTION_ARWEAVE_KEYFILE_PATH", keyfile_path
+    )
+    monkeypatch.setattr(
+        full_host,
+        "PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER",
+        (os.getuid(), os.getgid()),
+    )
+    assert full_host._validated_baked_arweave_keyfile_path() == str(
+        keyfile_path
+    )
+
+    keyfile_path.chmod(0o640)
+    with pytest.raises(FullParityError, match="Arweave keyfile path identity"):
+        full_host._validated_baked_arweave_keyfile_path()
+
+
 def test_full_gateway_restart_reasserts_run_owned_path_authority():
     source = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     authority_keys = {
         "GATEWAY_ENV_FILE",
         "GATEWAY_PRIVATE_KEY_PATH",
+        "ARWEAVE_KEYFILE_PATH",
         "LEADPOET_GATEWAY_ENV_SECRET_ID",
         "GATEWAY_RESTART_CONTROLLER_ROOT",
         "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
@@ -2418,11 +2449,17 @@ def test_full_gateway_restart_reasserts_run_owned_path_authority():
         '"$GATEWAY_PRIVATE_KEY_PATH" >> "$ENV_CLONE"'
     ) in source
     assert 'GATEWAY_PRIVATE_KEY_PATH="$GATEWAY_PRIVATE_KEY_PATH" \\' in source
+    assert (
+        "printf 'export ARWEAVE_KEYFILE_PATH=%q\\n' "
+        '"$ARWEAVE_KEYFILE_PATH" >> "$ENV_CLONE"'
+    ) in source
+    assert 'ARWEAVE_KEYFILE_PATH="$ARWEAVE_KEYFILE_PATH" \\' in source
     assert is_process_control_environment_key("GATEWAY_PYTHON_BIN")
     full_source = inspect.getsource(full_host.run_full)
     assert '"GATEWAY_V2_RELEASE_BUCKET": ATTESTED_V2_RELEASE_BUCKET' in full_source
     assert '"GATEWAY_V2_KMS_KEY_ID": ATTESTED_V2_KMS_KEY_ID' in full_source
     assert '"GATEWAY_PRIVATE_KEY_PATH": gateway_private_key_path' in full_source
+    assert '"ARWEAVE_KEYFILE_PATH": arweave_keyfile_path' in full_source
 
 
 def test_controller_dependency_closure_includes_gateway_database_client():

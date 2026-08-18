@@ -1663,11 +1663,13 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
         path.write_text(
             "export GATEWAY_RESTART_INVOCATION_ID=stale\n"
             "export LEADPOET_RESTART_INVOCATION_ID=stale\n"
-            "export GATEWAY_PRIVATE_KEY_PATH=/stale/private-key.pem\n",
+            "export GATEWAY_PRIVATE_KEY_PATH=/stale/private-key.pem\n"
+            "export ARWEAVE_KEYFILE_PATH=/stale/arweave-keyfile.json\n",
             encoding="utf-8",
         )
     active_invocation = "gateway-active-invocation"
     active_private_key = "/run-scoped/gateway-private-key.pem"
+    active_arweave_keyfile = "/run-scoped/arweave-keyfile.json"
     preserved = subprocess.run(
         [
             "bash",
@@ -1676,9 +1678,9 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
                 "set -euo pipefail\n"
                 + merge_and_reassert
                 + '\nset -a\n. "$ENV_CLONE"\nset +a\n'
-                + "printf '%s\\n%s\\n%s\\n' \"$GATEWAY_RESTART_INVOCATION_ID\" "
+                + "printf '%s\\n%s\\n%s\\n%s\\n' \"$GATEWAY_RESTART_INVOCATION_ID\" "
                 + '"$LEADPOET_RESTART_INVOCATION_ID" '
-                + '"$GATEWAY_PRIVATE_KEY_PATH"\n'
+                + '"$GATEWAY_PRIVATE_KEY_PATH" "$ARWEAVE_KEYFILE_PATH"\n'
             ),
         ],
         check=True,
@@ -1691,12 +1693,14 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
             "GATEWAY_RESTART_INVOCATION_ID": active_invocation,
             "LEADPOET_RESTART_INVOCATION_ID": "stale-parent",
             "GATEWAY_PRIVATE_KEY_PATH": active_private_key,
+            "ARWEAVE_KEYFILE_PATH": active_arweave_keyfile,
         },
     )
     assert preserved.stdout.splitlines() == [
         active_invocation,
         active_invocation,
         active_private_key,
+        active_arweave_keyfile,
     ]
 
 

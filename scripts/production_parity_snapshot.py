@@ -535,6 +535,7 @@ def restore_snapshot(
     )
     safe_database_target(target_dsn, production_host=production_host)
     env, _ = _postgres_env(target_dsn, read_only=False)
+    env["PGSSLMODE"] = "disable"
     manifest = validate_snapshot_manifest(
         _load_json(manifest_path, description="snapshot manifest")
     )

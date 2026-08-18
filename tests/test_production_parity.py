@@ -26,6 +26,7 @@ from leadpoet_canonical.production_parity import (
 from scripts.materialize_production_parity_secrets import (
     build_gateway_environment,
 )
+from scripts import production_parity_snapshot as parity_snapshot
 from scripts import run_production_parity_full_host as full_host
 from scripts.production_parity_snapshot import (
     DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
@@ -256,6 +257,66 @@ def test_snapshot_io_defaults_stay_short_and_explicit():
     for invalid in (True, 0, MAX_SNAPSHOT_IO_TIMEOUT_SECONDS + 1):
         with pytest.raises(ProductionParityError, match="timeout is invalid"):
             _snapshot_io_timeout_seconds(invalid)
+
+
+def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
+    monkeypatch,
+    tmp_path: Path,
+):
+    observed: dict[str, object] = {}
+    original_safe_database_target = parity_snapshot.safe_database_target
+
+    def record_safe_database_target(dsn: str, *, production_host: str) -> None:
+        original_safe_database_target(dsn, production_host=production_host)
+        observed["target_validated"] = True
+
+    def fake_run(command, *, env, timeout, stdin=None):
+        assert observed.get("target_validated") is True
+        observed["command"] = list(command)
+        observed["env"] = dict(env)
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(
+        parity_snapshot,
+        "verify_snapshot",
+        lambda **_kwargs: {"migration_delta": []},
+    )
+    monkeypatch.setattr(
+        parity_snapshot,
+        "safe_database_target",
+        record_safe_database_target,
+    )
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_load_json",
+        lambda *_args, **_kwargs: {"capture_mode": "schema-only"},
+    )
+    monkeypatch.setattr(
+        parity_snapshot,
+        "validate_snapshot_manifest",
+        lambda value: value,
+    )
+    monkeypatch.setattr(parity_snapshot, "_run", fake_run)
+    monkeypatch.setenv("PGSSLMODE", "verify-full")
+
+    production_env, _ = parity_snapshot._postgres_env(
+        "postgresql://reader:x@db.production.example/postgres",
+        read_only=True,
+    )
+    restore_snapshot(
+        root=tmp_path,
+        contract_path=tmp_path / "contract.json",
+        manifest_path=tmp_path / "manifest.json",
+        archive_path=tmp_path / "snapshot.dump",
+        target_dsn=(
+            "postgresql://postgres:x@127.0.0.1:32768/leadpoet_parity_test"
+        ),
+        production_host="db.production.example",
+    )
+
+    assert production_env["PGSSLMODE"] == "require"
+    assert observed["command"][0] == "pg_restore"
+    assert observed["env"]["PGSSLMODE"] == "disable"
 
 
 def test_full_deadline_accepts_twenty_hours_and_rejects_larger_budget():

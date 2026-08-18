@@ -7185,6 +7185,14 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
         lambda **_kwargs: tmp_path,
     )
     monkeypatch.setattr(rehearsal, "_prepared_fixture_seed", fixture_seed)
+    # This test exercises stage ordering after a gateway failure. Ownership
+    # normalization has its own coverage and would otherwise try to run the
+    # fake image tag below through Docker.
+    monkeypatch.setattr(
+        rehearsal,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: None,
+    )
 
     def run_component(_tag, *, component, **_kwargs):
         calls.append(component)

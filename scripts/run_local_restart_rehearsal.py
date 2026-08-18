@@ -1233,7 +1233,42 @@ def _run_workflow(
         )
     command.append(tag)
     try:
-        _run(command)
+        try:
+            _run(command)
+        finally:
+            _run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--platform",
+                    docker_platform,
+                    "--network",
+                    "none",
+                    "--cpus",
+                    "1",
+                    "--memory",
+                    "128m",
+                    "--pids-limit",
+                    "32",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--cap-drop",
+                    "ALL",
+                    "--cap-add",
+                    "CHOWN",
+                    "--read-only",
+                    "--mount",
+                    f"type=bind,src={evidence_root},dst=/evidence",
+                    "--entrypoint",
+                    "/usr/bin/chown",
+                    tag,
+                    "--recursive",
+                    "--no-dereference",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "/evidence",
+                ]
+            )
     except BaseException:
         _preserve_failure_evidence(
             evidence_root=evidence_root,

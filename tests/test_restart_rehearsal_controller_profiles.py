@@ -212,9 +212,84 @@ def test_workflow_preserves_distinct_n_minus_one_identity(
         docker_platform="linux/arm64",
     )
 
-    assert len(commands) == 1
+    assert len(commands) == 2
     assert f"REHEARSAL_FROM_SHA={from_sha}" in commands[0]
     assert f"REHEARSAL_CANDIDATE_SHA={candidate_sha}" in commands[0]
+    assert commands[1] == [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        "linux/arm64",
+        "--network",
+        "none",
+        "--cpus",
+        "1",
+        "--memory",
+        "128m",
+        "--pids-limit",
+        "32",
+        "--security-opt",
+        "no-new-privileges",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "CHOWN",
+        "--read-only",
+        "--mount",
+        f"type=bind,src={tmp_path / 'evidence'},dst=/evidence",
+        "--entrypoint",
+        "/usr/bin/chown",
+        "rehearsal-image",
+        "--recursive",
+        "--no-dereference",
+        f"{os.getuid()}:{os.getgid()}",
+        "/evidence",
+    ]
+
+
+def test_workflow_normalizes_evidence_before_preserving_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    commands: list[list[str]] = []
+    events: list[str] = []
+
+    def fake_run(command):
+        commands.append(command)
+        if len(commands) == 1:
+            raise subprocess.CalledProcessError(1, command)
+
+    def fake_preserve_failure_evidence(**_kwargs):
+        assert len(commands) == 2
+        events.append("preserved")
+
+    monkeypatch.setattr(controller, "_run", fake_run)
+    monkeypatch.setattr(
+        controller,
+        "_preserve_failure_evidence",
+        fake_preserve_failure_evidence,
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        controller._run_workflow(
+            "rehearsal-image",
+            source_root=tmp_path / "source",
+            evidence_root=tmp_path / "evidence",
+            from_sha="a" * 40,
+            candidate_sha="b" * 40,
+            profile="prepush",
+            docker_platform="linux/arm64",
+        )
+
+    assert commands[1][-4:] == [
+        "--recursive",
+        "--no-dereference",
+        f"{os.getuid()}:{os.getgid()}",
+        "/evidence",
+    ]
+    assert events == ["preserved"]
 
 
 def test_instruction_files_define_fast_default_and_match() -> None:

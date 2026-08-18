@@ -1385,7 +1385,7 @@ class _FakeUrllibResponse:
         self.status = int(doc.get("status") or 0)
         self.code = self.status
         self.url = url
-        self.headers = dict(doc.get("headers") or {})
+        self.headers = _build_urllib_headers(doc.get("headers"))
 
     def read(self, amt: int | None = None) -> bytes:
         if amt is None:
@@ -1400,10 +1400,13 @@ class _FakeUrllibResponse:
         return self.status
 
     def getheader(self, name: str, default: Any = None) -> Any:
-        for key, value in self.headers.items():
-            if str(key).lower() == str(name).lower():
-                return value
-        return default
+        return self.headers.get(str(name), default)
+
+    def getheaders(self) -> list[tuple[str, str]]:
+        return list(self.headers.items())
+
+    def info(self) -> Any:
+        return self.headers
 
     def close(self) -> None:  # pragma: no cover - trivial
         return None
@@ -1413,6 +1416,19 @@ class _FakeUrllibResponse:
 
     def __exit__(self, *exc_info: Any) -> None:
         self.close()
+
+
+def _build_urllib_headers(values: Any) -> Any:
+    from email.message import Message
+
+    headers = Message()
+    try:
+        items = values.items()
+    except AttributeError:
+        items = ()
+    for name, value in items:
+        headers[str(name)] = str(value)
+    return headers
 
 
 def _build_urllib_replay_response(
@@ -1976,6 +1992,19 @@ def _rl_dev_raise_httpx_transport_response(doc, request):
     raise error_class("replayed httpx transport failure", request=request)
 
 
+def _rl_dev_urllib_headers(values):
+    import email.message as _rl_email_message
+
+    headers = _rl_email_message.Message()
+    try:
+        items = values.items()
+    except AttributeError:
+        items = ()
+    for name, value in items:
+        headers[str(name)] = str(value)
+    return headers
+
+
 class _RlDevFakeResponse(object):
     def __init__(self, url, doc):
         self._body = str(doc.get("body_text") or "").encode("utf-8")
@@ -1983,7 +2012,7 @@ class _RlDevFakeResponse(object):
         self.status = int(doc.get("status") or 0)
         self.code = self.status
         self.url = url
-        self.headers = dict(doc.get("headers") or {})
+        self.headers = _rl_dev_urllib_headers(doc.get("headers"))
 
     def read(self, amt=None):
         if amt is None:
@@ -1998,10 +2027,13 @@ class _RlDevFakeResponse(object):
         return self.status
 
     def getheader(self, name, default=None):
-        for key, value in self.headers.items():
-            if str(key).lower() == str(name).lower():
-                return value
-        return default
+        return self.headers.get(str(name), default)
+
+    def getheaders(self):
+        return list(self.headers.items())
+
+    def info(self):
+        return self.headers
 
     def close(self):
         return None

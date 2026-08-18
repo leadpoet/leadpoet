@@ -373,6 +373,81 @@ def test_replay_bootstrap_serves_urllib_from_snapshot_dir(tmp_path):
     assert decoded["body"] == body
 
 
+def test_urllib_record_and_replay_preserve_standard_header_contract(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    record_probe = r'''
+import http.server
+import json
+import threading
+import urllib.request
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json; charset=iso-8859-1")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/headers" % server.server_port
+try:
+    with urllib.request.urlopen(url) as response:
+        outcome = {
+            "body": response.read().decode(response.headers.get_content_charset()),
+            "charset": response.info().get_content_charset(),
+            "header": response.getheader("CONTENT-TYPE"),
+            "headers": dict(response.getheaders()),
+        }
+finally:
+    server.shutdown()
+    server.server_close()
+print(json.dumps({"outcome": outcome, "url": url}, sort_keys=True))
+'''
+    recorded = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + record_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+    assert recorded.returncode == 0, recorded.stderr
+    recorded_doc = json.loads(recorded.stdout)
+
+    replay_probe = (
+        "\nimport json, urllib.request\n"
+        f"with urllib.request.urlopen({recorded_doc['url']!r}) as response:\n"
+        "    outcome = {\n"
+        "        'body': response.read().decode(response.headers.get_content_charset()),\n"
+        "        'charset': response.info().get_content_charset(),\n"
+        "        'header': response.getheader('CONTENT-TYPE'),\n"
+        "        'headers': dict(response.getheaders()),\n"
+        "    }\n"
+        "print(json.dumps(outcome, sort_keys=True))\n"
+    )
+    replayed = subprocess.run(
+        [sys.executable, "-c", dev_replay_bootstrap() + replay_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+    assert replayed.returncode == 0, replayed.stderr
+    assert json.loads(replayed.stdout) == recorded_doc["outcome"]
+    assert recorded_doc["outcome"]["body"] == '{"ok": true}'
+    assert recorded_doc["outcome"]["charset"] == "iso-8859-1"
+    assert recorded_doc["outcome"]["header"] == (
+        "application/json; charset=iso-8859-1"
+    )
+
+
 def test_replay_bootstrap_serves_httpx_async_client_from_snapshot_dir(tmp_path):
     pytest.importorskip("httpx")
     recorder = _record_store(tmp_path)
@@ -1582,7 +1657,33 @@ def test_inprocess_urllib_replay_preserves_http_error(tmp_path):
     assert raised.value.code == 404
     assert raised.value.reason == "Missing"
     assert raised.value.headers["content-type"] == "application/json"
+    assert raised.value.headers.get_content_charset() is None
     assert raised.value.read() == b'{"detail": "not found"}'
+
+
+def test_inprocess_urllib_replay_preserves_standard_header_contract(tmp_path):
+    import urllib.request
+
+    recorder = _record_store(tmp_path)
+    url = "https://api.scrapingdog.com/headers?api_key=REDACTED"
+    recorder.record_response(
+        build_snapshot_request("GET", url),
+        status=200,
+        body_text='{"ok": true}',
+        content_type="application/json; charset=iso-8859-1",
+    )
+
+    with _replay_store(tmp_path).replay_installed():
+        response = urllib.request.urlopen(url)
+
+    assert response.headers.get_content_charset() == "iso-8859-1"
+    assert response.info() is response.headers
+    assert response.getheader("CONTENT-TYPE") == (
+        "application/json; charset=iso-8859-1"
+    )
+    assert dict(response.getheaders()) == {
+        "content-type": "application/json; charset=iso-8859-1"
+    }
 
 
 def test_inprocess_urllib_replay_preserves_dns_failure(tmp_path):

@@ -1664,12 +1664,15 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
             "export GATEWAY_RESTART_INVOCATION_ID=stale\n"
             "export LEADPOET_RESTART_INVOCATION_ID=stale\n"
             "export GATEWAY_PRIVATE_KEY_PATH=/stale/private-key.pem\n"
-            "export ARWEAVE_KEYFILE_PATH=/stale/arweave-keyfile.json\n",
+            "export ARWEAVE_KEYFILE_PATH=/stale/arweave-keyfile.json\n"
+            "export GATEWAY_RESTART_GIT_SSH_COMMAND=stale-restart-command\n"
+            "export GIT_SSH_COMMAND=stale-git-command\n",
             encoding="utf-8",
         )
     active_invocation = "gateway-active-invocation"
     active_private_key = "/run-scoped/gateway-private-key.pem"
     active_arweave_keyfile = "/run-scoped/arweave-keyfile.json"
+    active_git_ssh_command = "ssh -i /run-scoped/deploy-key"
     preserved = subprocess.run(
         [
             "bash",
@@ -1678,9 +1681,10 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
                 "set -euo pipefail\n"
                 + merge_and_reassert
                 + '\nset -a\n. "$ENV_CLONE"\nset +a\n'
-                + "printf '%s\\n%s\\n%s\\n%s\\n' \"$GATEWAY_RESTART_INVOCATION_ID\" "
+                + "printf '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$GATEWAY_RESTART_INVOCATION_ID\" "
                 + '"$LEADPOET_RESTART_INVOCATION_ID" '
-                + '"$GATEWAY_PRIVATE_KEY_PATH" "$ARWEAVE_KEYFILE_PATH"\n'
+                + '"$GATEWAY_PRIVATE_KEY_PATH" "$ARWEAVE_KEYFILE_PATH" '
+                + '"$GIT_SSH_COMMAND"\n'
             ),
         ],
         check=True,
@@ -1694,6 +1698,7 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
             "LEADPOET_RESTART_INVOCATION_ID": "stale-parent",
             "GATEWAY_PRIVATE_KEY_PATH": active_private_key,
             "ARWEAVE_KEYFILE_PATH": active_arweave_keyfile,
+            "GATEWAY_RESTART_GIT_SSH_COMMAND": active_git_ssh_command,
         },
     )
     assert preserved.stdout.splitlines() == [
@@ -1701,6 +1706,7 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
         active_invocation,
         active_private_key,
         active_arweave_keyfile,
+        active_git_ssh_command,
     ]
 
 

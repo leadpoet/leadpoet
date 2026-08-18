@@ -1055,6 +1055,11 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
         "_validated_baked_arweave_keyfile_path",
         lambda: "/home/ec2-user/gateway/secrets/arweave_keyfile.json",
     )
+    monkeypatch.setattr(
+        full_host,
+        "_validated_baked_private_model_ssh_command",
+        lambda: "ssh -i /home/ec2-user/.ssh/research_lab_private_model_deploy",
+    )
     monkeypatch.setattr(full_host, "_checkout_identity", lambda _sha: None)
     monkeypatch.setattr(full_host.time, "monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr(full_host.boto3, "client", lambda *_args, **_kwargs: object())
@@ -2092,6 +2097,9 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
             "HTTP_PROXY": "http://production-proxy.invalid",
             "HTTPS_PROXY": "http://production-proxy.invalid",
             "GIT_SSH_COMMAND": "ssh -i /production/key",
+            "GATEWAY_RESTART_GIT_SSH_COMMAND": (
+                "ssh -i /production/restart-key"
+            ),
             "AWS_ACCESS_KEY_ID": "must-drop",
             "AWS_SECRET_ACCESS_KEY": "must-drop",
             "GATEWAY_ENV_FILE": "/production/gateway.env",
@@ -2174,6 +2182,7 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "GIT_SSH_COMMAND",
+        "GATEWAY_RESTART_GIT_SSH_COMMAND",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "GATEWAY_ENV_FILE",
@@ -2409,12 +2418,46 @@ def test_full_baked_arweave_keyfile_path_is_exact_and_metadata_only(
         full_host._validated_baked_arweave_keyfile_path()
 
 
+def test_full_baked_private_model_ssh_command_is_exact_and_metadata_only(
+    monkeypatch, tmp_path: Path
+):
+    deploy_key = tmp_path / "research_lab_private_model_deploy"
+    known_hosts = tmp_path / "known_hosts"
+    for path in (deploy_key, known_hosts):
+        path.write_bytes(b"not-read-by-validator")
+        path.chmod(0o600)
+    monkeypatch.setattr(
+        full_host, "PRODUCTION_PRIVATE_MODEL_DEPLOY_KEY_PATH", deploy_key
+    )
+    monkeypatch.setattr(
+        full_host, "PRODUCTION_PRIVATE_MODEL_KNOWN_HOSTS_PATH", known_hosts
+    )
+    monkeypatch.setattr(
+        full_host,
+        "PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER",
+        (os.getuid(), os.getgid()),
+    )
+    assert full_host._validated_baked_private_model_ssh_command() == (
+        f"ssh -i {deploy_key} -o IdentitiesOnly=yes -o BatchMode=yes "
+        "-o StrictHostKeyChecking=yes "
+        f"-o UserKnownHostsFile={known_hosts} "
+        "-o GlobalKnownHostsFile=/dev/null"
+    )
+
+    known_hosts.write_bytes(b"")
+    with pytest.raises(
+        FullParityError, match="private-model known-hosts path identity"
+    ):
+        full_host._validated_baked_private_model_ssh_command()
+
+
 def test_full_gateway_restart_reasserts_run_owned_path_authority():
     source = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     authority_keys = {
         "GATEWAY_ENV_FILE",
         "GATEWAY_PRIVATE_KEY_PATH",
         "ARWEAVE_KEYFILE_PATH",
+        "GATEWAY_RESTART_GIT_SSH_COMMAND",
         "LEADPOET_GATEWAY_ENV_SECRET_ID",
         "GATEWAY_RESTART_CONTROLLER_ROOT",
         "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
@@ -2454,12 +2497,20 @@ def test_full_gateway_restart_reasserts_run_owned_path_authority():
         '"$ARWEAVE_KEYFILE_PATH" >> "$ENV_CLONE"'
     ) in source
     assert 'ARWEAVE_KEYFILE_PATH="$ARWEAVE_KEYFILE_PATH" \\' in source
+    assert (
+        'GATEWAY_RESTART_GIT_SSH_COMMAND="$GATEWAY_RESTART_GIT_SSH_COMMAND" \\'
+        in source
+    )
     assert is_process_control_environment_key("GATEWAY_PYTHON_BIN")
     full_source = inspect.getsource(full_host.run_full)
     assert '"GATEWAY_V2_RELEASE_BUCKET": ATTESTED_V2_RELEASE_BUCKET' in full_source
     assert '"GATEWAY_V2_KMS_KEY_ID": ATTESTED_V2_KMS_KEY_ID' in full_source
     assert '"GATEWAY_PRIVATE_KEY_PATH": gateway_private_key_path' in full_source
     assert '"ARWEAVE_KEYFILE_PATH": arweave_keyfile_path' in full_source
+    assert (
+        '"GATEWAY_RESTART_GIT_SSH_COMMAND": ('
+        in full_source
+    )
 
 
 def test_controller_dependency_closure_includes_gateway_database_client():

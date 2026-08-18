@@ -116,6 +116,12 @@ PRODUCTION_GATEWAY_PRIVATE_KEY_PATH = Path(
 PRODUCTION_ARWEAVE_KEYFILE_PATH = Path(
     "/home/ec2-user/gateway/secrets/arweave_keyfile.json"
 )
+PRODUCTION_PRIVATE_MODEL_DEPLOY_KEY_PATH = Path(
+    "/home/ec2-user/.ssh/research_lab_private_model_deploy"
+)
+PRODUCTION_PRIVATE_MODEL_KNOWN_HOSTS_PATH = Path(
+    "/home/ec2-user/.ssh/known_hosts"
+)
 PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER = (1000, 1000)
 ATTESTED_V2_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 ATTESTED_V2_RELEASE_PREFIX = "attested-v2/releases"
@@ -935,6 +941,7 @@ def _validated_baked_secret_path(path: Path, *, field: str) -> str:
         resolved != path
         or path.is_symlink()
         or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size <= 0
         or stat.S_IMODE(metadata.st_mode) != 0o600
         or (metadata.st_uid, metadata.st_gid)
         != PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER
@@ -954,6 +961,23 @@ def _validated_baked_arweave_keyfile_path() -> str:
     return _validated_baked_secret_path(
         PRODUCTION_ARWEAVE_KEYFILE_PATH,
         field="Arweave keyfile",
+    )
+
+
+def _validated_baked_private_model_ssh_command() -> str:
+    deploy_key = _validated_baked_secret_path(
+        PRODUCTION_PRIVATE_MODEL_DEPLOY_KEY_PATH,
+        field="private-model deploy key",
+    )
+    known_hosts = _validated_baked_secret_path(
+        PRODUCTION_PRIVATE_MODEL_KNOWN_HOSTS_PATH,
+        field="private-model known-hosts",
+    )
+    return (
+        f"ssh -i {deploy_key} -o IdentitiesOnly=yes -o BatchMode=yes "
+        "-o StrictHostKeyChecking=yes "
+        f"-o UserKnownHostsFile={known_hosts} "
+        "-o GlobalKnownHostsFile=/dev/null"
     )
 
 
@@ -2448,6 +2472,9 @@ def run_full(
         )
     gateway_private_key_path = _validated_baked_gateway_private_key_path()
     arweave_keyfile_path = _validated_baked_arweave_keyfile_path()
+    private_model_git_ssh_command = (
+        _validated_baked_private_model_ssh_command()
+    )
     started = time.monotonic()
     deadline = _full_deadline(
         started=started,
@@ -2621,6 +2648,9 @@ def run_full(
                 "GATEWAY_LOG_FILE": str(work / "gateway" / "gateway.log"),
                 "GATEWAY_PRIVATE_KEY_PATH": gateway_private_key_path,
                 "ARWEAVE_KEYFILE_PATH": arweave_keyfile_path,
+                "GATEWAY_RESTART_GIT_SSH_COMMAND": (
+                    private_model_git_ssh_command
+                ),
                 "GATEWAY_RESTART_CONTROLLER_ROOT": str(work / "restart-controller"),
                 "GATEWAY_DEPLOYMENT_DIR": str(work / "deployments"),
                 "GATEWAY_HOST_RESTART_SCRIPT": str(ROOT / "gw_restart.sh"),

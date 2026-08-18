@@ -786,6 +786,72 @@ def test_fast_live_boundary_rejects_every_non_get_or_foreign_request():
         provider({**base, "body_b64": "eA=="})
 
 
+def test_fast_live_boundary_disables_environment_proxy_routing(monkeypatch):
+    observed_handlers: list[object] = []
+
+    def fake_build_opener(*handlers):
+        observed_handlers.extend(handlers)
+        return object()
+
+    monkeypatch.setattr(fast_parity, "build_opener", fake_build_opener)
+    _ProductionReadOnlySupabaseProvider(
+        origin="https://qplwoislplkcegvdmbim.supabase.co",
+        service_role_key="secret-read-key",
+    )
+
+    assert len(observed_handlers) == 2
+    assert isinstance(observed_handlers[0], fast_parity.ProxyHandler)
+    assert observed_handlers[0].proxies == {}
+    assert observed_handlers[1] is fast_parity._NoRedirect
+
+
+def test_database_cleanup_fails_closed_when_docker_absence_cannot_be_proven(
+    monkeypatch,
+):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+
+    def unavailable(command, *, timeout, **_kwargs):
+        assert timeout in {10, 30}
+        if "ls" in command:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="Cannot connect to the Docker daemon",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="remove failed")
+
+    monkeypatch.setattr(fast_parity, "_run", unavailable)
+    with pytest.raises(
+        ProductionParityError,
+        match="container cleanup verification failed",
+    ):
+        database.cleanup()
+
+
+def test_database_cleanup_accepts_independently_proven_absence(monkeypatch):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+
+    def absent(command, *, timeout, **_kwargs):
+        assert timeout in {10, 30}
+        if "ls" in command:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="already absent")
+
+    monkeypatch.setattr(fast_parity, "_run", absent)
+    assert database.cleanup() == {
+        "containers_removed": [database.postgres, database.postgrest],
+        "network_removed": database.network,
+    }
+
+
 def test_standalone_postgrest_schema_opener_rewrites_exact_supabase_prefix(
     monkeypatch,
 ):

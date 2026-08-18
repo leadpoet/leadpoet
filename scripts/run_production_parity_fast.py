@@ -336,7 +336,7 @@ class _ProductionReadOnlySupabaseProvider:
         self.origin = normalized
         self.service_role_key = str(service_role_key)
         self.pages: list[dict[str, Any]] = []
-        self._opener = build_opener(_NoRedirect)
+        self._opener = build_opener(ProxyHandler({}), _NoRedirect)
 
     def __call__(self, request: Mapping[str, Any]) -> dict[str, Any]:
         url = str(request.get("url") or "")
@@ -1145,11 +1145,31 @@ LIMIT 1;
             ("network", self.network),
         ):
             command = (
-                ["docker", "container", "inspect", resource_name]
+                [
+                    "docker",
+                    "container",
+                    "ls",
+                    "--all",
+                    "--quiet",
+                    "--filter",
+                    f"name=^/{resource_name}$",
+                ]
                 if resource_type == "container"
-                else ["docker", "network", "inspect", resource_name]
+                else [
+                    "docker",
+                    "network",
+                    "ls",
+                    "--quiet",
+                    "--filter",
+                    f"name=^{resource_name}$",
+                ]
             )
-            if _run(command, timeout=10).returncode == 0:
+            probe = _run(command, timeout=10)
+            if probe.returncode != 0:
+                raise ProductionParityError(
+                    f"parity {resource_type} cleanup verification failed"
+                )
+            if probe.stdout.strip():
                 remaining.append(f"{resource_type}:{resource_name}")
         if remaining:
             raise ProductionParityError(

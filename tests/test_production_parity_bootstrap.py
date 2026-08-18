@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 from types import SimpleNamespace
 
 from botocore.exceptions import ClientError
@@ -1913,7 +1914,13 @@ def test_full_workflow_derives_temp_before_use_and_cleans_safe_exact_path():
     assert 'expected="$RUNNER_TEMP/production-parity-' in prepare
     assert 'PARITY_TEMP="$expected"' in prepare
     assert export in prepare
-    assert prepare.index(export) < prepare.index('mkdir -m 700 "$PARITY_TEMP"')
+    absent = 'test ! -e "$expected"'
+    create = 'mkdir -m 700 "$expected"'
+    marker = 'printf \'%s\\n\' "$owner_token" > "$owner_marker"'
+    assert prepare.index(absent) < prepare.index(create)
+    assert prepare.index(create) < prepare.index(marker) < prepare.index(export)
+    assert "PARITY_OWNER_TOKEN=%s" in prepare
+    assert ".leadpoet-production-parity-owner" in prepare
 
     for name in (
         "Validate redacted evidence upload path",
@@ -1926,6 +1933,8 @@ def test_full_workflow_derives_temp_before_use_and_cleans_safe_exact_path():
         assert "${GITHUB_RUN_ATTEMPT:-}" in cleanup
         assert 'expected="$RUNNER_TEMP/production-parity-' in cleanup
         assert 'parity_temp="${PARITY_TEMP:-$expected}"' in cleanup
+        assert 'owner_token="${PARITY_OWNER_TOKEN:-}"' in cleanup
+        assert ".leadpoet-production-parity-owner" in cleanup
         assert '"$parity_temp"' in cleanup
         assert '"$expected"' in cleanup
 
@@ -1934,6 +1943,130 @@ def test_full_workflow_derives_temp_before_use_and_cleans_safe_exact_path():
         "${{ runner.temp }}/production-parity-${{ github.run_id }}-"
         "${{ github.run_attempt }}/full-evidence.json"
     )
+
+
+def test_full_workflow_never_scrubs_a_preexisting_temp_collision(tmp_path):
+    path = (
+        Path(__file__).parents[1]
+        / ".github/workflows/physical-v2-staging.yml"
+    )
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["validate"]["steps"]
+    by_name = {step.get("name"): step for step in steps}
+    prepare = by_name["Prepare isolated self-hosted controller workspace"]["run"]
+    evidence = by_name["Validate redacted evidence upload path"]["run"]
+    scrub = by_name["Scrub self-hosted controller workspace"]["run"]
+
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    expected = runner_temp / "production-parity-12345-2"
+    expected.mkdir()
+    sentinel = expected / "must-survive"
+    sentinel.write_text("preexisting\n", encoding="utf-8")
+    (expected / "full-evidence.json").write_text(
+        '{"status":"fabricated-collision"}\n', encoding="utf-8"
+    )
+    (expected / ".leadpoet-production-parity-owner").write_text(
+        "different-owner\n", encoding="utf-8"
+    )
+    github_env = tmp_path / "github-env"
+    github_env.touch()
+    github_output = tmp_path / "github-output"
+    github_output.touch()
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(runner_temp),
+        "GITHUB_RUN_ID": "12345",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "GITHUB_ENV": str(github_env),
+        "GITHUB_OUTPUT": str(github_output),
+    }
+
+    prepared = subprocess.run(
+        ["bash", "-c", prepare],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert prepared.returncode != 0
+    exported = dict(
+        line.split("=", 1)
+        for line in github_env.read_text(encoding="utf-8").splitlines()
+    )
+    assert re.fullmatch(r"[0-9a-f]{64}", exported["PARITY_OWNER_TOKEN"])
+    assert "PARITY_TEMP" not in exported
+
+    validated = subprocess.run(
+        ["bash", "-c", evidence],
+        cwd=tmp_path,
+        env={**env, **exported},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert validated.returncode != 0
+    assert github_output.read_text(encoding="utf-8") == ""
+
+    scrubbed = subprocess.run(
+        ["bash", "-c", scrub],
+        cwd=tmp_path,
+        env={**env, **exported},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert scrubbed.returncode != 0
+    assert sentinel.read_text(encoding="utf-8") == "preexisting\n"
+
+
+def test_full_workflow_scrubs_only_its_owned_temp_after_later_failure(tmp_path):
+    path = (
+        Path(__file__).parents[1]
+        / ".github/workflows/physical-v2-staging.yml"
+    )
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["validate"]["steps"]
+    by_name = {step.get("name"): step for step in steps}
+    prepare = by_name["Prepare isolated self-hosted controller workspace"]["run"]
+    scrub = by_name["Scrub self-hosted controller workspace"]["run"]
+
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    github_env = tmp_path / "github-env"
+    github_env.touch()
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(runner_temp),
+        "GITHUB_RUN_ID": "67890",
+        "GITHUB_RUN_ATTEMPT": "3",
+        "GITHUB_ENV": str(github_env),
+    }
+    subprocess.run(
+        ["bash", "-c", prepare],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    exported = dict(
+        line.split("=", 1)
+        for line in github_env.read_text(encoding="utf-8").splitlines()
+    )
+    owned = Path(exported["PARITY_TEMP"])
+    assert owned.is_dir()
+
+    subprocess.run(
+        ["bash", "-c", scrub],
+        cwd=tmp_path,
+        env={**env, **exported},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert not owned.exists()
 
 
 def test_fast_and_cleanup_pin_account_and_reject_stale_cleanup_code():
@@ -1962,7 +2095,14 @@ def test_fast_and_cleanup_pin_account_and_reject_stale_cleanup_code():
             assert account_gate["name"].startswith(
                 "Require exact parity AWS account"
             )
-            assert account_gate.get("if") == credential.get("if")
+            if credential.get("id") == "cleanup_credentials":
+                assert credential["if"] in account_gate["if"]
+                assert (
+                    "steps.cleanup_credentials.outcome == 'success'"
+                    in account_gate["if"]
+                )
+            else:
+                assert account_gate.get("if") == credential.get("if")
             assert "aws sts get-caller-identity" in account_gate["run"]
             assert '"493765492819"' in account_gate["run"]
             assert credential["with"]["unset-current-credentials"] is True
@@ -1978,6 +2118,23 @@ def test_fast_and_cleanup_pin_account_and_reject_stale_cleanup_code():
     )
     assert "git rev-parse origin/main" in cleanup
     assert cleanup_gate < cleanup_action < cleanup_credentials
+
+
+def test_full_cleanup_rejects_stale_credentials_after_refresh_failure():
+    path = (
+        Path(__file__).parents[1]
+        / ".github/workflows/physical-v2-staging.yml"
+    )
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["validate"]["steps"]
+    by_name = {step.get("name"): step for step in steps}
+    refresh = by_name["Refresh parity AWS role for cleanup"]
+    account = by_name["Require exact parity AWS account for cleanup"]
+    destroy = by_name["Destroy every run-scoped resource"]
+
+    assert refresh["id"] == "cleanup_credentials"
+    assert "steps.cleanup_credentials.outcome == 'success'" in account["if"]
+    assert "steps.cleanup_account.outcome == 'success'" in destroy["if"]
 
 
 def test_configure_requires_exact_parity_variable_inventory():

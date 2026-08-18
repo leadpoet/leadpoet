@@ -47,6 +47,87 @@ def test_checkpoint_payload_is_canonical():
     assert first == second
 
 
+def _set_parity_boundary(monkeypatch):
+    monkeypatch.setenv("LEADPOET_PRODUCTION_PARITY_MODE", "enabled")
+    monkeypatch.setenv("LEADPOET_PRODUCTION_PARITY_RUN_ID", "pp-123-1")
+    monkeypatch.setenv(
+        "LEADPOET_PRODUCTION_PARITY_SUPABASE_ORIGIN",
+        "https://d111111abcdef8.cloudfront.net",
+    )
+    monkeypatch.setenv(
+        "LEADPOET_PRODUCTION_PARITY_BENCHMARK_DATE", "2026-08-19"
+    )
+    monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
+    monkeypatch.setenv("BITTENSOR_NETUID", "71")
+
+
+@pytest.mark.asyncio
+async def test_production_parity_blocks_arweave_before_sign_or_network(
+    monkeypatch,
+):
+    _set_parity_boundary(monkeypatch)
+    observed = {"initialize": 0, "transaction": 0, "post": 0}
+
+    def forbidden_initialize():
+        observed["initialize"] += 1
+
+    class ForbiddenTransaction:
+        def __init__(self, *_args, **_kwargs):
+            observed["transaction"] += 1
+
+    def forbidden_post(*_args, **_kwargs):
+        observed["post"] += 1
+        return _Response()
+
+    monkeypatch.setattr(arweave_client, "_initialize_client", forbidden_initialize)
+    monkeypatch.setattr(arweave_client, "Transaction", ForbiddenTransaction)
+    monkeypatch.setattr(requests, "post", forbidden_post)
+
+    with pytest.raises(
+        arweave_client.ArweaveWriteBoundaryError,
+        match="disabled in production parity",
+    ):
+        await arweave_client.write_event({"event": "blocked"})
+    with pytest.raises(
+        arweave_client.ArweaveWriteBoundaryError,
+        match="disabled in production parity",
+    ):
+        await arweave_client.upload_checkpoint(
+            header={
+                "checkpoint_number": 7,
+                "event_count": 1,
+                "merkle_root": "a" * 64,
+                "time_range": {"start": "start", "end": "end"},
+            },
+            signature="signature",
+            events=b"events",
+            tree_levels=[["root"]],
+        )
+    assert observed == {"initialize": 0, "transaction": 0, "post": 0}
+
+
+def test_arweave_write_boundary_preserves_production_and_rejects_partial_parity(
+    monkeypatch,
+):
+    for key in (
+        "LEADPOET_PRODUCTION_PARITY_MODE",
+        "LEADPOET_PRODUCTION_PARITY_RUN_ID",
+        "LEADPOET_PRODUCTION_PARITY_SUPABASE_ORIGIN",
+        "LEADPOET_PRODUCTION_PARITY_BENCHMARK_DATE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
+    monkeypatch.setenv("BITTENSOR_NETUID", "71")
+    arweave_client._require_arweave_write_boundary()
+
+    monkeypatch.setenv("LEADPOET_PRODUCTION_PARITY_MODE", "enabled")
+    with pytest.raises(
+        arweave_client.ArweaveWriteBoundaryError,
+        match="configuration is invalid",
+    ):
+        arweave_client._require_arweave_write_boundary()
+
+
 @pytest.mark.asyncio
 async def test_checkpoint_upload_requires_network_acceptance(monkeypatch):
     class FakeTransaction:

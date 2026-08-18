@@ -11,19 +11,30 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import hmac
+from http.client import HTTPException
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import math
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Iterator, Mapping, Sequence
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.request import (
+    HTTPRedirectHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+    urlopen,
+)
 
 import boto3
 
@@ -32,13 +43,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gateway.research_lab.maintenance import (  # noqa: E402
-    set_autoresearch_maintenance_paused,
-    set_scoring_maintenance_paused,
-)
-from leadpoet_canonical.allocation_handoff_v2 import (  # noqa: E402
-    validate_allocation_handoff_v2,
-)
 from leadpoet_canonical.production_parity import (  # noqa: E402
     ProductionParityError,
     sha256_json,
@@ -47,25 +51,28 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
 from leadpoet_canonical.production_parity_boundary_v2 import (  # noqa: E402
     validate_production_parity_boundary_document_v2,
 )
-from research_lab.validator_integration import (  # noqa: E402
-    ResearchLabValidatorFlags,
-    build_research_lab_allocation_component,
-    fetch_research_lab_attested_allocation_bundle,
-    verify_research_lab_allocation_bundle,
-)
 from scripts.build_production_parity_contract import build_contract  # noqa: E402
 from scripts.capture_production_parity_runtime_config import capture  # noqa: E402
-from scripts.check_production_parity_rebenchmark import check as check_rebenchmark  # noqa: E402
 from scripts.materialize_production_parity_secrets import (  # noqa: E402
     _parse_environment_document,
     create as create_gateway_secret,
     delete as delete_gateway_secret,
+    is_process_control_environment_key,
 )
 from scripts.production_parity_snapshot import (  # noqa: E402
     capture_snapshot,
     restore_snapshot,
 )
 from scripts.run_production_parity_fast import _DockerDatabase  # noqa: E402
+from gateway.tee.acceptance_corpus_v2 import (  # noqa: E402
+    load_and_validate_acceptance_corpus_v2,
+)
+from gateway.tee.release_channel_v2 import (  # noqa: E402
+    fetch_release_channel_v2,
+)
+from gateway.tee.release_manifest_v2 import (  # noqa: E402
+    validate_release_manifest,
+)
 
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -86,15 +93,371 @@ OPENROUTER_MANAGEMENT_CREDENTIAL_REFS = (
     "OPENROUTER_API_MANAGEMENT_KEY",
     "OR_MANAGEMENT_KEY",
 )
+MINER_INTAKE_ENVIRONMENT_OVERRIDES = {
+    "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
+    "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
+    "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "true",
+    "RESEARCH_LAB_SOURCE_ADD_ENABLED": "true",
+    "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false",
+    "RESEARCH_LAB_PAID_LOOPS_ENABLED": "false",
+}
 EARLY_BOOT_MARKER = Path(
     "/run/leadpoet-production-parity/early-boot-isolated"
 )
 FULL_WORK_ROOT = Path("/opt/leadpoet-production-parity")
+PRODUCTION_V2_CONFIG_DIR = Path("/home/ec2-user/.config/leadpoet/v2")
+ATTESTED_V2_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
+ATTESTED_V2_RELEASE_PREFIX = "attested-v2/releases"
+ATTESTED_V2_KMS_KEY_ID = (
+    "arn:aws:kms:us-east-1:493765492819:"
+    "key/c5412928-093e-4bf5-aafc-7b27c02f1445"
+)
 MAX_FULL_TIMEOUT_SECONDS = 72_000
+CLONE_PREFIX_ADAPTER_MAX_BODY_BYTES = 64 * 1024 * 1024
+CLONE_PREFIX_ADAPTER_TIMEOUT_SECONDS = 15
+CHILD_REQUEST_MAX_BYTES = 64 * 1024
+CLONE_PREFIX_ADAPTER_METHODS = frozenset(
+    {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
+)
+FULL_FAILURE_STAGES = frozenset(
+    {
+        "initialization",
+        "runtime-config-capture",
+        "parity-contract",
+        "production-dsn",
+        "snapshot-capture",
+        "clone-start",
+        "snapshot-restore",
+        "clone-http-origin",
+        "clone-secret",
+        "acceptance-corpus",
+        "gateway-restart",
+        "gateway-health",
+        "clone-controls",
+        "rebenchmark-publication",
+        "weight-readiness",
+        "allocation-handoff",
+        "nonforwarding-weight-path",
+        "miner-intake",
+        "clone-shape",
+        "clone-weight-history",
+        "cleanup",
+        "unknown",
+    }
+)
+FULL_ERROR_TYPES = frozenset(
+    {
+        "BotoCoreError",
+        "AcceptanceCorpusV2Error",
+        "CalledProcessError",
+        "ClientError",
+        "CleanupError",
+        "FullParityError",
+        "HTTPError",
+        "JSONDecodeError",
+        "OSError",
+        "ProductionParityError",
+        "ReleaseChannelV2Error",
+        "ReleaseManifestV2Error",
+        "RuntimeError",
+        "TimeoutError",
+        "TimeoutExpired",
+        "URLError",
+        "ValueError",
+    }
+)
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
+
+def _connection_nominated_headers(headers: Mapping[str, Any]) -> set[str]:
+    value = str(headers.get("Connection") or "")
+    return {
+        item.strip().lower()
+        for item in value.split(",")
+        if item.strip()
+    }
 
 
 class FullParityError(RuntimeError):
     """The full disposable workflow did not reach every required stage."""
+
+
+def _validated_public_origin(origin: str) -> str:
+    parsed = urlsplit(str(origin or ""))
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise FullParityError("clone public origin identity is invalid") from exc
+    if (
+        parsed.scheme != "https"
+        or not str(parsed.hostname or "").endswith(".cloudfront.net")
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise FullParityError("clone public origin identity is invalid")
+    return f"https://{parsed.hostname}"
+
+
+def _failure_identity(stage: str, exc: BaseException) -> tuple[str, str]:
+    bounded_stage = stage if stage in FULL_FAILURE_STAGES else "unknown"
+    raw_type = type(exc).__name__
+    bounded_type = raw_type if raw_type in FULL_ERROR_TYPES else "UnexpectedError"
+    return bounded_stage, bounded_type
+
+
+class _RejectCloneRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        raise HTTPError(req.full_url, code, msg, headers, fp)
+
+
+class _ClonePrefixServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler: type[BaseHTTPRequestHandler],
+        *,
+        upstream_origin: str,
+        public_origin: str,
+    ) -> None:
+        self.upstream_origin = upstream_origin
+        self.public_origin = public_origin
+        self.opener = build_opener(ProxyHandler({}), _RejectCloneRedirects())
+        super().__init__(server_address, handler)
+
+
+class _ClonePrefixHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return None
+
+    def _reject(self, status: int) -> None:
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def _forward(self) -> None:
+        if self.command not in CLONE_PREFIX_ADAPTER_METHODS:
+            self._reject(405)
+            return
+        target = urlsplit(self.path)
+        request_origin = str(self.headers.get("Origin") or "").rstrip("/")
+        if (
+            target.scheme
+            or target.netloc
+            or target.fragment
+            or (
+                target.path not in {"/rest/v1", "/rest/v1/"}
+                and not target.path.startswith("/rest/v1/")
+            )
+            or (
+                request_origin
+                and request_origin
+                != self.server.public_origin  # type: ignore[attr-defined]
+            )
+            or self.headers.get("Proxy-Authorization") is not None
+            or self.headers.get("Proxy-Connection") is not None
+            or self.headers.get("Transfer-Encoding") is not None
+        ):
+            self._reject(404)
+            return
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            content_length = int(raw_length)
+        except ValueError:
+            self._reject(400)
+            return
+        if not 0 <= content_length <= CLONE_PREFIX_ADAPTER_MAX_BODY_BYTES:
+            self._reject(413)
+            return
+        self.connection.settimeout(CLONE_PREFIX_ADAPTER_TIMEOUT_SECONDS)
+        try:
+            body = self.rfile.read(content_length) if content_length else b""
+        except (OSError, TimeoutError):
+            self._reject(408)
+            return
+        if len(body) != content_length:
+            self._reject(400)
+            return
+
+        upstream_path = target.path[len("/rest/v1") :] or "/"
+        upstream = urlsplit(self.server.upstream_origin)  # type: ignore[attr-defined]
+        upstream_url = urlunsplit(
+            (upstream.scheme, upstream.netloc, upstream_path, target.query, "")
+        )
+        request_hop_headers = (
+            set(_HOP_BY_HOP_HEADERS)
+            | _connection_nominated_headers(self.headers)
+        )
+        headers = {
+            str(name): str(value)
+            for name, value in self.headers.items()
+            if str(name).lower() not in request_hop_headers
+        }
+        request = Request(
+            upstream_url,
+            data=body if content_length else None,
+            headers=headers,
+            method=self.command,
+        )
+        response = None
+        try:
+            try:
+                response = self.server.opener.open(  # type: ignore[attr-defined]
+                    request, timeout=CLONE_PREFIX_ADAPTER_TIMEOUT_SECONDS
+                )
+            except HTTPError as exc:
+                response = exc
+            status = int(response.getcode())
+            if 300 <= status < 400:
+                self._reject(502)
+                return
+            response_body = response.read(CLONE_PREFIX_ADAPTER_MAX_BODY_BYTES + 1)
+            if len(response_body) > CLONE_PREFIX_ADAPTER_MAX_BODY_BYTES:
+                self._reject(502)
+                return
+            response_headers = list(response.headers.items())
+            response_hop_headers = (
+                set(_HOP_BY_HOP_HEADERS)
+                | _connection_nominated_headers(response.headers)
+            )
+        except (HTTPException, OSError, TimeoutError, URLError):
+            self._reject(502)
+            return
+        finally:
+            if response is not None:
+                response.close()
+
+        self.send_response(status)
+        for name, value in response_headers:
+            if str(name).lower() not in response_hop_headers:
+                self.send_header(str(name), str(value))
+        self.send_header("Content-Length", str(len(response_body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(response_body)
+        self.close_connection = True
+
+    do_GET = _forward
+    do_HEAD = _forward
+    do_OPTIONS = _forward
+    do_POST = _forward
+    do_PUT = _forward
+    do_PATCH = _forward
+    do_DELETE = _forward
+
+
+class _ClonePostgrestPrefixAdapter:
+    """Expose only Supabase `/rest/v1` paths to one loopback PostgREST."""
+
+    def __init__(
+        self,
+        *,
+        upstream_origin: str,
+        public_origin: str,
+        listen_host: str = "0.0.0.0",
+        listen_port: int = 3000,
+    ) -> None:
+        parsed = urlsplit(upstream_origin)
+        try:
+            upstream_port = parsed.port
+        except ValueError as exc:
+            raise FullParityError(
+                "clone PostgREST prefix adapter identity is invalid"
+            ) from exc
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or upstream_port in (None, 3000)
+            or not 1 <= upstream_port <= 65535
+            or listen_host not in {"0.0.0.0", "127.0.0.1"}
+            or not isinstance(listen_port, int)
+            or isinstance(listen_port, bool)
+            or not 0 <= listen_port <= 65535
+        ):
+            raise FullParityError("clone PostgREST prefix adapter identity is invalid")
+        self.upstream_origin = upstream_origin.rstrip("/")
+        self.public_origin = _validated_public_origin(public_origin)
+        self.listen_host = listen_host
+        self.listen_port = listen_port
+        self.server: _ClonePrefixServer | None = None
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> dict[str, Any]:
+        if self.server is not None or self.thread is not None:
+            raise FullParityError("clone PostgREST prefix adapter already started")
+        try:
+            server = _ClonePrefixServer(
+                (self.listen_host, self.listen_port),
+                _ClonePrefixHandler,
+                upstream_origin=self.upstream_origin,
+                public_origin=self.public_origin,
+            )
+        except OSError as exc:
+            raise FullParityError(
+                "clone PostgREST prefix adapter could not bind"
+            ) from exc
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="production-parity-clone-prefix-adapter",
+            daemon=True,
+        )
+        thread.start()
+        if not thread.is_alive():
+            server.server_close()
+            raise FullParityError("clone PostgREST prefix adapter did not start")
+        self.server = server
+        self.thread = thread
+        return {
+            "listen_host": str(server.server_address[0]),
+            "listen_port": int(server.server_address[1]),
+            "upstream_host": "127.0.0.1",
+            "path_prefix": "/rest/v1",
+        }
+
+    def cleanup(self) -> str:
+        server = self.server
+        thread = self.thread
+        if server is None or thread is None:
+            return "already_absent"
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+        self.server = None
+        self.thread = None
+        if thread.is_alive():
+            raise FullParityError(
+                "clone PostgREST prefix adapter remained after cleanup"
+            )
+        return "removed"
 
 
 def _full_deadline(*, started: float, timeout_seconds: int) -> float:
@@ -198,14 +561,254 @@ def _dsn_from_secret(raw: str) -> str:
     return dsn
 
 
+def _acceptance_corpus_tree(
+    root: Path,
+    *,
+    owner_uid: int,
+    owner_gid: int,
+) -> tuple[list[Path], list[Path]]:
+    try:
+        root_metadata = root.lstat()
+    except OSError as exc:
+        raise FullParityError("signed acceptance corpus is unavailable") from exc
+    if (
+        root.is_symlink()
+        or not stat.S_ISDIR(root_metadata.st_mode)
+        or stat.S_IMODE(root_metadata.st_mode) != 0o700
+        or root_metadata.st_uid != owner_uid
+        or root_metadata.st_gid != owner_gid
+    ):
+        raise FullParityError("signed acceptance corpus ownership differs")
+
+    directories: list[Path] = []
+    files: list[Path] = []
+    for current, names, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in sorted(names):
+            path = current_path / name
+            metadata = path.lstat()
+            if (
+                path.is_symlink()
+                or not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+                or metadata.st_uid != owner_uid
+                or metadata.st_gid != owner_gid
+            ):
+                raise FullParityError("signed acceptance corpus ownership differs")
+            directories.append(path)
+        for name in sorted(filenames):
+            path = current_path / name
+            metadata = path.lstat()
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_uid != owner_uid
+                or metadata.st_gid != owner_gid
+            ):
+                raise FullParityError("signed acceptance corpus ownership differs")
+            files.append(path)
+    return directories, files
+
+
+def _copy_acceptance_file(source: Path, destination: Path) -> None:
+    source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    destination_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    source_descriptor = os.open(source, source_flags)
+    try:
+        source_metadata = os.fstat(source_descriptor)
+        if (
+            not stat.S_ISREG(source_metadata.st_mode)
+            or stat.S_IMODE(source_metadata.st_mode) != 0o600
+        ):
+            raise FullParityError("signed acceptance corpus ownership differs")
+        destination_descriptor = os.open(
+            destination,
+            destination_flags,
+            0o600,
+        )
+        try:
+            while True:
+                chunk = os.read(source_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_descriptor, view)
+                    if written <= 0:
+                        raise FullParityError(
+                            "signed acceptance corpus copy failed"
+                        )
+                    view = view[written:]
+            os.fchmod(destination_descriptor, 0o600)
+            os.fsync(destination_descriptor)
+        finally:
+            os.close(destination_descriptor)
+    finally:
+        os.close(source_descriptor)
+
+
+def _materialize_acceptance_corpus(
+    *,
+    source_config_dir: Path,
+    destination_config_dir: Path,
+    candidate_sha: str,
+    candidate_release_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    release = validate_release_manifest(candidate_release_manifest)
+    signer_hash = str(release.get("acceptance_signer_pubkey_hash") or "")
+    if (
+        release.get("commit_sha") != candidate_sha
+        or not HASH_RE.fullmatch(signer_hash)
+        or not HASH_RE.fullmatch(str(release.get("release_hash") or ""))
+    ):
+        raise FullParityError("candidate acceptance signer identity differs")
+
+    source_config = Path(source_config_dir)
+    source_manifest = source_config / "acceptance-corpus-v2.json"
+    source_root = source_config / "acceptance-corpus-v2"
+    try:
+        source_config_metadata = source_config.lstat()
+        manifest_metadata = source_manifest.lstat()
+    except OSError as exc:
+        raise FullParityError("signed acceptance corpus is unavailable") from exc
+    if (
+        source_config.is_symlink()
+        or not stat.S_ISDIR(source_config_metadata.st_mode)
+        or stat.S_IMODE(source_config_metadata.st_mode) != 0o700
+        or source_manifest.is_symlink()
+        or not stat.S_ISREG(manifest_metadata.st_mode)
+        or stat.S_IMODE(manifest_metadata.st_mode) != 0o600
+        or manifest_metadata.st_uid != source_config_metadata.st_uid
+        or manifest_metadata.st_gid != source_config_metadata.st_gid
+    ):
+        raise FullParityError("signed acceptance corpus ownership differs")
+    directories, files = _acceptance_corpus_tree(
+        source_root,
+        owner_uid=manifest_metadata.st_uid,
+        owner_gid=manifest_metadata.st_gid,
+    )
+    try:
+        source_value = load_and_validate_acceptance_corpus_v2(
+            source_manifest,
+            corpus_root=source_root,
+            expected_signing_pubkey_hash=signer_hash,
+        )
+    except Exception as exc:
+        raise FullParityError(
+            "signed acceptance corpus does not match candidate release"
+        ) from exc
+    listed_files = {
+        Path(str(item.get("artifact_path") or "")).as_posix()
+        for item in source_value.get("fixtures") or ()
+        if isinstance(item, Mapping)
+    }
+    discovered_files = {
+        path.relative_to(source_root).as_posix() for path in files
+    }
+    expected_directories = {
+        parent.as_posix()
+        for listed_file in listed_files
+        for parent in Path(listed_file).parents
+        if parent != Path(".")
+    }
+    discovered_directories = {
+        path.relative_to(source_root).as_posix() for path in directories
+    }
+    if (
+        not listed_files
+        or listed_files != discovered_files
+        or expected_directories != discovered_directories
+        or len(listed_files) != len(source_value.get("fixtures") or ())
+    ):
+        raise FullParityError("signed acceptance corpus file set differs")
+
+    destination_config = Path(destination_config_dir)
+    destination_manifest = destination_config / "acceptance-corpus-v2.json"
+    destination_root = destination_config / "acceptance-corpus-v2"
+    try:
+        destination_metadata = destination_config.lstat()
+    except OSError as exc:
+        raise FullParityError(
+            "run-owned acceptance corpus destination is unavailable"
+        ) from exc
+    if (
+        destination_config.is_symlink()
+        or not stat.S_ISDIR(destination_metadata.st_mode)
+        or stat.S_IMODE(destination_metadata.st_mode) != 0o700
+        or destination_metadata.st_uid != os.getuid()
+        or destination_manifest.exists()
+        or destination_root.exists()
+    ):
+        raise FullParityError("run-owned acceptance corpus destination differs")
+
+    try:
+        destination_root.mkdir(mode=0o700)
+        for source_directory in sorted(
+            directories,
+            key=lambda path: (len(path.relative_to(source_root).parts), str(path)),
+        ):
+            destination_directory = destination_root / source_directory.relative_to(
+                source_root
+            )
+            destination_directory.mkdir(mode=0o700)
+            destination_directory.chmod(0o700)
+        for source_file in sorted(files):
+            _copy_acceptance_file(
+                source_file,
+                destination_root / source_file.relative_to(source_root),
+            )
+        _copy_acceptance_file(source_manifest, destination_manifest)
+        destination_value = load_and_validate_acceptance_corpus_v2(
+            destination_manifest,
+            corpus_root=destination_root,
+            expected_signing_pubkey_hash=signer_hash,
+        )
+        destination_directories, destination_files = _acceptance_corpus_tree(
+            destination_root,
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+        destination_manifest_metadata = destination_manifest.lstat()
+        if (
+            source_value != destination_value
+            or len(destination_directories) != len(directories)
+            or len(destination_files) != len(files)
+            or destination_manifest_metadata.st_uid != os.getuid()
+            or destination_manifest_metadata.st_gid != os.getgid()
+            or stat.S_IMODE(destination_manifest_metadata.st_mode) != 0o600
+        ):
+            raise FullParityError("copied acceptance corpus identity differs")
+    except Exception:
+        shutil.rmtree(destination_root, ignore_errors=True)
+        destination_manifest.unlink(missing_ok=True)
+        raise
+    return {
+        "candidate_sha": candidate_sha,
+        "release_hash": release["release_hash"],
+        "manifest_hash": source_value["manifest_hash"],
+        "fixture_count": len(files),
+        "copied_exact": True,
+    }
+
+
 def _wait_https_origin(origin: str, *, timeout_seconds: int = 300) -> None:
+    origin = _validated_public_origin(origin)
     deadline = time.monotonic() + timeout_seconds
     last_error = "pending"
+    opener = build_opener(ProxyHandler({}), _RejectCloneRedirects())
     while time.monotonic() < deadline:
         try:
-            request = Request(origin.rstrip("/") + "/", method="GET")
-            with urlopen(request, timeout=10) as response:
-                if int(response.status) in {200, 401, 403, 404}:
+            request = Request(
+                origin.rstrip("/") + "/rest/v1/", method="GET"
+            )
+            with opener.open(request, timeout=10) as response:
+                if int(response.status) == 200:
                     return
         except Exception as exc:  # noqa: BLE001 - bounded readiness probe
             last_error = type(exc).__name__
@@ -213,38 +816,270 @@ def _wait_https_origin(origin: str, *, timeout_seconds: int = 300) -> None:
     raise FullParityError(f"TLS clone origin did not become ready: {last_error}")
 
 
+def _validated_clone_environment(
+    gateway_env_file: Path,
+    *,
+    candidate_sha: str,
+    run_id: str,
+    supabase_origin: str,
+) -> dict[str, str]:
+    expected_path = FULL_WORK_ROOT / run_id / "runtime" / "gateway.env"
+    try:
+        metadata = gateway_env_file.lstat()
+    except OSError as exc:
+        raise FullParityError("clone gateway environment is unavailable") from exc
+    if (
+        gateway_env_file.resolve() != expected_path.resolve()
+        or gateway_env_file.is_symlink()
+        or not gateway_env_file.is_file()
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & 0o777 != 0o600
+    ):
+        raise FullParityError("clone gateway environment ownership differs")
+    values = _parse_gateway_environment_file(gateway_env_file)
+    try:
+        boundary = validate_production_parity_boundary_document_v2(
+            values,
+            network=str(values.get("BITTENSOR_NETWORK") or ""),
+            netuid=int(values.get("BITTENSOR_NETUID") or 0),
+        )
+    except (TypeError, ValueError) as exc:
+        raise FullParityError("clone gateway boundary is invalid") from exc
+    normalized_origin = supabase_origin.rstrip("/")
+    forbidden_aws_environment = {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_PROFILE",
+        "AWS_CONFIG_FILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "BOTO_CONFIG",
+    }
+    if (
+        boundary.get("mode") != "production-parity"
+        or boundary.get("run_id") != run_id
+        or boundary.get("supabase_origin") != normalized_origin
+        or values.get("LEADPOET_PARITY_CANDIDATE_SHA") != candidate_sha
+        or str(values.get("SUPABASE_URL") or "").rstrip("/")
+        != normalized_origin
+        or not str(values.get("SUPABASE_ANON_KEY") or "").strip()
+        or not str(values.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+        or str(values.get("DISABLE_BACKGROUND_TASKS") or "").lower()
+        != "true"
+        or any(str(values.get(name) or "").strip() for name in forbidden_aws_environment)
+    ):
+        raise FullParityError("clone gateway boundary identity differs")
+    return values
+
+
 @contextmanager
-def _gateway_environment_file(path: Path) -> Iterator[None]:
-    previous = os.environ.get("GATEWAY_ENV_FILE")
-    os.environ["GATEWAY_ENV_FILE"] = str(path)
+def _applied_clone_environment(
+    values: Mapping[str, str],
+    gateway_env_file: Path,
+    *,
+    overrides: Mapping[str, str] | None = None,
+) -> Iterator[None]:
+    explicit_overrides = dict(overrides or {})
+    if any(
+        is_process_control_environment_key(key)
+        for key in explicit_overrides
+    ):
+        raise FullParityError("clone environment override is invalid")
+    updates = {
+        **{
+            key: value
+            for key, value in values.items()
+            if not is_process_control_environment_key(key)
+        },
+        "GATEWAY_ENV_FILE": str(gateway_env_file),
+        **explicit_overrides,
+    }
+    previous = {key: os.environ.get(key) for key in updates}
+    os.environ.update(updates)
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop("GATEWAY_ENV_FILE", None)
-        else:
-            os.environ["GATEWAY_ENV_FILE"] = previous
+        for key, old_value in previous.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
 
 
-async def _set_clone_controls() -> dict[str, Any]:
-    scoring = await set_scoring_maintenance_paused(
-        paused=False,
-        reason="production_parity_full_rebenchmark",
-        actor_ref="system:production-parity",
-        event_doc={"production_parity": True},
-    )
-    autoresearch = await set_autoresearch_maintenance_paused(
-        paused=True,
-        reason="production_parity_no_miner_or_candidate_activity",
-        actor_ref="system:production-parity",
-        event_doc={"production_parity": True},
-    )
+def _clone_child_environment(*, region: str | None = None) -> dict[str, str]:
+    child = {
+        "AWS_CONFIG_FILE": "/dev/null",
+        "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
+        "BOTO_CONFIG": "/dev/null",
+        "HOME": str(Path.home()),
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PYTHONNOUSERSITE": "1",
+    }
+    if region is not None:
+        child["AWS_REGION"] = region
+        child["AWS_DEFAULT_REGION"] = region
+    return child
+
+
+def _clone_runtime_environment(
+    values: Mapping[str, str],
+    *,
+    gateway_env_file: Path,
+    region: str,
+) -> dict[str, str]:
+    if region != "us-east-1":
+        raise FullParityError("clone runtime region is invalid")
     return {
-        "scoring_event_id": scoring.get("event_id"),
-        "autoresearch_event_id": autoresearch.get("event_id"),
+        **_clone_child_environment(region=region),
+        **{
+            key: value
+            for key, value in values.items()
+            if not is_process_control_environment_key(key)
+        },
+        "GATEWAY_ENV_FILE": str(gateway_env_file),
+        "AWS_REGION": region,
+        "AWS_DEFAULT_REGION": region,
+    }
+
+
+def _full_restart_environment(
+    *,
+    region: str,
+    updates: Mapping[str, str],
+) -> dict[str, str]:
+    if region != "us-east-1":
+        raise FullParityError("gateway restart region is invalid")
+    return {
+        "AWS_CONFIG_FILE": "/dev/null",
+        "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
+        "BOTO_CONFIG": "/dev/null",
+        "AWS_REGION": region,
+        "AWS_DEFAULT_REGION": region,
+        "HOME": str(Path.home()),
+        "LANG": "C.UTF-8",
+        "LOGNAME": "root",
+        "PATH": (
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ),
+        "PYTHONNOUSERSITE": "1",
+        "SHELL": "/bin/bash",
+        "USER": "root",
+        **dict(updates),
+    }
+
+
+def _read_child_request() -> dict[str, Any]:
+    payload = sys.stdin.buffer.read(CHILD_REQUEST_MAX_BYTES + 1)
+    if not payload or len(payload) > CHILD_REQUEST_MAX_BYTES:
+        raise FullParityError("child request is invalid")
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise FullParityError("child request is invalid") from exc
+    if not isinstance(value, Mapping):
+        raise FullParityError("child request is invalid")
+    return dict(value)
+
+
+async def _run_clone_controls_child(request: Mapping[str, Any]) -> dict[str, Any]:
+    if (
+        request.get("schema_version")
+        != "leadpoet.production_parity_clone_controls_request.v1"
+        or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
+        or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
+    ):
+        raise FullParityError("clone controls request is invalid")
+    candidate_sha = str(request["candidate_sha"])
+    run_id = str(request["run_id"])
+    supabase_origin = str(request.get("supabase_origin") or "")
+    gateway_env_file = Path(str(request.get("gateway_env_file") or ""))
+    values = _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+    )
+    with _applied_clone_environment(values, gateway_env_file):
+        from gateway.research_lab.maintenance import (
+            set_autoresearch_maintenance_paused,
+            set_scoring_maintenance_paused,
+        )
+
+        scoring = await set_scoring_maintenance_paused(
+            paused=False,
+            reason="production_parity_full_rebenchmark",
+            actor_ref="system:production-parity",
+            event_doc={"production_parity": True},
+        )
+        autoresearch = await set_autoresearch_maintenance_paused(
+            paused=True,
+            reason="production_parity_no_miner_or_candidate_activity",
+            actor_ref="system:production-parity",
+            event_doc={"production_parity": True},
+        )
+    scoring_event_id = str(scoring.get("event_id") or "")
+    autoresearch_event_id = str(autoresearch.get("event_id") or "")
+    if (
+        not 1 <= len(scoring_event_id) <= 128
+        or not 1 <= len(autoresearch_event_id) <= 128
+    ):
+        raise FullParityError("clone controls did not persist bounded events")
+    return {
+        "schema_version": "leadpoet.production_parity_clone_controls_evidence.v1",
+        "candidate_sha": candidate_sha,
+        "run_id": run_id,
+        "scoring_event_id": scoring_event_id,
+        "autoresearch_event_id": autoresearch_event_id,
         "scoring_paused": False,
         "autoresearch_paused": True,
     }
+
+
+def _run_clone_controls(
+    *,
+    candidate_sha: str,
+    run_id: str,
+    supabase_origin: str,
+    gateway_env_file: Path,
+) -> dict[str, Any]:
+    _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+    )
+    request = {
+        "schema_version": "leadpoet.production_parity_clone_controls_request.v1",
+        "candidate_sha": candidate_sha,
+        "run_id": run_id,
+        "supabase_origin": supabase_origin,
+        "gateway_env_file": str(gateway_env_file),
+    }
+    result = _run(
+        [sys.executable, str(Path(__file__).resolve()), "--clone-controls-child"],
+        timeout=180,
+        env=_clone_child_environment(),
+        input_text=json.dumps(request, separators=(",", ":")),
+    )
+    if result.returncode != 0 or len(result.stdout or "") > 64 * 1024:
+        raise FullParityError("clone controls child failed closed")
+    evidence = _last_json_document(
+        result.stdout or "", field="clone controls child"
+    )
+    if (
+        evidence.get("schema_version")
+        != "leadpoet.production_parity_clone_controls_evidence.v1"
+        or evidence.get("candidate_sha") != candidate_sha
+        or evidence.get("run_id") != run_id
+        or evidence.get("scoring_paused") is not False
+        or evidence.get("autoresearch_paused") is not True
+        or not str(evidence.get("scoring_event_id") or "")
+        or not str(evidence.get("autoresearch_event_id") or "")
+    ):
+        raise FullParityError("clone controls child evidence is incomplete")
+    return evidence
 
 
 def _gateway_json(path: str) -> dict[str, Any]:
@@ -419,24 +1254,16 @@ def _parse_gateway_environment_file(path: Path) -> dict[str, str]:
             line = line[7:].lstrip()
         if "=" not in line:
             raise FullParityError("gateway environment file has an invalid row")
-        key, raw_value = line.split("=", 1)
+        if "\x00" in line:
+            raise FullParityError("gateway environment file has an invalid row")
+        key, value = line.split("=", 1)
         key = key.strip()
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or key in values:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise FullParityError("gateway environment file has an invalid key")
-        if raw_value == "":
-            value = ""
-        else:
-            try:
-                tokens = shlex.split(raw_value, posix=True)
-            except ValueError as exc:
-                raise FullParityError(
-                    "gateway environment file has invalid quoting"
-                ) from exc
-            if len(tokens) != 1:
-                raise FullParityError(
-                    "gateway environment file has a multi-token value"
-                )
-            value = tokens[0]
+        if key in values and values[key] != value:
+            raise FullParityError(
+                "gateway environment file has a conflicting duplicate"
+            )
         values[key] = value
     if not values:
         raise FullParityError("gateway environment file is empty")
@@ -576,8 +1403,10 @@ def _last_json_document(output: str, *, field: str) -> dict[str, Any]:
 
 def _run_miner_intake_path(
     *,
+    region: str,
     candidate_sha: str,
     run_id: str,
+    supabase_origin: str,
     gateway_env_file: Path,
     production_gateway_environment: Mapping[str, str],
     miner_intake_secret: str,
@@ -593,22 +1422,23 @@ def _run_miner_intake_path(
         field="production OpenRouter management credential",
     )
     builtwith_credential = _builtwith_key_from_secret(miner_intake_secret)
-    parsed_env = _parse_gateway_environment_file(gateway_env_file)
+    _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+    )
     child_env = {
-        **os.environ,
-        **parsed_env,
-        "GATEWAY_ENV_FILE": str(gateway_env_file),
-        "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
-        "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
-        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "true",
-        "RESEARCH_LAB_SOURCE_ADD_ENABLED": "true",
-        "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false",
-        "RESEARCH_LAB_PAID_LOOPS_ENABLED": "false",
+        **_clone_child_environment(region=region),
+        **MINER_INTAKE_ENVIRONMENT_OVERRIDES,
     }
     request = {
         "schema_version": "leadpoet.production_parity_miner_intake_request.v1",
         "candidate_sha": candidate_sha,
         "run_id": run_id,
+        "region": region,
+        "supabase_origin": supabase_origin,
+        "gateway_env_file": str(gateway_env_file),
         "openrouter_runtime_credential": runtime_credential,
         "openrouter_management_credential": management_credential,
         "builtwith_credential": builtwith_credential,
@@ -627,7 +1457,11 @@ def _run_miner_intake_path(
     # emits only bounded booleans/counts; credentials never enter evidence.
     request.clear()
     runtime_credential = management_credential = builtwith_credential = ""
-    if result.returncode != 0:
+    if (
+        result.returncode != 0
+        or len(result.stdout or "") > 256 * 1024
+        or len(result.stderr or "") > 64 * 1024
+    ):
         raise FullParityError("exact miner-intake workflow failed closed")
     evidence = _last_json_document(
         result.stdout or "", field="miner-intake workflow"
@@ -696,6 +1530,39 @@ def _verify_builtwith_credential_live(credential: str) -> dict[str, Any]:
 
 
 async def _run_miner_intake_child(request: Mapping[str, Any]) -> dict[str, Any]:
+    if (
+        request.get("schema_version")
+        != "leadpoet.production_parity_miner_intake_request.v1"
+        or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
+        or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
+        or request.get("region") != "us-east-1"
+        or os.getenv("AWS_REGION") != "us-east-1"
+        or os.getenv("AWS_DEFAULT_REGION") != "us-east-1"
+    ):
+        raise FullParityError("miner-intake child identity differs")
+    candidate_sha = str(request["candidate_sha"])
+    run_id = str(request["run_id"])
+    supabase_origin = _validated_public_origin(
+        str(request.get("supabase_origin") or "")
+    )
+    gateway_env_file = Path(str(request.get("gateway_env_file") or ""))
+    values = _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+    )
+    with _applied_clone_environment(
+        values,
+        gateway_env_file,
+        overrides=MINER_INTAKE_ENVIRONMENT_OVERRIDES,
+    ):
+        return await _run_miner_intake_child_validated(request)
+
+
+async def _run_miner_intake_child_validated(
+    request: Mapping[str, Any],
+) -> dict[str, Any]:
     from types import SimpleNamespace
 
     import httpx
@@ -1100,21 +1967,65 @@ async def _run_miner_intake_child(request: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _wait_rebenchmark(
-    *, candidate_sha: str, secret_id: str, timeout_seconds: int
+    *,
+    candidate_sha: str,
+    secret_id: str,
+    region: str,
+    run_id: str,
+    supabase_origin: str,
+    timeout_seconds: int,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        last = asyncio.run(
-            check_rebenchmark(
-                root=ROOT,
-                candidate_sha=candidate_sha,
-                secret_id=secret_id,
+        remaining = max(1, math.ceil(deadline - time.monotonic()))
+        try:
+            result = _run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/check_production_parity_rebenchmark.py"),
+                    "--root",
+                    str(ROOT),
+                    "--candidate-sha",
+                    candidate_sha,
+                    "--secret-id",
+                    secret_id,
+                    "--region",
+                    region,
+                    "--run-id",
+                    run_id,
+                    "--supabase-origin",
+                    supabase_origin,
+                ],
+                timeout=min(remaining, 300),
+                env=_clone_child_environment(region=region),
             )
+        except subprocess.TimeoutExpired:
+            last = {"reason": "clone_readiness_child_timeout"}
+            sleep_seconds = min(30, max(0, deadline - time.monotonic()))
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+            continue
+        if len(result.stdout or "") > 256 * 1024:
+            raise FullParityError("clone readiness child output is unbounded")
+        if result.returncode not in {0, 2}:
+            raise FullParityError("clone readiness child failed closed")
+        last = _last_json_document(
+            result.stdout or "", field="clone readiness child"
         )
-        if last.get("available") is True:
+        if (
+            last.get("schema_version")
+            != "leadpoet.production_parity_rebenchmark_readiness.v1"
+            or last.get("candidate_sha") != candidate_sha
+        ):
+            raise FullParityError("clone readiness child identity differs")
+        if result.returncode == 0 and last.get("available") is True:
             return last
-        time.sleep(30)
+        if result.returncode != 2 or last.get("available") is not False:
+            raise FullParityError("clone readiness child status differs")
+        sleep_seconds = min(30, max(0, deadline - time.monotonic()))
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
     raise FullParityError(
         "full rebenchmark did not publish before timeout: "
         + str(last.get("reason") or "unknown")
@@ -1141,6 +2052,16 @@ def _current_epoch_from_readiness(output: str) -> int:
 def _validate_real_handoff(
     *, epoch: int, candidate_sha: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    from leadpoet_canonical.allocation_handoff_v2 import (
+        validate_allocation_handoff_v2,
+    )
+    from research_lab.validator_integration import (
+        ResearchLabValidatorFlags,
+        build_research_lab_allocation_component,
+        fetch_research_lab_attested_allocation_bundle,
+        verify_research_lab_allocation_bundle,
+    )
+
     handoff = fetch_research_lab_attested_allocation_bundle(
         "http://127.0.0.1:8000",
         epoch,
@@ -1180,6 +2101,95 @@ def _validate_real_handoff(
         "allocation_doc": component["allocation_doc"],
     }
     return public_evidence, rehearsal_input
+
+
+def _run_clone_handoff_child(request: Mapping[str, Any]) -> dict[str, Any]:
+    if (
+        request.get("schema_version")
+        != "leadpoet.production_parity_clone_handoff_request.v1"
+        or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
+        or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
+        or not isinstance(request.get("epoch"), int)
+        or isinstance(request.get("epoch"), bool)
+        or int(request.get("epoch") or 0) <= 0
+    ):
+        raise FullParityError("clone allocation handoff request is invalid")
+    candidate_sha = str(request["candidate_sha"])
+    run_id = str(request["run_id"])
+    epoch = int(request["epoch"])
+    supabase_origin = str(request.get("supabase_origin") or "")
+    gateway_env_file = Path(str(request.get("gateway_env_file") or ""))
+    values = _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+    )
+    with _applied_clone_environment(values, gateway_env_file):
+        handoff, allocation_input = _validate_real_handoff(
+            epoch=epoch,
+            candidate_sha=candidate_sha,
+        )
+    return {
+        "schema_version": "leadpoet.production_parity_clone_handoff_evidence.v1",
+        "candidate_sha": candidate_sha,
+        "run_id": run_id,
+        "epoch": epoch,
+        "handoff": handoff,
+        "allocation_input": allocation_input,
+    }
+
+
+def _run_clone_handoff(
+    *,
+    epoch: int,
+    candidate_sha: str,
+    run_id: str,
+    supabase_origin: str,
+    gateway_env_file: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+    )
+    request = {
+        "schema_version": "leadpoet.production_parity_clone_handoff_request.v1",
+        "candidate_sha": candidate_sha,
+        "run_id": run_id,
+        "epoch": epoch,
+        "supabase_origin": supabase_origin,
+        "gateway_env_file": str(gateway_env_file),
+    }
+    result = _run(
+        [sys.executable, str(Path(__file__).resolve()), "--clone-handoff-child"],
+        timeout=600,
+        env=_clone_child_environment(),
+        input_text=json.dumps(request, separators=(",", ":")),
+    )
+    if result.returncode != 0 or len(result.stdout or "") > 4 * 1024 * 1024:
+        raise FullParityError("clone allocation handoff child failed closed")
+    evidence = _last_json_document(
+        result.stdout or "", field="clone allocation handoff child"
+    )
+    handoff = evidence.get("handoff")
+    allocation_input = evidence.get("allocation_input")
+    if (
+        evidence.get("schema_version")
+        != "leadpoet.production_parity_clone_handoff_evidence.v1"
+        or evidence.get("candidate_sha") != candidate_sha
+        or evidence.get("run_id") != run_id
+        or evidence.get("epoch") != epoch
+        or not isinstance(handoff, Mapping)
+        or not isinstance(allocation_input, Mapping)
+        or handoff.get("epoch") != epoch
+        or allocation_input.get("candidate_sha") != candidate_sha
+        or int(allocation_input.get("source_epoch") or 0) != epoch
+        or handoff.get("allocation_hash") != allocation_input.get("allocation_hash")
+    ):
+        raise FullParityError("clone allocation handoff child evidence is incomplete")
+    return dict(handoff), dict(allocation_input)
 
 
 def _run_nonforwarding_weight_path(
@@ -1272,7 +2282,8 @@ def run_full(
     timeout_seconds: int,
 ) -> dict[str, Any]:
     if (
-        not RUN_RE.fullmatch(run_id)
+        region != "us-east-1"
+        or not RUN_RE.fullmatch(run_id)
         or not SHA_RE.fullmatch(base_sha)
         or not SHA_RE.fullmatch(candidate_sha)
         or base_sha == candidate_sha
@@ -1281,6 +2292,7 @@ def run_full(
         or not re.fullmatch(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", artifact_bucket)
     ):
         raise FullParityError("full parity inputs are invalid")
+    supabase_origin = _validated_public_origin(supabase_origin)
     _checkout_identity(candidate_sha)
     try:
         boot_state = EARLY_BOOT_MARKER.read_text(encoding="utf-8").strip()
@@ -1309,7 +2321,9 @@ def run_full(
     artifact_policy = work / "v2-config" / "encrypted-artifact-policy.json"
     secrets_client: Any | None = None
     database: _DockerDatabase | None = None
+    prefix_adapter: _ClonePostgrestPrefixAdapter | None = None
     secret_created = False
+    failure_stage = "initialization"
     evidence: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -1324,13 +2338,15 @@ def run_full(
             postgres_image=postgres_image,
             postgrest_image=postgrest_image,
             postgres_publish="127.0.0.1::5432",
-            postgrest_publish="0.0.0.0:3000:3000",
+            postgrest_publish="127.0.0.1::3000",
         )
+        failure_stage = "runtime-config-capture"
         capture(
             client=secrets_client,
             secret_id=production_gateway_secret_id,
             output=runtime_config,
         )
+        failure_stage = "parity-contract"
         contract = build_contract(
             root=ROOT,
             base_sha=base_sha,
@@ -1342,6 +2358,7 @@ def run_full(
             json.dumps(contract, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
+        failure_stage = "production-dsn"
         dsn = _dsn_from_secret(
             _secret_value(
                 secrets_client,
@@ -1350,6 +2367,7 @@ def run_full(
             )
         )
         production_host = str(urlparse(dsn).hostname or "").lower()
+        failure_stage = "snapshot-capture"
         manifest = capture_snapshot(
             contract_path=contract_path,
             archive_path=archive_path,
@@ -1365,8 +2383,10 @@ def run_full(
         )
         if manifest["capture_mode"] != "full":
             raise FullParityError("authoritative parity requires a full production clone")
+        failure_stage = "clone-start"
         database.start()
         prerequisites = database.prepare_snapshot_restore()
+        failure_stage = "snapshot-restore"
         restore = restore_snapshot(
             root=ROOT,
             contract_path=contract_path,
@@ -1385,8 +2405,21 @@ def run_full(
             "clone_prerequisites": prerequisites,
             "clone_restore_contract": restore_contract,
         }
-        _local_url, _ = database.start_postgrest()
+        failure_stage = "clone-http-origin"
+        local_url, _ = database.start_postgrest()
+        prefix_adapter = _ClonePostgrestPrefixAdapter(
+            upstream_origin=local_url,
+            public_origin=supabase_origin,
+        )
+        prefix_adapter_evidence = prefix_adapter.start()
+        if (
+            prefix_adapter_evidence.get("listen_host") != "0.0.0.0"
+            or prefix_adapter_evidence.get("listen_port") != 3000
+            or prefix_adapter_evidence.get("path_prefix") != "/rest/v1"
+        ):
+            raise FullParityError("clone PostgREST prefix adapter bind differs")
         _wait_https_origin(supabase_origin)
+        failure_stage = "clone-secret"
         secret_state = create_gateway_secret(
             client=secrets_client,
             source_secret_id=production_gateway_secret_id,
@@ -1416,9 +2449,24 @@ def run_full(
             encoding="utf-8",
         )
         artifact_policy.chmod(0o600)
-        env = os.environ.copy()
-        env.update(
-            {
+        failure_stage = "acceptance-corpus"
+        release_channel = fetch_release_channel_v2(
+            bucket=ATTESTED_V2_RELEASE_BUCKET,
+            commit_sha=candidate_sha,
+            prefix=ATTESTED_V2_RELEASE_PREFIX,
+            s3_client=boto3.client("s3", region_name=region),
+        )
+        acceptance_corpus = _materialize_acceptance_corpus(
+            source_config_dir=PRODUCTION_V2_CONFIG_DIR,
+            destination_config_dir=artifact_policy.parent,
+            candidate_sha=candidate_sha,
+            candidate_release_manifest=release_channel[
+                "gateway_release_manifest"
+            ],
+        )
+        env = _full_restart_environment(
+            region=region,
+            updates={
                 "LEADPOET_REPO_ROOT": str(ROOT),
                 "GATEWAY_ROOT": str(ROOT / "gateway"),
                 "LEADPOET_GATEWAY_ENV_SECRET_ID": secret_state["secret_id"],
@@ -1430,14 +2478,24 @@ def run_full(
                 "GATEWAY_HOST_RESTART_SCRIPT": str(ROOT / "gw_restart.sh"),
                 "GATEWAY_TEE_EIF_ROOT": str(work / "tee"),
                 "GATEWAY_V2_CONFIG_DIR": str(work / "v2-config"),
+                "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST": str(
+                    work / "v2-config" / "acceptance-corpus-v2.json"
+                ),
+                "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT": str(
+                    work / "v2-config" / "acceptance-corpus-v2"
+                ),
                 "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT": str(work / "offline-artifacts"),
                 "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT": str(work / "offline-artifacts" / "validator-runtime"),
                 "GATEWAY_RESTART_LOCK_FILE": str(work / "gateway-restart.lock"),
                 "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(work / "docker-operation.lock"),
                 "GATEWAY_DEPLOY_COMMIT": candidate_sha,
-                "GATEWAY_V2_RELEASE_PREFIX": "attested-v2/releases",
-            }
+                "GATEWAY_PYTHON_BIN": "/home/ec2-user/venv311/bin/python3",
+                "GATEWAY_V2_RELEASE_BUCKET": ATTESTED_V2_RELEASE_BUCKET,
+                "GATEWAY_V2_RELEASE_PREFIX": ATTESTED_V2_RELEASE_PREFIX,
+                "GATEWAY_V2_KMS_KEY_ID": ATTESTED_V2_KMS_KEY_ID,
+            },
         )
+        failure_stage = "gateway-restart"
         restart = _run(
             ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha],
             timeout=min(
@@ -1451,8 +2509,8 @@ def run_full(
             log_path=gateway_log,
         )
         if restart.returncode != 0:
-            detail = gateway_log.read_text(encoding="utf-8", errors="replace")[-4000:]
-            raise FullParityError(f"exact gateway restart failed: {detail}")
+            raise FullParityError("exact gateway restart failed")
+        failure_stage = "gateway-health"
         health = _gateway_json("/health/v2-authority")
         build = _gateway_json("/build-info")
         if (
@@ -1462,21 +2520,36 @@ def run_full(
         ):
             raise FullParityError("gateway V2 health is not exact-candidate ready")
 
-        with _gateway_environment_file(gateway_env_file):
-            controls = asyncio.run(_set_clone_controls())
-            rebenchmark = _wait_rebenchmark(
-                candidate_sha=candidate_sha,
-                secret_id=secret_state["secret_id"],
-                timeout_seconds=_remaining_full_timeout(
-                    deadline=deadline,
-                    stage="full rebenchmark publication",
-                ),
-            )
+        failure_stage = "clone-controls"
+        controls = _run_clone_controls(
+            candidate_sha=candidate_sha,
+            run_id=run_id,
+            supabase_origin=supabase_origin,
+            gateway_env_file=gateway_env_file,
+        )
+        failure_stage = "rebenchmark-publication"
+        rebenchmark = _wait_rebenchmark(
+            candidate_sha=candidate_sha,
+            secret_id=secret_state["secret_id"],
+            region=region,
+            run_id=run_id,
+            supabase_origin=supabase_origin,
+            timeout_seconds=_remaining_full_timeout(
+                deadline=deadline,
+                stage="full rebenchmark publication",
+            ),
+        )
 
-        parsed_env = _parse_gateway_environment_file(gateway_env_file)
+        parsed_env = _validated_clone_environment(
+            gateway_env_file,
+            candidate_sha=candidate_sha,
+            run_id=run_id,
+            supabase_origin=supabase_origin,
+        )
+        failure_stage = "weight-readiness"
         readiness = _run(
             [
-                env.get("GATEWAY_PYTHON_BIN", "/home/ec2-user/venv311/bin/python3"),
+                "/home/ec2-user/venv311/bin/python3",
                 "-m",
                 "gateway.tee.verify_weight_submission_ready_v2",
                 "--gateway-url",
@@ -1491,32 +2564,29 @@ def run_full(
                 ),
                 1800,
             ),
-            env={**env, **parsed_env, "GATEWAY_ENV_FILE": str(gateway_env_file)},
+            env=_clone_runtime_environment(
+                parsed_env,
+                gateway_env_file=gateway_env_file,
+                region=region,
+            ),
         )
         readiness_output = _require(readiness, stage="real gateway weight readiness")
         epoch = _current_epoch_from_readiness(readiness_output)
-        with _gateway_environment_file(gateway_env_file):
-            # The integration layer reads its internal key from the same exact
-            # gateway environment file used by production.
-            previous = {key: os.environ.get(key) for key in parsed_env}
-            os.environ.update(parsed_env)
-            try:
-                handoff, allocation_input = _validate_real_handoff(
-                    epoch=epoch,
-                    candidate_sha=candidate_sha,
-                )
-            finally:
-                for key, old in previous.items():
-                    if old is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = old
+        failure_stage = "allocation-handoff"
+        handoff, allocation_input = _run_clone_handoff(
+            epoch=epoch,
+            candidate_sha=candidate_sha,
+            run_id=run_id,
+            supabase_origin=supabase_origin,
+            gateway_env_file=gateway_env_file,
+        )
         allocation_override.write_text(
             json.dumps(allocation_input, sort_keys=True, separators=(",", ":"))
             + "\n",
             encoding="utf-8",
         )
         allocation_override.chmod(0o600)
+        failure_stage = "nonforwarding-weight-path"
         weight_path = _run_nonforwarding_weight_path(
             base_sha=base_sha,
             candidate_sha=candidate_sha,
@@ -1537,9 +2607,12 @@ def run_full(
             ),
             field="production gateway environment",
         )
+        failure_stage = "miner-intake"
         miner_intake = _run_miner_intake_path(
+            region=region,
             candidate_sha=candidate_sha,
             run_id=run_id,
+            supabase_origin=supabase_origin,
             gateway_env_file=gateway_env_file,
             production_gateway_environment=production_gateway_environment,
             miner_intake_secret=_secret_value(
@@ -1548,6 +2621,7 @@ def run_full(
                 field="miner-intake credential",
             ),
         )
+        failure_stage = "clone-shape"
         service_role_key = _clone_service_role_key(
             parsed_env,
             candidate_sha=candidate_sha,
@@ -1560,6 +2634,7 @@ def run_full(
             expected_shape=validate_snapshot_manifest(manifest)["database"],
             capture_mode="full",
         )
+        failure_stage = "clone-weight-history"
         scale = database.weight_input_scale_evidence(
             service_role_key=service_role_key
         )
@@ -1569,6 +2644,7 @@ def run_full(
                 "contract_hash": contract["contract_hash"],
                 "snapshot_hash": manifest["manifest_hash"],
                 "snapshot_restore": restore,
+                "clone_http_adapter": prefix_adapter_evidence,
                 "production_shape": shape,
                 "production_weight_input_scale": scale,
                 "gateway": {
@@ -1577,65 +2653,92 @@ def run_full(
                     "attestation_ready": True,
                 },
                 "controls": controls,
+                "acceptance_corpus": acceptance_corpus,
+                "external_write_boundaries": {
+                    "arweave": "blocked-production-parity",
+                },
                 "rebenchmark": rebenchmark,
                 "allocation_handoff": handoff,
                 "weight_path": weight_path,
                 "miner_intake": miner_intake,
             }
         )
+    except Exception as exc:
+        bounded_stage, bounded_type = _failure_identity(failure_stage, exc)
+        evidence["status"] = "failed"
+        evidence["failure_stage"] = bounded_stage
+        evidence["error_type"] = bounded_type
+        raise
     finally:
         cleanup: dict[str, Any] = {}
+        if prefix_adapter is not None:
+            try:
+                cleanup["prefix_adapter"] = prefix_adapter.cleanup()
+            except Exception as exc:  # noqa: BLE001 - bounded cleanup evidence
+                cleanup["prefix_adapter_error"] = _failure_identity(
+                    "cleanup", exc
+                )[1]
         if database is not None:
             try:
                 cleanup["database"] = database.cleanup()
             except Exception as exc:  # noqa: BLE001 - cleanup evidence must survive
-                cleanup["database_error"] = type(exc).__name__
+                cleanup["database_error"] = _failure_identity("cleanup", exc)[1]
         if secret_created and secrets_client is not None:
             try:
                 cleanup["secret"] = delete_gateway_secret(
                     client=secrets_client, run_id=run_id
                 )
             except Exception as exc:  # noqa: BLE001
-                cleanup["secret_error"] = type(exc).__name__
+                cleanup["secret_error"] = _failure_identity("cleanup", exc)[1]
         try:
             shutil.rmtree(work)
             cleanup["work"] = "removed"
         except FileNotFoundError:
             cleanup["work"] = "already_absent"
         except OSError as exc:
-            cleanup["work_error"] = type(exc).__name__
+            cleanup["work_error"] = _failure_identity("cleanup", exc)[1]
         evidence["cleanup"] = cleanup
         evidence["duration_seconds"] = round(time.monotonic() - started, 3)
         evidence["finished_at"] = datetime.now(timezone.utc).isoformat()
         if evidence.get("status") == "passed" and (
-            "database_error" in cleanup
+            "prefix_adapter_error" in cleanup
+            or "database_error" in cleanup
             or "secret_error" in cleanup
             or "work_error" in cleanup
         ):
             evidence["status"] = "failed"
-            evidence["failure"] = "run-scoped cleanup was incomplete"
+            evidence["failure_stage"] = "cleanup"
+            evidence["error_type"] = "CleanupError"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
             json.dumps(evidence, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
     if evidence.get("status") != "passed":
-        raise FullParityError(str(evidence.get("failure") or "full parity failed"))
+        raise FullParityError("full parity failed closed")
     return evidence
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    if list(argv if argv is not None else sys.argv[1:]) == ["--miner-intake-child"]:
+    raw_args = list(argv if argv is not None else sys.argv[1:])
+    child_modes = {
+        "--clone-controls-child",
+        "--clone-handoff-child",
+        "--miner-intake-child",
+    }
+    if len(raw_args) == 1 and raw_args[0] in child_modes:
+        child_mode = raw_args[0]
+        logging.disable(logging.CRITICAL)
         try:
-            request = json.load(sys.stdin)
-            if not isinstance(request, Mapping):
-                raise FullParityError("miner-intake request is invalid")
-            result = asyncio.run(_run_miner_intake_child(request))
-        except Exception as exc:  # noqa: BLE001 - never print secret-bearing detail
-            print(
-                f"ERROR: miner-intake child failed closed ({type(exc).__name__})",
-                file=sys.stderr,
-            )
+            request = _read_child_request()
+            if child_mode == "--clone-controls-child":
+                result = asyncio.run(_run_clone_controls_child(request))
+            elif child_mode == "--clone-handoff-child":
+                result = _run_clone_handoff_child(request)
+            else:
+                result = asyncio.run(_run_miner_intake_child(request))
+        except Exception:  # noqa: BLE001 - never print secret-bearing detail
+            print("ERROR: clone child failed closed", file=sys.stderr)
             return 1
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0

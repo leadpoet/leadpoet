@@ -240,6 +240,50 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
     assert setup.READONLY_DSN_SECRET_ID in json.dumps(deny)
     assert setup.DEFAULT_MINER_INTAKE_SECRET_ID in json.dumps(deny)
 
+    runner = setup._runner_policy(
+        account_id=ACCOUNT,
+        region="us-east-1",
+        production_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
+        readonly_secret_id=setup.READONLY_DSN_SECRET_ID,
+        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
+    )
+    attested_version = (
+        "arn:aws:s3:::leadpoet-attested-v2-artifacts-493765492819/"
+        "encrypted-artifacts/credential.json"
+    )
+    private_model_version = (
+        "arn:aws:s3:::leadpoet-private-model-artifacts-493765492819/"
+        "research-lab/current.json"
+    )
+    assert _policy_allows(
+        runner, "s3:GetObjectVersion", attested_version, {}
+    )
+    assert not _policy_allows(
+        runner, "s3:GetObjectVersion", private_model_version, {}
+    )
+    assert _policy_allows(runner, "s3:GetObject", attested_version, {})
+    assert _policy_allows(runner, "s3:GetObject", private_model_version, {})
+    run_object = (
+        f"arn:aws:s3:::leadpoet-parity-{ACCOUNT}-fixture/"
+        "production-parity/runs/pp-1-1/full-evidence.json"
+    )
+    assert _policy_allows(
+        runner, "s3:GetObjectRetention", attested_version, {}
+    )
+    assert _policy_allows(runner, "s3:GetObjectRetention", run_object, {})
+    assert not _policy_allows(
+        runner, "s3:GetObjectRetention", private_model_version, {}
+    )
+    run_checkpoint = (
+        f"arn:aws:s3:::leadpoet-parity-{ACCOUNT}-fixture/"
+        "production-parity/runs/pp-1-1/baseline-checkpoints/"
+        f"{COMMIT}/checkpoint.json"
+    )
+    assert _policy_allows(runner, "s3:PutObject", run_checkpoint, {})
+    assert not _policy_allows(
+        runner, "s3:PutObject", private_model_version, {}
+    )
+
 
 def test_controller_managed_policy_partition_and_adversarial_boundaries():
     policy = _controller_policy()
@@ -2136,6 +2180,11 @@ def test_controller_dependencies_use_a_scrubbed_per_run_virtualenv():
     )
     assert '"$host_python" -I -m venv "$venv_root"' in action
     assert 'test "$observed_host_python" = "3.11|$resolved_host_python"' in action
+    assert 'test "$host_python" = "/usr/bin/python3.11"' in action
+    assert 'test "$resolved_host_python" = "/usr/bin/python3.11"' in action
+    assert 'stat -Lc \'%u:%g:%a\' "$host_python"' in action
+    assert '= "0:0:755"' in action
+    assert "[0-7][0145][0145]" in action
     assert 'sys.version_info.major}.{sys.version_info.minor}' in action
     assert '"$venv_python" -m pip install' in action
     assert "--no-cache-dir" in action
@@ -2154,6 +2203,33 @@ def test_controller_dependencies_use_a_scrubbed_per_run_virtualenv():
         assert "python-executable: ${{ env.pythonLocation }}/bin/python3" in github_hosted
     assert 'printf \'PARITY_TEMP=%s\\n\' "$PARITY_TEMP" >> "$GITHUB_ENV"' in full
     assert 'rm -rf -- "$parity_temp"' in full
+
+
+def test_full_controller_python_identity_rejects_owner_or_write_poison():
+    def accepted(
+        *,
+        file_identity: tuple[int, int, int],
+        parent_identities: list[tuple[int, int, int]],
+    ) -> bool:
+        if file_identity != (0, 0, 0o755):
+            return False
+        return all(
+            uid == 0 and gid == 0 and mode & 0o022 == 0
+            for uid, gid, mode in parent_identities
+        )
+
+    trusted_parents = [(0, 0, 0o555), (0, 0, 0o755), (0, 0, 0o555)]
+    assert accepted(file_identity=(0, 0, 0o755), parent_identities=trusted_parents)
+    assert not accepted(
+        file_identity=(1000, 0, 0o755), parent_identities=trusted_parents
+    )
+    assert not accepted(
+        file_identity=(0, 0, 0o775), parent_identities=trusted_parents
+    )
+    assert not accepted(
+        file_identity=(0, 0, 0o755),
+        parent_identities=[*trusted_parents[:-1], (0, 0, 0o777)],
+    )
 
 
 def test_full_workflow_derives_temp_before_use_and_cleans_safe_exact_path():

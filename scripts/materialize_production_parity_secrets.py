@@ -61,6 +61,119 @@ _DROP_EXACT = {
 _DROP_NAME_RE = re.compile(
     r"(?:^|_)(?:MNEMONIC|PRIVATE_KEY|SECRET_SEED|SEED_PHRASE|WALLET_PASSWORD)(?:_|$)"
 )
+_DROP_PROCESS_CONTROL_EXACT = frozenset(
+    {
+        "ALL_PROXY",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_CA_BUNDLE",
+        "AWS_CONFIG_FILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_DEFAULT_REGION",
+        "AWS_EC2_METADATA_DISABLED",
+        "AWS_ENDPOINT_URL",
+        "AWS_PROFILE",
+        "AWS_REGION",
+        "AWS_ROLE_ARN",
+        "AWS_ROLE_SESSION_NAME",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SECURITY_TOKEN",
+        "AWS_SESSION_TOKEN",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "BASH_ENV",
+        "BOTO_CONFIG",
+        "CDPATH",
+        "CURL_CA_BUNDLE",
+        "ENV",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_WORK_TREE",
+        "GATEWAY_DEPLOY_COMMIT",
+        "GATEWAY_DEPLOY_PLAN_FILE",
+        "GATEWAY_DEPLOYMENT_DIR",
+        "GATEWAY_DEPLOYMENT_MANIFEST",
+        "GATEWAY_ENV_FILE",
+        "GATEWAY_EXACT_COMMIT_HELPER",
+        "GATEWAY_GIT_HELPER",
+        "GATEWAY_HOST_MEMORY_GUARD_PATH",
+        "GATEWAY_HOST_RESTART_SCRIPT",
+        "GATEWAY_LAST_GOOD_MANIFEST",
+        "GATEWAY_LOG_FILE",
+        "GATEWAY_LOG_ROOT",
+        "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
+        "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
+        "GATEWAY_PYTHON_BIN",
+        "GATEWAY_RESTART_CONTROLLER_ROOT",
+        "GATEWAY_RESTART_LOCK_FILE",
+        "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
+        "GATEWAY_RESTART_TIMING_DIR",
+        "GATEWAY_RESTART_TIMING_FILE",
+        "GATEWAY_ROOT",
+        "GATEWAY_STATEFUL_CUTOVER_MANIFEST",
+        "GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST",
+        "GATEWAY_TEE_EIF_ROOT",
+        "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
+        "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
+        "GATEWAY_V2_ARTIFACT_POLICY",
+        "GATEWAY_V2_CONFIG_DIR",
+        "GATEWAY_V2_KMS_KEY_ID",
+        "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
+        "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
+        "GATEWAY_V2_RELEASE_BUCKET",
+        "GATEWAY_V2_RELEASE_LINEAGE",
+        "GATEWAY_V2_RELEASE_MANIFEST",
+        "GATEWAY_V2_RELEASE_PREFIX",
+        "HOME",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "IFS",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        "LEADPOET_GATEWAY_ENV_SECRET_ID",
+        "LEADPOET_REPO_ROOT",
+        "LEADPOET_RESTART_INVOCATION_ID",
+        "LEADPOET_RESTART_START_PATH",
+        "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON",
+        "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH",
+        "LOGNAME",
+        "NO_PROXY",
+        "PATH",
+        "PYTHONBREAKPOINT",
+        "PYTHONHOME",
+        "PYTHONINSPECT",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONWARNINGS",
+        "REQUESTS_CA_BUNDLE",
+        "SHELL",
+        "SHELLOPTS",
+        "SSH_AUTH_SOCK",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USER",
+        "VIRTUAL_ENV",
+        "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT",
+        "all_proxy",
+        "https_proxy",
+        "http_proxy",
+        "no_proxy",
+    }
+)
+_DROP_PROCESS_CONTROL_PREFIXES = (
+    "AWS_ENDPOINT_URL_",
+    "DYLD_",
+    "GIT_CONFIG_KEY_",
+    "GIT_CONFIG_VALUE_",
+)
 _FORCED_KEYS = {
     "SUPABASE_URL",
     "SUPABASE_ANON_KEY",
@@ -74,6 +187,9 @@ _FORCED_KEYS = {
     "VALIDATOR_NETUID",
     "GATEWAY_URL",
     "VALIDATOR_V2_GATEWAY_URL",
+    "DISABLE_BACKGROUND_TASKS",
+    "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
+    "GATEWAY_TEE_TOPOLOGY_MODE",
     "LEADPOET_PARITY_CANDIDATE_SHA",
     "LEADPOET_PRODUCTION_PARITY_MODE",
     "LEADPOET_PRODUCTION_PARITY_RUN_ID",
@@ -95,6 +211,12 @@ _FORCED_KEYS = {
 
 class SecretMaterializationError(RuntimeError):
     """A source secret or run-scoped replacement is incomplete or unsafe."""
+
+
+def is_process_control_environment_key(key: str) -> bool:
+    return key in _DROP_PROCESS_CONTROL_EXACT or key.startswith(
+        _DROP_PROCESS_CONTROL_PREFIXES
+    )
 
 
 def _parse_environment_document(raw: str, *, field: str) -> dict[str, str]:
@@ -229,6 +351,7 @@ def build_gateway_environment(
         for key, value in source.items()
         if key not in _DROP_EXACT
         and not _DROP_NAME_RE.search(key)
+        and not is_process_control_environment_key(str(key))
         and key not in _FORCED_KEYS
     }
     generated = {
@@ -244,6 +367,9 @@ def build_gateway_environment(
         "VALIDATOR_NETUID": "71",
         "GATEWAY_URL": "http://127.0.0.1:8000",
         "VALIDATOR_V2_GATEWAY_URL": "http://127.0.0.1:8000",
+        "DISABLE_BACKGROUND_TASKS": "true",
+        "GATEWAY_STATEFUL_CUTOVER_CEREMONY": "0",
+        "GATEWAY_TEE_TOPOLOGY_MODE": "full",
         "LEADPOET_PARITY_CANDIDATE_SHA": candidate_sha,
         **boundary_environment,
         "RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET": artifact_bucket,

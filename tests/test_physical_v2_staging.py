@@ -785,6 +785,14 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert "environment:" not in source
     assert "LEADPOET_PARITY_MINER_INTAKE_SECRET_ID" in source
     assert "leadpoet.production_parity_full.v3" in source
+    assert 'test "$AWS_REGION" = "us-east-1"' in source
+    assert "export AWS_REGION={q(required['AWS_REGION'])}" in source
+    assert "export AWS_DEFAULT_REGION={q(required['AWS_REGION'])}" in source
+    assert 'get("acceptance_corpus", {}).get("copied_exact") is not True' in source
+    assert 'get("acceptance_corpus", {}).get("candidate_sha")' in source
+    assert 'get("acceptance_corpus", {}).get("fixture_count", 0) <= 0' in source
+    assert 'get("external_write_boundaries", {}).get("arweave")' in source
+    assert '!= "blocked-production-parity"' in source
 
 
 def test_full_workflow_rebinds_bundle_clone_to_canonical_current_main():

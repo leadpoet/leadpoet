@@ -168,6 +168,7 @@ jobs:
           test "$PARITY_VOLUME_GIB" = "512"
           test "$FULL_TIMEOUT_SECONDS" = "72000"
           test "$SSM_TIMEOUT_SECONDS" = "77400"
+          test "$AWS_REGION" = "us-east-1"
           base="$(python3 scripts/resolve_production_parity_deployed_sha.py \
             --gateway-url "$PRODUCTION_GATEWAY_URL" \
             --candidate-sha "$CANDIDATE_SHA" \
@@ -247,6 +248,10 @@ jobs:
           command = f"""
           set -Eeuo pipefail
           umask 077
+          export AWS_REGION={q(required['AWS_REGION'])}
+          export AWS_DEFAULT_REGION={q(required['AWS_REGION'])}
+          test "$AWS_REGION" = "us-east-1"
+          test "$AWS_DEFAULT_REGION" = "us-east-1"
           sudo mkdir -p {q(root)}
           sudo chown ec2-user:ec2-user {q(root)}
           aws s3 cp {q(f"s3://{artifact_bucket}/{prefix}/candidate.bundle")} {q(root + "/candidate.bundle")} --region {q(required['AWS_REGION'])} --only-show-errors
@@ -476,6 +481,12 @@ jobs:
               ) != value.get("allocation_handoff", {}).get("allocation_hash")
               or value.get("weight_path", {}).get("chain_boundary")
                   != "strict-non-forwarding"
+              or value.get("acceptance_corpus", {}).get("copied_exact") is not True
+              or value.get("acceptance_corpus", {}).get("candidate_sha")
+                  != sys.argv[2]
+              or value.get("acceptance_corpus", {}).get("fixture_count", 0) <= 0
+              or value.get("external_write_boundaries", {}).get("arweave")
+                  != "blocked-production-parity"
               or value.get("miner_intake", {}).get("status") != "passed"
               or value.get("miner_intake", {}).get("provider_security_write")
                   != "exact-idempotent-logging-disable"

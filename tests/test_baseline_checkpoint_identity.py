@@ -8,6 +8,7 @@ their immutable receipt/runtime provenance instead of spending the same ICP
 budget again.
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -600,6 +601,123 @@ def test_active_checkpoint_round_trip_preserves_runtime_provenance():
         repo_git_sha=MODEL_REPO_SHA,
         manifest_hash=MODEL_MANIFEST_HASH,
     ) == []
+
+
+def test_production_parity_checkpoint_location_preserves_store_and_resume():
+    run_id = "pp-123-1"
+    bucket = "leadpoet-parity-493765492819-" + hashlib.sha256(
+        f"493765492819:{run_id}:{RUNTIME_SHA}".encode("ascii")
+    ).hexdigest()[:16]
+    environment = {
+        "LEADPOET_PRODUCTION_PARITY_MODE": "enabled",
+        "LEADPOET_PRODUCTION_PARITY_RUN_ID": run_id,
+        "LEADPOET_PRODUCTION_PARITY_SUPABASE_ORIGIN": (
+            "https://d111111abcdef8.cloudfront.net"
+        ),
+        "LEADPOET_PRODUCTION_PARITY_BENCHMARK_DATE": "2026-07-15",
+        "LEADPOET_PARITY_CANDIDATE_SHA": RUNTIME_SHA,
+        "RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET": bucket,
+        "ATTESTED_RUNTIME_COMMIT_SHA": RUNTIME_SHA,
+        "BITTENSOR_NETWORK": "finney",
+        "BITTENSOR_NETUID": "71",
+    }
+    stored = {}
+    s3 = mock.Mock()
+
+    def put_object(**kwargs):
+        stored["bucket"] = kwargs["Bucket"]
+        stored["key"] = kwargs["Key"]
+        stored["body"] = bytes(kwargs["Body"])
+
+    def get_object(**kwargs):
+        assert kwargs == {"Bucket": stored["bucket"], "Key": stored["key"]}
+        body = mock.Mock()
+        body.read.return_value = stored["body"]
+        return {"Body": body}
+
+    s3.put_object.side_effect = put_object
+    s3.get_object.side_effect = get_object
+    stub = types.ModuleType("boto3")
+    stub.client = lambda *args, **kwargs: s3
+
+    with mock.patch.dict(os.environ, environment, clear=False):
+        location = sw._baseline_progress_s3_location(
+            "s3://leadpoet-private-model-artifacts-493765492819/"
+            "research-lab/sourcing-model/branches/leadpoet-lab/current.json",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:" + "c" * 64,
+            private_model_artifact_hash="sha256:" + "d" * 64,
+        )
+        assert location is not None
+        with mock.patch.dict(sys.modules, {"boto3": stub}):
+            digest = sw._store_baseline_scoring_progress(
+                *location,
+                benchmark_date="2026-07-15",
+                window_hash="sha256:" + "c" * 64,
+                private_model_artifact_hash="sha256:" + "d" * 64,
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+                scoring_configuration_hash_value=SCORING_CONFIG_HASH,
+                rows=[
+                    {
+                        "icp_ref": "icp-1",
+                        "score": 54.0,
+                        "company_count": 1,
+                    }
+                ],
+                attested_parent_receipt_hashes=[PARENT_RECEIPT_HASH],
+                repo_git_sha=MODEL_REPO_SHA,
+                manifest_hash=MODEL_MANIFEST_HASH,
+            )
+            resumed = sw._load_baseline_scoring_progress(
+                *location,
+                benchmark_date="2026-07-15",
+                window_hash="sha256:" + "c" * 64,
+                private_model_artifact_hash="sha256:" + "d" * 64,
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+                scoring_configuration_hash_value=SCORING_CONFIG_HASH,
+                repo_git_sha=MODEL_REPO_SHA,
+                manifest_hash=MODEL_MANIFEST_HASH,
+            )
+            active_body = stored["body"]
+            invalidated_digest = sw._invalidate_baseline_scoring_progress(
+                *location,
+                benchmark_date="2026-07-15",
+                window_hash="sha256:" + "c" * 64,
+                private_model_artifact_hash="sha256:" + "d" * 64,
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+                scoring_configuration_hash_value=SCORING_CONFIG_HASH,
+                rows=[
+                    {
+                        "icp_ref": "icp-1",
+                        "score": 54.0,
+                        "company_count": 1,
+                    }
+                ],
+                reason="globally_all_zero",
+                repo_git_sha=MODEL_REPO_SHA,
+                manifest_hash=MODEL_MANIFEST_HASH,
+            )
+            invalidated_resume = sw._load_baseline_scoring_progress(
+                *location,
+                benchmark_date="2026-07-15",
+                window_hash="sha256:" + "c" * 64,
+                private_model_artifact_hash="sha256:" + "d" * 64,
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+                scoring_configuration_hash_value=SCORING_CONFIG_HASH,
+                repo_git_sha=MODEL_REPO_SHA,
+                manifest_hash=MODEL_MANIFEST_HASH,
+            )
+
+    assert stored["bucket"] == bucket
+    assert str(stored["key"]).startswith(
+        f"production-parity/runs/{run_id}/baseline-checkpoints/{RUNTIME_SHA}/"
+    )
+    assert digest == sw.canonical_hash(json.loads(active_body))
+    assert resumed == [{"icp_ref": "icp-1", "score": 54.0, "company_count": 1}]
+    invalidated_doc = json.loads(stored["body"])
+    assert invalidated_digest == sw.canonical_hash(invalidated_doc)
+    assert invalidated_doc["checkpoint_status"] == "invalidated"
+    assert invalidated_resume == []
 
 
 def test_unresolved_attempt_ledger_round_trips_across_release():

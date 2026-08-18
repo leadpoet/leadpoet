@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta, timezone
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import http.client
 import inspect
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
+import threading
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 import yaml
@@ -29,8 +35,10 @@ from leadpoet_canonical.production_parity import (
 )
 from scripts.materialize_production_parity_secrets import (
     build_gateway_environment,
+    is_process_control_environment_key,
 )
 from scripts import production_parity_snapshot as parity_snapshot
+from scripts import check_production_parity_rebenchmark as parity_readiness
 from scripts import run_production_parity_fast as fast_parity
 from scripts import run_production_parity_full_host as full_host
 from scripts.production_parity_snapshot import (
@@ -614,6 +622,346 @@ def test_full_deadline_accepts_twenty_hours_and_rejects_larger_budget():
             full_host._full_deadline(started=10.0, timeout_seconds=invalid)
 
 
+def test_full_clone_prefix_adapter_forwards_only_strict_supabase_paths():
+    observed: list[dict[str, object]] = []
+
+    class UpstreamHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, _format, *_args):
+            return None
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length)
+            observed.append(
+                {
+                    "method": self.command,
+                    "path": self.path,
+                    "body": body,
+                    "authorization": self.headers.get("Authorization"),
+                    "request_hop": self.headers.get("X-Request-Hop"),
+                }
+            )
+            response_body = b'{"ok":true}'
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("X-End-To-End", "kept")
+            self.send_header("Connection", "X-Response-Hop")
+            self.send_header("X-Response-Hop", "drop")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+        def do_GET(self):
+            observed.append({"method": self.command, "path": self.path})
+            self.send_response(302)
+            self.send_header("Location", "https://foreign.example.invalid/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    adapter = full_host._ClonePostgrestPrefixAdapter(
+        upstream_origin=f"http://127.0.0.1:{upstream.server_address[1]}",
+        public_origin=ORIGIN,
+        listen_host="127.0.0.1",
+        listen_port=0,
+    )
+    try:
+        adapter_evidence = adapter.start()
+        port = int(adapter_evidence["listen_port"])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.request(
+            "POST",
+            "/rest/v1/research_lab_jobs?select=id",
+            body=b'{"status":"queued"}',
+            headers={
+                "Authorization": "Bearer test-token",
+                "Content-Type": "application/json",
+                "Origin": ORIGIN,
+                "Connection": "X-Request-Hop",
+                "X-Request-Hop": "drop",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 201
+        assert response.read() == b'{"ok":true}'
+        assert response.getheader("X-End-To-End") == "kept"
+        assert response.getheader("X-Response-Hop") is None
+        connection.close()
+        assert observed == [
+            {
+                "method": "POST",
+                "path": "/research_lab_jobs?select=id",
+                "body": b'{"status":"queued"}',
+                "authorization": "Bearer test-token",
+                "request_hop": None,
+            }
+        ]
+
+        for path, headers in (
+            ("/rpc/foreign", {}),
+            ("/rest/v1/table", {"Origin": "https://foreign.example"}),
+            (
+                "/rest/v1/table",
+                {"Proxy-Authorization": "Basic forbidden"},
+            ),
+        ):
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", port, timeout=5
+            )
+            connection.request("GET", path, headers=headers)
+            rejected = connection.getresponse()
+            assert rejected.status == 404
+            rejected.read()
+            connection.close()
+        assert len(observed) == 1
+
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.putrequest(
+            "GET", "http://foreign.example/rest/v1/table", skip_host=True
+        )
+        connection.putheader("Host", "foreign.example")
+        connection.endheaders()
+        rejected = connection.getresponse()
+        assert rejected.status == 404
+        rejected.read()
+        connection.close()
+        assert len(observed) == 1
+
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.request("GET", "/rest/v1/redirect")
+        rejected_redirect = connection.getresponse()
+        assert rejected_redirect.status == 502
+        rejected_redirect.read()
+        connection.close()
+        assert observed[-1] == {"method": "GET", "path": "/redirect"}
+    finally:
+        assert adapter.cleanup() in {"removed", "already_absent"}
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=5)
+    assert adapter.cleanup() == "already_absent"
+    assert not upstream_thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:99999",
+        "http://localhost:54321",
+        "http://user@127.0.0.1:54321",
+        "http://127.0.0.1:54321/foreign",
+    ],
+)
+def test_full_clone_prefix_adapter_rejects_foreign_upstreams(origin):
+    with pytest.raises(FullParityError, match="adapter identity is invalid"):
+        full_host._ClonePostgrestPrefixAdapter(
+            upstream_origin=origin,
+            public_origin=ORIGIN,
+            listen_host="127.0.0.1",
+            listen_port=0,
+        )
+
+
+def test_full_clone_https_readiness_probes_exact_rest_prefix(monkeypatch):
+    observed = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Opener:
+        def open(self, request, *, timeout):
+            observed["url"] = request.full_url
+            observed["timeout"] = timeout
+            return Response()
+
+    monkeypatch.setattr(full_host, "build_opener", lambda *_args: Opener())
+    full_host._wait_https_origin(ORIGIN, timeout_seconds=1)
+    assert observed == {"url": ORIGIN + "/rest/v1/", "timeout": 10}
+
+
+def _acceptance_corpus_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    source_config = tmp_path / "production-v2"
+    source_root = source_config / "acceptance-corpus-v2"
+    fixture_dir = source_root / "daily"
+    fixture_dir.mkdir(parents=True, mode=0o700)
+    source_config.chmod(0o700)
+    source_root.chmod(0o700)
+    fixture_dir.chmod(0o700)
+    fixture = fixture_dir / "one.json"
+    fixture.write_bytes(b'{"fixture":1}\n')
+    fixture.chmod(0o600)
+    manifest = source_config / "acceptance-corpus-v2.json"
+    manifest.write_text(
+        json.dumps({"fixtures": [{"artifact_path": "daily/one.json"}]})
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest.chmod(0o600)
+    destination_config = tmp_path / "run-v2"
+    destination_config.mkdir(mode=0o700)
+    destination_config.chmod(0o700)
+    return source_config, destination_config
+
+
+def test_full_acceptance_corpus_is_candidate_bound_and_copied_exactly(
+    monkeypatch,
+    tmp_path: Path,
+):
+    source_config, destination_config = _acceptance_corpus_fixture(tmp_path)
+    observed: list[tuple[Path, Path, str]] = []
+    signer_hash = "sha256:" + "c" * 64
+    release_hash = "sha256:" + "d" * 64
+
+    monkeypatch.setattr(
+        full_host,
+        "validate_release_manifest",
+        lambda _value: {
+            "commit_sha": SHA,
+            "acceptance_signer_pubkey_hash": signer_hash,
+            "release_hash": release_hash,
+        },
+    )
+
+    def fake_load(manifest_path, *, corpus_root, expected_signing_pubkey_hash):
+        observed.append(
+            (Path(manifest_path), Path(corpus_root), expected_signing_pubkey_hash)
+        )
+        assert expected_signing_pubkey_hash == signer_hash
+        value = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        assert (Path(corpus_root) / "daily" / "one.json").read_bytes() == (
+            b'{"fixture":1}\n'
+        )
+        return {
+            "fixtures": value["fixtures"],
+            "manifest_hash": "sha256:" + "e" * 64,
+        }
+
+    monkeypatch.setattr(
+        full_host,
+        "load_and_validate_acceptance_corpus_v2",
+        fake_load,
+    )
+    evidence = full_host._materialize_acceptance_corpus(
+        source_config_dir=source_config,
+        destination_config_dir=destination_config,
+        candidate_sha=SHA,
+        candidate_release_manifest={"untrusted": "input"},
+    )
+
+    destination_manifest = destination_config / "acceptance-corpus-v2.json"
+    destination_fixture = (
+        destination_config / "acceptance-corpus-v2" / "daily" / "one.json"
+    )
+    assert destination_manifest.read_bytes() == (
+        source_config / "acceptance-corpus-v2.json"
+    ).read_bytes()
+    assert destination_fixture.read_bytes() == b'{"fixture":1}\n'
+    assert destination_manifest.stat().st_mode & 0o777 == 0o600
+    assert destination_fixture.stat().st_mode & 0o777 == 0o600
+    assert destination_fixture.parent.stat().st_mode & 0o777 == 0o700
+    assert len(observed) == 2
+    assert observed[0][0] == source_config / "acceptance-corpus-v2.json"
+    assert observed[1][0] == destination_manifest
+    assert evidence == {
+        "candidate_sha": SHA,
+        "release_hash": release_hash,
+        "manifest_hash": "sha256:" + "e" * 64,
+        "fixture_count": 1,
+        "copied_exact": True,
+    }
+
+
+def test_full_acceptance_corpus_rejects_unlisted_directories(
+    monkeypatch,
+    tmp_path: Path,
+):
+    source_config, destination_config = _acceptance_corpus_fixture(tmp_path)
+    extra = source_config / "acceptance-corpus-v2" / "unlisted"
+    extra.mkdir(mode=0o700)
+    extra.chmod(0o700)
+    signer_hash = "sha256:" + "c" * 64
+    monkeypatch.setattr(
+        full_host,
+        "validate_release_manifest",
+        lambda _value: {
+            "commit_sha": SHA,
+            "acceptance_signer_pubkey_hash": signer_hash,
+            "release_hash": "sha256:" + "d" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        full_host,
+        "load_and_validate_acceptance_corpus_v2",
+        lambda manifest_path, **_kwargs: {
+            "fixtures": json.loads(
+                Path(manifest_path).read_text(encoding="utf-8")
+            )["fixtures"],
+            "manifest_hash": "sha256:" + "e" * 64,
+        },
+    )
+    with pytest.raises(FullParityError, match="file set differs"):
+        full_host._materialize_acceptance_corpus(
+            source_config_dir=source_config,
+            destination_config_dir=destination_config,
+            candidate_sha=SHA,
+            candidate_release_manifest={},
+        )
+
+
+@pytest.mark.parametrize("failure", ["missing", "signer-mismatch"])
+def test_full_acceptance_corpus_fails_before_restart(
+    monkeypatch,
+    tmp_path: Path,
+    failure: str,
+):
+    source_config, destination_config = _acceptance_corpus_fixture(tmp_path)
+    if failure == "missing":
+        (source_config / "acceptance-corpus-v2.json").unlink()
+    monkeypatch.setattr(
+        full_host,
+        "validate_release_manifest",
+        lambda _value: {
+            "commit_sha": SHA,
+            "acceptance_signer_pubkey_hash": "sha256:" + "c" * 64,
+            "release_hash": "sha256:" + "d" * 64,
+        },
+    )
+
+    def reject_mismatch(*_args, **_kwargs):
+        raise ValueError("signer mismatch")
+
+    monkeypatch.setattr(
+        full_host,
+        "load_and_validate_acceptance_corpus_v2",
+        reject_mismatch,
+    )
+    with pytest.raises(FullParityError, match="acceptance corpus"):
+        full_host._materialize_acceptance_corpus(
+            source_config_dir=source_config,
+            destination_config_dir=destination_config,
+            candidate_sha=SHA,
+            candidate_release_manifest={},
+        )
+    assert not (destination_config / "acceptance-corpus-v2.json").exists()
+    assert not (destination_config / "acceptance-corpus-v2").exists()
+
+    source = inspect.getsource(full_host.run_full)
+    assert source.index("_materialize_acceptance_corpus(") < source.index(
+        '["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha]'
+    )
+
+
 def test_full_snapshot_disk_headroom_fits_512_gib_and_fails_closed(
     monkeypatch,
     tmp_path: Path,
@@ -647,9 +995,11 @@ def test_full_snapshot_disk_headroom_fits_512_gib_and_fails_closed(
         )
 
 
+@pytest.mark.parametrize("cleanup_raises", [False, True])
 def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
     monkeypatch,
     tmp_path: Path,
+    cleanup_raises: bool,
 ):
     marker = tmp_path / "early-boot-isolated"
     marker.write_text("isolated\n", encoding="utf-8")
@@ -671,6 +1021,8 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
 
         @staticmethod
         def cleanup():
+            if cleanup_raises:
+                raise OSError("injected cleanup failure")
             return {"status": "removed"}
 
     def fake_capture_snapshot(**kwargs):
@@ -718,7 +1070,7 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
             production_gateway_secret_id="gateway-secret",
             readonly_dsn_secret_id="readonly-secret",
             miner_intake_secret_id="miner-secret",
-            supabase_origin="https://parity.example",
+            supabase_origin=ORIGIN,
             artifact_bucket="parity-artifacts",
             postgres_image="postgres@sha256:" + "c" * 64,
             postgrest_image="postgrest@sha256:" + "d" * 64,
@@ -728,13 +1080,21 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
 
     assert observed == {
         "postgres_publish": "127.0.0.1::5432",
-        "postgrest_publish": "0.0.0.0:3000:3000",
+        "postgrest_publish": "127.0.0.1::3000",
         "capture": 990,
         "restore": 850,
     }
     assert not (work_root / "pp-test-1" / "runtime").exists()
-    cleanup = json.loads(output.read_text(encoding="utf-8"))["cleanup"]
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+    assert evidence["status"] == "failed"
+    assert evidence["failure_stage"] == "snapshot-restore"
+    assert evidence["error_type"] == "FullParityError"
+    cleanup = evidence["cleanup"]
     assert cleanup["work"] == "removed"
+    if cleanup_raises:
+        assert cleanup["database_error"] == "OSError"
+    else:
+        assert cleanup["database"] == {"status": "removed"}
 
 
 @pytest.mark.parametrize(
@@ -1700,6 +2060,7 @@ def test_critical_stage_ledger_fails_closed_and_hashes_evidence():
 
 
 def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
+    artifact_bucket = "leadpoet-parity-493765492819-" + "f" * 16
     environment = build_gateway_environment(
         {
             "OPENROUTER_API_KEY": "runtime-key",
@@ -1709,11 +2070,36 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
             "WALLET_PRIVATE_KEY": "must-drop",
             "SUPABASE_URL": "https://qplwoislplkcegvdmbim.supabase.co",
             "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED": "true",
+            "PATH": "/production/poison",
+            "PYTHONPATH": "/production/import-poison",
+            "HTTP_PROXY": "http://production-proxy.invalid",
+            "HTTPS_PROXY": "http://production-proxy.invalid",
+            "GIT_SSH_COMMAND": "ssh -i /production/key",
+            "AWS_ACCESS_KEY_ID": "must-drop",
+            "AWS_SECRET_ACCESS_KEY": "must-drop",
+            "GATEWAY_ENV_FILE": "/production/gateway.env",
+            "GATEWAY_PYTHON_BIN": "/production/python",
+            "GATEWAY_RESTART_LOCK_FILE": "/production/restart.lock",
+            "GATEWAY_TEE_EIF_ROOT": "/production/tee",
+            "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST": "/production/corpus.json",
+            "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT": "/production/corpus",
+            "GATEWAY_V2_CONFIG_DIR": "/production/v2",
+            "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT": "/production/offline",
+            "GATEWAY_V2_RELEASE_BUCKET": "production-bucket-poison",
+            "GATEWAY_V2_RELEASE_PREFIX": "production-prefix-poison",
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE": "/production/docker.lock",
+            "LEADPOET_GATEWAY_ENV_SECRET_ID": "production-secret-poison",
+            "LEADPOET_REPO_ROOT": "/production/repo",
+            "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT": "/production/validator",
+            "DISABLE_BACKGROUND_TASKS": "false",
+            "GATEWAY_STATEFUL_CUTOVER_CEREMONY": "1",
+            "GATEWAY_TEE_TOPOLOGY_MODE": "component",
+            "RESEARCH_LAB_PROVIDER_HTTP_PROXY": "provider-proxy-ref",
         },
-        run_id="parity-20260815",
+        run_id="pp-1-1",
         candidate_sha=SHA,
         supabase_origin=ORIGIN,
-        artifact_bucket="leadpoet-parity-artifacts-example",
+        artifact_bucket=artifact_bucket,
         benchmark_date="2026-08-16",
         jwt_secret="j" * 48,
     )
@@ -1725,7 +2111,36 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["SUPABASE_URL"] == ORIGIN
     assert (
         environment["RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET"]
-        == "leadpoet-parity-artifacts-example"
+        == artifact_bucket
+    )
+    for key in (
+        "PATH",
+        "PYTHONPATH",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "GIT_SSH_COMMAND",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "GATEWAY_ENV_FILE",
+        "GATEWAY_PYTHON_BIN",
+        "GATEWAY_RESTART_LOCK_FILE",
+        "GATEWAY_TEE_EIF_ROOT",
+        "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
+        "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
+        "GATEWAY_V2_CONFIG_DIR",
+        "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
+        "GATEWAY_V2_RELEASE_BUCKET",
+        "GATEWAY_V2_RELEASE_PREFIX",
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        "LEADPOET_GATEWAY_ENV_SECRET_ID",
+        "LEADPOET_REPO_ROOT",
+        "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT",
+    ):
+        assert key not in environment
+        assert is_process_control_environment_key(key)
+    assert (
+        environment["RESEARCH_LAB_PROVIDER_HTTP_PROXY"]
+        == "provider-proxy-ref"
     )
     assert environment["ENABLE_FULFILLMENT"] == "false"
     assert environment["BITTENSOR_NETWORK"] == "finney"
@@ -1741,6 +2156,48 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["RESEARCH_LAB_AUTO_PROMOTION_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_AUTO_COMMIT_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED"] == "false"
+    assert environment["DISABLE_BACKGROUND_TASKS"] == "true"
+    assert environment["GATEWAY_STATEFUL_CUTOVER_CEREMONY"] == "0"
+    assert environment["GATEWAY_TEE_TOPOLOGY_MODE"] == "full"
+
+
+def test_full_gateway_restart_reasserts_run_owned_path_authority():
+    source = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    authority_keys = {
+        "GATEWAY_ENV_FILE",
+        "LEADPOET_GATEWAY_ENV_SECRET_ID",
+        "GATEWAY_RESTART_CONTROLLER_ROOT",
+        "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        "GATEWAY_V2_CONFIG_DIR",
+        "GATEWAY_V2_RELEASE_MANIFEST",
+        "GATEWAY_V2_RELEASE_LINEAGE",
+        "GATEWAY_V2_ARTIFACT_POLICY",
+        "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
+        "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
+        "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
+        "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT",
+        "GATEWAY_V2_RELEASE_PREFIX",
+        "GATEWAY_V2_RELEASE_BUCKET",
+        "GATEWAY_V2_KMS_KEY_ID",
+    }
+    for key in authority_keys:
+        assert source.count(f'"{key}"') >= 3
+        assert f"  {key}\n" in source
+        assert is_process_control_environment_key(key)
+    assert source.count(
+        'set -a\n. "$ENV_CLONE"\nset +a\n'
+        "restore_gateway_restart_path_authority"
+    ) == 2
+    assert source.count('"GATEWAY_PYTHON_BIN"') >= 3
+    assert (
+        "printf 'export GATEWAY_PYTHON_BIN=%q\\n' \"$GATEWAY_PYTHON_BIN\" "
+        '>> "$ENV_CLONE"'
+    ) in source
+    assert is_process_control_environment_key("GATEWAY_PYTHON_BIN")
+    full_source = inspect.getsource(full_host.run_full)
+    assert '"GATEWAY_V2_RELEASE_BUCKET": ATTESTED_V2_RELEASE_BUCKET' in full_source
+    assert '"GATEWAY_V2_KMS_KEY_ID": ATTESTED_V2_KMS_KEY_ID' in full_source
 
 
 def test_controller_dependency_closure_includes_gateway_database_client():
@@ -1749,22 +2206,278 @@ def test_controller_dependency_closure_includes_gateway_database_client():
     assert names == {"boto3", "cryptography", "httpx", "supabase"}
 
 
+def test_full_baseline_checkpoint_is_run_scoped_and_production_default_is_unchanged(
+    monkeypatch,
+):
+    run_id = "pp-123-1"
+    bucket = "leadpoet-parity-493765492819-" + hashlib.sha256(
+        f"493765492819:{run_id}:{SHA}".encode("ascii")
+    ).hexdigest()[:16]
+    environment = build_gateway_environment(
+        {},
+        run_id=run_id,
+        candidate_sha=SHA,
+        supabase_origin=ORIGIN,
+        artifact_bucket=bucket,
+        benchmark_date="2026-08-19",
+        jwt_secret="j" * 48,
+    )
+    assert "RESEARCH_LAB_SCORING_PER_ICP_CHECKPOINT" not in environment
+    monkeypatch.delenv(
+        "RESEARCH_LAB_SCORING_PER_ICP_CHECKPOINT", raising=False
+    )
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("ATTESTED_RUNTIME_COMMIT_SHA", SHA)
+    assert scoring_worker._per_icp_checkpoint_enabled() is True
+    location = scoring_worker._baseline_progress_s3_location(
+        "s3://leadpoet-private-model-artifacts-493765492819/"
+        "research-lab/sourcing-model/branches/leadpoet-lab/current.json",
+        benchmark_date="2026-08-19",
+        window_hash=HASH,
+        private_model_artifact_hash="sha256:" + "c" * 64,
+    )
+    assert location is not None
+    assert location[0] == bucket
+    assert location[1].startswith(
+        f"production-parity/runs/{run_id}/baseline-checkpoints/{SHA}/"
+    )
+    assert "leadpoet-private-model-artifacts" not in "/".join(location)
+    assert location[1].endswith("b" * 16 + "-" + "c" * 16 + ".json")
+
+    for key in (*environment, "ATTESTED_RUNTIME_COMMIT_SHA"):
+        monkeypatch.delenv(key, raising=False)
+    production_location = scoring_worker._baseline_progress_s3_location(
+        "s3://leadpoet-private-model-artifacts-493765492819/"
+        "research-lab/sourcing-model/branches/leadpoet-lab/current.json",
+        benchmark_date="2026-08-19",
+        window_hash=HASH,
+        private_model_artifact_hash="sha256:" + "c" * 64,
+    )
+    assert production_location == (
+        "leadpoet-private-model-artifacts-493765492819",
+        "research-lab/sourcing-model/branches/leadpoet-lab/baselines/"
+        "2026-08-19/scoring-progress/" + "b" * 16 + "-" + "c" * 16 + ".json",
+    )
+
+
+def test_full_baseline_checkpoint_fails_closed_on_partial_boundary(
+    monkeypatch,
+):
+    monkeypatch.setenv("LEADPOET_PRODUCTION_PARITY_MODE", "enabled")
+    with pytest.raises(RuntimeError, match="checkpoint boundary is invalid"):
+        scoring_worker._baseline_progress_s3_location(
+            "s3://leadpoet-private-model-artifacts-493765492819/current.json",
+            benchmark_date="2026-08-19",
+            window_hash=HASH,
+            private_model_artifact_hash="sha256:" + "c" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    "poison", ["bucket", "run", "candidate", "runtime", "benchmark_date"]
+)
+def test_full_baseline_checkpoint_rejects_mismatched_run_identity(
+    monkeypatch,
+    poison: str,
+):
+    run_id = "pp-123-1"
+    bucket = "leadpoet-parity-493765492819-" + hashlib.sha256(
+        f"493765492819:{run_id}:{SHA}".encode("ascii")
+    ).hexdigest()[:16]
+    environment = build_gateway_environment(
+        {},
+        run_id=run_id,
+        candidate_sha=SHA,
+        supabase_origin=ORIGIN,
+        artifact_bucket=bucket,
+        benchmark_date="2026-08-19",
+        jwt_secret="j" * 48,
+    )
+    if poison == "bucket":
+        environment["RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET"] = (
+            "leadpoet-parity-493765492819-" + "f" * 16
+        )
+    elif poison == "run":
+        environment["LEADPOET_PRODUCTION_PARITY_RUN_ID"] = "pp-999-1"
+    elif poison == "candidate":
+        environment["LEADPOET_PARITY_CANDIDATE_SHA"] = "f" * 40
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv(
+        "ATTESTED_RUNTIME_COMMIT_SHA",
+        "f" * 40 if poison == "runtime" else SHA,
+    )
+    with pytest.raises(RuntimeError, match="checkpoint destination differs"):
+        scoring_worker._baseline_progress_s3_location(
+            "s3://leadpoet-private-model-artifacts-493765492819/current.json",
+            benchmark_date=(
+                "2026-08-20" if poison == "benchmark_date" else "2026-08-19"
+            ),
+            window_hash=HASH,
+            private_model_artifact_hash="sha256:" + "c" * 64,
+        )
+
+
 def test_full_runner_accepts_json_secret_and_strict_env_file(tmp_path: Path):
     dsn = "postgresql://reader:password@db.example.com:5432/postgres"
     assert _dsn_from_secret(json.dumps({"readonly_dsn": dsn})) == dsn
     env_file = tmp_path / "gateway.env"
     env_file.write_text(
-        "export SIMPLE=value\nQUOTED='a value'\nEMPTY=\n",
+        "export SIMPLE=value\nMULTI=a value with spaces\n"
+        "UNMATCHED='raw shell junk\nEMPTY=\nSIMPLE=value\n",
         encoding="utf-8",
     )
     assert _parse_gateway_environment_file(env_file) == {
         "SIMPLE": "value",
-        "QUOTED": "a value",
+        "MULTI": "a value with spaces",
+        "UNMATCHED": "'raw shell junk",
         "EMPTY": "",
     }
-    env_file.write_text("BAD=a b\n", encoding="utf-8")
-    with pytest.raises(FullParityError, match="multi-token"):
+    env_file.write_text("DUP=one\nDUP=two\n", encoding="utf-8")
+    with pytest.raises(FullParityError, match="conflicting duplicate"):
         _parse_gateway_environment_file(env_file)
+    env_file.write_bytes(b"BAD=value\x00poison\n")
+    with pytest.raises(FullParityError, match="invalid row"):
+        _parse_gateway_environment_file(env_file)
+
+
+def test_full_parent_import_never_loads_gateway_database_globals():
+    code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import scripts.run_production_parity_full_host  # noqa: F401
+for name in ('gateway.config', 'gateway.db', 'gateway.db.client',
+             'gateway.research_lab.maintenance', 'gateway.research_lab.store'):
+    if name in sys.modules:
+        raise SystemExit(name)
+"""
+    environment = {
+        **os.environ,
+        "SUPABASE_URL": "https://production.example.invalid",
+        "SUPABASE_SERVICE_ROLE_KEY": "production-poison",
+        "PYTHONPATH": "/production/import-poison",
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(ROOT)],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_full_child_environments_ignore_parent_and_clone_process_poison(
+    monkeypatch,
+    tmp_path: Path,
+):
+    poison = {
+        "PATH": "/production/path-poison",
+        "PYTHONPATH": "/production/import-poison",
+        "HTTP_PROXY": "http://production-proxy.invalid",
+        "HTTPS_PROXY": "http://production-proxy.invalid",
+        "GIT_SSH_COMMAND": "ssh -i /production/key",
+        "AWS_ACCESS_KEY_ID": "production-access-key",
+        "AWS_SECRET_ACCESS_KEY": "production-secret-key",
+    }
+    for key, value in poison.items():
+        monkeypatch.setenv(key, value)
+
+    child = full_host._clone_child_environment(region="us-east-1")
+    assert child["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert child["AWS_REGION"] == "us-east-1"
+    assert child["AWS_DEFAULT_REGION"] == "us-east-1"
+    for key in poison:
+        if key != "PATH":
+            assert key not in child
+
+    runtime = full_host._clone_runtime_environment(
+        {
+            **poison,
+            "RESEARCH_LAB_PROVIDER_HTTP_PROXY": "provider-proxy-ref",
+            "SUPABASE_URL": ORIGIN,
+        },
+        gateway_env_file=tmp_path / "gateway.env",
+        region="us-east-1",
+    )
+    assert runtime["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert runtime["SUPABASE_URL"] == ORIGIN
+    assert runtime["RESEARCH_LAB_PROVIDER_HTTP_PROXY"] == "provider-proxy-ref"
+    for key in poison:
+        if key != "PATH":
+            assert key not in runtime
+
+
+def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
+    monkeypatch,
+    tmp_path: Path,
+):
+    observed: dict[str, object] = {}
+    poisoned_clone = {
+        "PATH": "/clone/path-poison",
+        "PYTHONPATH": "/clone/import-poison",
+        "HTTP_PROXY": "http://clone-proxy.invalid",
+        "HTTPS_PROXY": "http://clone-proxy.invalid",
+        "GIT_SSH_COMMAND": "ssh -i /clone/key",
+        "AWS_ACCESS_KEY_ID": "clone-access-key",
+        "AWS_SECRET_ACCESS_KEY": "clone-secret-key",
+        "RESEARCH_LAB_PROVIDER_HTTP_PROXY": "provider-proxy-ref",
+    }
+
+    monkeypatch.setattr(
+        full_host,
+        "_validated_clone_environment",
+        lambda *_args, **_kwargs: poisoned_clone,
+    )
+
+    def fake_run(_command, **kwargs):
+        observed["env"] = dict(kwargs["env"])
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                {
+                    "schema_version": (
+                        "leadpoet.production_parity_miner_intake_evidence.v1"
+                    ),
+                    "candidate_sha": SHA,
+                    "run_id": "pp-1-1",
+                    "status": "passed",
+                    "production_database_mutated": False,
+                    "production_chain_mutated": False,
+                    "chain_registration_boundary": "strict-ephemeral-hotkey",
+                    "openrouter": {"admitted": True},
+                    "source_add": {"admitted": True},
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(full_host, "_run", fake_run)
+    full_host._run_miner_intake_path(
+        region="us-east-1",
+        candidate_sha=SHA,
+        run_id="pp-1-1",
+        supabase_origin=ORIGIN,
+        gateway_env_file=tmp_path / "gateway.env",
+        production_gateway_environment={
+            "OPENROUTER_API_KEY": "runtime-credential",
+            "OPENROUTER_MANAGEMENT_KEY": "management-credential",
+        },
+        miner_intake_secret=json.dumps(
+            {"builtwith_api_key": "builtwith-credential"}
+        ),
+    )
+    child_env = observed["env"]
+    assert isinstance(child_env, dict)
+    assert child_env["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert child_env["AWS_REGION"] == "us-east-1"
+    assert child_env["AWS_DEFAULT_REGION"] == "us-east-1"
+    for key in poisoned_clone:
+        if key != "PATH":
+            assert key not in child_env
 
 
 def test_miner_intake_secret_resolution_is_strict_and_value_opaque():
@@ -1876,6 +2589,107 @@ def test_weight_readiness_epoch_parser_uses_real_reported_epoch():
         _current_epoch_from_readiness("no json")
 
 
+def test_rebenchmark_readiness_uses_explicit_region_and_filters_secret_poison(
+    monkeypatch,
+):
+    observed = {}
+    environment = build_gateway_environment(
+        {},
+        run_id="pp-1-1",
+        candidate_sha=SHA,
+        supabase_origin=ORIGIN,
+        artifact_bucket="leadpoet-parity-493765492819-" + "d" * 16,
+        benchmark_date="2026-08-19",
+        jwt_secret="j" * 48,
+    )
+    environment.update(
+        {
+            "PATH": "/secret/path-poison",
+            "PYTHONPATH": "/secret/import-poison",
+            "HTTP_PROXY": "http://secret-proxy.invalid",
+            "HTTPS_PROXY": "http://secret-proxy.invalid",
+            "GIT_SSH_COMMAND": "ssh -i /secret/key",
+            "AWS_ACCESS_KEY_ID": "secret-access-key",
+            "AWS_SECRET_ACCESS_KEY": "secret-secret-key",
+            "RESEARCH_LAB_PROVIDER_HTTP_PROXY": "provider-proxy-ref",
+        }
+    )
+
+    class Secrets:
+        def get_secret_value(self, *, SecretId):
+            assert SecretId.endswith("/pp-1-1/gateway")
+            return {"SecretString": json.dumps(environment)}
+
+    def fake_client(service, *, region_name):
+        observed["service"] = service
+        observed["region"] = region_name
+        return Secrets()
+
+    monkeypatch.setattr(parity_readiness.boto3, "client", fake_client)
+    filtered = parity_readiness._secret_environment(
+        "leadpoet/staging/production-parity/runs/pp-1-1/gateway",
+        SHA,
+        region="us-east-1",
+        run_id="pp-1-1",
+        supabase_origin=ORIGIN,
+    )
+    assert observed == {"service": "secretsmanager", "region": "us-east-1"}
+    assert filtered["SUPABASE_URL"] == ORIGIN
+    assert filtered["RESEARCH_LAB_PROVIDER_HTTP_PROXY"] == "provider-proxy-ref"
+    for key in (
+        "PATH",
+        "PYTHONPATH",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "GIT_SSH_COMMAND",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+    ):
+        assert key not in filtered
+
+
+def test_full_rebenchmark_child_receives_exact_region_run_and_origin(monkeypatch):
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = list(command)
+        observed["env"] = dict(kwargs["env"])
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "schema_version": (
+                        "leadpoet.production_parity_rebenchmark_readiness.v1"
+                    ),
+                    "candidate_sha": SHA,
+                    "available": True,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(full_host, "_run", fake_run)
+    result = full_host._wait_rebenchmark(
+        candidate_sha=SHA,
+        secret_id=(
+            "leadpoet/staging/production-parity/runs/pp-1-1/gateway"
+        ),
+        region="us-east-1",
+        run_id="pp-1-1",
+        supabase_origin=ORIGIN,
+        timeout_seconds=30,
+    )
+    assert result["available"] is True
+    command = observed["command"]
+    assert command[command.index("--region") + 1] == "us-east-1"
+    assert command[command.index("--run-id") + 1] == "pp-1-1"
+    assert command[command.index("--supabase-origin") + 1] == ORIGIN
+    child_env = observed["env"]
+    assert child_env["AWS_REGION"] == "us-east-1"
+    assert child_env["AWS_DEFAULT_REGION"] == "us-east-1"
+
+
 def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
     controller = _controller_policy(
         account_id="493765492819",
@@ -1905,6 +2719,39 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
     assert '"Effect": "Deny"' in encoded
     assert "kms:ScheduleKeyDeletion" in encoded
     assert "testnet" not in encoded
+    version_statements = [
+        statement
+        for statement in runner["Statement"]
+        if statement.get("Action") == ["s3:GetObjectVersion"]
+    ]
+    assert version_statements == [
+        {
+            "Effect": "Allow",
+            "Action": ["s3:GetObjectVersion"],
+            "Resource": "arn:aws:s3:::leadpoet-attested-v2-artifacts-*/*",
+        }
+    ]
+    retention_statements = [
+        statement
+        for statement in runner["Statement"]
+        if statement.get("Action") == ["s3:GetObjectRetention"]
+    ]
+    assert retention_statements == [
+        {
+            "Effect": "Allow",
+            "Action": ["s3:GetObjectRetention"],
+            "Resource": [
+                "arn:aws:s3:::leadpoet-parity-493765492819-*/*",
+                "arn:aws:s3:::leadpoet-attested-v2-artifacts-*/*",
+            ],
+        }
+    ]
+    get_object = next(
+        statement
+        for statement in runner["Statement"]
+        if statement.get("Action") == ["s3:GetObject"]
+    )
+    assert "s3:GetObjectVersion" not in get_object["Action"]
     write_statement = next(
         statement
         for statement in runner["Statement"]

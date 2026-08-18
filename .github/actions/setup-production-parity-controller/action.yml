@@ -35,6 +35,22 @@ runs:
         resolved_host_python="$(realpath -e -- "$host_python")"
         test -f "$resolved_host_python"
         test -x "$resolved_host_python"
+        if [ -n "${PARITY_TEMP:-}" ]; then
+          test "$host_python" = "/usr/bin/python3.11"
+          test "$resolved_host_python" = "/usr/bin/python3.11"
+          test ! -L "$host_python"
+          test "$(stat -Lc '%u:%g:%a' "$host_python")" = "0:0:755"
+          for trusted_parent in / /usr /usr/bin; do
+            test -d "$trusted_parent"
+            test ! -L "$trusted_parent"
+            test "$(stat -Lc '%u:%g' "$trusted_parent")" = "0:0"
+            trusted_mode="$(stat -Lc '%a' "$trusted_parent")"
+            case "$trusted_mode" in
+              [0-7][0145][0145]) ;;
+              *) exit 1 ;;
+            esac
+          done
+        fi
         observed_host_python="$("$host_python" -I -c '
         import os
         import sys

@@ -28,6 +28,7 @@ SECRET_RE = re.compile(
 )
 ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+RUN_RE = re.compile(r"^pp-[1-9][0-9]*-[1-9][0-9]*$")
 
 
 class RebenchmarkReadinessError(RuntimeError):
@@ -60,11 +61,25 @@ def _checkout_identity(root: Path, candidate_sha: str) -> None:
         )
 
 
-def _secret_environment(secret_id: str, candidate_sha: str) -> dict[str, str]:
-    if not SECRET_RE.fullmatch(secret_id):
+def _secret_environment(
+    secret_id: str,
+    candidate_sha: str,
+    *,
+    region: str,
+    run_id: str,
+    supabase_origin: str,
+) -> dict[str, str]:
+    if (
+        not SECRET_RE.fullmatch(secret_id)
+        or not RUN_RE.fullmatch(run_id)
+        or secret_id
+        != f"leadpoet/staging/production-parity/runs/{run_id}/gateway"
+    ):
         raise RebenchmarkReadinessError("gateway staging secret identity is invalid")
     try:
-        response = boto3.client("secretsmanager").get_secret_value(
+        response = boto3.client(
+            "secretsmanager", region_name=region
+        ).get_secret_value(
             SecretId=secret_id
         )
         value = json.loads(str(response.get("SecretString") or ""))
@@ -89,15 +104,29 @@ def _secret_environment(secret_id: str, candidate_sha: str) -> dict[str, str]:
     from leadpoet_canonical.production_parity_boundary_v2 import (
         validate_production_parity_boundary_document_v2,
     )
+    from scripts.materialize_production_parity_secrets import (
+        is_process_control_environment_key,
+    )
 
     boundary = validate_production_parity_boundary_document_v2(
         environment, network="finney", netuid=71
     )
-    if boundary.get("mode") != "production-parity":
+    normalized_origin = supabase_origin.rstrip("/")
+    if (
+        boundary.get("mode") != "production-parity"
+        or boundary.get("run_id") != run_id
+        or boundary.get("supabase_origin") != normalized_origin
+        or str(environment.get("SUPABASE_URL") or "").rstrip("/")
+        != normalized_origin
+    ):
         raise RebenchmarkReadinessError(
             "gateway readiness probe is not bound to disposable state"
         )
-    return environment
+    return {
+        key: value
+        for key, value in environment.items()
+        if not is_process_control_environment_key(key)
+    }
 
 
 @contextmanager
@@ -207,13 +236,27 @@ def _sanitize(value: Mapping[str, Any], *, candidate_sha: str) -> dict[str, Any]
 
 
 async def check(
-    *, root: Path, candidate_sha: str, secret_id: str
+    *,
+    root: Path,
+    candidate_sha: str,
+    secret_id: str,
+    region: str,
+    run_id: str,
+    supabase_origin: str,
 ) -> dict[str, Any]:
     if not SHA_RE.fullmatch(candidate_sha):
         raise RebenchmarkReadinessError("candidate SHA is invalid")
     root = root.resolve()
     _checkout_identity(root, candidate_sha)
-    environment = _secret_environment(secret_id, candidate_sha)
+    if region != "us-east-1":
+        raise RebenchmarkReadinessError("gateway staging region is invalid")
+    environment = _secret_environment(
+        secret_id,
+        candidate_sha,
+        region=region,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+    )
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     with _patched_environment(environment):
@@ -233,6 +276,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--secret-id", required=True)
+    parser.add_argument("--region", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--supabase-origin", required=True)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
@@ -242,6 +288,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 root=args.root,
                 candidate_sha=str(args.candidate_sha).lower(),
                 secret_id=str(args.secret_id),
+                region=str(args.region),
+                run_id=str(args.run_id),
+                supabase_origin=str(args.supabase_origin),
             )
         )
     except (OSError, ValueError, BotoCoreError, ClientError, RebenchmarkReadinessError):

@@ -1969,6 +1969,21 @@ def _runner_policy(
             },
             {
                 "Effect": "Allow",
+                "Action": ["s3:GetObjectVersion"],
+                "Resource": (
+                    "arn:aws:s3:::leadpoet-attested-v2-artifacts-*/*"
+                ),
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["s3:GetObjectRetention"],
+                "Resource": [
+                    run_objects,
+                    "arn:aws:s3:::leadpoet-attested-v2-artifacts-*/*",
+                ],
+            },
+            {
+                "Effect": "Allow",
                 "Action": [
                     "s3:PutObject",
                     "s3:PutObjectRetention",

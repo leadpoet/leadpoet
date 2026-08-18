@@ -26,6 +26,10 @@ from pathlib import Path
 import requests
 from arweave.arweave_lib import Wallet, Transaction
 
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    validate_production_parity_boundary_document_v2,
+)
+
 
 # Configuration (will be loaded from config.py)
 ARWEAVE_KEYFILE_PATH = os.getenv("ARWEAVE_KEYFILE_PATH", "secrets/arweave_keyfile.json")
@@ -40,6 +44,27 @@ DIRECT_UPLOAD_MAX_PAYLOAD_BYTES = 5 * 1024 * 1024
 # Global client instance (initialized on first use)
 _wallet: Optional[Wallet] = None
 _peer = None  # Arweave peer/client
+
+
+class ArweaveWriteBoundaryError(RuntimeError):
+    """An Arweave write was requested outside the production boundary."""
+
+
+def _require_arweave_write_boundary() -> None:
+    try:
+        boundary = validate_production_parity_boundary_document_v2(
+            os.environ,
+            network=str(os.getenv("BITTENSOR_NETWORK") or ""),
+            netuid=int(os.getenv("BITTENSOR_NETUID") or 0),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ArweaveWriteBoundaryError(
+            "Arweave write boundary configuration is invalid"
+        ) from exc
+    if boundary.get("mode") != "production":
+        raise ArweaveWriteBoundaryError(
+            "Arweave writes are disabled in production parity"
+        )
 
 
 def checkpoint_payload_bytes(
@@ -149,6 +174,7 @@ async def write_event(event: Dict, tags: Optional[Dict[str, str]] = None) -> str
         >>> tx_id = await write_event(event, tags={"event_type": "SUBMISSION_REQUEST"})
         >>> print(f"Event written to Arweave: {tx_id}")
     """
+    _require_arweave_write_boundary()
     _initialize_client()
     
     if _wallet is None:
@@ -185,11 +211,16 @@ async def write_event(event: Dict, tags: Optional[Dict[str, str]] = None) -> str
             transaction.add_tag("App-Version", "1.0")
             
             # Sign transaction
+            _require_arweave_write_boundary()
             transaction.sign()
             
             # Send transaction (simpler approach - no chunked upload for small data)
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, transaction.send)
+            def send_transaction():
+                _require_arweave_write_boundary()
+                transaction.send()
+
+            await loop.run_in_executor(None, send_transaction)
             
             tx_id = transaction.id
             
@@ -375,6 +406,7 @@ async def upload_checkpoint(
     Raises:
         RuntimeError: If upload fails after retries
     """
+    _require_arweave_write_boundary()
     _initialize_client()
     
     if _wallet is None:
@@ -408,6 +440,7 @@ async def upload_checkpoint(
             payload_file.seek(0)
 
         def create_transaction():
+            _require_arweave_write_boundary()
             if payload_file is None:
                 tx = Transaction(_wallet, data=payload_bytes)
             else:
@@ -440,6 +473,7 @@ async def upload_checkpoint(
             )
 
         def send_transaction():
+            _require_arweave_write_boundary()
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/plain, */*",
@@ -464,6 +498,7 @@ async def upload_checkpoint(
             require_accepted(response, operation="transaction header")
 
             for chunk_index in range(len(tx.chunks["chunks"])):
+                _require_arweave_write_boundary()
                 chunk = dict(tx.get_chunk(chunk_index))
                 chunk["data_path"] = chunk["data_path"].decode("ascii")
                 chunk["chunk"] = chunk["chunk"].decode("ascii")

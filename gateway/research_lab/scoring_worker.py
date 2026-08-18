@@ -27,6 +27,9 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from leadpoet_canonical.attested_v2 import merkle_root
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    validate_production_parity_boundary_document_v2,
+)
 from leadpoet_observability import (
     hash_identifier as observability_hash_identifier,
     record_retry as record_operation_retry,
@@ -2114,14 +2117,60 @@ def _baseline_progress_s3_location(
     window_hash: str,
     private_model_artifact_hash: str,
 ) -> tuple[str, str] | None:
-    uri = str(manifest_uri or "")
-    if not uri.startswith("s3://"):
-        return None
-    rest = uri[5:]
-    bucket, sep, key = rest.partition("/")
-    if not bucket or not sep or not key:
-        return None
-    base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
+    try:
+        boundary = validate_production_parity_boundary_document_v2(
+            os.environ,
+            network=str(os.getenv("BITTENSOR_NETWORK") or ""),
+            netuid=int(os.getenv("BITTENSOR_NETUID") or 0),
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "production parity baseline checkpoint boundary is invalid"
+        ) from exc
+    if boundary.get("mode") == "production-parity":
+        run_id = str(boundary.get("run_id") or "")
+        candidate_sha = str(
+            os.getenv("LEADPOET_PARITY_CANDIDATE_SHA") or ""
+        )
+        runtime_commit_sha = _gateway_runtime_commit_sha()
+        artifact_bucket = str(
+            os.getenv("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET") or ""
+        )
+        expected_bucket = (
+            "leadpoet-parity-493765492819-"
+            + hashlib.sha256(
+                f"493765492819:{run_id}:{runtime_commit_sha}".encode("ascii")
+            ).hexdigest()[:16]
+        )
+        if (
+            not re.fullmatch(r"pp-[1-9][0-9]*-[1-9][0-9]*", run_id)
+            or not _FULL_GIT_COMMIT_RE.fullmatch(candidate_sha)
+            or runtime_commit_sha != candidate_sha
+            or str(benchmark_date or "")
+            != str(boundary.get("benchmark_date") or "")
+            or artifact_bucket != expected_bucket
+        ):
+            raise RuntimeError(
+                "production parity baseline checkpoint destination differs"
+            )
+        bucket = artifact_bucket
+        base_prefix = (
+            f"production-parity/runs/{run_id}/baseline-checkpoints/"
+            f"{runtime_commit_sha}"
+        )
+    else:
+        uri = str(manifest_uri or "")
+        if not uri.startswith("s3://"):
+            return None
+        rest = uri[5:]
+        bucket, sep, key = rest.partition("/")
+        if not bucket or not sep or not key:
+            return None
+        base_prefix = (
+            key.rsplit("/", 1)[0]
+            if "/" in key
+            else "research-lab/sourcing-model"
+        )
     safe_date = "".join(
         ch if ch.isdigit() or ch == "-" else "-" for ch in str(benchmark_date or "date")
     )[:32]

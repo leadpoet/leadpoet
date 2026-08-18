@@ -153,6 +153,79 @@ def test_runtime_context_respects_model_maxima_for_long_outer_timeout() -> None:
     }
 
 
+def test_v52_capability_scope_compatibility_patch_is_exact_and_restores_host(
+    tmp_path,
+) -> None:
+    adapter_path = tmp_path / "research_lab_adapter.py"
+    adapter_path.write_bytes(b"affected-adapter-fixture\n")
+    expected_hash = hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+    probe = f"""
+import contextlib
+import json
+import types
+
+_registered = {{}}
+def _register(name, implementation):
+    _registered[name] = implementation
+def _reset():
+    _registered.clear()
+def _capability(name):
+    return _registered[name]
+
+_caps = types.SimpleNamespace(
+    register=_register,
+    reset=_reset,
+    capability=_capability,
+    registered_capabilities=lambda: tuple(sorted(_registered)),
+)
+_sourcing_model = types.ModuleType("sourcing_model")
+_sourcing_model.runtime_capabilities = _caps
+sys.modules["sourcing_model"] = _sourcing_model
+
+@contextlib.contextmanager
+def _old_scope(_context):
+    _reset()
+    try:
+        yield
+    finally:
+        _reset()
+
+_adapter = types.SimpleNamespace(
+    __file__={str(adapter_path)!r},
+    _bound_runtime_capabilities=_old_scope,
+)
+_original = _adapter._bound_runtime_capabilities
+assert not _research_lab_patch_affected_runtime_capability_scope(
+    _adapter, "0" * 64
+)
+assert _adapter._bound_runtime_capabilities is _original
+
+_register("deadline", lambda: 123.0)
+_register("emit", lambda _event: None)
+assert _research_lab_patch_affected_runtime_capability_scope(
+    _adapter, {expected_hash!r}
+)
+with _adapter._bound_runtime_capabilities({{
+    "runtime_capabilities": {{
+        "remaining_non_cleanup_physical_exchanges": 17,
+    }},
+}}):
+    assert _capability("deadline")() == 123.0
+    assert _capability("remaining_non_cleanup_physical_exchanges")() == 17
+assert _capability("deadline")() == 123.0
+assert set(_registered) == {{"deadline", "emit"}}
+print(json.dumps({{"status": "ok"}}))
+"""
+    completed = _run_bootstrap_probe(probe)
+    assert json.loads(completed.stdout) == {"status": "ok"}
+    assert (
+        private_runtime._PROVIDER_DIAGNOSTICS_BOOTSTRAP.count(
+            "b0780e9d5148ae0c66d437e2978b5d307987291345c80b42fe24c1a76dc61760"
+        )
+        == 1
+    )
+
+
 @pytest.mark.parametrize(
     "runtime_cap",
     (float("nan"), float("inf"), float("-inf")),

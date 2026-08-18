@@ -2050,11 +2050,12 @@ def test_signed_legacy_profiles_and_manifest_identities_are_exact(
         "leadpoet-sourcing-wrapper-contract-v12",
         "leadpoet-sourcing-wrapper-contract-v13",
         "leadpoet-sourcing-wrapper-contract-v26",
+        "leadpoet-sourcing-wrapper-contract-v52",
     }
     assert sum(
         len(value["release_identities"])
         for value in compatibility.reviewed_consumer_snapshots().values()
-    ) == 9
+    ) == 10
     release = snapshot["release_identities"][0]
     assert compatibility._reviewed_consumer_snapshot_for_source_hash(
         legacy_root,

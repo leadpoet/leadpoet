@@ -3256,6 +3256,74 @@ def _research_lab_emit_trace_bootstrap():
 
 _research_lab_emit_trace_bootstrap()
 
+_research_lab_affected_capability_scope_adapter_sha256 = (
+    "b0780e9d5148ae0c66d437e2978b5d307987291345c80b42fe24c1a76dc61760"
+)
+
+def _research_lab_patch_affected_runtime_capability_scope(
+    adapter_module,
+    expected_adapter_sha256=_research_lab_affected_capability_scope_adapter_sha256,
+):
+    # Preserve host capabilities for one exact signed adapter revision.
+    try:
+        import contextlib as _research_lab_contextlib
+        import hashlib as _research_lab_hashlib
+        from collections.abc import Mapping as _ResearchLabMapping
+        from sourcing_model import runtime_capabilities as _research_lab_caps
+    except ImportError:
+        return False
+
+    try:
+        adapter_path = os.path.realpath(str(getattr(adapter_module, "__file__", "")))
+        if not adapter_path or not os.path.isfile(adapter_path):
+            return False
+        with open(adapter_path, "rb") as adapter_handle:
+            adapter_sha256 = _research_lab_hashlib.sha256(
+                adapter_handle.read()
+            ).hexdigest()
+        if adapter_sha256 != expected_adapter_sha256:
+            return False
+        if not callable(getattr(adapter_module, "_bound_runtime_capabilities", None)):
+            raise RuntimeError("affected adapter capability scope is unavailable")
+
+        @_research_lab_contextlib.contextmanager
+        def _preserving_runtime_capabilities(context):
+            previous = {
+                name: _research_lab_caps.capability(name)
+                for name in _research_lab_caps.registered_capabilities()
+            }
+            _research_lab_caps.reset()
+            try:
+                for name, implementation in previous.items():
+                    _research_lab_caps.register(name, implementation)
+                supplied = (
+                    context.get("runtime_capabilities")
+                    if isinstance(context, _ResearchLabMapping)
+                    else None
+                )
+                if isinstance(supplied, _ResearchLabMapping):
+                    remaining = supplied.get(
+                        "remaining_non_cleanup_physical_exchanges"
+                    )
+                    _research_lab_caps.register(
+                        "remaining_non_cleanup_physical_exchanges",
+                        lambda remaining=remaining: remaining,
+                    )
+                yield
+            finally:
+                _research_lab_caps.reset()
+                for name, implementation in previous.items():
+                    _research_lab_caps.register(name, implementation)
+
+        adapter_module._bound_runtime_capabilities = (
+            _preserving_runtime_capabilities
+        )
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            "failed to preserve affected sourcing runtime capabilities"
+        ) from exc
+
 def _research_lab_patch_strict_qualify(adapter_module):
     try:
         import asyncio
@@ -3330,6 +3398,7 @@ except ImportError:
     pass
 except (AttributeError, TypeError, ValueError) as exc:
     raise RuntimeError("failed to register sourcing runtime capabilities") from exc
+_research_lab_patch_affected_runtime_capability_scope(module)
 _research_lab_patch_strict_qualify(module)
 fn = getattr(module, callable_name)
 with contextlib.redirect_stdout(sys.stderr):
@@ -3392,6 +3461,7 @@ except ImportError:
     pass
 except (AttributeError, TypeError, ValueError) as exc:
     raise RuntimeError("failed to register sourcing runtime capabilities") from exc
+_research_lab_patch_affected_runtime_capability_scope(module)
 _research_lab_patch_strict_qualify(module)
 fn = getattr(module, callable_name)
 with contextlib.redirect_stdout(sys.stderr):

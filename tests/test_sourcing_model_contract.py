@@ -623,6 +623,24 @@ def test_exact_v52_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
     assert resolved["parity_sha256"] == (
         "sha256:1e06b5bbe638356661494054363fbba8b8cba0181260b3396ce259f129d90e5d"
     )
+    releases = reviewed_consumer_snapshots()[
+        "leadpoet-sourcing-wrapper-contract-v52"
+    ]["release_identities"]
+    assert releases == (
+        {
+            "source_tree_hash": (
+                "sha256:6835100e66840dab82a08d93abfeaba8cbaf51484c20e62a91c787c9d36366aa"
+            ),
+            "git_commit_sha": "82cfc8ecc1d57fd91f6a56ad4d2b7fd4fc4f2e43",
+            "manifest_hash": (
+                "sha256:168b4fb51a20cc82835d35905ae0dcf5bd39e6a1c2115b289dd6c9cb975c3652"
+            ),
+            "image_digest": (
+                "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+                "sourcing-model@sha256:1d4b55a84575559b2c8a13663d59b48985caa834fc4fb4fa34ba76c4f552b83f"
+            ),
+        },
+    )
 
     runtime_capabilities = tmp_path / "sourcing_model/runtime_capabilities.py"
     runtime_capabilities.write_text(

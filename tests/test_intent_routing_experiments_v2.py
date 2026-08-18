@@ -725,7 +725,7 @@ def test_v2_enforces_compiled_plan_availability_calls_time_and_credit_caps():
             )
 
     zero_time_calls = []
-    with pytest.raises(RoutingExperimentError, match="total_time_cap_exceeded"):
+    with pytest.raises(RoutingExperimentError, match="step_time_cap_exceeded"):
         evaluate_routing_experiment_v2(
             spec,
             gold_labels=labels,
@@ -734,6 +734,50 @@ def test_v2_enforces_compiled_plan_availability_calls_time_and_credit_caps():
             require_isolation=False,
         )
     assert zero_time_calls == []
+
+    second_tool = "intent.second"
+    second_binding = _binding("second", second_tool, H("5"))
+    mixed_spec = replace(
+        spec,
+        variants=(replace(spec.variants[0], binding_ids=("baseline", "second")), spec.variants[1]),
+        provider_bindings=(*spec.provider_bindings, second_binding),
+        credit_budget=replace(
+            spec.credit_budget,
+            provider_credit_ceilings={**spec.credit_budget.provider_credit_ceilings, "second": 1000},
+        ),
+    )
+
+    class MixedTimeAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del payload, kwargs
+            return Plan(
+                {
+                    "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                    "steps": [tool, second_tool],
+                },
+                (tool, second_tool),
+            )
+
+        def plan_step_budgets(self, plan):
+            del plan
+            return (
+                RoutingPlanStepBudget(tool, "invoke", 1, 0.0, 10),
+                RoutingPlanStepBudget(second_tool, "invoke", 1, 1.0, 10),
+            )
+
+    mixed_calls = []
+    with pytest.raises(RoutingExperimentError, match="step_time_cap_exceeded"):
+        evaluate_routing_experiment_v2(
+            mixed_spec,
+            gold_labels=labels,
+            runner=lambda *args: mixed_calls.append(args),
+            adapters={
+                "baseline": MixedTimeAdapter({tool: H("4"), second_tool: H("5")}),
+                "candidate": adapters["candidate"],
+            },
+            require_isolation=False,
+        )
+    assert mixed_calls == []
 
     class UnavailableAdapter(FakeV2Adapter):
         def compile_variant(self, payload, **kwargs):

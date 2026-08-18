@@ -4248,6 +4248,8 @@ def _v2_run_unit(
         budget = budget_by_tool.get(tool_id)
         if budget is None:
             raise RoutingExperimentError(f"v2_model_plan_invoked_unplanned_tool:{tool_id}")
+        if budget.timeout_seconds <= 0:
+            raise RoutingExperimentError(f"v2_model_plan_step_time_cap_exceeded:{tool_id}")
         if available_tools.get(tool_id) is not True:
             raise RoutingExperimentError(f"v2_model_plan_invoked_unavailable_tool:{tool_id}")
         attempt = attempt_by_tool.get(tool_id, 0)

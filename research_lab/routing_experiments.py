@@ -21,11 +21,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
+import importlib
 import json
 import math
 import os
 from pathlib import Path
+import sys
 import re
+import types
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from .canonical import sha256_json
@@ -341,6 +344,9 @@ class FrozenRoutingInput:
     calibration_unit_refs: tuple[str, ...]
     holdout_unit_refs: tuple[str, ...]
     gold_label_set_hash: str
+    # Exact model-owned RoutingFeatureSet.as_payload().  The Lab never
+    # reconstructs this document from segment metadata.
+    feature_set_payload: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "FrozenRoutingInput":
@@ -356,6 +362,7 @@ class FrozenRoutingInput:
                 data.get("holdout_unit_refs", ()), "holdout_unit_refs", maximum=MAX_UNITS_PER_SPLIT
             ),
             gold_label_set_hash=str(data.get("gold_label_set_hash") or ""),
+            feature_set_payload=dict(data.get("feature_set_payload") or {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -363,6 +370,7 @@ class FrozenRoutingInput:
         data["features"] = list(self.features)
         data["calibration_unit_refs"] = list(self.calibration_unit_refs)
         data["holdout_unit_refs"] = list(self.holdout_unit_refs)
+        data["feature_set_payload"] = dict(self.feature_set_payload)
         return data
 
 def validate_frozen_routing_input(
@@ -382,6 +390,10 @@ def validate_frozen_routing_input(
         errors.append("calibration_and_holdout_units_are_required")
     if any(not (item.startswith("icp.") or item.startswith("company.")) for item in frozen.features):
         errors.append("feature_ids_must_use_model_namespace")
+    if not isinstance(frozen.feature_set_payload, Mapping):
+        errors.append("feature_set_payload_must_be_an_object")
+    elif not frozen.feature_set_payload:
+        errors.append("feature_set_payload_is_required")
     if set(frozen.calibration_unit_refs).intersection(frozen.holdout_unit_refs):
         errors.append("calibration_and_holdout_units_must_be_disjoint")
     # The feature-set digest is model-owned.  The Lab stores and compares it
@@ -399,28 +411,278 @@ class RoutingAdmissionPlanAdapter(Protocol):
 
     Implementations live with the pinned Sourcing_model artifact.  The Lab
     does not define or inspect route steps, feature predicates, stages, or
-    fallback semantics.  It only asks the model adapter to parse, validate,
-    serialize, identify, and enumerate the already-owned plan.
+    fallback semantics.  It asks the model adapter to parse exact profile,
+    feature-set, and admission-plan payloads, compile initial/challenger plans,
+    and execute those plans through the model-owned route semantics.
     """
 
-    def parse(self, payload: Mapping[str, Any]) -> Any: ...
+    def parse_profile(self, payload: Mapping[str, Any]) -> Any: ...
 
-    def validate(
+    def parse_feature_set(self, payload: Mapping[str, Any]) -> Any: ...
+
+    def validate_feature_set(
         self,
-        plan: Any,
+        feature_set: Any,
         *,
-        signal_type: str,
-        feature_set_hash: str,
-        binding_tool_ids: frozenset[str],
+        expected_hash: str,
+        expected_features: Sequence[str],
     ) -> Sequence[str]: ...
 
-    def as_payload(self, plan: Any) -> Mapping[str, Any]: ...
+    def validate_profile(
+        self,
+        profile: Any,
+        *,
+        signal_type: str,
+        feature_set: Any,
+        binding_tool_ids: frozenset[str],
+        binding_source_lineages: Mapping[str, str],
+    ) -> Sequence[str]: ...
 
-    def profile_id(self, plan: Any) -> str: ...
+    def profile_as_payload(self, profile: Any) -> Mapping[str, Any]: ...
 
-    def profile_hash(self, plan: Any) -> str: ...
+    def profile_id(self, profile: Any) -> str: ...
 
-    def ordered_tool_ids(self, plan: Any) -> Sequence[str]: ...
+    def profile_hash(self, profile: Any) -> str: ...
+
+    def compile_initial(
+        self,
+        profile: Any,
+        *,
+        signal_type: str,
+        feature_set: Any,
+        available_tools: Mapping[str, bool],
+        remaining_seconds: float,
+        remaining_calls: int,
+        credit_cap: float,
+    ) -> Any: ...
+
+    def compile_challenger(
+        self,
+        parent_plan: Any,
+        *,
+        profile: Any,
+        feature_set: Any,
+        available_tools: Mapping[str, bool],
+        attempted_tool_ids: Sequence[str],
+        attempted_source_lineages: Sequence[str],
+        remaining_seconds: float,
+        remaining_calls: int,
+        credit_cap: float,
+    ) -> Any: ...
+
+    def execute_plan(
+        self,
+        plan: Any,
+        invoke: Callable[[str], Any],
+    ) -> tuple[Sequence[Any], bool]: ...
+
+    def plan_as_payload(self, plan: Any) -> Mapping[str, Any]: ...
+
+    def parse_plan(self, payload: Mapping[str, Any]) -> Any: ...
+
+    def plan_hash(self, plan: Any) -> str: ...
+
+
+class PinnedSourcingModelRoutingAdapter:
+    """Concrete adapter for one exact Sourcing_model checkout/artifact.
+
+    The loader is intentionally explicit and fail-closed.  Production wiring
+    should pass the extracted, hash-verified ``leadpoet-lab`` model root; the
+    Lab never falls back to a site-local routing implementation.
+    """
+
+    def __init__(self, *, runtime: Any, profiles: Any, features: Any) -> None:
+        self.runtime = runtime
+        self.profiles = profiles
+        self.features = features
+        self.catalog = runtime.runtime_catalog({})
+        self.policy = runtime.runtime_policy()
+
+    @classmethod
+    def from_model_root(cls, model_root: str | os.PathLike[str]) -> "PinnedSourcingModelRoutingAdapter":
+        root = Path(model_root).resolve()
+        if not (root / "sourcing_model" / "routing" / "runtime.py").is_file():
+            raise RoutingExperimentError("pinned_sourcing_model_runtime_not_found")
+        loaded = sys.modules.get("sourcing_model")
+        loaded_file = getattr(loaded, "__file__", None)
+        if loaded_file:
+            try:
+                loaded_root = Path(str(loaded_file)).resolve().parents[1]
+            except (OSError, IndexError):
+                loaded_root = None
+            if loaded_root is not None and loaded_root != root:
+                raise RoutingExperimentError(
+                    "pinned_sourcing_model_module_already_loaded_from_other_root"
+                )
+        root_text = str(root)
+        if root_text not in sys.path:
+            sys.path.insert(0, root_text)
+        # Do not replace already-loaded site packages.  If this process has
+        # imported a different ``gateway``/``qualification`` dependency tree,
+        # the model must be loaded in an isolated worker instead of allowing a
+        # mixed tree with silently incompatible helper symbols.
+        if loaded is None:
+            # Import only the model routing package.  The checkout's top-level
+            # ``sourcing_model.__init__`` imports credentialed application
+            # helpers that are not needed by the pure routing contract and can
+            # collide with the host's packages.  A package shell preserves the
+            # exact source root while keeping this adapter side-effect free.
+            package = types.ModuleType("sourcing_model")
+            package.__file__ = str(root / "sourcing_model" / "__init__.py")
+            package.__path__ = [str(root / "sourcing_model")]
+            package.__package__ = "sourcing_model"
+            sys.modules["sourcing_model"] = package
+        importlib.invalidate_caches()
+        try:
+            runtime = importlib.import_module("sourcing_model.routing.runtime")
+            profiles = importlib.import_module("sourcing_model.routing.profiles")
+            features = importlib.import_module("sourcing_model.routing.features")
+        except Exception as exc:
+            raise RoutingExperimentError(f"pinned_sourcing_model_import_failed:{exc}") from exc
+        return cls(runtime=runtime, profiles=profiles, features=features)
+
+    def parse_profile(self, payload: Mapping[str, Any]) -> Any:
+        return self.profiles.RoutingProfile.from_payload(payload)
+
+    def parse_feature_set(self, payload: Mapping[str, Any]) -> Any:
+        return self.features.RoutingFeatureSet.from_payload(payload)
+
+    def validate_feature_set(
+        self,
+        feature_set: Any,
+        *,
+        expected_hash: str,
+        expected_features: Sequence[str],
+    ) -> Sequence[str]:
+        errors: list[str] = []
+        if feature_set.sha256() != expected_hash:
+            errors.append("model_feature_set_hash_mismatch")
+        if tuple(feature_set.features) != tuple(sorted(set(expected_features))):
+            errors.append("model_feature_set_payload_features_mismatch")
+        return errors
+
+    def validate_profile(
+        self,
+        profile: Any,
+        *,
+        signal_type: str,
+        feature_set: Any,
+        binding_tool_ids: frozenset[str],
+        binding_source_lineages: Mapping[str, str],
+    ) -> Sequence[str]:
+        errors: list[str] = []
+        if profile.intent_category != str(signal_type or "").strip().upper():
+            errors.append("model_profile_intent_category_mismatch")
+        if not profile.matches(intent_category=profile.intent_category, features=feature_set):
+            errors.append("model_profile_feature_predicate_mismatch")
+        policy_tools = {step.tool_id for step in self.policy.steps_for(self.runtime.STAGE_INTENT_EVIDENCE)}
+        for step in profile.steps:
+            if step.tool_id not in binding_tool_ids:
+                errors.append(f"model_profile_tool_not_bound:{step.tool_id}")
+            elif binding_source_lineages.get(step.tool_id) != step.source_lineage_id:
+                errors.append(f"model_profile_source_lineage_mismatch:{step.tool_id}")
+            if step.tool_id not in policy_tools:
+                errors.append(f"model_profile_tool_not_in_policy:{step.tool_id}")
+            binding = next((item for item in self.catalog.tools if item.tool_id == step.tool_id), None)
+            if binding is None or self.runtime.STAGE_INTENT_EVIDENCE not in binding.stages:
+                errors.append(f"model_profile_tool_not_intent_capable:{step.tool_id}")
+        return errors
+
+    def profile_as_payload(self, profile: Any) -> Mapping[str, Any]:
+        return profile.as_payload()
+
+    def profile_id(self, profile: Any) -> str:
+        return profile.profile_id
+
+    def profile_hash(self, profile: Any) -> str:
+        return profile.sha256()
+
+    def _registry(self, profile: Any) -> Any:
+        return self.profiles.RoutingProfileRegistry(profiles=(profile,))
+
+    def compile_initial(
+        self,
+        profile: Any,
+        *,
+        signal_type: str,
+        feature_set: Any,
+        available_tools: Mapping[str, bool],
+        remaining_seconds: float,
+        remaining_calls: int,
+        credit_cap: float,
+    ) -> Any:
+        return self.runtime.compile_intent_evidence_admission_route(
+            str(signal_type or "").strip().upper(),
+            feature_set=feature_set,
+            existing_evidence=False,
+            available_tools=available_tools,
+            remaining_seconds=remaining_seconds,
+            remaining_calls=remaining_calls,
+            credit_cap=credit_cap,
+            catalog=self.runtime.runtime_catalog(available_tools),
+            policy=self.runtime.runtime_policy(),
+            profile_registry=self._registry(profile),
+            profile_id=profile.profile_id,
+            expected_profile_sha256=profile.sha256(),
+            expected_profile_version=profile.version,
+        )
+
+    def compile_challenger(
+        self,
+        parent_plan: Any,
+        *,
+        profile: Any,
+        feature_set: Any,
+        available_tools: Mapping[str, bool],
+        attempted_tool_ids: Sequence[str],
+        attempted_source_lineages: Sequence[str],
+        remaining_seconds: float,
+        remaining_calls: int,
+        credit_cap: float,
+    ) -> Any:
+        return self.runtime.compile_challenger_admission_plan(
+            parent_plan=parent_plan,
+            catalog=self.runtime.runtime_catalog(available_tools),
+            policy=self.runtime.runtime_policy(),
+            context=self.runtime.RouteContext(
+                stage=self.runtime.STAGE_INTENT_EVIDENCE,
+                features=tuple(feature_set.features),
+                intent_category=parent_plan.intent_category,
+                remaining_seconds=remaining_seconds,
+                remaining_calls=remaining_calls,
+                remaining_results=1,
+                credit_cap=credit_cap,
+            ),
+            feature_set=feature_set,
+            registry=self._registry(profile),
+            attempted_tool_ids=tuple(attempted_tool_ids),
+            attempted_source_lineages=tuple(attempted_source_lineages),
+        )
+
+    def execute_plan(self, plan: Any, invoke: Callable[[str], Any]) -> tuple[Sequence[Any], bool]:
+        results: list[Any] = []
+        predicted = False
+        for step in plan.route.steps:
+            if step.execution_mode != self.runtime.EXECUTION_INVOKE:
+                continue
+            for _ in range(step.max_calls):
+                result = invoke(step.tool_id)
+                results.append(result)
+                outcome = str(getattr(result, "outcome", "") or (result.get("outcome") if isinstance(result, Mapping) else ""))
+                if outcome == ProviderOutcome.VERIFIED.value:
+                    predicted = True
+                    if step.stop_on_success:
+                        return results, predicted
+        return results, predicted
+
+    def plan_as_payload(self, plan: Any) -> Mapping[str, Any]:
+        return plan.as_payload()
+
+    def parse_plan(self, payload: Mapping[str, Any]) -> Any:
+        return self.profiles.RoutingAdmissionPlan.from_payload(payload)
+
+    def plan_hash(self, plan: Any) -> str:
+        return plan.sha256()
 
 
 @dataclass(frozen=True)
@@ -443,7 +705,7 @@ def _model_profile(
     if not isinstance(payload, Mapping):
         raise RoutingExperimentError("model routing profile payload must be an object")
     try:
-        return adapter.parse(payload)
+        return adapter.parse_profile(payload)
     except Exception as exc:  # adapter errors become a deterministic Lab rejection
         raise RoutingExperimentError(f"model_routing_profile_parse_failed:{exc}") from exc
 
@@ -463,13 +725,24 @@ def _profile_hash(profile: LabRoutingProfile, adapter: RoutingAdmissionPlanAdapt
     )
 
 
+def _model_feature_set(
+    frozen: FrozenRoutingInput,
+    adapter: RoutingAdmissionPlanAdapter,
+) -> Any:
+    try:
+        return adapter.parse_feature_set(frozen.feature_set_payload)
+    except Exception as exc:
+        raise RoutingExperimentError(f"model_feature_set_parse_failed:{exc}") from exc
+
+
 def validate_model_routing_profile(
     profile: LabRoutingProfile | Mapping[str, Any],
     *,
     adapter: RoutingAdmissionPlanAdapter,
     signal_type: str,
-    feature_set_hash: str,
+    feature_set: Any,
     binding_tool_ids: Iterable[str],
+    binding_source_lineages: Mapping[str, str],
 ) -> list[str]:
     """Validate the exact model payload through the pinned model adapter."""
 
@@ -478,14 +751,15 @@ def validate_model_routing_profile(
         plan = _model_profile(profile, adapter)
         errors.extend(
             str(item)
-            for item in adapter.validate(
+            for item in adapter.validate_profile(
                 plan,
                 signal_type=signal_type,
-                feature_set_hash=feature_set_hash,
+                feature_set=feature_set,
                 binding_tool_ids=frozenset(binding_tool_ids),
+                binding_source_lineages=binding_source_lineages,
             )
         )
-        canonical = adapter.as_payload(plan)
+        canonical = adapter.profile_as_payload(plan)
         if not isinstance(canonical, Mapping):
             errors.append("model_routing_profile_payload_is_not_an_object")
         elif dict(canonical) != dict(profile.profile_payload if isinstance(profile, LabRoutingProfile) else profile):
@@ -704,6 +978,22 @@ def validate_routing_experiment_spec(
         errors.append(str(exc))
     errors.extend(validate_sourcing_model_artifact_identity(spec.artifact))
     errors.extend(validate_frozen_routing_input(spec.frozen_input))
+    feature_set = None
+    try:
+        feature_set = _model_feature_set(spec.frozen_input, adapter)
+        errors.extend(
+            str(item)
+            for item in adapter.validate_feature_set(
+                feature_set,
+                expected_hash=lab_hash_to_model(
+                    spec.frozen_input.feature_set_hash,
+                    "feature_set_hash",
+                ),
+                expected_features=spec.frozen_input.features,
+            )
+        )
+    except RoutingExperimentError as exc:
+        errors.append(str(exc))
     if spec.frozen_input.signal_type != spec.signal_type:
         errors.append("frozen_input_signal_type_mismatch")
     if not 1 <= len(spec.provider_bindings) <= MAX_PROVIDER_BINDINGS:
@@ -740,8 +1030,12 @@ def validate_routing_experiment_spec(
                 variant,
                 adapter=adapter,
                 signal_type=spec.signal_type,
-                feature_set_hash=spec.frozen_input.feature_set_hash,
+                feature_set=feature_set,
                 binding_tool_ids=binding_ids,
+                binding_source_lineages={
+                    item.tool_id: item.source_lineage_id
+                    for item in spec.provider_bindings
+                },
             )
         )
     if spec.baseline_profile_id not in profile_ids:
@@ -834,8 +1128,12 @@ def validate_llm_routing_profile_proposal(
             proposal.proposed_profile,
             adapter=adapter,
             signal_type=spec.signal_type,
-            feature_set_hash=spec.frozen_input.feature_set_hash,
+            feature_set=_model_feature_set(spec.frozen_input, adapter),
             binding_tool_ids={item.tool_id for item in spec.provider_bindings},
+            binding_source_lineages={
+                item.tool_id: item.source_lineage_id
+                for item in spec.provider_bindings
+            },
         )
     )
     try:
@@ -970,7 +1268,17 @@ def validate_provider_receipt(receipt: ProviderReceipt | Mapping[str, Any]) -> l
 
 
 class ProviderReceiptRepository(Protocol):
-    """Durable persistence seam for redacted Lab provider receipts."""
+    """Durable persistence seam for redacted Lab provider receipts.
+
+    The site already has ``EvidenceStore`` and ``ProviderOutcomeStoreV2``, but
+    neither is a compatible implementation: ``EvidenceStore`` stores replay
+    tapes and exposes only fingerprint lookup/record, while
+    ``ProviderOutcomeStoreV2`` stores aggregate checkpoint transitions and does
+    not expose typed receipt lookup.  Until a site adapter is reviewed, the
+    Lab must use this seam with the append-only JSONL implementation below (or
+    another implementation with the same contract); it must not silently
+    write these receipts into either production store.
+    """
 
     def get(self, key: str) -> ProviderReceipt | None: ...
 
@@ -1155,6 +1463,9 @@ class RoutingEvaluationReceipt:
     provider_receipt_refs: tuple[str, ...]
     provider_cache_hits: int
     provider_cache_misses: int
+    billing_rollup_id: str = ""
+    billing_rollup_hash: str = ""
+    billing_rollup_total_credit_microunits: int = 0
     live_credit_spend: bool = False
     immutable: bool = True
     contract_version: str = ROUTING_EVALUATION_RECEIPT_VERSION
@@ -1176,6 +1487,9 @@ class RoutingEvaluationReceipt:
             "provider_receipt_refs": list(self.provider_receipt_refs),
             "provider_cache_hits": self.provider_cache_hits,
             "provider_cache_misses": self.provider_cache_misses,
+            "billing_rollup_id": self.billing_rollup_id,
+            "billing_rollup_hash": self.billing_rollup_hash,
+            "billing_rollup_total_credit_microunits": self.billing_rollup_total_credit_microunits,
             "live_credit_spend": self.live_credit_spend,
             "immutable": self.immutable,
         }
@@ -1217,6 +1531,7 @@ def _receipt_for_runner_result(
 
 
 def _run_variant_unit(
+    spec: RoutingExperimentSpec,
     variant: LabRoutingProfile,
     *,
     adapter: RoutingAdmissionPlanAdapter,
@@ -1225,10 +1540,30 @@ def _run_variant_unit(
     receipt_store: ProviderReceiptStore,
     runner: Callable[[ProviderBindingIdentity, str], ProviderReceipt | Mapping[str, Any]],
 ) -> tuple[list[ProviderReceipt], bool]:
+    profile = _model_profile(variant, adapter)
+    feature_set = _model_feature_set(spec.frozen_input, adapter)
+    available_tools = {item.tool_id: True for item in spec.provider_bindings}
+    plan = adapter.compile_initial(
+        profile,
+        signal_type=spec.signal_type,
+        feature_set=feature_set,
+        available_tools=available_tools,
+        remaining_seconds=60.0,
+        remaining_calls=MAX_TOOLS_PER_VARIANT,
+        credit_cap=MAX_CREDIT_MICROUNITS_PER_VARIANT / 1_000_000,
+    )
+    _validate_compiled_admission_plan(
+        plan,
+        adapter=adapter,
+        feature_set_hash=spec.frozen_input.feature_set_hash,
+    )
+    bindings_by_tool = dict(bindings)
     receipts: list[ProviderReceipt] = []
-    plan = _model_profile(variant, adapter)
-    for tool_id in tuple(adapter.ordered_tool_ids(plan))[:MAX_TOOLS_PER_VARIANT]:
-        binding = bindings[tool_id]
+
+    def invoke(tool_id: str) -> ProviderReceipt:
+        binding = bindings_by_tool.get(tool_id)
+        if binding is None:
+            raise RoutingExperimentError(f"model plan references unbound tool:{tool_id}")
         request_fingerprint = sha256_json(
             {
                 "experiment_request": "intent-route-v1",
@@ -1237,7 +1572,6 @@ def _run_variant_unit(
             }
         )
         key = provider_receipt_key(
-            binding_id=binding.binding_id,
             tool_id=binding.tool_id,
             binding_version=binding.adapter_version,
             request_fingerprint=request_fingerprint,
@@ -1257,13 +1591,63 @@ def _run_variant_unit(
                 raise RoutingExperimentError("runner receipt_ref is not content addressed")
             receipt_store.put(key, receipt)
         receipts.append(receipt)
-        if receipt.outcome == ProviderOutcome.VERIFIED.value:
-            return receipts, True
-    return receipts, False
+        return receipt
+
+    _initial_results, predicted = adapter.execute_plan(plan, invoke)
+    if predicted:
+        return receipts, True
+    try:
+        challenger = adapter.compile_challenger(
+            plan,
+            profile=profile,
+            feature_set=feature_set,
+            available_tools=available_tools,
+            attempted_tool_ids=tuple(item.tool_id for item in receipts),
+            attempted_source_lineages=tuple(item.source_lineage_id for item in receipts),
+            remaining_seconds=60.0,
+            remaining_calls=MAX_TOOLS_PER_VARIANT,
+            credit_cap=MAX_CREDIT_MICROUNITS_PER_VARIANT / 1_000_000,
+        )
+    except Exception as exc:
+        if "no distinct dormant challenger remains" in str(exc):
+            return receipts, False
+        if isinstance(exc, RoutingExperimentError):
+            raise
+        raise RoutingExperimentError(f"model challenger compilation failed:{exc}") from exc
+    _validate_compiled_admission_plan(
+        challenger,
+        adapter=adapter,
+        feature_set_hash=spec.frozen_input.feature_set_hash,
+    )
+    _challenger_results, challenger_predicted = adapter.execute_plan(challenger, invoke)
+    return receipts, bool(challenger_predicted)
+
+
+def _validate_compiled_admission_plan(
+    plan: Any,
+    *,
+    adapter: RoutingAdmissionPlanAdapter,
+    feature_set_hash: str,
+) -> None:
+    payload = adapter.plan_as_payload(plan)
+    if not isinstance(payload, Mapping):
+        raise RoutingExperimentError("model admission plan payload is not an object")
+    try:
+        parsed = adapter.parse_plan(payload)
+        raw_feature_hash = str(payload.get("feature_set_sha256") or "")
+        if raw_feature_hash != lab_hash_to_model(feature_set_hash, "feature_set_hash"):
+            raise RoutingExperimentError("model admission plan feature-set hash mismatch")
+        if adapter.plan_hash(parsed) != adapter.plan_hash(plan):
+            raise RoutingExperimentError("model admission plan hash is not stable")
+    except RoutingExperimentError:
+        raise
+    except Exception as exc:
+        raise RoutingExperimentError(f"model admission plan validation failed:{exc}") from exc
 
 
 def _metrics_for_split(
     *,
+    spec: RoutingExperimentSpec,
     split: str,
     unit_refs: Sequence[str],
     gold_labels: Mapping[str, bool],
@@ -1273,6 +1657,7 @@ def _metrics_for_split(
     receipt_store: ProviderReceiptStore,
     runner: Callable[[ProviderBindingIdentity, str], ProviderReceipt | Mapping[str, Any]],
     baseline_positive_units: set[str],
+    receipt_refs: list[str],
 ) -> RoutingEvaluationMetrics:
     predicted_positive_count = 0
     true_positive_count = 0
@@ -1289,10 +1674,9 @@ def _metrics_for_split(
     total_latency = 0
     total_receipts = 0
     overlap_count = 0
-    receipt_refs: list[str] = []
-
     for unit_ref in unit_refs:
         receipts, predicted = _run_variant_unit(
+            spec,
             variant,
             unit_ref=unit_ref,
             adapter=adapter,
@@ -1369,7 +1753,9 @@ def _evaluate_variant(
     baseline_positive_by_split: Mapping[str, set[str]],
 ) -> VariantEvaluation:
     bindings = {item.tool_id: item for item in spec.provider_bindings}
+    receipt_refs: list[str] = []
     calibration = _metrics_for_split(
+        spec=spec,
         split="calibration",
         unit_refs=spec.frozen_input.calibration_unit_refs,
         gold_labels=gold_labels,
@@ -1379,8 +1765,10 @@ def _evaluate_variant(
         receipt_store=receipt_store,
         runner=runner,
         baseline_positive_units=baseline_positive_by_split.get("calibration", set()),
+        receipt_refs=receipt_refs,
     )
     holdout = _metrics_for_split(
+        spec=spec,
         split="holdout",
         unit_refs=spec.frozen_input.holdout_unit_refs,
         gold_labels=gold_labels,
@@ -1390,35 +1778,13 @@ def _evaluate_variant(
         receipt_store=receipt_store,
         runner=runner,
         baseline_positive_units=baseline_positive_by_split.get("holdout", set()),
+        receipt_refs=receipt_refs,
     )
     gates = spec.gates
     passed_precision = calibration.precision >= gates.min_calibration_precision and holdout.precision >= gates.min_holdout_precision
     passed_recall = holdout.recall >= gates.min_holdout_recall
     passed_cost = holdout.no_signal_credit_microunits <= gates.max_holdout_no_signal_credit_microunits
     passed_efficiency = holdout.marginal_verified_positives_per_credit >= gates.min_marginal_verified_positives_per_credit
-    variant_receipt_keys = []
-    for unit_ref in (
-        *spec.frozen_input.calibration_unit_refs,
-        *spec.frozen_input.holdout_unit_refs,
-    ):
-        plan = _model_profile(variant, adapter)
-        for tool_id in tuple(adapter.ordered_tool_ids(plan))[:MAX_TOOLS_PER_VARIANT]:
-            binding = bindings[tool_id]
-            request_fingerprint = sha256_json(
-                {
-                    "experiment_request": "intent-route-v1",
-                    "tool_id": binding.tool_id,
-                    "unit_ref": unit_ref,
-                }
-            )
-            variant_receipt_keys.append(
-                provider_receipt_key(
-                    binding_id=binding.binding_id,
-                    tool_id=binding.tool_id,
-                    binding_version=binding.adapter_version,
-                    request_fingerprint=request_fingerprint,
-                )
-            )
     return VariantEvaluation(
         variant_id=_profile_id(variant, adapter),
         calibration=calibration,
@@ -1428,7 +1794,7 @@ def _evaluate_variant(
         passed_cost_gate=passed_cost,
         passed_efficiency_gate=passed_efficiency,
         passed=passed_precision and passed_recall and passed_cost and passed_efficiency,
-        receipt_refs=receipt_store.refs_for_keys(variant_receipt_keys),
+        receipt_refs=tuple(sorted(set(receipt_refs))),
     )
 
 
@@ -1488,9 +1854,10 @@ def evaluate_routing_experiment(
     ):
         for unit_ref in refs:
             receipts, predicted = _run_variant_unit(
-            baseline,
-            unit_ref=unit_ref,
-            adapter=adapter,
+                spec,
+                baseline,
+                unit_ref=unit_ref,
+                adapter=adapter,
                 bindings=bindings,
                 receipt_store=store,
                 runner=runner,
@@ -1511,6 +1878,9 @@ def evaluate_routing_experiment(
     )
     selected_profile_id = select_smallest_passing_variant(evaluations)
     billing_rollup = authoritative_billing_rollup(store) if authoritative_billing_rollup else None
+    billing_rollup_id = ""
+    billing_rollup_hash = ""
+    billing_rollup_total = 0
     stored_receipts = [
         receipt
         for key in store.repository.keys()
@@ -1535,7 +1905,14 @@ def evaluate_routing_experiment(
             raise RoutingExperimentError("measured_lab_requires_authoritative_billing_rollup")
         if not isinstance(billing_rollup, Mapping):
             raise RoutingExperimentError("authoritative_billing_rollup_must_be_an_object")
+        billing_rollup_id = _ensure_safe_ref(
+            billing_rollup.get("rollup_id"), "billing_rollup_id"
+        )
+        billing_rollup_hash = _ensure_hash(
+            billing_rollup.get("rollup_hash"), "billing_rollup_hash"
+        )
         billed_total = int(billing_rollup.get("total_credit_microunits", -1))
+        billing_rollup_total = billed_total
         observed_total = sum(item.credit_microunits for item in stored_receipts)
         if billed_total != observed_total:
             raise RoutingExperimentError("authoritative_billing_delta_mismatch")
@@ -1554,6 +1931,9 @@ def evaluate_routing_experiment(
         provider_receipt_refs=store.refs(),
         provider_cache_hits=store.cache_hits,
         provider_cache_misses=store.cache_misses,
+        billing_rollup_id=billing_rollup_id,
+        billing_rollup_hash=billing_rollup_hash,
+        billing_rollup_total_credit_microunits=billing_rollup_total,
         live_credit_spend=spec.allow_live_credit_spend,
     )
     payload = draft.to_dict()
@@ -1684,6 +2064,7 @@ __all__ = [
     "RoutingExperimentSpec",
     "LabRoutingProfile",
     "RoutingAdmissionPlanAdapter",
+    "PinnedSourcingModelRoutingAdapter",
     "RoutingPromotionReceipt",
     "FrozenRoutingInput",
     "LLMRoutingProfileProposal",

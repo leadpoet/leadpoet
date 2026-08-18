@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import os
 
 import pytest
 
@@ -15,6 +16,7 @@ from research_lab.routing_experiments import (
     ProviderOutcome,
     ProviderReceipt,
     ProviderReceiptStore,
+    PinnedSourcingModelRoutingAdapter,
     ReceiptExecutionMode,
     RoutingAdmissionPlanAdapter,
     RoutingEvaluationGates,
@@ -41,47 +43,99 @@ HASH_D = "sha256:" + "d" * 64
 HASH_E = "sha256:" + "e" * 64
 HASH_F = "sha256:" + "f" * 64
 HASH_0 = "sha256:" + "0" * 64
+FEATURE_SET_PAYLOAD = {
+    "schema_version": "routing-feature-set:v1",
+    "features": [
+        "company.country.us",
+        "company.industry.manufacturing",
+        "icp.company_size.201_500",
+    ],
+}
+FEATURE_SET_HASH = sha256_json(FEATURE_SET_PAYLOAD)
 
 
 @dataclass(frozen=True)
 class FakeModelPlan:
     payload: dict[str, object]
+    steps: tuple[str, ...] = ()
+    dormant: tuple[str, ...] = ()
 
 
 class FakeRoutingAdmissionPlanAdapter:
     """Test double for the pinned model's exact RoutingProfile schema."""
 
-    def parse(self, payload):
-        required = {"profile_id", "profile_version", "feature_set_hash", "steps"}
+    def parse_profile(self, payload):
+        required = {
+            "schema_version", "profile_id", "version", "intent_category",
+            "required_features", "forbidden_features", "steps", "priority",
+            "is_default", "call_cap", "seconds_cap", "credit_cap",
+            "challenger_call_cap", "challenger_seconds_cap",
+            "challenger_credit_cap", "max_challengers",
+        }
         if set(payload) != required:
             raise ValueError("RoutingProfile payload shape drift")
-        if not isinstance(payload["steps"], list):
-            raise ValueError("steps must be an array")
         return FakeModelPlan(dict(payload))
 
-    def validate(self, plan, *, signal_type, feature_set_hash, binding_tool_ids):
-        del signal_type
+    def parse_feature_set(self, payload):
+        if set(payload) != {"schema_version", "features"}:
+            raise ValueError("RoutingFeatureSet payload shape drift")
+        return FakeModelPlan(dict(payload))
+
+    def validate_feature_set(self, feature_set, *, expected_hash, expected_features):
         errors = []
-        if plan.payload["feature_set_hash"] != feature_set_hash:
+        if sha256_json(feature_set.payload) != "sha256:" + expected_hash:
             errors.append("model_feature_set_hash_mismatch")
-        tools = [step.get("tool_id") for step in plan.payload["steps"]]
+        if tuple(feature_set.payload["features"]) != tuple(expected_features):
+            errors.append("model_feature_set_payload_features_mismatch")
+        return errors
+
+    def validate_profile(self, profile, *, signal_type, feature_set, binding_tool_ids, binding_source_lineages):
+        del feature_set, binding_source_lineages
+        errors = []
+        if profile.payload["intent_category"] != signal_type.upper():
+            errors.append("model_profile_intent_category_mismatch")
+        tools = [step.get("tool_id") for step in profile.payload["steps"]]
         if len(tools) != len(set(tools)):
             errors.append("model_route_duplicate_tool")
         if any(tool not in binding_tool_ids for tool in tools):
             errors.append("model_route_tool_not_bound")
         return errors
 
-    def as_payload(self, plan):
+    def profile_as_payload(self, profile):
+        return dict(profile.payload)
+
+    def profile_id(self, profile):
+        return profile.payload["profile_id"]
+
+    def profile_hash(self, profile):
+        return sha256_json(profile.payload).split(":", 1)[1]
+
+    def compile_initial(self, profile, *, signal_type, feature_set, available_tools, remaining_seconds, remaining_calls, credit_cap):
+        del signal_type, feature_set, remaining_seconds, remaining_calls, credit_cap
+        steps = profile.payload["steps"]
+        active = tuple(step["tool_id"] for step in steps if step["phase"] == "primary" and step["tool_id"] in available_tools)
+        dormant = tuple(step["tool_id"] for step in steps if step["phase"] == "challenger" and step["tool_id"] in available_tools)
+        return FakeModelPlan({"feature_set_sha256": FEATURE_SET_HASH.split(":", 1)[1], "steps": list(active), "dormant": list(dormant)}, active, dormant)
+
+    def compile_challenger(self, parent_plan, *, profile, feature_set, available_tools, attempted_tool_ids, attempted_source_lineages, remaining_seconds, remaining_calls, credit_cap):
+        del feature_set, available_tools, attempted_source_lineages, remaining_seconds, remaining_calls, credit_cap
+        remaining = tuple(tool for tool in parent_plan.dormant if tool not in attempted_tool_ids)
+        if not remaining:
+            raise ValueError("no distinct dormant challenger remains")
+        return FakeModelPlan({"feature_set_sha256": FEATURE_SET_HASH.split(":", 1)[1], "steps": [remaining[0]], "dormant": []}, (remaining[0],), ())
+
+    def execute_plan(self, plan, invoke):
+        results = [invoke(tool) for tool in plan.steps]
+        return results, any(item.outcome == "verified" for item in results)
+
+    def plan_as_payload(self, plan):
         return dict(plan.payload)
 
-    def profile_id(self, plan):
-        return plan.payload["profile_id"]
+    def parse_plan(self, payload):
+        return FakeModelPlan(dict(payload), tuple(payload.get("steps") or ()), tuple(payload.get("dormant") or ()))
 
-    def profile_hash(self, plan):
-        return sha256_json(plan.payload).split(":", 1)[1]
-
-    def ordered_tool_ids(self, plan):
-        return tuple(step["tool_id"] for step in plan.payload["steps"])
+    def plan_hash(self, plan):
+        return sha256_json({"payload": plan.payload, "steps": plan.steps, "dormant": plan.dormant}).split(":", 1)[1]
 
 
 ADAPTER: RoutingAdmissionPlanAdapter = FakeRoutingAdmissionPlanAdapter()
@@ -105,15 +159,16 @@ def _artifact() -> SourcingModelArtifactIdentity:
 
 def _frozen() -> tuple[FrozenRoutingInput, dict[str, bool]]:
     labels = {"unit:cal-1": True, "unit:cal-2": False, "unit:hold-1": True, "unit:hold-2": True}
-    features = ("company.country.us", "company.industry.manufacturing", "icp.company_size.201_1000")
+    features = ("company.country.us", "company.industry.manufacturing", "icp.company_size.201_500")
     frozen = FrozenRoutingInput(
         segment_ref="icp_segment:manufacturing-us-midmarket",
         signal_type="hiring",
         features=features,
-        feature_set_hash=HASH_F,
+        feature_set_hash=FEATURE_SET_HASH,
         calibration_unit_refs=("unit:cal-1", "unit:cal-2"),
         holdout_unit_refs=("unit:hold-1", "unit:hold-2"),
         gold_label_set_hash=sha256_json({"labels": sorted(labels.items())}),
+        feature_set_payload=FEATURE_SET_PAYLOAD,
     )
     return frozen, labels
 
@@ -136,9 +191,34 @@ def _profile(profile_id: str, tools: tuple[str, ...]) -> LabRoutingProfile:
     return LabRoutingProfile(
         profile_payload={
             "profile_id": profile_id,
-            "profile_version": "v1",
-            "feature_set_hash": HASH_F,
-            "steps": [{"tool_id": tool} for tool in tools],
+            "schema_version": "routing-profile:v1",
+            "version": "v1",
+            "intent_category": "HIRING",
+            "required_features": [],
+            "forbidden_features": [],
+            "steps": [
+                {
+                    "tool_id": tool,
+                    "phase": "primary" if index == 0 else "challenger",
+                    "order": index,
+                    "source_lineage_id": (
+                        "lineage:jobs.scrapingdog"
+                        if "scrapingdog" in tool
+                        else "lineage:jobs.bloomberry"
+                    ),
+                    "required": False,
+                }
+                for index, tool in enumerate(tools)
+            ],
+            "priority": 0,
+            "is_default": False,
+            "call_cap": 4,
+            "seconds_cap": 180.0,
+            "credit_cap": 1.0,
+            "challenger_call_cap": 1,
+            "challenger_seconds_cap": 60.0,
+            "challenger_credit_cap": 1.0,
+            "max_challengers": 1 if len(tools) > 1 else 0,
         }
     )
 
@@ -194,6 +274,111 @@ def test_hash_boundary_is_explicit_and_reversible() -> None:
         model_hash_to_lab(HASH_A)
 
 
+def test_pinned_model_loader_fails_closed_when_artifact_is_unavailable(tmp_path) -> None:
+    with pytest.raises(RoutingExperimentError, match="runtime_not_found"):
+        PinnedSourcingModelRoutingAdapter.from_model_root(tmp_path)
+
+
+def test_actual_pinned_model_profile_feature_and_admission_contract() -> None:
+    # Exact model integration is opt-in because CI does not vendor the model
+    # checkout. Run it locally with:
+    # LEADPOET_PINNED_SOURCING_MODEL_ROOT=/path/to/Sourcing_model \
+    #   pytest -q tests/test_intent_routing_experiments.py \
+    #   -k actual_pinned_model
+    model_root = os.getenv("LEADPOET_PINNED_SOURCING_MODEL_ROOT", "").strip()
+    if not model_root:
+        pytest.skip("set LEADPOET_PINNED_SOURCING_MODEL_ROOT for exact model integration")
+    adapter = PinnedSourcingModelRoutingAdapter.from_model_root(model_root)
+    feature_payload = {
+        "schema_version": "routing-feature-set:v1",
+        "features": ["icp.company_size.201_500"],
+    }
+    feature_set = adapter.parse_feature_set(feature_payload)
+    profile_payload = {
+        "schema_version": "routing-profile:v1",
+        "profile_id": "hiring-lab",
+        "version": "v1",
+        "intent_category": "HIRING",
+        "required_features": [],
+        "forbidden_features": [],
+        "steps": [
+            {
+                "tool_id": "intent.source_add.bloomberry_jobs",
+                "phase": "primary",
+                "order": 0,
+                "source_lineage_id": "bloomberry-jobs",
+                "required": False,
+            },
+            {
+                "tool_id": "intent.jobs_feed",
+                "phase": "challenger",
+                "order": 0,
+                "source_lineage_id": "scrapingdog-jobs",
+                "required": False,
+            },
+        ],
+        "priority": 0,
+        "is_default": False,
+        "call_cap": 4,
+        "seconds_cap": 180.0,
+        "credit_cap": 10.0,
+        "challenger_call_cap": 1,
+        "challenger_seconds_cap": 60.0,
+        "challenger_credit_cap": 1.0,
+        "max_challengers": 1,
+    }
+    profile = adapter.parse_profile(profile_payload)
+    assert adapter.validate_feature_set(
+        feature_set,
+        expected_hash=feature_set.sha256(),
+        expected_features=feature_set.features,
+    ) == []
+    assert adapter.validate_profile(
+        profile,
+        signal_type="hiring",
+        feature_set=feature_set,
+        binding_tool_ids=frozenset(
+            {"intent.source_add.bloomberry_jobs", "intent.jobs_feed"}
+        ),
+        binding_source_lineages={
+            "intent.source_add.bloomberry_jobs": "bloomberry-jobs",
+            "intent.jobs_feed": "scrapingdog-jobs",
+        },
+    ) == []
+    plan = adapter.compile_initial(
+        profile,
+        signal_type="hiring",
+        feature_set=feature_set,
+        available_tools={
+            "intent.source_add.bloomberry_jobs": True,
+            "intent.jobs_feed": True,
+        },
+        remaining_seconds=60.0,
+        remaining_calls=4,
+        credit_cap=10.0,
+    )
+    restored = adapter.parse_plan(adapter.plan_as_payload(plan))
+    assert adapter.plan_hash(restored) == adapter.plan_hash(plan)
+    assert plan.profile_version == "v1"
+    assert plan.feature_set_sha256 == feature_set.sha256()
+    challenger = adapter.compile_challenger(
+        plan,
+        profile=profile,
+        feature_set=feature_set,
+        available_tools={
+            "intent.source_add.bloomberry_jobs": True,
+            "intent.jobs_feed": True,
+        },
+        attempted_tool_ids=plan.active_tool_ids,
+        attempted_source_lineages=("bloomberry-jobs",),
+        remaining_seconds=60.0,
+        remaining_calls=2,
+        credit_cap=1.0,
+    )
+    assert challenger.challenge_index == 1
+    assert challenger.active_tool_ids == ("intent.jobs_feed",)
+
+
 def test_artifact_and_model_payload_are_exact_branch_bound() -> None:
     spec, _ = _spec()
     assert validate_sourcing_model_artifact_identity(_artifact()) == []
@@ -208,7 +393,7 @@ def test_feature_ids_keep_model_namespace_and_hash_unchanged() -> None:
     spec, _ = _spec()
     bad_features = replace(spec.frozen_input, features=("country.us",))
     assert "feature_ids_must_use_model_namespace" in validate_routing_experiment_spec(replace(spec, frozen_input=bad_features), adapter=ADAPTER)
-    assert spec.frozen_input.feature_set_hash == HASH_F
+    assert spec.frozen_input.feature_set_hash == FEATURE_SET_HASH
 
 
 def test_live_measured_lab_requires_explicit_budget_and_rollup() -> None:
@@ -230,6 +415,8 @@ def test_live_measured_lab_requires_explicit_budget_and_rollup() -> None:
         adapter=ADAPTER,
         receipt_store=store,
         authoritative_billing_rollup=lambda repository: {
+            "rollup_id": "billing-rollup:test",
+            "rollup_hash": HASH_A,
             "total_credit_microunits": sum(
                 receipt.credit_microunits
                 for key in repository.repository.keys()
@@ -238,6 +425,8 @@ def test_live_measured_lab_requires_explicit_budget_and_rollup() -> None:
         },
     )
     assert evaluation.live_credit_spend is True
+    with pytest.raises(RoutingExperimentError, match="immutable Lab evidence"):
+        promote_routing_profile_to_lab(live, evaluation, adapter=ADAPTER)
 
 
 def test_llm_proposal_is_payload_only_and_cannot_self_promote() -> None:

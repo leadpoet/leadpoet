@@ -115,37 +115,34 @@ def _parse_environment_document(raw: str, *, field: str) -> dict[str, str]:
                 continue
             if line.startswith("export "):
                 line = line[7:].strip()
-            if "=" not in line:
+            try:
+                tokens = shlex.split(line, comments=False, posix=True)
+            except ValueError:
+                tokens = [line]
+            assignment = tokens[0] if len(tokens) == 1 else line
+            if "=" not in assignment:
                 raise SecretMaterializationError(
                     f"{field} contains a non-assignment"
                 )
-            key, value = line.split("=", 1)
-            try:
-                tokens = shlex.split(value.strip(), comments=False, posix=True)
-            except ValueError as exc:
-                raise SecretMaterializationError(
-                    f"{field} contains invalid shell quoting"
-                ) from exc
-            if not tokens and not value.strip():
-                normalized = ""
-            elif len(tokens) == 1:
-                normalized = tokens[0]
-            else:
-                raise SecretMaterializationError(
-                    f"{field} contains an unquoted multi-token value"
-                )
-            shell_rows.append((key.strip(), normalized))
+            key, value = assignment.split("=", 1)
+            shell_rows.append((key.strip(), value))
         rows = shell_rows
 
     values: dict[str, str] = {}
     for raw_key, raw_value in rows:
         key = str(raw_key or "").strip()
-        if not ENV_KEY_RE.fullmatch(key) or key in values:
+        if not ENV_KEY_RE.fullmatch(key):
             raise SecretMaterializationError(f"{field} contains an invalid key")
         if isinstance(raw_value, (dict, list)):
             value = json.dumps(raw_value, sort_keys=True, separators=(",", ":"))
         else:
             value = "" if raw_value is None else str(raw_value)
+        if key in values:
+            if values[key] != value:
+                raise SecretMaterializationError(
+                    f"{field} contains a conflicting duplicate assignment"
+                )
+            continue
         values[key] = value
     if not values:
         raise SecretMaterializationError(f"{field} is empty")

@@ -483,6 +483,18 @@ def verify_snapshot(
     manifest = validate_snapshot_manifest(
         _load_json(manifest_path, description="snapshot manifest")
     )
+    if manifest["source_sha"] != contract["base_sha"]:
+        raise ProductionParityError(
+            "snapshot source commit differs from the parity contract"
+        )
+    if manifest["capture_sha"] != contract["candidate_sha"]:
+        raise ProductionParityError(
+            "snapshot capture commit differs from the parity contract"
+        )
+    if manifest["capture_contract_hash"] != contract["contract_hash"]:
+        raise ProductionParityError(
+            "snapshot capture contract differs from the parity contract"
+        )
     if (
         expected_production_host is not None
         and manifest["source_host_hash"]

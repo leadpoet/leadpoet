@@ -108,14 +108,18 @@ FAST_CANDIDATE_MIGRATION_HEADROOM_SECONDS = (
     * DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS
 )
 FAST_DOCKER_STARTUP_AND_CLEANUP_HEADROOM_SECONDS = 420
-FAST_PRODUCTION_DATA_READ_HEADROOM_SECONDS = 480
+# All live production rows are read through the measured two-row pagination
+# policy.  Enforce one aggregate wall-clock bound here instead of pretending
+# that every policy retry timeout can fit inside the workflow independently.
+FAST_PRODUCTION_DATA_READ_TIMEOUT_SECONDS = 480
+FAST_PRODUCTION_DATA_READ_REQUEST_TIMEOUT_SECONDS = 5
 FAST_JOB_SETUP_HEADROOM_SECONDS = 300
 FAST_JOB_FIXED_TIMEOUT_SECONDS = (
     2 * DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS
     + FAST_REHEARSAL_TIMEOUT_SECONDS
     + FAST_SCHEMA_PREFLIGHT_HEADROOM_SECONDS
     + FAST_DOCKER_STARTUP_AND_CLEANUP_HEADROOM_SECONDS
-    + FAST_PRODUCTION_DATA_READ_HEADROOM_SECONDS
+    + FAST_PRODUCTION_DATA_READ_TIMEOUT_SECONDS
     + FAST_JOB_SETUP_HEADROOM_SECONDS
 )
 FAST_JOB_MINIMUM_TIMEOUT_SECONDS = (
@@ -323,7 +327,13 @@ class _ProductionReadOnlySupabaseProvider:
 
     adapter_name = "strict-read-only-production-postgrest"
 
-    def __init__(self, *, origin: str, service_role_key: str) -> None:
+    def __init__(
+        self,
+        *,
+        origin: str,
+        service_role_key: str,
+        deadline_monotonic: float | None = None,
+    ) -> None:
         normalized = str(origin or "").strip().rstrip("/")
         if normalized != SUPABASE_WEIGHT_SOURCE_ORIGIN:
             raise ProductionParityError(
@@ -335,6 +345,11 @@ class _ProductionReadOnlySupabaseProvider:
             )
         self.origin = normalized
         self.service_role_key = str(service_role_key)
+        if deadline_monotonic is not None and deadline_monotonic <= 0:
+            raise ProductionParityError(
+                "production PostgREST read deadline is invalid"
+            )
+        self.deadline_monotonic = deadline_monotonic
         self.pages: list[dict[str, Any]] = []
         self._opener = build_opener(ProxyHandler({}), _NoRedirect)
 
@@ -375,10 +390,22 @@ class _ProductionReadOnlySupabaseProvider:
             }
         )
         outbound = Request(url, headers=headers, method="GET")
+        requested_timeout = max(1, int(request.get("timeout_ms") or 0) // 1000)
+        timeout = min(
+            requested_timeout,
+            FAST_PRODUCTION_DATA_READ_REQUEST_TIMEOUT_SECONDS,
+        )
+        if self.deadline_monotonic is not None:
+            remaining = self.deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                raise ProductionParityError(
+                    "production PostgREST read deadline expired"
+                )
+            timeout = min(float(timeout), remaining)
         try:
             with self._opener.open(
                 outbound,
-                timeout=max(1, int(request.get("timeout_ms") or 0) // 1000),
+                timeout=timeout,
             ) as response:
                 response_body = response.read()
                 status = int(response.status)
@@ -420,7 +447,7 @@ class _ProductionReadOnlySupabaseProvider:
 
 
 def _load_production_supabase_read(
-    *, region: str, secret_id: str
+    *, region: str, secret_id: str, deadline_monotonic: float
 ) -> _ProductionReadOnlySupabaseProvider:
     try:
         raw = (
@@ -438,6 +465,7 @@ def _load_production_supabase_read(
     return _ProductionReadOnlySupabaseProvider(
         origin=str(values.get("SUPABASE_URL") or ""),
         service_role_key=str(values.get("SUPABASE_SERVICE_ROLE_KEY") or ""),
+        deadline_monotonic=deadline_monotonic,
     )
 
 
@@ -668,6 +696,7 @@ class _DockerDatabase:
         self.network = f"leadpoet-parity-{suffix}"
         self.postgres = f"leadpoet-parity-postgres-{suffix}"
         self.postgrest = f"leadpoet-parity-postgrest-{suffix}"
+        self.postgres_volume = f"leadpoet-parity-pgdata-{suffix}"
         self.database = f"leadpoet_parity_{candidate_sha[:12]}"
         self.password = secrets.token_urlsafe(24)
         self.jwt_secret = secrets.token_urlsafe(48)
@@ -680,6 +709,13 @@ class _DockerDatabase:
         self.supabase_url = ""
 
     def start(self) -> None:
+        _require_success(
+            _run(
+                ["docker", "volume", "create", self.postgres_volume],
+                timeout=30,
+            ),
+            stage="parity PostgreSQL volume creation",
+        )
         _require_success(
             _run(["docker", "network", "create", self.network], timeout=30),
             stage="parity Docker network creation",
@@ -694,6 +730,11 @@ class _DockerDatabase:
                     self.postgres,
                     "--network",
                     self.network,
+                    "--mount",
+                    (
+                        "type=volume,source="
+                        f"{self.postgres_volume},target=/var/lib/postgresql/data"
+                    ),
                     "-p",
                     self.postgres_publish,
                     "-e",
@@ -1138,14 +1179,16 @@ LIMIT 1;
         for container in (self.postgrest, self.postgres):
             _run(["docker", "rm", "-f", container], timeout=30)
         _run(["docker", "network", "rm", self.network], timeout=30)
+        _run(["docker", "volume", "rm", self.postgres_volume], timeout=30)
         remaining: list[str] = []
         for resource_type, resource_name in (
             ("container", self.postgrest),
             ("container", self.postgres),
             ("network", self.network),
+            ("volume", self.postgres_volume),
         ):
-            command = (
-                [
+            if resource_type == "container":
+                command = [
                     "docker",
                     "container",
                     "ls",
@@ -1154,8 +1197,8 @@ LIMIT 1;
                     "--filter",
                     f"name=^/{resource_name}$",
                 ]
-                if resource_type == "container"
-                else [
+            elif resource_type == "network":
+                command = [
                     "docker",
                     "network",
                     "ls",
@@ -1163,7 +1206,15 @@ LIMIT 1;
                     "--filter",
                     f"name=^{resource_name}$",
                 ]
-            )
+            else:
+                command = [
+                    "docker",
+                    "volume",
+                    "ls",
+                    "--quiet",
+                    "--filter",
+                    f"name=^{resource_name}$",
+                ]
             probe = _run(command, timeout=10)
             if probe.returncode != 0:
                 raise ProductionParityError(
@@ -1178,6 +1229,7 @@ LIMIT 1;
         return {
             "containers_removed": [self.postgres, self.postgrest],
             "network_removed": self.network,
+            "volume_removed": self.postgres_volume,
         }
 
 
@@ -1474,8 +1526,13 @@ def _run_database_lane(
             raise ProductionParityError(
                 "production parity BITTENSOR_NETUID is invalid"
             ) from exc
+        production_read_started = time.monotonic()
         live_provider = _load_production_supabase_read(
-            region=region, secret_id=production_gateway_secret_id
+            region=region,
+            secret_id=production_gateway_secret_id,
+            deadline_monotonic=(
+                production_read_started + FAST_PRODUCTION_DATA_READ_TIMEOUT_SECONDS
+            ),
         )
         activation_row, activation_live_evidence = (
             _read_production_chain_realized_activation(
@@ -1506,6 +1563,13 @@ def _run_database_lane(
             service_role_key=service_role_key,
             scope=manifest["database"]["weight_history_scope"],
             provider=live_provider,
+        )
+        weight_input_scale["bounded_live_read_seconds"] = round(
+            time.monotonic() - production_read_started,
+            6,
+        )
+        weight_input_scale["live_read_timeout_seconds"] = (
+            FAST_PRODUCTION_DATA_READ_TIMEOUT_SECONDS
         )
         result = {
             "restore": {

@@ -371,9 +371,11 @@ def test_disposable_clone_waits_for_final_tcp_postmaster(monkeypatch):
     postmaster_states = iter(("bootstrap-ready", "bootstrap-shutdown", "final-ready"))
     observed_states: list[str] = []
     readiness_commands: list[list[str]] = []
+    docker_commands: list[list[str]] = []
 
     def fake_run(command, **_kwargs):
         command = list(command)
+        docker_commands.append(command)
         if command[:4] == ["docker", "exec", database.postgres, "pg_isready"]:
             state = next(postmaster_states)
             observed_states.append(state)
@@ -413,6 +415,14 @@ def test_disposable_clone_waits_for_final_tcp_postmaster(monkeypatch):
         for command in readiness_commands
     )
     assert database.target_dsn.endswith(":32768/" + database.database)
+    assert ["docker", "volume", "create", database.postgres_volume] in docker_commands
+    postgres_run = next(
+        command for command in docker_commands if command[:3] == ["docker", "run", "-d"]
+    )
+    assert (
+        "type=volume,source="
+        f"{database.postgres_volume},target=/var/lib/postgresql/data"
+    ) in postgres_run
 
 
 def test_disposable_clone_proves_restored_deterministic_uuid(monkeypatch):
@@ -441,6 +451,7 @@ def test_database_lane_retains_primary_failure_and_cleanup_evidence(
     cleanup = {
         "containers_removed": ["postgres", "postgrest"],
         "network_removed": "network",
+        "volume_removed": "volume",
     }
 
     class Database:
@@ -514,6 +525,7 @@ def test_fast_ledger_records_cleanup_independently_of_database_failure(
     cleanup = {
         "containers_removed": ["postgres", "postgrest"],
         "network_removed": "network",
+        "volume_removed": "volume",
     }
     events: list[str] = []
     clock = [100.0]
@@ -750,6 +762,52 @@ def test_snapshot_rejects_persistent_or_mutable_production_input(field, value):
         )
 
 
+@pytest.mark.parametrize(
+    ("manifest_field", "replacement", "error"),
+    (
+        ("source_sha", "d" * 40, "source commit"),
+        ("capture_sha", "d" * 40, "capture commit"),
+        ("capture_contract_hash", "sha256:" + "d" * 64, "capture contract"),
+    ),
+)
+def test_snapshot_verification_requires_exact_contract_bindings(
+    monkeypatch,
+    tmp_path: Path,
+    manifest_field: str,
+    replacement: str,
+    error: str,
+):
+    contract = {
+        "base_sha": "c" * 40,
+        "candidate_sha": SHA,
+        "contract_hash": HASH,
+    }
+    manifest = {
+        "source_sha": contract["base_sha"],
+        "capture_sha": contract["candidate_sha"],
+        "capture_contract_hash": contract["contract_hash"],
+    }
+    manifest[manifest_field] = replacement
+
+    def fake_load(_path, *, description):
+        return contract if description == "parity contract" else manifest
+
+    monkeypatch.setattr(parity_snapshot, "_load_json", fake_load)
+    monkeypatch.setattr(parity_snapshot, "validate_contract", lambda value: value)
+    monkeypatch.setattr(
+        parity_snapshot,
+        "validate_snapshot_manifest",
+        lambda value: value,
+    )
+
+    with pytest.raises(ProductionParityError, match=error):
+        parity_snapshot.verify_snapshot(
+            contract_path=tmp_path / "contract.json",
+            manifest_path=tmp_path / "manifest.json",
+            archive_path=tmp_path / "snapshot.dump",
+        )
+
+
 def test_clone_target_can_never_resolve_to_production():
     with pytest.raises(ProductionParityError, match="isolated parity database"):
         safe_database_target(
@@ -849,7 +907,32 @@ def test_database_cleanup_accepts_independently_proven_absence(monkeypatch):
     assert database.cleanup() == {
         "containers_removed": [database.postgres, database.postgrest],
         "network_removed": database.network,
+        "volume_removed": database.postgres_volume,
     }
+
+
+def test_database_cleanup_rejects_a_surviving_clone_volume(monkeypatch):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+
+    def volume_survives(command, *, timeout, **_kwargs):
+        assert timeout in {10, 30}
+        if command[:3] == ["docker", "volume", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="volume-id\n",
+                stderr="",
+            )
+        if "ls" in command:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(fast_parity, "_run", volume_survives)
+    with pytest.raises(ProductionParityError, match="volume"):
+        database.cleanup()
 
 
 def test_standalone_postgrest_schema_opener_rewrites_exact_supabase_prefix(
@@ -1399,7 +1482,7 @@ def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():
         + fast_parity.FAST_SCHEMA_PREFLIGHT_NETWORK_PROBE_COUNT
         * fast_parity.FAST_SCHEMA_PREFLIGHT_TIMEOUT_SECONDS
         + fast_parity.FAST_DOCKER_STARTUP_AND_CLEANUP_HEADROOM_SECONDS
-        + fast_parity.FAST_PRODUCTION_DATA_READ_HEADROOM_SECONDS
+        + fast_parity.FAST_PRODUCTION_DATA_READ_TIMEOUT_SECONDS
         + fast_parity.FAST_JOB_SETUP_HEADROOM_SECONDS
     )
     assert fast_parity.FAST_SCHEMA_PREFLIGHT_NETWORK_PROBE_COUNT == (
@@ -1413,6 +1496,22 @@ def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():
     assert fast_parity._fast_job_minimum_timeout_seconds(5) >= outer_seconds
     assert role_duration_seconds == fast_parity.FAST_AWS_ROLE_DURATION_SECONDS
     assert role_duration_seconds - outer_seconds >= 20 * 60
+
+
+def test_fast_workflow_freezes_snapshot_source_to_contract_base():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/production-parity-fast.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    step = next(
+        item
+        for item in workflow["jobs"]["validate"]["steps"]
+        if item.get("name") == "Capture production shape and run bounded parity"
+    )
+    script = str(step["run"])
+    assert '--source-sha "${{ steps.inputs.outputs.base }}"' in script
+    assert "resolve_production_parity_deployed_sha.py" not in script
 
 
 def test_fast_live_boundary_executes_get_without_disclosing_credential():
@@ -1472,6 +1571,60 @@ def test_fast_live_boundary_executes_get_without_disclosing_credential():
     assert base64.b64decode(result["body_b64"]) == b'[{"epoch_id":24570}]'
     assert credential not in json.dumps(provider.pages, sort_keys=True)
     assert "attacker-value" not in json.dumps(provider.pages, sort_keys=True)
+
+
+def test_fast_live_boundary_enforces_per_request_and_aggregate_deadlines(
+    monkeypatch,
+):
+    now = [100.0]
+    monkeypatch.setattr(fast_parity.time, "monotonic", lambda: now[0])
+    provider = _ProductionReadOnlySupabaseProvider(
+        origin="https://qplwoislplkcegvdmbim.supabase.co",
+        service_role_key="production-read-credential",
+        deadline_monotonic=108.0,
+    )
+    observed: dict[str, float] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def read():
+            return b"[]"
+
+    class Opener:
+        @staticmethod
+        def open(_request, *, timeout):
+            observed["timeout"] = timeout
+            return Response()
+
+    provider._opener = Opener()
+    request = {
+        "provider_id": "supabase",
+        "method": "GET",
+        "url": (
+            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/"
+            "research_lab_finalized_allocation_epochs_v2?select=epoch_id"
+        ),
+        "headers": {"range": "0-1"},
+        "body_b64": "",
+        "timeout_ms": 45_000,
+        "logical_operation_id": "bounded-page",
+    }
+    provider(request)
+    assert observed["timeout"] == (
+        fast_parity.FAST_PRODUCTION_DATA_READ_REQUEST_TIMEOUT_SECONDS
+    )
+
+    now[0] = 108.0
+    with pytest.raises(ProductionParityError, match="deadline expired"):
+        provider(request)
 
 
 @pytest.mark.asyncio

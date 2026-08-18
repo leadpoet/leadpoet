@@ -159,9 +159,7 @@ jobs:
             --manifest "$RUNNER_TEMP/snapshot-manifest.json" \
             --ttl-hours 2 \
             --mode schema-only \
-            --source-sha "$(python3 scripts/resolve_production_parity_deployed_sha.py \
-              --gateway-url "$PRODUCTION_GATEWAY_URL" \
-              --candidate-sha "${{ steps.inputs.outputs.candidate }}")"
+            --source-sha "${{ steps.inputs.outputs.base }}"
           unset LEADPOET_PARITY_PRODUCTION_READONLY_DSN LEADPOET_PARITY_PRODUCTION_DB_HOST
           python3 scripts/run_production_parity_fast.py \
             --contract "$RUNNER_TEMP/candidate-contract.json" \

@@ -81,6 +81,9 @@ def _condition_matches(
             elif operator == "DateLessThan":
                 if not all(str(value) < str(expected) for value in actual_values):
                     return False
+            elif operator == "DateGreaterThanEquals":
+                if not all(str(value) >= str(expected) for value in actual_values):
+                    return False
             else:
                 raise AssertionError(f"unsupported condition operator {operator}")
     return True
@@ -96,12 +99,18 @@ def _policy_allows(
     for statement in policy["Statement"]:
         actions = statement["Action"]
         actions = actions if isinstance(actions, list) else [actions]
-        resources = statement["Resource"]
-        resources = resources if isinstance(resources, list) else [resources]
         if not any(fnmatchcase(action.lower(), str(item).lower()) for item in actions):
             continue
-        if not any(fnmatchcase(resource, str(item)) for item in resources):
-            continue
+        if "Resource" in statement:
+            resources = statement["Resource"]
+            resources = resources if isinstance(resources, list) else [resources]
+            if not any(fnmatchcase(resource, str(item)) for item in resources):
+                continue
+        else:
+            resources = statement["NotResource"]
+            resources = resources if isinstance(resources, list) else [resources]
+            if any(fnmatchcase(resource, str(item)) for item in resources):
+                continue
         if not _condition_matches(statement.get("Condition", {}), context):
             continue
         if statement["Effect"] == "Deny":
@@ -150,14 +159,50 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
         setup.READONLY_DSN_SECRET_ID,
         setup.DEFAULT_MINER_INTAKE_SECRET_ID,
     ]
+    static_bases = {
+        (
+            f"arn:aws:secretsmanager:us-east-1:{ACCOUNT}:secret:"
+            f"{secret_id}"
+        )
+        for secret_id in (
+            setup.READONLY_DSN_SECRET_ID,
+            setup.DEFAULT_MINER_INTAKE_SECRET_ID,
+        )
+    }
+    expected_static_resources = static_bases | {
+        base + "-??????" for base in static_bases
+    }
+    read_static = next(
+        item for item in static["Statement"]
+        if item["Effect"] == "Allow"
+        and "secretsmanager:GetSecretValue" in (
+            item["Action"] if isinstance(item["Action"], list) else [item["Action"]]
+        )
+    )
+    assert set(read_static["Resource"]) == expected_static_resources
     tag_static = next(
         item for item in static["Statement"]
         if item["Effect"] == "Allow"
         and item["Action"] == "secretsmanager:TagResource"
     )
-    assert all(
-        resource.endswith("-??????") for resource in tag_static["Resource"]
-    )
+    assert set(tag_static["Resource"]) == expected_static_resources
+    context = {"aws:CurrentTime": "2026-08-18T12:00:00Z"}
+    for base in static_bases:
+        assert _policy_allows(
+            static, "secretsmanager:GetSecretValue", base, context
+        )
+        assert _policy_allows(
+            static,
+            "secretsmanager:GetSecretValue",
+            base + "-ABC123",
+            context,
+        )
+        assert not _policy_allows(
+            static,
+            "secretsmanager:GetSecretValue",
+            base + "-adjacent-ABC123",
+            context,
+        )
     expiry_deny = next(
         item for item in static["Statement"]
         if item["Effect"] == "Deny" and item["Action"] == "*"

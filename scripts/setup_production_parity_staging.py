@@ -2114,12 +2114,17 @@ def _static_bootstrap_policy(
         raise SetupError("static bootstrap policy expiry is invalid") from exc
     if expiry.tzinfo is None:
         raise SetupError("static bootstrap policy expiry is invalid")
-    static_secrets = [
+    static_secret_bases = [
         (
             f"arn:aws:secretsmanager:{region}:{account_id}:secret:"
-            f"{secret_id}-??????"
+            f"{secret_id}"
         )
         for secret_id in (readonly_secret_id, miner_intake_secret_id)
+    ]
+    static_secrets = [
+        resource
+        for base in static_secret_bases
+        for resource in (base, base + "-??????")
     ]
     return {
         "Version": "2012-10-17",

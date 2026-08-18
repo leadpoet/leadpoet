@@ -529,6 +529,88 @@ def test_v2_receipt_mode_is_exact_and_live_requires_authorization_aware_runner(t
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    "runner_factory",
+    [
+        lambda calls: lambda *args: calls.append(args),
+        lambda calls: lambda binding, unit, request, **kwargs: calls.append(
+            (binding, unit, request, kwargs)
+        ),
+        lambda calls: lambda binding, unit, request: calls.append(
+            (binding, unit, request)
+        ),
+    ],
+    ids=["varargs_only", "kwargs_only", "three_args"],
+)
+def test_v2_live_runner_requires_named_authorization_parameter(tmp_path, runner_factory):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+    from research_lab.routing_experiments import JsonlProviderReceiptRepository
+
+    calls = []
+    runner = runner_factory(calls)
+    with pytest.raises(RoutingExperimentError, match="requires_authorization_aware_runner"):
+        evaluate_routing_experiment_v2(
+            measured,
+            gold_labels=labels,
+            runner=runner,
+            adapters=adapters,
+            receipt_store=ProviderReceiptStore(
+                JsonlProviderReceiptRepository(tmp_path / "rejected.jsonl")
+            ),
+            authoritative_billing_rollup=lambda _store: {
+                "rollup_id": "rejected",
+                "rollup_hash": H("9"),
+                "total_credit_microunits": 0,
+            },
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_live_runner_with_named_authorization_parameter_passes(tmp_path):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+    from research_lab.routing_experiments import JsonlProviderReceiptRepository
+
+    calls = []
+
+    def explicit_runner(binding, unit, request, authorization):
+        calls.append(authorization)
+        value = dict(_runner(binding, unit, request))
+        value["execution_mode"] = ReceiptExecutionMode.MEASURED_LAB.value
+        value["receipt_ref"] = "provider_receipt:" + sha256_json(
+            {key: item for key, item in value.items() if key != "receipt_ref"}
+        ).split(":", 1)[1][:16]
+        return value
+
+    evaluation = evaluate_routing_experiment_v2(
+        measured,
+        gold_labels=labels,
+        runner=explicit_runner,
+        adapters=adapters,
+        receipt_store=ProviderReceiptStore(
+            JsonlProviderReceiptRepository(tmp_path / "accepted.jsonl")
+        ),
+        authoritative_billing_rollup=lambda _store: {
+            "rollup_id": "accepted",
+            "rollup_hash": H("8"),
+            "total_credit_microunits": 40,
+        },
+        require_isolation=False,
+    )
+    assert evaluation.live_credit_spend is True
+    assert len(calls) == 4
+
+
 def test_v2_worker_factory_reuses_one_handle_per_artifact_and_isolates_distinct_artifacts():
     same_spec, _adapters, _labels, _tool, _source_tool = _spec("intent_evidence")
     calls = []
@@ -912,7 +994,8 @@ def test_v2_live_resume_uses_exact_measured_cache_and_zero_new_billing(tmp_path)
     assert first.billing_rollup_total_credit_microunits == 40
     assert run_count[0] == 4
 
-    def no_call_runner(*_args):
+    def no_call_runner(binding, unit, request, authorization):
+        del binding, unit, request, authorization
         raise AssertionError("resumed exact measured evaluation made a provider call")
 
     resumed = evaluate_routing_experiment_v2(
@@ -996,10 +1079,14 @@ def test_v2_live_mode_rejects_fixture_or_replay_cache_entries(tmp_path):
         fixture = replace(fixture, receipt_ref="provider_receipt:" + sha256_json(identity).split(":", 1)[1][:16])
         fixture_store.put(key, fixture)
     with pytest.raises(RoutingExperimentError, match="cached_receipt_execution_mode_mismatch"):
+        def no_call_runner(binding, unit, request, authorization):
+            del binding, unit, request, authorization
+            pytest.fail("fixture cache should fail before runner")
+
         evaluate_routing_experiment_v2(
             measured,
             gold_labels=labels,
-            runner=lambda *_args: pytest.fail("fixture cache should fail before runner"),
+            runner=no_call_runner,
             adapters=adapters,
             receipt_store=fixture_store,
             authoritative_billing_rollup=lambda _store: {"rollup_id": "m2", "rollup_hash": H("8"), "total_credit_microunits": 0},

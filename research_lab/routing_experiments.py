@@ -4124,11 +4124,14 @@ def _v2_runner_accepts_authorization(
         parameters = tuple(inspect.signature(runner).parameters.values())
     except (TypeError, ValueError):
         return False
-    positional = [
-        item for item in parameters
-        if item.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
-    ]
-    return any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in parameters) or len(positional) >= 4
+    authorization = next(
+        (item for item in parameters if item.name == "authorization"),
+        None,
+    )
+    return authorization is not None and authorization.kind in {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }
 
 
 def _v2_call_runner(
@@ -4142,6 +4145,14 @@ def _v2_call_runner(
 
     try:
         signature = inspect.signature(runner)
+        authorization_parameter = next(
+            (
+                item
+                for item in signature.parameters.values()
+                if item.name == "authorization"
+            ),
+            None,
+        )
         positional = [
             item
             for item in signature.parameters.values()
@@ -4151,6 +4162,14 @@ def _v2_call_runner(
     except (TypeError, ValueError):
         positional = []
         accepts_varargs = True
+        authorization_parameter = None
+    if authorization_parameter is not None and authorization_parameter.kind == inspect.Parameter.KEYWORD_ONLY:
+        return runner(
+            binding,
+            unit_ref,
+            request_fingerprint,
+            authorization=authorization,
+        )
     if accepts_varargs or len(positional) >= 4:
         return runner(binding, unit_ref, request_fingerprint, authorization)
     if len(positional) >= 3:

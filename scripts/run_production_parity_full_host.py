@@ -1272,6 +1272,7 @@ def run_full(
         if manifest["capture_mode"] != "full":
             raise FullParityError("authoritative parity requires a full production clone")
         database.start()
+        prerequisites = database.prepare_snapshot_restore()
         restore = restore_snapshot(
             root=ROOT,
             contract_path=contract_path,
@@ -1284,6 +1285,7 @@ def run_full(
                 stage="full production snapshot restore",
             ),
         )
+        restore = {**restore, "clone_prerequisites": prerequisites}
         _local_url, service_role_key = database.start_postgrest()
         _wait_https_origin(supabase_origin)
         secret_state = create_gateway_secret(

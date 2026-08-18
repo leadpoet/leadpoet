@@ -449,17 +449,126 @@ class _DockerDatabase:
             stage="parity PostgreSQL probe",
         )
 
+    def prepare_snapshot_restore(self) -> dict[str, bool]:
+        """Install and verify the Supabase objects referenced by the public dump."""
+        self._psql(
+            """
+DO $$ BEGIN CREATE ROLE anon NOLOGIN INHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE authenticated NOLOGIN INHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE service_role NOLOGIN INHERIT BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER ROLE anon WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE authenticated WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE service_role WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
+CREATE SCHEMA IF NOT EXISTS auth;
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+CREATE OR REPLACE FUNCTION auth.role()
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT COALESCE(
+    NULLIF(current_setting('request.jwt.claim.role', true), ''),
+    NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role',
+    current_user::text
+  )
+$$;
+CREATE OR REPLACE FUNCTION auth.jwt()
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT COALESCE(
+    NULLIF(current_setting('request.jwt.claim', true), ''),
+    NULLIF(current_setting('request.jwt.claims', true), '')
+  )::jsonb
+$$;
+CREATE OR REPLACE FUNCTION auth.uid()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT COALESCE(
+    NULLIF(current_setting('request.jwt.claim.sub', true), ''),
+    NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'
+  )::uuid
+$$;
+GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO anon, authenticated, service_role;
+"""
+        )
+        raw = self._psql(
+            """
+SELECT json_build_object(
+  'anon_role', EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'anon'
+      AND NOT rolcanlogin AND rolinherit AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
+      AND NOT rolbypassrls
+  ),
+  'authenticated_role', EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'authenticated'
+      AND NOT rolcanlogin AND rolinherit AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
+      AND NOT rolbypassrls
+  ),
+  'service_role', EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'service_role'
+      AND NOT rolcanlogin AND rolinherit AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
+      AND rolbypassrls
+  ),
+  'auth_schema', to_regnamespace('auth') IS NOT NULL,
+  'extensions_schema', to_regnamespace('extensions') IS NOT NULL,
+  'pgcrypto_extension', EXISTS (
+    SELECT 1
+    FROM pg_extension AS e
+    JOIN pg_namespace AS n ON n.oid = e.extnamespace
+    WHERE e.extname = 'pgcrypto' AND n.nspname = 'extensions'
+  ),
+  'auth_role_function', to_regprocedure('auth.role()') IS NOT NULL,
+  'auth_jwt_function', to_regprocedure('auth.jwt()') IS NOT NULL,
+  'auth_uid_function', to_regprocedure('auth.uid()') IS NOT NULL
+)::text;
+"""
+        ).strip()
+        try:
+            evidence = json.loads(raw)
+        except ValueError as exc:
+            raise ProductionParityError(
+                "snapshot restore prerequisite readback is invalid"
+            ) from exc
+        expected = {
+            "anon_role",
+            "authenticated_role",
+            "service_role",
+            "auth_schema",
+            "extensions_schema",
+            "pgcrypto_extension",
+            "auth_role_function",
+            "auth_jwt_function",
+            "auth_uid_function",
+        }
+        if (
+            not isinstance(evidence, dict)
+            or set(evidence) != expected
+            or any(evidence.get(name) is not True for name in expected)
+        ):
+            raise ProductionParityError(
+                "snapshot restore prerequisites did not verify"
+            )
+        return {name: True for name in sorted(expected)}
+
     def start_postgrest(self) -> tuple[str, str]:
+        self.prepare_snapshot_restore()
         role_sql = f"""
 DO $$ BEGIN
   CREATE ROLE authenticator LOGIN PASSWORD '{self.authenticator_password}';
 EXCEPTION WHEN duplicate_object THEN
   ALTER ROLE authenticator WITH LOGIN PASSWORD '{self.authenticator_password}';
 END $$;
-DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE service_role NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-GRANT anon, service_role TO authenticator;
-GRANT USAGE ON SCHEMA public TO anon, service_role;
+GRANT anon, authenticated, service_role TO authenticator;
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service_role;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO service_role;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
@@ -772,8 +881,11 @@ def _run_database_lane(
     )
     result: dict[str, Any] = {}
     cleanup: dict[str, Any] | None = None
+    primary_error: Exception | None = None
+    cleanup_error: Exception | None = None
     try:
         database.start()
+        prerequisites = database.prepare_snapshot_restore()
         restore = restore_snapshot(
             root=ROOT,
             contract_path=contract_path,
@@ -808,14 +920,24 @@ def _run_database_lane(
             provider=live_provider,
         )
         result = {
-            "restore": restore,
+            "restore": {**restore, "clone_prerequisites": prerequisites},
             "schema": schema,
             "shape": shape,
             "weight_input_scale": weight_input_scale,
         }
+    except Exception as exc:  # noqa: BLE001 - cleanup evidence must survive
+        primary_error = exc
     finally:
-        cleanup = database.cleanup()
-    return {**result, "cleanup": cleanup}
+        try:
+            cleanup = database.cleanup()
+        except Exception as exc:  # noqa: BLE001 - preserve both failure causes
+            cleanup_error = exc
+    return {
+        "result": result or None,
+        "primary_error": primary_error,
+        "cleanup": cleanup,
+        "cleanup_error": cleanup_error,
+    }
 
 
 def run_fast_lane(
@@ -950,8 +1072,18 @@ def run_fast_lane(
                 failures[name] = exc
 
     database_duration = time.monotonic() - started.get("database", time.monotonic())
-    if "database" in results:
-        database = results["database"]
+    database_outcome = results.get("database")
+    database = (
+        database_outcome.get("result")
+        if isinstance(database_outcome, Mapping)
+        else None
+    )
+    database_primary_error = (
+        database_outcome.get("primary_error")
+        if isinstance(database_outcome, Mapping)
+        else None
+    )
+    if isinstance(database, Mapping) and database_primary_error is None:
         ledger.record(
             "snapshot-restore-and-migrations",
             status="passed",
@@ -978,7 +1110,9 @@ def run_fast_lane(
         )
     else:
         reason = (
-            f"{type(failures['database']).__name__}: {failures['database']}"
+            f"{type(database_primary_error).__name__}: {database_primary_error}"
+            if isinstance(database_primary_error, Exception)
+            else f"{type(failures['database']).__name__}: {failures['database']}"
             if "database" in failures
             else "production snapshot was unavailable"
         )
@@ -1055,14 +1189,29 @@ def run_fast_lane(
             if not any(item["stage_id"] == stage for item in ledger.stages):
                 ledger.record(stage, status="failed", duration_seconds=rehearsal_duration, reason=reason)
 
-    cleanup = results.get("database", {}).get("cleanup")
-    cleanup_ok = snapshot_evidence is not None and cleanup is not None
+    cleanup = (
+        database_outcome.get("cleanup")
+        if isinstance(database_outcome, Mapping)
+        else None
+    )
+    cleanup_error = (
+        database_outcome.get("cleanup_error")
+        if isinstance(database_outcome, Mapping)
+        else None
+    )
+    cleanup_ok = cleanup is not None and cleanup_error is None
     ledger.record(
         "cleanup",
         status="passed" if cleanup_ok else "failed",
         duration_seconds=0,
         evidence=dict(cleanup or {}),
-        reason="" if cleanup_ok else "database lane did not prove run-scoped cleanup",
+        reason=(
+            ""
+            if cleanup_ok
+            else f"{type(cleanup_error).__name__}: {cleanup_error}"
+            if isinstance(cleanup_error, Exception)
+            else "database lane did not prove run-scoped cleanup"
+        ),
     )
     final = ledger.finalize()
     ledger_path.parent.mkdir(parents=True, exist_ok=True)

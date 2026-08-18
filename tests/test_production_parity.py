@@ -27,6 +27,7 @@ from scripts.materialize_production_parity_secrets import (
     build_gateway_environment,
 )
 from scripts import production_parity_snapshot as parity_snapshot
+from scripts import run_production_parity_fast as fast_parity
 from scripts import run_production_parity_full_host as full_host
 from scripts.production_parity_snapshot import (
     DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
@@ -319,6 +320,188 @@ def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     assert observed["env"]["PGSSLMODE"] == "disable"
 
 
+def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
+    monkeypatch,
+):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+    expected = {
+        "anon_role",
+        "authenticated_role",
+        "service_role",
+        "auth_schema",
+        "extensions_schema",
+        "pgcrypto_extension",
+        "auth_role_function",
+        "auth_jwt_function",
+        "auth_uid_function",
+    }
+    observed: list[str] = []
+
+    def fake_psql(sql: str, *, timeout: int = 120) -> str:
+        assert timeout == 120
+        observed.append(sql)
+        return "" if len(observed) == 1 else json.dumps({key: True for key in expected})
+
+    monkeypatch.setattr(database, "_psql", fake_psql)
+
+    assert database.prepare_snapshot_restore() == {
+        key: True for key in sorted(expected)
+    }
+    bootstrap = observed[0]
+    for role in ("anon", "authenticated", "service_role"):
+        assert f"CREATE ROLE {role} NOLOGIN INHERIT" in bootstrap
+    assert "CREATE SCHEMA IF NOT EXISTS auth" in bootstrap
+    assert "CREATE SCHEMA IF NOT EXISTS extensions" in bootstrap
+    assert "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions" in bootstrap
+    for function in ("auth.role()", "auth.jwt()", "auth.uid()"):
+        assert f"FUNCTION {function}" in bootstrap
+    assert "auth.users" not in bootstrap
+    assert "net.http" not in bootstrap
+
+
+def test_database_lane_retains_primary_failure_and_cleanup_evidence(
+    monkeypatch,
+    tmp_path: Path,
+):
+    cleanup = {
+        "containers_removed": ["postgres", "postgrest"],
+        "network_removed": "network",
+    }
+
+    class Database:
+        target_dsn = "postgresql://postgres:x@127.0.0.1/leadpoet_parity_test"
+
+        @staticmethod
+        def start():
+            return None
+
+        @staticmethod
+        def prepare_snapshot_restore():
+            return {"verified": True}
+
+        @staticmethod
+        def cleanup():
+            return cleanup
+
+    monkeypatch.setattr(fast_parity, "_DockerDatabase", lambda **_kwargs: Database())
+    monkeypatch.setattr(
+        fast_parity,
+        "_load_json",
+        lambda *_args, **_kwargs: {"candidate_sha": SHA},
+    )
+    monkeypatch.setattr(fast_parity, "validate_contract", lambda value: value)
+
+    def fail_restore(**_kwargs):
+        raise ProductionParityError("isolated restore failed")
+
+    monkeypatch.setattr(fast_parity, "restore_snapshot", fail_restore)
+    outcome = fast_parity._run_database_lane(
+        contract_path=tmp_path / "contract.json",
+        manifest_path=tmp_path / "manifest.json",
+        archive_path=tmp_path / "snapshot.dump",
+        production_host="db.production.example",
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+        region="us-east-1",
+        production_gateway_secret_id="gateway-secret",
+    )
+
+    assert outcome["result"] is None
+    assert isinstance(outcome["primary_error"], ProductionParityError)
+    assert outcome["cleanup"] == cleanup
+    assert outcome["cleanup_error"] is None
+
+
+def test_fast_ledger_records_cleanup_independently_of_database_failure(
+    monkeypatch,
+    tmp_path: Path,
+):
+    oracle: dict[str, object] = {"schema_version": "test-oracle"}
+    contract = {
+        "candidate_sha": SHA,
+        "base_sha": "c" * 40,
+        "risk": "high",
+        "source_commitments": [],
+        "historical_oracle_hash": sha256_json(oracle),
+        "behavior_contract_hash": HASH,
+        "contract_hash": HASH,
+    }
+    manifest = {
+        "capture_mode": "schema-only",
+        "manifest_hash": HASH,
+        "source_sha": "c" * 40,
+        "capture_sha": "d" * 40,
+    }
+    cleanup = {
+        "containers_removed": ["postgres", "postgrest"],
+        "network_removed": "network",
+    }
+
+    monkeypatch.setattr(fast_parity, "_load_json", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        fast_parity,
+        "verify_contract_checkout",
+        lambda *_args, **_kwargs: contract,
+    )
+    monkeypatch.setattr(
+        fast_parity,
+        "validate_snapshot_manifest",
+        lambda _value: manifest,
+    )
+    monkeypatch.setattr(
+        fast_parity,
+        "validate_historical_oracle",
+        lambda _value: oracle,
+    )
+    monkeypatch.setattr(fast_parity, "required_oracle_stage_ids", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        fast_parity,
+        "verify_snapshot",
+        lambda **_kwargs: {"snapshot": "verified"},
+    )
+    monkeypatch.setattr(
+        fast_parity,
+        "_run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        fast_parity,
+        "_run_database_lane",
+        lambda **_kwargs: {
+            "result": None,
+            "primary_error": ProductionParityError("isolated restore failed"),
+            "cleanup": cleanup,
+            "cleanup_error": None,
+        },
+    )
+
+    def fail_rehearsal(**_kwargs):
+        raise ProductionParityError("rehearsal failed")
+
+    monkeypatch.setattr(fast_parity, "_run_rehearsal", fail_rehearsal)
+    result = fast_parity.run_fast_lane(
+        contract_path=tmp_path / "contract.json",
+        manifest_path=tmp_path / "manifest.json",
+        archive_path=tmp_path / "snapshot.dump",
+        ledger_path=tmp_path / "ledger.json",
+        production_host="db.production.example",
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+        region="us-east-1",
+        production_gateway_secret_id="gateway-secret",
+    )
+    stages = {item["stage_id"]: item for item in result["stages"]}
+
+    assert stages["snapshot-restore-and-migrations"]["status"] == "failed"
+    assert "isolated restore failed" in stages["snapshot-restore-and-migrations"]["reason"]
+    assert stages["cleanup"]["status"] == "passed"
+    assert stages["cleanup"]["evidence"] == cleanup
+
+
 def test_full_deadline_accepts_twenty_hours_and_rejects_larger_budget():
     maximum = full_host.MAX_FULL_TIMEOUT_SECONDS
     assert maximum == 20 * 60 * 60
@@ -380,6 +563,10 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
         @staticmethod
         def start():
             return None
+
+        @staticmethod
+        def prepare_snapshot_restore():
+            return {"verified": True}
 
         @staticmethod
         def cleanup():

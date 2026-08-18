@@ -108,6 +108,10 @@ EARLY_BOOT_MARKER = Path(
 )
 FULL_WORK_ROOT = Path("/opt/leadpoet-production-parity")
 PRODUCTION_V2_CONFIG_DIR = Path("/home/ec2-user/.config/leadpoet/v2")
+PRODUCTION_GATEWAY_PRIVATE_KEY_PATH = Path(
+    "/home/ec2-user/gateway/secrets/gateway_private_key.pem"
+)
+PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER = (1000, 1000)
 ATTESTED_V2_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 ATTESTED_V2_RELEASE_PREFIX = "attested-v2/releases"
 ATTESTED_V2_KMS_KEY_ID = (
@@ -858,6 +862,16 @@ def _validated_clone_environment(
         "AWS_SHARED_CREDENTIALS_FILE",
         "BOTO_CONFIG",
     }
+    forbidden_external_authority = {
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_HOST",
+        "LANGFUSE_BASE_URL",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+        "MINIO_ENDPOINT",
+        "MINIO_BUCKET",
+    }
     try:
         expected_trace_prefixes = production_parity_trace_prefixes(
             artifact_bucket=str(
@@ -878,14 +892,45 @@ def _validated_clone_environment(
         or not str(values.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
         or str(values.get("DISABLE_BACKGROUND_TASKS") or "").lower()
         != "true"
+        or str(values.get("LANGFUSE_ENABLED") or "").lower() != "false"
+        or values.get("AWS_S3_BUCKET")
+        != values.get("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET")
+        or str(values.get("RESEARCH_LAB_CORPUS_EXPORT_ENABLED") or "").lower()
+        != "false"
+        or bool(values.get("RESEARCH_LAB_CORPUS_EXPORT_S3_PREFIX"))
+        or bool(values.get("RESEARCH_LAB_EVIDENCE_PROXY_URL"))
+        or bool(values.get("RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"))
+        or bool(values.get("RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX"))
         or any(
             values.get(name) != expected
             for name, expected in expected_trace_prefixes.items()
         )
         or any(str(values.get(name) or "").strip() for name in forbidden_aws_environment)
+        or any(name in values for name in forbidden_external_authority)
     ):
         raise FullParityError("clone gateway boundary identity differs")
     return values
+
+
+def _validated_baked_gateway_private_key_path() -> str:
+    """Return the AMI-baked gateway key path without reading its contents."""
+
+    path = PRODUCTION_GATEWAY_PRIVATE_KEY_PATH
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise FullParityError("baked gateway private-key path is unavailable") from exc
+    if (
+        resolved != path
+        or path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or (metadata.st_uid, metadata.st_gid)
+        != PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER
+    ):
+        raise FullParityError("baked gateway private-key path identity differs")
+    return str(path)
 
 
 @contextmanager
@@ -2340,6 +2385,7 @@ def run_full(
         raise FullParityError(
             "transient host early production-service isolation differs"
         )
+    gateway_private_key_path = _validated_baked_gateway_private_key_path()
     started = time.monotonic()
     deadline = _full_deadline(
         started=started,
@@ -2509,6 +2555,7 @@ def run_full(
                 "GATEWAY_ENV_FILE": str(gateway_env_file),
                 "GATEWAY_LOG_ROOT": str(work / "gateway"),
                 "GATEWAY_LOG_FILE": str(work / "gateway" / "gateway.log"),
+                "GATEWAY_PRIVATE_KEY_PATH": gateway_private_key_path,
                 "GATEWAY_RESTART_CONTROLLER_ROOT": str(work / "restart-controller"),
                 "GATEWAY_DEPLOYMENT_DIR": str(work / "deployments"),
                 "GATEWAY_HOST_RESTART_SCRIPT": str(ROOT / "gw_restart.sh"),

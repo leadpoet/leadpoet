@@ -1662,10 +1662,12 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
     for path in (env_clone, env_secret):
         path.write_text(
             "export GATEWAY_RESTART_INVOCATION_ID=stale\n"
-            "export LEADPOET_RESTART_INVOCATION_ID=stale\n",
+            "export LEADPOET_RESTART_INVOCATION_ID=stale\n"
+            "export GATEWAY_PRIVATE_KEY_PATH=/stale/private-key.pem\n",
             encoding="utf-8",
         )
     active_invocation = "gateway-active-invocation"
+    active_private_key = "/run-scoped/gateway-private-key.pem"
     preserved = subprocess.run(
         [
             "bash",
@@ -1674,8 +1676,9 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
                 "set -euo pipefail\n"
                 + merge_and_reassert
                 + '\nset -a\n. "$ENV_CLONE"\nset +a\n'
-                + "printf '%s\\n%s\\n' \"$GATEWAY_RESTART_INVOCATION_ID\" "
-                + '"$LEADPOET_RESTART_INVOCATION_ID"\n'
+                + "printf '%s\\n%s\\n%s\\n' \"$GATEWAY_RESTART_INVOCATION_ID\" "
+                + '"$LEADPOET_RESTART_INVOCATION_ID" '
+                + '"$GATEWAY_PRIVATE_KEY_PATH"\n'
             ),
         ],
         check=True,
@@ -1687,9 +1690,14 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
             "ENV_SECRET": str(env_secret),
             "GATEWAY_RESTART_INVOCATION_ID": active_invocation,
             "LEADPOET_RESTART_INVOCATION_ID": "stale-parent",
+            "GATEWAY_PRIVATE_KEY_PATH": active_private_key,
         },
     )
-    assert preserved.stdout.splitlines() == [active_invocation, active_invocation]
+    assert preserved.stdout.splitlines() == [
+        active_invocation,
+        active_invocation,
+        active_private_key,
+    ]
 
 
 def test_gateway_candidate_reexec_rebinds_restart_identity_before_telemetry() -> None:

@@ -255,7 +255,7 @@ def _urllib_transport_response(error: BaseException) -> dict[str, Any] | None:
     import ssl
     from urllib.error import HTTPError, URLError
 
-    if isinstance(error, TimeoutError):
+    if isinstance(error, (TimeoutError, socket.timeout)):
         return {
             "outcome": URLLIB_TRANSPORT_OUTCOME,
             "error_type": "TimeoutError",
@@ -265,7 +265,7 @@ def _urllib_transport_response(error: BaseException) -> dict[str, Any] | None:
         return None
 
     reason = error.reason
-    if isinstance(reason, TimeoutError):
+    if isinstance(reason, (TimeoutError, socket.timeout)):
         reason_type = "timeout"
     elif isinstance(reason, socket.gaierror):
         reason_type = "dns"
@@ -1906,7 +1906,7 @@ def _rl_dev_urllib_transport_response(error):
     import ssl
     import urllib.error
 
-    if isinstance(error, TimeoutError):
+    if isinstance(error, (TimeoutError, socket.timeout)):
         return {
             "outcome": _RL_DEV_URLLIB_TRANSPORT_OUTCOME,
             "error_type": "TimeoutError",
@@ -1917,7 +1917,7 @@ def _rl_dev_urllib_transport_response(error):
     ):
         return None
     reason = error.reason
-    if isinstance(reason, TimeoutError):
+    if isinstance(reason, (TimeoutError, socket.timeout)):
         reason_type = "timeout"
     elif isinstance(reason, socket.gaierror):
         reason_type = "dns"

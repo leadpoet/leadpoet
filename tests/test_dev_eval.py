@@ -1645,8 +1645,8 @@ threading.Thread(target=accept_without_responding, daemon=True).start()
 url = "http://127.0.0.1:%d/probe" % listener.getsockname()[1]
 try:
     urllib.request.urlopen(url, timeout=0.05)
-except TimeoutError as exc:
-    outcome = {"error_type": type(exc).__name__}
+except (TimeoutError, socket.timeout):
+    outcome = {"is_timeout": True}
 else:
     raise AssertionError("timeout did not reach urllib")
 finally:
@@ -1669,16 +1669,17 @@ print(json.dumps({
     assert recorded.returncode == 0, recorded.stderr
     assert json.loads(recorded.stdout) == {
         "failure_file_exists": False,
-        "outcome": {"error_type": "TimeoutError"},
+        "outcome": {"is_timeout": True},
     }
 
     replay_probe = r'''
 import json
+import socket
 import urllib.request
 try:
     urllib.request.urlopen("http://127.0.0.1:1/probe", timeout=1)
-except TimeoutError as exc:
-    print(json.dumps({"error_type": type(exc).__name__}))
+except (TimeoutError, socket.timeout):
+    print(json.dumps({"is_timeout": True}))
 else:
     raise AssertionError("replayed timeout was not preserved")
 '''
@@ -1687,6 +1688,11 @@ else:
     snapshot_text = snapshot_files[0].read_text(encoding="utf-8")
     assert "live timeout detail" not in snapshot_text
     snapshot = json.loads(snapshot_text)
+    assert snapshot["response"] == {
+        "outcome": "urllib_transport_error",
+        "error_type": "TimeoutError",
+        "reason_type": "timeout",
+    }
     replay_url = snapshot["request_key"].split("|")[2]
     replay_probe = replay_probe.replace(
         "http://127.0.0.1:1/probe", "http://" + replay_url
@@ -1700,7 +1706,7 @@ else:
         check=False,
     )
     assert replayed.returncode == 0, replayed.stderr
-    assert json.loads(replayed.stdout) == {"error_type": "TimeoutError"}
+    assert json.loads(replayed.stdout) == {"is_timeout": True}
 
 
 def test_httpx_async_timeout_is_recorded_reused_and_replayed(tmp_path):

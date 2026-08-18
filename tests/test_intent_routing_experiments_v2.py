@@ -111,13 +111,21 @@ class FakeV2Adapter:
             raise ValueError("stage mismatch")
         return payload
 
-    def validate_variant_payload(self, payload, *, stage, feature_set, binding_tool_ids, binding_source_lineages):
+    def validate_variant_payload(self, payload, *, stage, feature_set, binding_tool_ids, binding_source_lineages, expected_signal_type=""):
         del feature_set, binding_source_lineages
         errors = []
+        if stage == "intent_evidence" and payload.get("signal_type") != expected_signal_type:
+            errors.append("model_profile_intent_category_mismatch")
+        if stage == "candidate_acquisition" and expected_signal_type:
+            errors.append("candidate_signal_type_must_be_empty")
         for tool in payload.get("tools", ()):
             if tool not in binding_tool_ids:
                 errors.append(f"model_tool_not_bound:{tool}")
         return errors
+
+    def routing_change_class(self, payload, *, stage):
+        del stage
+        return payload.get("route_change_class", "custom")
 
     def variant_tool_descriptors(self, payload, *, stage):
         return tuple(
@@ -142,8 +150,10 @@ class FakeV2Adapter:
         expected = self.manifests.get(binding.tool_id)
         return [] if expected == binding.manifest_hash else [f"manifest:{binding.tool_id}"]
 
-    def compile_variant(self, payload, *, stage, feature_set, available_tools, remaining_seconds, remaining_calls, credit_cap):
+    def compile_variant(self, payload, *, stage, feature_set, available_tools, remaining_seconds, remaining_calls, credit_cap, expected_signal_type=""):
         del stage, feature_set, remaining_seconds, remaining_calls, credit_cap
+        if payload.get("stage") == "intent_evidence" and payload.get("signal_type") != expected_signal_type:
+            raise RoutingExperimentError("model_profile_intent_category_mismatch")
         tools = tuple(tool for tool in payload.get("tools", ()) if available_tools.get(tool, False))
         return Plan({"feature_set_sha256": FEATURE_HASH.split(":", 1)[1], "steps": list(tools), "skipped": payload.get("skipped", {})}, tools)
 
@@ -228,20 +238,28 @@ def _spec(stage: str = "intent_evidence", *, with_source_add: bool = False, two_
         tools.append(source_tool)
     artifact, authority = _artifact("a", "1")
     candidate_artifact, candidate_authority = _artifact("b", "2")
-    payload = {"stage": stage, "tools": tools, "manifest_hashes": {tool: manifest, source_tool: source_manifest}}
+    payload = {
+        "stage": stage,
+        "tools": tools,
+        "manifest_hashes": {tool: manifest, source_tool: source_manifest},
+        "signal_type": "HIRING" if stage == "intent_evidence" else "",
+        "route_change_class": "custom",
+    }
+    candidate_artifact_for_variant = candidate_artifact if (with_source_add or two_artifacts) else artifact
+    candidate_authority_for_variant = candidate_authority if (with_source_add or two_artifacts) else authority
     provenance = ()
     if with_source_add:
-        provenance = (SourceAddProvenance("source-add-request", sha256_json(source_request), source_tool, stage, source_manifest, (candidate_artifact if two_artifacts else artifact).commit_sha, True, source_request),)
-    baseline = RoutingExperimentV2Variant("baseline", stage, artifact, {"stage": stage, "tools": [tool], "manifest_hashes": {tool: manifest}}, ("baseline",), "route_only", (), authority)
+        provenance = (SourceAddProvenance("source-add-request", sha256_json(source_request), source_tool, stage, source_manifest, candidate_artifact_for_variant.commit_sha, True, source_request),)
+    baseline = RoutingExperimentV2Variant("baseline", stage, artifact, {"stage": stage, "tools": [tool], "manifest_hashes": {tool: manifest}, "signal_type": "HIRING" if stage == "intent_evidence" else "", "route_change_class": "custom"}, ("baseline",), "route_only", (), authority)
     candidate = RoutingExperimentV2Variant(
         "candidate",
         stage,
-        candidate_artifact if two_artifacts else artifact,
+        candidate_artifact_for_variant,
         payload,
         tuple(item.binding_id for item in bindings),
         "tool_and_route" if with_source_add else change_kind,
         provenance,
-        candidate_authority if two_artifacts else authority,
+        candidate_authority_for_variant,
         (source_tool,) if with_source_add else (),
     )
     labels = {"cal-1": True, "hold-1": False}
@@ -281,10 +299,74 @@ def test_v2_intent_route_only_and_combined_source_add_run_with_decision_receipts
     tool_only_payload = dict(spec.variants[1].routing_payload)
     tool_only_payload["tools"] = ["intent.baseline"]
     tool_only_payload["manifest_hashes"] = {"intent.baseline": H("4")}
+    tool_only_payload["route_change_class"] = "default"
     tool_only = replace(spec.variants[1], variant_id="tool-only", routing_payload=tool_only_payload, change_kind="tool_only")
     tool_only_spec = replace(spec, experiment_id="v2-tool-only", variants=(spec.variants[0], tool_only))
     assert validate_routing_experiment_v2_spec(tool_only_spec, adapters={"baseline": adapters["baseline"], "tool-only": adapters["candidate"]}) == []
     assert promote_routing_experiment_v2_to_lab(evaluation).startswith("sha256:")
+
+
+def test_v2_signal_type_is_frozen_and_rejected_before_provider_calls():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    mismatched_payload = dict(spec.variants[1].routing_payload)
+    mismatched_payload["signal_type"] = "FUNDING"
+    mismatched = replace(spec.variants[1], routing_payload=mismatched_payload)
+    mismatched_spec = replace(spec, experiment_id="v2-signal-mismatch", variants=(spec.variants[0], mismatched))
+    errors = validate_routing_experiment_v2_spec(
+        mismatched_spec,
+        adapters={"baseline": adapters["baseline"], "candidate": adapters["candidate"]},
+    )
+    assert any("intent_category_mismatch" in error for error in errors)
+    calls = []
+    with pytest.raises(RoutingExperimentError, match="invalid v2 routing experiment"):
+        evaluate_routing_experiment_v2(
+            mismatched_spec,
+            gold_labels=labels,
+            runner=lambda *args: calls.append(args),
+            adapters=adapters,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
+def test_v2_change_kind_requires_baseline_artifact_and_model_owned_route_class(stage):
+    spec, adapters, labels, _tool, _source_tool = _spec(stage, with_source_add=True)
+    assert validate_routing_experiment_v2_spec(spec, adapters=adapters) == []
+
+    tool_only_payload = dict(spec.variants[1].routing_payload)
+    tool_only_payload["route_change_class"] = "default"
+    tool_only = replace(spec.variants[1], variant_id="tool-only", routing_payload=tool_only_payload, change_kind="tool_only")
+    tool_only_spec = replace(spec, experiment_id=f"{spec.experiment_id}-tool-only", variants=(spec.variants[0], tool_only))
+    assert validate_routing_experiment_v2_spec(tool_only_spec, adapters={"baseline": adapters["baseline"], "tool-only": adapters["candidate"]}) == []
+
+    mislabeled_tool_only = replace(tool_only, variant_id="bad-tool-only", routing_payload={**tool_only_payload, "route_change_class": "custom"})
+    errors = validate_routing_experiment_v2_spec(
+        replace(tool_only_spec, variants=(spec.variants[0], mislabeled_tool_only)),
+        adapters={"baseline": adapters["baseline"], "bad-tool-only": adapters["candidate"]},
+    )
+    assert any("tool_only_requires_default" in error for error in errors)
+
+    mislabeled_combined = replace(spec.variants[1], variant_id="bad-combined", routing_payload={**spec.variants[1].routing_payload, "route_change_class": "default"})
+    errors = validate_routing_experiment_v2_spec(
+        replace(spec, experiment_id=f"{spec.experiment_id}-bad-combined", variants=(spec.variants[0], mislabeled_combined)),
+        adapters={"baseline": adapters["baseline"], "bad-combined": adapters["candidate"]},
+    )
+    assert any("tool_and_route_requires_custom" in error for error in errors)
+
+    same_artifact_tool = replace(tool_only, variant_id="same-artifact", artifact=spec.variants[0].artifact)
+    errors = validate_routing_experiment_v2_spec(
+        replace(spec, experiment_id=f"{spec.experiment_id}-same-artifact", variants=(spec.variants[0], same_artifact_tool)),
+        adapters={"baseline": adapters["baseline"], "same-artifact": adapters["candidate"]},
+    )
+    assert any("tool_variant_artifact_must_differ" in error for error in errors)
+
+    route_only_wrong_artifact = replace(spec.variants[1], variant_id="bad-route-only", change_kind="route_only", source_add_provenance=(), new_tool_ids=())
+    errors = validate_routing_experiment_v2_spec(
+        replace(spec, experiment_id=f"{spec.experiment_id}-bad-route-only", variants=(spec.variants[0], route_only_wrong_artifact)),
+        adapters={"baseline": adapters["baseline"], "bad-route-only": adapters["candidate"]},
+    )
+    assert any("route_only_artifact_must_match_baseline" in error for error in errors)
 
 
 @pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
@@ -317,6 +399,46 @@ def test_v2_rejects_unregistered_tool_wrong_manifest_and_missing_binding():
     assert any("manifest:intent.unregistered" in error for error in validate_routing_experiment_v2_spec(unknown_spec, adapters={"baseline": adapters["baseline"], "unknown": adapters["candidate"]}))
 
 
+def test_v2_rejects_malformed_booleans_without_coercion():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    raw = spec.to_dict()
+    raw["allow_live_credit_spend"] = "false"
+    parsed = RoutingExperimentV2Spec.from_mapping(raw)
+    assert parsed.allow_live_credit_spend == "false"
+    assert any("allow_live_credit_spend_must_be_boolean" in error for error in validate_routing_experiment_v2_spec(parsed, adapters=adapters))
+    raw = spec.to_dict()
+    raw["availability"] = {"candidate": {"intent.baseline": "false"}}
+    parsed = RoutingExperimentV2Spec.from_mapping(raw)
+    assert parsed.availability["candidate"]["intent.baseline"] == "false"
+    assert any("availability_must_be_boolean" in error for error in validate_routing_experiment_v2_spec(parsed, adapters=adapters))
+    with pytest.raises(RoutingExperimentError, match="gold_labels_must_use_boolean"):
+        evaluate_routing_experiment_v2(spec, gold_labels={"cal-1": "true", "hold-1": False}, runner=_runner, adapters=adapters, require_isolation=False)
+
+
+def test_v2_worker_factory_reuses_one_handle_per_artifact_and_isolates_distinct_artifacts():
+    same_spec, _adapters, _labels, _tool, _source_tool = _spec("intent_evidence")
+    calls = []
+
+    def worker_factory(artifact):
+        artifact_key = sha256_json({
+            "model_artifact_hash": artifact.model_artifact_hash,
+            "manifest_hash": artifact.manifest_hash,
+            "commit_sha": artifact.commit_sha,
+        })
+        calls.append(artifact_key)
+        return IsolatedRoutingAdapter(object(), f"proc-{len(calls)}", artifact_key)
+
+    factory = RoutingExperimentV2AdapterFactory.from_worker_factory(same_spec.variants, worker_factory)
+    assert len(calls) == 1
+    assert factory.handles["baseline"] is factory.handles["candidate"]
+
+    split_spec, _adapters, _labels, _tool, _source_tool = _spec("intent_evidence", with_source_add=True, two_artifacts=True)
+    calls.clear()
+    split_factory = RoutingExperimentV2AdapterFactory.from_worker_factory(split_spec.variants, worker_factory)
+    assert len(calls) == 2
+    assert split_factory.handles["baseline"].process_id != split_factory.handles["candidate"].process_id
+
+
 def test_v2_fail_closed_on_timeout_malformed_retry_and_budget():
     spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
     calls = []
@@ -346,9 +468,13 @@ def test_v2_fail_closed_on_timeout_malformed_retry_and_budget():
             raise TimeoutError("retryable")
         return _runner(binding, unit, request)
     retry_adapters = {key: RetryAdapter(value.manifests) for key, value in adapters.items()}
-    retry = evaluate_routing_experiment_v2(spec, gold_labels=labels, runner=retry_runner, adapters=retry_adapters, require_isolation=False)
+    retry_decisions = RoutingDecisionReceiptStore()
+    retry = evaluate_routing_experiment_v2(spec, gold_labels=labels, runner=retry_runner, adapters=retry_adapters, decision_store=retry_decisions, require_isolation=False)
     assert retry.selected_variant_id in {"baseline", "candidate"}
     assert len(retry_calls) > len(set(retry_calls)) or len(retry_calls) >= 2
+    retry_receipts = [item for item in retry_decisions.values() if item.variant_id == "baseline" and item.unit_ref == "cal-1"]
+    assert retry_receipts and retry_receipts[0].attempted_tool_ids == ("intent.baseline", "intent.baseline")
+    assert retry_receipts[0].outcome_reasons == (("intent.baseline", "adapter_failure"), ("intent.baseline", "verified"))
     unavailable_spec_base, unavailable_adapters, unavailable_labels, _unused_tool, _unused_source = _spec("intent_evidence", with_source_add=True)
     unavailable_spec = replace(unavailable_spec_base, availability={"candidate": {"intent.baseline": False, "intent.source_add.new": True}})
     unavailable_calls = []
@@ -367,6 +493,88 @@ def test_v2_fail_closed_on_timeout_malformed_retry_and_budget():
     with pytest.raises(RoutingExperimentError, match="budget"):
         evaluate_routing_experiment_v2(tiny, gold_labels=labels, runner=budget_runner, adapters=adapters, require_isolation=False)
     assert budget_calls == []
+
+
+def test_v2_enforces_compiled_plan_availability_calls_time_and_credit_caps():
+    spec, adapters, labels, tool, _source_tool = _spec("intent_evidence")
+
+    class UnplannedAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del payload, kwargs
+            return Plan({"feature_set_sha256": FEATURE_HASH.split(":", 1)[1], "steps": []}, ())
+
+        def plan_step_budgets(self, plan):
+            del plan
+            return ()
+
+        def execute_plan(self, plan, invoke):
+            del plan
+            invoke(tool)
+            return (), False
+
+    unplanned_calls = []
+    with pytest.raises(RoutingExperimentError, match="invoked_unplanned_tool"):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=lambda *args: unplanned_calls.append(args),
+            adapters={"baseline": UnplannedAdapter({tool: H("4")}), "candidate": adapters["candidate"]},
+            require_isolation=False,
+        )
+    assert unplanned_calls == []
+
+    class UnavailableAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del kwargs
+            return Plan({"feature_set_sha256": FEATURE_HASH.split(":", 1)[1], "steps": [tool]}, (tool,))
+
+        def execute_plan(self, plan, invoke):
+            del plan
+            invoke(tool)
+            return (), False
+
+    unavailable = replace(spec, availability={"baseline": {tool: False}})
+    unavailable_calls = []
+    with pytest.raises(RoutingExperimentError, match="invoked_unavailable_tool"):
+        evaluate_routing_experiment_v2(
+            unavailable,
+            gold_labels=labels,
+            runner=lambda *args: unavailable_calls.append(args),
+            adapters={"baseline": UnavailableAdapter({tool: H("4")}), "candidate": adapters["candidate"]},
+            require_isolation=False,
+        )
+    assert unavailable_calls == []
+
+    class OverCallAdapter(FakeV2Adapter):
+        def execute_plan(self, plan, invoke):
+            results = [invoke(tool), invoke(tool)]
+            invoke(tool)
+            return results, False
+
+        def plan_step_budgets(self, plan):
+            return tuple(RoutingPlanStepBudget(item, "invoke", 2, 1, 100) for item in plan.tools)
+
+    overcall_calls = []
+    with pytest.raises(RoutingExperimentError, match="max_calls_exceeded"):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=lambda *args: (overcall_calls.append(args) or _runner(*args)),
+            adapters={"baseline": OverCallAdapter({tool: H("4")}), "candidate": adapters["candidate"]},
+            require_isolation=False,
+        )
+    assert len(overcall_calls) == 2
+
+    def oversized_runner(binding, unit, request):
+        value = dict(_runner(binding, unit, request))
+        value["credit_microunits"] = 11
+        value["receipt_ref"] = "provider_receipt:" + sha256_json({key: item for key, item in value.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
+        return value
+
+    store = ProviderReceiptStore()
+    with pytest.raises(RoutingExperimentError, match="exceeds_reserved_credit"):
+        evaluate_routing_experiment_v2(spec, gold_labels=labels, runner=oversized_runner, adapters=adapters, receipt_store=store, require_isolation=False)
+    assert len(store) == 0
 
 
 def test_v2_cache_isolation_by_variant_and_artifact_and_two_artifacts():
@@ -400,11 +608,142 @@ def test_v2_live_billing_is_explicit_and_never_promoted(tmp_path):
     durable_path = tmp_path / "leadpoet-v2-receipts-test.jsonl"
     from research_lab.routing_experiments import JsonlProviderReceiptRepository
     store = ProviderReceiptStore(JsonlProviderReceiptRepository(durable_path))
+    def measured_runner(binding, unit, request):
+        value = dict(_runner(binding, unit, request))
+        value["execution_mode"] = ReceiptExecutionMode.MEASURED_LAB.value
+        value["receipt_ref"] = "provider_receipt:" + sha256_json({key: item for key, item in value.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
+        return value
     rollup = lambda _store: {"rollup_id": "billing-v2", "rollup_hash": H("7"), "total_credit_microunits": 40}
-    evaluation = evaluate_routing_experiment_v2(measured, gold_labels=labels, runner=_runner, adapters=adapters, receipt_store=store, authoritative_billing_rollup=rollup, require_isolation=False)
+    evaluation = evaluate_routing_experiment_v2(measured, gold_labels=labels, runner=measured_runner, adapters=adapters, receipt_store=store, authoritative_billing_rollup=rollup, require_isolation=False)
     assert evaluation.live_credit_spend is True
     with pytest.raises(RoutingExperimentError, match="cannot_auto_promote"):
         promote_routing_experiment_v2_to_lab(evaluation)
+
+
+def test_v2_live_resume_uses_exact_measured_cache_and_zero_new_billing(tmp_path):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        experiment_id=spec.experiment_id + "-resume",
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+    from research_lab.routing_experiments import JsonlProviderReceiptRepository
+    store = ProviderReceiptStore(JsonlProviderReceiptRepository(tmp_path / "resume.jsonl"))
+    run_count = [0]
+
+    def measured_runner(binding, unit, request):
+        run_count[0] += 1
+        value = dict(_runner(binding, unit, request))
+        value["execution_mode"] = ReceiptExecutionMode.MEASURED_LAB.value
+        value["receipt_ref"] = "provider_receipt:" + sha256_json({key: item for key, item in value.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
+        return value
+
+    rollups = iter((40, 0))
+    first = evaluate_routing_experiment_v2(
+        measured,
+        gold_labels=labels,
+        runner=measured_runner,
+        adapters=adapters,
+        receipt_store=store,
+        authoritative_billing_rollup=lambda _store: {"rollup_id": "r1", "rollup_hash": H("7"), "total_credit_microunits": next(rollups)},
+        require_isolation=False,
+    )
+    assert first.billing_rollup_total_credit_microunits == 40
+    assert run_count[0] == 4
+
+    def no_call_runner(*_args):
+        raise AssertionError("resumed exact measured evaluation made a provider call")
+
+    resumed = evaluate_routing_experiment_v2(
+        measured,
+        gold_labels=labels,
+        runner=no_call_runner,
+        adapters=adapters,
+        receipt_store=store,
+        authoritative_billing_rollup=lambda _store: {"rollup_id": "r2", "rollup_hash": H("8"), "total_credit_microunits": next(rollups)},
+        require_isolation=False,
+    )
+    assert resumed.billing_rollup_total_credit_microunits == 0
+    assert resumed.provider_cache_hits == 4
+    assert all(item.holdout.total_credit_microunits == 10 for item in resumed.variants)
+
+
+def test_v2_route_payload_changes_cannot_reuse_same_request_cache():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    store = ProviderReceiptStore()
+    first_calls = []
+
+    def recording_runner(binding, unit, request):
+        first_calls.append(request)
+        return _runner(binding, unit, request)
+
+    first = evaluate_routing_experiment_v2(spec, gold_labels=labels, runner=recording_runner, adapters=adapters, receipt_store=store, require_isolation=False)
+    first_keys = set(store.repository.keys())
+    changed_payload = dict(spec.variants[1].routing_payload)
+    changed_payload["skipped"] = {"intent.baseline": "changed_route_payload"}
+    changed = replace(spec.variants[1], routing_payload=changed_payload)
+    changed_spec = replace(spec, variants=(spec.variants[0], changed))
+    second_calls = []
+    second = evaluate_routing_experiment_v2(
+        changed_spec,
+        gold_labels=labels,
+        runner=lambda binding, unit, request: (second_calls.append(request) or _runner(binding, unit, request)),
+        adapters=adapters,
+        receipt_store=store,
+        require_isolation=False,
+    )
+    assert first.experiment_hash != second.experiment_hash
+    assert second_calls
+    assert set(store.repository.keys()) - first_keys
+    assert not set(second_calls).intersection(first_calls)
+
+
+def test_v2_live_mode_rejects_fixture_or_replay_cache_entries(tmp_path):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        experiment_id=spec.experiment_id + "-fixture-cache",
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+    from research_lab.routing_experiments import JsonlProviderReceiptRepository
+    measured_store = ProviderReceiptStore(JsonlProviderReceiptRepository(tmp_path / "measured.jsonl"))
+
+    def measured_runner(binding, unit, request):
+        value = dict(_runner(binding, unit, request))
+        value["execution_mode"] = ReceiptExecutionMode.MEASURED_LAB.value
+        value["receipt_ref"] = "provider_receipt:" + sha256_json({key: item for key, item in value.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
+        return value
+
+    evaluate_routing_experiment_v2(
+        measured,
+        gold_labels=labels,
+        runner=measured_runner,
+        adapters=adapters,
+        receipt_store=measured_store,
+        authoritative_billing_rollup=lambda _store: {"rollup_id": "m", "rollup_hash": H("7"), "total_credit_microunits": 40},
+        require_isolation=False,
+    )
+    fixture_store = ProviderReceiptStore(JsonlProviderReceiptRepository(tmp_path / "fixture.jsonl"))
+    for key in measured_store.repository.keys():
+        receipt = measured_store.repository.get(key)
+        assert receipt is not None
+        fixture = replace(receipt, execution_mode=ReceiptExecutionMode.FIXTURE.value)
+        identity = fixture.to_dict()
+        identity.pop("receipt_ref")
+        fixture = replace(fixture, receipt_ref="provider_receipt:" + sha256_json(identity).split(":", 1)[1][:16])
+        fixture_store.put(key, fixture)
+    with pytest.raises(RoutingExperimentError, match="live_cache_requires_measured_lab"):
+        evaluate_routing_experiment_v2(
+            measured,
+            gold_labels=labels,
+            runner=lambda *_args: pytest.fail("fixture cache should fail before runner"),
+            adapters=adapters,
+            receipt_store=fixture_store,
+            authoritative_billing_rollup=lambda _store: {"rollup_id": "m2", "rollup_hash": H("8"), "total_credit_microunits": 0},
+            require_isolation=False,
+        )
 
 
 def test_exact_candidate_model_profile_and_plan_contract():
@@ -413,6 +752,7 @@ def test_exact_candidate_model_profile_and_plan_contract():
     feature_set = adapter.parse_feature_set(FEATURES)
     default_payload = metadata["profiles"][0]
     profile = adapter.parse_variant_payload(default_payload, stage="candidate_acquisition")
+    assert adapter.routing_change_class(profile, stage="candidate_acquisition") == "default"
     assert adapter.validate_variant_payload(
         profile,
         stage="candidate_acquisition",
@@ -436,9 +776,22 @@ def test_exact_candidate_model_profile_and_plan_contract():
     icp_payload["profile_id"] = "candidate-icp-us"
     icp_payload["is_default"] = False
     icp_payload["required_features"] = ["company.country.us"]
+    icp_profile = adapter.parse_variant_payload(icp_payload, stage="candidate_acquisition")
+    assert adapter.routing_change_class(icp_profile, stage="candidate_acquisition") == "custom"
     registry = adapter.candidate_profiles.CandidateRoutingProfileRegistry.from_payload({
         "schema_version": "candidate-routing-registry:v1",
         "registry_version": metadata["registry_version"],
         "profiles": [default_payload, icp_payload],
     })
     assert registry.select(features=feature_set).profile_id == "candidate-icp-us"
+
+    intent_metadata = adapter.profiles.routing_profile_metadata()
+    intent_default_payload = next(item for item in intent_metadata["profiles"] if item["intent_category"] == "HIRING")
+    intent_default = adapter.parse_variant_payload(intent_default_payload, stage="intent_evidence")
+    assert adapter.routing_change_class(intent_default, stage="intent_evidence") == "default"
+    intent_custom_payload = dict(intent_default_payload)
+    intent_custom_payload["profile_id"] = "hiring-icp-us"
+    intent_custom_payload["is_default"] = False
+    intent_custom_payload["required_features"] = ["company.country.us"]
+    intent_custom = adapter.parse_variant_payload(intent_custom_payload, stage="intent_evidence")
+    assert adapter.routing_change_class(intent_custom, stage="intent_evidence") == "custom"

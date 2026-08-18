@@ -97,7 +97,10 @@ def _run_exact_docker_source_extraction(exact_root: Path) -> int:
     from gateway.research_lab import code_build as code_build_module
     from gateway.research_lab import model_authority_v2 as authority_module
     from gateway.research_lab.code_build import CodeEditBuildError
-    from gateway.tee.source_bundle_v2 import compute_private_source_tree_hash
+    from gateway.tee.source_bundle_v2 import (
+        build_source_bundle_v2,
+        compute_private_source_tree_hash,
+    )
 
     image_digest = str(context["image_digest"])
     event_path = Path(str(context["event_path"]))
@@ -127,6 +130,7 @@ def _run_exact_docker_source_extraction(exact_root: Path) -> int:
                 encoding="utf-8",
             )
         expected_tree_hash = compute_private_source_tree_hash(fixture_root)
+        extracted_root = Path(raw) / "extracted"
 
         def strict_run(command: list[str], *, cwd: Path, timeout_seconds: int) -> str:
             nonlocal reader_started
@@ -179,18 +183,17 @@ def _run_exact_docker_source_extraction(exact_root: Path) -> int:
                 "exact N-1 source extraction issued an unknown Docker command"
             )
 
-        artifact = SimpleNamespace(
-            model_artifact_hash=expected_tree_hash,
-            image_digest=image_digest,
-        )
-        with authority_module._SOURCE_BUNDLE_CACHE_LOCK:
-            authority_module._SOURCE_BUNDLE_CACHE.clear()
-            authority_module._SOURCE_BUNDLE_BUILD_LOCKS.clear()
         with patch.object(code_build_module, "_run", strict_run):
-            bundle = authority_module._source_bundle_for_artifact(
-                artifact,
-                timeout_seconds=int(context["timeout_seconds"]),
+            observed_tree_hash, _top_level_paths = (
+                authority_module._extract_parent_image_source(
+                    image_digest=image_digest,
+                    source_dir=extracted_root,
+                    timeout_seconds=int(context["timeout_seconds"]),
+                )
             )
+            bundle = build_source_bundle_v2(extracted_root)
+        if observed_tree_hash != expected_tree_hash:
+            raise RuntimeError("exact N-1 Docker extraction changed its tree identity")
         if bundle.get("source_tree_hash") != expected_tree_hash:
             raise RuntimeError("exact N-1 source bundle changed its tree identity")
         observed_operations = [" ".join(command[1:3]) for command in strict_commands]

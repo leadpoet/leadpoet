@@ -1066,6 +1066,240 @@ print(json.dumps({"body": body, "hits": len(hits), "stored": stored}))
     }
 
 
+def test_record_bootstrap_exa_poll_records_only_terminal_response(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import http.server
+import json
+import os
+import threading
+import urllib.request
+
+hits = []
+responses = [
+    b'{"id":"agent_run_1","status":"running"}',
+    b'{"id":"agent_run_1","status":"completed","results":[]}',
+]
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        body = responses.pop(0)
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/agent/runs/agent_run_1" % server.server_port
+_rl_dev_provider_for_host = lambda _host: "exa"
+try:
+    with urllib.request.urlopen(url) as response:
+        first = json.loads(response.read().decode("utf-8"))
+    with urllib.request.urlopen(url) as response:
+        second = json.loads(response.read().decode("utf-8"))
+finally:
+    server.shutdown()
+    server.server_close()
+snapshot_paths = os.listdir(os.path.join(
+    os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "snapshots"
+))
+with open(
+    os.path.join(
+        os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"],
+        "snapshots",
+        snapshot_paths[0],
+    ),
+    "r",
+    encoding="utf-8",
+) as handle:
+    stored = json.loads(json.load(handle)["response"]["body_text"])
+print(json.dumps({
+    "first": first,
+    "hits": len(hits),
+    "snapshot_count": len(snapshot_paths),
+    "second": second,
+    "stored": stored,
+}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "first": {"id": "agent_run_1", "status": "running"},
+        "hits": 2,
+        "snapshot_count": 1,
+        "second": {
+            "id": "agent_run_1",
+            "status": "completed",
+            "results": [],
+        },
+        "stored": {
+            "id": "agent_run_1",
+            "status": "completed",
+            "results": [],
+        },
+    }
+
+
+def test_record_bootstrap_exa_poll_replaces_seeded_nonterminal_response(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import http.server
+import json
+import os
+import threading
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        body = b'{"id":"agent_run_1","status":"completed","results":[]}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/agent/runs/agent_run_1" % server.server_port
+_rl_dev_provider_for_host = lambda _host: "exa"
+provider, request_key, storage_name = _rl_dev_request_identity("GET", url, None)
+snapshot_root = os.path.join(
+    os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "snapshots"
+)
+os.makedirs(snapshot_root, exist_ok=True)
+snapshot_path = os.path.join(snapshot_root, storage_name + ".json")
+with open(snapshot_path, "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema_version": "1.0",
+        "record_type": "research_lab_dev_provider_snapshot",
+        "request_key": request_key,
+        "provider": provider,
+        "method": "GET",
+        "endpoint": request_key.split("|")[2],
+        "params_hash": request_key.split("|")[3],
+        "response": {
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body_text": '{"id":"agent_run_1","status":"running"}',
+        },
+    }, handle)
+try:
+    with urllib.request.urlopen(url) as response:
+        observed = json.loads(response.read().decode("utf-8"))
+finally:
+    server.shutdown()
+    server.server_close()
+with open(snapshot_path, "r", encoding="utf-8") as handle:
+    stored = json.loads(json.load(handle)["response"]["body_text"])
+print(json.dumps({"hits": len(hits), "observed": observed, "stored": stored}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    terminal = {
+        "id": "agent_run_1",
+        "status": "completed",
+        "results": [],
+    }
+    assert json.loads(completed.stdout) == {
+        "hits": 1,
+        "observed": terminal,
+        "stored": terminal,
+    }
+
+
+def test_record_bootstrap_exa_start_response_remains_replayable(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import http.server
+import json
+import threading
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        hits.append(self.path)
+        body = b'{"id":"agent_run_1","status":"running"}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/agent/runs" % server.server_port
+_rl_dev_provider_for_host = lambda _host: "exa"
+request = urllib.request.Request(url, data=b'{"query":"bounded"}', method="POST")
+try:
+    with urllib.request.urlopen(request) as response:
+        first = json.loads(response.read().decode("utf-8"))
+    with urllib.request.urlopen(request) as response:
+        second = json.loads(response.read().decode("utf-8"))
+finally:
+    server.shutdown()
+    server.server_close()
+print(json.dumps({"first": first, "hits": len(hits), "second": second}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    expected = {"id": "agent_run_1", "status": "running"}
+    assert json.loads(completed.stdout) == {
+        "first": expected,
+        "hits": 1,
+        "second": expected,
+    }
+
+
 def test_record_bootstrap_reuses_existing_httpx_async_response_without_network(
     tmp_path,
 ):

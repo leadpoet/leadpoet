@@ -1640,6 +1640,7 @@ _RL_DEV_RECORD_RETRY_TRANSIENT = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_RECOR
 _RL_DEV_RECORD_ICP_REF = os.environ.get("RESEARCH_LAB_DEV_RECORD_ICP_REF", "").strip()
 _RL_DEV_AUTH_PARAMS = ("api_key", "apikey", "x-api-key", "authorization", "token", "access_token", "bearer")
 _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrouter": "{}"}
+_RL_DEV_EXA_AGENT_NONTERMINAL_STATUSES = ("queued", "running", "in_progress", "pending")
 _RL_DEV_SECRET_ENV_NAMES = (
     "AWS_SECRET_ACCESS_KEY",
     "DEEPLINE_API_KEY",
@@ -1830,6 +1831,24 @@ class _RlDevSnapshotMiss(RuntimeError):
     pass
 
 
+def _rl_dev_nonterminal_poll_response(provider, method, endpoint, response):
+    if provider != "exa" or str(method or "").upper() != "GET":
+        return False
+    endpoint_text = str(endpoint or "")
+    path = "/" + endpoint_text.split("/", 1)[1] if "/" in endpoint_text else ""
+    if not path.startswith("/agent/runs/") or not isinstance(response, dict):
+        return False
+    try:
+        body = json.loads(str(response.get("body_text") or ""))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(body, dict):
+        return False
+    return str(body.get("status") or "").strip().lower() in (
+        _RL_DEV_EXA_AGENT_NONTERMINAL_STATUSES
+    )
+
+
 def _rl_dev_lookup(method, url, body, params=None):
     provider, request_key, storage_name = _rl_dev_request_identity(method, url, body, params)
     path = _rl_dev_snapshot_path(storage_name)
@@ -1867,6 +1886,13 @@ def _rl_dev_lookup_existing(method, url, body, params=None):
         raise RuntimeError(
             "existing provider snapshot is corrupt: " + request_key
         )
+    if _rl_dev_nonterminal_poll_response(
+        provider,
+        method,
+        request_key.split("|")[2],
+        response,
+    ):
+        return None
     if _RL_DEV_RECORD_RETRY_TRANSIENT and response.get("outcome") in (
         _RL_DEV_URLLIB_TRANSPORT_OUTCOME,
         _RL_DEV_HTTPX_TRANSPORT_OUTCOME,
@@ -2320,13 +2346,22 @@ def _rl_dev_record(
         response, redaction_count = _rl_dev_redact_runtime_secret_values(response)
         if redaction_count:
             response["runtime_secret_redaction_count"] = redaction_count
+        method_normalized = str(method or "GET").strip().upper() or "GET"
+        endpoint = request_key.split("|")[2]
+        if _rl_dev_nonterminal_poll_response(
+            provider,
+            method_normalized,
+            endpoint,
+            response,
+        ):
+            return response
         record = {
             "schema_version": "1.0",
             "record_type": "research_lab_dev_provider_snapshot",
             "request_key": request_key,
             "provider": provider,
-            "method": str(method or "GET").strip().upper() or "GET",
-            "endpoint": request_key.split("|")[2],
+            "method": method_normalized,
+            "endpoint": endpoint,
             "params_hash": request_key.split("|")[3],
             "response": response,
         }

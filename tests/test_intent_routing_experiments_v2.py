@@ -403,6 +403,60 @@ def test_v2_empty_considered_no_call_plan_is_allowed():
     assert all(item.considered_tool_ids == () for item in decisions.values())
 
 
+def test_v2_canonicalizes_skipped_receipt_order_to_considered_tools():
+    spec, adapters, labels, tool, source_tool = _spec("intent_evidence", with_source_add=True)
+
+    class ReverseSkipAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del payload, kwargs
+            return Plan(
+                {
+                    "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                    "steps": [],
+                    "considered": [tool, source_tool],
+                },
+                (),
+            )
+
+        def plan_step_budgets(self, plan):
+            del plan
+            return ()
+
+        def considered_tool_ids(self, plan, *, stage):
+            del plan, stage
+            return (tool, source_tool)
+
+        def plan_decision_projection(self, plan):
+            del plan
+            return {
+                "skipped_tool_reasons": {
+                    source_tool: "second",
+                    tool: "first",
+                },
+                "attempted_tool_ids": (),
+                "outcome_reasons": {},
+            }
+
+    decisions = RoutingDecisionReceiptStore()
+    evaluate_routing_experiment_v2(
+        spec,
+        gold_labels=labels,
+        runner=_runner,
+        adapters={
+            "baseline": adapters["baseline"],
+            "candidate": ReverseSkipAdapter(adapters["candidate"].manifests),
+        },
+        decision_store=decisions,
+        require_isolation=False,
+    )
+    candidate_receipts = [item for item in decisions.values() if item.variant_id == "candidate"]
+    assert candidate_receipts
+    assert all(
+        receipt.skipped_tool_reasons == ((tool, "first"), (source_tool, "second"))
+        for receipt in candidate_receipts
+    )
+
+
 @pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
 def test_v2_decision_receipts_round_trip_considered_tools_for_both_stages(tmp_path, stage):
     spec, adapters, labels, _tool, source_tool = _spec(stage, with_source_add=True)
@@ -495,6 +549,16 @@ def test_v2_decision_receipts_round_trip_considered_tools_for_both_stages(tmp_pa
     ).split(":", 1)[1][:16]
     assert any("outcomes_are_invalid" in error for error in validate_routing_decision_receipt(invalid_outcome))
 
+    invalid_provider_ref = valid_receipt.to_dict()
+    invalid_provider_ref["provider_receipt_refs"] = ["provider_receipt:" + "A" * 16]
+    invalid_provider_ref["receipt_id"] = "routing_decision:" + sha256_json(
+        {**invalid_provider_ref, "receipt_id": "routing_decision:pending"}
+    ).split(":", 1)[1][:16]
+    assert any(
+        "provider_receipt_ref_format_is_invalid" in error
+        for error in validate_routing_decision_receipt(invalid_provider_ref)
+    )
+
 
 def test_v2_live_requires_durable_decision_store_before_provider_calls(tmp_path):
     spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
@@ -540,6 +604,63 @@ def test_v2_live_requires_durable_decision_store_before_provider_calls(tmp_path)
                 require_isolation=False,
             )
         assert calls == []
+
+
+@pytest.mark.parametrize("broken_method", ["keys", "get"])
+def test_v2_live_readiness_checks_repository_without_provider_calls(tmp_path, broken_method):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+
+    class BrokenRepository:
+        durable = True
+
+        def keys(self):
+            if broken_method == "keys":
+                raise RuntimeError("keys unavailable")
+            return ()
+
+        def get(self, key):
+            del key
+            if broken_method == "get":
+                raise RuntimeError("get unavailable")
+            return None
+
+        def append(self, key, receipt):
+            raise AssertionError("readiness must not append")
+
+    calls = []
+
+    def measured_runner(binding, unit, request, authorization):
+        calls.append((binding, unit, request, authorization))
+        value = dict(_runner(binding, unit, request))
+        value["execution_mode"] = ReceiptExecutionMode.MEASURED_LAB.value
+        value["receipt_ref"] = "provider_receipt:" + sha256_json(
+            {key: item for key, item in value.items() if key != "receipt_ref"}
+        ).split(":", 1)[1][:16]
+        return value
+
+    with pytest.raises(RoutingExperimentError, match="durable_decision_receipt_store"):
+        evaluate_routing_experiment_v2(
+            measured,
+            gold_labels=labels,
+            runner=measured_runner,
+            adapters=adapters,
+            receipt_store=ProviderReceiptStore(
+                JsonlProviderReceiptRepository(tmp_path / f"provider-{broken_method}.jsonl")
+            ),
+            decision_store=RoutingDecisionReceiptStore(BrokenRepository()),
+            authoritative_billing_rollup=lambda _store: {
+                "rollup_id": "readiness",
+                "rollup_hash": H("9"),
+                "total_credit_microunits": 0,
+            },
+            require_isolation=False,
+        )
+    assert calls == []
 
 
 def test_v2_decision_store_requires_structural_repository_and_keeps_custom_seam():
@@ -785,8 +906,26 @@ def test_v2_receipt_mode_is_exact_and_live_requires_authorization_aware_runner(t
         ),
         lambda calls: lambda *, authorization: calls.append(authorization),
         lambda calls: lambda *args, authorization: calls.append((args, authorization)),
+        lambda calls: lambda binding, unit, request, extra, authorization: calls.append(
+            (binding, unit, request, extra, authorization)
+        ),
+        lambda calls: lambda binding, unit, request, extra, *, authorization: calls.append(
+            (binding, unit, request, extra, authorization)
+        ),
+        lambda calls: lambda binding, unit, request, authorization, extra: calls.append(
+            (binding, unit, request, authorization, extra)
+        ),
     ],
-    ids=["varargs_only", "kwargs_only", "three_args", "authorization_only", "varargs_with_authorization"],
+    ids=[
+        "varargs_only",
+        "kwargs_only",
+        "three_args",
+        "authorization_only",
+        "varargs_with_authorization",
+        "required_positional_before_authorization",
+        "required_positional_before_keyword_authorization",
+        "required_positional_after_authorization",
+    ],
 )
 def test_v2_live_runner_requires_named_authorization_parameter(tmp_path, runner_factory):
     spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
@@ -829,8 +968,8 @@ def test_v2_live_runner_with_named_authorization_parameter_passes(tmp_path):
 
     calls = []
 
-    def explicit_runner(binding, unit, request, authorization):
-        calls.append(authorization)
+    def explicit_runner(binding, unit, request, authorization, optional=None):
+        calls.append((authorization, optional))
         value = dict(_runner(binding, unit, request))
         value["execution_mode"] = ReceiptExecutionMode.MEASURED_LAB.value
         value["receipt_ref"] = "provider_receipt:" + sha256_json(

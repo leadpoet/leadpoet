@@ -55,6 +55,7 @@ MAX_LATENCY_MS = 900_000
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _RAW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_PROVIDER_RECEIPT_REF_RE = re.compile(r"^provider_receipt:[0-9a-f]{16}$")
 _SAFE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}$")
 _SAFE_FEATURE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
 _SAFE_PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
@@ -4233,6 +4234,12 @@ def validate_routing_decision_receipt(
         and len(receipt.provider_receipt_refs) != len(set(receipt.provider_receipt_refs))
     ):
         errors.append("v2_decision_provider_receipt_refs_must_be_unique")
+    if isinstance(receipt.provider_receipt_refs, tuple) and any(
+        not isinstance(item, str)
+        or _PROVIDER_RECEIPT_REF_RE.fullmatch(item) is None
+        for item in receipt.provider_receipt_refs
+    ):
+        errors.append("v2_decision_provider_receipt_ref_format_is_invalid")
     try:
         _bounded_int(
             receipt.total_credit_microunits,
@@ -4404,9 +4411,53 @@ class RoutingDecisionReceiptStore:
         self.repository = candidate
 
     def readiness_errors(self) -> list[str]:
-        """Check the repository seam without reading or writing receipt data."""
+        """Check the repository seam without mutating receipt data."""
 
-        return _routing_decision_repository_shape_errors(self.repository)
+        errors = _routing_decision_repository_shape_errors(self.repository)
+        if errors:
+            return errors
+        try:
+            raw_keys = self.repository.keys()
+            if isinstance(raw_keys, (str, bytes)):
+                return ["v2_decision_receipt_repository_keys_must_be_iterable"]
+            keys = tuple(raw_keys)
+        except Exception as exc:
+            return [
+                "v2_decision_receipt_repository_keys_failed:"
+                + type(exc).__name__
+            ]
+        for key in keys:
+            if not isinstance(key, str):
+                return ["v2_decision_receipt_repository_key_must_be_a_string"]
+            try:
+                _ensure_safe_ref(key, "v2_decision_receipt_repository_key")
+            except RoutingExperimentError as exc:
+                return [str(exc)]
+        if len(set(keys)) != len(keys):
+            return ["v2_decision_receipt_repository_keys_must_be_unique"]
+        existing_probe = bool(keys)
+        probe_key = keys[0] if existing_probe else "routing_decision:readiness_probe"
+        try:
+            probe_value = self.repository.get(probe_key)
+        except Exception as exc:
+            return [
+                "v2_decision_receipt_repository_get_failed:"
+                + type(exc).__name__
+            ]
+        if existing_probe and probe_value is None:
+            return ["v2_decision_receipt_repository_get_missing_existing_receipt"]
+        if probe_value is not None:
+            if not isinstance(probe_value, RoutingDecisionReceiptV2):
+                return ["v2_decision_receipt_repository_get_returned_invalid_receipt"]
+            if probe_value.receipt_id != probe_key:
+                return ["v2_decision_receipt_repository_get_key_mismatch"]
+            receipt_errors = validate_routing_decision_receipt(probe_value)
+            if receipt_errors:
+                return [
+                    "v2_decision_receipt_repository_get_returned_invalid_receipt:"
+                    + ";".join(receipt_errors)
+                ]
+        return []
 
     @property
     def is_durable(self) -> bool:
@@ -4612,13 +4663,18 @@ def _v2_runner_accepts_authorization(
     runner: Callable[..., ProviderReceipt | Mapping[str, Any]],
 ) -> bool:
     try:
-        parameters = tuple(inspect.signature(runner).parameters.values())
+        signature = inspect.signature(runner)
+        parameters = tuple(signature.parameters.values())
     except (TypeError, ValueError):
         return False
     authorization = next(
         (item for item in parameters if item.name == "authorization"),
         None,
     )
+    if authorization is None or any(
+        item.kind == inspect.Parameter.VAR_POSITIONAL for item in parameters
+    ):
+        return False
     positional = tuple(
         item
         for item in parameters
@@ -4627,12 +4683,21 @@ def _v2_runner_accepts_authorization(
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
         }
     )
-    has_varargs = any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in parameters)
-    if authorization is None or has_varargs or len(positional) < 3:
-        return False
     if authorization.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD:
-        return parameters.index(authorization) >= 3
-    return authorization.kind == inspect.Parameter.KEYWORD_ONLY
+        if len(positional) < 4 or positional[3] is not authorization:
+            return False
+        try:
+            signature.bind(object(), object(), object(), object())
+        except TypeError:
+            return False
+        return True
+    if authorization.kind == inspect.Parameter.KEYWORD_ONLY:
+        try:
+            signature.bind(object(), object(), object(), authorization=object())
+        except TypeError:
+            return False
+        return True
+    return False
 
 
 def _v2_call_runner(
@@ -4979,14 +5044,16 @@ def _v2_run_unit(
             else:
                 reserved_by_binding.pop(binding_id, None)
     attempted = tuple(_ensure_safe_ref(item, "v2_attempted_tool_id") for item in attempt_order)
-    skipped_projection = {
-        tool_id: reason
-        for tool_id, reason in projected_skipped.items()
-        if tool_id not in attempt_by_tool
-    }
+    projected_skip_by_tool = dict(projected_skipped)
+    skipped_projection: dict[str, str] = {}
     for tool_id in considered_tool_ids:
         if tool_id not in attempt_by_tool:
-            skipped_projection.setdefault(tool_id, "runtime_unavailable" if not available_tools.get(tool_id, True) else "model_route_stopped")
+            skipped_projection[tool_id] = projected_skip_by_tool.get(
+                tool_id,
+                "runtime_unavailable"
+                if not available_tools.get(tool_id, True)
+                else "model_route_stopped",
+            )
     skipped = _v2_projection_pairs(skipped_projection, "skipped_tool_reasons")
     # Provider receipts are the only authority for outcomes.  The model may
     # project skipped-route metadata, but it cannot invent or overwrite a

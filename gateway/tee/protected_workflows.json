@@ -3157,7 +3157,7 @@
       "symbol": "checkpoint_payload_bytes"
     },
     {
-      "ast_sha256": "sha256:16bb6b281c8be2d56144489e20c3f6d1889b676d52a85e22500b66932f9c825d",
+      "ast_sha256": "sha256:501fbe94a77b32c297d5c4ceac93242546ca0c5b3bb9d6ec0dfa02be31534a32",
       "path": "gateway/utils/arweave_client.py",
       "symbol": "upload_checkpoint"
     },
@@ -4847,7 +4847,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:70404bc9e7fff517bb868ebe009ee57fe8cc67b5f9ea4b1f9b5abfb9699bc9e3",
-  "protected_source_commit": "02c7d17ab0cbce5384fc08467d5f7d906783541d",
+  "manifest_hash": "sha256:bd1291760af50eb5b50323eba8d8678406e85ac186ac92c9c43b216323eff526",
+  "protected_source_commit": "5e4f65eff7f4ad4442fc2be4ab29e96106ef88f5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

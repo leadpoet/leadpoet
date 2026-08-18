@@ -9,12 +9,15 @@ from research_lab.canonical import sha256_json
 from research_lab.routing_experiments import (
     ExperimentCreditBudget,
     InMemoryProviderReceiptRepository,
+    JsonlProviderReceiptRepository,
+    JsonlRoutingDecisionReceiptRepository,
     ProviderBindingIdentity,
     ProviderOutcome,
     ProviderReceipt,
     ProviderReceiptStore,
     PinnedSourcingModelRoutingAdapter,
     ReceiptExecutionMode,
+    RoutingDecisionReceiptV2,
     RoutingDecisionReceiptStore,
     RoutingCallAuthorization,
     RoutingEvaluationGates,
@@ -30,6 +33,7 @@ from research_lab.routing_experiments import (
     evaluate_routing_experiment_v2,
     promote_routing_experiment_v2_to_lab,
     validate_routing_experiment_v2_spec,
+    validate_routing_decision_receipt,
 )
 
 
@@ -314,6 +318,7 @@ def test_v2_intent_route_only_and_combined_source_add_run_with_decision_receipts
     assert evaluation.selected_variant_id == "baseline"
     assert evaluation.decision_receipt_refs
     assert all(item.stage == "intent_evidence" for item in evaluation.variants)
+    assert all("intent.baseline" in receipt.considered_tool_ids for receipt in decisions.values())
     assert all(set(receipt.attempted_tool_ids) <= {"intent.baseline", "intent.source_add.new"} for receipt in decisions.values())
     assert any(dict(receipt.skipped_tool_reasons).get("intent.source_add.new") == "model_route_stopped" for receipt in decisions.values())
     tool_only_payload = dict(spec.variants[1].routing_payload)
@@ -325,6 +330,80 @@ def test_v2_intent_route_only_and_combined_source_add_run_with_decision_receipts
     tool_only_spec = replace(spec, experiment_id="v2-tool-only", variants=(spec.variants[0], tool_only))
     assert validate_routing_experiment_v2_spec(tool_only_spec, adapters={"baseline": adapters["baseline"], "tool-only": adapters["candidate"]}) == []
     assert promote_routing_experiment_v2_to_lab(evaluation).startswith("sha256:")
+
+
+@pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
+def test_v2_decision_receipts_round_trip_considered_tools_for_both_stages(tmp_path, stage):
+    spec, adapters, labels, _tool, source_tool = _spec(stage, with_source_add=True)
+    path = tmp_path / f"decisions-{stage}.jsonl"
+    decisions = RoutingDecisionReceiptStore(JsonlRoutingDecisionReceiptRepository(path))
+    assert decisions.is_durable is True
+    evaluate_routing_experiment_v2(
+        spec,
+        gold_labels=labels,
+        runner=_runner,
+        adapters=adapters,
+        decision_store=decisions,
+        require_isolation=False,
+    )
+    original = decisions.values()
+    assert original
+    assert all(receipt.considered_tool_ids for receipt in original)
+    assert any(source_tool in receipt.considered_tool_ids for receipt in original)
+
+    reloaded = RoutingDecisionReceiptStore(JsonlRoutingDecisionReceiptRepository(path))
+    assert [item.to_dict() for item in reloaded.values()] == [item.to_dict() for item in original]
+    for receipt in original:
+        assert RoutingDecisionReceiptV2.from_mapping(receipt.to_dict()) == receipt
+
+    malformed = original[0].to_dict()
+    malformed.pop("considered_tool_ids")
+    assert any("missing_fields" in error for error in validate_routing_decision_receipt(malformed))
+    malformed = original[0].to_dict()
+    malformed["considered_tool_ids"] = "not-an-array"
+    assert any("must_be_an_array" in error for error in validate_routing_decision_receipt(malformed))
+
+
+def test_v2_live_requires_durable_decision_store_before_provider_calls(tmp_path):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+
+    for index, decision_store in enumerate((None, RoutingDecisionReceiptStore())):
+        if decision_store is not None:
+            assert decision_store.is_durable is False
+        calls = []
+
+        def measured_runner(binding, unit, request, authorization):
+            calls.append((binding, unit, request, authorization))
+            value = dict(_runner(binding, unit, request))
+            value["execution_mode"] = ReceiptExecutionMode.MEASURED_LAB.value
+            value["receipt_ref"] = "provider_receipt:" + sha256_json(
+                {key: item for key, item in value.items() if key != "receipt_ref"}
+            ).split(":", 1)[1][:16]
+            return value
+
+        with pytest.raises(RoutingExperimentError, match="durable_decision_receipt_store"):
+            evaluate_routing_experiment_v2(
+                measured,
+                gold_labels=labels,
+                runner=measured_runner,
+                adapters=adapters,
+                receipt_store=ProviderReceiptStore(
+                    JsonlProviderReceiptRepository(tmp_path / f"provider-{index}.jsonl")
+                ),
+                decision_store=decision_store,
+                authoritative_billing_rollup=lambda _store: {
+                    "rollup_id": "rejected",
+                    "rollup_hash": H("9"),
+                    "total_credit_microunits": 0,
+                },
+                require_isolation=False,
+            )
+        assert calls == []
 
 
 def test_v2_signal_type_is_frozen_and_rejected_before_provider_calls():
@@ -599,6 +678,9 @@ def test_v2_live_runner_with_named_authorization_parameter_passes(tmp_path):
         adapters=adapters,
         receipt_store=ProviderReceiptStore(
             JsonlProviderReceiptRepository(tmp_path / "accepted.jsonl")
+        ),
+        decision_store=RoutingDecisionReceiptStore(
+            JsonlRoutingDecisionReceiptRepository(tmp_path / "accepted-decisions.jsonl")
         ),
         authoritative_billing_rollup=lambda _store: {
             "rollup_id": "accepted",
@@ -946,6 +1028,9 @@ def test_v2_live_billing_is_explicit_and_never_promoted(tmp_path):
     durable_path = tmp_path / "leadpoet-v2-receipts-test.jsonl"
     from research_lab.routing_experiments import JsonlProviderReceiptRepository
     store = ProviderReceiptStore(JsonlProviderReceiptRepository(durable_path))
+    decisions = RoutingDecisionReceiptStore(
+        JsonlRoutingDecisionReceiptRepository(tmp_path / "leadpoet-v2-decisions-test.jsonl")
+    )
     def measured_runner(binding, unit, request, authorization):
         assert isinstance(authorization, RoutingCallAuthorization)
         assert authorization.remaining_credit_microunits <= 10
@@ -955,7 +1040,7 @@ def test_v2_live_billing_is_explicit_and_never_promoted(tmp_path):
         value["receipt_ref"] = "provider_receipt:" + sha256_json({key: item for key, item in value.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
         return value
     rollup = lambda _store: {"rollup_id": "billing-v2", "rollup_hash": H("7"), "total_credit_microunits": 40}
-    evaluation = evaluate_routing_experiment_v2(measured, gold_labels=labels, runner=measured_runner, adapters=adapters, receipt_store=store, authoritative_billing_rollup=rollup, require_isolation=False)
+    evaluation = evaluate_routing_experiment_v2(measured, gold_labels=labels, runner=measured_runner, adapters=adapters, receipt_store=store, decision_store=decisions, authoritative_billing_rollup=rollup, require_isolation=False)
     assert evaluation.live_credit_spend is True
     with pytest.raises(RoutingExperimentError, match="cannot_auto_promote"):
         promote_routing_experiment_v2_to_lab(evaluation)
@@ -971,6 +1056,8 @@ def test_v2_live_resume_uses_exact_measured_cache_and_zero_new_billing(tmp_path)
     )
     from research_lab.routing_experiments import JsonlProviderReceiptRepository
     store = ProviderReceiptStore(JsonlProviderReceiptRepository(tmp_path / "resume.jsonl"))
+    decision_path = tmp_path / "resume-decisions.jsonl"
+    decisions = RoutingDecisionReceiptStore(JsonlRoutingDecisionReceiptRepository(decision_path))
     run_count = [0]
 
     def measured_runner(binding, unit, request, authorization):
@@ -988,6 +1075,7 @@ def test_v2_live_resume_uses_exact_measured_cache_and_zero_new_billing(tmp_path)
         runner=measured_runner,
         adapters=adapters,
         receipt_store=store,
+        decision_store=decisions,
         authoritative_billing_rollup=lambda _store: {"rollup_id": "r1", "rollup_hash": H("7"), "total_credit_microunits": next(rollups)},
         require_isolation=False,
     )
@@ -1004,6 +1092,7 @@ def test_v2_live_resume_uses_exact_measured_cache_and_zero_new_billing(tmp_path)
         runner=no_call_runner,
         adapters=adapters,
         receipt_store=store,
+        decision_store=RoutingDecisionReceiptStore(JsonlRoutingDecisionReceiptRepository(decision_path)),
         authoritative_billing_rollup=lambda _store: {"rollup_id": "r2", "rollup_hash": H("8"), "total_credit_microunits": next(rollups)},
         require_isolation=False,
     )
@@ -1052,6 +1141,9 @@ def test_v2_live_mode_rejects_fixture_or_replay_cache_entries(tmp_path):
     )
     from research_lab.routing_experiments import JsonlProviderReceiptRepository
     measured_store = ProviderReceiptStore(JsonlProviderReceiptRepository(tmp_path / "measured.jsonl"))
+    decisions = RoutingDecisionReceiptStore(
+        JsonlRoutingDecisionReceiptRepository(tmp_path / "measured-decisions.jsonl")
+    )
 
     def measured_runner(binding, unit, request, authorization):
         assert authorization.request_fingerprint == request
@@ -1066,6 +1158,7 @@ def test_v2_live_mode_rejects_fixture_or_replay_cache_entries(tmp_path):
         runner=measured_runner,
         adapters=adapters,
         receipt_store=measured_store,
+        decision_store=decisions,
         authoritative_billing_rollup=lambda _store: {"rollup_id": "m", "rollup_hash": H("7"), "total_credit_microunits": 40},
         require_isolation=False,
     )
@@ -1089,6 +1182,9 @@ def test_v2_live_mode_rejects_fixture_or_replay_cache_entries(tmp_path):
             runner=no_call_runner,
             adapters=adapters,
             receipt_store=fixture_store,
+            decision_store=RoutingDecisionReceiptStore(
+                JsonlRoutingDecisionReceiptRepository(tmp_path / "fixture-decisions.jsonl")
+            ),
             authoritative_billing_rollup=lambda _store: {"rollup_id": "m2", "rollup_hash": H("8"), "total_credit_microunits": 0},
             require_isolation=False,
         )

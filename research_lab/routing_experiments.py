@@ -3938,6 +3938,7 @@ class RoutingDecisionReceiptV2:
     unit_ref: str
     plan_hash: str
     route_hash: str
+    considered_tool_ids: tuple[str, ...]
     attempted_tool_ids: tuple[str, ...]
     skipped_tool_reasons: tuple[tuple[str, str], ...]
     outcome_reasons: tuple[tuple[str, str], ...]
@@ -3947,6 +3948,10 @@ class RoutingDecisionReceiptV2:
     execution_mode: str
     immutable: bool = True
     contract_version: str = ROUTING_DECISION_RECEIPT_V2_VERSION
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "RoutingDecisionReceiptV2":
+        return _routing_decision_receipt_from_mapping(cls, data)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -3959,6 +3964,7 @@ class RoutingDecisionReceiptV2:
             "unit_ref": self.unit_ref,
             "plan_hash": self.plan_hash,
             "route_hash": self.route_hash,
+            "considered_tool_ids": list(self.considered_tool_ids),
             "attempted_tool_ids": list(self.attempted_tool_ids),
             "skipped_tool_reasons": [list(item) for item in self.skipped_tool_reasons],
             "outcome_reasons": [list(item) for item in self.outcome_reasons],
@@ -3970,23 +3976,355 @@ class RoutingDecisionReceiptV2:
         }
 
 
-class RoutingDecisionReceiptStore:
-    """Append-only decision receipt store, separate from provider receipts."""
+def _v2_receipt_string_sequence(value: Any, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or isinstance(value, (str, bytes)):
+        raise RoutingExperimentError(f"{field_name}_must_be_an_array")
+    if any(not isinstance(item, str) for item in value):
+        raise RoutingExperimentError(f"{field_name}_must_use_strings")
+    return tuple(value)
+
+
+def _v2_receipt_pair_sequence(value: Any, field_name: str) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, (list, tuple)) or isinstance(value, (str, bytes)):
+        raise RoutingExperimentError(f"{field_name}_must_be_an_array")
+    pairs: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise RoutingExperimentError(f"{field_name}_must_use_string_pairs")
+        if any(not isinstance(part, str) for part in item):
+            raise RoutingExperimentError(f"{field_name}_must_use_string_pairs")
+        pairs.append((item[0], item[1]))
+    return tuple(pairs)
+
+
+def _v2_receipt_int(value: Any, field_name: str) -> int:
+    if type(value) is not int:
+        raise RoutingExperimentError(f"{field_name}_must_be_an_integer")
+    return value
+
+
+def _v2_receipt_str(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise RoutingExperimentError(f"{field_name}_must_be_a_string")
+    return value
+
+
+def _v2_receipt_bool(value: Any, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise RoutingExperimentError(f"{field_name}_must_be_boolean")
+    return value
+
+
+def _routing_decision_receipt_from_mapping(
+    cls: type[RoutingDecisionReceiptV2],
+    data: Mapping[str, Any],
+) -> RoutingDecisionReceiptV2:
+    if not isinstance(data, Mapping):
+        raise RoutingExperimentError("v2_decision_receipt_must_be_an_object")
+    required = (
+        "contract_version",
+        "receipt_id",
+        "experiment_id",
+        "variant_id",
+        "artifact_key",
+        "stage",
+        "unit_ref",
+        "plan_hash",
+        "route_hash",
+        "considered_tool_ids",
+        "attempted_tool_ids",
+        "skipped_tool_reasons",
+        "outcome_reasons",
+        "provider_receipt_refs",
+        "total_credit_microunits",
+        "latency_ms",
+        "execution_mode",
+        "immutable",
+    )
+    missing = [field_name for field_name in required if field_name not in data]
+    if missing:
+        raise RoutingExperimentError(
+            "v2_decision_receipt_missing_fields:" + ",".join(missing)
+        )
+    return cls(
+        receipt_id=_v2_receipt_str(data["receipt_id"], "v2_decision_receipt_id"),
+        experiment_id=_v2_receipt_str(data["experiment_id"], "v2_decision_experiment_id"),
+        variant_id=_v2_receipt_str(data["variant_id"], "v2_decision_variant_id"),
+        artifact_key=_v2_receipt_str(data["artifact_key"], "v2_decision_artifact_key"),
+        stage=_v2_receipt_str(data["stage"], "v2_decision_stage"),
+        unit_ref=_v2_receipt_str(data["unit_ref"], "v2_decision_unit_ref"),
+        plan_hash=_v2_receipt_str(data["plan_hash"], "v2_decision_plan_hash"),
+        route_hash=_v2_receipt_str(data["route_hash"], "v2_decision_route_hash"),
+        considered_tool_ids=_v2_receipt_string_sequence(
+            data["considered_tool_ids"], "v2_decision_considered_tool_ids"
+        ),
+        attempted_tool_ids=_v2_receipt_string_sequence(
+            data["attempted_tool_ids"], "v2_decision_attempted_tool_ids"
+        ),
+        skipped_tool_reasons=_v2_receipt_pair_sequence(
+            data["skipped_tool_reasons"], "v2_decision_skipped_tool_reasons"
+        ),
+        outcome_reasons=_v2_receipt_pair_sequence(
+            data["outcome_reasons"], "v2_decision_outcome_reasons"
+        ),
+        provider_receipt_refs=_v2_receipt_string_sequence(
+            data["provider_receipt_refs"], "v2_decision_provider_receipt_refs"
+        ),
+        total_credit_microunits=_v2_receipt_int(
+            data["total_credit_microunits"], "v2_decision_total_credit_microunits"
+        ),
+        latency_ms=_v2_receipt_int(data["latency_ms"], "v2_decision_latency_ms"),
+        execution_mode=_v2_receipt_str(data["execution_mode"], "v2_decision_execution_mode"),
+        immutable=_v2_receipt_bool(data["immutable"], "v2_decision_immutable"),
+        contract_version=_v2_receipt_str(
+            data["contract_version"], "v2_decision_contract_version"
+        ),
+    )
+
+
+def validate_routing_decision_receipt(
+    receipt: RoutingDecisionReceiptV2 | Mapping[str, Any],
+) -> list[str]:
+    if not isinstance(receipt, RoutingDecisionReceiptV2):
+        try:
+            receipt = RoutingDecisionReceiptV2.from_mapping(receipt)
+        except RoutingExperimentError as exc:
+            return [str(exc)]
+    errors: list[str] = []
+    for field_name in (
+        "receipt_id",
+        "experiment_id",
+        "variant_id",
+        "unit_ref",
+    ):
+        try:
+            _ensure_safe_ref(getattr(receipt, field_name), field_name)
+        except RoutingExperimentError as exc:
+            errors.append(str(exc))
+    for field_name in ("artifact_key", "plan_hash", "route_hash"):
+        try:
+            _ensure_hash(getattr(receipt, field_name), field_name)
+        except RoutingExperimentError as exc:
+            errors.append(str(exc))
+    try:
+        _v2_safe_stage(receipt.stage)
+    except RoutingExperimentError as exc:
+        errors.append(str(exc))
+    if receipt.contract_version != ROUTING_DECISION_RECEIPT_V2_VERSION:
+        errors.append("v2_decision_receipt_contract_version_is_invalid")
+    if receipt.immutable is not True:
+        errors.append("v2_decision_receipt_must_be_immutable")
+    if receipt.execution_mode not in {mode.value for mode in ReceiptExecutionMode}:
+        errors.append("v2_decision_receipt_execution_mode_is_invalid")
+    for field_name, values in (
+        ("considered_tool_ids", receipt.considered_tool_ids),
+        ("attempted_tool_ids", receipt.attempted_tool_ids),
+        ("provider_receipt_refs", receipt.provider_receipt_refs),
+    ):
+        if not isinstance(values, tuple):
+            errors.append(f"v2_decision_{field_name}_is_invalid")
+            continue
+        if any(not isinstance(item, str) for item in values):
+            errors.append(f"v2_decision_{field_name}_is_invalid")
+            continue
+        for item in values:
+            try:
+                _ensure_safe_ref(item, f"v2_decision_{field_name[:-4]}_id")
+            except RoutingExperimentError as exc:
+                errors.append(str(exc))
+    if len(set(receipt.considered_tool_ids)) != len(receipt.considered_tool_ids):
+        errors.append("v2_decision_considered_tool_ids_must_be_unique")
+    for field_name, pairs in (
+        ("skipped_tool_reasons", receipt.skipped_tool_reasons),
+        ("outcome_reasons", receipt.outcome_reasons),
+    ):
+        if not isinstance(pairs, tuple):
+            errors.append(f"v2_decision_{field_name}_is_invalid")
+            continue
+        for pair in pairs:
+            if (
+                not isinstance(pair, tuple)
+                or len(pair) != 2
+                or any(not isinstance(item, str) for item in pair)
+            ):
+                errors.append(f"v2_decision_{field_name}_is_invalid")
+                continue
+            try:
+                _ensure_safe_ref(pair[0], f"v2_decision_{field_name[:-8]}_tool_id")
+                _ensure_safe_ref(pair[1], f"v2_decision_{field_name[:-8]}_reason")
+            except RoutingExperimentError as exc:
+                errors.append(str(exc))
+    try:
+        _bounded_int(
+            receipt.total_credit_microunits,
+            "v2_decision_total_credit_microunits",
+            minimum=0,
+            maximum=MAX_CREDIT_MICROUNITS_PER_VARIANT,
+        )
+        _bounded_int(
+            receipt.latency_ms,
+            "v2_decision_latency_ms",
+            minimum=0,
+            maximum=MAX_LATENCY_MS,
+        )
+    except RoutingExperimentError as exc:
+        errors.append(str(exc))
+    try:
+        _ensure_no_secret_material(receipt.to_dict(), field_name="v2_decision_receipt")
+    except RoutingExperimentError as exc:
+        errors.append(str(exc))
+    identity_payload = receipt.to_dict()
+    identity_payload["receipt_id"] = "routing_decision:pending"
+    expected_id = "routing_decision:" + sha256_json(identity_payload).split(":", 1)[1][:16]
+    if receipt.receipt_id != expected_id:
+        errors.append("v2_decision_receipt_id_mismatch")
+    return sorted(set(errors))
+
+
+class RoutingDecisionReceiptRepository(Protocol):
+    """Persistence seam for redacted per-unit route decision receipts."""
+
+    durable: bool
+
+    def get(self, key: str) -> RoutingDecisionReceiptV2 | None: ...
+
+    def append(self, key: str, receipt: RoutingDecisionReceiptV2) -> RoutingDecisionReceiptV2: ...
+
+    def keys(self) -> Iterable[str]: ...
+
+
+class InMemoryRoutingDecisionReceiptRepository:
+    """Non-durable repository used by fixture and replay experiments."""
+
+    durable = False
 
     def __init__(self) -> None:
         self._rows: dict[str, RoutingDecisionReceiptV2] = {}
 
-    def put(self, receipt: RoutingDecisionReceiptV2) -> RoutingDecisionReceiptV2:
-        if receipt.receipt_id in self._rows and self._rows[receipt.receipt_id].to_dict() != receipt.to_dict():
+    def get(self, key: str) -> RoutingDecisionReceiptV2 | None:
+        return self._rows.get(str(key))
+
+    def append(self, key: str, receipt: RoutingDecisionReceiptV2) -> RoutingDecisionReceiptV2:
+        key = str(key)
+        if key != receipt.receipt_id:
+            raise RoutingExperimentError("v2_decision_receipt_repository_key_mismatch")
+        errors = validate_routing_decision_receipt(receipt)
+        if errors:
+            raise RoutingExperimentError("v2_decision_receipt_invalid: " + "; ".join(errors))
+        existing = self._rows.get(key)
+        if existing is not None and existing.to_dict() != receipt.to_dict():
             raise RoutingExperimentError("v2_decision_receipt_id_collision")
-        self._rows[receipt.receipt_id] = receipt
+        self._rows[key] = receipt
         return receipt
 
+    def keys(self) -> Iterable[str]:
+        return tuple(self._rows)
+
+
+class JsonlRoutingDecisionReceiptRepository:
+    """Append-only, fsync-backed repository for redacted decision receipts."""
+
+    durable = True
+    _lock_guard = threading.Lock()
+    _locks: dict[str, threading.RLock] = {}
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        self.path = Path(path).resolve()
+        self._rows: dict[str, RoutingDecisionReceiptV2] = {}
+        with self._lock_guard:
+            self._lock = self._locks.setdefault(str(self.path), threading.RLock())
+        with self._lock:
+            self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        with self.path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                    if not isinstance(record, Mapping):
+                        raise RoutingExperimentError("v2_decision_receipt_repository_record_is_invalid")
+                    key = record.get("key")
+                    receipt = RoutingDecisionReceiptV2.from_mapping(record.get("receipt") or {})
+                    if not isinstance(key, str) or not key:
+                        raise RoutingExperimentError("v2_decision_receipt_repository_key_is_empty")
+                    if key != receipt.receipt_id:
+                        raise RoutingExperimentError("v2_decision_receipt_repository_key_mismatch")
+                    errors = validate_routing_decision_receipt(receipt)
+                    if errors:
+                        raise RoutingExperimentError(
+                            "v2_decision_receipt_repository_record_invalid: " + "; ".join(errors)
+                        )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    if isinstance(exc, RoutingExperimentError):
+                        raise
+                    raise RoutingExperimentError("v2_decision_receipt_repository_record_invalid") from exc
+                existing = self._rows.get(key)
+                if existing is not None and existing.to_dict() != receipt.to_dict():
+                    raise RoutingExperimentError("v2_decision_receipt_id_collision")
+                self._rows[key] = receipt
+
+    def get(self, key: str) -> RoutingDecisionReceiptV2 | None:
+        with self._lock:
+            return self._rows.get(str(key))
+
+    def append(self, key: str, receipt: RoutingDecisionReceiptV2) -> RoutingDecisionReceiptV2:
+        with self._lock:
+            key = str(key)
+            if key != receipt.receipt_id:
+                raise RoutingExperimentError("v2_decision_receipt_repository_key_mismatch")
+            errors = validate_routing_decision_receipt(receipt)
+            if errors:
+                raise RoutingExperimentError("v2_decision_receipt_invalid: " + "; ".join(errors))
+            existing = self._rows.get(key)
+            if existing is not None:
+                if existing.to_dict() != receipt.to_dict():
+                    raise RoutingExperimentError("v2_decision_receipt_id_collision")
+                return existing
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"key": key, "receipt": receipt.to_dict()}
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._rows[key] = receipt
+            return receipt
+
+    def keys(self) -> Iterable[str]:
+        with self._lock:
+            return tuple(self._rows)
+
+
+class RoutingDecisionReceiptStore:
+    """Append-only decision receipt store, separate from provider receipts."""
+
+    def __init__(self, repository: RoutingDecisionReceiptRepository | None = None) -> None:
+        self.repository = repository if repository is not None else InMemoryRoutingDecisionReceiptRepository()
+
+    @property
+    def is_durable(self) -> bool:
+        return getattr(self.repository, "durable", False) is True
+
+    def put(self, receipt: RoutingDecisionReceiptV2 | Mapping[str, Any]) -> RoutingDecisionReceiptV2:
+        normalized = receipt if isinstance(receipt, RoutingDecisionReceiptV2) else RoutingDecisionReceiptV2.from_mapping(receipt)
+        errors = validate_routing_decision_receipt(normalized)
+        if errors:
+            raise RoutingExperimentError("v2_decision_receipt_invalid: " + "; ".join(errors))
+        return self.repository.append(normalized.receipt_id, normalized)
+
     def get(self, receipt_id: str) -> RoutingDecisionReceiptV2 | None:
-        return self._rows.get(str(receipt_id))
+        return self.repository.get(str(receipt_id))
 
     def values(self) -> tuple[RoutingDecisionReceiptV2, ...]:
-        return tuple(self._rows[key] for key in sorted(self._rows))
+        values: list[RoutingDecisionReceiptV2] = []
+        for key in sorted(self.repository.keys()):
+            receipt = self.repository.get(key)
+            if receipt is not None:
+                values.append(receipt)
+        return tuple(values)
 
 
 @dataclass(frozen=True)
@@ -4467,6 +4805,7 @@ def _v2_run_unit(
         unit_ref=unit_ref,
         plan_hash=_v2_model_or_lab_hash(plan_hash, "v2_plan_hash"),
         route_hash=_v2_hash(route_hash, "v2_route_hash"),
+        considered_tool_ids=considered_tool_ids,
         attempted_tool_ids=attempted,
         skipped_tool_reasons=skipped,
         outcome_reasons=outcomes,
@@ -4571,6 +4910,8 @@ def evaluate_routing_experiment_v2(
             raise RoutingExperimentError("v2_live_spend_requires_authorization_aware_runner")
         if receipt_store is None or isinstance(receipt_store.repository, InMemoryProviderReceiptRepository):
             raise RoutingExperimentError("v2_live_spend_requires_durable_receipt_repository")
+        if decision_store is None or getattr(decision_store, "is_durable", False) is not True:
+            raise RoutingExperimentError("v2_live_spend_requires_durable_decision_receipt_store")
         if authoritative_billing_rollup is None:
             raise RoutingExperimentError("v2_live_spend_requires_authoritative_billing_rollup")
     elif spec.receipt_execution_mode == ReceiptExecutionMode.MEASURED_LAB.value:
@@ -4756,6 +5097,9 @@ __all__ = [
     "ProviderReceiptStore",
     "InMemoryProviderReceiptRepository",
     "JsonlProviderReceiptRepository",
+    "RoutingDecisionReceiptRepository",
+    "InMemoryRoutingDecisionReceiptRepository",
+    "JsonlRoutingDecisionReceiptRepository",
     "ProposalState",
     "ProfileLifecycle",
     "ReceiptExecutionMode",
@@ -4798,6 +5142,7 @@ __all__ = [
     "validate_model_routing_profile",
     "validate_provider_binding_identity",
     "validate_provider_receipt",
+    "validate_routing_decision_receipt",
     "validate_routing_evaluation_receipt",
     "validate_routing_evaluation_gates",
     "validate_routing_experiment_spec",

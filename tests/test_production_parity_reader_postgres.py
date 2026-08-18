@@ -222,3 +222,29 @@ def test_binder_failure_commits_nologin_for_unsafe_existing_role(postgres):
         connection.close()
     assert _bind(postgres, "not-a-password")["status"] == "disabled"
     assert _contract(postgres)["login_enabled"] is False
+
+
+def test_migration_refuses_an_existing_superuser_collision(postgres):
+    _apply_migration(postgres)
+    connection = _admin(postgres)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f"ALTER ROLE {READER} SUPERUSER")
+    finally:
+        connection.close()
+
+    try:
+        with pytest.raises(
+            psycopg2.errors.RaiseException,
+            match="unexpectedly superuser",
+        ):
+            _apply_migration(postgres)
+        assert _contract(postgres)["superuser"] is True
+    finally:
+        connection = _admin(postgres)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(f"ALTER ROLE {READER} NOSUPERUSER")
+        finally:
+            connection.close()
+        _apply_migration(postgres)

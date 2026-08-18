@@ -25,6 +25,15 @@ BEGIN
     EXECUTE 'CREATE ROLE leadpoet_parity_reader NOLOGIN';
   END IF;
 
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'leadpoet_parity_reader'
+      AND rolsuper
+  ) THEN
+    RAISE EXCEPTION 'production parity reader role is unexpectedly superuser';
+  END IF;
+
   FOR membership IN
     SELECT granted.rolname
     FROM pg_catalog.pg_auth_members member
@@ -38,14 +47,25 @@ BEGIN
     );
   END LOOP;
 
+  -- Hosted Supabase delegates BYPASSRLS through supautils but rejects any
+  -- superuser-option syntax in ALTER ROLE, including a redundant false value.
+  -- The exact precheck above and the default on CREATE preserve fail-closed
+  -- non-superuser identity without crossing that reserved-option boundary.
   ALTER ROLE leadpoet_parity_reader WITH
-    NOSUPERUSER
     NOCREATEDB
     NOCREATEROLE
     NOINHERIT
     NOREPLICATION
     BYPASSRLS
     CONNECTION LIMIT 2;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'leadpoet_parity_reader'
+      AND rolsuper
+  ) THEN
+    RAISE EXCEPTION 'production parity reader role is unexpectedly superuser';
+  END IF;
   ALTER ROLE leadpoet_parity_reader
     SET default_transaction_read_only = on;
   ALTER ROLE leadpoet_parity_reader

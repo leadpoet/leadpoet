@@ -1832,6 +1832,9 @@ def test_migration_is_clone_safe_and_rechecks_complete_contract():
     assert "has_sequence_privilege" in source
     assert "default_transaction_read_only=on" in source
     assert "pg_auth_members" in source
+    assert source.count("AND rolsuper") == 2
+    assert "unexpectedly superuser" in source
+    assert "NOSUPERUSER" not in source
     assert "EXCEPTION WHEN OTHERS" in source
     assert PASSWORD not in source
 

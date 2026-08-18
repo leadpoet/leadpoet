@@ -4,15 +4,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ClientError
 
 from scripts.cleanup_production_parity_staging import (
     _owned_run,
     cleanup_stale,
 )
 from scripts.provision_production_parity_staging import (
+    PARITY_VOLUME_GIB,
+    PRODUCTION_ACCOUNT_ID,
+    PRODUCTION_REGION,
+    SCHEMA_VERSION,
     ProvisioningError,
+    _artifact_bucket_name,
+    _distribution_arn,
+    _resource_arn,
     _single_production_instance,
     create_stack,
+    delete_stack,
 )
 from leadpoet_canonical.attested_v2 import sha256_json
 from tests.restart_rehearsal.sanitized_weight_fixture import (
@@ -22,7 +31,10 @@ from tests.restart_rehearsal.sanitized_weight_fixture import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 40
-RUN_ID = "run-123456"
+RUN_ID = "pp-123456-1"
+INSTANCE_ID = "i-0123456789abcdef0"
+SECURITY_GROUP_ID = "sg-0123456789abcdef0"
+DISTRIBUTION_ID = "E123456789ABCD"
 
 
 def _reference_instance() -> dict:
@@ -59,7 +71,7 @@ class _EC2:
                 {
                     "Instances": [
                         {
-                            "InstanceId": "i-parity",
+                            "InstanceId": INSTANCE_ID,
                             "PublicDnsName": "ec2-parity.example.invalid",
                         }
                     ]
@@ -78,14 +90,14 @@ class _EC2:
         }
 
     def create_security_group(self, **_kwargs):
-        return {"GroupId": "sg-parity"}
+        return {"GroupId": SECURITY_GROUP_ID}
 
     def authorize_security_group_ingress(self, **kwargs):
         self.ingress = kwargs
 
     def run_instances(self, **kwargs):
         self.launch = kwargs
-        return {"Instances": [{"InstanceId": "i-parity"}]}
+        return {"Instances": [{"InstanceId": INSTANCE_ID}]}
 
     def get_waiter(self, _name):
         return _Waiter()
@@ -146,8 +158,8 @@ class _CloudFront:
         self.config = kwargs["DistributionConfig"]
         return {
             "Distribution": {
-                "Id": "EDIST",
-                "ARN": "arn:aws:cloudfront::123:distribution/EDIST",
+                "Id": DISTRIBUTION_ID,
+                "ARN": _distribution_arn(DISTRIBUTION_ID),
             }
         }
 
@@ -159,7 +171,7 @@ class _SSM:
     def describe_instance_information(self, **_kwargs):
         return {
             "InstanceInformationList": [
-                {"InstanceId": "i-parity", "PingStatus": "Online"}
+                {"InstanceId": INSTANCE_ID, "PingStatus": "Online"}
             ]
         }
 
@@ -193,6 +205,164 @@ class _S3:
         self.deleted.append(kwargs["Bucket"])
 
 
+def _owned_tags() -> list[dict[str, str]]:
+    return [
+        {"Key": "leadpoet:parity-run", "Value": RUN_ID},
+        {"Key": "leadpoet:candidate-sha", "Value": SHA},
+        {"Key": "leadpoet:ephemeral", "Value": "true"},
+        {"Key": "Name", "Value": f"leadpoet-parity-{RUN_ID}"},
+    ]
+
+
+def _delete_state(**overrides) -> dict:
+    value = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "ready",
+        "account_id": PRODUCTION_ACCOUNT_ID,
+        "region": PRODUCTION_REGION,
+        "run_id": RUN_ID,
+        "candidate_sha": SHA,
+        "instance_id": INSTANCE_ID,
+        "instance_arn": _resource_arn(
+            kind="instance", resource_id=INSTANCE_ID
+        ),
+        "security_group_id": SECURITY_GROUP_ID,
+        "security_group_arn": _resource_arn(
+            kind="security-group", resource_id=SECURITY_GROUP_ID
+        ),
+        "cloudfront_distribution_id": DISTRIBUTION_ID,
+        "cloudfront_distribution_arn": _distribution_arn(DISTRIBUTION_ID),
+        "artifact_bucket": _artifact_bucket_name(
+            account_id=PRODUCTION_ACCOUNT_ID,
+            run_id=RUN_ID,
+            candidate_sha=SHA,
+        ),
+        "volume_gib": PARITY_VOLUME_GIB,
+    }
+    value.update(overrides)
+    return value
+
+
+def _aws_error(code: str, operation: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code, "Message": "redacted test failure"}},
+        operation,
+    )
+
+
+class _DeleteCloudFront:
+    def __init__(
+        self,
+        *,
+        absent: bool = False,
+        tags: list[dict[str, str]] | None = None,
+        distribution_id: str = DISTRIBUTION_ID,
+        distribution_arn: str | None = None,
+        fail_delete: bool = False,
+        enabled: bool = False,
+    ):
+        self.absent = absent
+        self.tags = list(tags if tags is not None else _owned_tags())
+        self.distribution_id = distribution_id
+        self.distribution_arn = distribution_arn or _distribution_arn(
+            DISTRIBUTION_ID
+        )
+        self.fail_delete = fail_delete
+        self.enabled = enabled
+        self.calls: list[str] = []
+
+    def get_distribution(self, **_kwargs):
+        self.calls.append("get_distribution")
+        if self.absent:
+            raise _aws_error("NoSuchDistribution", "GetDistribution")
+        return {
+            "ETag": "etag-1",
+            "Distribution": {
+                "Id": self.distribution_id,
+                "ARN": self.distribution_arn,
+                "Status": "Deployed",
+                "DistributionConfig": {"Enabled": self.enabled},
+            },
+        }
+
+    def list_tags_for_resource(self, **_kwargs):
+        self.calls.append("list_tags_for_resource")
+        return {"Tags": {"Items": self.tags}}
+
+    def delete_distribution(self, **_kwargs):
+        self.calls.append("delete_distribution")
+        if self.fail_delete:
+            raise RuntimeError("injected CloudFront deletion failure")
+
+    def update_distribution(self, **kwargs):
+        self.calls.append("update_distribution")
+        self.enabled = bool(kwargs["DistributionConfig"]["Enabled"])
+
+
+class _DeleteEC2:
+    def __init__(
+        self,
+        *,
+        instance_absent: bool = False,
+        group_absent: bool = False,
+        instance_tags: list[dict[str, str]] | None = None,
+        instance_id: str = INSTANCE_ID,
+        group_arn: str | None = None,
+    ):
+        self.instance_absent = instance_absent
+        self.group_absent = group_absent
+        self.instance_tags = list(
+            instance_tags if instance_tags is not None else _owned_tags()
+        )
+        self.instance_id = instance_id
+        self.group_arn = group_arn or _resource_arn(
+            kind="security-group", resource_id=SECURITY_GROUP_ID
+        )
+        self.calls: list[str] = []
+
+    def describe_instances(self, **_kwargs):
+        self.calls.append("describe_instances")
+        if self.instance_absent:
+            return {"Reservations": []}
+        return {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": self.instance_id,
+                            "State": {"Name": "running"},
+                            "Tags": self.instance_tags,
+                        }
+                    ]
+                }
+            ]
+        }
+
+    def terminate_instances(self, **_kwargs):
+        self.calls.append("terminate_instances")
+
+    def get_waiter(self, _name):
+        return _Waiter()
+
+    def describe_security_groups(self, **_kwargs):
+        self.calls.append("describe_security_groups")
+        if self.group_absent:
+            raise _aws_error("InvalidGroup.NotFound", "DescribeSecurityGroups")
+        return {
+            "SecurityGroups": [
+                {
+                    "GroupId": SECURITY_GROUP_ID,
+                    "OwnerId": PRODUCTION_ACCOUNT_ID,
+                    "SecurityGroupArn": self.group_arn,
+                    "Tags": _owned_tags(),
+                }
+            ]
+        }
+
+    def delete_security_group(self, **_kwargs):
+        self.calls.append("delete_security_group")
+
+
 def test_reference_gateway_must_be_one_nitro_imdsv2_instance():
     ec2 = _EC2()
     assert _single_production_instance(ec2, "52.91.135.79")["ImageId"] == "ami-production"
@@ -208,7 +378,7 @@ def test_transient_stack_is_one_encrypted_nitro_host_with_tls_viewer_boundary(mo
     monkeypatch.setattr(
         "scripts.provision_production_parity_staging._wait_distribution",
         lambda _client, _distribution_id, *, enabled, timeout_seconds=1200: {
-            "ARN": "arn:aws:cloudfront::123:distribution/EDIST",
+            "ARN": _distribution_arn(DISTRIBUTION_ID),
             "DomainName": "parity.cloudfront.net",
             "DistributionConfig": {"Enabled": enabled},
             "Status": "Deployed",
@@ -226,9 +396,20 @@ def test_transient_stack_is_one_encrypted_nitro_host_with_tls_viewer_boundary(mo
         production_gateway_ip="52.91.135.79",
         instance_profile_name="leadpoet-production-parity-runner",
         instance_type=None,
-        volume_gib=512,
+        volume_gib=PARITY_VOLUME_GIB,
     )
-    assert state["instance_id"] == "i-parity"
+    assert state["instance_id"] == INSTANCE_ID
+    assert state["account_id"] == PRODUCTION_ACCOUNT_ID
+    assert state["region"] == PRODUCTION_REGION
+    assert state["instance_arn"] == _resource_arn(
+        kind="instance", resource_id=INSTANCE_ID
+    )
+    assert state["security_group_arn"] == _resource_arn(
+        kind="security-group", resource_id=SECURITY_GROUP_ID
+    )
+    assert state["cloudfront_distribution_arn"] == _distribution_arn(
+        DISTRIBUTION_ID
+    )
     assert state["supabase_origin"] == "https://parity.cloudfront.net"
     assert state["artifact_bucket"].startswith(
         "leadpoet-parity-493765492819-"
@@ -245,6 +426,7 @@ def test_transient_stack_is_one_encrypted_nitro_host_with_tls_viewer_boundary(mo
     assert "systemctl mask --now" in ec2.launch["UserData"]
     assert "leadpoet-production-parity/early-boot-isolated" in ec2.launch["UserData"]
     root = ec2.launch["BlockDeviceMappings"][0]["Ebs"]
+    assert root["VolumeSize"] == PARITY_VOLUME_GIB
     assert root["Encrypted"] is True
     assert root["DeleteOnTermination"] is True
     assert root["VolumeType"] == "gp3"
@@ -277,12 +459,186 @@ def test_partial_provisioning_failure_immediately_rolls_back_costly_resources():
             production_gateway_ip="52.91.135.79",
             instance_profile_name="leadpoet-production-parity-runner",
             instance_type=None,
-            volume_gib=512,
+            volume_gib=PARITY_VOLUME_GIB,
         )
-    assert ec2.terminated == ["i-parity"]
-    assert ec2.deleted_groups == ["sg-parity"]
+    assert ec2.terminated == [INSTANCE_ID]
+    assert ec2.deleted_groups == [SECURITY_GROUP_ID]
     assert len(s3.deleted) == 1
     assert s3.deleted[0].startswith("leadpoet-parity-493765492819-")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("account_id", "000000000000"),
+        ("region", "us-west-2"),
+        ("status", "creating"),
+        ("run_id", "run-123456"),
+        ("candidate_sha", "b" * 39),
+        ("instance_id", "i-wrong"),
+        ("security_group_id", "sg-wrong"),
+        ("cloudfront_distribution_id", "wrong"),
+        ("instance_arn", "arn:aws:ec2:us-east-1:000000000000:instance/i-wrong"),
+        ("volume_gib", 511),
+        ("artifact_bucket", "leadpoet-parity-wrong"),
+    ),
+)
+def test_delete_rejects_unbound_state_before_any_resource_read(field, value):
+    state = _delete_state(**{field: value})
+    ec2 = _DeleteEC2()
+    cloudfront = _DeleteCloudFront()
+    with pytest.raises(ProvisioningError):
+        delete_stack(ec2=ec2, cloudfront=cloudfront, state=state)
+    assert ec2.calls == []
+    assert cloudfront.calls == []
+
+
+@pytest.mark.parametrize(
+    "identity",
+    (
+        {"account_id": "000000000000"},
+        {"region": "us-west-2"},
+    ),
+)
+def test_delete_rejects_wrong_live_aws_identity_before_resource_read(identity):
+    ec2 = _DeleteEC2()
+    cloudfront = _DeleteCloudFront()
+    with pytest.raises(ProvisioningError, match="AWS deletion identity"):
+        delete_stack(
+            ec2=ec2,
+            cloudfront=cloudfront,
+            state=_delete_state(),
+            **identity,
+        )
+    assert ec2.calls == []
+    assert cloudfront.calls == []
+
+
+def test_delete_reads_exact_live_ownership_before_each_mutation():
+    ec2 = _DeleteEC2()
+    cloudfront = _DeleteCloudFront()
+    result = delete_stack(
+        ec2=ec2, cloudfront=cloudfront, state=_delete_state()
+    )
+    assert result["distribution_deleted"] is True
+    assert result["instance_terminated"] is True
+    assert result["security_group_deleted"] is True
+    assert cloudfront.calls == [
+        "get_distribution",
+        "list_tags_for_resource",
+        "get_distribution",
+        "list_tags_for_resource",
+        "delete_distribution",
+    ]
+    assert ec2.calls.index("describe_instances") < ec2.calls.index(
+        "terminate_instances"
+    )
+    assert ec2.calls.index("describe_security_groups") < ec2.calls.index(
+        "delete_security_group"
+    )
+
+
+def test_delete_revalidates_cloudfront_after_disabling_before_delete():
+    ec2 = _DeleteEC2()
+    cloudfront = _DeleteCloudFront(enabled=True)
+    delete_stack(ec2=ec2, cloudfront=cloudfront, state=_delete_state())
+    update_index = cloudfront.calls.index("update_distribution")
+    delete_index = cloudfront.calls.index("delete_distribution")
+    tag_reads = [
+        index
+        for index, call in enumerate(cloudfront.calls)
+        if call == "list_tags_for_resource"
+    ]
+    assert tag_reads[0] < update_index
+    assert any(update_index < index < delete_index for index in tag_reads)
+
+
+def test_delete_is_idempotent_when_every_resource_is_already_absent():
+    ec2 = _DeleteEC2(instance_absent=True, group_absent=True)
+    cloudfront = _DeleteCloudFront(absent=True)
+    result = delete_stack(
+        ec2=ec2, cloudfront=cloudfront, state=_delete_state()
+    )
+    assert result["distribution_deleted"] is True
+    assert result["instance_terminated"] is True
+    assert result["security_group_deleted"] is True
+    assert "terminate_instances" not in ec2.calls
+    assert "delete_security_group" not in ec2.calls
+    assert "delete_distribution" not in cloudfront.calls
+
+
+def test_delete_aggregates_failure_after_other_resource_attempts():
+    ec2 = _DeleteEC2()
+    cloudfront = _DeleteCloudFront(fail_delete=True)
+    with pytest.raises(
+        ProvisioningError, match="cloudfront:RuntimeError"
+    ):
+        delete_stack(ec2=ec2, cloudfront=cloudfront, state=_delete_state())
+    assert "terminate_instances" in ec2.calls
+    assert "delete_security_group" in ec2.calls
+
+
+def test_delete_refuses_wrong_live_tags_but_cleans_independent_resources():
+    wrong_tags = _owned_tags()
+    wrong_tags[1] = {"Key": "leadpoet:candidate-sha", "Value": "b" * 40}
+    ec2 = _DeleteEC2(instance_tags=wrong_tags)
+    cloudfront = _DeleteCloudFront()
+    with pytest.raises(
+        ProvisioningError, match="instance:ProvisioningError"
+    ):
+        delete_stack(ec2=ec2, cloudfront=cloudfront, state=_delete_state())
+    assert "terminate_instances" not in ec2.calls
+    assert "delete_security_group" in ec2.calls
+    assert "delete_distribution" in cloudfront.calls
+
+
+def test_delete_refuses_wrong_cloudfront_tags_without_mutating_distribution():
+    wrong_tags = _owned_tags()
+    wrong_tags[0] = {"Key": "leadpoet:parity-run", "Value": "pp-999999-1"}
+    ec2 = _DeleteEC2()
+    cloudfront = _DeleteCloudFront(tags=wrong_tags)
+    with pytest.raises(
+        ProvisioningError, match="cloudfront:ProvisioningError"
+    ):
+        delete_stack(ec2=ec2, cloudfront=cloudfront, state=_delete_state())
+    assert "delete_distribution" not in cloudfront.calls
+    assert "terminate_instances" in ec2.calls
+    assert "delete_security_group" in ec2.calls
+
+
+@pytest.mark.parametrize(
+    "ec2",
+    (
+        _DeleteEC2(instance_id="i-11111111111111111"),
+        _DeleteEC2(
+            group_arn=(
+                "arn:aws:ec2:us-east-1:493765492819:"
+                "security-group/sg-11111111111111111"
+            )
+        ),
+    ),
+)
+def test_delete_refuses_wrong_live_resource_identity(ec2):
+    cloudfront = _DeleteCloudFront()
+    with pytest.raises(ProvisioningError, match="ProvisioningError"):
+        delete_stack(ec2=ec2, cloudfront=cloudfront, state=_delete_state())
+
+
+def test_delete_refuses_wrong_live_cloudfront_arn_without_mutating_it():
+    ec2 = _DeleteEC2()
+    cloudfront = _DeleteCloudFront(
+        distribution_arn=(
+            "arn:aws:cloudfront::000000000000:distribution/"
+            f"{DISTRIBUTION_ID}"
+        )
+    )
+    with pytest.raises(
+        ProvisioningError, match="cloudfront:ProvisioningError"
+    ):
+        delete_stack(ec2=ec2, cloudfront=cloudfront, state=_delete_state())
+    assert "delete_distribution" not in cloudfront.calls
+    assert "terminate_instances" in ec2.calls
+    assert "delete_security_group" in ec2.calls
 
 
 def test_cleanup_requires_all_exact_ownership_tags():

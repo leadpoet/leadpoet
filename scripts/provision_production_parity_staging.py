@@ -17,11 +17,17 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
 
-RUN_RE = re.compile(r"^[a-z0-9-]{6,40}$")
+RUN_RE = re.compile(r"^pp-[0-9]{1,20}-[0-9]{1,6}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 INSTANCE_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,31}$")
 IP_RE = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
-SCHEMA_VERSION = "leadpoet.production_parity_ephemeral_stack.v2"
+INSTANCE_ID_RE = re.compile(r"^i-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
+SECURITY_GROUP_ID_RE = re.compile(r"^sg-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
+CLOUDFRONT_DISTRIBUTION_ID_RE = re.compile(r"^E[A-Z0-9]{7,31}$")
+SCHEMA_VERSION = "leadpoet.production_parity_ephemeral_stack.v3"
+PRODUCTION_ACCOUNT_ID = "493765492819"
+PRODUCTION_REGION = "us-east-1"
+PARITY_VOLUME_GIB = 512
 TAG_RUN = "leadpoet:parity-run"
 TAG_SHA = "leadpoet:candidate-sha"
 TAG_EPHEMERAL = "leadpoet:ephemeral"
@@ -42,6 +48,20 @@ class ProvisioningError(RuntimeError):
     """A transient stack could not be proven bounded to one candidate."""
 
 
+def _resource_arn(*, kind: str, resource_id: str) -> str:
+    return (
+        f"arn:aws:ec2:{PRODUCTION_REGION}:{PRODUCTION_ACCOUNT_ID}:"
+        f"{kind}/{resource_id}"
+    )
+
+
+def _distribution_arn(distribution_id: str) -> str:
+    return (
+        f"arn:aws:cloudfront::{PRODUCTION_ACCOUNT_ID}:"
+        f"distribution/{distribution_id}"
+    )
+
+
 def _tags(run_id: str, candidate_sha: str) -> list[dict[str, str]]:
     return [
         {"Key": TAG_RUN, "Value": run_id},
@@ -60,6 +80,94 @@ def _artifact_bucket_name(
         f"{account_id}:{run_id}:{candidate_sha}".encode("ascii")
     ).hexdigest()[:16]
     return f"leadpoet-parity-{account_id}-{suffix}"
+
+
+def _client_error_code(exc: BaseException) -> str:
+    if not isinstance(exc, ClientError):
+        return ""
+    return str(exc.response.get("Error", {}).get("Code") or "")
+
+
+def _require_ownership_tags(
+    tags: Sequence[Mapping[str, Any]], *, run_id: str, candidate_sha: str
+) -> None:
+    expected = {
+        TAG_RUN: run_id,
+        TAG_SHA: candidate_sha,
+        TAG_EPHEMERAL: "true",
+        "Name": f"leadpoet-parity-{run_id}",
+    }
+    for key, expected_value in expected.items():
+        observed = [
+            str(tag.get("Value") or "")
+            for tag in tags
+            if str(tag.get("Key") or "") == key
+        ]
+        if observed != [expected_value]:
+            raise ProvisioningError(
+                "ephemeral resource ownership tags do not match state"
+            )
+
+
+def _validate_state(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ProvisioningError("ephemeral stack state schema differs")
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise ProvisioningError("ephemeral stack state schema differs")
+    if value.get("status") != "ready":
+        raise ProvisioningError("ephemeral stack state is not ready")
+    if value.get("account_id") != PRODUCTION_ACCOUNT_ID:
+        raise ProvisioningError("ephemeral stack state account differs")
+    if value.get("region") != PRODUCTION_REGION:
+        raise ProvisioningError("ephemeral stack state region differs")
+
+    run_id = str(value.get("run_id") or "")
+    candidate_sha = str(value.get("candidate_sha") or "")
+    instance_id = str(value.get("instance_id") or "")
+    security_group_id = str(value.get("security_group_id") or "")
+    distribution_id = str(value.get("cloudfront_distribution_id") or "")
+    if not RUN_RE.fullmatch(run_id):
+        raise ProvisioningError("ephemeral stack state run identity is invalid")
+    if not SHA_RE.fullmatch(candidate_sha):
+        raise ProvisioningError("ephemeral stack state candidate identity is invalid")
+    if not INSTANCE_ID_RE.fullmatch(instance_id):
+        raise ProvisioningError("ephemeral stack state instance identity is invalid")
+    if not SECURITY_GROUP_ID_RE.fullmatch(security_group_id):
+        raise ProvisioningError(
+            "ephemeral stack state security-group identity is invalid"
+        )
+    if not CLOUDFRONT_DISTRIBUTION_ID_RE.fullmatch(distribution_id):
+        raise ProvisioningError(
+            "ephemeral stack state CloudFront identity is invalid"
+        )
+
+    expected_instance_arn = _resource_arn(
+        kind="instance", resource_id=instance_id
+    )
+    expected_security_group_arn = _resource_arn(
+        kind="security-group", resource_id=security_group_id
+    )
+    expected_distribution_arn = _distribution_arn(distribution_id)
+    if value.get("instance_arn") != expected_instance_arn:
+        raise ProvisioningError("ephemeral stack state instance ARN differs")
+    if value.get("security_group_arn") != expected_security_group_arn:
+        raise ProvisioningError("ephemeral stack state security-group ARN differs")
+    if value.get("cloudfront_distribution_arn") != expected_distribution_arn:
+        raise ProvisioningError("ephemeral stack state CloudFront ARN differs")
+
+    expected_bucket = _artifact_bucket_name(
+        account_id=PRODUCTION_ACCOUNT_ID,
+        run_id=run_id,
+        candidate_sha=candidate_sha,
+    )
+    if value.get("artifact_bucket") != expected_bucket:
+        raise ProvisioningError("ephemeral stack state artifact bucket differs")
+    if (
+        type(value.get("volume_gib")) is not int
+        or value.get("volume_gib") != PARITY_VOLUME_GIB
+    ):
+        raise ProvisioningError("ephemeral stack state volume differs")
+    return dict(value)
 
 
 def _create_artifact_bucket(
@@ -258,7 +366,9 @@ def _create_stack_resources(
         not RUN_RE.fullmatch(run_id)
         or not SHA_RE.fullmatch(candidate_sha)
         or not instance_profile_name
-        or volume_gib != 512
+        or account_id != PRODUCTION_ACCOUNT_ID
+        or region != PRODUCTION_REGION
+        or volume_gib != PARITY_VOLUME_GIB
     ):
         raise ProvisioningError("ephemeral stack inputs are invalid")
     reference = _single_production_instance(ec2, production_gateway_ip)
@@ -282,6 +392,8 @@ def _create_stack_resources(
     )
     security_group_id = str(security_group["GroupId"])
     journal["security_group_id"] = security_group_id
+    if not SECURITY_GROUP_ID_RE.fullmatch(security_group_id):
+        raise ProvisioningError("ephemeral security-group identity is invalid")
     prefix_list_id = _cloudfront_prefix_list(ec2)
     ec2.authorize_security_group_ingress(
         GroupId=security_group_id,
@@ -340,6 +452,8 @@ def _create_stack_resources(
         raise ProvisioningError("ephemeral host launch returned an invalid inventory")
     instance_id = str(values[0].get("InstanceId") or "")
     journal["instance_id"] = instance_id
+    if not INSTANCE_ID_RE.fullmatch(instance_id):
+        raise ProvisioningError("ephemeral instance identity is invalid")
     ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
     described = ec2.describe_instances(InstanceIds=[instance_id])
     host = described["Reservations"][0]["Instances"][0]
@@ -405,25 +519,37 @@ def _create_stack_resources(
     distribution = created["Distribution"]
     distribution_id = str(distribution["Id"])
     journal["cloudfront_distribution_id"] = distribution_id
+    if not CLOUDFRONT_DISTRIBUTION_ID_RE.fullmatch(distribution_id):
+        raise ProvisioningError("ephemeral CloudFront identity is invalid")
+    distribution_arn = str(distribution.get("ARN") or "")
+    if distribution_arn != _distribution_arn(distribution_id):
+        raise ProvisioningError("ephemeral CloudFront ARN is invalid")
     cloudfront.tag_resource(
-        Resource=distribution["ARN"],
+        Resource=distribution_arn,
         Tags={"Items": _tags(run_id, candidate_sha)},
     )
     deployed = _wait_distribution(cloudfront, distribution_id, enabled=True)
+    if deployed.get("ARN") != distribution_arn:
+        raise ProvisioningError("deployed CloudFront ARN differs from creation")
     domain = str(deployed.get("DomainName") or "")
     if not domain.endswith(".cloudfront.net"):
         raise ProvisioningError("CloudFront parity domain is invalid")
-    return {
+    state = {
         "schema_version": SCHEMA_VERSION,
         "status": "ready",
+        "account_id": account_id,
         "region": region,
         "run_id": run_id,
         "candidate_sha": candidate_sha,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "instance_id": instance_id,
+        "instance_arn": _resource_arn(kind="instance", resource_id=instance_id),
         "security_group_id": security_group_id,
+        "security_group_arn": _resource_arn(
+            kind="security-group", resource_id=security_group_id
+        ),
         "cloudfront_distribution_id": distribution_id,
-        "cloudfront_distribution_arn": str(deployed.get("ARN") or ""),
+        "cloudfront_distribution_arn": distribution_arn,
         "supabase_origin": f"https://{domain}",
         "artifact_bucket": artifact_bucket,
         "artifact_retention_days": ARTIFACT_RETENTION_DAYS,
@@ -432,6 +558,7 @@ def _create_stack_resources(
         "selected_instance_type": selected_type,
         "volume_gib": volume_gib,
     }
+    return _validate_state(state)
 
 
 def _rollback_partial_stack(
@@ -548,55 +675,223 @@ def _load_state(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ProvisioningError("ephemeral stack state is unreadable") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
+    if not isinstance(value, dict):
         raise ProvisioningError("ephemeral stack state schema differs")
-    if not RUN_RE.fullmatch(str(value.get("run_id") or "")):
-        raise ProvisioningError("ephemeral stack state run identity is invalid")
-    return value
+    return _validate_state(value)
 
 
-def delete_stack(*, ec2: Any, cloudfront: Any, state: Mapping[str, Any]) -> dict[str, Any]:
-    distribution_id = str(state.get("cloudfront_distribution_id") or "")
-    instance_id = str(state.get("instance_id") or "")
-    security_group_id = str(state.get("security_group_id") or "")
-    artifact_bucket = str(state.get("artifact_bucket") or "")
-    if distribution_id:
-        current = cloudfront.get_distribution_config(Id=distribution_id)
-        config = dict(current["DistributionConfig"])
-        if config.get("Enabled") is True:
-            config["Enabled"] = False
+def _read_owned_distribution(
+    cloudfront: Any, state: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    distribution_id = str(state["cloudfront_distribution_id"])
+    distribution_arn = str(state["cloudfront_distribution_arn"])
+    try:
+        response = cloudfront.get_distribution(Id=distribution_id)
+    except ClientError as exc:
+        if _client_error_code(exc) == "NoSuchDistribution":
+            return None
+        raise
+    distribution = response.get("Distribution")
+    if not isinstance(distribution, Mapping):
+        raise ProvisioningError("CloudFront deletion identity is unavailable")
+    if (
+        distribution.get("Id") != distribution_id
+        or distribution.get("ARN") != distribution_arn
+        or response.get("ETag") in (None, "")
+    ):
+        raise ProvisioningError("CloudFront deletion identity differs from state")
+    tags = cloudfront.list_tags_for_resource(Resource=distribution_arn)
+    values = tags.get("Tags", {}).get("Items", [])
+    if not isinstance(values, list):
+        raise ProvisioningError("CloudFront ownership tags are unavailable")
+    _require_ownership_tags(
+        values,
+        run_id=str(state["run_id"]),
+        candidate_sha=str(state["candidate_sha"]),
+    )
+    return response
+
+
+def _delete_owned_distribution(cloudfront: Any, state: Mapping[str, Any]) -> None:
+    distribution_id = str(state["cloudfront_distribution_id"])
+    current = _read_owned_distribution(cloudfront, state)
+    if current is None:
+        return
+    distribution = current["Distribution"]
+    config = dict(distribution.get("DistributionConfig") or {})
+    if config.get("Enabled") is True:
+        config["Enabled"] = False
+        try:
             cloudfront.update_distribution(
                 Id=distribution_id,
                 IfMatch=current["ETag"],
                 DistributionConfig=config,
             )
+        except ClientError as exc:
+            if _client_error_code(exc) == "NoSuchDistribution":
+                return
+            raise
+        try:
             _wait_distribution(cloudfront, distribution_id, enabled=False)
-        current = cloudfront.get_distribution_config(Id=distribution_id)
-        cloudfront.delete_distribution(Id=distribution_id, IfMatch=current["ETag"])
-    if instance_id:
-        ec2.terminate_instances(InstanceIds=[instance_id])
+        except ClientError as exc:
+            if _client_error_code(exc) == "NoSuchDistribution":
+                return
+            raise
+    elif distribution.get("Status") != "Deployed":
+        try:
+            _wait_distribution(cloudfront, distribution_id, enabled=False)
+        except ClientError as exc:
+            if _client_error_code(exc) == "NoSuchDistribution":
+                return
+            raise
+    current = _read_owned_distribution(cloudfront, state)
+    if current is None:
+        return
+    try:
+        cloudfront.delete_distribution(
+            Id=distribution_id, IfMatch=current["ETag"]
+        )
+    except ClientError as exc:
+        if _client_error_code(exc) != "NoSuchDistribution":
+            raise
+
+
+def _read_owned_instance(
+    ec2: Any, state: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    instance_id = str(state["instance_id"])
+    try:
+        response = ec2.describe_instances(InstanceIds=[instance_id])
+    except ClientError as exc:
+        if _client_error_code(exc) == "InvalidInstanceID.NotFound":
+            return None
+        raise
+    instances = [
+        instance
+        for reservation in response.get("Reservations", [])
+        for instance in reservation.get("Instances", [])
+    ]
+    if not instances:
+        return None
+    if len(instances) != 1 or instances[0].get("InstanceId") != instance_id:
+        raise ProvisioningError("instance deletion identity differs from state")
+    _require_ownership_tags(
+        instances[0].get("Tags", []),
+        run_id=str(state["run_id"]),
+        candidate_sha=str(state["candidate_sha"]),
+    )
+    return instances[0]
+
+
+def _delete_owned_instance(ec2: Any, state: Mapping[str, Any]) -> None:
+    instance_id = str(state["instance_id"])
+    instance = _read_owned_instance(ec2, state)
+    if instance is None:
+        return
+    state_name = str(instance.get("State", {}).get("Name") or "")
+    if state_name == "terminated":
+        return
+    if state_name != "shutting-down":
+        try:
+            ec2.terminate_instances(InstanceIds=[instance_id])
+        except ClientError as exc:
+            if _client_error_code(exc) == "InvalidInstanceID.NotFound":
+                return
+            raise
+    try:
         ec2.get_waiter("instance_terminated").wait(InstanceIds=[instance_id])
-    if security_group_id:
-        deadline = time.monotonic() + 180
-        while True:
-            try:
-                ec2.delete_security_group(GroupId=security_group_id)
-                break
-            except ClientError as exc:
-                if (
-                    exc.response.get("Error", {}).get("Code") != "DependencyViolation"
-                    or time.monotonic() >= deadline
-                ):
-                    raise
-                time.sleep(5)
+    except Exception:  # noqa: BLE001 - verify idempotent completion after races
+        observed = _read_owned_instance(ec2, state)
+        if observed is None or observed.get("State", {}).get("Name") == "terminated":
+            return
+        raise
+
+
+def _read_owned_security_group(
+    ec2: Any, state: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    security_group_id = str(state["security_group_id"])
+    try:
+        response = ec2.describe_security_groups(GroupIds=[security_group_id])
+    except ClientError as exc:
+        if _client_error_code(exc) == "InvalidGroup.NotFound":
+            return None
+        raise
+    groups = response.get("SecurityGroups", [])
+    if not groups:
+        return None
+    expected_arn = str(state["security_group_arn"])
+    if (
+        len(groups) != 1
+        or groups[0].get("GroupId") != security_group_id
+        or groups[0].get("OwnerId") != PRODUCTION_ACCOUNT_ID
+        or groups[0].get("SecurityGroupArn") != expected_arn
+    ):
+        raise ProvisioningError(
+            "security-group deletion identity differs from state"
+        )
+    _require_ownership_tags(
+        groups[0].get("Tags", []),
+        run_id=str(state["run_id"]),
+        candidate_sha=str(state["candidate_sha"]),
+    )
+    return groups[0]
+
+
+def _delete_owned_security_group(ec2: Any, state: Mapping[str, Any]) -> None:
+    security_group_id = str(state["security_group_id"])
+    deadline = time.monotonic() + 180
+    while True:
+        if _read_owned_security_group(ec2, state) is None:
+            return
+        try:
+            ec2.delete_security_group(GroupId=security_group_id)
+            return
+        except ClientError as exc:
+            code = _client_error_code(exc)
+            if code == "InvalidGroup.NotFound":
+                return
+            if code != "DependencyViolation" or time.monotonic() >= deadline:
+                raise
+            time.sleep(5)
+
+
+def delete_stack(
+    *,
+    ec2: Any,
+    cloudfront: Any,
+    state: Mapping[str, Any],
+    region: str = PRODUCTION_REGION,
+    account_id: str = PRODUCTION_ACCOUNT_ID,
+) -> dict[str, Any]:
+    state = _validate_state(state)
+    if region != state["region"] or account_id != state["account_id"]:
+        raise ProvisioningError("AWS deletion identity differs from state")
+
+    errors: list[str] = []
+    cleanup = (
+        ("cloudfront", lambda: _delete_owned_distribution(cloudfront, state)),
+        ("instance", lambda: _delete_owned_instance(ec2, state)),
+        ("security-group", lambda: _delete_owned_security_group(ec2, state)),
+    )
+    for label, operation in cleanup:
+        try:
+            operation()
+        except Exception as exc:  # noqa: BLE001 - report all cleanup failures
+            errors.append(f"{label}:{type(exc).__name__}")
+    if errors:
+        raise ProvisioningError(
+            "ephemeral stack deletion was incomplete: " + ",".join(errors)
+        )
+
     return {
         "run_id": state["run_id"],
-        "instance_terminated": bool(instance_id),
-        "distribution_deleted": bool(distribution_id),
-        "security_group_deleted": bool(security_group_id),
+        "instance_terminated": True,
+        "distribution_deleted": True,
+        "security_group_deleted": True,
         # COMPLIANCE retention is intentionally irreversible. The scheduled
         # exact-tag cleanup deletes versions and this bucket after one day.
-        "artifact_bucket_retained_for_compliance": bool(artifact_bucket),
+        "artifact_bucket_retained_for_compliance": True,
     }
 
 
@@ -615,7 +910,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     create_parser.add_argument("--production-gateway-ip", required=True)
     create_parser.add_argument("--instance-profile-name", required=True)
     create_parser.add_argument("--instance-type")
-    create_parser.add_argument("--volume-gib", type=int, default=512)
+    create_parser.add_argument("--volume-gib", type=int, default=PARITY_VOLUME_GIB)
     create_parser.add_argument("--state", type=Path, required=True)
     delete_parser = subparsers.add_parser("delete")
     delete_parser.add_argument("--state", type=Path, required=True)
@@ -626,6 +921,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cloudfront = boto3.client("cloudfront")
         s3 = boto3.client("s3", region_name=args.region)
         sts = boto3.client("sts", region_name=args.region)
+        caller_account_id = str(sts.get_caller_identity()["Account"])
         if args.command == "create":
             result = create_stack(
                 ec2=ec2,
@@ -633,7 +929,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cloudfront=cloudfront,
                 s3=s3,
                 region=args.region,
-                account_id=str(sts.get_caller_identity()["Account"]),
+                account_id=caller_account_id,
                 run_id=args.run_id,
                 candidate_sha=args.candidate_sha.lower(),
                 production_gateway_ip=args.production_gateway_ip,
@@ -644,7 +940,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write(args.state, result)
         else:
             state = _load_state(args.state)
-            result = delete_stack(ec2=ec2, cloudfront=cloudfront, state=state)
+            result = delete_stack(
+                ec2=ec2,
+                cloudfront=cloudfront,
+                state=state,
+                region=args.region,
+                account_id=caller_account_id,
+            )
     except (BotoCoreError, ClientError, OSError, ValueError, ProvisioningError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

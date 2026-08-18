@@ -128,6 +128,54 @@ class RoutingPlanStepBudget:
         )
 
 
+@dataclass(frozen=True)
+class RoutingCallAuthorization:
+    """Redacted per-call authorization for measured provider runners."""
+
+    experiment_id: str
+    variant_id: str
+    artifact_key: str
+    stage: str
+    unit_ref: str
+    tool_id: str
+    attempt: int
+    request_fingerprint: str
+    remaining_credit_microunits: int
+    timeout_ceiling_ms: int
+    execution_mode: str
+    contract_version: str = "leadpoet.routing_call_authz:v1"
+
+    def __post_init__(self) -> None:
+        _ensure_safe_ref(self.experiment_id, "routing_authorization_experiment_id")
+        _ensure_safe_ref(self.variant_id, "routing_authorization_variant_id")
+        _ensure_hash(self.artifact_key, "routing_authorization_artifact_key")
+        _v2_safe_stage(self.stage)
+        _ensure_safe_ref(self.unit_ref, "routing_authorization_unit_ref")
+        _ensure_safe_ref(self.tool_id, "routing_authorization_tool_id")
+        _bounded_int(self.attempt, "routing_authorization_attempt", minimum=0, maximum=MAX_TOOLS_PER_VARIANT)
+        _ensure_hash(self.request_fingerprint, "routing_authorization_request_fingerprint")
+        _bounded_int(
+            self.remaining_credit_microunits,
+            "routing_authorization_remaining_credit_microunits",
+            minimum=0,
+            maximum=MAX_CREDIT_MICROUNITS_PER_VARIANT,
+        )
+        _bounded_int(
+            self.timeout_ceiling_ms,
+            "routing_authorization_timeout_ceiling_ms",
+            minimum=0,
+            maximum=MAX_LATENCY_MS,
+        )
+        if self.execution_mode not in {mode.value for mode in ReceiptExecutionMode}:
+            raise RoutingExperimentError("routing_authorization_execution_mode_is_invalid")
+        if self.contract_version != "leadpoet.routing_call_authz:v1":
+            raise RoutingExperimentError("routing_authorization_contract_version_is_invalid")
+        _ensure_no_secret_material(self.to_dict(), field_name="routing_call_authorization")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class ProfileLifecycle(str, Enum):
     DRAFT = "draft"
     PROPOSED = "proposed"
@@ -1006,6 +1054,67 @@ class PinnedSourcingModelRoutingAdapter:
         }:
             raise RoutingExperimentError("v2_routing_change_stage_is_invalid")
         return "default" if bool(payload.is_default) else "custom"
+
+    def routing_identity(
+        self,
+        payload: Any,
+        *,
+        stage: str,
+        exclude_tool_ids: Sequence[str] = (),
+    ) -> str:
+        """Hash the exact typed model profile, optionally omitting declared tools.
+
+        The Lab does not define a route schema.  It asks the pinned model type
+        for its canonical payload and uses the model's own payload hash helper;
+        the only normalization allowed here is removing explicitly declared
+        SourceAdd tool steps for a tool-only comparison.
+        """
+
+        if stage not in {
+            self.runtime.STAGE_INTENT_EVIDENCE,
+            self.runtime.STAGE_CANDIDATE_ACQUISITION,
+        }:
+            raise RoutingExperimentError("v2_routing_identity_stage_is_invalid")
+        excluded = frozenset(_ensure_safe_ref(item, "v2_routing_identity_excluded_tool") for item in exclude_tool_ids)
+        as_payload = getattr(payload, "as_payload", None)
+        if not callable(as_payload):
+            raise RoutingExperimentError("v2_model_routing_identity_payload_unavailable")
+        raw_payload = as_payload()
+        if not isinstance(raw_payload, Mapping):
+            raise RoutingExperimentError("v2_model_routing_identity_payload_is_not_an_object")
+        normalized = dict(raw_payload)
+        if excluded:
+            typed_steps = getattr(payload, "steps", None)
+            if not isinstance(typed_steps, Sequence) or isinstance(typed_steps, (str, bytes)):
+                raise RoutingExperimentError("v2_model_routing_identity_steps_are_invalid")
+            order_by_group: dict[str, int] = {}
+            normalized_steps: list[Mapping[str, Any]] = []
+            for step in typed_steps:
+                tool_id = str(getattr(step, "tool_id", "") or "")
+                if tool_id in excluded:
+                    continue
+                group = str(getattr(step, "phase", "candidate") or "candidate")
+                order = order_by_group.get(group, 0)
+                order_by_group[group] = order + 1
+                try:
+                    normalized_step = replace(step, order=order)
+                    step_payload = normalized_step.as_payload()
+                except Exception as exc:
+                    raise RoutingExperimentError("v2_model_routing_identity_step_normalization_failed") from exc
+                if not isinstance(step_payload, Mapping):
+                    raise RoutingExperimentError("v2_model_routing_identity_step_payload_is_not_an_object")
+                normalized_steps.append(step_payload)
+            normalized["steps"] = normalized_steps
+        try:
+            contracts = importlib.import_module("sourcing_model.routing.contracts")
+            hasher = getattr(contracts, "sha256_payload", None)
+            if not callable(hasher):
+                raise RoutingExperimentError("v2_model_routing_identity_hasher_unavailable")
+            return model_hash_to_lab(hasher(normalized), "v2_model_routing_identity")
+        except RoutingExperimentError:
+            raise
+        except Exception as exc:
+            raise RoutingExperimentError("v2_model_routing_identity_hash_failed") from exc
 
     def variant_tool_descriptors(self, payload: Any, *, stage: str) -> Sequence[Mapping[str, Any]]:
         raw_steps = getattr(payload, "steps", ())
@@ -3287,6 +3396,7 @@ class RoutingExperimentV2Adapter(Protocol):
     def parse_variant_payload(self, payload: Mapping[str, Any], *, stage: str) -> Any: ...
     def validate_variant_payload(self, payload: Any, *, stage: str, feature_set: Any, binding_tool_ids: frozenset[str], binding_source_lineages: Mapping[str, str], expected_signal_type: str = "") -> Sequence[str]: ...
     def routing_change_class(self, payload: Any, *, stage: str) -> str: ...
+    def routing_identity(self, payload: Any, *, stage: str, exclude_tool_ids: Sequence[str] = ()) -> str: ...
     def variant_tool_descriptors(self, payload: Any, *, stage: str) -> Sequence[Mapping[str, Any]]: ...
     def lookup_tool_descriptor(self, tool_id: str, *, stage: str) -> Mapping[str, Any] | None: ...
     def validate_provider_binding(self, binding: ProviderBindingIdentity, *, stage: str) -> Sequence[str]: ...
@@ -3633,6 +3743,8 @@ def validate_routing_experiment_v2_spec(
     if not isinstance(normalized_features, Sequence) or isinstance(normalized_features, (str, bytes)):
         feature_set_errors.append("v2_feature_set_payload_features_are_required")
         normalized_features = ()
+    model_payload_by_variant: dict[str, Any] = {}
+    routing_identity_by_variant: dict[str, str] = {}
     for variant in spec.variants:
         if variant.stage != spec.input.stage:
             errors.append(f"v2_variant_stage_mismatch:{variant.variant_id}")
@@ -3672,6 +3784,7 @@ def validate_routing_experiment_v2_spec(
             binding_tool_ids = frozenset(item.tool_id for item in binding_items)
             source_lineages = {item.tool_id: item.source_lineage_id for item in binding_items}
             model_payload = adapter.parse_variant_payload(variant.routing_payload, stage=variant.stage)
+            model_payload_by_variant[variant.variant_id] = model_payload
             errors.extend(
                 adapter.validate_variant_payload(
                     model_payload,
@@ -3683,13 +3796,12 @@ def validate_routing_experiment_v2_spec(
                 )
             )
             try:
-                route_change_class = adapter.routing_change_class(model_payload, stage=variant.stage)
+                routing_identity_by_variant[variant.variant_id] = adapter.routing_identity(
+                    model_payload,
+                    stage=variant.stage,
+                )
             except Exception as exc:
-                raise RoutingExperimentError("v2_model_routing_change_class_unavailable") from exc
-            if variant.change_kind == "tool_only" and route_change_class != "default":
-                errors.append(f"v2_tool_only_requires_default_model_routing:{variant.variant_id}")
-            if variant.change_kind == "tool_and_route" and route_change_class != "custom":
-                errors.append(f"v2_tool_and_route_requires_custom_model_routing:{variant.variant_id}")
+                raise RoutingExperimentError("v2_model_routing_identity_unavailable") from exc
             descriptors = tuple(adapter.variant_tool_descriptors(model_payload, stage=variant.stage))
             descriptor_by_tool: dict[str, Mapping[str, Any]] = {}
             for descriptor in descriptors:
@@ -3752,6 +3864,33 @@ def validate_routing_experiment_v2_spec(
             errors.append(f"v2_variant_validation_failed:{variant.variant_id}:{exc}")
         except Exception as exc:
             errors.append(f"v2_variant_validation_failed:{variant.variant_id}:{type(exc).__name__}")
+    baseline_identity = routing_identity_by_variant.get(spec.baseline_variant_id)
+    if baseline_identity:
+        for variant in spec.variants:
+            if variant.variant_id == spec.baseline_variant_id:
+                continue
+            candidate_identity = routing_identity_by_variant.get(variant.variant_id)
+            if not candidate_identity:
+                continue
+            try:
+                if variant.change_kind == "tool_only":
+                    candidate_identity = adapters[variant.variant_id].routing_identity(
+                        model_payload_by_variant[variant.variant_id],
+                        stage=variant.stage,
+                        exclude_tool_ids=variant.new_tool_ids,
+                    )
+                    if candidate_identity != baseline_identity:
+                        errors.append(f"v2_tool_only_routing_identity_mismatch:{variant.variant_id}")
+                elif variant.change_kind == "tool_and_route":
+                    candidate_identity = adapters[variant.variant_id].routing_identity(
+                        model_payload_by_variant[variant.variant_id],
+                        stage=variant.stage,
+                        exclude_tool_ids=variant.new_tool_ids,
+                    )
+                    if candidate_identity == baseline_identity:
+                        errors.append(f"v2_tool_and_route_routing_identity_must_differ:{variant.variant_id}")
+            except Exception as exc:
+                errors.append(f"v2_variant_routing_identity_comparison_failed:{variant.variant_id}:{type(exc).__name__}")
     return sorted(set(errors))
 
 
@@ -3946,13 +4085,28 @@ def _v2_failure_receipt(
     )
 
 
+def _v2_runner_accepts_authorization(
+    runner: Callable[..., ProviderReceipt | Mapping[str, Any]],
+) -> bool:
+    try:
+        parameters = tuple(inspect.signature(runner).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        item for item in parameters
+        if item.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+    ]
+    return any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in parameters) or len(positional) >= 4
+
+
 def _v2_call_runner(
     runner: Callable[..., ProviderReceipt | Mapping[str, Any]],
     binding: ProviderBindingIdentity,
     unit_ref: str,
     request_fingerprint: str,
+    authorization: RoutingCallAuthorization,
 ) -> ProviderReceipt | Mapping[str, Any]:
-    """Pass the v2 request identity without breaking the v1 two-arg seam."""
+    """Pass typed authorization when supported without breaking v1 seams."""
 
     try:
         signature = inspect.signature(runner)
@@ -3965,7 +4119,9 @@ def _v2_call_runner(
     except (TypeError, ValueError):
         positional = []
         accepts_varargs = True
-    if accepts_varargs or len(positional) >= 3:
+    if accepts_varargs or len(positional) >= 4:
+        return runner(binding, unit_ref, request_fingerprint, authorization)
+    if len(positional) >= 3:
         return runner(binding, unit_ref, request_fingerprint)
     return runner(binding, unit_ref)
 
@@ -4094,7 +4250,40 @@ def _v2_run_unit(
         receipt = store.get(key)
         if receipt is None:
             try:
-                value = _v2_call_runner(runner, binding, unit_ref, request_fingerprint)
+                remaining_credit = max(
+                    0,
+                    min(
+                        planned_credit_by_tool[tool_id] - consumed_credit_by_tool.get(tool_id, 0),
+                        spec.credit_budget.total_credit_microunits - spent_total[0],
+                    ),
+                )
+                remaining_timeout = max(
+                    0,
+                    min(
+                        int(math.ceil(budget.timeout_seconds * 1000)),
+                        int(math.ceil(planned_seconds_cap * 1000)) - consumed_latency_ms[0],
+                    ),
+                )
+                authorization = RoutingCallAuthorization(
+                    experiment_id=spec.experiment_id,
+                    variant_id=variant.variant_id,
+                    artifact_key=_v2_variant_artifact_key(variant),
+                    stage=variant.stage,
+                    unit_ref=unit_ref,
+                    tool_id=tool_id,
+                    attempt=attempt,
+                    request_fingerprint=request_fingerprint,
+                    remaining_credit_microunits=remaining_credit,
+                    timeout_ceiling_ms=remaining_timeout,
+                    execution_mode=spec.receipt_execution_mode,
+                )
+                value = _v2_call_runner(
+                    runner,
+                    binding,
+                    unit_ref,
+                    request_fingerprint,
+                    authorization,
+                )
                 receipt = _receipt_for_runner_result(
                     value,
                     binding=binding,
@@ -4112,8 +4301,8 @@ def _v2_run_unit(
             receipt_errors = validate_provider_receipt(receipt)
             if receipt_errors:
                 raise RoutingExperimentError("provider receipt invalid: " + "; ".join(receipt_errors))
-            if spec.allow_live_credit_spend and receipt.execution_mode != ReceiptExecutionMode.MEASURED_LAB.value:
-                raise RoutingExperimentError("v2_live_runner_receipt_must_be_measured_lab")
+            if receipt.execution_mode != spec.receipt_execution_mode:
+                raise RoutingExperimentError("v2_runner_receipt_execution_mode_mismatch")
             if receipt.credit_microunits > planned_credit_by_tool[tool_id]:
                 raise RoutingExperimentError(f"v2_provider_receipt_exceeds_reserved_credit:{tool_id}")
             if consumed_credit_by_tool.get(tool_id, 0) + receipt.credit_microunits > planned_credit_by_tool[tool_id]:
@@ -4134,10 +4323,8 @@ def _v2_run_unit(
         else:
             if receipt.request_fingerprint != request_fingerprint:
                 raise RoutingExperimentError("v2_cached_receipt_request_identity_mismatch")
-            if spec.allow_live_credit_spend and receipt.execution_mode != ReceiptExecutionMode.MEASURED_LAB.value:
-                raise RoutingExperimentError("v2_live_cache_requires_measured_lab_receipt")
-            if not spec.allow_live_credit_spend and receipt.execution_mode == ReceiptExecutionMode.MEASURED_LAB.value:
-                raise RoutingExperimentError("v2_measured_receipt_cannot_be_used_without_live_mode")
+            if receipt.execution_mode != spec.receipt_execution_mode:
+                raise RoutingExperimentError("v2_cached_receipt_execution_mode_mismatch")
             if receipt.credit_microunits > planned_credit_by_tool[tool_id]:
                 raise RoutingExperimentError(f"v2_cached_receipt_exceeds_reserved_credit:{tool_id}")
             if consumed_credit_by_tool.get(tool_id, 0) + receipt.credit_microunits > planned_credit_by_tool[tool_id]:
@@ -4198,18 +4385,10 @@ def _v2_run_unit(
         if tool_id not in attempt_by_tool:
             skipped_projection.setdefault(tool_id, "runtime_unavailable" if not available_tools.get(tool_id, True) else "model_route_stopped")
     skipped = _v2_projection_pairs(skipped_projection, "skipped_tool_reasons")
-    projected_outcomes = projection.get("outcome_reasons")
-    if projected_outcomes:
-        outcomes = list(_v2_projection_pairs(projected_outcomes, "outcome_reasons"))
-        projected_tools = {tool_id for tool_id, _reason in outcomes}
-        outcomes.extend(
-            (item.tool_id, item.outcome)
-            for item in receipts
-            if item.tool_id not in projected_tools
-        )
-        outcomes = tuple(outcomes)
-    else:
-        outcomes = tuple((item.tool_id, item.outcome) for item in receipts)
+    # Provider receipts are the only authority for outcomes.  The model may
+    # project skipped-route metadata, but it cannot invent or overwrite a
+    # provider result for an attempted or unattempted tool.
+    outcomes = tuple((item.tool_id, item.outcome) for item in receipts)
     decision_draft = RoutingDecisionReceiptV2(
         receipt_id="routing_decision:pending",
         experiment_id=spec.experiment_id,
@@ -4319,6 +4498,8 @@ def evaluate_routing_experiment_v2(
     if spec.allow_live_credit_spend:
         if spec.receipt_execution_mode != ReceiptExecutionMode.MEASURED_LAB.value:
             raise RoutingExperimentError("v2_live_spend_requires_measured_lab_execution_mode")
+        if not _v2_runner_accepts_authorization(runner):
+            raise RoutingExperimentError("v2_live_spend_requires_authorization_aware_runner")
         if receipt_store is None or isinstance(receipt_store.repository, InMemoryProviderReceiptRepository):
             raise RoutingExperimentError("v2_live_spend_requires_durable_receipt_repository")
         if authoritative_billing_rollup is None:
@@ -4529,6 +4710,7 @@ __all__ = [
     "LabRoutingProfile",
     "RoutingAdmissionPlanAdapter",
     "RoutingPlanStepBudget",
+    "RoutingCallAuthorization",
     "PinnedSourcingModelRoutingAdapter",
     "RoutingPromotionReceipt",
     "FrozenRoutingInput",

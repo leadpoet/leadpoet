@@ -1267,7 +1267,7 @@
       "symbol": "ResearchLabGatewayScoringWorker._run_lease_held_recovery_and_preflight"
     },
     {
-      "ast_sha256": "sha256:23759d1a02b551c357022187264fad48d774b9164d038ca7d4fa73a4cd79bb48",
+      "ast_sha256": "sha256:62744cdef122ad38a59fd4f121818520be15b9a6f2a0ecc410830aa75600195b",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._run_owned_provider_preflight"
     },
@@ -4847,7 +4847,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:a92b405150f0d3c4e3a8524fb0e8d36fce32439080c04f403e016e505387d134",
-  "protected_source_commit": "2c69efd020b6159d3559104f2e77f644b40583d4",
+  "manifest_hash": "sha256:9a716b7f06b144bf5206ffe623481707ba4163da240326683ab8e2fa90c3a4e6",
+  "protected_source_commit": "ab7804ff4290f23f2ff3368e6bd8d88665c199c6",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

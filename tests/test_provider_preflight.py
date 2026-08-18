@@ -504,6 +504,45 @@ def test_failed_recovery_probe_refreshes_only_preflight_owned_pause(monkeypatch)
     assert set_calls[0]["event_doc"]["recovery_probe_failed"] is True
 
 
+def test_failed_recovery_probe_never_refreshes_operator_pause(monkeypatch):
+    monkeypatch.setattr(pp, "preflight_auto_pause_enabled", lambda: True)
+    set_calls = []
+
+    async def is_paused():
+        return {
+            "paused": True,
+            "reason": "operator planned maintenance",
+            "event_seq": 42,
+        }
+
+    async def set_paused(**kwargs):
+        set_calls.append(kwargs)
+
+    asyncio.run(
+        pp.apply_preflight_control_result(
+            scope="scoring",
+            actor_ref="owner",
+            result={
+                "healthy": False,
+                "pause_worthy": True,
+                "systemic_transport_failure": False,
+                "verdicts": [
+                    {
+                        "provider": "exa",
+                        "healthy": False,
+                        "status": "credit_or_auth",
+                    }
+                ],
+            },
+            is_paused=is_paused,
+            set_paused=set_paused,
+            refresh_existing_preflight_pause=True,
+        )
+    )
+
+    assert set_calls == []
+
+
 def test_gate_healthy_auto_resumes_preflight_pause_only(monkeypatch):
     _stub_shared(monkeypatch, {"healthy": True, "pause_worthy": False, "verdicts": []})
     set_calls = []

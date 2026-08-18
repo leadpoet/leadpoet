@@ -5900,9 +5900,7 @@ class ResearchLabGatewayScoringWorker:
             set_paused=set_scoring_maintenance_paused,
             prefetched_state=maintenance_state,
             may_change_pause_state=True,
-            refresh_existing_preflight_pause=(
-                bool(systemic_transport_failure) and fresh_measurement
-            ),
+            refresh_existing_preflight_pause=fresh_measurement,
         )
         if force_measurement:
             forced_full_fleet_complete = (

@@ -570,6 +570,134 @@ async def test_owner_stops_after_one_systemic_transport_failure_batch(
 
 
 @pytest.mark.asyncio
+async def test_isolated_failure_refreshes_pause_and_paces_full_fleet_recovery(
+    monkeypatch,
+) -> None:
+    worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_index=0,
+        scoring_worker_total_workers=25,
+    )
+    worker.worker_ref = "scoring-worker-1"
+    worker._lease_holder_ref = "scoring-worker-1:lease"
+    worker._holds_maintenance_lease = False
+    worker._baseline_profile_preflight_monotonic_at = {}
+    worker._is_private_baseline_owner = lambda: True
+    checked: list[dict[str, Any]] = []
+    control_events: list[dict[str, Any]] = []
+    control_state: dict[str, Any] = {
+        "paused": True,
+        "reason": "provider_preflight:exa=credit_or_auth",
+        "event_seq": 41,
+        "status_at": "stale",
+    }
+    pause_age_seconds = {"value": 601.0}
+
+    async def acquire(**_kwargs: Any) -> bool:
+        return True
+
+    async def noop() -> None:
+        return None
+
+    async def preflight(**kwargs: Any) -> dict[str, Any]:
+        worker_index = int(kwargs["worker_index"])
+        checked.append(dict(kwargs))
+        healthy = worker_index != 7
+        return {
+            "proceed": healthy,
+            "healthy": healthy,
+            "pause_worthy": not healthy,
+            "disabled": False,
+            "measurement_cached": False,
+            "verdicts": [
+                {
+                    "provider": "exa",
+                    "healthy": healthy,
+                    "status": "healthy" if healthy else "credit_or_auth",
+                }
+            ],
+        }
+
+    async def read_control() -> dict[str, Any]:
+        return dict(control_state)
+
+    async def write_control(**kwargs: Any) -> dict[str, Any]:
+        control_events.append(dict(kwargs))
+        assert kwargs["expected_prior_seq"] == control_state["event_seq"]
+        control_state.update(
+            {
+                "paused": bool(kwargs["paused"]),
+                "reason": str(kwargs["reason"]),
+                "event_seq": int(control_state["event_seq"]) + 1,
+                "status_at": f"refresh-{len(control_events)}",
+            }
+        )
+        return dict(control_state)
+
+    class Heartbeat:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.held = False
+
+        async def start(self) -> None:
+            self.held = True
+
+        def ensure_held(self) -> None:
+            assert self.held is True
+
+        async def stop(self) -> None:
+            self.held = False
+
+    monkeypatch.setenv("RESEARCH_LAB_PROVIDER_PREFLIGHT_AUTO_PAUSE", "true")
+    monkeypatch.setattr(scoring, "try_acquire_maintenance_lease", acquire)
+    monkeypatch.setattr(scoring, "MaintenanceLeaseHeartbeat", Heartbeat)
+    monkeypatch.setattr(scoring, "preflight_gate", preflight)
+    monkeypatch.setattr(scoring, "get_scoring_maintenance_state", read_control)
+    monkeypatch.setattr(scoring, "set_scoring_maintenance_paused", write_control)
+    monkeypatch.setattr(worker, "_recover_stale_candidate_claims", noop)
+    monkeypatch.setattr(worker, "_alert_stuck_candidates", noop)
+    monkeypatch.setattr(
+        scoring,
+        "_status_age_seconds",
+        lambda _value: pause_age_seconds["value"],
+    )
+    monkeypatch.setattr(
+        scoring,
+        "provider_preflight_settings",
+        lambda: {"ttl_seconds": 600.0},
+    )
+
+    first = await worker._run_lease_held_recovery_and_preflight(
+        dict(control_state)
+    )
+    assert first["proceed"] is False
+    assert first["systemic_transport_failure"] is False
+    assert len(checked) == 25
+    assert {int(call["worker_index"]) for call in checked} == set(range(25))
+    assert all(call["force_measurement"] is True for call in checked)
+    assert len(control_events) == 1
+    assert control_events[0]["event_doc"]["recovery_probe_failed"] is True
+    assert control_events[0]["event_doc"]["systemic_transport_failure"] is False
+
+    pause_age_seconds["value"] = 0.0
+    cooling_down = await worker._run_lease_held_recovery_and_preflight(
+        dict(control_state)
+    )
+    assert cooling_down["reason"] == "provider_preflight_recovery_cooldown"
+    assert cooling_down["retry_after_seconds"] == 600.0
+    assert len(checked) == 25
+    assert len(control_events) == 1
+
+    pause_age_seconds["value"] = 601.0
+    second = await worker._run_lease_held_recovery_and_preflight(
+        dict(control_state)
+    )
+    assert second["proceed"] is False
+    assert second["systemic_transport_failure"] is False
+    assert len(checked) == 50
+    assert len(control_events) == 2
+
+
+@pytest.mark.asyncio
 async def test_paused_fleet_honors_durable_recovery_cooldown(monkeypatch) -> None:
     worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
     worker.config = SimpleNamespace(

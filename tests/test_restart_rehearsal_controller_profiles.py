@@ -212,10 +212,26 @@ def test_workflow_preserves_distinct_n_minus_one_identity(
         docker_platform="linux/arm64",
     )
 
-    assert len(commands) == 2
+    assert len(commands) == 1
     assert f"REHEARSAL_FROM_SHA={from_sha}" in commands[0]
     assert f"REHEARSAL_CANDIDATE_SHA={candidate_sha}" in commands[0]
-    assert commands[1] == [
+
+
+def test_evidence_ownership_normalizer_is_exact_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(controller, "_run", lambda command: commands.append(command))
+
+    controller._normalize_evidence_ownership(
+        "rehearsal-image",
+        evidence_root=tmp_path / "evidence",
+        docker_platform="linux/arm64",
+    )
+
+    assert commands == [[
         "docker",
         "run",
         "--rm",
@@ -245,7 +261,68 @@ def test_workflow_preserves_distinct_n_minus_one_identity(
         "--no-dereference",
         f"{os.getuid()}:{os.getgid()}",
         "/evidence",
+    ]]
+
+
+def test_outer_evidence_normalizes_post_workflow_component_and_join_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    events: list[str] = []
+
+    def fake_normalize(
+        tag: str,
+        *,
+        evidence_root: Path,
+        docker_platform: str,
+    ) -> None:
+        assert tag == "rehearsal-image"
+        assert docker_platform == "linux/arm64"
+        assert (evidence_root / "workflow-complete").is_file()
+        assert (
+            evidence_root
+            / "local-services"
+            / "epochs"
+            / "post-workflow-component"
+        ).is_file()
+        assert (evidence_root / "joined-evidence.json").is_file()
+        events.append("outer-normalize")
+
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        fake_normalize,
+    )
+
+    with controller._temporary_evidence_directory(
+        "rehearsal-image",
+        docker_platform="linux/arm64",
+    ) as evidence_root:
+        (evidence_root / "workflow-complete").write_text(
+            "complete\n",
+            encoding="utf-8",
+        )
+        events.append("workflow-complete")
+        late_component_root = evidence_root / "local-services" / "epochs"
+        late_component_root.mkdir(parents=True)
+        (late_component_root / "post-workflow-component").write_text(
+            "root-container-artifact\n",
+            encoding="utf-8",
+        )
+        events.append("component-late-write")
+        (evidence_root / "joined-evidence.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+        events.append("join-late-write")
+
+    assert events == [
+        "workflow-complete",
+        "component-late-write",
+        "join-late-write",
+        "outer-normalize",
     ]
+    assert not evidence_root.exists()
 
 
 def test_workflow_normalizes_evidence_before_preserving_failure(

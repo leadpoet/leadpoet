@@ -590,6 +590,71 @@ def _prepare_drand_artifact(
     return cache_root
 
 
+def _normalize_evidence_ownership(
+    tag: str,
+    *,
+    evidence_root: Path,
+    docker_platform: str,
+) -> None:
+    """Return every candidate-container artifact to the invoking host user."""
+
+    _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--platform",
+            docker_platform,
+            "--network",
+            "none",
+            "--cpus",
+            "1",
+            "--memory",
+            "128m",
+            "--pids-limit",
+            "32",
+            "--security-opt",
+            "no-new-privileges",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "CHOWN",
+            "--read-only",
+            "--mount",
+            f"type=bind,src={evidence_root},dst=/evidence",
+            "--entrypoint",
+            "/usr/bin/chown",
+            tag,
+            "--recursive",
+            "--no-dereference",
+            f"{os.getuid()}:{os.getgid()}",
+            "/evidence",
+        ]
+    )
+
+
+@contextmanager
+def _temporary_evidence_directory(
+    tag: str,
+    *,
+    docker_platform: str,
+) -> Iterator[Path]:
+    """Normalize after the last possible writer and before host cleanup."""
+
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-restart-evidence-"
+    ) as evidence_raw:
+        evidence_root = Path(evidence_raw)
+        try:
+            yield evidence_root
+        finally:
+            _normalize_evidence_ownership(
+                tag,
+                evidence_root=evidence_root,
+                docker_platform=docker_platform,
+            )
+
+
 def _run_component(
     tag: str,
     *,
@@ -715,6 +780,11 @@ def _run_component(
         if returncode:
             raise subprocess.CalledProcessError(returncode, command)
     except BaseException:
+        _normalize_evidence_ownership(
+            tag,
+            evidence_root=evidence_root,
+            docker_platform=docker_platform,
+        )
         _preserve_failure_evidence(
             evidence_root=evidence_root,
             candidate_sha=candidate_sha,
@@ -1233,43 +1303,13 @@ def _run_workflow(
         )
     command.append(tag)
     try:
-        try:
-            _run(command)
-        finally:
-            _run(
-                [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--platform",
-                    docker_platform,
-                    "--network",
-                    "none",
-                    "--cpus",
-                    "1",
-                    "--memory",
-                    "128m",
-                    "--pids-limit",
-                    "32",
-                    "--security-opt",
-                    "no-new-privileges",
-                    "--cap-drop",
-                    "ALL",
-                    "--cap-add",
-                    "CHOWN",
-                    "--read-only",
-                    "--mount",
-                    f"type=bind,src={evidence_root},dst=/evidence",
-                    "--entrypoint",
-                    "/usr/bin/chown",
-                    tag,
-                    "--recursive",
-                    "--no-dereference",
-                    f"{os.getuid()}:{os.getgid()}",
-                    "/evidence",
-                ]
-            )
+        _run(command)
     except BaseException:
+        _normalize_evidence_ownership(
+            tag,
+            evidence_root=evidence_root,
+            docker_platform=docker_platform,
+        )
         _preserve_failure_evidence(
             evidence_root=evidence_root,
             candidate_sha=candidate_sha,
@@ -1334,6 +1374,11 @@ def _join_evidence(
                 "joined restart rehearsal evidence was not produced"
             )
     except BaseException:
+        _normalize_evidence_ownership(
+            tag,
+            evidence_root=evidence_root,
+            docker_platform=docker_platform,
+        )
         _preserve_failure_evidence(
             evidence_root=evidence_root,
             candidate_sha=candidate_sha,
@@ -1484,10 +1529,10 @@ def _run_profile(args: argparse.Namespace) -> int:
         harness_sha=harness_sha,
         required_shas=(from_sha, candidate_sha),
     ) as source_root:
-        with tempfile.TemporaryDirectory(
-            prefix="leadpoet-restart-evidence-"
-        ) as evidence_raw:
-            evidence_root = Path(evidence_raw)
+        with _temporary_evidence_directory(
+            tag,
+            docker_platform=docker_platform,
+        ) as evidence_root:
             stage_results: list[dict[str, Any]] = []
             print(
                 "Running validator enclave finalization proof under CPython 3.7",
@@ -1755,6 +1800,14 @@ def _run_profile(args: argparse.Namespace) -> int:
                 if item.get("status") != "passed"
             ]
             if incomplete:
+                # Every container writer is terminal. Normalize before the
+                # host copies a failed tree; the outer context normalizes
+                # again immediately before TemporaryDirectory removes it.
+                _normalize_evidence_ownership(
+                    tag,
+                    evidence_root=evidence_root,
+                    docker_platform=docker_platform,
+                )
                 durable_failure = _preserve_batched_failure_evidence(
                     evidence_root=evidence_root,
                     candidate_sha=candidate_sha,

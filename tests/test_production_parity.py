@@ -706,7 +706,10 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
     assert "leadpoet/staging/production-parity-miner-intake" in encoded
     assert "ssm:DescribeInstanceInformation" in encoded
     assert "secretsmanager:ListSecrets" in encoded
-    assert "s3:PutObjectLockConfiguration" in encoded
+    assert "s3:GetBucketObjectLockConfiguration" in encoded
+    assert "s3:PutBucketObjectLockConfiguration" in encoded
+    assert "s3:GetObjectLockConfiguration" not in encoded
+    assert "s3:PutObjectLockConfiguration" not in encoded
     assert '"Effect": "Deny"' in encoded
     assert "kms:ScheduleKeyDeletion" in encoded
     assert "testnet" not in encoded

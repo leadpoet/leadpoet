@@ -152,7 +152,11 @@ def test_gateway_enclave_measured_runtime_adapter_is_strict() -> None:
     assert '"--platform=ptrace"' in service
     assert '"model_sandbox_self_test"' in service
     assert '"LEADPOET_MODEL_SOURCE_ROOT"' in service
-    assert '"/leadpoet-model-sandboxes/lp-job-"' in service
+    assert "not visible.is_absolute()" in service
+    assert "len(parts) != 4" in service
+    assert 'parts[1] != "leadpoet-model-sandboxes"' in service
+    assert 're.fullmatch(r"lp-job-[0-9a-f]{16}", parts[2])' in service
+    assert 'parts[3] != "source"' in service
     assert 'item.get("type") == "bind"' in service
     assert 'model sandbox measured rootfs inputs differ' in service
     assert 'raise ValueError("model sandbox runsc operation differs")' in service

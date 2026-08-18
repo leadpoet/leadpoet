@@ -220,6 +220,18 @@ def store(monkeypatch: pytest.MonkeyPatch) -> ConfirmationFakeStore:
     fake.select_one_results["research_lab_private_model_benchmark_current"] = _healthy_benchmark_row()
     monkeypatch.delenv(promotion.PROMOTION_CONFIRMATION_RERUN_ENV, raising=False)
     monkeypatch.delenv(promotion.CONFIRMATION_MIN_DELTA_ENV, raising=False)
+
+    async def _fake_pending_activation(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    # Confirmation-gate tests do not exercise the image-activation crash
+    # recovery boundary.  Keep that production boundary fail-closed while
+    # making the suite's intentionally minimal active-model fakes explicit.
+    monkeypatch.setattr(
+        promotion,
+        "_active_version_has_pending_candidate_activation",
+        _fake_pending_activation,
+    )
     return fake
 
 

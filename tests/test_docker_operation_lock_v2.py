@@ -51,31 +51,41 @@ def test_shell_lock_excludes_competing_docker_operation(tmp_path: Path) -> None:
     _fake_flock(bin_dir)
     lock_file = tmp_path / "docker-operation.lock"
     ready_file = tmp_path / "holder.ready"
+    release_file = tmp_path / "holder.release"
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(lock_file),
         "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": "1",
     }
+    holder_env = {
+        **env,
+        "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": "5",
+    }
     holder = subprocess.Popen(
         [
             "bash",
             "-c",
             (
+                "set -e; "
                 f'. "{LOCK_HELPER}"; '
                 "leadpoet_acquire_docker_operation_lock_v2; "
                 f'touch "{ready_file}"; '
-                "sleep 2"
+                f'while [ ! -e "{release_file}" ]; do sleep 0.02; done'
             ),
         ],
-        env=env,
+        env=holder_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
     try:
-        deadline = time.monotonic() + 2
-        while not ready_file.exists() and time.monotonic() < deadline:
+        deadline = time.monotonic() + 5
+        while (
+            not ready_file.exists()
+            and holder.poll() is None
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.02)
         assert ready_file.exists(), holder.communicate(timeout=1)
 
@@ -93,7 +103,10 @@ def test_shell_lock_excludes_competing_docker_operation(tmp_path: Path) -> None:
         assert blocked.returncode != 0
         assert "timed out waiting" in blocked.stderr
     finally:
-        holder.wait(timeout=4)
+        release_file.touch()
+        holder_stdout, holder_stderr = holder.communicate(timeout=4)
+
+    assert holder.returncode == 0, (holder_stdout, holder_stderr)
 
     acquired_after_release = subprocess.run(
         [
@@ -228,31 +241,41 @@ def test_post_activation_reacquire_respects_competing_lock(tmp_path: Path) -> No
     _fake_flock(bin_dir)
     lock_file = tmp_path / "docker-operation.lock"
     ready_file = tmp_path / "holder.ready"
+    release_file = tmp_path / "holder.release"
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(lock_file),
         "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": "1",
     }
+    holder_env = {
+        **env,
+        "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": "5",
+    }
     holder = subprocess.Popen(
         [
             "bash",
             "-c",
             (
+                "set -e; "
                 f'. "{LOCK_HELPER}"; '
                 "leadpoet_acquire_docker_operation_lock_v2; "
                 f'touch "{ready_file}"; '
-                "sleep 2"
+                f'while [ ! -e "{release_file}" ]; do sleep 0.02; done'
             ),
         ],
-        env=env,
+        env=holder_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
     try:
-        deadline = time.monotonic() + 2
-        while not ready_file.exists() and time.monotonic() < deadline:
+        deadline = time.monotonic() + 5
+        while (
+            not ready_file.exists()
+            and holder.poll() is None
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.02)
         assert ready_file.exists(), holder.communicate(timeout=1)
 
@@ -276,7 +299,10 @@ def test_post_activation_reacquire_respects_competing_lock(tmp_path: Path) -> No
         assert blocked.returncode != 0
         assert "timed out waiting" in blocked.stderr
     finally:
-        holder.wait(timeout=4)
+        release_file.touch()
+        holder_stdout, holder_stderr = holder.communicate(timeout=4)
+
+    assert holder.returncode == 0, (holder_stdout, holder_stderr)
 
 
 def test_post_activation_accepts_exact_inherited_lock(tmp_path: Path) -> None:

@@ -469,8 +469,11 @@ def project_intent_stage3_admission(*, outcome, policy):
 def _install_future_tree(
     root: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    write_source: bool = True,
 ) -> tuple[dict, dict[str, str]]:
-    _write_future_source(root)
+    if write_source:
+        _write_future_source(root)
     policy = deepcopy(compatibility.semantic_compatibility_policy_v1())
     for relative, specification in policy["critical_binding_slices"].items():
         observed, violations = compatibility._critical_binding_slice_v1(

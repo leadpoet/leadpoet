@@ -23,17 +23,17 @@ from research_lab.eval.private_runtime import (  # noqa: E402
     PrivateModelAdapterSpec,
     PrivateModelRuntimeError,
     SubprocessPrivateModelRunner,
-    build_local_private_artifact_manifest,
     canonicalize_private_model_icp,
     compute_private_source_tree_hash,
     employee_count_buckets_for_icp,
     ensure_private_model_outputs,
     load_private_artifact_manifest,
 )
-from research_lab.sourcing_model_contract_check import (  # noqa: E402
-    reviewed_consumer_snapshots,
-)
 import research_lab.eval.private_runtime as private_runtime_module  # noqa: E402
+from tests.private_model_artifact_fixtures import (  # noqa: E402
+    build_private_artifact_with_adapted_source_admission,
+    install_reviewed_consumer_snapshot,
+)
 
 
 def _routing_receipt_line(runtime_cap_seconds: float) -> str:
@@ -61,28 +61,12 @@ def _routing_receipt_line(runtime_cap_seconds: float) -> str:
     return "sourcing_branch_receipt " + json.dumps(receipt)
 
 
-def _install_reviewed_consumer_snapshot(source_root: Path) -> None:
-    snapshot = reviewed_consumer_snapshots()[EXPECTED_CONSUMER_CONTRACT_ID]
-    contract = snapshot["contract"]
-    contract_path = source_root / str(contract["canonical_path"])
-    parity_path = source_root / str(contract["parity_fixture_path"])
-    contract_path.parent.mkdir(parents=True, exist_ok=True)
-    parity_path.parent.mkdir(parents=True, exist_ok=True)
-    contract_path.write_bytes(Path(snapshot["contract_path"]).read_bytes())
-    parity_path.write_bytes(Path(snapshot["parity_path"]).read_bytes())
-
-
 def main() -> int:
     errors: list[str] = []
     with tempfile.TemporaryDirectory(prefix="research-lab-private-runtime-") as tmp:
         root = Path(tmp)
         adapter = root / "research_lab_adapter.py"
-        adapter.write_text(
-            """
-import json
-import sys
-
-
+        fixture_entrypoint = """
 def run_icp(icp, context):
     print("diagnostic line that must not corrupt adapter JSON")
     required = ("required_attribute", "intent_signal", "intent_category", "employee_count", "geography")
@@ -132,11 +116,15 @@ def run_icp(icp, context):
         },
         "score": 82.5
     }]
-""".strip()
-            + "\n",
+""".strip() + "\n"
+        adapter.write_text(
+            "import json\nimport sys\n\n" + fixture_entrypoint,
             encoding="utf-8",
         )
-        _install_reviewed_consumer_snapshot(root)
+        install_reviewed_consumer_snapshot(
+            root,
+            contract_id=EXPECTED_CONSUMER_CONTRACT_ID,
+        )
 
         runner = SubprocessPrivateModelRunner(PrivateModelAdapterSpec(source_path=root, timeout_seconds=30))
         research_lab_icp = {
@@ -216,7 +204,7 @@ def run_icp(icp, context):
             "component_registry_version": "sourcing-model-components:v2",
             "scoring_adapter_version": "qualification-company-scorer:v1",
         }
-        manifest = build_local_private_artifact_manifest(
+        manifest = build_private_artifact_with_adapted_source_admission(
             source_path=root,
             git_commit_sha="abcdef1234567890",
             image_digest="123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:" + "2" * 64,

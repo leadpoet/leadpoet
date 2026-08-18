@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 from contextlib import contextmanager
@@ -2001,6 +2002,42 @@ def test_gateway_rehearsal_chain_adapter_enforces_exact_cutover_reads(
             json.dumps(request).encode(),
             archive=False,
         )
+
+
+def test_gateway_rehearsal_subtensor_stubs_return_exact_metagraph(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "SOURCE_ROOT",
+        Path(__file__).resolve().parents[2],
+    )
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+
+    sync_subtensor = rehearsal_sitecustomize._LocalSubtensor(network="finney")
+    sync_metagraph = sync_subtensor.metagraph(71)
+    async_subtensor = rehearsal_sitecustomize._LocalAsyncSubtensor(
+        network="finney"
+    )
+    async_metagraph = asyncio.run(async_subtensor.metagraph(netuid=71))
+
+    assert isinstance(sync_metagraph, rehearsal_sitecustomize._LocalMetagraph)
+    assert isinstance(async_metagraph, rehearsal_sitecustomize._LocalMetagraph)
+    assert sync_metagraph.netuid == async_metagraph.netuid == 71
+    assert sync_metagraph.hotkeys == async_metagraph.hotkeys
+    assert len(sync_metagraph.hotkeys) == sync_metagraph.n
+    assert len(async_metagraph.hotkeys) == async_metagraph.n
+
+    with pytest.raises(ValueError, match="local metagraph contract differs"):
+        sync_subtensor.metagraph(72)
+    with pytest.raises(ValueError, match="local metagraph contract differs"):
+        asyncio.run(async_subtensor.metagraph(72))
 
 
 def test_gateway_rehearsal_chain_adapter_supports_exact_epoch_close_search(

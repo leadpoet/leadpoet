@@ -264,6 +264,65 @@ def test_candidate_commit_cache_cannot_fall_back_to_release_admission(
     ) == 97
 
 
+def test_redundant_normalized_tag_tolerates_transient_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_root = tmp_path / "pcr0-builder"
+    parent, candidate = _two_commit_repository(build_root)
+    state_root = tmp_path / "state"
+    adapter = _load_adapter(
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        build_root=build_root,
+        candidate=candidate,
+    )
+    monkeypatch.chdir(build_root)
+    tag = _production_cache_tag(1_786_872_224)
+    normalized_tag = tag + "-normalized:latest"
+    raw_archive = tmp_path / "raw.tar"
+    normalized_archive = tmp_path / "normalized.tar"
+
+    assert adapter.command_docker(_build_argv(tag)) == 0
+    assert adapter.command_docker(["save", tag, "-o", str(raw_archive)]) == 0
+    normalize_saved_image(
+        archive_path=raw_archive,
+        output_path=normalized_archive,
+        normalized_image=normalized_tag,
+        temporary_parent=tmp_path,
+    )
+    assert adapter.command_docker(["load", "-i", str(normalized_archive)]) == 0
+
+    # ``docker load`` already established the immutable normalized-image
+    # provenance. The production normalizer then repeats the same tag while
+    # the shared historical checkout can be moving; only the later Nitro use
+    # must require the checkout to have returned to the recorded commit.
+    _git(build_root, "checkout", "-q", candidate)
+    assert adapter.command_docker(
+        ["tag", normalized_image_id(parent, VALIDATOR_ROLE), normalized_tag]
+    ) == 0
+    assert adapter.command_nitro(
+        [
+            "build-enclave",
+            "--docker-uri",
+            normalized_tag,
+            "--output-file",
+            str(tmp_path / "wrong-head.eif"),
+        ]
+    ) == 97
+
+    _git(build_root, "checkout", "-q", parent)
+    assert adapter.command_nitro(
+        [
+            "build-enclave",
+            "--docker-uri",
+            normalized_tag,
+            "--output-file",
+            str(tmp_path / "restored-head.eif"),
+        ]
+    ) == 0
+
+
 def test_pcr0_cache_adapter_rejects_near_miss_builds_and_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

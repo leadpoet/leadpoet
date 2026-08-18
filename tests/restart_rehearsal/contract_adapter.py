@@ -871,7 +871,7 @@ def _docker_load(
     return list(tags)
 
 
-def _pcr0_cache_image_is_bound(
+def _pcr0_cache_loaded_image_is_bound(
     *,
     image: str,
     record: dict[str, Any],
@@ -883,7 +883,6 @@ def _pcr0_cache_image_is_bound(
     commit = str(record.get("commit") or "")
     role = str(record.get("role") or "")
     image_id = _image_record_id(record)
-    build_root = Path(str(record.get("build_root") or ""))
     expected = {
         "commit": commit,
         "role": role,
@@ -892,6 +891,31 @@ def _pcr0_cache_image_is_bound(
         "normalized_image_id": image_id,
         "build_root": str(record.get("build_root") or ""),
     }
+    return (
+        re.fullmatch(r"[0-9a-f]{40}", commit) is not None
+        and role == VALIDATOR_ROLE
+        and str(record.get("provenance") or "") == PCR0_CACHE_PROVENANCE
+        and str(record.get("source_tag") or "") == source_tag
+        and Path(str(record.get("build_root") or "")).is_absolute()
+        and image_id == normalized_image_id(commit, role)
+        and normalizations.get(image) == expected
+    )
+
+
+def _pcr0_cache_image_is_bound(
+    *,
+    image: str,
+    record: dict[str, Any],
+    normalizations: dict[str, Any],
+) -> bool:
+    if not _pcr0_cache_loaded_image_is_bound(
+        image=image,
+        record=record,
+        normalizations=normalizations,
+    ):
+        return False
+    commit = str(record.get("commit") or "")
+    build_root = Path(str(record.get("build_root") or ""))
     try:
         configured_root = Path(
             os.environ.get("PCR0_BUILD_DIR", "/tmp/pcr0_builder")
@@ -901,15 +925,8 @@ def _pcr0_cache_image_is_bound(
     except (OSError, ValueError):
         return False
     return (
-        re.fullmatch(r"[0-9a-f]{40}", commit) is not None
-        and role == VALIDATOR_ROLE
-        and str(record.get("provenance") or "") == PCR0_CACHE_PROVENANCE
-        and str(record.get("source_tag") or "") == source_tag
-        and build_root.is_absolute()
-        and resolved_build_root == configured_root
+        resolved_build_root == configured_root
         and observed_commit == commit
-        and image_id == normalized_image_id(commit, role)
-        and normalizations.get(image) == expected
     )
 
 
@@ -1302,7 +1319,7 @@ def command_docker(argv: list[str]) -> int:
                     not isinstance(source, dict)
                     or not isinstance(provenance, dict)
                     or argv[1] != str(provenance.get("normalized_image_id") or "")
-                    or not _pcr0_cache_image_is_bound(
+                    or not _pcr0_cache_loaded_image_is_bound(
                         image=target,
                         record=source,
                         normalizations=normalizations,

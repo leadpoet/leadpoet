@@ -684,6 +684,9 @@ class _LocalSubtensor:
         _event("epoch_snapshot", method="get_current_block")
         return CURRENT_BLOCK
 
+    def metagraph(self, netuid: int) -> "_LocalMetagraph":
+        return _LocalMetagraph(netuid=netuid, subtensor=self)
+
     def get_uid_for_hotkey_on_subnet(
         self,
         *,
@@ -774,6 +777,9 @@ class _LocalAsyncSubtensor:
     async def close(self) -> None:
         _event("epoch_snapshot", method="async_close")
 
+    async def metagraph(self, netuid: int) -> "_LocalMetagraph":
+        return _LocalMetagraph(netuid=netuid, subtensor=self)
+
 
 class _LocalAxonInfo:
     def __init__(self, uid: int):
@@ -795,7 +801,10 @@ class _LocalMetagraph:
     def __init__(self, *, netuid: int, subtensor: Any):
         import numpy as np
 
-        if int(netuid) != 71 or not isinstance(subtensor, _LocalSubtensor):
+        if int(netuid) != 71 or not isinstance(
+            subtensor,
+            (_LocalSubtensor, _LocalAsyncSubtensor),
+        ):
             raise ValueError("local metagraph contract differs")
         self.netuid = int(netuid)
         self.hotkeys = list(_local_metagraph_hotkeys())

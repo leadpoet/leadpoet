@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import textwrap
@@ -841,6 +844,8 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
         code_build_module.verify_private_artifact_manifest_signature = (
             _verify_local_candidate_signature
         )
+        semantic_policy = ExitStack()
+        semantic_policy.enter_context(_fixture_semantic_admission_policy(fake_app))
         try:
             config = ResearchLabGatewayConfig(
                 private_test_cmd="python3 -m py_compile research_lab_adapter.py sourcing_model/__init__.py",
@@ -937,6 +942,7 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
         except Exception as exc:
             errors.append(f"image-extracted code builder failed valid fake build: {exc}")
         finally:
+            semantic_policy.close()
             code_build_module.verify_private_artifact_manifest_signature = (
                 original_signature_verify
             )
@@ -1036,6 +1042,8 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
         code_build_module.verify_private_artifact_manifest_signature = (
             _verify_local_candidate_signature
         )
+        semantic_policy = ExitStack()
+        semantic_policy.enter_context(_fixture_semantic_admission_policy(fake_app))
         inspection_call_count = 0
         repair_call_count = 0
         judge_call_count = 0
@@ -1063,7 +1071,7 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                     "has_source_inspection_context": "source_inspection_context" in content,
                     "has_loop_direction_plan": "loop_direction_plan" in content,
                     "has_real_file": "sourcing_model/__init__.py" in content,
-                    "has_source_excerpt": "VALUE" in content and "def qualify" in content,
+                    "has_source_excerpt": "VALUE" in content and "def fixture_query" in content,
                     "has_bad_example": "sourcing_model/example.py" in content,
                 }
             )
@@ -1239,6 +1247,22 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 _MemoryTreeRepository,
             )
 
+            expected_child_source_tree_hash = _fixture_candidate_source_tree_hash(
+                fake_app,
+                base_image_ref=artifact.image_digest,
+                draft=_allowed_runtime_patch_draft(),
+            )
+
+            class _ExactSourceTreeRepository(_MemoryTreeRepository):
+                def commit_child(self, **kwargs):
+                    commit = super().commit_child(**kwargs)
+                    rebound = replace(
+                        commit,
+                        source_tree_hash=expected_child_source_tree_hash,
+                    )
+                    self.commits[kwargs["slot"].node_id] = rebound
+                    return rebound
+
             result = await CodeEditLoopEngine(
                 settings=AutoResearchRuntimeSettings(
                     min_seconds=0,
@@ -1254,7 +1278,7 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 event_sink=_event_sink,
                 builder=CodeEditCandidateBuilder(config),
                 dev_evaluator=_MemoryTreeEvaluator(),
-                tree_repository=_MemoryTreeRepository(),
+                tree_repository=_ExactSourceTreeRepository(),
                 artifact_io=_MemoryTreeArtifactIO(),
                 provider_registry_loader=lambda: (
                     [],
@@ -1365,6 +1389,7 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
         except Exception as exc:
             errors.append(f"code-edit loop source-context verification failed: {exc}")
         finally:
+            semantic_policy.close()
             code_build_module.verify_private_artifact_manifest_signature = (
                 original_signature_verify
             )
@@ -1384,19 +1409,50 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
     return errors
 
 
-def _write_fake_parent_app(root: Path, *, omit: tuple[str, ...] = ()) -> None:
-    # Reuse the reviewed consumer-contract fixture so this verifier tracks the
-    # exact v7/v8 source surface instead of maintaining another stale copy.
-    from tests.test_sourcing_model_contract import _conforming_tree
+@contextmanager
+def _fixture_semantic_admission_policy(root: Path):
+    """Run real semantic admission without claiming a private release identity."""
 
-    _conforming_tree(root)
+    import pytest
+    from research_lab import sourcing_model_contract_check as compatibility
+    from tests.test_sourcing_model_semantic_compatibility_v1 import (
+        _install_future_tree,
+    )
+
+    monkeypatch = pytest.MonkeyPatch()
+    compatibility.clear_source_tree_compatibility_admission_cache_v1()
+    try:
+        _install_future_tree(root, monkeypatch, write_source=False)
+        if compatibility.resolve_reviewed_consumer_snapshot(root) is not None:
+            raise AssertionError("synthetic fixture unexpectedly matched a legacy release")
+        yield
+    finally:
+        compatibility.clear_source_tree_compatibility_admission_cache_v1()
+        monkeypatch.undo()
+
+
+def _write_fake_parent_app(root: Path, *, omit: tuple[str, ...] = ()) -> None:
+    # Use a public synthetic semantic-v1 tree. The fixture policy context
+    # exercises real semantic admission without claiming a reviewed private
+    # source identity.
+    from tests.test_sourcing_model_semantic_compatibility_v1 import (
+        _write_future_source,
+    )
+
+    _write_future_source(root)
+    (root / "requirements.txt").write_text("httpx\n", encoding="utf-8")
     for rel in ("gateway", "qualification", "validator_models"):
         if rel in omit:
             continue
         (root / rel).mkdir(parents=True, exist_ok=True)
         (root / rel / "__init__.py").write_text("", encoding="utf-8")
     (root / "sourcing_model" / "__init__.py").write_text(
-        'VALUE = "old"\n\n\ndef qualify():\n    return VALUE\n',
+        (
+            "from sourcing_model.core import qualify\n"
+            'VALUE = "old"\n\n\n'
+            "def fixture_query():\n"
+            "    return VALUE\n"
+        ),
         encoding="utf-8",
     )
     (root / "sourcing_model" / "secret_like.py").write_text(
@@ -1407,6 +1463,39 @@ def _write_fake_parent_app(root: Path, *, omit: tuple[str, ...] = ()) -> None:
     for rel in ("research_lab_adapter.py", "requirements.txt"):
         if rel in omit:
             (root / rel).unlink(missing_ok=True)
+
+
+def _fixture_candidate_source_tree_hash(
+    parent_source: Path,
+    *,
+    base_image_ref: str,
+    draft: CodeEditDraft,
+) -> str:
+    """Mirror the committed candidate tree identity used by the real builder."""
+
+    with tempfile.TemporaryDirectory(prefix="research-lab-fixture-tree-") as tmp:
+        repo = Path(tmp) / "repo"
+        shutil.copytree(parent_source, repo)
+        code_build_module._write_research_lab_build_scaffold(
+            repo,
+            base_image_ref=base_image_ref,
+        )
+        code_build_module._initialize_temporary_git_repo(repo)
+        diff_path = Path(tmp) / "candidate.diff"
+        diff_path.write_text(draft.unified_diff, encoding="utf-8")
+        code_build_module._run_git_apply(
+            diff_path,
+            cwd=repo,
+            timeout_seconds=30,
+            check=True,
+        )
+        code_build_module._run_git_apply(
+            diff_path,
+            cwd=repo,
+            timeout_seconds=30,
+            check=False,
+        )
+        return private_runtime_module.compute_private_source_tree_hash(repo)
 
 
 def _write_fake_docker(root: Path) -> Path:
@@ -1461,6 +1550,10 @@ def _write_fake_manifest_writer(root: Path) -> Path:
             import json
             import os
             from pathlib import Path
+            import sys
+
+            sys.path.insert(0, __OFFLINE_VERIFIER_ROOT__)
+            from research_lab.eval.private_runtime import compute_private_source_tree_hash
 
             def sha256_json(value):
                 encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -1474,7 +1567,7 @@ def _write_fake_manifest_writer(root: Path) -> Path:
             if not dockerfile.startswith("FROM 123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:"):
                 raise SystemExit("candidate Dockerfile should inherit from parent ECR image")
             payload = {
-                "model_artifact_hash": "sha256:" + "a" * 64,
+                "model_artifact_hash": compute_private_source_tree_hash(Path.cwd()),
                 "git_commit_sha": git_commit_sha,
                 "image_digest": "123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:" + "9" * 64,
                 "config_hash": "sha256:" + "a" * 64,
@@ -1497,7 +1590,7 @@ def _write_fake_manifest_writer(root: Path) -> Path:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
             """
-        ),
+        ).replace("__OFFLINE_VERIFIER_ROOT__", repr(str(ROOT))),
         encoding="utf-8",
     )
     return writer
@@ -1515,12 +1608,13 @@ def _allowed_runtime_patch_draft() -> CodeEditDraft:
             "diff --git a/sourcing_model/__init__.py b/sourcing_model/__init__.py\n"
             "--- a/sourcing_model/__init__.py\n"
             "+++ b/sourcing_model/__init__.py\n"
-            "@@ -1,5 +1,5 @@\n"
+            "@@ -1,6 +1,6 @@\n"
+            " from sourcing_model.core import qualify\n"
             '-VALUE = "old"\n'
             '+VALUE = "new"\n'
             " \n"
             " \n"
-            " def qualify():\n"
+            " def fixture_query():\n"
             "     return VALUE\n"
         ),
         redacted_summary="Change one runtime source constant.",
@@ -1648,7 +1742,7 @@ def _allowed_runtime_patch_draft_with_bad_hunk_counts() -> CodeEditDraft:
         risk=draft.risk,
         lane=draft.lane,
         target_files=draft.target_files,
-        unified_diff=draft.unified_diff.replace("@@ -1,5 +1,5 @@", "@@ -1,99 +1,99 @@"),
+        unified_diff=draft.unified_diff.replace("@@ -1,6 +1,6 @@", "@@ -1,99 +1,99 @@"),
         redacted_summary=draft.redacted_summary,
         test_plan=draft.test_plan,
         rollback_plan=draft.rollback_plan,

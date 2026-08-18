@@ -82,7 +82,8 @@
     "sourcing_model/validation.py",
     "sourcing_model/verified_event_identity.py",
     "sourcing_model/routing/features.py",
-    "sourcing_model/routing/profiles.py"
+    "sourcing_model/routing/profiles.py",
+    "sourcing_model/routing/candidate_profiles.py"
   ],
   "functions": {
     "sourcing_model/segmented_run_receipt.py": {
@@ -320,6 +321,12 @@
         "case"
       ],
       "evaluate_candidate_enrichment_parity_cases": [
+        "document"
+      ],
+      "evaluate_candidate_routing_parity_case": [
+        "case"
+      ],
+      "evaluate_candidate_routing_parity_cases": [
         "document"
       ],
       "evaluate_company_fit_decision_parity": [
@@ -710,6 +717,13 @@
       "default_routing_profile_registry": [],
       "routing_profile_metadata": [],
       "compile_confirmation_admission_plan": []
+    },
+    "sourcing_model/routing/candidate_profiles.py": {
+      "compile_candidate_routing_plan": [],
+      "default_candidate_routing_profile_registry": [],
+      "candidate_routing_profile_metadata": [
+        "registry"
+      ]
     }
   },
   "exact_signatures": [
@@ -815,7 +829,10 @@
     "sourcing_model/social_technology_problem.py:social_technology_problem_contract_identity",
     "sourcing_model/social_tool_evaluation.py:compile_tool_evaluation_search_request",
     "sourcing_model/social_tool_evaluation.py:evaluate_tool_evaluation_candidate",
-    "sourcing_model/social_tool_evaluation.py:social_tool_evaluation_contract_identity"
+    "sourcing_model/social_tool_evaluation.py:social_tool_evaluation_contract_identity",
+    "sourcing_model/routing/candidate_profiles.py:compile_candidate_routing_plan",
+    "sourcing_model/routing/candidate_profiles.py:default_candidate_routing_profile_registry",
+    "sourcing_model/routing/candidate_profiles.py:candidate_routing_profile_metadata"
   ],
   "full_parameters": {
     "sourcing_model/account_evidence_contract.py:account_evidence_contract_identity": [],
@@ -1055,6 +1072,12 @@
       "case"
     ],
     "sourcing_model/consumer_parity.py:evaluate_candidate_enrichment_parity_cases": [
+      "document"
+    ],
+    "sourcing_model/consumer_parity.py:evaluate_candidate_routing_parity_case": [
+      "case"
+    ],
+    "sourcing_model/consumer_parity.py:evaluate_candidate_routing_parity_cases": [
       "document"
     ],
     "sourcing_model/consumer_parity.py:evaluate_company_fit_decision_parity": [
@@ -1577,6 +1600,23 @@
       "feature_set",
       "registry",
       "confirmation_tool_ids"
+    ],
+    "sourcing_model/routing/candidate_profiles.py:compile_candidate_routing_plan": [
+      "catalog",
+      "policy",
+      "context",
+      "feature_set",
+      "registry",
+      "profile_id",
+      "expected_profile_sha256",
+      "expected_profile_version"
+    ],
+    "sourcing_model/routing/candidate_profiles.py:default_candidate_routing_profile_registry": [
+      "policy"
+    ],
+    "sourcing_model/routing/candidate_profiles.py:candidate_routing_profile_metadata": [
+      "registry",
+      "policy"
     ]
   },
   "required_keyword_only": {
@@ -1974,7 +2014,16 @@
       "context",
       "feature_set",
       "registry"
-    ]
+    ],
+    "sourcing_model/routing/candidate_profiles.py:compile_candidate_routing_plan": [
+      "catalog",
+      "policy",
+      "context",
+      "feature_set",
+      "registry"
+    ],
+    "sourcing_model/routing/candidate_profiles.py:default_candidate_routing_profile_registry": [],
+    "sourcing_model/routing/candidate_profiles.py:candidate_routing_profile_metadata": []
   },
   "frozen_asyncness": {
     "sourcing_model/segmented_run_receipt.py:contract_identity": false,
@@ -2011,6 +2060,8 @@
     "sourcing_model/consumer_parity.py:evaluate_all": false,
     "sourcing_model/consumer_parity.py:evaluate_candidate_enrichment_parity_case": false,
     "sourcing_model/consumer_parity.py:evaluate_candidate_enrichment_parity_cases": false,
+    "sourcing_model/consumer_parity.py:evaluate_candidate_routing_parity_case": false,
+    "sourcing_model/consumer_parity.py:evaluate_candidate_routing_parity_cases": false,
     "sourcing_model/consumer_parity.py:evaluate_company_fit_decision_parity": false,
     "sourcing_model/consumer_parity.py:evaluate_corporate_filing_route_parity_cases": false,
     "sourcing_model/consumer_parity.py:evaluate_regulatory_registry_route_parity_cases": false,
@@ -2125,7 +2176,10 @@
     "sourcing_model/routing/profiles.py:default_routing_profile_registry": false,
     "sourcing_model/routing/profiles.py:routing_profile_metadata": false,
     "sourcing_model/routing/runtime.py:compile_intent_evidence_admission_route": false,
-    "sourcing_model/routing/profiles.py:compile_confirmation_admission_plan": false
+    "sourcing_model/routing/profiles.py:compile_confirmation_admission_plan": false,
+    "sourcing_model/routing/candidate_profiles.py:compile_candidate_routing_plan": false,
+    "sourcing_model/routing/candidate_profiles.py:default_candidate_routing_profile_registry": false,
+    "sourcing_model/routing/candidate_profiles.py:candidate_routing_profile_metadata": false
   },
   "required_imports": {
     "sourcing_model/clients.py": [
@@ -2515,6 +2569,11 @@
       "ROUTING_PROFILE_SCHEMA_VERSION": "routing-profile:v1",
       "ADMISSION_PLAN_SCHEMA_VERSION": "routing-admission-plan:v2",
       "LAB_PROFILE_PROPOSAL_CONTRACT_VERSION": "lab-routing-profile-proposal:v1"
+    },
+    "sourcing_model/routing/candidate_profiles.py": {
+      "CANDIDATE_ROUTING_PROFILE_SCHEMA_VERSION": "candidate-routing-profile:v1",
+      "CANDIDATE_ROUTING_REGISTRY_SCHEMA_VERSION": "candidate-routing-registry:v1",
+      "CANDIDATE_ROUTING_PLAN_SCHEMA_VERSION": "candidate-routing-plan:v1"
     }
   }
 }

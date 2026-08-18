@@ -111,11 +111,11 @@ REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
         "contract_id": "leadpoet-sourcing-wrapper-contract-v52",
         "contract_path": CONTRACT_V52_PATH,
         "contract_sha256": (
-            "sha256:48609451a69cf41a6a7615224e628417df4a27040a1b54c9958460cc76a48fc9"
+            "sha256:2454c60c1e2614feef912aa6ea471307657dac7d418bdb3bdab5b105ddbb5932"
         ),
         "parity_path": PARITY_FIXTURE_V52_PATH,
         "parity_sha256": (
-            "sha256:1e06b5bbe638356661494054363fbba8b8cba0181260b3396ce259f129d90e5d"
+            "sha256:7d18b358f7f6dcf1b58a175af43288a1db244c08af6fc5295116dbfe51976332"
         ),
         "required_source_constants": {
             "sourcing_model/runtime_capabilities.py": {
@@ -127,15 +127,15 @@ REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
         "release_identities": (
             {
                 "source_tree_hash": (
-                    "sha256:6835100e66840dab82a08d93abfeaba8cbaf51484c20e62a91c787c9d36366aa"
+                    "sha256:603c4569fa35d6a66ee60596a44e37841aab1c6d794c3109349c1d6b7a5bcd85"
                 ),
-                "git_commit_sha": "82cfc8ecc1d57fd91f6a56ad4d2b7fd4fc4f2e43",
+                "git_commit_sha": "6ed6289626b7e81c745daff97feabd237aa4ccee",
                 "manifest_hash": (
-                    "sha256:168b4fb51a20cc82835d35905ae0dcf5bd39e6a1c2115b289dd6c9cb975c3652"
+                    "sha256:e75c820acf1e2d1348aab3d34b85c3ae578fe8043d5ef97b28817a8b234bd3c0"
                 ),
                 "image_digest": (
                     "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
-                    "sourcing-model@sha256:1d4b55a84575559b2c8a13663d59b48985caa834fc4fb4fa34ba76c4f552b83f"
+                    "sourcing-model@sha256:5539652d47471773ca94221373ce01b5e610715177155a12ae8026da48e2ae52"
                 ),
             },
         ),

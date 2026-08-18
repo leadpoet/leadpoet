@@ -2117,6 +2117,217 @@
       "credit_cap": 0.09
     }
   ],
+  "candidate_routing_parity_cases": [
+    {
+      "fixture_id": "candidate-default-broad-waterfall",
+      "profile_snapshot": {
+        "company_fit": {
+          "industry": "Software",
+          "country": "US",
+          "company_size": "11-50"
+        }
+      },
+      "runtime_features": [
+        "icp.structured_eligible"
+      ],
+      "available_tools": {
+        "candidate.backlog": true,
+        "candidate.deepline_firmographic": true
+      },
+      "budgets": {
+        "remaining_seconds": 120,
+        "remaining_calls": 4,
+        "remaining_results": 200,
+        "credit_cap": 4
+      }
+    },
+    {
+      "fixture_id": "candidate-software-source-add",
+      "profile_snapshot": {
+        "company_fit": {
+          "industry": "Software",
+          "country": "US",
+          "company_size": "11-50"
+        }
+      },
+      "runtime_features": [
+        "icp.structured_eligible"
+      ],
+      "source_add_registration": {
+        "provider_id": "parity_company_source",
+        "priority": 15,
+        "capabilities": [
+          "candidate.structured_firmographic"
+        ],
+        "best_for": [
+          "icp.industry.software"
+        ],
+        "binding_requirements": [
+          "domain_scoped_request"
+        ],
+        "unit_cost": 0.11,
+        "max_calls": 1,
+        "max_results": 50,
+        "timeout_seconds": 30
+      },
+      "profile_registry": {
+        "schema_version": "candidate-routing-registry:v1",
+        "registry_version": "candidate-routing-registry:parity-v1",
+        "profiles": [
+          {
+            "schema_version": "candidate-routing-profile:v1",
+            "profile_id": "candidate-default",
+            "version": "v1",
+            "required_features": [],
+            "forbidden_features": [],
+            "steps": [
+              {
+                "tool_id": "candidate.backlog",
+                "order": 0
+              },
+              {
+                "tool_id": "candidate.deepline_firmographic",
+                "order": 1
+              },
+              {
+                "tool_id": "candidate.source_add.parity_company_source",
+                "order": 2
+              }
+            ],
+            "is_default": true,
+            "call_cap": 8,
+            "seconds_cap": 120,
+            "credit_cap": 4
+          },
+          {
+            "schema_version": "candidate-routing-profile:v1",
+            "profile_id": "software-source-add",
+            "version": "v1",
+            "required_features": [
+              "icp.industry.software"
+            ],
+            "forbidden_features": [
+              "company.country.ca"
+            ],
+            "steps": [
+              {
+                "tool_id": "candidate.source_add.parity_company_source",
+                "order": 0
+              }
+            ],
+            "priority": 1,
+            "call_cap": 1,
+            "seconds_cap": 30,
+            "credit_cap": 0.11
+          }
+        ]
+      },
+      "available_tools": {
+        "candidate.backlog": true,
+        "candidate.deepline_firmographic": true,
+        "candidate.source_add.parity_company_source": true
+      },
+      "budgets": {
+        "remaining_seconds": 120,
+        "remaining_calls": 4,
+        "remaining_results": 50,
+        "credit_cap": 0.11
+      }
+    },
+    {
+      "fixture_id": "candidate-software-source-add-unavailable",
+      "profile_snapshot": {
+        "company_fit": {
+          "industry": "Software",
+          "country": "US",
+          "company_size": "11-50"
+        }
+      },
+      "runtime_features": [
+        "icp.structured_eligible"
+      ],
+      "source_add_registration": {
+        "provider_id": "parity_company_source",
+        "priority": 15,
+        "capabilities": [
+          "candidate.structured_firmographic"
+        ],
+        "best_for": [
+          "icp.industry.software"
+        ],
+        "binding_requirements": [
+          "domain_scoped_request"
+        ],
+        "unit_cost": 0.11,
+        "max_calls": 1,
+        "max_results": 50,
+        "timeout_seconds": 30
+      },
+      "profile_registry": {
+        "schema_version": "candidate-routing-registry:v1",
+        "registry_version": "candidate-routing-registry:parity-v1",
+        "profiles": [
+          {
+            "schema_version": "candidate-routing-profile:v1",
+            "profile_id": "candidate-default",
+            "version": "v1",
+            "required_features": [],
+            "forbidden_features": [],
+            "steps": [
+              {
+                "tool_id": "candidate.backlog",
+                "order": 0
+              },
+              {
+                "tool_id": "candidate.deepline_firmographic",
+                "order": 1
+              },
+              {
+                "tool_id": "candidate.source_add.parity_company_source",
+                "order": 2
+              }
+            ],
+            "is_default": true,
+            "call_cap": 8,
+            "seconds_cap": 120,
+            "credit_cap": 4
+          },
+          {
+            "schema_version": "candidate-routing-profile:v1",
+            "profile_id": "software-source-add",
+            "version": "v1",
+            "required_features": [
+              "icp.industry.software"
+            ],
+            "forbidden_features": [
+              "company.country.ca"
+            ],
+            "steps": [
+              {
+                "tool_id": "candidate.source_add.parity_company_source",
+                "order": 0
+              }
+            ],
+            "priority": 1,
+            "call_cap": 1,
+            "seconds_cap": 30,
+            "credit_cap": 0.11
+          }
+        ]
+      },
+      "available_tools": {
+        "candidate.backlog": false,
+        "candidate.deepline_firmographic": false,
+        "candidate.source_add.parity_company_source": false
+      },
+      "budgets": {
+        "remaining_seconds": 120,
+        "remaining_calls": 4,
+        "remaining_results": 50,
+        "credit_cap": 0.11
+      }
+    }
+  ],
   "candidate_enrichment_parity_cases": [
     {
       "fixture_id": "maps-verified-identity-bounded",
@@ -3815,6 +4026,164 @@
         }
       ],
       "source_add_attestation_sha256": "58f2e7514353c6446b6f60d7c9b86b01f19049b30081c9809ea101b0daa7f71c"
+    }
+  ],
+  "expected_candidate_routing_projections": [
+    {
+      "fixture_id": "candidate-default-broad-waterfall",
+      "feature_ids": [
+        "icp.company_size.11_50",
+        "icp.country.us",
+        "icp.industry.software"
+      ],
+      "feature_set_sha256": "10e5b43a26c13970f64f35789813285586e598ad088c8f8a74fe1a22c7d51bf3",
+      "profile_id": "candidate-default",
+      "profile_version": "v1",
+      "profile_sha256": "021adcdbe3e5753fe1636bdfceccb91c79147428160a145c49cee2f05ac92639",
+      "registry_sha256": "6dbe46543924407feee3e04ae5443baf42f488bcc5e6b16017c46501efad8b1b",
+      "base_policy_sha256": "7a79a121a4636a96b088cbbee97d3a72e6773d1408b163606379d4e1d5babb73",
+      "catalog_sha256": "bf7cec040ec2a2b2db69eb649e763983721b84dc582e231ed6a0f9c19bbd0b05",
+      "context_sha256": "5d07513573f7eed9bb72ceddd1e4d4270c64ee9ceb48abccc1c8b14846ff198c",
+      "selected_tool_ids": [
+        "candidate.backlog",
+        "candidate.deepline_firmographic",
+        "candidate.model_semantic"
+      ],
+      "exclusions": [
+        {
+          "tool_id": "candidate.jobs_feed",
+          "reason_code": "tool_unavailable",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.registry_feed",
+          "reason_code": "tool_unavailable",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.scrapingdog_job_postings",
+          "reason_code": "tool_unavailable",
+          "matched_avoid_when": []
+        }
+      ],
+      "route_sha256": "98adb9be23d51b89fc97b333610154e0fb5931ae0854f2df02252352aa87f878",
+      "candidate_plan_sha256": "00ea7acaa6e4ab15766d53b129b3fcc32bda6132516af096cafea677f151f651",
+      "replay_plan_sha256": "00ea7acaa6e4ab15766d53b129b3fcc32bda6132516af096cafea677f151f651"
+    },
+    {
+      "fixture_id": "candidate-software-source-add",
+      "feature_ids": [
+        "icp.company_size.11_50",
+        "icp.country.us",
+        "icp.industry.software"
+      ],
+      "feature_set_sha256": "10e5b43a26c13970f64f35789813285586e598ad088c8f8a74fe1a22c7d51bf3",
+      "profile_id": "software-source-add",
+      "profile_version": "v1",
+      "profile_sha256": "258d00d288b6f2e3a2e51279842604cc906ef56ae4a818ed93365f14e2059c04",
+      "registry_sha256": "6dfc3e395b3ecc0ddec0531eaa8022718c74240b629342ae50c4e6599199a97d",
+      "base_policy_sha256": "7157e42ee1eda109366309a5d067db9b9f360037380ab68ece645638a3cda6fb",
+      "catalog_sha256": "3cbc8aec5948da16cd45fb484725ed4f21f0019f70c273406e0f5ffecce524e4",
+      "context_sha256": "56f8a18605a567c446cc05b493b0da3b74e4ccde8bcc501503c3dd7bdcad323d",
+      "selected_tool_ids": [
+        "candidate.source_add.parity_company_source"
+      ],
+      "exclusions": [
+        {
+          "tool_id": "candidate.backlog",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.deepline_firmographic",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.jobs_feed",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.model_semantic",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.registry_feed",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.scrapingdog_job_postings",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        }
+      ],
+      "route_sha256": "55c3169805fce4f37656d360ebd2afcc7a72bb7132c6e70b5410f5033733f68c",
+      "candidate_plan_sha256": "c597f56713a1e032bc794db4b1c71d26080f1a5e62d39a21de5772e9b0b51e5c",
+      "replay_plan_sha256": "c597f56713a1e032bc794db4b1c71d26080f1a5e62d39a21de5772e9b0b51e5c",
+      "source_add_tool_id": "candidate.source_add.parity_company_source",
+      "source_add_manifest_sha256": "182d583a5ddbe97e6d8eb95efdd15705dc44704f6af811726edc8abb0f2e848f"
+    },
+    {
+      "fixture_id": "candidate-software-source-add-unavailable",
+      "feature_ids": [
+        "icp.company_size.11_50",
+        "icp.country.us",
+        "icp.industry.software"
+      ],
+      "feature_set_sha256": "10e5b43a26c13970f64f35789813285586e598ad088c8f8a74fe1a22c7d51bf3",
+      "profile_id": "software-source-add",
+      "profile_version": "v1",
+      "profile_sha256": "258d00d288b6f2e3a2e51279842604cc906ef56ae4a818ed93365f14e2059c04",
+      "registry_sha256": "6dfc3e395b3ecc0ddec0531eaa8022718c74240b629342ae50c4e6599199a97d",
+      "base_policy_sha256": "7157e42ee1eda109366309a5d067db9b9f360037380ab68ece645638a3cda6fb",
+      "catalog_sha256": "a788e9d1bcfde356a3143eccc9a8d91efe3de7cd2fc77c7c84840e72028a2ce0",
+      "context_sha256": "56f8a18605a567c446cc05b493b0da3b74e4ccde8bcc501503c3dd7bdcad323d",
+      "selected_tool_ids": [],
+      "exclusions": [
+        {
+          "tool_id": "candidate.backlog",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.deepline_firmographic",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.jobs_feed",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.model_semantic",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.registry_feed",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.scrapingdog_job_postings",
+          "reason_code": "profile_not_selected",
+          "matched_avoid_when": []
+        },
+        {
+          "tool_id": "candidate.source_add.parity_company_source",
+          "reason_code": "tool_unavailable",
+          "matched_avoid_when": []
+        }
+      ],
+      "route_sha256": "ffb09fbb59f8bb05f963cf07036e56b10f579c109ad3a74d1ae7ddc13b468dfd",
+      "candidate_plan_sha256": "efa98d103346def9f3b7f0b6c9cd9b84279ede174593f8029d38c09e03dfbddc",
+      "replay_plan_sha256": "efa98d103346def9f3b7f0b6c9cd9b84279ede174593f8029d38c09e03dfbddc",
+      "source_add_tool_id": "candidate.source_add.parity_company_source",
+      "source_add_manifest_sha256": "182d583a5ddbe97e6d8eb95efdd15705dc44704f6af811726edc8abb0f2e848f"
     }
   ],
   "expected_candidate_enrichment_projections": [

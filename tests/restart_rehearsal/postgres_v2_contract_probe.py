@@ -234,6 +234,9 @@ CANDIDATE_HYBRID_PURPOSES_MIGRATION = (
 PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION = (
     "153-research-lab-private-model-lineage-generation.sql"
 )
+MODEL_COMPATIBILITY_PURPOSE_MIGRATION = (
+    "154-research-lab-model-compatibility-purpose.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -288,6 +291,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION,
     CANDIDATE_HYBRID_PURPOSES_MIGRATION,
     PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION,
+    MODEL_COMPATIBILITY_PURPOSE_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -318,6 +322,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_149_compact_weight_settlement_contract_valid",
     "post_152_candidate_hybrid_purpose_contract_valid",
     "post_153_private_model_lineage_generation_contract_valid",
+    "post_154_model_compatibility_purpose_contract_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5274,6 +5279,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             str(role): frozenset(str(purpose) for purpose in purposes)
             for role, purposes in ROLE_PURPOSES.items()
         }
+        expected_pairs["gateway_scoring"] = expected_pairs[
+            "gateway_scoring"
+        ] - frozenset({"research_lab.model_compatibility.v2"})
         definition = candidate_hybrid_purpose_contract.get(
             "constraint_definition"
         )
@@ -5382,6 +5390,46 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-153 private model lineage generation contract differs"
+            )
+        database.apply_migration(
+            scripts / MODEL_COMPATIBILITY_PURPOSE_MIGRATION
+        )
+        applied.append(MODEL_COMPATIBILITY_PURPOSE_MIGRATION)
+        candidate_hybrid_purpose_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_candidate_hybrid_purpose_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        definition = candidate_hybrid_purpose_contract.get(
+            "constraint_definition"
+        )
+        clauses = re.findall(
+            r"\(role = '([^']+)'::text\)\s+AND\s+"
+            r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
+            definition if isinstance(definition, str) else "",
+            flags=re.DOTALL,
+        )
+        observed_pairs = {
+            role: frozenset(
+                re.findall(r"'([^']+)'::text", encoded_purposes)
+            )
+            for role, encoded_purposes in clauses
+        }
+        expected_pairs = {
+            str(role): frozenset(str(purpose) for purpose in purposes)
+            for role, purposes in ROLE_PURPOSES.items()
+        }
+        if (
+            candidate_hybrid_purpose_contract.get("constraint_valid")
+            is not True
+            or observed_pairs != expected_pairs
+        ):
+            raise PostgresContractProbeError(
+                "post-154 model compatibility purpose contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(

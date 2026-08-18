@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_NAME = "scripts/152-research-lab-candidate-hybrid-purposes.sql"
 MIGRATION = ROOT / MIGRATION_NAME
 SQL = MIGRATION.read_text(encoding="utf-8")
+UPGRADE_MIGRATION_NAME = "scripts/154-research-lab-model-compatibility-purpose.sql"
+UPGRADE_SQL = (ROOT / UPGRADE_MIGRATION_NAME).read_text(encoding="utf-8")
 CONTRACT_RPC = "research_lab_candidate_hybrid_purpose_contract_v1"
 
 
@@ -39,7 +41,7 @@ def test_candidate_hybrid_purpose_migration_matches_canonical_contract() -> None
         SQL,
         re.MULTILINE,
     )
-    assert (MIGRATION_NAME, CONTRACT_RPC) in REQUIRED_SUPABASE_V2_RPCS
+    assert (UPGRADE_MIGRATION_NAME, CONTRACT_RPC) in REQUIRED_SUPABASE_V2_RPCS
 
     for role, expected_purposes in ROLE_PURPOSES.items():
         match = re.search(
@@ -48,9 +50,10 @@ def test_candidate_hybrid_purpose_migration_matches_canonical_contract() -> None
             re.DOTALL,
         )
         assert match is not None, role
-        assert set(re.findall(r"'([^']+)'", match.group(1))) == set(
-            expected_purposes
-        )
+        historical_purposes = set(expected_purposes)
+        if role == "gateway_scoring":
+            historical_purposes.discard("research_lab.model_compatibility.v2")
+        assert set(re.findall(r"'([^']+)'", match.group(1))) == historical_purposes
 
     assert re.search(
         r"REVOKE\s+ALL\s+ON\s+FUNCTION[\s\S]+?"
@@ -59,6 +62,25 @@ def test_candidate_hybrid_purpose_migration_matches_canonical_contract() -> None
         SQL,
         re.IGNORECASE,
     )
+
+
+def test_model_compatibility_purpose_upgrade_matches_canonical_contract() -> None:
+    assert re.search(r"\bBEGIN\s*;", UPGRADE_SQL)
+    assert re.search(r"\bCOMMIT\s*;\s*$", UPGRADE_SQL)
+    assert "SET LOCAL lock_timeout = '5s'" in UPGRADE_SQL
+    assert "NOT VALID" in UPGRADE_SQL
+    assert "VALIDATE CONSTRAINT" in UPGRADE_SQL
+
+    for role, expected_purposes in ROLE_PURPOSES.items():
+        match = re.search(
+            rf"role = '{re.escape(role)}' AND purpose IN \((.*?)\n\s*\)",
+            UPGRADE_SQL,
+            re.DOTALL,
+        )
+        assert match is not None, role
+        assert set(re.findall(r"'([^']+)'", match.group(1))) == set(
+            expected_purposes
+        )
     assert re.search(
         r"GRANT\s+EXECUTE\s+ON\s+FUNCTION[\s\S]+?"
         r"research_lab_candidate_hybrid_purpose_contract_v1\(\)"
@@ -168,6 +190,8 @@ def test_candidate_hybrid_purpose_migration_is_idempotent_and_fail_closed() -> N
         )
         psql(SQL)
         psql(SQL)
+        psql(UPGRADE_SQL)
+        psql(UPGRADE_SQL)
 
         values = ",".join(
             "(%s,%s)" % (_sql_text(role), _sql_text(purpose))

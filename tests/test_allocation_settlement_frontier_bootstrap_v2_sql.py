@@ -205,6 +205,7 @@ def test_migration_is_additive_private_and_declares_current_contract() -> None:
                 {
                     "research_lab.candidate_hybrid_test.v2",
                     "research_lab.candidate_hybrid_discovery.v2",
+                    "research_lab.model_compatibility.v2",
                 }
             )
         assert set(re.findall(r"'([^']+)'", match.group(1))) == (

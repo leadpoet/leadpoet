@@ -1570,6 +1570,10 @@ def test_v1_purpose_and_unknown_operation_fail_closed():
             "run_model_sandbox_v2",
             "research_lab.candidate_hybrid_discovery.v2",
         ),
+        (
+            "run_model_sandbox_v2",
+            "research_lab.model_compatibility.v2",
+        ),
     ),
 )
 def test_scoring_role_authorizes_exact_hybrid_candidate_purposes(

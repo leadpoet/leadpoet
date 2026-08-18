@@ -749,7 +749,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_compact_weight_settlement_contract_v1",
     ),
     (
-        "scripts/152-research-lab-candidate-hybrid-purposes.sql",
+        "scripts/154-research-lab-model-compatibility-purpose.sql",
         "research_lab_candidate_hybrid_purpose_contract_v1",
     ),
     (
@@ -937,7 +937,7 @@ def _verify_candidate_hybrid_purpose_contract_v1(
     except HTTPError as exc:
         raise SupabaseSchemaPreflightV2Error(
             "candidate hybrid purpose schema contract is unavailable; apply "
-            "scripts/152-research-lab-candidate-hybrid-purposes.sql before "
+            "scripts/154-research-lab-model-compatibility-purpose.sql before "
             f"restart (HTTP {exc.code})"
         ) from exc
     except Exception as exc:
@@ -947,7 +947,7 @@ def _verify_candidate_hybrid_purpose_contract_v1(
     if status < 200 or status >= 300:
         raise SupabaseSchemaPreflightV2Error(
             "candidate hybrid purpose schema contract is unavailable; apply "
-            "scripts/152-research-lab-candidate-hybrid-purposes.sql before "
+            "scripts/154-research-lab-model-compatibility-purpose.sql before "
             f"restart (HTTP {status})"
         )
     try:

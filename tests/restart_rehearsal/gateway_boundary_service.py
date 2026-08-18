@@ -509,6 +509,7 @@ def _migration_schema_contract(
         "149-research-lab-compact-weight-settlement-authority.sql",
         "152-research-lab-candidate-hybrid-purposes.sql",
         "153-research-lab-private-model-lineage-generation.sql",
+        "154-research-lab-model-compatibility-purpose.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (

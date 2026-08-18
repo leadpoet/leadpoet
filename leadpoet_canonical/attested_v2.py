@@ -85,6 +85,7 @@ ROLE_PURPOSES = {
             "research_lab.candidate_test.v2",
             "research_lab.candidate_hybrid_test.v2",
             "research_lab.candidate_hybrid_discovery.v2",
+            "research_lab.model_compatibility.v2",
             "research_lab.company_score.v2",
             "research_lab.provider_preflight.v2",
             "research_lab.candidate_score.v2",

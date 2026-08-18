@@ -177,6 +177,11 @@
       "symbol": "_is_checkpoint_bootstrap_scope"
     },
     {
+      "ast_sha256": "sha256:095cfee8496d54fb9de728aefaa7b844aa479a435cdbaf3fbc8005eb7425526c",
+      "path": "gateway/research_lab/attested_scoring_v2.py",
+      "symbol": "_load_model_compatibility_replay_v2"
+    },
+    {
       "ast_sha256": "sha256:cb633a53de3f32bdf23e6db356f5b4058c85a8d162a8770c2e94dbc784e2486f",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "_local_failed_receipt_hashes"
@@ -197,7 +202,7 @@
       "symbol": "_resolve_parent_ancestry_transport_v2"
     },
     {
-      "ast_sha256": "sha256:3c70a9d7938cdd9ded4b96f089586e5a97b8fe749f784403631d4fe15d810261",
+      "ast_sha256": "sha256:e5b7a982ea7645327b1d4aa89012bac832f4ad6ef9491559ef5bb4a133fb60c9",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "_validate_checkpointed_graph_proof_v2"
     },
@@ -207,7 +212,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:9e206701884452554f6c263622f1f8e0e48ff3c123d793768c9b9648d48a7aab",
+      "ast_sha256": "sha256:fc697e8c5aa56e207ba7afa58cedc406a404b38398e5dc5040f8087e4e46e035",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -215,6 +220,21 @@
       "ast_sha256": "sha256:dad14978e3c332536f2badf4bdde239ad1973e3306a2a064e191919e0f282252",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:b333b4c82a30777a0c75bc2008b2c9fd1bf0b41cdafb209bb0d1eeb93fbec7be",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "_MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2"
+    },
+    {
+      "ast_sha256": "sha256:c14d264081baacf003d243b9f155a94ea5248c11f2bc5f21ba1d10f4ffb61159",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "_MODEL_COMPATIBILITY_PURPOSE_V2"
+    },
+    {
+      "ast_sha256": "sha256:18c4b02465731982f39981fb3df45b0fa4bba2939ddc28089ae6d516e5e508e6",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "_RECEIPT_IDEMPOTENCY_FIELDS_V2"
     },
     {
       "ast_sha256": "sha256:aefc68ff23a361576ace928e913f91521be556e53226893ecde35a2c643cadc5",
@@ -295,6 +315,11 @@
       "ast_sha256": "sha256:9c39febe8306565962d1bcd635b72f628e398aa0da1bad7c82c5501454f10965",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_compact_weight_publication_intent_v2"
+    },
+    {
+      "ast_sha256": "sha256:8056c21a015ab112df2ed1d193efa6a4655d9601f41173dff9962f19090035e9",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_compatible_model_compatibility_receipt_v2"
     },
     {
       "ast_sha256": "sha256:0ee14e4610a55655883f35764594bc64ccee9be9c06e731081c27e7c018b0dc8",
@@ -4822,7 +4847,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:520e3ab82ccd8aaa0aaa5f03ba902416487a910b5d258c011325dbf850ba545f",
-  "protected_source_commit": "eba4084ba1183c962a138dfaf5d6c5920d8b2547",
+  "manifest_hash": "sha256:095d6c992c7945597f9bd2d4bd8c0aec98764211bf1a064758985aa230f6049d",
+  "protected_source_commit": "3498ab173c9bb17bd1e75311123948957a4efa52",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -6,6 +6,7 @@ import inspect
 import json
 from pathlib import Path
 import re
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -74,6 +75,20 @@ def test_setup_keeps_readonly_database_password_out_of_process_arguments(
     observed = {}
     credential = "c" * 64
 
+    class TrustedPsqlFixture:
+        def resolve(self, *, strict):
+            assert strict is True
+            return self
+
+        def stat(self):
+            return Path(sys.executable).stat()
+
+        def __fspath__(self):
+            return sys.executable
+
+        def __str__(self):
+            return "/opt/homebrew/Cellar/libpq/test/bin/psql"
+
     def fake_run(argv, **kwargs):
         observed["argv"] = argv
         observed["env"] = kwargs["env"]
@@ -106,6 +121,10 @@ def test_setup_keeps_readonly_database_password_out_of_process_arguments(
         "scripts.setup_production_parity_staging.subprocess.run",
         fake_run,
     )
+    monkeypatch.setattr(
+        "scripts.setup_production_parity_staging.LOCAL_PSQL",
+        TrustedPsqlFixture(),
+    )
     _verify_readonly_dsn(
         "postgresql://leadpoet_parity_reader.qplwoislplkcegvdmbim:"
         + credential
@@ -114,6 +133,7 @@ def test_setup_keeps_readonly_database_password_out_of_process_arguments(
     )
 
     assert all(credential not in item for item in observed["argv"])
+    assert observed["argv"][0] == "/opt/homebrew/Cellar/libpq/test/bin/psql"
     assert credential not in json.dumps(observed["env"])
     assert "PGPASSWORD" not in observed["env"]
     assert "PGPASSFILE" not in observed["env"]

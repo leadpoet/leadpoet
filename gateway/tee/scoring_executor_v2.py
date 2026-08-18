@@ -340,7 +340,7 @@ class ScoringExecutorV2:
                 artifact_sink=context.record_artifact,
             )
             sealed_artifacts = []
-            artifact_payloads = (
+            artifact_payloads = () if metadata_compatibility else (
                 ("model_output", canonical_json(result.get("output")).encode("utf-8")),
                 (
                     "model_trace",

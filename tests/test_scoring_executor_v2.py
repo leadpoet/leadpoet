@@ -1046,7 +1046,9 @@ async def test_model_metadata_uses_dedicated_zero_credential_authority(
         ),
         retry_policy_hashes={},
         model_sandbox=_Sandbox(),
-        artifact_seal=_seal_artifact,
+        artifact_seal=lambda **_kwargs: pytest.fail(
+            "metadata compatibility must not seal model artifacts"
+        ),
     )
     monkeypatch.setattr(
         executor,
@@ -1074,6 +1076,7 @@ async def test_model_metadata_uses_dedicated_zero_credential_authority(
     assert observed["kwargs"]["purpose"] == MODEL_COMPATIBILITY_PURPOSE_V2
     assert context.provider_credential_ref_hashes == {}
     assert result.output["trace_entries"] == []
+    assert result.output["sealed_artifacts"] == []
 
 
 @pytest.mark.asyncio

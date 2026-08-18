@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from pathlib import Path
+import os
 
 import pytest
 
@@ -1008,7 +1008,10 @@ def test_v2_live_mode_rejects_fixture_or_replay_cache_entries(tmp_path):
 
 
 def test_exact_candidate_model_profile_and_plan_contract():
-    adapter = PinnedSourcingModelRoutingAdapter.from_model_root("/private/tmp/leadpoet-model-candidate-routing-20260818")
+    model_root = os.getenv("LEADPOET_PINNED_SOURCING_MODEL_ROOT", "").strip()
+    if not model_root:
+        pytest.skip("set LEADPOET_PINNED_SOURCING_MODEL_ROOT for exact model integration")
+    adapter = PinnedSourcingModelRoutingAdapter.from_model_root(model_root)
     metadata = adapter.candidate_profiles.candidate_routing_profile_metadata()
     feature_set = adapter.parse_feature_set(FEATURES)
     default_payload = metadata["profiles"][0]

@@ -667,6 +667,45 @@ def test_malformed_iam_receipt_still_cleans_bounded_role_and_stays_disabled(
     assert events == ["disable", "iam-only", "cleanup-bootstrap", "disable"]
 
 
+def test_lost_iam_receipt_still_cleans_ambiguous_remote_role_and_disables(
+    monkeypatch,
+):
+    migration = b"-- exact idempotent migration\n"
+    migration_hash = hashlib.sha256(migration).hexdigest()
+    events: list[str] = []
+
+    def fake_run(*args, **kwargs):
+        if args[:3] == ("git", "rev-parse", "HEAD"):
+            return COMMIT.encode()
+        return b""
+
+    monkeypatch.setattr(bootstrap, "_run", fake_run)
+    monkeypatch.setattr(
+        bootstrap,
+        "_committed_blob",
+        lambda commit, path: (
+            migration if path == bootstrap.MIGRATION_PATH else b"source"
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap, "_disable_repository", lambda: events.append("disable")
+    )
+
+    def gateway(source, *, path, argv):
+        events.append(argv[0])
+        if argv[0] == "iam-only":
+            raise bootstrap.BootstrapError("IAM receipt transport was lost")
+        return {"status": "static_bootstrap_authority_removed"}
+
+    monkeypatch.setattr(bootstrap, "_gateway_command", gateway)
+    with pytest.raises(
+        bootstrap.BootstrapError,
+        match="receipt transport was lost",
+    ):
+        bootstrap.bootstrap(commit=COMMIT, migration_sha256=migration_hash)
+    assert events == ["disable", "iam-only", "cleanup-bootstrap", "disable"]
+
+
 def test_orchestrator_rejects_stale_checkout_before_any_commission_write(
     monkeypatch,
 ):

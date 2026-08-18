@@ -510,12 +510,13 @@ def bootstrap(*, commit: str, migration_sha256: str) -> dict[str, Any]:
     configured = False
     cleanup_error: Exception | None = None
     try:
+        # The remote IAM transaction may commit before SSH or receipt parsing
+        # fails. Cleanup is exact-owned and idempotent when the role is absent,
+        # so make it mandatory before crossing that ambiguous boundary.
+        bootstrap_role_created = True
         iam_receipt = _gateway_command(
             setup_source, path=SETUP_PATH, argv=["iam-only"]
         )
-        # A successful iam-only process has created the bounded role even when
-        # its receipt is malformed; ensure the outer finally still removes it.
-        bootstrap_role_created = True
         if (
             iam_receipt.get("status") != "iam_ready"
             or iam_receipt.get("account_id") != setup.EXPECTED_ACCOUNT_ID

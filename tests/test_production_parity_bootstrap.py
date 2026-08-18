@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 from botocore.exceptions import ClientError
 import pytest
+import yaml
 
 from scripts import bootstrap_production_parity_staging as bootstrap
 from scripts import install_production_parity_static_secrets as installer
@@ -1835,18 +1836,26 @@ def test_migration_is_clone_safe_and_rechecks_complete_contract():
 
 
 def test_full_workflow_uses_self_hosted_bounded_windows_and_exact_volume():
-    source = (
+    workflow_path = (
         Path(__file__).parents[1]
         / ".github/workflows/physical-v2-staging.yml"
-    ).read_text(encoding="utf-8")
+    )
+    source = workflow_path.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(source)
+    job = workflow["jobs"]["validate"]
     assert "leadpoet-gateway-v2-builder" in source
     assert "runs-on: ubuntu-latest" not in source
+    assert job["timeout-minutes"] == 1430
+    assert "PARITY_TEMP" not in job["env"]
+    assert not any(
+        "${{ runner." in str(value) for value in job["env"].values()
+    )
     assert 'FULL_TIMEOUT_SECONDS: "72000"' in source
     assert 'SSM_TIMEOUT_SECONDS: "77400"' in source
     assert '${PARITY_VOLUME_GIB:-' not in source
     assert 'test "$PARITY_VOLUME_GIB" = "512"' in source
     assert source.count("unset-current-credentials: true") >= 7
-    assert source.count("allowed-account-ids: \"493765492819\"") >= 7
+    assert "allowed-account-ids:" not in source
     assert "--max-wait-seconds 16200" in source
     assert "--max-wait-seconds 12600" in source
     assert "Refresh parity AWS role for cleanup" in source
@@ -1854,7 +1863,8 @@ def test_full_workflow_uses_self_hosted_bounded_windows_and_exact_volume():
     assert "echo 'verified=true' >> \"$GITHUB_OUTPUT\"" in source
     assert source.count(
         "always() && steps.provenance.outputs.verified == 'true'"
-    ) == 2
+    ) == 3
+    assert "steps.cleanup_account.outcome == 'success'" in source
     assert "id: evidence_path" in source
     assert (
         "always() && steps.evidence_path.outputs.verified == 'true'" in source
@@ -1885,21 +1895,80 @@ def test_controller_dependencies_use_a_scrubbed_per_run_virtualenv():
     assert 'printf \'VIRTUAL_ENV=%s\\n\' "$venv_root"' in action
     assert 'test "$(command -v python3)" = "$VIRTUAL_ENV/bin/python3"' in action
     assert '"$venv_python" "$script" --help' in action
-    assert 'PARITY_TEMP: ${{ runner.temp }}/production-parity-' in full
-    assert 'rm -rf -- "$PARITY_TEMP"' in full
+    assert 'printf \'PARITY_TEMP=%s\\n\' "$PARITY_TEMP" >> "$GITHUB_ENV"' in full
+    assert 'rm -rf -- "$parity_temp"' in full
+
+
+def test_full_workflow_derives_temp_before_use_and_cleans_safe_exact_path():
+    path = (
+        Path(__file__).parents[1]
+        / ".github/workflows/physical-v2-staging.yml"
+    )
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["validate"]["steps"]
+    by_name = {step.get("name"): step for step in steps}
+
+    prepare = by_name["Prepare isolated self-hosted controller workspace"]["run"]
+    export = 'printf \'PARITY_TEMP=%s\\n\' "$PARITY_TEMP" >> "$GITHUB_ENV"'
+    assert 'expected="$RUNNER_TEMP/production-parity-' in prepare
+    assert 'PARITY_TEMP="$expected"' in prepare
+    assert export in prepare
+    assert prepare.index(export) < prepare.index('mkdir -m 700 "$PARITY_TEMP"')
+
+    for name in (
+        "Validate redacted evidence upload path",
+        "Destroy every run-scoped resource",
+        "Scrub self-hosted controller workspace",
+    ):
+        cleanup = by_name[name]["run"]
+        assert "${RUNNER_TEMP:-}" in cleanup
+        assert "${GITHUB_RUN_ID:-}" in cleanup
+        assert "${GITHUB_RUN_ATTEMPT:-}" in cleanup
+        assert 'expected="$RUNNER_TEMP/production-parity-' in cleanup
+        assert 'parity_temp="${PARITY_TEMP:-$expected}"' in cleanup
+        assert '"$parity_temp"' in cleanup
+        assert '"$expected"' in cleanup
+
+    upload = by_name["Upload redacted evidence"]["with"]["path"]
+    assert upload == (
+        "${{ runner.temp }}/production-parity-${{ github.run_id }}-"
+        "${{ github.run_attempt }}/full-evidence.json"
+    )
 
 
 def test_fast_and_cleanup_pin_account_and_reject_stale_cleanup_code():
     root = Path(__file__).parents[1]
-    fast = (root / ".github/workflows/production-parity-fast.yml").read_text(
-        encoding="utf-8"
+    workflow_jobs = (
+        (".github/workflows/production-parity-fast.yml", "validate"),
+        (".github/workflows/physical-v2-staging.yml", "validate"),
+        (".github/workflows/production-parity-cleanup.yml", "cleanup"),
     )
-    cleanup = (
-        root / ".github/workflows/production-parity-cleanup.yml"
-    ).read_text(encoding="utf-8")
-    for source in (fast, cleanup):
-        assert 'allowed-account-ids: "493765492819"' in source
-        assert "unset-current-credentials: true" in source
+    sources = {}
+    for relative_path, job_name in workflow_jobs:
+        source = (root / relative_path).read_text(encoding="utf-8")
+        sources[relative_path] = source
+        assert "allowed-account-ids:" not in source
+        workflow = yaml.safe_load(source)
+        steps = workflow["jobs"][job_name]["steps"]
+        credential_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses") == "aws-actions/configure-aws-credentials@v4"
+        ]
+        assert credential_indexes
+        for index in credential_indexes:
+            credential = steps[index]
+            account_gate = steps[index + 1]
+            assert account_gate["name"].startswith(
+                "Require exact parity AWS account"
+            )
+            assert account_gate.get("if") == credential.get("if")
+            assert "aws sts get-caller-identity" in account_gate["run"]
+            assert '"493765492819"' in account_gate["run"]
+            assert credential["with"]["unset-current-credentials"] is True
+
+    fast = sources[".github/workflows/production-parity-fast.yml"]
+    cleanup = sources[".github/workflows/production-parity-cleanup.yml"]
     cleanup_gate = cleanup.index("name: Require exact current main before credentials")
     cleanup_action = cleanup.index(
         "uses: ./.github/actions/setup-production-parity-controller"

@@ -43,14 +43,17 @@ jobs:
       PARITY_VOLUME_GIB: ${{ vars.LEADPOET_PARITY_VOLUME_GIB }}
       FULL_TIMEOUT_SECONDS: "72000"
       SSM_TIMEOUT_SECONDS: "77400"
-      PARITY_TEMP: ${{ runner.temp }}/production-parity-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Prepare isolated self-hosted controller workspace
         shell: bash
         run: |
           set -Eeuo pipefail
+          test -n "${RUNNER_TEMP:-}"
+          test -n "${GITHUB_RUN_ID:-}"
+          test -n "${GITHUB_RUN_ATTEMPT:-}"
           expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          test -n "$PARITY_TEMP" && test "$PARITY_TEMP" = "$expected"
+          PARITY_TEMP="$expected"
+          printf 'PARITY_TEMP=%s\n' "$PARITY_TEMP" >> "$GITHUB_ENV"
           test ! -e "$PARITY_TEMP"
           mkdir -m 700 "$PARITY_TEMP"
 
@@ -104,9 +107,15 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          allowed-account-ids: "493765492819"
           role-duration-seconds: 21600
           unset-current-credentials: true
+
+      - name: Require exact parity AWS account
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "493765492819"
 
       - name: Freeze candidate and source inputs
         id: inputs
@@ -258,9 +267,15 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          allowed-account-ids: "493765492819"
           role-duration-seconds: 21600
           unset-current-credentials: true
+
+      - name: Require exact parity AWS account for poll window 1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "493765492819"
 
       - name: Poll candidate window 1
         id: poll1
@@ -279,9 +294,16 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          allowed-account-ids: "493765492819"
           role-duration-seconds: 21600
           unset-current-credentials: true
+
+      - name: Require exact parity AWS account for poll window 2
+        if: steps.poll1.outputs.status == 'pending'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "493765492819"
 
       - name: Poll candidate window 2
         if: steps.poll1.outputs.status == 'pending'
@@ -301,9 +323,16 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          allowed-account-ids: "493765492819"
           role-duration-seconds: 21600
           unset-current-credentials: true
+
+      - name: Require exact parity AWS account for poll window 3
+        if: steps.poll2.outputs.status == 'pending'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "493765492819"
 
       - name: Poll candidate window 3
         if: steps.poll2.outputs.status == 'pending'
@@ -323,9 +352,16 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          allowed-account-ids: "493765492819"
           role-duration-seconds: 21600
           unset-current-credentials: true
+
+      - name: Require exact parity AWS account for poll window 4
+        if: steps.poll3.outputs.status == 'pending'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "493765492819"
 
       - name: Poll candidate window 4
         if: steps.poll3.outputs.status == 'pending'
@@ -345,9 +381,16 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          allowed-account-ids: "493765492819"
           role-duration-seconds: 21600
           unset-current-credentials: true
+
+      - name: Require exact parity AWS account for poll window 5
+        if: steps.poll4.outputs.status == 'pending'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "493765492819"
 
       - name: Poll candidate window 5
         if: steps.poll4.outputs.status == 'pending'
@@ -435,11 +478,15 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          test -n "${RUNNER_TEMP:-}"
+          test -n "${GITHUB_RUN_ID:-}"
+          test -n "${GITHUB_RUN_ATTEMPT:-}"
           expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          test -n "$PARITY_TEMP" && test "$PARITY_TEMP" = "$expected"
-          if [ -e "$PARITY_TEMP/full-evidence.json" ]; then
-            test -f "$PARITY_TEMP/full-evidence.json"
-            test ! -L "$PARITY_TEMP/full-evidence.json"
+          parity_temp="${PARITY_TEMP:-$expected}"
+          test -n "$parity_temp" && test "$parity_temp" = "$expected"
+          if [ -e "$parity_temp/full-evidence.json" ]; then
+            test -f "$parity_temp/full-evidence.json"
+            test ! -L "$parity_temp/full-evidence.json"
           fi
           echo 'verified=true' >> "$GITHUB_OUTPUT"
 
@@ -451,7 +498,7 @@ jobs:
           name: production-parity-full-${{ env.CANDIDATE_SHA }}
           retention-days: 14
           if-no-files-found: ignore
-          path: ${{ env.PARITY_TEMP }}/full-evidence.json
+          path: ${{ runner.temp }}/production-parity-${{ github.run_id }}-${{ github.run_attempt }}/full-evidence.json
 
       - name: Refresh parity AWS role for cleanup
         if: >-
@@ -460,30 +507,45 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          allowed-account-ids: "493765492819"
           role-duration-seconds: 21600
           unset-current-credentials: true
 
-      - name: Destroy every run-scoped resource
+      - name: Require exact parity AWS account for cleanup
+        id: cleanup_account
         if: >-
           always() && steps.provenance.outputs.verified == 'true'
         shell: bash
         run: |
+          set -Eeuo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "493765492819"
+
+      - name: Destroy every run-scoped resource
+        if: >-
+          always() && steps.provenance.outputs.verified == 'true' &&
+          steps.cleanup_account.outcome == 'success'
+        shell: bash
+        run: |
           set +e
+          if [ -z "${RUNNER_TEMP:-}" ] || [ -z "${GITHUB_RUN_ID:-}" ] || \
+             [ -z "${GITHUB_RUN_ATTEMPT:-}" ]; then
+            exit 1
+          fi
           expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          if [ -z "$PARITY_TEMP" ] || [ "$PARITY_TEMP" != "$expected" ]; then
+          parity_temp="${PARITY_TEMP:-$expected}"
+          if [ -z "$parity_temp" ] || [ "$parity_temp" != "$expected" ]; then
             exit 1
           fi
           cleanup_status=0
-          if [ -s "$PARITY_TEMP/parity-stack.json" ]; then
+          if [ -s "$parity_temp/parity-stack.json" ]; then
             python3 scripts/provision_production_parity_staging.py \
               --region "$AWS_REGION" delete \
-              --state "$PARITY_TEMP/parity-stack.json" || cleanup_status=$?
+              --state "$parity_temp/parity-stack.json" || cleanup_status=$?
           fi
-          shred -u "$PARITY_TEMP/candidate.bundle" 2>/dev/null || \
-            rm -f "$PARITY_TEMP/candidate.bundle"
-          rm -f "$PARITY_TEMP/ssm-parameters.json"
-          rm -rf -- "$PARITY_TEMP"
+          shred -u "$parity_temp/candidate.bundle" 2>/dev/null || \
+            rm -f "$parity_temp/candidate.bundle"
+          rm -f "$parity_temp/ssm-parameters.json"
+          rm -rf -- "$parity_temp"
           exit "$cleanup_status"
 
       - name: Scrub self-hosted controller workspace
@@ -491,10 +553,15 @@ jobs:
         shell: bash
         run: |
           set +e
-          expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          if [ -z "$PARITY_TEMP" ] || [ "$PARITY_TEMP" != "$expected" ]; then
+          if [ -z "${RUNNER_TEMP:-}" ] || [ -z "${GITHUB_RUN_ID:-}" ] || \
+             [ -z "${GITHUB_RUN_ATTEMPT:-}" ]; then
             exit 1
           fi
-          rm -rf -- "$PARITY_TEMP"
+          expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          parity_temp="${PARITY_TEMP:-$expected}"
+          if [ -z "$parity_temp" ] || [ "$parity_temp" != "$expected" ]; then
+            exit 1
+          fi
+          rm -rf -- "$parity_temp"
           git reset --hard HEAD >/dev/null 2>&1
           git clean -ffdx >/dev/null 2>&1

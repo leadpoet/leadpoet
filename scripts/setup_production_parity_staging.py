@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
@@ -30,11 +31,16 @@ RUNNER_ROLE = "leadpoet-production-parity-runner"
 RUNNER_PROFILE = "leadpoet-production-parity-runner"
 OIDC_URL = "https://token.actions.githubusercontent.com"
 DEFAULT_REPOSITORY = "leadpoet/leadpoet"
+EXPECTED_REPOSITORY_ID = "1075412927"
 EXPECTED_ACCOUNT_ID = "493765492819"
 EXPECTED_REGION = "us-east-1"
 PRODUCTION_GATEWAY_IP = "52.91.135.79"
 PRODUCTION_GATEWAY_URL = "https://gateway.subnet71.com"
 PRODUCTION_GATEWAY_SECRET_ID = "leadpoet/prod/gateway/env"
+PRODUCTION_AMI_ID = "ami-0cae6d6fe6048ca2c"
+PRODUCTION_INSTANCE_TYPE = "r7i.4xlarge"
+PRODUCTION_SUBNET_ID = "subnet-025170c1eff61494d"
+PRODUCTION_VPC_ID = "vpc-0c975a643bc1e0e79"
 READONLY_DSN_SECRET_ID = "leadpoet/staging/production-parity/readonly-dsn"
 PRODUCTION_POOLER_HOST = "aws-0-us-east-1.pooler.supabase.com"
 PRODUCTION_READER_USER = "leadpoet_parity_reader.qplwoislplkcegvdmbim"
@@ -48,6 +54,23 @@ GATEWAY_IAM_CACHE = Path("/home/ec2-user/.config/leadpoet/gateway.env")
 DEFAULT_MINER_INTAKE_SECRET_ID = (
     "leadpoet/staging/production-parity-miner-intake"
 )
+CONTROLLER_WORKFLOWS = (
+    "Production Parity Full",
+    "Production Parity Fast",
+    "Production Parity Cleanup",
+)
+CONTROLLER_POLICY_PATH = "/leadpoet/production-parity/"
+CONTROLLER_REVOKE_POLICY = "LeadpoetProductionParityRevokeOlderSessions"
+RUNNER_REVOKE_POLICY = "LeadpoetProductionParityRunnerRevokeOlderSessions"
+CONTROLLER_POLICY_DESCRIPTION = (
+    "Leadpoet production-parity controller boundary"
+)
+CONTROLLER_POLICY_NAMES = {
+    "ec2_launch": "LeadpoetParityControllerEc2Launch",
+    "lifecycle": "LeadpoetParityControllerLifecycle",
+    "cloudfront": "LeadpoetParityControllerCloudFront",
+    "data": "LeadpoetParityControllerData",
+}
 
 
 class SetupError(RuntimeError):
@@ -324,6 +347,8 @@ def _ensure_role(
     expected_inline_policies: set[str],
     expected_attached_policies: set[str],
     max_session_duration: int = 43200,
+    revoke_policy_name: str | None = None,
+    revocation_receipt: dict[str, Any] | None = None,
 ) -> str:
     try:
         role = iam.get_role(RoleName=name)["Role"]
@@ -370,6 +395,8 @@ def _ensure_role(
             MaxSessionDuration=max_session_duration,
             Tags=[{"Key": "leadpoet:purpose", "Value": "production-parity"}],
         )["Role"]
+        inline = set()
+        attached = set()
     # Trust is an authorization boundary, so converge and prove the inert
     # trust before any caller replaces existing inline policy contents.
     role = iam.get_role(RoleName=name)["Role"]
@@ -388,6 +415,41 @@ def _ensure_role(
         != _json(trust)
     ):
         raise SetupError(f"IAM role {name} trust readback differs")
+    if revoke_policy_name is not None:
+        if _json(trust) != _json(_inert_trust()) or revocation_receipt is None:
+            raise SetupError("IAM role session revocation contract is invalid")
+        cutoff = _new_session_cutoff()
+        revoke_document = _revoke_older_sessions_policy(cutoff=cutoff)
+        _put_policy(
+            iam,
+            role=name,
+            name=revoke_policy_name,
+            document=revoke_document,
+        )
+        actual_revoke = iam.get_role_policy(
+            RoleName=name,
+            PolicyName=revoke_policy_name,
+        ).get("PolicyDocument")
+        if _json(_policy_document(actual_revoke)) != _json(revoke_document):
+            raise SetupError(f"IAM role {name} session revocation readback differs")
+        revocation_receipt.update({
+            "cutoff": cutoff,
+            "document": revoke_document,
+        })
+    inline = set(
+        iam.list_role_policies(RoleName=name).get("PolicyNames", [])
+    )
+    attached = {
+        str(item.get("PolicyArn") or "")
+        for item in iam.list_attached_role_policies(RoleName=name).get(
+            "AttachedPolicies", []
+        )
+    }
+    if (
+        not inline.issubset(expected_inline_policies)
+        or not attached.issubset(expected_attached_policies)
+    ):
+        raise SetupError(f"existing IAM role {name} policy inventory differs")
     return str(role["Arn"])
 
 
@@ -451,6 +513,238 @@ def _put_policy(iam: Any, *, role: str, name: str, document: Mapping[str, Any]) 
     )
 
 
+def _neutralize_controller_role(
+    iam: Any,
+    *,
+    account_id: str,
+    managed_policy_arns: set[str],
+    legacy_inline_policy: str,
+    revoke_document: Mapping[str, Any],
+) -> None:
+    inert_trust = _inert_trust()
+    iam.update_assume_role_policy(
+        RoleName=CONTROLLER_ROLE,
+        PolicyDocument=_json(inert_trust),
+    )
+    iam.update_role(RoleName=CONTROLLER_ROLE, MaxSessionDuration=43200)
+    _put_policy(
+        iam,
+        role=CONTROLLER_ROLE,
+        name=CONTROLLER_REVOKE_POLICY,
+        document=revoke_document,
+    )
+    revoke_readback = iam.get_role_policy(
+        RoleName=CONTROLLER_ROLE,
+        PolicyName=CONTROLLER_REVOKE_POLICY,
+    ).get("PolicyDocument")
+    if _json(_policy_document(revoke_readback)) != _json(revoke_document):
+        raise SetupError("controller IAM session revocation readback differs")
+    inline = set(
+        iam.list_role_policies(RoleName=CONTROLLER_ROLE).get("PolicyNames", [])
+    )
+    attached = {
+        str(item.get("PolicyArn") or "")
+        for item in iam.list_attached_role_policies(
+            RoleName=CONTROLLER_ROLE
+        ).get("AttachedPolicies", [])
+    }
+    if not inline.issubset(
+        {legacy_inline_policy, CONTROLLER_REVOKE_POLICY}
+    ) or not attached.issubset(managed_policy_arns):
+        raise SetupError("controller IAM policy inventory changed unexpectedly")
+    if legacy_inline_policy in inline:
+        iam.delete_role_policy(
+            RoleName=CONTROLLER_ROLE,
+            PolicyName=legacy_inline_policy,
+        )
+    for policy_arn in sorted(attached):
+        iam.detach_role_policy(
+            RoleName=CONTROLLER_ROLE,
+            PolicyArn=policy_arn,
+        )
+    _assert_role_configuration(
+        iam,
+        account_id=account_id,
+        name=CONTROLLER_ROLE,
+        trust=inert_trust,
+        inline_policies={CONTROLLER_REVOKE_POLICY: revoke_document},
+        attached_policies=set(),
+        max_session_duration=43200,
+    )
+
+
+def _managed_policy_arn(*, account_id: str, name: str) -> str:
+    return (
+        f"arn:aws:iam::{account_id}:policy/"
+        f"{CONTROLLER_POLICY_PATH.strip('/')}/{name}"
+    )
+
+
+def _managed_policy_entities(
+    iam: Any, *, policy_arn: str
+) -> tuple[set[str], set[str], set[str]]:
+    roles: set[str] = set()
+    users: set[str] = set()
+    groups: set[str] = set()
+    marker: str | None = None
+    while True:
+        response = iam.list_entities_for_policy(
+            PolicyArn=policy_arn,
+            **({"Marker": marker} if marker else {}),
+        )
+        roles.update(
+            str(item.get("RoleName") or "")
+            for item in response.get("PolicyRoles", [])
+        )
+        users.update(
+            str(item.get("UserName") or "")
+            for item in response.get("PolicyUsers", [])
+        )
+        groups.update(
+            str(item.get("GroupName") or "")
+            for item in response.get("PolicyGroups", [])
+        )
+        if not response.get("IsTruncated"):
+            break
+        marker = str(response.get("Marker") or "")
+        if not marker:
+            raise SetupError("IAM managed policy entity pagination differs")
+    return roles, users, groups
+
+
+def _assert_managed_policy(
+    iam: Any,
+    *,
+    account_id: str,
+    name: str,
+    document: Mapping[str, Any],
+    expected_roles: set[str],
+) -> str:
+    arn = _managed_policy_arn(account_id=account_id, name=name)
+    policy = iam.get_policy(PolicyArn=arn).get("Policy", {})
+    tags = {
+        str(item.get("Key") or ""): str(item.get("Value") or "")
+        for item in iam.list_policy_tags(PolicyArn=arn).get("Tags", [])
+    }
+    versions = iam.list_policy_versions(PolicyArn=arn).get("Versions", [])
+    roles, users, groups = _managed_policy_entities(iam, policy_arn=arn)
+    if (
+        policy.get("Arn") != arn
+        or policy.get("PolicyName") != name
+        or policy.get("Path") != CONTROLLER_POLICY_PATH
+        or policy.get("Description") != CONTROLLER_POLICY_DESCRIPTION
+        or tags != {"leadpoet:purpose": "production-parity"}
+        or roles != expected_roles
+        or users
+        or groups
+        or len(versions) != 1
+        or versions[0].get("IsDefaultVersion") is not True
+        or versions[0].get("VersionId") != policy.get("DefaultVersionId")
+    ):
+        raise SetupError(f"IAM managed policy {name} identity differs")
+    actual = iam.get_policy_version(
+        PolicyArn=arn,
+        VersionId=str(policy["DefaultVersionId"]),
+    ).get("PolicyVersion", {}).get("Document")
+    if _json(_policy_document(actual)) != _json(document):
+        raise SetupError(f"IAM managed policy {name} document differs")
+    return arn
+
+
+def _ensure_managed_policy(
+    iam: Any,
+    *,
+    account_id: str,
+    name: str,
+    document: Mapping[str, Any],
+) -> str:
+    if len(_json(document)) > 6144:
+        raise SetupError(f"IAM managed policy {name} exceeds the AWS quota")
+    arn = _managed_policy_arn(account_id=account_id, name=name)
+    try:
+        policy = iam.get_policy(PolicyArn=arn).get("Policy", {})
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "NoSuchEntity":
+            raise
+        iam.create_policy(
+            PolicyName=name,
+            Path=CONTROLLER_POLICY_PATH,
+            PolicyDocument=_json(document),
+            Description=CONTROLLER_POLICY_DESCRIPTION,
+            Tags=[{"Key": "leadpoet:purpose", "Value": "production-parity"}],
+        )
+        return _assert_managed_policy(
+            iam,
+            account_id=account_id,
+            name=name,
+            document=document,
+            expected_roles=set(),
+        )
+
+    tags = {
+        str(item.get("Key") or ""): str(item.get("Value") or "")
+        for item in iam.list_policy_tags(PolicyArn=arn).get("Tags", [])
+    }
+    roles, users, groups = _managed_policy_entities(iam, policy_arn=arn)
+    if (
+        policy.get("Arn") != arn
+        or policy.get("PolicyName") != name
+        or policy.get("Path") != CONTROLLER_POLICY_PATH
+        or policy.get("Description") != CONTROLLER_POLICY_DESCRIPTION
+        or tags != {"leadpoet:purpose": "production-parity"}
+        or roles
+        or users
+        or groups
+    ):
+        raise SetupError(f"existing IAM managed policy {name} is not owned by parity")
+
+    default_version = str(policy.get("DefaultVersionId") or "")
+    current = iam.get_policy_version(
+        PolicyArn=arn,
+        VersionId=default_version,
+    ).get("PolicyVersion", {}).get("Document")
+    versions = iam.list_policy_versions(PolicyArn=arn).get("Versions", [])
+    version_ids = [str(item.get("VersionId") or "") for item in versions]
+    default_ids = [
+        str(item.get("VersionId") or "")
+        for item in versions
+        if item.get("IsDefaultVersion") is True
+    ]
+    if (
+        not default_version
+        or not 1 <= len(versions) <= 5
+        or any(not value for value in version_ids)
+        or len(set(version_ids)) != len(version_ids)
+        or default_ids != [default_version]
+    ):
+        raise SetupError(f"IAM managed policy {name} version inventory differs")
+    for version in versions:
+        version_id = str(version.get("VersionId") or "")
+        if not version_id or version_id == default_version:
+            continue
+        iam.delete_policy_version(PolicyArn=arn, VersionId=version_id)
+    if _json(_policy_document(current)) != _json(document):
+        created = iam.create_policy_version(
+            PolicyArn=arn,
+            PolicyDocument=_json(document),
+            SetAsDefault=True,
+        ).get("PolicyVersion", {})
+        replacement = str(created.get("VersionId") or "")
+        if not replacement or replacement == default_version:
+            raise SetupError(f"IAM managed policy {name} version creation differs")
+        iam.delete_policy_version(
+            PolicyArn=arn,
+            VersionId=default_version,
+        )
+    return _assert_managed_policy(
+        iam,
+        account_id=account_id,
+        name=name,
+        document=document,
+        expected_roles=set(),
+    )
+
+
 def _inert_trust() -> dict[str, Any]:
     return {
         "Version": "2012-10-17",
@@ -460,6 +754,67 @@ def _inert_trust() -> dict[str, Any]:
             "Action": "sts:AssumeRole",
         }],
     }
+
+
+def _controller_trust(*, oidc_arn: str) -> dict[str, Any]:
+    claim = "token.actions.githubusercontent.com:"
+    return {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Federated": oidc_arn},
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+                "StringEquals": {
+                    claim + "aud": "sts.amazonaws.com",
+                    claim + "sub": (
+                        "repo:leadpoet/leadpoet:ref:refs/heads/main"
+                    ),
+                    claim + "repository": DEFAULT_REPOSITORY,
+                    claim + "repository_id": EXPECTED_REPOSITORY_ID,
+                    claim + "ref": "refs/heads/main",
+                    claim + "workflow": list(CONTROLLER_WORKFLOWS),
+                },
+            },
+        }],
+    }
+
+
+def _revoke_older_sessions_policy(*, cutoff: str) -> dict[str, Any]:
+    return {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Deny",
+            "Action": "*",
+            "Resource": "*",
+            "Condition": {
+                "DateLessThan": {"aws:TokenIssueTime": cutoff},
+            },
+        }],
+    }
+
+
+def _new_session_cutoff() -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
+
+
+def _wait_until_after_session_cutoffs(cutoffs: Sequence[str]) -> None:
+    try:
+        not_before = max(
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            for value in cutoffs
+        )
+    except (ValueError, TypeError) as exc:
+        raise SetupError("IAM session revocation cutoff is invalid") from exc
+    remaining = (not_before - datetime.now(timezone.utc)).total_seconds()
+    if remaining > 35:
+        raise SetupError("IAM session revocation cutoff is unexpectedly distant")
+    if remaining >= 0:
+        time.sleep(remaining + 0.1)
+    if datetime.now(timezone.utc) <= not_before:
+        raise SetupError("IAM session revocation cutoff has not elapsed")
 
 
 def _ensure_instance_profile(iam: Any, *, account_id: str) -> None:
@@ -529,51 +884,314 @@ def _controller_policy(
         f"{miner_intake_secret_id}-??????"
     )
     parity_bucket = f"arn:aws:s3:::leadpoet-parity-{account_id}-*"
+    ec2_prefix = f"arn:aws:ec2:{region}:{account_id}"
+    instance_arn = ec2_prefix + ":instance/*"
+    volume_arn = ec2_prefix + ":volume/*"
+    network_interface_arn = ec2_prefix + ":network-interface/*"
+    security_group_arn = ec2_prefix + ":security-group/*"
+    subnet_arn = ec2_prefix + f":subnet/{PRODUCTION_SUBNET_ID}"
+    vpc_arn = ec2_prefix + f":vpc/{PRODUCTION_VPC_ID}"
+    image_arn = f"arn:aws:ec2:{region}::image/{PRODUCTION_AMI_ID}"
+    distribution_arn = (
+        f"arn:aws:cloudfront::{account_id}:distribution/*"
+    )
+    parity_tag_keys = [
+        "Name",
+        "leadpoet:candidate-sha",
+        "leadpoet:ephemeral",
+        "leadpoet:parity-run",
+    ]
+    request_tag_condition = {
+        "StringEquals": {
+            "aws:RequestTag/leadpoet:ephemeral": "true",
+        },
+        "StringLike": {
+            "aws:RequestTag/Name": "leadpoet-parity-pp-*-*",
+            "aws:RequestTag/leadpoet:parity-run": "pp-*-*",
+            "aws:RequestTag/leadpoet:candidate-sha": (
+                "????????????????????????????????????????"
+            ),
+        },
+        "ForAllValues:StringEquals": {
+            "aws:TagKeys": parity_tag_keys,
+        },
+    }
+    ec2_resource_tag_condition = {
+        "StringEquals": {
+            "ec2:ResourceTag/leadpoet:ephemeral": "true",
+        },
+        "StringLike": {
+            "ec2:ResourceTag/Name": "leadpoet-parity-pp-*-*",
+            "ec2:ResourceTag/leadpoet:parity-run": "pp-*-*",
+            "ec2:ResourceTag/leadpoet:candidate-sha": (
+                "????????????????????????????????????????"
+            ),
+        },
+    }
+    cloudfront_resource_tag_condition = {
+        "StringEquals": {
+            "aws:ResourceTag/leadpoet:ephemeral": "true",
+        },
+        "StringLike": {
+            "aws:ResourceTag/Name": "leadpoet-parity-pp-*-*",
+            "aws:ResourceTag/leadpoet:parity-run": "pp-*-*",
+            "aws:ResourceTag/leadpoet:candidate-sha": (
+                "????????????????????????????????????????"
+            ),
+        },
+    }
+    ssm_resource_tag_condition = {
+        "StringEquals": {
+            "ssm:resourceTag/leadpoet:ephemeral": "true",
+        },
+        "StringLike": {
+            "ssm:resourceTag/Name": "leadpoet-parity-pp-*-*",
+            "ssm:resourceTag/leadpoet:parity-run": "pp-*-*",
+            "ssm:resourceTag/leadpoet:candidate-sha": (
+                "????????????????????????????????????????"
+            ),
+        },
+    }
+    cloudfront_create_tag_condition = {
+        **request_tag_condition,
+        "StringEquals": {
+            **request_tag_condition["StringEquals"],
+            **cloudfront_resource_tag_condition["StringEquals"],
+        },
+        "StringLike": {
+            **request_tag_condition["StringLike"],
+            **cloudfront_resource_tag_condition["StringLike"],
+        },
+    }
     return {
         "Version": "2012-10-17",
         "Statement": [
             {
+                "Sid": "ReadEc2Inventory",
+                "Effect": "Allow",
+                "Action": "ec2:Describe*",
+                "Resource": "*",
+            },
+            {
+                "Sid": "LaunchFromAccountImage",
+                "Effect": "Allow",
+                "Action": "ec2:RunInstances",
+                "Resource": image_arn,
+            },
+            {
+                "Sid": "LaunchInAccountSubnet",
+                "Effect": "Allow",
+                "Action": "ec2:RunInstances",
+                "Resource": subnet_arn,
+            },
+            {
+                "Sid": "LaunchWithOwnedSecurityGroup",
+                "Effect": "Allow",
+                "Action": "ec2:RunInstances",
+                "Resource": security_group_arn,
+                "Condition": {
+                    **ec2_resource_tag_condition,
+                    "ArnEquals": {"ec2:Vpc": vpc_arn},
+                },
+            },
+            {
+                "Sid": "CreateTaggedParityInstance",
+                "Effect": "Allow",
+                "Action": "ec2:RunInstances",
+                "Resource": instance_arn,
+                "Condition": {
+                    **request_tag_condition,
+                    "StringEquals": {
+                        **request_tag_condition["StringEquals"],
+                        "ec2:InstanceMetadataTags": "enabled",
+                        "ec2:InstanceType": PRODUCTION_INSTANCE_TYPE,
+                        "ec2:MetadataHttpEndpoint": "enabled",
+                        "ec2:MetadataHttpTokens": "required",
+                        "ec2:Region": region,
+                    },
+                    "NumericEquals": {
+                        "ec2:MetadataHttpPutResponseHopLimit": "2",
+                    },
+                    "ArnEquals": {
+                        "ec2:InstanceProfile": (
+                            f"arn:aws:iam::{account_id}:instance-profile/"
+                            f"{RUNNER_PROFILE}"
+                        ),
+                    },
+                },
+            },
+            {
+                "Sid": "CreateTaggedParityVolume",
+                "Effect": "Allow",
+                "Action": "ec2:RunInstances",
+                "Resource": volume_arn,
+                "Condition": {
+                    **request_tag_condition,
+                    "StringEquals": {
+                        **request_tag_condition["StringEquals"],
+                        "ec2:Region": region,
+                        "ec2:VolumeType": "gp3",
+                    },
+                    "Bool": {"ec2:Encrypted": "true"},
+                    "NumericEquals": {"ec2:VolumeSize": "512"},
+                },
+            },
+            {
+                "Sid": "CreateTaggedParityNetworkInterface",
+                "Effect": "Allow",
+                "Action": "ec2:RunInstances",
+                "Resource": network_interface_arn,
+                "Condition": {
+                    **request_tag_condition,
+                    "StringEquals": {
+                        **request_tag_condition["StringEquals"],
+                        "ec2:Region": region,
+                    },
+                    "ArnEquals": {
+                        "ec2:Subnet": subnet_arn,
+                        "ec2:Vpc": vpc_arn,
+                    },
+                    "Bool": {"ec2:AssociatePublicIpAddress": "true"},
+                },
+            },
+            {
+                "Sid": "CreateTaggedLaunchResourceTags",
+                "Effect": "Allow",
+                "Action": "ec2:CreateTags",
+                "Resource": [instance_arn, volume_arn, network_interface_arn],
+                "Condition": {
+                    **request_tag_condition,
+                    "StringEquals": {
+                        **request_tag_condition["StringEquals"],
+                        "ec2:CreateAction": "RunInstances",
+                    },
+                },
+            },
+            {
+                "Sid": "CreateTaggedSecurityGroup",
+                "Effect": "Allow",
+                "Action": "ec2:CreateSecurityGroup",
+                "Resource": security_group_arn,
+                "Condition": request_tag_condition,
+            },
+            {
+                "Sid": "CreateSecurityGroupInAccountVpc",
+                "Effect": "Allow",
+                "Action": "ec2:CreateSecurityGroup",
+                "Resource": vpc_arn,
+            },
+            {
+                "Sid": "CreateSecurityGroupTags",
+                "Effect": "Allow",
+                "Action": "ec2:CreateTags",
+                "Resource": security_group_arn,
+                "Condition": {
+                    **request_tag_condition,
+                    "StringEquals": {
+                        **request_tag_condition["StringEquals"],
+                        "ec2:CreateAction": "CreateSecurityGroup",
+                    },
+                },
+            },
+            {
+                "Sid": "TerminateOnlyOwnedParityInstances",
+                "Effect": "Allow",
+                "Action": "ec2:TerminateInstances",
+                "Resource": instance_arn,
+                "Condition": ec2_resource_tag_condition,
+            },
+            {
+                "Sid": "MutateOnlyOwnedParitySecurityGroups",
                 "Effect": "Allow",
                 "Action": [
-                    "ec2:Describe*",
-                    "ec2:RunInstances",
-                    "ec2:TerminateInstances",
-                    "ec2:CreateSecurityGroup",
                     "ec2:DeleteSecurityGroup",
                     "ec2:AuthorizeSecurityGroupIngress",
-                    "ec2:CreateTags",
+                ],
+                "Resource": security_group_arn,
+                "Condition": {
+                    **ec2_resource_tag_condition,
+                    "ArnEquals": {"ec2:Vpc": vpc_arn},
+                },
+            },
+            {
+                "Sid": "CreateTaggedCloudFrontDistribution",
+                "Effect": "Allow",
+                "Action": "cloudfront:CreateDistribution",
+                "Resource": "*",
+                "Condition": request_tag_condition,
+            },
+            {
+                "Sid": "ApplyOnlyParityTagsToAccountDistribution",
+                "Effect": "Allow",
+                "Action": "cloudfront:TagResource",
+                "Resource": distribution_arn,
+                "Condition": cloudfront_create_tag_condition,
+            },
+            {
+                "Sid": "ReadCloudFrontInventory",
+                "Effect": "Allow",
+                "Action": [
+                    "cloudfront:ListDistributions",
+                    "cloudfront:ListCachePolicies",
+                    "cloudfront:ListOriginRequestPolicies",
                 ],
                 "Resource": "*",
             },
             {
+                "Sid": "ReadAccountDistributionTags",
+                "Effect": "Allow",
+                "Action": "cloudfront:ListTagsForResource",
+                "Resource": distribution_arn,
+            },
+            {
+                "Sid": "ReadAndDeleteOnlyOwnedDistributions",
                 "Effect": "Allow",
                 "Action": [
-                    "cloudfront:CreateDistribution",
                     "cloudfront:GetDistribution",
                     "cloudfront:GetDistributionConfig",
-                    "cloudfront:ListDistributions",
-                    "cloudfront:ListTagsForResource",
-                    "cloudfront:ListCachePolicies",
-                    "cloudfront:ListOriginRequestPolicies",
-                    "cloudfront:TagResource",
                     "cloudfront:UpdateDistribution",
                     "cloudfront:DeleteDistribution",
                 ],
-                "Resource": "*",
+                "Resource": distribution_arn,
+                "Condition": cloudfront_resource_tag_condition,
             },
             {
+                "Sid": "SendOnlyAwsShellDocument",
+                "Effect": "Allow",
+                "Action": "ssm:SendCommand",
+                "Resource": (
+                    f"arn:aws:ssm:{region}::document/AWS-RunShellScript"
+                ),
+            },
+            {
+                "Sid": "SendOnlyToOwnedParityInstances",
+                "Effect": "Allow",
+                "Action": "ssm:SendCommand",
+                "Resource": instance_arn,
+                "Condition": ssm_resource_tag_condition,
+            },
+            {
+                "Sid": "ReadSsmCommandState",
                 "Effect": "Allow",
                 "Action": [
-                    "ssm:SendCommand",
                     "ssm:GetCommandInvocation",
                     "ssm:DescribeInstanceInformation",
                 ],
                 "Resource": "*",
             },
             {
+                "Sid": "PassOnlyParityRunnerToEc2",
                 "Effect": "Allow",
                 "Action": ["iam:PassRole"],
                 "Resource": runner_arn,
+                "Condition": {
+                    "StringEquals": {
+                        "iam:PassedToService": "ec2.amazonaws.com",
+                    },
+                    "ArnLike": {
+                        "iam:AssociatedResourceArn": instance_arn,
+                    },
+                },
             },
             {
                 "Effect": "Allow",
@@ -691,6 +1309,498 @@ def _controller_policy(
             },
         ],
     }
+
+
+def _controller_policy_slices(
+    *,
+    account_id: str,
+    region: str,
+    production_secret_id: str,
+    readonly_secret_id: str,
+    miner_intake_secret_id: str,
+    runner_arn: str,
+) -> dict[str, dict[str, Any]]:
+    complete = _controller_policy(
+        account_id=account_id,
+        region=region,
+        production_secret_id=production_secret_id,
+        readonly_secret_id=readonly_secret_id,
+        miner_intake_secret_id=miner_intake_secret_id,
+        runner_arn=runner_arn,
+    )
+    grouped: dict[str, list[Mapping[str, Any]]] = {
+        name: [] for name in CONTROLLER_POLICY_NAMES
+    }
+    lifecycle_ec2 = {
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:DeleteSecurityGroup",
+        "ec2:TerminateInstances",
+    }
+    for statement in complete["Statement"]:
+        raw_actions = statement.get("Action", [])
+        actions = {
+            str(value)
+            for value in (
+                raw_actions if isinstance(raw_actions, list) else [raw_actions]
+            )
+        }
+        if actions and all(value.startswith("cloudfront:") for value in actions):
+            group = "cloudfront"
+        elif actions & lifecycle_ec2 or any(
+            value.startswith(("ssm:", "iam:")) for value in actions
+        ):
+            group = "lifecycle"
+        elif any(value.startswith("ec2:") for value in actions):
+            group = "ec2_launch"
+        else:
+            group = "data"
+        grouped[group].append(statement)
+    slices = {
+        CONTROLLER_POLICY_NAMES[group]: {
+            "Version": "2012-10-17",
+            "Statement": statements,
+        }
+        for group, statements in grouped.items()
+    }
+    if any(not document["Statement"] for document in slices.values()):
+        raise SetupError("controller IAM managed-policy partition is incomplete")
+    if sum(len(value["Statement"]) for value in slices.values()) != len(
+        complete["Statement"]
+    ):
+        raise SetupError("controller IAM managed-policy partition differs")
+    for name, document in slices.items():
+        if len(_json(document)) > 6144:
+            raise SetupError(f"IAM managed policy {name} exceeds the AWS quota")
+    return slices
+
+
+def _simulation_context(values: Mapping[str, Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for name, value in sorted(values.items()):
+        items = value if isinstance(value, list) else [value]
+        if name == "aws:TagKeys":
+            value_type = "stringList"
+        elif name in {
+            "ec2:MetadataHttpPutResponseHopLimit",
+            "ec2:VolumeSize",
+        }:
+            value_type = "numeric"
+        elif name in {
+            "ec2:AssociatePublicIpAddress",
+            "ec2:Encrypted",
+        }:
+            value_type = "boolean"
+        elif name == "aws:TokenIssueTime":
+            value_type = "date"
+        else:
+            value_type = "string"
+        result.append({
+            "ContextKeyName": name,
+            "ContextKeyValues": [str(item) for item in items],
+            "ContextKeyType": value_type,
+        })
+    return result
+
+
+def _simulate_controller_policy(
+    iam: Any,
+    *,
+    account_id: str,
+    region: str,
+    controller_arn: str,
+    runner_arn: str,
+    session_cutoff: str,
+) -> None:
+    ec2_prefix = f"arn:aws:ec2:{region}:{account_id}"
+    instance = ec2_prefix + ":instance/i-0123456789abcdef0"
+    volume = ec2_prefix + ":volume/vol-0123456789abcdef0"
+    interface = ec2_prefix + ":network-interface/eni-0123456789abcdef0"
+    security_group = ec2_prefix + ":security-group/sg-0123456789abcdef0"
+    subnet = ec2_prefix + f":subnet/{PRODUCTION_SUBNET_ID}"
+    vpc = ec2_prefix + f":vpc/{PRODUCTION_VPC_ID}"
+    image = f"arn:aws:ec2:{region}::image/{PRODUCTION_AMI_ID}"
+    distribution = f"arn:aws:cloudfront::{account_id}:distribution/E123456789ABCD"
+    document = f"arn:aws:ssm:{region}::document/AWS-RunShellScript"
+    tags = {
+        "Name": "leadpoet-parity-pp-123456-1",
+        "leadpoet:candidate-sha": "a" * 40,
+        "leadpoet:ephemeral": "true",
+        "leadpoet:parity-run": "pp-123456-1",
+    }
+    session = {
+        "aws:TokenIssueTime": (
+            datetime.fromisoformat(session_cutoff.replace("Z", "+00:00"))
+            + timedelta(seconds=1)
+        ).isoformat().replace("+00:00", "Z"),
+    }
+    request = {
+        **session,
+        **{f"aws:RequestTag/{key}": value for key, value in tags.items()},
+        "aws:TagKeys": sorted(tags),
+    }
+    ec2_owned = {
+        **session,
+        **{f"ec2:ResourceTag/{key}": value for key, value in tags.items()},
+        "ec2:Vpc": vpc,
+    }
+    ssm_owned = {
+        **session,
+        **{f"ssm:resourceTag/{key}": value for key, value in tags.items()},
+    }
+    cloudfront_owned = {
+        **session,
+        **{f"aws:ResourceTag/{key}": value for key, value in tags.items()},
+    }
+    launch = {
+        **request,
+        **ec2_owned,
+        "ec2:AssociatePublicIpAddress": "true",
+        "ec2:Encrypted": "true",
+        "ec2:InstanceMetadataTags": "enabled",
+        "ec2:InstanceProfile": (
+            f"arn:aws:iam::{account_id}:instance-profile/{RUNNER_PROFILE}"
+        ),
+        "ec2:InstanceType": PRODUCTION_INSTANCE_TYPE,
+        "ec2:MetadataHttpEndpoint": "enabled",
+        "ec2:MetadataHttpPutResponseHopLimit": "2",
+        "ec2:MetadataHttpTokens": "required",
+        "ec2:Region": region,
+        "ec2:Subnet": subnet,
+        "ec2:VolumeSize": "512",
+        "ec2:VolumeType": "gp3",
+    }
+    cases: list[tuple[str, str, list[str], Mapping[str, Any], str]] = [
+        (
+            "launch-positive",
+            "ec2:RunInstances",
+            [image, subnet, security_group, instance, volume, interface],
+            launch,
+            "allowed",
+        ),
+        (
+            "launch-wrong-instance-type",
+            "ec2:RunInstances",
+            [instance],
+            {**launch, "ec2:InstanceType": "m5.large"},
+            "implicitDeny",
+        ),
+        (
+            "launch-alternate-image",
+            "ec2:RunInstances",
+            [f"arn:aws:ec2:{region}::image/ami-0123456789abcdef0"],
+            launch,
+            "implicitDeny",
+        ),
+        (
+            "launch-alternate-subnet",
+            "ec2:RunInstances",
+            [ec2_prefix + ":subnet/subnet-0123456789abcdef0"],
+            launch,
+            "implicitDeny",
+        ),
+        (
+            "launch-wrong-instance-profile",
+            "ec2:RunInstances",
+            [instance],
+            {
+                **launch,
+                "ec2:InstanceProfile": (
+                    f"arn:aws:iam::{account_id}:instance-profile/other"
+                ),
+            },
+            "implicitDeny",
+        ),
+        (
+            "launch-wrong-volume-size",
+            "ec2:RunInstances",
+            [volume],
+            {**launch, "ec2:VolumeSize": "200"},
+            "implicitDeny",
+        ),
+        (
+            "launch-unencrypted-volume",
+            "ec2:RunInstances",
+            [volume],
+            {**launch, "ec2:Encrypted": "false"},
+            "implicitDeny",
+        ),
+        (
+            "launch-imdsv1",
+            "ec2:RunInstances",
+            [instance],
+            {**launch, "ec2:MetadataHttpTokens": "optional"},
+            "implicitDeny",
+        ),
+        (
+            "launch-network-wrong-subnet",
+            "ec2:RunInstances",
+            [interface],
+            {
+                **launch,
+                "ec2:Subnet": (
+                    ec2_prefix + ":subnet/subnet-0123456789abcdef0"
+                ),
+            },
+            "implicitDeny",
+        ),
+        (
+            "launch-unowned-security-group",
+            "ec2:RunInstances",
+            [security_group],
+            {
+                **launch,
+                "ec2:ResourceTag/leadpoet:ephemeral": "false",
+            },
+            "implicitDeny",
+        ),
+        (
+            "launch-missing-request-tag",
+            "ec2:RunInstances",
+            [instance],
+            {
+                key: value
+                for key, value in launch.items()
+                if key != "aws:RequestTag/leadpoet:candidate-sha"
+            },
+            "implicitDeny",
+        ),
+        (
+            "launch-tags-positive",
+            "ec2:CreateTags",
+            [instance, volume, interface],
+            {**request, "ec2:CreateAction": "RunInstances"},
+            "allowed",
+        ),
+        (
+            "launch-tags-wrong-create-action",
+            "ec2:CreateTags",
+            [instance],
+            {**request, "ec2:CreateAction": "CreateSecurityGroup"},
+            "implicitDeny",
+        ),
+        (
+            "security-group-tags-positive",
+            "ec2:CreateTags",
+            [security_group],
+            {**request, "ec2:CreateAction": "CreateSecurityGroup"},
+            "allowed",
+        ),
+        (
+            "security-group-create-positive",
+            "ec2:CreateSecurityGroup",
+            [security_group, vpc],
+            request,
+            "allowed",
+        ),
+        (
+            "security-group-create-unowned",
+            "ec2:CreateSecurityGroup",
+            [security_group],
+            {
+                **request,
+                "aws:RequestTag/leadpoet:ephemeral": "false",
+            },
+            "implicitDeny",
+        ),
+        (
+            "terminate-owned",
+            "ec2:TerminateInstances",
+            [instance],
+            ec2_owned,
+            "allowed",
+        ),
+        (
+            "terminate-unowned",
+            "ec2:TerminateInstances",
+            [instance],
+            {**ec2_owned, "ec2:ResourceTag/leadpoet:ephemeral": "false"},
+            "implicitDeny",
+        ),
+        (
+            "security-group-delete-owned",
+            "ec2:DeleteSecurityGroup",
+            [security_group],
+            ec2_owned,
+            "allowed",
+        ),
+        (
+            "security-group-delete-unowned",
+            "ec2:DeleteSecurityGroup",
+            [security_group],
+            {**ec2_owned, "ec2:ResourceTag/leadpoet:ephemeral": "false"},
+            "implicitDeny",
+        ),
+        (
+            "security-group-ingress-owned",
+            "ec2:AuthorizeSecurityGroupIngress",
+            [security_group],
+            ec2_owned,
+            "allowed",
+        ),
+        (
+            "security-group-ingress-unowned",
+            "ec2:AuthorizeSecurityGroupIngress",
+            [security_group],
+            {**ec2_owned, "ec2:ResourceTag/leadpoet:ephemeral": "false"},
+            "implicitDeny",
+        ),
+        (
+            "ssm-positive",
+            "ssm:SendCommand",
+            [document, instance],
+            ssm_owned,
+            "allowed",
+        ),
+        (
+            "ssm-other-document",
+            "ssm:SendCommand",
+            [f"arn:aws:ssm:{region}::document/OtherDocument"],
+            ssm_owned,
+            "implicitDeny",
+        ),
+        (
+            "ssm-unowned-instance",
+            "ssm:SendCommand",
+            [instance],
+            {
+                **ssm_owned,
+                "ssm:resourceTag/leadpoet:ephemeral": "false",
+            },
+            "implicitDeny",
+        ),
+        (
+            "cloudfront-create-positive",
+            "cloudfront:CreateDistribution",
+            ["*"],
+            request,
+            "allowed",
+        ),
+        (
+            "cloudfront-create-unowned",
+            "cloudfront:CreateDistribution",
+            ["*"],
+            {**request, "aws:RequestTag/leadpoet:ephemeral": "false"},
+            "implicitDeny",
+        ),
+        (
+            "cloudfront-tag-positive",
+            "cloudfront:TagResource",
+            [distribution],
+            {**request, **cloudfront_owned},
+            "allowed",
+        ),
+        (
+            "cloudfront-tag-takeover",
+            "cloudfront:TagResource",
+            [distribution],
+            {
+                **request,
+                **cloudfront_owned,
+                "aws:ResourceTag/leadpoet:ephemeral": "false",
+            },
+            "implicitDeny",
+        ),
+        (
+            "cloudfront-update-owned",
+            "cloudfront:UpdateDistribution",
+            [distribution],
+            cloudfront_owned,
+            "allowed",
+        ),
+        (
+            "cloudfront-update-unowned",
+            "cloudfront:UpdateDistribution",
+            [distribution],
+            {
+                **cloudfront_owned,
+                "aws:ResourceTag/leadpoet:ephemeral": "false",
+            },
+            "implicitDeny",
+        ),
+        (
+            "cloudfront-delete-owned",
+            "cloudfront:DeleteDistribution",
+            [distribution],
+            cloudfront_owned,
+            "allowed",
+        ),
+        (
+            "cloudfront-delete-unowned",
+            "cloudfront:DeleteDistribution",
+            [distribution],
+            {
+                **cloudfront_owned,
+                "aws:ResourceTag/leadpoet:ephemeral": "false",
+            },
+            "implicitDeny",
+        ),
+        (
+            "pass-role-positive",
+            "iam:PassRole",
+            [runner_arn],
+            {
+                **session,
+                "iam:AssociatedResourceArn": instance,
+                "iam:PassedToService": "ec2.amazonaws.com",
+            },
+            "allowed",
+        ),
+        (
+            "pass-role-wrong-service",
+            "iam:PassRole",
+            [runner_arn],
+            {
+                **session,
+                "iam:AssociatedResourceArn": instance,
+                "iam:PassedToService": "lambda.amazonaws.com",
+            },
+            "implicitDeny",
+        ),
+        (
+            "pass-role-wrong-role",
+            "iam:PassRole",
+            [f"arn:aws:iam::{account_id}:role/other"],
+            {
+                **session,
+                "iam:AssociatedResourceArn": instance,
+                "iam:PassedToService": "ec2.amazonaws.com",
+            },
+            "implicitDeny",
+        ),
+    ]
+    for name, action, resources, context, expected in cases:
+        response = iam.simulate_principal_policy(
+            PolicySourceArn=controller_arn,
+            ActionNames=[action],
+            ResourceArns=resources,
+            ContextEntries=_simulation_context(context),
+        )
+        if response.get("IsTruncated"):
+            raise SetupError(f"controller IAM simulation {name} was truncated")
+        results = response.get("EvaluationResults", [])
+        decisions = {
+            str(item.get("EvalResourceName") or ""): str(
+                item.get("EvalDecision") or ""
+            )
+            for item in results
+            if str(item.get("EvalActionName") or "") == action
+        }
+        missing_context = {
+            str(value)
+            for item in results
+            for value in item.get("MissingContextValues", [])
+        }
+        expected_missing = (
+            {"aws:RequestTag/leadpoet:candidate-sha"}
+            if name == "launch-missing-request-tag"
+            else set()
+        )
+        if (
+            set(decisions) != set(resources)
+            or set(decisions.values()) != {expected}
+            or missing_context != expected_missing
+        ):
+            raise SetupError(f"controller IAM simulation {name} differs")
 
 
 def _runner_policy(
@@ -1395,119 +2505,144 @@ def setup_iam_only(args: argparse.Namespace) -> dict[str, Any]:
         miner_intake_secret_id=args.miner_intake_secret_id,
     )
     inert_trust = _inert_trust()
-    runner_arn = _ensure_role(
-        iam,
-        account_id=account_id,
-        name=RUNNER_ROLE,
-        trust=inert_trust,
-        expected_inline_policies={runner_policy_name},
-        expected_attached_policies={runner_managed_policy},
-    )
-    _put_policy(
-        iam,
-        role=RUNNER_ROLE,
-        name=runner_policy_name,
-        document=runner_policy,
-    )
-    iam.attach_role_policy(
-        RoleName=RUNNER_ROLE,
-        PolicyArn=runner_managed_policy,
-    )
-    _assert_role_configuration(
-        iam,
-        account_id=account_id,
-        name=RUNNER_ROLE,
-        trust=inert_trust,
-        inline_policies={runner_policy_name: runner_policy},
-        attached_policies={runner_managed_policy},
-        max_session_duration=43200,
-    )
-    iam.update_assume_role_policy(
-        RoleName=RUNNER_ROLE,
-        PolicyDocument=_json(runner_trust),
-    )
-    _assert_role_configuration(
-        iam,
-        account_id=account_id,
-        name=RUNNER_ROLE,
-        trust=runner_trust,
-        inline_policies={runner_policy_name: runner_policy},
-        attached_policies={runner_managed_policy},
-        max_session_duration=43200,
-    )
-    _ensure_instance_profile(iam, account_id=account_id)
-
-    owner, repository_name = args.repository.split("/", 1)
-    controller_trust = {
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Effect": "Allow",
-            "Principal": {"Federated": oidc_arn},
-            "Action": "sts:AssumeRoleWithWebIdentity",
-            "Condition": {
-                "StringEquals": {
-                    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-                },
-                "StringLike": {
-                    "token.actions.githubusercontent.com:sub": (
-                        f"repo:{owner}/{repository_name}:ref:refs/heads/main"
-                    )
-                },
-            },
-        }],
+    controller_trust = _controller_trust(oidc_arn=oidc_arn)
+    legacy_controller_policy = "LeadpoetProductionParityController"
+    managed_policy_arns = {
+        _managed_policy_arn(account_id=account_id, name=name)
+        for name in CONTROLLER_POLICY_NAMES.values()
     }
-    controller_policy_name = "LeadpoetProductionParityController"
-    controller_policy = _controller_policy(
-        account_id=account_id,
-        region=args.region,
-        production_secret_id=args.production_gateway_secret_id,
-        readonly_secret_id=args.readonly_dsn_secret_id,
-        miner_intake_secret_id=args.miner_intake_secret_id,
-        runner_arn=runner_arn,
-    )
-    controller_arn = _ensure_role(
-        iam,
-        account_id=account_id,
-        name=CONTROLLER_ROLE,
-        trust=inert_trust,
-        expected_inline_policies={controller_policy_name},
-        expected_attached_policies=set(),
-    )
-    _put_policy(
-        iam,
-        role=CONTROLLER_ROLE,
-        name=controller_policy_name,
-        document=controller_policy,
-    )
-    _assert_role_configuration(
-        iam,
-        account_id=account_id,
-        name=CONTROLLER_ROLE,
-        trust=inert_trust,
-        inline_policies={controller_policy_name: controller_policy},
-        attached_policies=set(),
-        max_session_duration=43200,
-    )
-    iam.update_assume_role_policy(
-        RoleName=CONTROLLER_ROLE,
-        PolicyDocument=_json(controller_trust),
-    )
-    _assert_role_configuration(
-        iam,
-        account_id=account_id,
-        name=CONTROLLER_ROLE,
-        trust=controller_trust,
-        inline_policies={controller_policy_name: controller_policy},
-        attached_policies=set(),
-        max_session_duration=43200,
-    )
-
-    bootstrap_created = False
+    runner_arn = f"arn:aws:iam::{account_id}:role/{RUNNER_ROLE}"
+    controller_arn = f"arn:aws:iam::{account_id}:role/{CONTROLLER_ROLE}"
+    runner_ready = False
+    controller_ready = False
+    runner_revocation: dict[str, Any] = {}
+    controller_revocation: dict[str, Any] = {}
+    bootstrap_cleanup_required = False
     try:
+        runner_arn = _ensure_role(
+            iam,
+            account_id=account_id,
+            name=RUNNER_ROLE,
+            trust=inert_trust,
+            expected_inline_policies={
+                runner_policy_name,
+                RUNNER_REVOKE_POLICY,
+            },
+            expected_attached_policies={runner_managed_policy},
+            revoke_policy_name=RUNNER_REVOKE_POLICY,
+            revocation_receipt=runner_revocation,
+        )
+        runner_ready = True
+        runner_session_cutoff = str(runner_revocation["cutoff"])
+        runner_revoke_policy = _policy_document(
+            runner_revocation["document"]
+        )
+        _put_policy(
+            iam,
+            role=RUNNER_ROLE,
+            name=runner_policy_name,
+            document=runner_policy,
+        )
+        iam.attach_role_policy(
+            RoleName=RUNNER_ROLE,
+            PolicyArn=runner_managed_policy,
+        )
+        _assert_role_configuration(
+            iam,
+            account_id=account_id,
+            name=RUNNER_ROLE,
+            trust=inert_trust,
+            inline_policies={
+                runner_policy_name: runner_policy,
+                RUNNER_REVOKE_POLICY: runner_revoke_policy,
+            },
+            attached_policies={runner_managed_policy},
+            max_session_duration=43200,
+        )
+        _ensure_instance_profile(iam, account_id=account_id)
+
+        controller_slices = _controller_policy_slices(
+            account_id=account_id,
+            region=args.region,
+            production_secret_id=args.production_gateway_secret_id,
+            readonly_secret_id=args.readonly_dsn_secret_id,
+            miner_intake_secret_id=args.miner_intake_secret_id,
+            runner_arn=runner_arn,
+        )
+        controller_arn = _ensure_role(
+            iam,
+            account_id=account_id,
+            name=CONTROLLER_ROLE,
+            trust=inert_trust,
+            expected_inline_policies={
+                legacy_controller_policy,
+                CONTROLLER_REVOKE_POLICY,
+            },
+            expected_attached_policies=managed_policy_arns,
+            revoke_policy_name=CONTROLLER_REVOKE_POLICY,
+            revocation_receipt=controller_revocation,
+        )
+        controller_ready = True
+        controller_session_cutoff = str(controller_revocation["cutoff"])
+        controller_revoke_policy = _policy_document(
+            controller_revocation["document"]
+        )
+        # Existing sessions dynamically observe role policies.  Detach every
+        # known permission while trust is inert before replacing any managed
+        # policy version, then attach the complete exact set atomically enough
+        # for a final simulator/readback gate.
+        _neutralize_controller_role(
+            iam,
+            account_id=account_id,
+            managed_policy_arns=managed_policy_arns,
+            legacy_inline_policy=legacy_controller_policy,
+            revoke_document=controller_revoke_policy,
+        )
+        for name, document in sorted(controller_slices.items()):
+            _ensure_managed_policy(
+                iam,
+                account_id=account_id,
+                name=name,
+                document=document,
+            )
+        for policy_arn in sorted(managed_policy_arns):
+            iam.attach_role_policy(
+                RoleName=CONTROLLER_ROLE,
+                PolicyArn=policy_arn,
+            )
+        _assert_role_configuration(
+            iam,
+            account_id=account_id,
+            name=CONTROLLER_ROLE,
+            trust=inert_trust,
+            inline_policies={
+                CONTROLLER_REVOKE_POLICY: controller_revoke_policy,
+            },
+            attached_policies=managed_policy_arns,
+            max_session_duration=43200,
+        )
+        for name, document in sorted(controller_slices.items()):
+            _assert_managed_policy(
+                iam,
+                account_id=account_id,
+                name=name,
+                document=document,
+                expected_roles={CONTROLLER_ROLE},
+            )
+        _simulate_controller_policy(
+            iam,
+            account_id=account_id,
+            region=args.region,
+            controller_arn=controller_arn,
+            runner_arn=runner_arn,
+            session_cutoff=controller_session_cutoff,
+        )
+
         # Never reuse an assumable bootstrap role across runs.  Ownership and
         # inventory are checked before deletion, then the replacement starts
         # with an inert trust while its least-privilege policy is installed.
         _delete_static_bootstrap_role(iam, account_id=account_id)
+        bootstrap_cleanup_required = True
         _ensure_role(
             iam,
             account_id=account_id,
@@ -1517,7 +2652,6 @@ def setup_iam_only(args: argparse.Namespace) -> dict[str, Any]:
             expected_attached_policies=set(),
             max_session_duration=3600,
         )
-        bootstrap_created = True
         bootstrap_expires_at = (
             datetime.now(timezone.utc) + timedelta(minutes=15)
         ).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -1561,9 +2695,125 @@ def setup_iam_only(args: argparse.Namespace) -> dict[str, Any]:
             attached_policies=set(),
             max_session_duration=3600,
         )
-    except Exception:
-        if bootstrap_created:
-            _delete_static_bootstrap_role(iam, account_id=account_id)
+
+        # These are the only two activation writes.  The runner remains inert
+        # until the controller lattice, simulator, and temporary installer
+        # authority are all proven; controller OIDC trust is last.
+        _wait_until_after_session_cutoffs(
+            [runner_session_cutoff, controller_session_cutoff]
+        )
+        iam.update_assume_role_policy(
+            RoleName=RUNNER_ROLE,
+            PolicyDocument=_json(runner_trust),
+        )
+        _assert_role_configuration(
+            iam,
+            account_id=account_id,
+            name=RUNNER_ROLE,
+            trust=runner_trust,
+            inline_policies={
+                runner_policy_name: runner_policy,
+                RUNNER_REVOKE_POLICY: runner_revoke_policy,
+            },
+            attached_policies={runner_managed_policy},
+            max_session_duration=43200,
+        )
+        iam.update_assume_role_policy(
+            RoleName=CONTROLLER_ROLE,
+            PolicyDocument=_json(controller_trust),
+        )
+        _assert_role_configuration(
+            iam,
+            account_id=account_id,
+            name=CONTROLLER_ROLE,
+            trust=controller_trust,
+            inline_policies={
+                CONTROLLER_REVOKE_POLICY: controller_revoke_policy,
+            },
+            attached_policies=managed_policy_arns,
+            max_session_duration=43200,
+        )
+    except Exception as exc:
+        cleanup_errors: list[str] = []
+        controller_cleanup_required = controller_ready or bool(
+            controller_revocation
+        )
+        runner_cleanup_required = runner_ready or bool(runner_revocation)
+        # Stop both new-session paths first and independently.  Only then mint
+        # the future cutoff used to revoke every session that could have been
+        # issued before the inert trusts propagated.
+        if controller_cleanup_required:
+            try:
+                iam.update_assume_role_policy(
+                    RoleName=CONTROLLER_ROLE,
+                    PolicyDocument=_json(inert_trust),
+                )
+            except Exception as cleanup_exc:
+                cleanup_errors.append(
+                    f"controller-trust: {type(cleanup_exc).__name__}"
+                )
+        if runner_cleanup_required:
+            try:
+                iam.update_assume_role_policy(
+                    RoleName=RUNNER_ROLE,
+                    PolicyDocument=_json(inert_trust),
+                )
+            except Exception as cleanup_exc:
+                cleanup_errors.append(
+                    f"runner-trust: {type(cleanup_exc).__name__}"
+                )
+        failure_cutoff = _new_session_cutoff()
+        failure_revoke_policy = _revoke_older_sessions_policy(
+            cutoff=failure_cutoff
+        )
+        if controller_cleanup_required:
+            try:
+                _neutralize_controller_role(
+                    iam,
+                    account_id=account_id,
+                    managed_policy_arns=managed_policy_arns,
+                    legacy_inline_policy=legacy_controller_policy,
+                    revoke_document=failure_revoke_policy,
+                )
+            except Exception as cleanup_exc:
+                cleanup_errors.append(f"controller: {type(cleanup_exc).__name__}")
+        if runner_cleanup_required:
+            try:
+                _put_policy(
+                    iam,
+                    role=RUNNER_ROLE,
+                    name=RUNNER_REVOKE_POLICY,
+                    document=failure_revoke_policy,
+                )
+                _assert_role_configuration(
+                    iam,
+                    account_id=account_id,
+                    name=RUNNER_ROLE,
+                    trust=inert_trust,
+                    inline_policies={
+                        runner_policy_name: runner_policy,
+                        RUNNER_REVOKE_POLICY: failure_revoke_policy,
+                    },
+                    attached_policies={runner_managed_policy},
+                    max_session_duration=43200,
+                )
+            except Exception as cleanup_exc:
+                cleanup_errors.append(f"runner: {type(cleanup_exc).__name__}")
+        if bootstrap_cleanup_required:
+            try:
+                _delete_static_bootstrap_role(iam, account_id=account_id)
+            except Exception as cleanup_exc:
+                cleanup_errors.append(f"bootstrap: {type(cleanup_exc).__name__}")
+        if controller_cleanup_required or runner_cleanup_required:
+            try:
+                _wait_until_after_session_cutoffs([failure_cutoff])
+            except Exception as cleanup_exc:
+                cleanup_errors.append(f"session-cutoff: {type(cleanup_exc).__name__}")
+        if cleanup_errors:
+            raise SetupError(
+                "IAM setup failed and fail-closed cleanup differed: "
+                + ", ".join(cleanup_errors)
+            ) from exc
         raise
     return {
         "status": "iam_ready",

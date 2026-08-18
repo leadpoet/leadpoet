@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from botocore.exceptions import ClientError
 
+from scripts import setup_production_parity_staging as parity_setup
 from scripts.cleanup_production_parity_staging import (
     _owned_run,
     cleanup_stale,
@@ -13,7 +14,13 @@ from scripts.cleanup_production_parity_staging import (
 from scripts.provision_production_parity_staging import (
     PARITY_VOLUME_GIB,
     PRODUCTION_ACCOUNT_ID,
+    PRODUCTION_AMI_ID,
+    PRODUCTION_GATEWAY_INSTANCE_ID,
+    PRODUCTION_INSTANCE_TYPE,
     PRODUCTION_REGION,
+    PRODUCTION_RUNNER_PROFILE,
+    PRODUCTION_SUBNET_ID,
+    PRODUCTION_VPC_ID,
     SCHEMA_VERSION,
     ProvisioningError,
     _artifact_bucket_name,
@@ -39,15 +46,31 @@ DISTRIBUTION_ID = "E123456789ABCD"
 
 def _reference_instance() -> dict:
     return {
-        "ImageId": "ami-production",
-        "InstanceId": "i-production",
-        "InstanceType": "m6i.xlarge",
-        "SubnetId": "subnet-production",
-        "VpcId": "vpc-production",
+        "ImageId": PRODUCTION_AMI_ID,
+        "InstanceId": PRODUCTION_GATEWAY_INSTANCE_ID,
+        "InstanceType": PRODUCTION_INSTANCE_TYPE,
+        "SubnetId": PRODUCTION_SUBNET_ID,
+        "VpcId": PRODUCTION_VPC_ID,
         "RootDeviceName": "/dev/xvda",
         "EnclaveOptions": {"Enabled": True},
         "MetadataOptions": {"HttpTokens": "required"},
     }
+
+
+def test_streamed_iam_and_provisioner_share_exact_launch_identity():
+    assert (
+        PRODUCTION_AMI_ID,
+        PRODUCTION_INSTANCE_TYPE,
+        PRODUCTION_SUBNET_ID,
+        PRODUCTION_VPC_ID,
+        PRODUCTION_RUNNER_PROFILE,
+    ) == (
+        parity_setup.PRODUCTION_AMI_ID,
+        parity_setup.PRODUCTION_INSTANCE_TYPE,
+        parity_setup.PRODUCTION_SUBNET_ID,
+        parity_setup.PRODUCTION_VPC_ID,
+        parity_setup.RUNNER_PROFILE,
+    )
 
 
 class _Waiter:
@@ -154,18 +177,16 @@ class _CloudFront:
     def get_paginator(self, name):
         return _Paginator("cache" if name == "list_cache_policies" else "origin")
 
-    def create_distribution(self, **kwargs):
-        self.config = kwargs["DistributionConfig"]
+    def create_distribution_with_tags(self, **kwargs):
+        value = kwargs["DistributionConfigWithTags"]
+        self.config = value["DistributionConfig"]
+        self.tags = value["Tags"]
         return {
             "Distribution": {
                 "Id": DISTRIBUTION_ID,
                 "ARN": _distribution_arn(DISTRIBUTION_ID),
             }
         }
-
-    def tag_resource(self, **kwargs):
-        self.tags = kwargs
-
 
 class _SSM:
     def describe_instance_information(self, **_kwargs):
@@ -363,10 +384,21 @@ class _DeleteEC2:
         self.calls.append("delete_security_group")
 
 
-def test_reference_gateway_must_be_one_nitro_imdsv2_instance():
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("InstanceId", "i-0123456789abcdef0"),
+        ("ImageId", "ami-0123456789abcdef0"),
+        ("InstanceType", "m5.large"),
+        ("SubnetId", "subnet-0123456789abcdef0"),
+        ("VpcId", "vpc-0123456789abcdef0"),
+        ("EnclaveOptions", {"Enabled": False}),
+        ("MetadataOptions", {"HttpTokens": "optional"}),
+    ),
+)
+def test_reference_gateway_must_match_exact_nitro_imdsv2_instance(field, value):
     ec2 = _EC2()
-    assert _single_production_instance(ec2, "52.91.135.79")["ImageId"] == "ami-production"
-    ec2.reference["EnclaveOptions"] = {"Enabled": False}
+    ec2.reference[field] = value
     with pytest.raises(ProvisioningError, match="Nitro/IMDSv2"):
         _single_production_instance(ec2, "52.91.135.79")
 
@@ -420,8 +452,29 @@ def test_transient_stack_is_one_encrypted_nitro_host_with_tls_viewer_boundary(mo
         == {"Mode": "COMPLIANCE", "Days": 1}
     )
     assert ec2.launch["MinCount"] == ec2.launch["MaxCount"] == 1
+    assert ec2.launch["ImageId"] == PRODUCTION_AMI_ID
+    assert ec2.launch["InstanceType"] == PRODUCTION_INSTANCE_TYPE
+    assert ec2.launch["IamInstanceProfile"] == {
+        "Name": "leadpoet-production-parity-runner"
+    }
+    assert ec2.launch["NetworkInterfaces"] == [{
+        "DeviceIndex": 0,
+        "SubnetId": PRODUCTION_SUBNET_ID,
+        "Groups": [SECURITY_GROUP_ID],
+        "AssociatePublicIpAddress": True,
+        "DeleteOnTermination": True,
+    }]
     assert ec2.launch["EnclaveOptions"] == {"Enabled": True}
-    assert ec2.launch["MetadataOptions"]["HttpTokens"] == "required"
+    assert ec2.launch["MetadataOptions"] == {
+        "HttpEndpoint": "enabled",
+        "HttpTokens": "required",
+        "HttpPutResponseHopLimit": 2,
+        "InstanceMetadataTags": "enabled",
+    }
+    assert ec2.launch["TagSpecifications"] == [
+        {"ResourceType": resource_type, "Tags": _owned_tags()}
+        for resource_type in ("instance", "volume", "network-interface")
+    ]
     assert ec2.launch["UserData"].startswith("#cloud-boothook")
     assert "systemctl mask --now" in ec2.launch["UserData"]
     assert "leadpoet-production-parity/early-boot-isolated" in ec2.launch["UserData"]
@@ -437,11 +490,41 @@ def test_transient_stack_is_one_encrypted_nitro_host_with_tls_viewer_boundary(mo
     assert "IpRanges" not in permission
     assert cloudfront.config["DefaultCacheBehavior"]["ViewerProtocolPolicy"] == "https-only"
     assert cloudfront.config["Origins"]["Items"][0]["CustomOriginConfig"]["HTTPPort"] == 3000
+    assert cloudfront.tags == {"Items": _owned_tags()}
+
+
+@pytest.mark.parametrize(
+    ("profile", "instance_type"),
+    (
+        ("other-profile", None),
+        ("leadpoet-production-parity-runner", "m5.large"),
+    ),
+)
+def test_transient_stack_rejects_unpinned_profile_or_instance_type(
+    profile, instance_type
+):
+    s3 = _S3()
+    with pytest.raises(ProvisioningError, match="inputs|instance type"):
+        create_stack(
+            ec2=_EC2(),
+            ssm=_SSM(),
+            cloudfront=_CloudFront(),
+            s3=s3,
+            region=PRODUCTION_REGION,
+            account_id=PRODUCTION_ACCOUNT_ID,
+            run_id=RUN_ID,
+            candidate_sha=SHA,
+            production_gateway_ip="52.91.135.79",
+            instance_profile_name=profile,
+            instance_type=instance_type,
+            volume_gib=PARITY_VOLUME_GIB,
+        )
+    assert s3.created is None
 
 
 def test_partial_provisioning_failure_immediately_rolls_back_costly_resources():
     class _FailingCloudFront(_CloudFront):
-        def create_distribution(self, **_kwargs):
+        def create_distribution_with_tags(self, **_kwargs):
             raise RuntimeError("injected distribution failure")
 
     ec2 = _EC2()

@@ -19,7 +19,6 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 RUN_RE = re.compile(r"^pp-[0-9]{1,20}-[0-9]{1,6}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-INSTANCE_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,31}$")
 IP_RE = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
 INSTANCE_ID_RE = re.compile(r"^i-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
 SECURITY_GROUP_ID_RE = re.compile(r"^sg-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
@@ -27,6 +26,12 @@ CLOUDFRONT_DISTRIBUTION_ID_RE = re.compile(r"^E[A-Z0-9]{7,31}$")
 SCHEMA_VERSION = "leadpoet.production_parity_ephemeral_stack.v3"
 PRODUCTION_ACCOUNT_ID = "493765492819"
 PRODUCTION_REGION = "us-east-1"
+PRODUCTION_GATEWAY_INSTANCE_ID = "i-07e945bb2653c2e8f"
+PRODUCTION_AMI_ID = "ami-0cae6d6fe6048ca2c"
+PRODUCTION_INSTANCE_TYPE = "r7i.4xlarge"
+PRODUCTION_SUBNET_ID = "subnet-025170c1eff61494d"
+PRODUCTION_VPC_ID = "vpc-0c975a643bc1e0e79"
+PRODUCTION_RUNNER_PROFILE = "leadpoet-production-parity-runner"
 PARITY_VOLUME_GIB = 512
 TAG_RUN = "leadpoet:parity-run"
 TAG_SHA = "leadpoet:candidate-sha"
@@ -267,11 +272,13 @@ def _single_production_instance(ec2: Any, public_ip: str) -> Mapping[str, Any]:
         )
     instance = instances[0]
     if (
-        instance.get("EnclaveOptions", {}).get("Enabled") is not True
+        instance.get("InstanceId") != PRODUCTION_GATEWAY_INSTANCE_ID
+        or instance.get("ImageId") != PRODUCTION_AMI_ID
+        or instance.get("InstanceType") != PRODUCTION_INSTANCE_TYPE
+        or instance.get("SubnetId") != PRODUCTION_SUBNET_ID
+        or instance.get("VpcId") != PRODUCTION_VPC_ID
+        or instance.get("EnclaveOptions", {}).get("Enabled") is not True
         or instance.get("MetadataOptions", {}).get("HttpTokens") != "required"
-        or not instance.get("ImageId")
-        or not instance.get("SubnetId")
-        or not instance.get("VpcId")
     ):
         raise ProvisioningError(
             "production gateway is not a complete Nitro/IMDSv2 reference"
@@ -365,15 +372,18 @@ def _create_stack_resources(
     if (
         not RUN_RE.fullmatch(run_id)
         or not SHA_RE.fullmatch(candidate_sha)
-        or not instance_profile_name
+        or instance_profile_name != PRODUCTION_RUNNER_PROFILE
         or account_id != PRODUCTION_ACCOUNT_ID
         or region != PRODUCTION_REGION
         or volume_gib != PARITY_VOLUME_GIB
     ):
         raise ProvisioningError("ephemeral stack inputs are invalid")
     reference = _single_production_instance(ec2, production_gateway_ip)
-    selected_type = str(instance_type or reference.get("InstanceType") or "")
-    if not INSTANCE_TYPE_RE.fullmatch(selected_type):
+    selected_type = str(instance_type or PRODUCTION_INSTANCE_TYPE)
+    if (
+        selected_type != PRODUCTION_INSTANCE_TYPE
+        or reference.get("InstanceType") != PRODUCTION_INSTANCE_TYPE
+    ):
         raise ProvisioningError("ephemeral instance type is invalid")
 
     artifact_bucket = _create_artifact_bucket(
@@ -388,7 +398,10 @@ def _create_stack_resources(
         GroupName=f"leadpoet-parity-{run_id}",
         Description=f"Disposable Leadpoet parity database origin {run_id}",
         VpcId=reference["VpcId"],
-        TagSpecifications=[{"ResourceType": "security-group", "Tags": _tags(run_id, candidate_sha)}],
+        TagSpecifications=[{
+            "ResourceType": "security-group",
+            "Tags": _tags(run_id, candidate_sha),
+        }],
     )
     security_group_id = str(security_group["GroupId"])
     journal["security_group_id"] = security_group_id
@@ -445,6 +458,10 @@ def _create_stack_resources(
         TagSpecifications=[
             {"ResourceType": "instance", "Tags": _tags(run_id, candidate_sha)},
             {"ResourceType": "volume", "Tags": _tags(run_id, candidate_sha)},
+            {
+                "ResourceType": "network-interface",
+                "Tags": _tags(run_id, candidate_sha),
+            },
         ],
     )
     values = launched.get("Instances", [])
@@ -470,51 +487,73 @@ def _create_stack_resources(
         policy_type="origin_request",
         name="Managed-AllViewerExceptHostHeader",
     )
-    created = cloudfront.create_distribution(
-        DistributionConfig={
-            "CallerReference": f"{run_id}-{candidate_sha}",
-            "Comment": f"Disposable Leadpoet parity {run_id}",
-            "Enabled": True,
-            "HttpVersion": "http2and3",
-            "IsIPV6Enabled": True,
-            "PriceClass": "PriceClass_100",
-            "Origins": {
-                "Quantity": 1,
-                "Items": [
-                    {
-                        "Id": "parity-postgrest",
-                        "DomainName": public_dns,
-                        "ConnectionAttempts": 3,
-                        "ConnectionTimeout": 10,
-                        "CustomOriginConfig": {
-                            "HTTPPort": 3000,
-                            "HTTPSPort": 443,
-                            "OriginProtocolPolicy": "http-only",
-                            "OriginSslProtocols": {"Quantity": 1, "Items": ["TLSv1.2"]},
-                            "OriginReadTimeout": 60,
-                            "OriginKeepaliveTimeout": 60,
-                        },
-                    }
-                ],
-            },
-            "DefaultCacheBehavior": {
-                "TargetOriginId": "parity-postgrest",
-                "ViewerProtocolPolicy": "https-only",
-                "AllowedMethods": {
-                    "Quantity": 7,
-                    "Items": ["GET", "HEAD", "OPTIONS", "PUT", "PATCH", "POST", "DELETE"],
-                    "CachedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]},
+    created = cloudfront.create_distribution_with_tags(
+        DistributionConfigWithTags={
+            "DistributionConfig": {
+                "CallerReference": f"{run_id}-{candidate_sha}",
+                "Comment": f"Disposable Leadpoet parity {run_id}",
+                "Enabled": True,
+                "HttpVersion": "http2and3",
+                "IsIPV6Enabled": True,
+                "PriceClass": "PriceClass_100",
+                "Origins": {
+                    "Quantity": 1,
+                    "Items": [
+                        {
+                            "Id": "parity-postgrest",
+                            "DomainName": public_dns,
+                            "ConnectionAttempts": 3,
+                            "ConnectionTimeout": 10,
+                            "CustomOriginConfig": {
+                                "HTTPPort": 3000,
+                                "HTTPSPort": 443,
+                                "OriginProtocolPolicy": "http-only",
+                                "OriginSslProtocols": {
+                                    "Quantity": 1,
+                                    "Items": ["TLSv1.2"],
+                                },
+                                "OriginReadTimeout": 60,
+                                "OriginKeepaliveTimeout": 60,
+                            },
+                        }
+                    ],
                 },
-                "Compress": False,
-                "CachePolicyId": cache_policy_id,
-                "OriginRequestPolicyId": origin_policy_id,
-                "SmoothStreaming": False,
+                "DefaultCacheBehavior": {
+                    "TargetOriginId": "parity-postgrest",
+                    "ViewerProtocolPolicy": "https-only",
+                    "AllowedMethods": {
+                        "Quantity": 7,
+                        "Items": [
+                            "GET",
+                            "HEAD",
+                            "OPTIONS",
+                            "PUT",
+                            "PATCH",
+                            "POST",
+                            "DELETE",
+                        ],
+                        "CachedMethods": {
+                            "Quantity": 2,
+                            "Items": ["GET", "HEAD"],
+                        },
+                    },
+                    "Compress": False,
+                    "CachePolicyId": cache_policy_id,
+                    "OriginRequestPolicyId": origin_policy_id,
+                    "SmoothStreaming": False,
+                },
+                "ViewerCertificate": {
+                    "CloudFrontDefaultCertificate": True
+                },
+                "Restrictions": {
+                    "GeoRestriction": {
+                        "RestrictionType": "none",
+                        "Quantity": 0,
+                    }
+                },
             },
-            "ViewerCertificate": {"CloudFrontDefaultCertificate": True},
-            "Restrictions": {
-                "GeoRestriction": {"RestrictionType": "none", "Quantity": 0}
-            },
-        }
+            "Tags": {"Items": _tags(run_id, candidate_sha)},
+        },
     )
     distribution = created["Distribution"]
     distribution_id = str(distribution["Id"])
@@ -524,10 +563,6 @@ def _create_stack_resources(
     distribution_arn = str(distribution.get("ARN") or "")
     if distribution_arn != _distribution_arn(distribution_id):
         raise ProvisioningError("ephemeral CloudFront ARN is invalid")
-    cloudfront.tag_resource(
-        Resource=distribution_arn,
-        Tags={"Items": _tags(run_id, candidate_sha)},
-    )
     deployed = _wait_distribution(cloudfront, distribution_id, enabled=True)
     if deployed.get("ARN") != distribution_arn:
         raise ProvisioningError("deployed CloudFront ARN differs from creation")

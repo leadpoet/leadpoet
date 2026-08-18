@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatchcase
 import hashlib
 import json
 import os
@@ -26,6 +27,85 @@ DSN = (
     + PASSWORD
     + "@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
 )
+
+
+def _controller_policy() -> dict:
+    return setup._controller_policy(
+        account_id=ACCOUNT,
+        region=setup.EXPECTED_REGION,
+        production_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
+        readonly_secret_id=setup.READONLY_DSN_SECRET_ID,
+        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
+        runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
+    )
+
+
+def _matches(value: str, expected: object, *, pattern: bool) -> bool:
+    values = expected if isinstance(expected, list) else [expected]
+    return any(
+        fnmatchcase(value, str(item)) if pattern else value == str(item)
+        for item in values
+    )
+
+
+def _condition_matches(
+    condition: dict[str, object], context: dict[str, object]
+) -> bool:
+    for operator, entries in condition.items():
+        assert isinstance(entries, dict)
+        for key, expected in entries.items():
+            if key not in context:
+                return False
+            actual = context[key]
+            actual_values = actual if isinstance(actual, list) else [actual]
+            if operator == "ForAllValues:StringEquals":
+                expected_values = (
+                    expected if isinstance(expected, list) else [expected]
+                )
+                if not all(str(value) in expected_values for value in actual_values):
+                    return False
+            elif operator in {"StringEquals", "ArnEquals", "Bool"}:
+                if not all(
+                    _matches(str(value), expected, pattern=False)
+                    for value in actual_values
+                ):
+                    return False
+            elif operator in {"StringLike", "ArnLike"}:
+                if not all(_matches(str(value), expected, pattern=True) for value in actual_values):
+                    return False
+            elif operator == "NumericEquals":
+                if not all(float(value) == float(expected) for value in actual_values):
+                    return False
+            elif operator == "DateLessThan":
+                if not all(str(value) < str(expected) for value in actual_values):
+                    return False
+            else:
+                raise AssertionError(f"unsupported condition operator {operator}")
+    return True
+
+
+def _policy_allows(
+    policy: dict,
+    action: str,
+    resource: str,
+    context: dict[str, object],
+) -> bool:
+    allowed = False
+    for statement in policy["Statement"]:
+        actions = statement["Action"]
+        actions = actions if isinstance(actions, list) else [actions]
+        resources = statement["Resource"]
+        resources = resources if isinstance(resources, list) else [resources]
+        if not any(fnmatchcase(action.lower(), str(item).lower()) for item in actions):
+            continue
+        if not any(fnmatchcase(resource, str(item)) for item in resources):
+            continue
+        if not _condition_matches(statement.get("Condition", {}), context):
+            continue
+        if statement["Effect"] == "Deny":
+            return False
+        allowed = True
+    return allowed
 
 
 def _not_found(operation: str = "GetSecretValue") -> ClientError:
@@ -114,6 +194,359 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
     assert setup.DEFAULT_MINER_INTAKE_SECRET_ID in json.dumps(deny)
 
 
+def test_controller_managed_policy_partition_and_adversarial_boundaries():
+    policy = _controller_policy()
+    slices = setup._controller_policy_slices(
+        account_id=ACCOUNT,
+        region=setup.EXPECTED_REGION,
+        production_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
+        readonly_secret_id=setup.READONLY_DSN_SECRET_ID,
+        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
+        runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
+    )
+    assert set(slices) == set(setup.CONTROLLER_POLICY_NAMES.values())
+    assert len(slices) <= 10
+    assert all(len(setup._json(document)) <= 6144 for document in slices.values())
+    partitioned = [
+        setup._json(statement)
+        for document in slices.values()
+        for statement in document["Statement"]
+    ]
+    assert sorted(partitioned) == sorted(
+        setup._json(statement) for statement in policy["Statement"]
+    )
+
+    restricted_writes = {
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateTags",
+        "ec2:DeleteSecurityGroup",
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ssm:SendCommand",
+        "cloudfront:TagResource",
+        "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution",
+    }
+    for statement in policy["Statement"]:
+        actions = statement["Action"]
+        actions = actions if isinstance(actions, list) else [actions]
+        assert not (
+            restricted_writes.intersection(actions)
+            and statement["Resource"] == "*"
+        )
+    create_distribution = next(
+        statement
+        for statement in policy["Statement"]
+        if statement["Action"] == "cloudfront:CreateDistribution"
+    )
+    assert create_distribution["Resource"] == "*"
+    assert create_distribution["Condition"]["ForAllValues:StringEquals"][
+        "aws:TagKeys"
+    ] == [
+        "Name",
+        "leadpoet:candidate-sha",
+        "leadpoet:ephemeral",
+        "leadpoet:parity-run",
+    ]
+
+    prefix = f"arn:aws:ec2:{setup.EXPECTED_REGION}:{ACCOUNT}"
+    instance = prefix + ":instance/i-0123456789abcdef0"
+    volume = prefix + ":volume/vol-0123456789abcdef0"
+    interface = prefix + ":network-interface/eni-0123456789abcdef0"
+    group = prefix + ":security-group/sg-0123456789abcdef0"
+    subnet = prefix + f":subnet/{setup.PRODUCTION_SUBNET_ID}"
+    vpc = prefix + f":vpc/{setup.PRODUCTION_VPC_ID}"
+    image = (
+        f"arn:aws:ec2:{setup.EXPECTED_REGION}::image/"
+        f"{setup.PRODUCTION_AMI_ID}"
+    )
+    distribution = (
+        f"arn:aws:cloudfront::{ACCOUNT}:distribution/E123456789ABCD"
+    )
+    tags = {
+        "Name": "leadpoet-parity-pp-123456-1",
+        "leadpoet:candidate-sha": "a" * 40,
+        "leadpoet:ephemeral": "true",
+        "leadpoet:parity-run": "pp-123456-1",
+    }
+    request = {
+        **{f"aws:RequestTag/{key}": value for key, value in tags.items()},
+        "aws:TagKeys": sorted(tags),
+    }
+    owned_ec2 = {
+        **{f"ec2:ResourceTag/{key}": value for key, value in tags.items()},
+        "ec2:Vpc": vpc,
+    }
+    launch = {
+        **request,
+        **owned_ec2,
+        "ec2:AssociatePublicIpAddress": "true",
+        "ec2:Encrypted": "true",
+        "ec2:InstanceMetadataTags": "enabled",
+        "ec2:InstanceProfile": (
+            f"arn:aws:iam::{ACCOUNT}:instance-profile/{setup.RUNNER_PROFILE}"
+        ),
+        "ec2:InstanceType": setup.PRODUCTION_INSTANCE_TYPE,
+        "ec2:MetadataHttpEndpoint": "enabled",
+        "ec2:MetadataHttpPutResponseHopLimit": "2",
+        "ec2:MetadataHttpTokens": "required",
+        "ec2:Region": setup.EXPECTED_REGION,
+        "ec2:Subnet": subnet,
+        "ec2:VolumeSize": "512",
+        "ec2:VolumeType": "gp3",
+    }
+    assert _policy_allows(policy, "ec2:RunInstances", image, launch)
+    assert _policy_allows(policy, "ec2:RunInstances", subnet, launch)
+    assert _policy_allows(policy, "ec2:RunInstances", instance, launch)
+    assert _policy_allows(policy, "ec2:RunInstances", volume, launch)
+    assert _policy_allows(policy, "ec2:RunInstances", interface, launch)
+    assert _policy_allows(policy, "ec2:RunInstances", group, launch)
+    assert not _policy_allows(
+        policy,
+        "ec2:RunInstances",
+        f"arn:aws:ec2:{setup.EXPECTED_REGION}::image/ami-0123456789abcdef0",
+        launch,
+    )
+    assert not _policy_allows(
+        policy,
+        "ec2:RunInstances",
+        prefix + ":subnet/subnet-0123456789abcdef0",
+        launch,
+    )
+    assert not _policy_allows(
+        policy,
+        "ec2:RunInstances",
+        instance,
+        {**launch, "ec2:InstanceProfile": "arn:aws:iam::493765492819:instance-profile/other"},
+    )
+    assert not _policy_allows(
+        policy,
+        "ec2:RunInstances",
+        volume,
+        {**launch, "ec2:VolumeSize": "200"},
+    )
+    assert not _policy_allows(
+        policy,
+        "ec2:RunInstances",
+        volume,
+        {**launch, "ec2:Encrypted": "false"},
+    )
+    assert not _policy_allows(
+        policy,
+        "ec2:RunInstances",
+        instance,
+        {**launch, "ec2:MetadataHttpTokens": "optional"},
+    )
+    assert not _policy_allows(
+        policy,
+        "ec2:RunInstances",
+        interface,
+        {
+            **launch,
+            "ec2:Subnet": prefix + ":subnet/subnet-0123456789abcdef0",
+        },
+    )
+    assert not _policy_allows(
+        policy,
+        "ec2:RunInstances",
+        group,
+        {**launch, "ec2:ResourceTag/leadpoet:ephemeral": "false"},
+    )
+    missing_sha = dict(launch)
+    missing_sha.pop("aws:RequestTag/leadpoet:candidate-sha")
+    assert not _policy_allows(
+        policy, "ec2:RunInstances", instance, missing_sha
+    )
+
+    assert _policy_allows(
+        policy,
+        "ec2:CreateTags",
+        instance,
+        {**request, "ec2:CreateAction": "RunInstances"},
+    )
+    assert not _policy_allows(
+        policy,
+        "ec2:CreateTags",
+        instance,
+        {**request, "ec2:CreateAction": "CreateSecurityGroup"},
+    )
+    assert _policy_allows(
+        policy,
+        "ec2:CreateTags",
+        group,
+        {**request, "ec2:CreateAction": "CreateSecurityGroup"},
+    )
+    assert _policy_allows(
+        policy, "ec2:CreateSecurityGroup", group, request
+    )
+    assert _policy_allows(
+        policy, "ec2:CreateSecurityGroup", vpc, request
+    )
+    assert not _policy_allows(
+        policy,
+        "ec2:CreateSecurityGroup",
+        prefix + ":vpc/vpc-0123456789abcdef0",
+        request,
+    )
+    for action, resource in (
+        ("ec2:TerminateInstances", instance),
+        ("ec2:DeleteSecurityGroup", group),
+        ("ec2:AuthorizeSecurityGroupIngress", group),
+    ):
+        assert _policy_allows(policy, action, resource, owned_ec2)
+        assert not _policy_allows(
+            policy,
+            action,
+            resource,
+            {**owned_ec2, "ec2:ResourceTag/leadpoet:ephemeral": "false"},
+        )
+
+    document = (
+        f"arn:aws:ssm:{setup.EXPECTED_REGION}::document/AWS-RunShellScript"
+    )
+    ssm_owned = {
+        **{f"ssm:resourceTag/{key}": value for key, value in tags.items()},
+    }
+    assert _policy_allows(policy, "ssm:SendCommand", document, ssm_owned)
+    assert _policy_allows(policy, "ssm:SendCommand", instance, ssm_owned)
+    assert not _policy_allows(
+        policy,
+        "ssm:SendCommand",
+        f"arn:aws:ssm:{setup.EXPECTED_REGION}::document/Other",
+        ssm_owned,
+    )
+    assert not _policy_allows(
+        policy,
+        "ssm:SendCommand",
+        instance,
+        {**ssm_owned, "ssm:resourceTag/leadpoet:ephemeral": "false"},
+    )
+
+    owned_distribution = {
+        **{f"aws:ResourceTag/{key}": value for key, value in tags.items()},
+    }
+    assert _policy_allows(
+        policy,
+        "cloudfront:TagResource",
+        distribution,
+        {**request, **owned_distribution},
+    )
+    assert not _policy_allows(
+        policy,
+        "cloudfront:TagResource",
+        distribution,
+        {
+            **request,
+            **owned_distribution,
+            "aws:ResourceTag/leadpoet:ephemeral": "false",
+        },
+    )
+    for action in (
+        "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution",
+    ):
+        assert _policy_allows(policy, action, distribution, owned_distribution)
+        assert not _policy_allows(
+            policy,
+            action,
+            distribution,
+            {
+                **owned_distribution,
+                "aws:ResourceTag/leadpoet:ephemeral": "false",
+            },
+        )
+
+    runner = f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}"
+    pass_context = {
+        "iam:AssociatedResourceArn": instance,
+        "iam:PassedToService": "ec2.amazonaws.com",
+    }
+    assert _policy_allows(policy, "iam:PassRole", runner, pass_context)
+    assert not _policy_allows(
+        policy,
+        "iam:PassRole",
+        runner,
+        {**pass_context, "iam:PassedToService": "lambda.amazonaws.com"},
+    )
+    assert not _policy_allows(
+        policy,
+        "iam:PassRole",
+        f"arn:aws:iam::{ACCOUNT}:role/other",
+        pass_context,
+    )
+
+
+def test_setup_simulator_executes_positive_and_adversarial_policy_matrix():
+    policy = _controller_policy()
+
+    class IAM:
+        calls = 0
+
+        def simulate_principal_policy(self, **kwargs):
+            self.calls += 1
+            context: dict[str, object] = {}
+            for item in kwargs["ContextEntries"]:
+                values = item["ContextKeyValues"]
+                context[item["ContextKeyName"]] = (
+                    values if item["ContextKeyType"].endswith("List") else values[0]
+                )
+            action = kwargs["ActionNames"][0]
+            return {
+                "IsTruncated": False,
+                "EvaluationResults": [
+                    {
+                        "EvalActionName": action,
+                        "EvalResourceName": resource,
+                        "EvalDecision": (
+                            "allowed"
+                            if _policy_allows(policy, action, resource, context)
+                            else "implicitDeny"
+                        ),
+                        "MissingContextValues": (
+                            ["aws:RequestTag/leadpoet:candidate-sha"]
+                            if action == "ec2:RunInstances"
+                            and resource.endswith(":instance/i-0123456789abcdef0")
+                            and "aws:RequestTag/leadpoet:candidate-sha"
+                            not in context
+                            else []
+                        ),
+                    }
+                    for resource in kwargs["ResourceArns"]
+                ],
+            }
+
+    iam = IAM()
+    setup._simulate_controller_policy(
+        iam,
+        account_id=ACCOUNT,
+        region=setup.EXPECTED_REGION,
+        controller_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.CONTROLLER_ROLE}",
+        runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
+        session_cutoff="2026-08-18T12:00:00Z",
+    )
+    assert iam.calls >= 30
+
+    class Broken(IAM):
+        def simulate_principal_policy(self, **kwargs):
+            response = super().simulate_principal_policy(**kwargs)
+            if self.calls == 1:
+                response["EvaluationResults"][0]["EvalDecision"] = "implicitDeny"
+            return response
+
+    with pytest.raises(setup.SetupError, match="simulation launch-positive differs"):
+        setup._simulate_controller_policy(
+            Broken(),
+            account_id=ACCOUNT,
+            region=setup.EXPECTED_REGION,
+            controller_arn=(
+                f"arn:aws:iam::{ACCOUNT}:role/{setup.CONTROLLER_ROLE}"
+            ),
+            runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
+            session_cutoff="2026-08-18T12:00:00Z",
+        )
+
+
 def test_iam_only_has_no_github_or_secretsmanager_dependency(monkeypatch):
     calls: list[tuple[str, object]] = []
 
@@ -135,17 +568,60 @@ def test_iam_only_has_no_github_or_secretsmanager_dependency(monkeypatch):
     iam = IAM()
     monkeypatch.setattr(setup, "_iam_clients", lambda region: (object(), iam, ACCOUNT))
     monkeypatch.setattr(
-        setup, "_ensure_oidc_provider", lambda *_: f"arn:aws:iam::{ACCOUNT}:oidc-provider/token.actions.githubusercontent.com"
+        setup,
+        "_ensure_oidc_provider",
+        lambda *_: (
+            f"arn:aws:iam::{ACCOUNT}:oidc-provider/"
+            "token.actions.githubusercontent.com"
+        ),
     )
+
+    def ensure_role(_iam, *, name, **kwargs):
+        receipt = kwargs.get("revocation_receipt")
+        revoke_name = kwargs.get("revoke_policy_name")
+        if receipt is not None and revoke_name:
+            cutoff = "2026-08-18T12:00:30Z"
+            document = setup._revoke_older_sessions_policy(cutoff=cutoff)
+            receipt.update({"cutoff": cutoff, "document": document})
+            calls.append(("policy", {
+                "role": name,
+                "name": revoke_name,
+                "document": document,
+            }))
+        return f"arn:aws:iam::{ACCOUNT}:role/{name}"
+
     monkeypatch.setattr(
         setup,
         "_ensure_role",
-        lambda _iam, *, name, **kwargs: f"arn:aws:iam::{ACCOUNT}:role/{name}",
+        ensure_role,
     )
     monkeypatch.setattr(
         setup, "_put_policy", lambda _iam, **kwargs: calls.append(("policy", kwargs))
     )
     monkeypatch.setattr(setup, "_assert_role_configuration", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_neutralize_controller_role",
+        lambda *args, **kwargs: calls.append(("neutralize", kwargs)),
+    )
+    monkeypatch.setattr(
+        setup,
+        "_ensure_managed_policy",
+        lambda _iam, *, account_id, name, **kwargs: setup._managed_policy_arn(
+            account_id=account_id, name=name
+        ),
+    )
+    monkeypatch.setattr(setup, "_assert_managed_policy", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_simulate_controller_policy",
+        lambda *args, **kwargs: calls.append(("simulate", kwargs)),
+    )
+    monkeypatch.setattr(
+        setup,
+        "_wait_until_after_session_cutoffs",
+        lambda cutoffs: calls.append(("wait-cutoff", cutoffs)),
+    )
     monkeypatch.setattr(setup, "_ensure_instance_profile", lambda *args, **kwargs: None)
     monkeypatch.setattr(setup, "_delete_static_bootstrap_role", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -170,6 +646,131 @@ def test_iam_only_has_no_github_or_secretsmanager_dependency(monkeypatch):
     )
     assert datetime.now(timezone.utc) < expiry <= datetime.now(timezone.utc) + timedelta(minutes=16)
     assert all("secretsmanager" not in name.lower() for name, _ in calls)
+    simulator_index = next(
+        index for index, item in enumerate(calls) if item[0] == "simulate"
+    )
+    wait_index = next(
+        index for index, item in enumerate(calls) if item[0] == "wait-cutoff"
+    )
+    runner_active = next(
+        index
+        for index, (name, payload) in enumerate(calls)
+        if name == "trust" and "ec2.amazonaws.com" in payload["PolicyDocument"]
+    )
+    controller_active = next(
+        index
+        for index, (name, payload) in enumerate(calls)
+        if name == "trust"
+        and "AssumeRoleWithWebIdentity" in payload["PolicyDocument"]
+    )
+    assert simulator_index < wait_index < runner_active < controller_active
+    runner_policy_writes = [
+        payload["name"]
+        for name, payload in calls
+        if name == "policy" and payload["role"] == setup.RUNNER_ROLE
+    ]
+    assert runner_policy_writes[:2] == [
+        setup.RUNNER_REVOKE_POLICY,
+        "LeadpoetProductionParityRunner",
+    ]
+
+
+def test_simulator_permission_denial_leaves_both_roles_inert_and_controller_detached(
+    monkeypatch,
+):
+    events: list[tuple[str, object]] = []
+
+    class IAM:
+        def get_role(self, *, RoleName):
+            assert RoleName == setup.VALIDATOR_ROLE
+            return {"Role": {"Arn": (
+                f"arn:aws:iam::{ACCOUNT}:role/{setup.VALIDATOR_ROLE}"
+            )}}
+
+        def attach_role_policy(self, **kwargs):
+            events.append(("attach", kwargs))
+
+        def update_assume_role_policy(self, **kwargs):
+            events.append(("trust", kwargs))
+
+    iam = IAM()
+    monkeypatch.setattr(setup, "_iam_clients", lambda region: (object(), iam, ACCOUNT))
+    monkeypatch.setattr(
+        setup,
+        "_ensure_oidc_provider",
+        lambda *_: (
+            f"arn:aws:iam::{ACCOUNT}:oidc-provider/"
+            "token.actions.githubusercontent.com"
+        ),
+    )
+
+    def ensure_role(_iam, *, name, **kwargs):
+        receipt = kwargs.get("revocation_receipt")
+        if receipt is not None and kwargs.get("revoke_policy_name"):
+            cutoff = "2026-08-18T12:00:30Z"
+            receipt.update({
+                "cutoff": cutoff,
+                "document": setup._revoke_older_sessions_policy(cutoff=cutoff),
+            })
+        return f"arn:aws:iam::{ACCOUNT}:role/{name}"
+
+    monkeypatch.setattr(
+        setup,
+        "_ensure_role",
+        ensure_role,
+    )
+    monkeypatch.setattr(setup, "_put_policy", lambda *args, **kwargs: None)
+    monkeypatch.setattr(setup, "_assert_role_configuration", lambda *args, **kwargs: None)
+    monkeypatch.setattr(setup, "_ensure_instance_profile", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_neutralize_controller_role",
+        lambda *args, **kwargs: events.append(("neutralize", kwargs)),
+    )
+    monkeypatch.setattr(
+        setup,
+        "_ensure_managed_policy",
+        lambda _iam, *, account_id, name, **kwargs: setup._managed_policy_arn(
+            account_id=account_id, name=name
+        ),
+    )
+    monkeypatch.setattr(setup, "_assert_managed_policy", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_simulate_controller_policy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+                "SimulatePrincipalPolicy",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        setup,
+        "_wait_until_after_session_cutoffs",
+        lambda cutoffs: events.append(("wait-cutoff", cutoffs)),
+    )
+    monkeypatch.setattr(setup, "_delete_static_bootstrap_role", lambda *args, **kwargs: None)
+    args = argparse.Namespace(
+        repository=setup.DEFAULT_REPOSITORY,
+        region=setup.EXPECTED_REGION,
+        production_gateway_ip=setup.PRODUCTION_GATEWAY_IP,
+        production_gateway_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
+        readonly_dsn_secret_id=setup.READONLY_DSN_SECRET_ID,
+        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
+        volume_gib=512,
+    )
+    with pytest.raises(ClientError) as denied:
+        setup.setup_iam_only(args)
+    assert denied.value.response["Error"]["Code"] == "AccessDenied"
+    assert [name for name, _ in events].count("neutralize") == 2
+    trust_documents = [
+        payload["PolicyDocument"]
+        for name, payload in events
+        if name == "trust"
+    ]
+    assert trust_documents == [setup._json(setup._inert_trust())] * 2
+    assert [name for name, _ in events].count("wait-cutoff") == 1
 
 
 def test_oidc_provider_creation_and_retry_preserve_tagless_shared_shape():
@@ -211,6 +812,90 @@ def test_oidc_provider_creation_and_retry_preserve_tagless_shared_shape():
     }]
 
 
+def test_controller_trust_is_exactly_bound_to_unique_main_workflows():
+    oidc = (
+        f"arn:aws:iam::{ACCOUNT}:oidc-provider/"
+        "token.actions.githubusercontent.com"
+    )
+    trust = setup._controller_trust(oidc_arn=oidc)
+    statement = trust["Statement"]
+    assert len(statement) == 1
+    assert set(statement[0]["Condition"]) == {"StringEquals"}
+    claims = statement[0]["Condition"]["StringEquals"]
+    prefix = "token.actions.githubusercontent.com:"
+    assert claims == {
+        prefix + "aud": "sts.amazonaws.com",
+        prefix + "sub": "repo:leadpoet/leadpoet:ref:refs/heads/main",
+        prefix + "repository": "leadpoet/leadpoet",
+        prefix + "repository_id": "1075412927",
+        prefix + "ref": "refs/heads/main",
+        prefix + "workflow": [
+            "Production Parity Full",
+            "Production Parity Fast",
+            "Production Parity Cleanup",
+        ],
+    }
+    root = Path(__file__).resolve().parents[1]
+    paths = {
+        "Production Parity Full": root / ".github/workflows/physical-v2-staging.yml",
+        "Production Parity Fast": root / ".github/workflows/production-parity-fast.yml",
+        "Production Parity Cleanup": root / ".github/workflows/production-parity-cleanup.yml",
+    }
+    all_names: dict[str, list[Path]] = {}
+    for path in (root / ".github/workflows").glob("*.yml"):
+        first = path.read_text(encoding="utf-8").splitlines()[0]
+        if first.startswith("name: "):
+            all_names.setdefault(first.removeprefix("name: "), []).append(path)
+    assert set(paths) == set(setup.CONTROLLER_WORKFLOWS)
+    assert all(all_names.get(name) == [path] for name, path in paths.items())
+    assert "branches: [main]" in paths["Production Parity Fast"].read_text()
+    assert "head_branch == 'main'" in paths["Production Parity Full"].read_text()
+    cleanup = paths["Production Parity Cleanup"].read_text()
+    assert "ref: main" in cleanup
+    assert "refs/heads/main:refs/remotes/origin/main" in cleanup
+
+
+def test_session_cutoff_covers_inert_convergence_race_and_waits_to_activate(
+    monkeypatch,
+):
+    class Clock(datetime):
+        current = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            assert tz == timezone.utc
+            return cls.current
+
+    def sleep(seconds):
+        Clock.current += timedelta(seconds=seconds)
+
+    monkeypatch.setattr(setup, "datetime", Clock)
+    monkeypatch.setattr(setup.time, "sleep", sleep)
+    setup_started = Clock.current
+    minted_before_inert_readback = setup_started + timedelta(seconds=3)
+    Clock.current += timedelta(seconds=5)
+    inert_readback = Clock.current
+    cutoff = setup._new_session_cutoff()
+    cutoff_time = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+    assert (
+        setup_started
+        < minted_before_inert_readback
+        < inert_readback
+        < cutoff_time
+    )
+    revoke = setup._revoke_older_sessions_policy(cutoff=cutoff)
+    assert revoke["Statement"][0]["Condition"] == {
+        "DateLessThan": {"aws:TokenIssueTime": cutoff}
+    }
+    setup._wait_until_after_session_cutoffs([cutoff])
+    assert Clock.current > cutoff_time
+    Clock.current = datetime(2026, 8, 18, 13, 0, tzinfo=timezone.utc)
+    future = setup._new_session_cutoff()
+    monkeypatch.setattr(setup.time, "sleep", lambda seconds: None)
+    with pytest.raises(setup.SetupError, match="has not elapsed"):
+        setup._wait_until_after_session_cutoffs([future])
+
+
 @pytest.mark.parametrize(
     ("role_name", "expected_attached"),
     (
@@ -237,6 +922,7 @@ def test_partial_owned_role_converges_and_reads_back_inert_trust_before_return(
     class IAM:
         trust = active
         duration = 3600
+        inline: dict[str, dict] = {}
         events: list[str] = []
 
         def get_role(self, **kwargs):
@@ -257,7 +943,8 @@ def test_partial_owned_role_converges_and_reads_back_inert_trust_before_return(
         def list_role_policies(self, **kwargs):
             # Simulate response loss immediately after create_role, before
             # put_role_policy/attach_role_policy completed.
-            return {"PolicyNames": []}
+            self.events.append("inventory")
+            return {"PolicyNames": sorted(self.inline)}
 
         def list_attached_role_policies(self, **kwargs):
             return {"AttachedPolicies": []}
@@ -270,33 +957,73 @@ def test_partial_owned_role_converges_and_reads_back_inert_trust_before_return(
             self.events.append("set-duration")
             self.duration = kwargs["MaxSessionDuration"]
 
+        def put_role_policy(self, **kwargs):
+            self.events.append("put-revoke")
+            self.inline[kwargs["PolicyName"]] = json.loads(
+                kwargs["PolicyDocument"]
+            )
+
+        def get_role_policy(self, **kwargs):
+            self.events.append("read-revoke")
+            return {"PolicyDocument": self.inline[kwargs["PolicyName"]]}
+
     iam = IAM()
     inert = setup._inert_trust()
+    revoke_name = (
+        setup.CONTROLLER_REVOKE_POLICY
+        if role_name == setup.CONTROLLER_ROLE
+        else setup.RUNNER_REVOKE_POLICY
+    )
+    receipt: dict[str, object] = {}
     arn = setup._ensure_role(
         iam,
         account_id=ACCOUNT,
         name=role_name,
         trust=inert,
-        expected_inline_policies={"ExpectedPolicy"},
+        expected_inline_policies={"ExpectedPolicy", revoke_name},
         expected_attached_policies=expected_attached,
         max_session_duration=43200,
+        revoke_policy_name=revoke_name,
+        revocation_receipt=receipt,
     )
     assert arn == f"arn:aws:iam::{ACCOUNT}:role/{role_name}"
     assert iam.events == [
-        "get-role", "set-inert", "set-duration", "get-role"
+        "get-role",
+        "inventory",
+        "set-inert",
+        "set-duration",
+        "get-role",
+        "put-revoke",
+        "read-revoke",
+        "inventory",
     ]
     assert iam.trust == inert
     assert iam.duration == 43200
+    assert iam.inline == {revoke_name: receipt["document"]}
 
 
-def test_owned_role_with_unexpected_policy_fails_before_trust_mutation():
+def test_owned_role_with_unexpected_policy_is_rejected_without_mutation():
     class IAM:
+        trust = {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"AWS": "*"},
+                "Action": "sts:AssumeRole",
+            }],
+        }
+        duration = 3600
+        inline = {"UnexpectedPolicy": {"Version": "2012-10-17", "Statement": []}}
+        events: list[str] = []
+
         def get_role(self, **kwargs):
             return {"Role": {
                 "Arn": (
                     f"arn:aws:iam::{ACCOUNT}:role/{setup.CONTROLLER_ROLE}"
                 ),
                 "Path": "/",
+                "AssumeRolePolicyDocument": self.trust,
+                "MaxSessionDuration": self.duration,
             }}
 
         def list_role_tags(self, **kwargs):
@@ -306,23 +1033,322 @@ def test_owned_role_with_unexpected_policy_fails_before_trust_mutation():
             }]}
 
         def list_role_policies(self, **kwargs):
-            return {"PolicyNames": ["UnexpectedPolicy"]}
+            self.events.append("inventory")
+            return {"PolicyNames": sorted(self.inline)}
 
         def list_attached_role_policies(self, **kwargs):
             return {"AttachedPolicies": []}
 
         def update_assume_role_policy(self, **kwargs):
-            pytest.fail("unexpected-policy role trust was mutated")
+            self.events.append("inert")
+            self.trust = json.loads(kwargs["PolicyDocument"])
 
+        def update_role(self, **kwargs):
+            self.duration = kwargs["MaxSessionDuration"]
+
+        def put_role_policy(self, **kwargs):
+            self.events.append("revoke")
+            self.inline[kwargs["PolicyName"]] = json.loads(
+                kwargs["PolicyDocument"]
+            )
+
+        def get_role_policy(self, **kwargs):
+            return {"PolicyDocument": self.inline[kwargs["PolicyName"]]}
+
+    iam = IAM()
+    receipt: dict[str, object] = {}
     with pytest.raises(setup.SetupError, match="policy inventory differs"):
         setup._ensure_role(
-            IAM(),
+            iam,
             account_id=ACCOUNT,
             name=setup.CONTROLLER_ROLE,
             trust=setup._inert_trust(),
-            expected_inline_policies={"ExpectedPolicy"},
+            expected_inline_policies={
+                "ExpectedPolicy",
+                setup.CONTROLLER_REVOKE_POLICY,
+            },
             expected_attached_policies=set(),
+            revoke_policy_name=setup.CONTROLLER_REVOKE_POLICY,
+            revocation_receipt=receipt,
         )
+    assert iam.trust != setup._inert_trust()
+    assert iam.events == ["inventory"]
+    assert receipt == {}
+    assert setup.CONTROLLER_REVOKE_POLICY not in iam.inline
+
+
+def test_controller_neutralization_detaches_allows_and_retains_only_cutoff_deny():
+    legacy = "LeadpoetProductionParityController"
+    managed = {
+        setup._managed_policy_arn(account_id=ACCOUNT, name=name)
+        for name in setup.CONTROLLER_POLICY_NAMES.values()
+    }
+    revoke = setup._revoke_older_sessions_policy(
+        cutoff="2026-08-18T12:00:30Z"
+    )
+
+    class IAM:
+        def __init__(self):
+            self.trust = {
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": "*"},
+                    "Action": "sts:AssumeRole",
+                }],
+            }
+            self.duration = 3600
+            self.inline = {
+                legacy: {"Version": "2012-10-17", "Statement": []}
+            }
+            self.attached = set(managed)
+            self.events: list[str] = []
+
+        def update_assume_role_policy(self, **kwargs):
+            self.events.append("inert")
+            self.trust = json.loads(kwargs["PolicyDocument"])
+
+        def update_role(self, **kwargs):
+            self.events.append("duration")
+            self.duration = kwargs["MaxSessionDuration"]
+
+        def list_role_policies(self, **kwargs):
+            return {"PolicyNames": sorted(self.inline)}
+
+        def list_attached_role_policies(self, **kwargs):
+            return {"AttachedPolicies": [
+                {"PolicyArn": value} for value in sorted(self.attached)
+            ]}
+
+        def delete_role_policy(self, **kwargs):
+            self.events.append("delete-legacy")
+            del self.inline[kwargs["PolicyName"]]
+
+        def detach_role_policy(self, **kwargs):
+            self.events.append("detach")
+            self.attached.remove(kwargs["PolicyArn"])
+
+        def put_role_policy(self, **kwargs):
+            self.events.append("put-revoke")
+            self.inline[kwargs["PolicyName"]] = json.loads(
+                kwargs["PolicyDocument"]
+            )
+
+        def get_role(self, **kwargs):
+            return {"Role": {
+                "Arn": f"arn:aws:iam::{ACCOUNT}:role/{setup.CONTROLLER_ROLE}",
+                "Path": "/",
+                "AssumeRolePolicyDocument": self.trust,
+                "MaxSessionDuration": self.duration,
+            }}
+
+        def list_role_tags(self, **kwargs):
+            return {"Tags": [{
+                "Key": "leadpoet:purpose",
+                "Value": "production-parity",
+            }]}
+
+        def get_role_policy(self, **kwargs):
+            return {"PolicyDocument": self.inline[kwargs["PolicyName"]]}
+
+    iam = IAM()
+    setup._neutralize_controller_role(
+        iam,
+        account_id=ACCOUNT,
+        managed_policy_arns=managed,
+        legacy_inline_policy=legacy,
+        revoke_document=revoke,
+    )
+    assert iam.trust == setup._inert_trust()
+    assert iam.attached == set()
+    assert iam.inline == {setup.CONTROLLER_REVOKE_POLICY: revoke}
+    assert iam.events[:4] == [
+        "inert",
+        "duration",
+        "put-revoke",
+        "delete-legacy",
+    ]
+    assert iam.events.count("detach") == len(managed)
+
+    collision = IAM()
+    collision.inline["UnexpectedAllow"] = {
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}],
+    }
+    with pytest.raises(setup.SetupError, match="inventory changed"):
+        setup._neutralize_controller_role(
+            collision,
+            account_id=ACCOUNT,
+            managed_policy_arns=managed,
+            legacy_inline_policy=legacy,
+            revoke_document=revoke,
+        )
+    assert collision.inline[setup.CONTROLLER_REVOKE_POLICY] == revoke
+    assert collision.events[:3] == ["inert", "duration", "put-revoke"]
+
+
+class _ManagedPolicyIam:
+    def __init__(self, name: str, *, roles: set[str] | None = None):
+        self.name = name
+        self.arn = setup._managed_policy_arn(account_id=ACCOUNT, name=name)
+        self.default = "v1"
+        self.documents = {
+            f"v{index}": {"Version": "2012-10-17", "Statement": []}
+            for index in range(1, 6)
+        }
+        self.roles = set(roles or set())
+        self.events: list[tuple[str, str]] = []
+
+    def get_policy(self, **kwargs):
+        assert kwargs == {"PolicyArn": self.arn}
+        return {"Policy": {
+            "Arn": self.arn,
+            "PolicyName": self.name,
+            "Path": setup.CONTROLLER_POLICY_PATH,
+            "Description": setup.CONTROLLER_POLICY_DESCRIPTION,
+            "DefaultVersionId": self.default,
+        }}
+
+    def list_policy_tags(self, **kwargs):
+        assert kwargs == {"PolicyArn": self.arn}
+        return {"Tags": [{
+            "Key": "leadpoet:purpose",
+            "Value": "production-parity",
+        }]}
+
+    def list_entities_for_policy(self, **kwargs):
+        assert kwargs == {"PolicyArn": self.arn}
+        return {
+            "PolicyRoles": [{"RoleName": value} for value in sorted(self.roles)],
+            "PolicyUsers": [],
+            "PolicyGroups": [],
+            "IsTruncated": False,
+        }
+
+    def get_policy_version(self, **kwargs):
+        return {"PolicyVersion": {"Document": self.documents[kwargs["VersionId"]]}}
+
+    def list_policy_versions(self, **kwargs):
+        assert kwargs == {"PolicyArn": self.arn}
+        return {"Versions": [
+            {
+                "VersionId": version,
+                "IsDefaultVersion": version == self.default,
+            }
+            for version in self.documents
+        ]}
+
+    def delete_policy_version(self, **kwargs):
+        version = kwargs["VersionId"]
+        assert version != self.default
+        self.events.append(("delete", version))
+        del self.documents[version]
+
+    def create_policy_version(self, **kwargs):
+        assert kwargs["SetAsDefault"] is True
+        version = "v6"
+        self.documents[version] = json.loads(kwargs["PolicyDocument"])
+        self.default = version
+        self.events.append(("create", version))
+        return {"PolicyVersion": {"VersionId": version}}
+
+
+def test_managed_policy_replacement_cleans_five_versions_and_is_exact():
+    name = setup.CONTROLLER_POLICY_NAMES["lifecycle"]
+    iam = _ManagedPolicyIam(name)
+    document = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": "ec2:DescribeInstances",
+            "Resource": "*",
+        }],
+    }
+    arn = setup._ensure_managed_policy(
+        iam,
+        account_id=ACCOUNT,
+        name=name,
+        document=document,
+    )
+    assert arn == iam.arn
+    assert iam.default == "v6"
+    assert iam.documents == {"v6": document}
+    assert iam.events == [
+        ("delete", "v2"),
+        ("delete", "v3"),
+        ("delete", "v4"),
+        ("delete", "v5"),
+        ("create", "v6"),
+        ("delete", "v1"),
+    ]
+
+
+def test_managed_policy_attached_to_other_entity_fails_before_version_write():
+    name = setup.CONTROLLER_POLICY_NAMES["cloudfront"]
+    iam = _ManagedPolicyIam(name, roles={"other-role"})
+    with pytest.raises(setup.SetupError, match="not owned by parity"):
+        setup._ensure_managed_policy(
+            iam,
+            account_id=ACCOUNT,
+            name=name,
+            document=iam.documents["v1"],
+        )
+    assert iam.events == []
+    assert len(iam.documents) == 5
+
+
+def test_managed_policy_first_create_and_exact_retry_are_idempotent():
+    name = setup.CONTROLLER_POLICY_NAMES["data"]
+    document = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": "s3:ListAllMyBuckets",
+            "Resource": "*",
+        }],
+    }
+
+    class IAM(_ManagedPolicyIam):
+        exists = False
+
+        def __init__(self):
+            super().__init__(name)
+            self.documents = {}
+
+        def get_policy(self, **kwargs):
+            if not self.exists:
+                raise ClientError(
+                    {"Error": {"Code": "NoSuchEntity", "Message": "absent"}},
+                    "GetPolicy",
+                )
+            return super().get_policy(**kwargs)
+
+        def create_policy(self, **kwargs):
+            assert kwargs == {
+                "PolicyName": name,
+                "Path": setup.CONTROLLER_POLICY_PATH,
+                "PolicyDocument": setup._json(document),
+                "Description": setup.CONTROLLER_POLICY_DESCRIPTION,
+                "Tags": [{
+                    "Key": "leadpoet:purpose",
+                    "Value": "production-parity",
+                }],
+            }
+            self.exists = True
+            self.default = "v1"
+            self.documents = {"v1": document}
+            self.events.append(("create-policy", "v1"))
+
+    iam = IAM()
+    expected = setup._managed_policy_arn(account_id=ACCOUNT, name=name)
+    assert setup._ensure_managed_policy(
+        iam, account_id=ACCOUNT, name=name, document=document
+    ) == expected
+    assert setup._ensure_managed_policy(
+        iam, account_id=ACCOUNT, name=name, document=document
+    ) == expected
+    assert iam.documents == {"v1": document}
+    assert iam.events == [("create-policy", "v1")]
 
 
 def test_gateway_iam_cache_rejects_session_key_without_token(

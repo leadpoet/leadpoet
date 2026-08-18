@@ -71,7 +71,8 @@ origin.
 `Production Parity Full` starts after the exact commit's normal attested
 release succeeds. It dynamically:
 
-1. derives the live gateway AMI, subnet, VPC, and default instance type;
+1. requires the exact commissioned gateway instance, AMI, subnet, VPC, and
+   instance type and fails if live readback differs;
 2. creates one encrypted, IMDSv2-required, Nitro-enabled EC2 instance;
 3. creates one temporary CloudFront HTTPS origin for cloned PostgREST;
 4. creates one run-scoped, encrypted, Object-Locked bucket and transfers the
@@ -148,6 +149,22 @@ read back. It creates only:
 - one restricted EC2 runner role and instance profile; and
 - the exact repository-variable inventory for fixed production resources and
   freshly resolved official PostgreSQL/PostgREST image digests.
+
+The standing controller trust accepts only the three named parity workflows
+on `leadpoet/leadpoet` main. Its permissions are four fixed, parity-owned
+customer-managed policies (EC2 launch, lifecycle/SSM, CloudFront, and data),
+each below the IAM managed-policy quota. Commissioning makes the role inert,
+revokes older sessions, detaches all permissions, replaces and reads back the
+sole policy versions, reattaches the complete set, and runs IAM's principal
+policy simulator against positive and adversarial resource/tag contexts before
+restoring trust. The runner follows the same inert/session-revocation boundary.
+That simulator proves the identity-policy lattice; it does not claim that a
+compound AWS API propagated every context key, so the real provisioner still
+fails closed on every API error and exact resource/tag readback.
+RunInstances is pinned to the exact AMI, subnet, VPC, runner profile, instance
+type, IMDSv2 settings, and encrypted 512-GiB gp3 shape. SSM, EC2 lifecycle, and
+CloudFront mutation are limited to exact account resources carrying all parity
+run, candidate, ephemeral, and Name ownership tags.
 
 Migration `156-production-parity-readonly-role.sql` is never pasted into an SQL
 editor and the repository bootstrap does not apply arbitrary SQL. During an

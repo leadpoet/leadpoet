@@ -1154,6 +1154,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_champion_lifetime_credit_contract_v1",
             "research_lab_active_model_replay_contract_v2",
             "persist_research_lab_ancestry_checkpoint_v2",
+            "research_lab_ancestry_disclosure_lookup_contract_v1",
             "persist_research_lab_allocation_settlement_frontier_v2",
             "persist_research_lab_allocation_frontier_bootstrap_v2",
             "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
@@ -1262,6 +1263,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     assert "research_lab_active_model_replay_contract_v2" in rpcs
     assert "resume_research_lab_credit_blocked_run_v1" in rpcs
     assert "persist_research_lab_ancestry_checkpoint_v2" in rpcs
+    assert "research_lab_ancestry_disclosure_lookup_contract_v1" in rpcs
     assert "persist_research_lab_allocation_settlement_frontier_v2" in rpcs
     assert "persist_research_lab_allocation_frontier_bootstrap_v2" in rpcs
     assert "research_lab_ancestry_checkpoint_bootstrap_contract_v2" in rpcs

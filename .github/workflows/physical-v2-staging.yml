@@ -128,6 +128,8 @@ jobs:
 
       - name: Set up exact candidate controller
         uses: ./.github/actions/setup-production-parity-controller
+        with:
+          python-executable: /usr/bin/python3.11
 
       - name: Configure parity AWS role
         uses: aws-actions/configure-aws-credentials@v4

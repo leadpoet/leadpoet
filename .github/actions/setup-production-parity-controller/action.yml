@@ -1,16 +1,18 @@
 name: Set up production parity controller
 description: Install the exact controller dependency constraints from the candidate
 
+inputs:
+  python-executable:
+    description: Absolute trusted host Python 3.11 executable
+    required: true
+
 runs:
   using: composite
   steps:
-    - name: Set up candidate Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
-
     - name: Install candidate-derived controller dependencies
       shell: bash
+      env:
+        LEADPOET_CONTROLLER_HOST_PYTHON: ${{ inputs.python-executable }}
       run: |
         set -Eeuo pipefail
         umask 077
@@ -22,6 +24,23 @@ runs:
         esac
         test -d "$RUNNER_TEMP"
         test ! -L "$RUNNER_TEMP"
+
+        host_python="$LEADPOET_CONTROLLER_HOST_PYTHON"
+        case "$host_python" in
+          /*) ;;
+          *) exit 1 ;;
+        esac
+        test -f "$host_python"
+        test -x "$host_python"
+        resolved_host_python="$(realpath -e -- "$host_python")"
+        test -f "$resolved_host_python"
+        test -x "$resolved_host_python"
+        observed_host_python="$("$host_python" -I -c '
+        import os
+        import sys
+        print(f"{sys.version_info.major}.{sys.version_info.minor}|{os.path.realpath(sys.executable)}")
+        ')"
+        test "$observed_host_python" = "3.11|$resolved_host_python"
 
         if [ -n "${PARITY_TEMP:-}" ]; then
           expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -40,10 +59,11 @@ runs:
 
         venv_root="$controller_root/venv"
         requirements_file="$controller_root/requirements.txt"
-        python3 -m venv "$venv_root"
+        "$host_python" -I -m venv "$venv_root"
         venv_python="$venv_root/bin/python"
         test -x "$venv_python"
         grep -Fx 'include-system-site-packages = false' "$venv_root/pyvenv.cfg"
+        test "$("$venv_python" -I -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.11"
         "$venv_python" scripts/resolve_production_parity_controller_requirements.py \
           --requirements requirements.txt \
           --output "$requirements_file"

@@ -2119,13 +2119,24 @@ def test_controller_dependencies_use_a_scrubbed_per_run_virtualenv():
     full = (
         root / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
+    fast = (
+        root / ".github/workflows/production-parity-fast.yml"
+    ).read_text(encoding="utf-8")
+    cleanup = (
+        root / ".github/workflows/production-parity-cleanup.yml"
+    ).read_text(encoding="utf-8")
 
+    assert "actions/setup-python" not in action
+    assert "python-executable:" in action
+    assert "required: true" in action
     assert 'controller_root="$PARITY_TEMP/controller"' in action
     assert (
         'controller_root="$RUNNER_TEMP/production-parity-controller-'
         '$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"' in action
     )
-    assert 'python3 -m venv "$venv_root"' in action
+    assert '"$host_python" -I -m venv "$venv_root"' in action
+    assert 'test "$observed_host_python" = "3.11|$resolved_host_python"' in action
+    assert 'sys.version_info.major}.{sys.version_info.minor}' in action
     assert '"$venv_python" -m pip install' in action
     assert "--no-cache-dir" in action
     assert "python3 -m pip install" not in action
@@ -2135,6 +2146,12 @@ def test_controller_dependencies_use_a_scrubbed_per_run_virtualenv():
     assert 'printf \'VIRTUAL_ENV=%s\\n\' "$venv_root"' in action
     assert 'test "$(command -v python3)" = "$VIRTUAL_ENV/bin/python3"' in action
     assert '"$venv_python" "$script" --help' in action
+    assert "uses: actions/setup-python@v5" not in full
+    assert "python-executable: /usr/bin/python3.11" in full
+    for github_hosted in (fast, cleanup):
+        assert "uses: actions/setup-python@v5" in github_hosted
+        assert "python-version: \"3.11\"" in github_hosted
+        assert "python-executable: ${{ env.pythonLocation }}/bin/python3" in github_hosted
     assert 'printf \'PARITY_TEMP=%s\\n\' "$PARITY_TEMP" >> "$GITHUB_ENV"' in full
     assert 'rm -rf -- "$parity_temp"' in full
 

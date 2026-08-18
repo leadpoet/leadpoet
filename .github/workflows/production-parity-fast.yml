@@ -49,8 +49,15 @@ jobs:
             refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 
+      - name: Set up trusted controller Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Set up exact candidate controller
         uses: ./.github/actions/setup-production-parity-controller
+        with:
+          python-executable: ${{ env.pythonLocation }}/bin/python3
 
       - name: Configure read-only parity role
         uses: aws-actions/configure-aws-credentials@v4

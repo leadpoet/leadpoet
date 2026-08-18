@@ -44,6 +44,7 @@ from scripts.production_parity_snapshot import (
 from scripts.run_production_parity_full_host import (
     FullParityError,
     _builtwith_key_from_secret,
+    _clone_service_role_key,
     _current_epoch_from_readiness,
     _dsn_from_secret,
     _parse_gateway_environment_file,
@@ -669,12 +670,17 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
         observed["restore"] = kwargs["timeout_seconds"]
         raise FullParityError("stop after restore")
 
+    def database_factory(**kwargs):
+        observed["postgres_publish"] = kwargs["postgres_publish"]
+        observed["postgrest_publish"] = kwargs["postgrest_publish"]
+        return Database()
+
     monkeypatch.setattr(full_host, "EARLY_BOOT_MARKER", marker)
     monkeypatch.setattr(full_host, "FULL_WORK_ROOT", work_root)
     monkeypatch.setattr(full_host, "_checkout_identity", lambda _sha: None)
     monkeypatch.setattr(full_host.time, "monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr(full_host.boto3, "client", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(full_host, "_DockerDatabase", lambda **_kwargs: Database())
+    monkeypatch.setattr(full_host, "_DockerDatabase", database_factory)
     monkeypatch.setattr(full_host, "capture", lambda **_kwargs: None)
     monkeypatch.setattr(
         full_host,
@@ -706,7 +712,12 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
             timeout_seconds=1_000,
         )
 
-    assert observed == {"capture": 990, "restore": 850}
+    assert observed == {
+        "postgres_publish": "127.0.0.1::5432",
+        "postgrest_publish": "0.0.0.0:3000:3000",
+        "capture": 990,
+        "restore": 850,
+    }
     assert not (work_root / "pp-test-1" / "runtime").exists()
     cleanup = json.loads(output.read_text(encoding="utf-8"))["cleanup"]
     assert cleanup["work"] == "removed"
@@ -1553,6 +1564,51 @@ def test_miner_intake_secret_resolution_is_strict_and_value_opaque():
     )
     with pytest.raises(FullParityError, match="credential is unavailable"):
         _required_secret_from_environment({}, ("FIRST",), field="credential")
+
+
+def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
+    jwt_secret = "j" * 48
+    environment = build_gateway_environment(
+        {},
+        run_id="parity-20260815",
+        candidate_sha=SHA,
+        supabase_origin=ORIGIN,
+        artifact_bucket="leadpoet-parity-artifacts-example",
+        benchmark_date="2026-08-16",
+        jwt_secret=jwt_secret,
+    )
+    token = _clone_service_role_key(
+        environment,
+        candidate_sha=SHA,
+        run_id="parity-20260815",
+        supabase_origin=ORIGIN,
+        jwt_secret=jwt_secret,
+    )
+    assert token == environment["SUPABASE_SERVICE_ROLE_KEY"]
+    with pytest.raises(FullParityError, match="credential is unavailable"):
+        _clone_service_role_key(
+            {**environment, "SUPABASE_SERVICE_ROLE_KEY": ""},
+            candidate_sha=SHA,
+            run_id="parity-20260815",
+            supabase_origin=ORIGIN,
+            jwt_secret=jwt_secret,
+        )
+    with pytest.raises(FullParityError, match="run-scoped clone service role"):
+        _clone_service_role_key(
+            {**environment, "LEADPOET_PARITY_CANDIDATE_SHA": "b" * 40},
+            candidate_sha=SHA,
+            run_id="parity-20260815",
+            supabase_origin=ORIGIN,
+            jwt_secret=jwt_secret,
+        )
+    with pytest.raises(FullParityError, match="credential identity differs"):
+        _clone_service_role_key(
+            environment,
+            candidate_sha=SHA,
+            run_id="parity-20260815",
+            supabase_origin=ORIGIN,
+            jwt_secret="x" * 48,
+        )
 
 
 def test_builtwith_live_probe_keeps_credential_out_of_url(monkeypatch):

@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -40,6 +43,9 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
     ProductionParityError,
     sha256_json,
     validate_snapshot_manifest,
+)
+from leadpoet_canonical.production_parity_boundary_v2 import (  # noqa: E402
+    validate_production_parity_boundary_document_v2,
 )
 from research_lab.validator_integration import (  # noqa: E402
     ResearchLabValidatorFlags,
@@ -448,6 +454,94 @@ def _required_secret_from_environment(
         if value:
             return value
     raise FullParityError(f"{field} is unavailable in the authorized environment")
+
+
+def _clone_service_role_key(
+    values: Mapping[str, str],
+    *,
+    candidate_sha: str,
+    run_id: str,
+    supabase_origin: str,
+    jwt_secret: str,
+) -> str:
+    """Verify the run-scoped 48-hour clone token used after rebenchmarking."""
+
+    boundary = validate_production_parity_boundary_document_v2(
+        values,
+        network=str(values.get("BITTENSOR_NETWORK") or ""),
+        netuid=int(values.get("BITTENSOR_NETUID") or 0),
+    )
+    normalized_origin = supabase_origin.rstrip("/")
+    if (
+        boundary.get("mode") != "production-parity"
+        or boundary.get("run_id") != run_id
+        or boundary.get("supabase_origin") != normalized_origin
+        or values.get("LEADPOET_PARITY_CANDIDATE_SHA") != candidate_sha
+        or str(values.get("SUPABASE_URL") or "").rstrip("/") != normalized_origin
+        or not jwt_secret
+    ):
+        raise FullParityError("run-scoped clone service role identity differs")
+    token = _required_secret_from_environment(
+        values,
+        ("SUPABASE_SERVICE_ROLE_KEY",),
+        field="run-scoped clone service role credential",
+    )
+    try:
+        encoded_header, encoded_payload, encoded_signature = token.split(".")
+        padding = "=" * (-len(encoded_payload) % 4)
+        header_padding = "=" * (-len(encoded_header) % 4)
+        signature_padding = "=" * (-len(encoded_signature) % 4)
+        header = json.loads(
+            base64.b64decode(
+                encoded_header + header_padding,
+                altchars=b"-_",
+                validate=True,
+            )
+        )
+        payload = json.loads(
+            base64.b64decode(
+                encoded_payload + padding,
+                altchars=b"-_",
+                validate=True,
+            )
+        )
+        signature = base64.b64decode(
+            encoded_signature + signature_padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        if not isinstance(header, Mapping) or not isinstance(payload, Mapping):
+            raise ValueError("JWT documents must be objects")
+        if isinstance(payload.get("iat"), bool) or isinstance(
+            payload.get("exp"), bool
+        ):
+            raise ValueError("JWT timestamps must be integers")
+        issued_at = int(payload.get("iat"))
+        expires_at = int(payload.get("exp"))
+    except (binascii.Error, TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise FullParityError(
+            "run-scoped clone service role credential is invalid"
+        ) from exc
+    expected_signature = hmac.new(
+        jwt_secret.encode("ascii"),
+        f"{encoded_header}.{encoded_payload}".encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    now = int(time.time())
+    if (
+        header != {"alg": "HS256", "typ": "JWT"}
+        or payload.get("aud") != "authenticated"
+        or payload.get("iss") != "leadpoet-production-parity"
+        or payload.get("role") != "service_role"
+        or expires_at - issued_at != 172_805
+        or issued_at > now
+        or expires_at <= now
+        or not hmac.compare_digest(signature, expected_signature)
+    ):
+        raise FullParityError(
+            "run-scoped clone service role credential identity differs"
+        )
+    return token
 
 
 def _builtwith_key_from_secret(raw: str) -> str:
@@ -1230,7 +1324,7 @@ def run_full(
             postgres_image=postgres_image,
             postgrest_image=postgrest_image,
             postgres_publish="127.0.0.1::5432",
-            postgrest_publish="0.0.0.0:3000",
+            postgrest_publish="0.0.0.0:3000:3000",
         )
         capture(
             client=secrets_client,
@@ -1291,7 +1385,7 @@ def run_full(
             "clone_prerequisites": prerequisites,
             "clone_restore_contract": restore_contract,
         }
-        _local_url, service_role_key = database.start_postgrest()
+        _local_url, _ = database.start_postgrest()
         _wait_https_origin(supabase_origin)
         secret_state = create_gateway_secret(
             client=secrets_client,
@@ -1453,6 +1547,13 @@ def run_full(
                 miner_intake_secret_id,
                 field="miner-intake credential",
             ),
+        )
+        service_role_key = _clone_service_role_key(
+            parsed_env,
+            candidate_sha=candidate_sha,
+            run_id=run_id,
+            supabase_origin=supabase_origin,
+            jwt_secret=database.jwt_secret,
         )
         shape = database.shape_evidence(
             service_role_key=service_role_key,

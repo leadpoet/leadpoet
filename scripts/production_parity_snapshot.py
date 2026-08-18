@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 from typing import Any, Mapping, Sequence
@@ -38,10 +41,36 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PINNED_POSTGRES_IMAGE_RE = re.compile(
+    r"^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$"
+)
+_POSTGRES_CLIENT_TOOLS = frozenset({"psql", "pg_dump", "pg_restore"})
+_POSTGRES_ENVIRONMENT_KEYS = (
+    "PGHOST",
+    "PGPORT",
+    "PGDATABASE",
+    "PGUSER",
+    "PGPASSWORD",
+    "PGSSLMODE",
+    "PGOPTIONS",
+)
+_POSTGRES_ARCHIVE_TARGET = "/leadpoet-parity.snapshot"
+_POSTGRES_MIGRATION_TARGET = "/leadpoet-parity.migration.sql"
+_POSTGRES_MOUNT_TARGETS = frozenset(
+    {_POSTGRES_ARCHIVE_TARGET, _POSTGRES_MIGRATION_TARGET}
+)
 DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS = 900
 DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS = 300
+DEFAULT_PINNED_POSTGRES_STARTUP_TIMEOUT_SECONDS = 600
 MAX_SNAPSHOT_IO_TIMEOUT_SECONDS = 72_000
 FULL_SNAPSHOT_DISK_RESERVE_BYTES = 64 * 1024**3
+
+
+@dataclass(frozen=True)
+class _PostgresClientMount:
+    source: Path
+    target: str
+    read_only: bool
 
 
 def _snapshot_io_timeout_seconds(value: int) -> int:
@@ -144,6 +173,193 @@ def _run(
     )
 
 
+def _postgres_client_environment(
+    env: Mapping[str, str], *, include_postgres: bool
+) -> dict[str, str]:
+    filtered = {"PATH": os.environ.get("PATH") or os.defpath}
+    if include_postgres:
+        for key in _POSTGRES_ENVIRONMENT_KEYS:
+            if key in env:
+                filtered[key] = str(env[key])
+    return filtered
+
+
+def _postgres_client_mount_argument(mount: _PostgresClientMount) -> str:
+    if type(mount.read_only) is not bool:
+        raise ProductionParityError("pinned PostgreSQL client mount mode is invalid")
+    if mount.target not in _POSTGRES_MOUNT_TARGETS:
+        raise ProductionParityError("pinned PostgreSQL client mount target is invalid")
+    source = Path(mount.source)
+    try:
+        if source.is_symlink():
+            raise ProductionParityError(
+                "pinned PostgreSQL client mount source must not be a symlink"
+            )
+        resolved = source.resolve(strict=True)
+        source_stat = resolved.stat()
+    except OSError as exc:
+        raise ProductionParityError(
+            "pinned PostgreSQL client mount source is unavailable"
+        ) from exc
+    if not stat.S_ISREG(source_stat.st_mode) or "," in str(resolved):
+        raise ProductionParityError(
+            "pinned PostgreSQL client mount source is invalid"
+        )
+    if not mount.read_only and mount.target != _POSTGRES_ARCHIVE_TARGET:
+        raise ProductionParityError(
+            "pinned PostgreSQL client writable mount is invalid"
+        )
+    value = f"type=bind,src={resolved},dst={mount.target}"
+    if mount.read_only:
+        value += ",readonly"
+    return value
+
+
+def _redact_postgres_client_diagnostic(
+    payload: bytes | None, env: Mapping[str, str]
+) -> bytes | None:
+    if payload is None:
+        return None
+    redacted = payload
+    for key in _POSTGRES_ENVIRONMENT_KEYS:
+        value = str(env.get(key) or "").encode("utf-8")
+        if value:
+            redacted = redacted.replace(value, b"[redacted]")
+    return redacted
+
+
+def _run_postgres(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    timeout: int,
+    stdin: bytes | None = None,
+    postgres_image: str | None = None,
+    mounts: Sequence[_PostgresClientMount] = (),
+) -> subprocess.CompletedProcess[bytes]:
+    if postgres_image is None:
+        if mounts:
+            raise ProductionParityError(
+                "host PostgreSQL client cannot use container mounts"
+            )
+        return _run(command, env=env, timeout=timeout, stdin=stdin)
+    if not _PINNED_POSTGRES_IMAGE_RE.fullmatch(postgres_image):
+        raise ProductionParityError(
+            "PostgreSQL client image must be digest-pinned"
+        )
+    if not command or command[0] not in _POSTGRES_CLIENT_TOOLS:
+        raise ProductionParityError("PostgreSQL client command is not allowed")
+
+    mount_arguments: list[str] = []
+    mount_targets: set[str] = set()
+    for mount in mounts:
+        if (
+            command[0] == "pg_dump"
+            and (mount.target != _POSTGRES_ARCHIVE_TARGET or mount.read_only)
+        ) or (
+            command[0] == "pg_restore"
+            and (mount.target != _POSTGRES_ARCHIVE_TARGET or not mount.read_only)
+        ) or (
+            command[0] == "psql"
+            and (mount.target != _POSTGRES_MIGRATION_TARGET or not mount.read_only)
+        ):
+            raise ProductionParityError(
+                "pinned PostgreSQL client mount does not match its command"
+            )
+        if mount.target in mount_targets:
+            raise ProductionParityError(
+                "pinned PostgreSQL client mount target is duplicated"
+            )
+        mount_targets.add(mount.target)
+        mount_arguments.extend(
+            ["--mount", _postgres_client_mount_argument(mount)]
+        )
+
+    container_name = (
+        f"leadpoet-parity-pg-client-{os.getpid()}-{secrets.token_hex(6)}"
+    )
+    docker_command = [
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        container_name,
+        "--network",
+        "host",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=67108864",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "-i",
+    ]
+    for key in _POSTGRES_ENVIRONMENT_KEYS:
+        if key in env:
+            docker_command.extend(["--env", key])
+    docker_command.extend(mount_arguments)
+    docker_command.extend(
+        ["--entrypoint", command[0], postgres_image, *list(command[1:])]
+    )
+    try:
+        result = subprocess.run(
+            docker_command,
+            cwd=ROOT,
+            env=_postgres_client_environment(env, include_postgres=True),
+            input=stdin,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container_name],
+                cwd=ROOT,
+                env=_postgres_client_environment({}, include_postgres=False),
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise
+    if result.returncode == 0:
+        return result
+    return subprocess.CompletedProcess(
+        args=result.args,
+        returncode=result.returncode,
+        stdout=_redact_postgres_client_diagnostic(result.stdout, env),
+        stderr=_redact_postgres_client_diagnostic(result.stderr, env),
+    )
+
+
+def _create_pinned_archive(path: Path) -> Path:
+    try:
+        parent = path.parent.resolve(strict=True)
+        resolved = parent / path.name
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(resolved, flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            created = os.fstat(descriptor)
+            if not stat.S_ISREG(created.st_mode) or created.st_nlink != 1:
+                raise ProductionParityError(
+                    "pinned PostgreSQL archive file is invalid"
+                )
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ProductionParityError(
+            "pinned PostgreSQL archive file could not be created safely"
+        ) from exc
+    return resolved
+
+
 def _require_success(result: subprocess.CompletedProcess[bytes], *, stage: str) -> bytes:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()[-800:]
@@ -151,7 +367,9 @@ def _require_success(result: subprocess.CompletedProcess[bytes], *, stage: str) 
     return result.stdout
 
 
-def _database_stats(env: Mapping[str, str]) -> dict[str, Any]:
+def _database_stats(
+    env: Mapping[str, str], *, postgres_image: str | None = None
+) -> dict[str, Any]:
     stats_sql = """
 SELECT json_build_object(
   'server_version_num', current_setting('server_version_num'),
@@ -218,10 +436,11 @@ WHERE c.relkind IN ('r', 'm')
   AND n.nspname = 'public';
 """
     raw = _require_success(
-        _run(
+        _run_postgres(
             ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", stats_sql],
             env=env,
             timeout=60,
+            postgres_image=postgres_image,
         ),
         stage="production database shape read",
     ).decode("utf-8", "replace").strip()
@@ -329,6 +548,7 @@ def capture_snapshot(
     source_sha: str,
     capture_mode: str = "full",
     timeout_seconds: int = DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
+    postgres_image: str | None = None,
 ) -> dict[str, Any]:
     timeout_seconds = _snapshot_io_timeout_seconds(timeout_seconds)
     contract = validate_contract(_load_json(contract_path, description="parity contract"))
@@ -341,17 +561,22 @@ def capture_snapshot(
         raise ProductionParityError("production snapshot capture mode is invalid")
 
     read_only = _require_success(
-        _run(
+        _run_postgres(
             ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", "SHOW transaction_read_only"],
             env=env,
-            timeout=30,
+            timeout=(
+                min(timeout_seconds, DEFAULT_PINNED_POSTGRES_STARTUP_TIMEOUT_SECONDS)
+                if postgres_image is not None
+                else 30
+            ),
+            postgres_image=postgres_image,
         ),
         stage="production read-only transaction check",
     ).decode("utf-8", "replace").strip()
     if read_only != "on":
         raise ProductionParityError("production snapshot session is not read-only")
 
-    stats = _database_stats(env)
+    stats = _database_stats(env, postgres_image=postgres_image)
     source_role = stats.get("source_role")
     if (
         not isinstance(source_role, Mapping)
@@ -378,6 +603,19 @@ def capture_snapshot(
             total_relation_bytes=int(stats.get("total_relation_bytes") or 0),
             simultaneous_copies=2,
         )
+    mounted_archive: Path | None = None
+    dump_archive = str(archive_path)
+    dump_mounts: tuple[_PostgresClientMount, ...] = ()
+    if postgres_image is not None:
+        mounted_archive = _create_pinned_archive(archive_path)
+        dump_archive = _POSTGRES_ARCHIVE_TARGET
+        dump_mounts = (
+            _PostgresClientMount(
+                source=mounted_archive,
+                target=_POSTGRES_ARCHIVE_TARGET,
+                read_only=False,
+            ),
+        )
     dump_command = [
             "pg_dump",
             "--format=custom",
@@ -387,7 +625,7 @@ def capture_snapshot(
             "--no-acl",
             "--serializable-deferrable",
             "--file",
-            str(archive_path),
+            dump_archive,
         ]
     if capture_mode == "schema-only":
         dump_command.insert(4, "--schema-only")
@@ -397,13 +635,15 @@ def capture_snapshot(
         f"-c statement_timeout={timeout_seconds * 1000} "
         "-c lock_timeout=5000"
     )
-    result = _run(
+    result = _run_postgres(
         dump_command,
         env=dump_env,
         timeout=timeout_seconds,
+        postgres_image=postgres_image,
+        mounts=dump_mounts,
     )
     _require_success(result, stage="read-only production snapshot capture")
-    post_stats = _database_stats(env)
+    post_stats = _database_stats(env, postgres_image=postgres_image)
     if (
         str(post_stats.get("capture_utc_date") or "")
         != str(stats.get("capture_utc_date") or "")
@@ -478,6 +718,7 @@ def verify_snapshot(
     manifest_path: Path,
     archive_path: Path,
     expected_production_host: str | None = None,
+    postgres_image: str | None = None,
 ) -> dict[str, Any]:
     contract = validate_contract(_load_json(contract_path, description="parity contract"))
     manifest = validate_snapshot_manifest(
@@ -508,15 +749,32 @@ def verify_snapshot(
         snapshot_migrations=manifest["migrations"],
         candidate_migrations=contract["migrations"],
     )
-    listing = subprocess.run(
-        ["pg_restore", "--list", str(archive_path)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if listing.returncode != 0 or not listing.stdout.strip():
+    if postgres_image is None:
+        listing = subprocess.run(
+            ["pg_restore", "--list", str(archive_path)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        listing_stdout = listing.stdout
+    else:
+        listing = _run_postgres(
+            ["pg_restore", "--list", _POSTGRES_ARCHIVE_TARGET],
+            env={},
+            timeout=120,
+            postgres_image=postgres_image,
+            mounts=(
+                _PostgresClientMount(
+                    source=archive_path,
+                    target=_POSTGRES_ARCHIVE_TARGET,
+                    read_only=True,
+                ),
+            ),
+        )
+        listing_stdout = listing.stdout.decode("utf-8", "replace")
+    if listing.returncode != 0 or not listing_stdout.strip():
         raise ProductionParityError("snapshot archive is not a readable PostgreSQL custom dump")
     return {
         "manifest_hash": manifest["manifest_hash"],
@@ -525,7 +783,7 @@ def verify_snapshot(
         "source_host_hash": manifest["source_host_hash"],
         "candidate_sha": contract["candidate_sha"],
         "migration_delta": delta,
-        "archive_entries": len(listing.stdout.splitlines()),
+        "archive_entries": len(listing_stdout.splitlines()),
     }
 
 
@@ -538,6 +796,7 @@ def restore_snapshot(
     target_dsn: str,
     production_host: str,
     timeout_seconds: int = DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
+    postgres_image: str | None = None,
 ) -> dict[str, Any]:
     timeout_seconds = _snapshot_io_timeout_seconds(timeout_seconds)
     evidence = verify_snapshot(
@@ -545,6 +804,7 @@ def restore_snapshot(
         manifest_path=manifest_path,
         archive_path=archive_path,
         expected_production_host=production_host,
+        postgres_image=postgres_image,
     )
     safe_database_target(target_dsn, production_host=production_host)
     env, _ = _postgres_env(target_dsn, read_only=False)
@@ -561,21 +821,40 @@ def restore_snapshot(
             simultaneous_copies=1,
         )
     _require_success(
-        _run(
+        _run_postgres(
             [
                 "pg_restore",
-                "--dbname",
-                env["PGDATABASE"],
+                *(
+                    ["--dbname", env["PGDATABASE"]]
+                    if postgres_image is None
+                    else ["--dbname="]
+                ),
                 "--clean",
                 "--if-exists",
                 "--no-owner",
                 "--no-acl",
                 "--exit-on-error",
                 "--jobs=4",
-                str(archive_path),
+                (
+                    _POSTGRES_ARCHIVE_TARGET
+                    if postgres_image is not None
+                    else str(archive_path)
+                ),
             ],
             env=restore_env,
             timeout=timeout_seconds,
+            postgres_image=postgres_image,
+            mounts=(
+                (
+                    _PostgresClientMount(
+                        source=archive_path,
+                        target=_POSTGRES_ARCHIVE_TARGET,
+                        read_only=True,
+                    ),
+                )
+                if postgres_image is not None
+                else ()
+            ),
         ),
         stage="isolated production snapshot restore",
     )
@@ -586,10 +865,33 @@ def restore_snapshot(
                 f"candidate migration bytes differ: {migration['path']}"
             )
         _require_success(
-            _run(
-                ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-f", str(path)],
+            _run_postgres(
+                [
+                    "psql",
+                    "-X",
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-f",
+                    (
+                        _POSTGRES_MIGRATION_TARGET
+                        if postgres_image is not None
+                        else str(path)
+                    ),
+                ],
                 env=env,
                 timeout=DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
+                postgres_image=postgres_image,
+                mounts=(
+                    (
+                        _PostgresClientMount(
+                            source=path,
+                            target=_POSTGRES_MIGRATION_TARGET,
+                            read_only=True,
+                        ),
+                    )
+                    if postgres_image is not None
+                    else ()
+                ),
             ),
             stage=f"candidate migration {migration['path']}",
         )

@@ -270,6 +270,284 @@ def test_snapshot_io_defaults_stay_short_and_explicit():
             _snapshot_io_timeout_seconds(invalid)
 
 
+def test_pinned_postgres_client_is_confined_and_redacts_environment(
+    monkeypatch,
+    tmp_path: Path,
+):
+    archive = tmp_path / "runtime" / "production.dump"
+    archive.parent.mkdir()
+    archive.write_bytes(b"snapshot")
+    image = "postgres@sha256:" + "c" * 64
+    pg_env = {
+        "PGHOST": "database-host-sentinel",
+        "PGPORT": "6543",
+        "PGDATABASE": "database-name-sentinel",
+        "PGUSER": "database-user-sentinel",
+        "PGPASSWORD": "database-password-sentinel",
+        "PGSSLMODE": "require",
+        "PGOPTIONS": "options-sentinel",
+        "AWS_SECRET_ACCESS_KEY": "ambient-aws-secret",
+        "LEADPOET_SENTRY_API_TOKEN": "ambient-sentry-secret",
+    }
+    observed: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = list(command)
+        observed["kwargs"] = kwargs
+        diagnostic = "|".join(
+            str(pg_env[key]) for key in parity_snapshot._POSTGRES_ENVIRONMENT_KEYS
+        ).encode()
+        return subprocess.CompletedProcess(
+            command,
+            7,
+            stdout=b"",
+            stderr=diagnostic,
+        )
+
+    monkeypatch.setattr(parity_snapshot.subprocess, "run", fake_run)
+    result = parity_snapshot._run_postgres(
+        ["pg_restore", "--list", parity_snapshot._POSTGRES_ARCHIVE_TARGET],
+        env=pg_env,
+        timeout=120,
+        postgres_image=image,
+        mounts=(
+            parity_snapshot._PostgresClientMount(
+                source=archive,
+                target=parity_snapshot._POSTGRES_ARCHIVE_TARGET,
+                read_only=True,
+            ),
+        ),
+    )
+
+    command = observed["command"]
+    kwargs = observed["kwargs"]
+    assert command[:4] == ["docker", "run", "--rm", "--name"]
+    assert command[command.index("--network") + 1] == "host"
+    assert "--read-only" in command
+    assert command[command.index("--cap-drop") + 1] == "ALL"
+    assert command[command.index("--security-opt") + 1] == "no-new-privileges"
+    assert command[command.index("--entrypoint") + 1] == "pg_restore"
+    assert command[command.index("--entrypoint") + 2] == image
+    mount_values = [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "--mount"
+    ]
+    assert mount_values == [
+        (
+            f"type=bind,src={archive.resolve()},"
+            f"dst={parity_snapshot._POSTGRES_ARCHIVE_TARGET},readonly"
+        )
+    ]
+    for key in parity_snapshot._POSTGRES_ENVIRONMENT_KEYS:
+        index = command.index(key)
+        assert command[index - 1] == "--env"
+        assert str(pg_env[key]) not in command
+        assert str(pg_env[key]).encode() not in (result.stderr or b"")
+    assert kwargs["env"] == {
+        "PATH": os.environ.get("PATH") or os.defpath,
+        **{
+            key: pg_env[key]
+            for key in parity_snapshot._POSTGRES_ENVIRONMENT_KEYS
+        },
+    }
+    assert "AWS_SECRET_ACCESS_KEY" not in kwargs["env"]
+    assert "LEADPOET_SENTRY_API_TOKEN" not in kwargs["env"]
+    mount_sources = {
+        field.removeprefix("src=")
+        for value in mount_values
+        for field in value.split(",")
+        if field.startswith("src=")
+    }
+    assert mount_sources == {str(archive.resolve())}
+    assert str(archive.parent.resolve()) not in mount_sources
+
+
+@pytest.mark.parametrize(
+    ("image", "command", "error"),
+    (
+        ("postgres:15", ["psql"], "digest-pinned"),
+        ("postgres@sha256:" + "c" * 64, ["bash"], "not allowed"),
+    ),
+)
+def test_pinned_postgres_client_rejects_untrusted_execution_before_subprocess(
+    monkeypatch,
+    image: str,
+    command: list[str],
+    error: str,
+):
+    monkeypatch.setattr(
+        parity_snapshot.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("subprocess must not run"),
+    )
+    with pytest.raises(ProductionParityError, match=error):
+        parity_snapshot._run_postgres(
+            command,
+            env={},
+            timeout=30,
+            postgres_image=image,
+        )
+
+
+def test_postgres_client_host_mode_delegates_byte_for_byte(monkeypatch):
+    command = ["psql", "-X", "-c", "SELECT 1"]
+    env = {"PGHOST": "127.0.0.1", "PGPASSWORD": "host-mode-sentinel"}
+    result = subprocess.CompletedProcess(command, 0, stdout=b"1\n", stderr=b"")
+    observed: dict[str, object] = {}
+
+    def fake_run(received, **kwargs):
+        observed["command"] = received
+        observed.update(kwargs)
+        return result
+
+    monkeypatch.setattr(parity_snapshot, "_run", fake_run)
+    assert parity_snapshot._run_postgres(
+        command,
+        env=env,
+        timeout=37,
+        stdin=b"input",
+        postgres_image=None,
+    ) is result
+    assert observed == {
+        "command": command,
+        "env": env,
+        "timeout": 37,
+        "stdin": b"input",
+    }
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    (
+        subprocess.TimeoutExpired(cmd=["docker"], timeout=1),
+        KeyboardInterrupt(),
+    ),
+)
+def test_pinned_postgres_client_interrupt_removes_exact_container(
+    monkeypatch,
+    interruption: BaseException,
+):
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), kwargs))
+        if len(calls) == 1:
+            raise interruption
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(parity_snapshot.subprocess, "run", fake_run)
+    with pytest.raises(type(interruption)):
+        parity_snapshot._run_postgres(
+            ["psql", "-c", "SELECT 1"],
+            env={"PGPASSWORD": "cleanup-password-sentinel"},
+            timeout=1,
+            postgres_image="postgres@sha256:" + "c" * 64,
+        )
+
+    container_name = calls[0][0][calls[0][0].index("--name") + 1]
+    assert calls[1][0] == ["docker", "rm", "-f", container_name]
+    assert calls[1][1]["env"] == {
+        "PATH": os.environ.get("PATH") or os.defpath
+    }
+    assert "cleanup-password-sentinel" not in calls[1][0]
+
+
+def test_capture_snapshot_routes_every_postgres_call_through_pinned_image(
+    monkeypatch,
+    tmp_path: Path,
+):
+    image = "postgres@sha256:" + "c" * 64
+    archive = tmp_path / "runtime" / "production.dump"
+    archive.parent.mkdir()
+    (archive.parent / "runtime-config.json").write_text(
+        "secret-neighbor", encoding="utf-8"
+    )
+    contract = {
+        "candidate_sha": SHA,
+        "contract_hash": HASH,
+    }
+    stats = {
+        "server_version_num": "150008",
+        "relation_count": 163,
+        "total_relation_bytes": 176_022_568_960,
+        "largest_relation_bytes": 48_022_609_920,
+        "capture_utc_timestamp": "2026-08-18T12:00:00+00:00",
+        "capture_utc_date": "2026-08-18",
+        "latest_completed_benchmark_date": "2026-08-17",
+        "current_day_rebenchmark_run_count": 0,
+        "current_day_benchmark_bundle_count": 0,
+        "weight_history_scope": {"netuid": 71},
+        "source_role": {
+            "role_name": "readonly",
+            "transaction_read_only": True,
+            "superuser": False,
+            "bypass_rls": False,
+            "replication": False,
+            "table_write_capable": False,
+        },
+    }
+    calls: list[dict[str, object]] = []
+
+    def fake_run_postgres(command, **kwargs):
+        calls.append({"command": list(command), **kwargs})
+        if command[0] == "pg_dump":
+            mounts = kwargs["mounts"]
+            assert len(mounts) == 1
+            Path(mounts[0].source).write_bytes(b"production-shaped-dump")
+            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+        if command[-1] == "SHOW transaction_read_only":
+            stdout = b"on\n"
+        else:
+            stdout = json.dumps(stats).encode()
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+    monkeypatch.setattr(parity_snapshot, "_load_json", lambda *_a, **_k: contract)
+    monkeypatch.setattr(parity_snapshot, "validate_contract", lambda value: value)
+    monkeypatch.setattr(
+        parity_snapshot,
+        "validate_snapshot_manifest",
+        lambda value, **_kwargs: value,
+    )
+    monkeypatch.setattr(parity_snapshot, "_source_migrations", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_require_full_snapshot_disk_headroom",
+        lambda *_args, **_kwargs: {},
+    )
+
+    capture_snapshot(
+        contract_path=tmp_path / "contract.json",
+        archive_path=archive,
+        manifest_path=tmp_path / "snapshot-manifest.json",
+        dsn="postgresql://reader:secret@db.production.example/postgres",
+        expected_production_host="db.production.example",
+        ttl_hours=24,
+        source_sha="c" * 40,
+        postgres_image=image,
+    )
+
+    assert [call["command"][0] for call in calls] == [
+        "psql",
+        "psql",
+        "pg_dump",
+        "psql",
+    ]
+    assert [call["timeout"] for call in calls] == [600, 60, 900, 60]
+    assert all(call["postgres_image"] == image for call in calls)
+    dump = calls[2]
+    assert dump["command"][-1] == parity_snapshot._POSTGRES_ARCHIVE_TARGET
+    assert len(dump["mounts"]) == 1
+    assert dump["mounts"][0] == parity_snapshot._PostgresClientMount(
+        source=archive.resolve(),
+        target=parity_snapshot._POSTGRES_ARCHIVE_TARGET,
+        read_only=False,
+    )
+    assert all(not call.get("mounts") for call in (calls[0], calls[1], calls[3]))
+    assert archive.stat().st_mode & 0o777 == 0o600
+
+
 def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     monkeypatch,
     tmp_path: Path,
@@ -327,6 +605,149 @@ def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     assert observed["command"][0] == "pg_restore"
     assert observed["env"]["PGSSLMODE"] == "disable"
     assert observed["env"]["PGOPTIONS"] == "-c check_function_bodies=off"
+
+
+def test_pinned_snapshot_verify_lists_only_the_archive_file(
+    monkeypatch,
+    tmp_path: Path,
+):
+    image = "postgres@sha256:" + "c" * 64
+    archive = tmp_path / "runtime" / "production.dump"
+    archive.parent.mkdir()
+    archive.write_bytes(b"snapshot")
+    contract = {
+        "base_sha": "c" * 40,
+        "candidate_sha": SHA,
+        "contract_hash": HASH,
+        "migrations": [],
+    }
+    manifest = {
+        "source_sha": contract["base_sha"],
+        "capture_sha": contract["candidate_sha"],
+        "capture_contract_hash": contract["contract_hash"],
+        "source_host_hash": "sha256:" + "d" * 64,
+        "manifest_hash": "sha256:" + "e" * 64,
+        "archive": {"sha256": "sha256:" + "f" * 64},
+        "migrations": [],
+    }
+    observed: dict[str, object] = {}
+
+    def fake_load(_path, *, description):
+        return contract if description == "parity contract" else manifest
+
+    def fake_run_postgres(command, **kwargs):
+        observed["command"] = list(command)
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=b"one\ntwo\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(parity_snapshot, "_load_json", fake_load)
+    monkeypatch.setattr(parity_snapshot, "validate_contract", lambda value: value)
+    monkeypatch.setattr(
+        parity_snapshot, "validate_snapshot_manifest", lambda value: value
+    )
+    monkeypatch.setattr(parity_snapshot, "validate_archive", lambda *_args: None)
+    monkeypatch.setattr(parity_snapshot, "migration_delta", lambda **_kwargs: [])
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+
+    evidence = parity_snapshot.verify_snapshot(
+        contract_path=tmp_path / "contract.json",
+        manifest_path=tmp_path / "manifest.json",
+        archive_path=archive,
+        postgres_image=image,
+    )
+
+    assert observed["command"] == [
+        "pg_restore",
+        "--list",
+        parity_snapshot._POSTGRES_ARCHIVE_TARGET,
+    ]
+    assert observed["postgres_image"] == image
+    assert observed["mounts"] == (
+        parity_snapshot._PostgresClientMount(
+            source=archive,
+            target=parity_snapshot._POSTGRES_ARCHIVE_TARGET,
+            read_only=True,
+        ),
+    )
+    assert evidence["archive_entries"] == 2
+
+
+def test_pinned_snapshot_restore_mounts_only_archive_and_exact_migration(
+    monkeypatch,
+    tmp_path: Path,
+):
+    image = "postgres@sha256:" + "c" * 64
+    archive = tmp_path / "runtime" / "production.dump"
+    archive.parent.mkdir()
+    archive.write_bytes(b"snapshot")
+    migration = tmp_path / "migrations" / "999-test.sql"
+    migration.parent.mkdir()
+    migration.write_text("SELECT 1;\n", encoding="utf-8")
+    migration_hash = parity_snapshot.file_sha256(migration)
+    calls: list[dict[str, object]] = []
+
+    def fake_verify_snapshot(**kwargs):
+        assert kwargs["postgres_image"] == image
+        return {
+            "migration_delta": [
+                {"path": "migrations/999-test.sql", "sha256": migration_hash}
+            ]
+        }
+
+    def fake_run_postgres(command, **kwargs):
+        calls.append({"command": list(command), **kwargs})
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(parity_snapshot, "verify_snapshot", fake_verify_snapshot)
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_load_json",
+        lambda *_args, **_kwargs: {"capture_mode": "schema-only"},
+    )
+    monkeypatch.setattr(
+        parity_snapshot, "validate_snapshot_manifest", lambda value: value
+    )
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+
+    restore_snapshot(
+        root=tmp_path,
+        contract_path=tmp_path / "contract.json",
+        manifest_path=tmp_path / "manifest.json",
+        archive_path=archive,
+        target_dsn=(
+            "postgresql://postgres:secret@127.0.0.1:32768/"
+            "leadpoet_parity_test"
+        ),
+        production_host="db.production.example",
+        postgres_image=image,
+    )
+
+    assert [call["command"][0] for call in calls] == ["pg_restore", "psql"]
+    assert all(call["postgres_image"] == image for call in calls)
+    assert "--dbname=" in calls[0]["command"]
+    assert "leadpoet_parity_test" not in calls[0]["command"]
+    assert "secret" not in calls[0]["command"]
+    assert calls[0]["env"]["PGSSLMODE"] == "disable"
+    assert calls[0]["mounts"] == (
+        parity_snapshot._PostgresClientMount(
+            source=archive,
+            target=parity_snapshot._POSTGRES_ARCHIVE_TARGET,
+            read_only=True,
+        ),
+    )
+    assert calls[1]["command"][-1] == parity_snapshot._POSTGRES_MIGRATION_TARGET
+    assert calls[1]["mounts"] == (
+        parity_snapshot._PostgresClientMount(
+            source=migration,
+            target=parity_snapshot._POSTGRES_MIGRATION_TARGET,
+            read_only=True,
+        ),
+    )
 
 
 def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
@@ -1007,7 +1428,7 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
     marker.write_text("isolated\n", encoding="utf-8")
     work_root = tmp_path / "encrypted-root-volume"
     output = tmp_path / "evidence" / "full.json"
-    observed: dict[str, int] = {}
+    observed: dict[str, object] = {}
     monotonic_values = iter((100.0, 110.2, 250.1, 251.0))
 
     class Database:
@@ -1029,6 +1450,7 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
 
     def fake_capture_snapshot(**kwargs):
         observed["capture"] = kwargs["timeout_seconds"]
+        observed["capture_image"] = kwargs["postgres_image"]
         return {
             "capture_mode": "full",
             "database": {"target_rebenchmark_date": "2026-08-19"},
@@ -1036,6 +1458,7 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
 
     def fake_restore_snapshot(**kwargs):
         observed["restore"] = kwargs["timeout_seconds"]
+        observed["restore_image"] = kwargs["postgres_image"]
         raise FullParityError("stop after restore")
 
     def database_factory(**kwargs):
@@ -1099,7 +1522,9 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
         "postgres_publish": "127.0.0.1::5432",
         "postgrest_publish": "127.0.0.1::3000",
         "capture": 990,
+        "capture_image": "postgres@sha256:" + "c" * 64,
         "restore": 850,
+        "restore_image": "postgres@sha256:" + "c" * 64,
     }
     assert not (work_root / "pp-test-1" / "runtime").exists()
     evidence = json.loads(output.read_text(encoding="utf-8"))

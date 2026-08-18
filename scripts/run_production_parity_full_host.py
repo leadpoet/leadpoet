@@ -2553,6 +2553,7 @@ def run_full(
                 deadline=deadline,
                 stage="full production snapshot capture",
             ),
+            postgres_image=postgres_image,
         )
         if manifest["capture_mode"] != "full":
             raise FullParityError("authoritative parity requires a full production clone")
@@ -2571,6 +2572,7 @@ def run_full(
                 deadline=deadline,
                 stage="full production snapshot restore",
             ),
+            postgres_image=postgres_image,
         )
         restore_contract = database.verify_snapshot_restore()
         restore = {

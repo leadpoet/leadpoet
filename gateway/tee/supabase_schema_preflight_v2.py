@@ -717,6 +717,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "persist_research_lab_ancestry_checkpoint_v2",
     ),
     (
+        "scripts/155-research-lab-ancestry-disclosure-root-fast-path.sql",
+        "research_lab_ancestry_disclosure_lookup_contract_v1",
+    ),
+    (
         "scripts/137-research-lab-allocation-settlement-frontier.sql",
         "persist_research_lab_allocation_settlement_frontier_v2",
     ),

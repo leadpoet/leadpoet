@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -22,6 +23,12 @@ COMPACT_MIGRATION_NAME = (
     "scripts/143-research-lab-compact-ancestry-checkpoints.sql"
 )
 COMPACT_SQL = (ROOT / COMPACT_MIGRATION_NAME).read_text(encoding="utf-8")
+DISCLOSURE_FAST_PATH_MIGRATION_NAME = (
+    "scripts/155-research-lab-ancestry-disclosure-root-fast-path.sql"
+)
+DISCLOSURE_FAST_PATH_SQL = (
+    ROOT / DISCLOSURE_FAST_PATH_MIGRATION_NAME
+).read_text(encoding="utf-8")
 TABLE = "research_lab_attested_ancestry_checkpoints_v2"
 COMPACT_WEIGHT_TABLE = "research_lab_compact_weight_authorities_v2"
 
@@ -255,8 +262,43 @@ def test_compact_checkpoint_migration_is_additive_and_preflight_required() -> No
     ) in REQUIRED_SUPABASE_V2_RPCS
 
 
+def test_disclosure_root_fast_path_preserves_exact_fallback_and_is_preflighted() -> None:
+    from gateway.tee.supabase_schema_preflight_v2 import REQUIRED_SUPABASE_V2_RPCS
+
+    assert re.search(r"\bBEGIN\s*;", DISCLOSURE_FAST_PATH_SQL)
+    assert re.search(r"\bCOMMIT\s*;\s*$", DISCLOSURE_FAST_PATH_SQL)
+    root_predicate = (
+        "p.root_receipt_hash = parent->>'parent_receipt_hash'"
+    )
+    # One existing exact-root predicate serves certificate parents; migration
+    # 155 adds the second for certificate-disclosure parents.
+    assert DISCLOSURE_FAST_PATH_SQL.count(root_predicate) == 2
+    assert DISCLOSURE_FAST_PATH_SQL.count(
+        "p.lineage_id = lineage"
+    ) >= 3
+    assert DISCLOSURE_FAST_PATH_SQL.count(
+        "p.certificate_sequence = (parent->>'authority_sequence')::BIGINT"
+    ) >= 3
+    assert DISCLOSURE_FAST_PATH_SQL.count(
+        "disclosed->>'receipt_hash' = parent->>'parent_receipt_hash'"
+    ) == 2
+    assert re.search(
+        r"IF NOT EXISTS \([\s\S]+?root_receipt_hash[\s\S]+?\) THEN\s+"
+        r"IF NOT EXISTS \(",
+        DISCLOSURE_FAST_PATH_SQL,
+    )
+    assert (
+        DISCLOSURE_FAST_PATH_MIGRATION_NAME,
+        "research_lab_ancestry_disclosure_lookup_contract_v1",
+    ) in REQUIRED_SUPABASE_V2_RPCS
+
+
 def _sha(character: str) -> str:
     return "sha256:" + character * 64
+
+
+def _named_sha(label: str) -> str:
+    return "sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
 def _checkpoint(
@@ -409,6 +451,19 @@ $$;
             }
         ],
     )
+    fallback_receipt = _named_sha("fallback-disclosed-receipt")
+    checkpoint_a["proof_doc"]["disclosed_receipts"] = [
+        {"receipt_hash": root_a}
+    ]
+    checkpoint_a["checkpoint_graph_doc"]["ancestry_proof"] = checkpoint_a[
+        "proof_doc"
+    ]
+    checkpoint_b["proof_doc"]["disclosed_receipts"] = [
+        {"receipt_hash": fallback_receipt}
+    ]
+    checkpoint_b["checkpoint_graph_doc"]["ancestry_proof"] = checkpoint_b[
+        "proof_doc"
+    ]
     checkpoint_c = _checkpoint(
         root=root_c,
         lineage=lineage,
@@ -499,11 +554,35 @@ $$;
         psql(SQL)  # Operators may safely rerun the migration.
         psql(COMPACT_SQL)
         psql(COMPACT_SQL)  # The compact contract is also idempotent.
+        psql(DISCLOSURE_FAST_PATH_SQL)
+        psql(DISCLOSURE_FAST_PATH_SQL)  # Function replacement is idempotent.
+        disclosure_roots = [
+            _named_sha(label)
+            for label in (
+                "direct-disclosure-child",
+                "fallback-disclosure-child",
+                "wrong-lineage-child",
+                "wrong-sequence-child",
+                "wrong-hash-child",
+            )
+        ]
+        receipt_values = ", ".join(
+            "('%s')" % value
+            for value in (
+                root_a,
+                root_b,
+                root_c,
+                root_d,
+                root_e,
+                fallback_receipt,
+                *disclosure_roots,
+            )
+        )
         psql(
             "INSERT INTO public.research_lab_attested_boot_identities_v2 VALUES "
             "('%s'); INSERT INTO public.research_lab_attested_execution_receipts_v2 "
-            "VALUES ('%s'), ('%s'), ('%s'), ('%s'), ('%s');"
-            % (issuer, root_a, root_b, root_c, root_d, root_e)
+            "VALUES %s;"
+            % (issuer, receipt_values)
         )
 
         for checkpoint in (checkpoint_a, checkpoint_b):
@@ -512,6 +591,142 @@ $$;
                 + "'%s'::jsonb);" % json.dumps(checkpoint).replace("'", "''")
             )
             assert '"root_activated": true' in result.stdout
+
+        direct_disclosure = _checkpoint(
+            root=disclosure_roots[0],
+            lineage=lineage,
+            certificate_hash=_named_sha("direct-disclosure-certificate"),
+            proof_hash=_named_sha("direct-disclosure-proof"),
+            graph_hash=_named_sha("direct-disclosure-graph"),
+            issuer=issuer,
+            sequence=1,
+            parent_authorities=[
+                {
+                    "authority_kind": "certificate_disclosure",
+                    "parent_receipt_hash": root_a,
+                    "authority_sequence": 0,
+                }
+            ],
+        )
+        direct = psql(
+            "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+            + "'%s'::jsonb);"
+            % json.dumps(direct_disclosure).replace("'", "''")
+        )
+        assert '"root_activated": true' in direct.stdout
+
+        fallback_disclosure = _checkpoint(
+            root=disclosure_roots[1],
+            lineage=lineage,
+            certificate_hash=_named_sha("fallback-disclosure-certificate"),
+            proof_hash=_named_sha("fallback-disclosure-proof"),
+            graph_hash=_named_sha("fallback-disclosure-graph"),
+            issuer=issuer,
+            sequence=1,
+            parent_authorities=[
+                {
+                    "authority_kind": "certificate_disclosure",
+                    "parent_receipt_hash": fallback_receipt,
+                    "authority_sequence": 0,
+                }
+            ],
+        )
+        fallback = psql(
+            "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+            + "'%s'::jsonb);"
+            % json.dumps(fallback_disclosure).replace("'", "''")
+        )
+        assert '"root_activated": true' in fallback.stdout
+
+        wrong_lineage = _checkpoint(
+            root=disclosure_roots[2],
+            lineage=_named_sha("wrong-lineage"),
+            certificate_hash=_named_sha("wrong-lineage-certificate"),
+            proof_hash=_named_sha("wrong-lineage-proof"),
+            graph_hash=_named_sha("wrong-lineage-graph"),
+            issuer=issuer,
+            sequence=1,
+            parent_authorities=[
+                {
+                    "authority_kind": "certificate_disclosure",
+                    "parent_receipt_hash": root_a,
+                    "authority_sequence": 0,
+                }
+            ],
+        )
+        wrong_sequence = _checkpoint(
+            root=disclosure_roots[3],
+            lineage=lineage,
+            certificate_hash=_named_sha("wrong-sequence-certificate"),
+            proof_hash=_named_sha("wrong-sequence-proof"),
+            graph_hash=_named_sha("wrong-sequence-graph"),
+            issuer=issuer,
+            sequence=2,
+            parent_authorities=[
+                {
+                    "authority_kind": "certificate_disclosure",
+                    "parent_receipt_hash": root_a,
+                    "authority_sequence": 1,
+                }
+            ],
+        )
+        wrong_hash = _checkpoint(
+            root=disclosure_roots[4],
+            lineage=lineage,
+            certificate_hash=_named_sha("wrong-hash-certificate"),
+            proof_hash=_named_sha("wrong-hash-proof"),
+            graph_hash=_named_sha("wrong-hash-graph"),
+            issuer=issuer,
+            sequence=1,
+            parent_authorities=[
+                {
+                    "authority_kind": "certificate_disclosure",
+                    "parent_receipt_hash": _named_sha("undisclosed-parent"),
+                    "authority_sequence": 0,
+                }
+            ],
+        )
+        for invalid_disclosure in (
+            wrong_lineage,
+            wrong_sequence,
+            wrong_hash,
+        ):
+            rejected_disclosure = psql(
+                "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+                + "'%s'::jsonb);"
+                % json.dumps(invalid_disclosure).replace("'", "''"),
+                expect_success=False,
+            )
+            assert (
+                "checkpoint disclosure parent is not durable"
+                in rejected_disclosure.stderr
+            )
+
+        disclosure_replay = psql(
+            "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+            + "'%s'::jsonb);"
+            % json.dumps(direct_disclosure).replace("'", "''")
+        )
+        assert '"status": "persisted"' in disclosure_replay.stdout
+
+        fast_path_plan = psql(
+            "SET enable_seqscan TO off; "
+            "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) "
+            "SELECT 1 "
+            "FROM public.research_lab_attested_ancestry_checkpoints_v2 p, "
+            "LATERAL pg_catalog.jsonb_array_elements("
+            "p.proof_doc->'disclosed_receipts') disclosed "
+            "WHERE p.root_receipt_hash = '%s' "
+            "AND p.lineage_id = '%s' "
+            "AND p.certificate_sequence = 0 "
+            "AND p.certificate_sequence < 1 "
+            "AND disclosed->>'receipt_hash' = '%s'; "
+            "RESET enable_seqscan;"
+            % (root_a, lineage, root_a)
+        )
+        assert "Index Scan using" in fast_path_plan.stdout
+        assert "root_receipt_hash" in fast_path_plan.stdout
+        assert "Execution Time:" in fast_path_plan.stdout
 
         rejected = psql(
             "SELECT public.persist_research_lab_ancestry_checkpoint_v2("

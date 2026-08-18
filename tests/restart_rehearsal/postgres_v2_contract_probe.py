@@ -237,6 +237,9 @@ PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION = (
 MODEL_COMPATIBILITY_PURPOSE_MIGRATION = (
     "154-research-lab-model-compatibility-purpose.sql"
 )
+ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION = (
+    "155-research-lab-ancestry-disclosure-root-fast-path.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -292,6 +295,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     CANDIDATE_HYBRID_PURPOSES_MIGRATION,
     PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION,
     MODEL_COMPATIBILITY_PURPOSE_MIGRATION,
+    ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -323,6 +327,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_152_candidate_hybrid_purpose_contract_valid",
     "post_153_private_model_lineage_generation_contract_valid",
     "post_154_model_compatibility_purpose_contract_valid",
+    "post_155_ancestry_disclosure_lookup_contract_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5430,6 +5435,30 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         ):
             raise PostgresContractProbeError(
                 "post-154 model compatibility purpose contract differs"
+            )
+        database.apply_migration(
+            scripts / ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION
+        )
+        applied.append(ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION)
+        disclosure_lookup_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_ancestry_disclosure_lookup_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if disclosure_lookup_contract != {
+            "schema_version": (
+                "leadpoet.ancestry-disclosure-lookup-contract.v1"
+            ),
+            "persistence_rpc": "persist_research_lab_ancestry_checkpoint_v2",
+            "root_witness_key": "root_receipt_hash",
+            "non_root_fallback": "lineage_sequence_disclosure_scan",
+        }:
+            raise PostgresContractProbeError(
+                "post-155 ancestry disclosure lookup contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(

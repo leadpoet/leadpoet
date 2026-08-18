@@ -4427,7 +4427,7 @@
       "symbol": "validate_source_add_reward_record"
     },
     {
-      "ast_sha256": "sha256:8c7f78f52f65164f0e38c0235815333e2fb74d98c0edfbc2188177594d44e21a",
+      "ast_sha256": "sha256:12fd36dd331094b828cf5a0785329b8b15bcdab1319b563b733f7c14a3757e98",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "REVIEWED_CONSUMER_SNAPSHOT_SPECS"
     },
@@ -4847,7 +4847,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:e76edf21b66f611ce76ab90fe8a871930bbf8d76c11fc461cb3b23e8f92785a5",
-  "protected_source_commit": "8560a0039c8d743f9f01506f862d7d46e3f66fa7",
+  "manifest_hash": "sha256:70404bc9e7fff517bb868ebe009ee57fe8cc67b5f9ea4b1f9b5abfb9699bc9e3",
+  "protected_source_commit": "02c7d17ab0cbce5384fc08467d5f7d906783541d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

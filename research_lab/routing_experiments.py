@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 import hashlib
 import importlib
+import inspect
 import json
 import math
 import os
@@ -41,6 +42,8 @@ from .canonical import sha256_json
 ROUTING_EXPERIMENT_CONTRACT_VERSION = "leadpoet.intent_routing_experiment:v1"
 ROUTING_EVALUATION_RECEIPT_VERSION = "leadpoet.intent_routing_evaluation:v1"
 ROUTING_PROMOTION_RECEIPT_VERSION = "leadpoet.intent_routing_promotion:v1"
+ROUTING_EXPERIMENT_V2_CONTRACT_VERSION = "leadpoet.intent_routing_experiment:v2"
+ROUTING_DECISION_RECEIPT_V2_VERSION = "leadpoet.routing_decision_receipt:v2"
 
 MAX_PROVIDER_BINDINGS = 64
 MAX_PROFILE_VARIANTS = 24
@@ -75,6 +78,8 @@ _FORBIDDEN_MARKERS = (
     "sk-or-",
     "openrouter_api_key",
 )
+
+ROUTING_EXPERIMENT_STAGES = frozenset({"candidate_acquisition", "intent_evidence"})
 
 
 class RoutingExperimentError(ValueError):
@@ -663,11 +668,13 @@ class PinnedSourcingModelRoutingAdapter:
         runtime: Any,
         profiles: Any,
         features: Any,
+        candidate_profiles: Any | None = None,
         observed_artifact_identity: Mapping[str, str] | None = None,
     ) -> None:
         self.runtime = runtime
         self.profiles = profiles
         self.features = features
+        self.candidate_profiles = candidate_profiles
         self.catalog = runtime.runtime_catalog({})
         self.policy = runtime.runtime_policy()
         self._observed_artifact_identity = dict(observed_artifact_identity or {})
@@ -711,12 +718,17 @@ class PinnedSourcingModelRoutingAdapter:
             runtime = importlib.import_module("sourcing_model.routing.runtime")
             profiles = importlib.import_module("sourcing_model.routing.profiles")
             features = importlib.import_module("sourcing_model.routing.features")
+            try:
+                candidate_profiles = importlib.import_module("sourcing_model.routing.candidate_profiles")
+            except Exception:
+                candidate_profiles = None
         except Exception as exc:
             raise RoutingExperimentError(f"pinned_sourcing_model_import_failed:{exc}") from exc
         return cls(
             runtime=runtime,
             profiles=profiles,
             features=features,
+            candidate_profiles=candidate_profiles,
             observed_artifact_identity=_observe_model_artifact_identity(
                 root,
                 runtime=runtime,
@@ -917,10 +929,21 @@ class PinnedSourcingModelRoutingAdapter:
         return plan.as_payload()
 
     def parse_plan(self, payload: Mapping[str, Any]) -> Any:
+        if str(payload.get("schema_version") or "") == "candidate-routing-plan:v1":
+            if self.candidate_profiles is None:
+                raise RoutingExperimentError("candidate_routing_plan_contract_unavailable")
+            return self.candidate_profiles.CandidateRoutingPlan.from_payload(payload)
         return self.profiles.RoutingAdmissionPlan.from_payload(payload)
 
     def plan_hash(self, plan: Any) -> str:
         return plan.sha256()
+
+    def route_hash(self, plan: Any) -> str:
+        route = getattr(plan, "route", plan)
+        getter = getattr(route, "sha256", None)
+        if not callable(getter):
+            raise RoutingExperimentError("model_route_hash_unavailable")
+        return getter()
 
     def plan_step_budgets(self, plan: Any) -> Sequence[RoutingPlanStepBudget]:
         return tuple(
@@ -933,6 +956,147 @@ class PinnedSourcingModelRoutingAdapter:
             )
             for step in plan.route.steps
         )
+
+    # V2 adapter seam.  Intent uses the exact existing RoutingProfile.  The
+    # candidate branch is deliberately fail-closed until the model exports
+    # its follow-on CandidateRoutingProfile contract and compiler; Lab code
+    # does not synthesize a candidate profile or route schema.
+    def parse_variant_payload(self, payload: Mapping[str, Any], *, stage: str) -> Any:
+        if stage == self.runtime.STAGE_INTENT_EVIDENCE:
+            return self.parse_profile(payload)
+        profile_type = getattr(self.candidate_profiles, "CandidateRoutingProfile", None) if self.candidate_profiles is not None else None
+        if profile_type is None or not callable(getattr(profile_type, "from_payload", None)):
+            raise RoutingExperimentError("candidate_routing_profile_contract_unavailable")
+        return profile_type.from_payload(payload)
+
+    def validate_variant_payload(
+        self,
+        payload: Any,
+        *,
+        stage: str,
+        feature_set: Any,
+        binding_tool_ids: frozenset[str],
+        binding_source_lineages: Mapping[str, str],
+    ) -> Sequence[str]:
+        if stage == self.runtime.STAGE_INTENT_EVIDENCE:
+            return self.validate_profile(
+                payload,
+                signal_type=payload.intent_category,
+                feature_set=feature_set,
+                binding_tool_ids=binding_tool_ids,
+                binding_source_lineages=binding_source_lineages,
+            )
+        errors: list[str] = []
+        if not payload.matches(feature_set):
+            errors.append("candidate_profile_feature_predicate_mismatch")
+        for step in payload.steps:
+            if step.tool_id not in binding_tool_ids:
+                errors.append(f"candidate_profile_tool_not_bound:{step.tool_id}")
+        return errors
+
+    def variant_tool_descriptors(self, payload: Any, *, stage: str) -> Sequence[Mapping[str, Any]]:
+        raw_steps = getattr(payload, "steps", ())
+        descriptors: list[Mapping[str, Any]] = []
+        for step in raw_steps:
+            tool_id = str(getattr(step, "tool_id", "") or (step.get("tool_id") if isinstance(step, Mapping) else ""))
+            if not tool_id:
+                continue
+            definition = next((item for item in self.catalog.tools if item.tool_id == tool_id), None)
+            if definition is None:
+                descriptors.append({"tool_id": tool_id, "stage": stage, "source_add": False})
+                continue
+            manifest_hash = str(getattr(definition, "manifest_sha256", "") or "")
+            if manifest_hash and not manifest_hash.startswith("sha256:"):
+                manifest_hash = model_hash_to_lab(manifest_hash, "model_tool_manifest_hash")
+            descriptors.append(
+                {
+                    "tool_id": tool_id,
+                    "stage": stage,
+                    "source_add": str(getattr(definition, "origin", "") or "") == "source_add",
+                    "manifest_hash": manifest_hash,
+                }
+            )
+        return tuple(descriptors)
+
+    def lookup_tool_descriptor(self, tool_id: str, *, stage: str) -> Mapping[str, Any] | None:
+        definition = next((item for item in self.catalog.tools if item.tool_id == tool_id), None)
+        if definition is None or stage not in tuple(getattr(definition, "stages", ())):
+            return None
+        manifest_hash = str(getattr(definition, "manifest_sha256", "") or "")
+        if manifest_hash and not manifest_hash.startswith("sha256:"):
+            manifest_hash = model_hash_to_lab(manifest_hash, "model_tool_manifest_hash")
+        return {
+            "tool_id": tool_id,
+            "stage": stage,
+            "source_add": str(getattr(definition, "origin", "") or "") == "source_add",
+            "manifest_hash": manifest_hash,
+        }
+
+    def validate_provider_binding(self, binding: ProviderBindingIdentity, *, stage: str) -> Sequence[str]:
+        del stage
+        definition = next((item for item in self.catalog.tools if item.tool_id == binding.tool_id), None)
+        if definition is None:
+            return (f"model_tool_definition_missing:{binding.tool_id}",)
+        expected = str(getattr(definition, "manifest_sha256", "") or "")
+        if expected and not expected.startswith("sha256:"):
+            expected = model_hash_to_lab(expected, "model_tool_manifest_hash")
+        return (f"provider_binding_manifest_mismatch:{binding.tool_id}",) if expected and expected != binding.manifest_hash else ()
+
+    def compile_variant(
+        self,
+        payload: Any,
+        *,
+        stage: str,
+        feature_set: Any,
+        available_tools: Mapping[str, bool],
+        remaining_seconds: float,
+        remaining_calls: int,
+        credit_cap: float,
+    ) -> Any:
+        if stage == self.runtime.STAGE_INTENT_EVIDENCE:
+            return self.compile_initial(
+                payload,
+                signal_type=payload.intent_category,
+                feature_set=feature_set,
+                available_tools=available_tools,
+                remaining_seconds=remaining_seconds,
+                remaining_calls=remaining_calls,
+                credit_cap=credit_cap,
+            )
+        if self.candidate_profiles is None:
+            raise RoutingExperimentError("candidate_routing_profile_compiler_unavailable")
+        registry = self.candidate_profiles.CandidateRoutingProfileRegistry(profiles=(payload,))
+        return self.candidate_profiles.compile_candidate_routing_plan(
+            catalog=self.runtime.runtime_catalog(available_tools),
+            policy=self.runtime.runtime_policy(),
+            context=self.runtime.RouteContext(
+                stage=self.runtime.STAGE_CANDIDATE_ACQUISITION,
+                features=tuple(feature_set.features),
+                remaining_seconds=remaining_seconds,
+                remaining_calls=remaining_calls,
+                remaining_results=1,
+                credit_cap=credit_cap,
+            ),
+            feature_set=feature_set,
+            registry=registry,
+            profile_id=payload.profile_id,
+            expected_profile_sha256=payload.sha256(),
+            expected_profile_version=payload.version,
+        )
+
+    def plan_decision_projection(self, plan: Any) -> Mapping[str, Any]:
+        steps = getattr(getattr(plan, "route", None), "steps", ())
+        attempted = tuple(str(getattr(step, "tool_id", "")) for step in steps if str(getattr(step, "execution_mode", "")) == self.runtime.EXECUTION_INVOKE)
+        exclusions = getattr(getattr(plan, "route", None), "exclusions", ())
+        return {
+            "attempted_tool_ids": tuple(item for item in attempted if item),
+            "skipped_tool_reasons": {
+                str(getattr(item, "tool_id", "")): str(getattr(item, "reason", "route_excluded"))
+                for item in exclusions
+                if str(getattr(item, "tool_id", ""))
+            },
+            "outcome_reasons": {},
+        }
 
     def intent_release_policy_hash(self) -> str:
         try:
@@ -2811,9 +2975,1359 @@ def verify_lab_routing_artifact_lineage(
     return sorted(set(errors))
 
 
+# ---------------------------------------------------------------------------
+# V2 experiment orchestration
+# ---------------------------------------------------------------------------
+#
+# V1 above intentionally remains frozen.  V2 adds an orchestration envelope
+# around the model-owned route contracts.  The Lab stores only opaque model
+# payloads and redacted projections; it does not define a candidate route or
+# a second tool catalog.  A model adapter is therefore required for every
+# operation that could interpret a profile or a plan.
+
+
+def _v2_safe_stage(value: Any) -> str:
+    stage = str(value or "").strip()
+    if stage not in ROUTING_EXPERIMENT_STAGES:
+        raise RoutingExperimentError("routing_experiment_v2_stage_is_invalid")
+    return stage
+
+
+def _v2_hash(value: Any, field_name: str) -> str:
+    try:
+        return _ensure_hash(value, field_name)
+    except RoutingExperimentError:
+        raise
+
+
+def _v2_model_or_lab_hash(value: Any, field_name: str) -> str:
+    text = str(value or "").strip().lower()
+    if _SHA256_RE.fullmatch(text):
+        return text
+    if _RAW_SHA256_RE.fullmatch(text):
+        return f"sha256:{text}"
+    raise RoutingExperimentError(f"{field_name} must be a SHA-256 hash")
+
+
+@dataclass(frozen=True)
+class RoutingExperimentV2Input:
+    """Frozen features and units shared by one stage-specific experiment."""
+
+    stage: str
+    feature_set_hash: str
+    feature_set_payload: Mapping[str, Any]
+    calibration_unit_refs: tuple[str, ...]
+    holdout_unit_refs: tuple[str, ...]
+    gold_label_set_hash: str
+    signal_type: str = ""
+
+    def __post_init__(self) -> None:
+        _v2_safe_stage(self.stage)
+        _v2_hash(self.feature_set_hash, "v2_feature_set_hash")
+        _v2_hash(self.gold_label_set_hash, "v2_gold_label_set_hash")
+        if not isinstance(self.feature_set_payload, Mapping):
+            raise RoutingExperimentError("v2_feature_set_payload_is_required")
+        if len(self.calibration_unit_refs) > MAX_UNITS_PER_SPLIT or len(self.holdout_unit_refs) > MAX_UNITS_PER_SPLIT:
+            raise RoutingExperimentError("v2_unit_count_exceeds_limit")
+        _ensure_ref_tuple(self.calibration_unit_refs, "v2_calibration_unit_refs", maximum=MAX_UNITS_PER_SPLIT)
+        _ensure_ref_tuple(self.holdout_unit_refs, "v2_holdout_unit_refs", maximum=MAX_UNITS_PER_SPLIT)
+        if set(self.calibration_unit_refs).intersection(self.holdout_unit_refs):
+            raise RoutingExperimentError("v2_calibration_and_holdout_units_must_be_disjoint")
+        if self.stage == "intent_evidence" and not str(self.signal_type or "").strip():
+            raise RoutingExperimentError("v2_intent_signal_type_is_required")
+        if self.stage == "candidate_acquisition" and str(self.signal_type or "").strip():
+            raise RoutingExperimentError("v2_candidate_signal_type_must_be_empty")
+        _ensure_no_secret_material(self.to_dict(), field_name="v2_routing_input")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "signal_type": self.signal_type,
+            "feature_set_hash": self.feature_set_hash,
+            "feature_set_payload": dict(self.feature_set_payload),
+            "calibration_unit_refs": list(self.calibration_unit_refs),
+            "holdout_unit_refs": list(self.holdout_unit_refs),
+            "gold_label_set_hash": self.gold_label_set_hash,
+        }
+
+
+@dataclass(frozen=True)
+class SourceAddProvenance:
+    """Approved model SourceAdd identity; no endpoint or provider payload."""
+
+    request_ref: str
+    request_hash: str
+    tool_id: str
+    stage: str
+    manifest_hash: str
+    artifact_commit_sha: str
+    approved: bool = True
+    request_payload: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        _ensure_safe_ref(self.request_ref, "source_add_request_ref")
+        _v2_hash(self.request_hash, "source_add_request_hash")
+        _ensure_safe_ref(self.tool_id, "source_add_tool_id")
+        _v2_safe_stage(self.stage)
+        _v2_hash(self.manifest_hash, "source_add_manifest_hash")
+        _ensure_git_sha(self.artifact_commit_sha, "source_add_artifact_commit_sha")
+        if not isinstance(self.approved, bool) or not self.approved:
+            raise RoutingExperimentError("source_add_provenance_must_be_approved")
+        if self.request_payload is not None:
+            if not isinstance(self.request_payload, Mapping):
+                raise RoutingExperimentError("source_add_request_payload_is_invalid")
+            if sha256_json(dict(self.request_payload)) != self.request_hash:
+                raise RoutingExperimentError("source_add_request_hash_mismatch")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class RoutingExperimentV2Variant:
+    """One immutable model artifact plus an exact model profile payload."""
+
+    variant_id: str
+    stage: str
+    artifact: SourcingModelArtifactIdentity
+    routing_payload: Mapping[str, Any]
+    binding_ids: tuple[str, ...]
+    change_kind: str = "route_only"
+    source_add_provenance: tuple[SourceAddProvenance, ...] = ()
+    # This is the already-signed PrivateModelArtifactManifest document.  It
+    # is an authority reference, not a Lab-defined replacement identity.
+    artifact_authority_manifest: Mapping[str, Any] | None = None
+    new_tool_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _ensure_safe_ref(self.variant_id, "v2_variant_id")
+        _v2_safe_stage(self.stage)
+        if not isinstance(self.artifact, SourcingModelArtifactIdentity):
+            raise RoutingExperimentError("v2_variant_artifact_must_be_typed")
+        if not isinstance(self.routing_payload, Mapping) or not self.routing_payload:
+            raise RoutingExperimentError("v2_variant_routing_payload_is_required")
+        if not self.binding_ids or len(self.binding_ids) > MAX_PROVIDER_BINDINGS:
+            raise RoutingExperimentError("v2_variant_binding_ids_are_invalid")
+        if self.change_kind not in {"route_only", "tool_only", "tool_and_route"}:
+            raise RoutingExperimentError("v2_variant_change_kind_is_invalid")
+        if self.change_kind == "route_only" and (self.source_add_provenance or self.new_tool_ids):
+            raise RoutingExperimentError("v2_route_only_variant_has_source_add_provenance")
+        if self.change_kind in {"tool_only", "tool_and_route"} and (not self.source_add_provenance or not self.new_tool_ids):
+            raise RoutingExperimentError("v2_tool_variant_requires_source_add_provenance")
+        if len(set(self.binding_ids)) != len(self.binding_ids):
+            raise RoutingExperimentError("v2_variant_binding_ids_must_be_unique")
+        for binding_id in self.binding_ids:
+            _ensure_safe_ref(binding_id, "v2_variant_binding_id")
+        for tool_id in self.new_tool_ids:
+            _ensure_safe_ref(tool_id, "v2_variant_new_tool_id")
+        if len(set(self.new_tool_ids)) != len(self.new_tool_ids):
+            raise RoutingExperimentError("v2_variant_new_tool_ids_must_be_unique")
+        if self.artifact_authority_manifest is not None and not isinstance(self.artifact_authority_manifest, Mapping):
+            raise RoutingExperimentError("v2_artifact_authority_manifest_is_invalid")
+        _ensure_no_secret_material(self.to_dict(), field_name="v2_variant")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "variant_id": self.variant_id,
+            "stage": self.stage,
+            "artifact": self.artifact.to_dict(),
+            "routing_payload": dict(self.routing_payload),
+            "binding_ids": list(self.binding_ids),
+            "change_kind": self.change_kind,
+            "source_add_provenance": [item.to_dict() for item in self.source_add_provenance],
+            "artifact_authority_manifest": (
+                dict(self.artifact_authority_manifest)
+                if self.artifact_authority_manifest is not None
+                else None
+            ),
+            "new_tool_ids": list(self.new_tool_ids),
+        }
+
+
+@dataclass(frozen=True)
+class RoutingExperimentV2Spec:
+    experiment_id: str
+    input: RoutingExperimentV2Input
+    variants: tuple[RoutingExperimentV2Variant, ...]
+    baseline_variant_id: str
+    provider_bindings: tuple[ProviderBindingIdentity, ...]
+    credit_budget: ExperimentCreditBudget
+    gates: RoutingEvaluationGates
+    availability: Mapping[str, Mapping[str, bool]] = field(default_factory=dict)
+    allow_live_credit_spend: bool = False
+    receipt_execution_mode: str = ReceiptExecutionMode.FIXTURE.value
+    contract_version: str = ROUTING_EXPERIMENT_V2_CONTRACT_VERSION
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "RoutingExperimentV2Spec":
+        input_data = data.get("input") or {}
+        availability_data = data.get("availability") if isinstance(data.get("availability"), Mapping) else {}
+        input_value = (
+            input_data
+            if isinstance(input_data, RoutingExperimentV2Input)
+            else RoutingExperimentV2Input(
+                stage=str(input_data.get("stage") or ""),
+                signal_type=str(input_data.get("signal_type") or ""),
+                feature_set_hash=str(input_data.get("feature_set_hash") or ""),
+                feature_set_payload=dict(input_data.get("feature_set_payload") or {}),
+                calibration_unit_refs=tuple(input_data.get("calibration_unit_refs") or ()),
+                holdout_unit_refs=tuple(input_data.get("holdout_unit_refs") or ()),
+                gold_label_set_hash=str(input_data.get("gold_label_set_hash") or ""),
+            )
+        )
+        variants: list[RoutingExperimentV2Variant] = []
+        for item in data.get("variants") or ():
+            if isinstance(item, RoutingExperimentV2Variant):
+                variants.append(item)
+                continue
+            variants.append(
+                RoutingExperimentV2Variant(
+                    variant_id=str(item.get("variant_id") or ""),
+                    stage=str(item.get("stage") or ""),
+                    artifact=SourcingModelArtifactIdentity.from_mapping(item.get("artifact") or {}),
+                    routing_payload=dict(item.get("routing_payload") or {}),
+                    binding_ids=tuple(item.get("binding_ids") or ()),
+                    change_kind=str(item.get("change_kind") or "route_only"),
+                    source_add_provenance=tuple(
+                        SourceAddProvenance(**dict(provenance))
+                        for provenance in item.get("source_add_provenance") or ()
+                    ),
+                    artifact_authority_manifest=(
+                        dict(item["artifact_authority_manifest"])
+                        if isinstance(item.get("artifact_authority_manifest"), Mapping)
+                        else None
+                    ),
+                    new_tool_ids=tuple(item.get("new_tool_ids") or ()),
+                )
+            )
+        return cls(
+            experiment_id=str(data.get("experiment_id") or ""),
+            input=input_value,
+            variants=tuple(variants),
+            baseline_variant_id=str(data.get("baseline_variant_id") or ""),
+            provider_bindings=tuple(
+                item if isinstance(item, ProviderBindingIdentity) else ProviderBindingIdentity.from_mapping(item)
+                for item in data.get("provider_bindings") or ()
+            ),
+            credit_budget=(
+                data["credit_budget"]
+                if isinstance(data.get("credit_budget"), ExperimentCreditBudget)
+                else ExperimentCreditBudget.from_mapping(data.get("credit_budget") or {})
+            ),
+            gates=(
+                data["gates"]
+                if isinstance(data.get("gates"), RoutingEvaluationGates)
+                else RoutingEvaluationGates.from_mapping(data.get("gates") or {})
+            ),
+            availability={
+                str(variant_id): {str(tool_id): bool(available) for tool_id, available in (value.items() if isinstance(value, Mapping) else ())}
+                for variant_id, value in availability_data.items()
+            },
+            allow_live_credit_spend=bool(data.get("allow_live_credit_spend", False)),
+            receipt_execution_mode=str(data.get("receipt_execution_mode") or ReceiptExecutionMode.FIXTURE.value),
+            contract_version=str(data.get("contract_version") or ROUTING_EXPERIMENT_V2_CONTRACT_VERSION),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "experiment_id": self.experiment_id,
+            "input": self.input.to_dict(),
+            "variants": [item.to_dict() for item in self.variants],
+            "baseline_variant_id": self.baseline_variant_id,
+            "provider_bindings": [item.to_dict() for item in self.provider_bindings],
+            "credit_budget": self.credit_budget.to_dict(),
+            "gates": self.gates.to_dict(),
+            "availability": {
+                variant_id: dict(sorted(values.items()))
+                for variant_id, values in sorted(self.availability.items())
+            },
+            "allow_live_credit_spend": self.allow_live_credit_spend,
+            "receipt_execution_mode": self.receipt_execution_mode,
+        }
+
+    def experiment_hash(self) -> str:
+        return sha256_json(self.to_dict())
+
+
+class RoutingExperimentV2Adapter(Protocol):
+    """Model-owned v2 adapter; candidate profiles stay opaque to the Lab."""
+
+    def parse_feature_set(self, payload: Mapping[str, Any]) -> Any: ...
+    def validate_feature_set(self, feature_set: Any, *, expected_hash: str, expected_features: Sequence[str]) -> Sequence[str]: ...
+    def validate_artifact_identity(self, artifact: SourcingModelArtifactIdentity) -> Sequence[str]: ...
+    def parse_variant_payload(self, payload: Mapping[str, Any], *, stage: str) -> Any: ...
+    def validate_variant_payload(self, payload: Any, *, stage: str, feature_set: Any, binding_tool_ids: frozenset[str], binding_source_lineages: Mapping[str, str]) -> Sequence[str]: ...
+    def variant_tool_descriptors(self, payload: Any, *, stage: str) -> Sequence[Mapping[str, Any]]: ...
+    def lookup_tool_descriptor(self, tool_id: str, *, stage: str) -> Mapping[str, Any] | None: ...
+    def validate_provider_binding(self, binding: ProviderBindingIdentity, *, stage: str) -> Sequence[str]: ...
+    def compile_variant(self, payload: Any, *, stage: str, feature_set: Any, available_tools: Mapping[str, bool], remaining_seconds: float, remaining_calls: int, credit_cap: float) -> Any: ...
+    def execute_plan(self, plan: Any, invoke: Callable[[str], Any]) -> tuple[Sequence[Any], bool]: ...
+    def plan_as_payload(self, plan: Any) -> Mapping[str, Any]: ...
+    def parse_plan(self, payload: Mapping[str, Any]) -> Any: ...
+    def plan_hash(self, plan: Any) -> str: ...
+    def route_hash(self, plan: Any) -> str: ...
+    def plan_step_budgets(self, plan: Any) -> Sequence[RoutingPlanStepBudget]: ...
+    def plan_decision_projection(self, plan: Any) -> Mapping[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class IsolatedRoutingAdapter:
+    """A model adapter handle owned by one artifact worker process.
+
+    The worker is created by the caller's model-authority runtime.  This
+    handle carries the worker identity and the observed model artifact key so
+    the Lab cannot accidentally compare two artifacts in one interpreter.
+    """
+
+    adapter: RoutingExperimentV2Adapter
+    process_id: str
+    observed_artifact_key: str
+
+    def __post_init__(self) -> None:
+        _ensure_safe_ref(self.process_id, "v2_model_process_id")
+        _v2_hash(self.observed_artifact_key, "v2_observed_artifact_key")
+
+
+class RoutingExperimentV2AdapterFactory:
+    """Bind exactly one isolated worker identity to each artifact key."""
+
+    def __init__(self, handles: Mapping[str, IsolatedRoutingAdapter]) -> None:
+        self.handles = dict(handles)
+        artifact_process: dict[str, str] = {}
+        for variant_id, handle in self.handles.items():
+            artifact_process.setdefault(handle.observed_artifact_key, handle.process_id)
+            if artifact_process[handle.observed_artifact_key] != handle.process_id:
+                raise RoutingExperimentError("v2_artifact_workers_must_be_stable")
+        if len(set(artifact_process.values())) != len(artifact_process):
+            raise RoutingExperimentError("v2_distinct_artifacts_require_distinct_workers")
+
+    @classmethod
+    def from_worker_factory(
+        cls,
+        variants: Sequence[RoutingExperimentV2Variant],
+        worker_factory: Callable[[SourcingModelArtifactIdentity], IsolatedRoutingAdapter],
+    ) -> "RoutingExperimentV2AdapterFactory":
+        """Build handles from the model-authority subprocess launcher.
+
+        ``worker_factory`` must launch a fresh model worker for each distinct
+        artifact and return the worker's observed artifact key.  Returning a
+        plain in-process adapter is rejected, so the Lab cannot accidentally
+        mix model roots while retaining a convenient fake-adapter seam for
+        contract tests.
+        """
+
+        handles: dict[str, IsolatedRoutingAdapter] = {}
+        for variant in variants:
+            handle = worker_factory(variant.artifact)
+            if not isinstance(handle, IsolatedRoutingAdapter):
+                raise RoutingExperimentError("v2_worker_factory_must_return_isolated_adapter")
+            handles[variant.variant_id] = handle
+        return cls(handles)
+
+    def for_variants(
+        self,
+        variants: Sequence[RoutingExperimentV2Variant],
+    ) -> Mapping[str, RoutingExperimentV2Adapter]:
+        output: dict[str, RoutingExperimentV2Adapter] = {}
+        for variant in variants:
+            handle = self.handles.get(variant.variant_id)
+            if handle is None:
+                raise RoutingExperimentError(f"v2_isolated_adapter_missing:{variant.variant_id}")
+            if handle.observed_artifact_key != _v2_variant_artifact_key(variant):
+                raise RoutingExperimentError(f"v2_isolated_adapter_artifact_mismatch:{variant.variant_id}")
+            output[variant.variant_id] = handle.adapter
+        return output
+
+
+def _v2_unwrap_adapters(
+    adapters: Mapping[str, RoutingExperimentV2Adapter | IsolatedRoutingAdapter],
+    *,
+    variants: Sequence[RoutingExperimentV2Variant],
+    require_isolation: bool,
+) -> Mapping[str, RoutingExperimentV2Adapter]:
+    if require_isolation and any(not isinstance(item, IsolatedRoutingAdapter) for item in adapters.values()):
+        raise RoutingExperimentError("v2_isolated_model_adapters_required")
+    output: dict[str, RoutingExperimentV2Adapter] = {}
+    artifact_process: dict[str, str] = {}
+    for variant in variants:
+        handle_or_adapter = adapters.get(variant.variant_id)
+        if handle_or_adapter is None:
+            continue
+        if isinstance(handle_or_adapter, IsolatedRoutingAdapter):
+            expected_key = _v2_variant_artifact_key(variant)
+            if handle_or_adapter.observed_artifact_key != expected_key:
+                raise RoutingExperimentError(f"v2_isolated_adapter_artifact_mismatch:{variant.variant_id}")
+            artifact_process.setdefault(expected_key, handle_or_adapter.process_id)
+            if artifact_process[expected_key] != handle_or_adapter.process_id:
+                raise RoutingExperimentError("v2_artifact_workers_must_be_stable")
+            output[variant.variant_id] = handle_or_adapter.adapter
+        else:
+            output[variant.variant_id] = handle_or_adapter
+    if len(set(artifact_process.values())) != len(artifact_process):
+        raise RoutingExperimentError("v2_distinct_artifacts_require_distinct_workers")
+    return output
+
+
+def _v2_authority_manifest_dict(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Normalize the signed PrivateModelArtifactManifest without copying it."""
+
+    try:
+        from research_lab.eval import PrivateModelArtifactManifest
+    except Exception as exc:  # pragma: no cover - package import is always present in Lab
+        raise RoutingExperimentError("v2_artifact_authority_contract_unavailable") from exc
+    try:
+        manifest = value if isinstance(value, PrivateModelArtifactManifest) else PrivateModelArtifactManifest.from_mapping(value)
+        return manifest.to_dict()
+    except Exception as exc:
+        raise RoutingExperimentError("v2_artifact_authority_manifest_is_malformed") from exc
+
+
+def _validate_v2_artifact_authority(
+    variant: RoutingExperimentV2Variant,
+) -> list[str]:
+    """Check the existing signed manifest and its model-owned route hashes."""
+
+    if variant.artifact_authority_manifest is None:
+        return ["v2_artifact_authority_manifest_required"]
+    errors: list[str] = []
+    try:
+        from research_lab.eval import validate_private_model_artifact_manifest
+
+        manifest = _v2_authority_manifest_dict(variant.artifact_authority_manifest)
+        errors.extend(validate_private_model_artifact_manifest(manifest))
+    except RoutingExperimentError as exc:
+        errors.append(str(exc))
+        return sorted(set(errors))
+    except Exception:
+        errors.append("v2_artifact_authority_manifest_is_malformed")
+        return sorted(set(errors))
+    for artifact_field, manifest_field in (
+        ("model_artifact_hash", "model_artifact_hash"),
+        ("manifest_hash", "manifest_hash"),
+        ("commit_sha", "git_commit_sha"),
+    ):
+        if str(manifest.get(manifest_field) or "").lower() != str(getattr(variant.artifact, artifact_field)).lower():
+            errors.append(f"v2_artifact_authority_{artifact_field}_mismatch")
+    extensions = manifest.get("signed_extensions")
+    if not isinstance(extensions, Mapping):
+        extensions = manifest
+    for artifact_field in (
+        "routing_contract_hash",
+        "routing_catalog_hash",
+        "routing_policy_hash",
+        "feature_schema_hash",
+        "verifier_contract_hash",
+    ):
+        observed = str(extensions.get(artifact_field) or "")
+        if observed and observed != str(getattr(variant.artifact, artifact_field)):
+            errors.append(f"v2_artifact_authority_{artifact_field}_mismatch")
+        if not observed:
+            errors.append(f"v2_artifact_authority_{artifact_field}_missing")
+    return sorted(set(errors))
+
+
+def _v2_normalize_source_manifest(value: Any, field_name: str) -> str:
+    text = str(value or "").strip().lower()
+    if _SHA256_RE.fullmatch(text):
+        return text
+    if _RAW_SHA256_RE.fullmatch(text):
+        return f"sha256:{text}"
+    raise RoutingExperimentError(f"{field_name} must be a source-add manifest digest")
+
+
+def _validate_v2_source_add_provenance(
+    provenance: SourceAddProvenance,
+    *,
+    descriptor: Mapping[str, Any],
+    binding: ProviderBindingIdentity,
+) -> list[str]:
+    """Apply the existing provider-capabilities v3 request validator rules."""
+
+    errors: list[str] = []
+    request = provenance.request_payload
+    if not isinstance(request, Mapping):
+        return [f"v2_source_add_request_payload_missing:{provenance.tool_id}"]
+    if str(request.get("schema_version") or "") != "leadpoet.routerverse_source_incorporation.v3":
+        errors.append(f"v2_source_add_request_schema_mismatch:{provenance.tool_id}")
+    if str(request.get("registration_symbol") or "") != "sourcing_model/routing/runtime.py::SOURCE_ADD_ROUTING_REGISTRATIONS":
+        errors.append(f"v2_source_add_registration_symbol_mismatch:{provenance.tool_id}")
+    if str(request.get("registration_type") or "") != "SourceAddRoutingRegistration":
+        errors.append(f"v2_source_add_registration_type_mismatch:{provenance.tool_id}")
+    if str(request.get("tool_id") or "") != provenance.tool_id:
+        errors.append(f"v2_source_add_request_tool_mismatch:{provenance.tool_id}")
+    if str(request.get("stage") or "") != provenance.stage:
+        errors.append(f"v2_source_add_request_stage_mismatch:{provenance.tool_id}")
+    if str(request.get("provider_id") or "") != binding.provider_id:
+        errors.append(f"v2_source_add_provider_mismatch:{provenance.tool_id}")
+    if str(request.get("runtime_binding_id") or "") != binding.provider_id:
+        errors.append(f"v2_source_add_runtime_binding_mismatch:{provenance.tool_id}")
+    try:
+        from gateway.research_lab.provider_capabilities import _normalize_source_add_v8_registration, _source_add_binding_manifest
+
+        values = {field: request.get(field) for field in (
+            "provider_id", "stage", "revision", "manifest_sha256", "execution_mode", "priority",
+            "capabilities", "idempotency", "cost_class", "unit_cost", "max_calls", "max_results",
+            "timeout_seconds", "intent_categories", "evidence_types", "category_contracts",
+            "binding_requirements", "best_for", "avoid_when", "best_for_description", "avoid_when_description",
+        )}
+        registration = _normalize_source_add_v8_registration(values)
+        expected_binding_manifest = _source_add_binding_manifest(registration)
+        if dict(request.get("binding_manifest") or {}) != expected_binding_manifest:
+            errors.append(f"v2_source_add_binding_manifest_invalid:{provenance.tool_id}")
+        expected_registration_manifest = _v2_normalize_source_manifest(registration.get("manifest_sha256"), "source_add_registration_manifest")
+        if expected_registration_manifest != _v2_normalize_source_manifest(provenance.manifest_hash, "source_add_provenance_manifest"):
+            errors.append(f"v2_source_add_provenance_manifest_mismatch:{provenance.tool_id}")
+    except Exception:
+        errors.append(f"v2_source_add_registration_invalid:{provenance.tool_id}")
+    for field_name, value in (
+        ("descriptor_manifest_hash", descriptor.get("manifest_hash")),
+        ("provider_binding_manifest_hash", binding.manifest_hash),
+    ):
+        try:
+            if _v2_normalize_source_manifest(value, field_name) != _v2_normalize_source_manifest(provenance.manifest_hash, "source_add_provenance_manifest"):
+                errors.append(f"v2_source_add_{field_name}_mismatch:{provenance.tool_id}")
+        except RoutingExperimentError as exc:
+            errors.append(str(exc))
+    if str(request.get("tool_id") or "") != str(descriptor.get("tool_id") or ""):
+        errors.append(f"v2_source_add_descriptor_tool_mismatch:{provenance.tool_id}")
+    if str(request.get("stage") or "") != str(descriptor.get("stage") or ""):
+        errors.append(f"v2_source_add_descriptor_stage_mismatch:{provenance.tool_id}")
+    if str(request.get("manifest_sha256") or "") != str(descriptor.get("request_manifest_sha256") or request.get("manifest_sha256") or ""):
+        # The model descriptor may expose the registration digest under either
+        # name; absence of a second copy is acceptable, disagreement is not.
+        if descriptor.get("request_manifest_sha256"):
+            errors.append(f"v2_source_add_request_manifest_mismatch:{provenance.tool_id}")
+    return sorted(set(errors))
+
+
+def _v2_variant_artifact_key(variant: RoutingExperimentV2Variant) -> str:
+    return sha256_json(
+        {
+            "model_artifact_hash": variant.artifact.model_artifact_hash,
+            "manifest_hash": variant.artifact.manifest_hash,
+            "commit_sha": variant.artifact.commit_sha,
+        }
+    )
+
+
+def validate_routing_experiment_v2_spec(
+    spec: RoutingExperimentV2Spec | Mapping[str, Any],
+    *,
+    adapters: Mapping[str, RoutingExperimentV2Adapter],
+) -> list[str]:
+    """Validate V2 admission before any model or provider execution."""
+
+    if not isinstance(spec, RoutingExperimentV2Spec):
+        try:
+            spec = RoutingExperimentV2Spec.from_mapping(spec)
+        except Exception as exc:
+            return [f"v2_experiment_spec_is_malformed:{type(exc).__name__}"]
+    errors: list[str] = []
+    if spec.contract_version != ROUTING_EXPERIMENT_V2_CONTRACT_VERSION:
+        errors.append("v2_experiment_contract_version_mismatch")
+    try:
+        _ensure_safe_ref(spec.experiment_id, "v2_experiment_id")
+    except RoutingExperimentError as exc:
+        errors.append(str(exc))
+    if spec.input.stage not in ROUTING_EXPERIMENT_STAGES:
+        errors.append("v2_input_stage_is_invalid")
+    if spec.receipt_execution_mode not in {mode.value for mode in ReceiptExecutionMode}:
+        errors.append("v2_receipt_execution_mode_is_invalid")
+    if not spec.variants or len(spec.variants) > MAX_PROFILE_VARIANTS:
+        errors.append("v2_variant_count_is_invalid")
+    variant_ids = [item.variant_id for item in spec.variants]
+    if len(variant_ids) != len(set(variant_ids)):
+        errors.append("v2_variant_ids_must_be_unique")
+    if spec.baseline_variant_id not in set(variant_ids):
+        errors.append("v2_baseline_variant_is_missing")
+    if not isinstance(spec.availability, Mapping):
+        errors.append("v2_availability_is_invalid")
+    else:
+        for variant_id, values in spec.availability.items():
+            if variant_id not in set(variant_ids):
+                errors.append(f"v2_availability_variant_is_unknown:{variant_id}")
+            if not isinstance(values, Mapping):
+                errors.append(f"v2_availability_variant_is_invalid:{variant_id}")
+            else:
+                for tool_id, available in values.items():
+                    try:
+                        _ensure_safe_ref(tool_id, "v2_availability_tool_id")
+                    except RoutingExperimentError as exc:
+                        errors.append(str(exc))
+                    if not isinstance(available, bool):
+                        errors.append(f"v2_availability_must_be_boolean:{variant_id}:{tool_id}")
+    binding_by_id = {item.binding_id: item for item in spec.provider_bindings}
+    if len(binding_by_id) != len(spec.provider_bindings):
+        errors.append("v2_provider_binding_ids_must_be_unique")
+    for variant_id, values in spec.availability.items() if isinstance(spec.availability, Mapping) else ():
+        variant = next((item for item in spec.variants if item.variant_id == variant_id), None)
+        variant_tools = {
+            binding_by_id[binding_id].tool_id
+            for binding_id in (variant.binding_ids if variant is not None else ())
+            if binding_id in binding_by_id
+        }
+        for tool_id in values if isinstance(values, Mapping) else ():
+            if tool_id not in variant_tools:
+                errors.append(f"v2_availability_tool_is_not_bound:{variant_id}:{tool_id}")
+    errors.extend(validate_experiment_credit_budget(spec.credit_budget, binding_ids=binding_by_id))
+    for binding in spec.provider_bindings:
+        errors.extend(validate_provider_binding_identity(binding))
+    errors.extend(validate_routing_evaluation_gates(spec.gates))
+    if spec.input.stage == "candidate_acquisition" and spec.gates.intent_release_policy_hash:
+        # Candidate routes do not use the intent-release policy identity.  A
+        # supplied value is accepted as metadata, but it cannot alter the
+        # candidate gate semantics.
+        pass
+    try:
+        _ensure_no_secret_material(spec.to_dict(), field_name="v2_experiment_spec")
+    except RoutingExperimentError as exc:
+        errors.append(str(exc))
+    feature_set_errors: list[str] = []
+    normalized_features = spec.input.feature_set_payload.get("features") if isinstance(spec.input.feature_set_payload, Mapping) else None
+    if not isinstance(normalized_features, Sequence) or isinstance(normalized_features, (str, bytes)):
+        feature_set_errors.append("v2_feature_set_payload_features_are_required")
+        normalized_features = ()
+    for variant in spec.variants:
+        if variant.stage != spec.input.stage:
+            errors.append(f"v2_variant_stage_mismatch:{variant.variant_id}")
+        errors.extend(validate_sourcing_model_artifact_identity(variant.artifact))
+        errors.extend(_validate_v2_artifact_authority(variant))
+        adapter = adapters.get(variant.variant_id)
+        if adapter is None:
+            errors.append(f"v2_variant_adapter_missing:{variant.variant_id}")
+            continue
+        try:
+            errors.extend(adapter.validate_artifact_identity(variant.artifact))
+            feature_set = adapter.parse_feature_set(spec.input.feature_set_payload)
+            errors.extend(
+                adapter.validate_feature_set(
+                    feature_set,
+                    expected_hash=lab_hash_to_model(spec.input.feature_set_hash, "v2_feature_set_hash"),
+                    expected_features=tuple(sorted(set(str(item) for item in normalized_features))),
+                )
+            )
+            binding_items = [binding_by_id[item] for item in variant.binding_ids if item in binding_by_id]
+            if len(binding_items) != len(variant.binding_ids):
+                errors.append(f"v2_variant_binding_missing:{variant.variant_id}")
+            binding_tool_ids = frozenset(item.tool_id for item in binding_items)
+            source_lineages = {item.tool_id: item.source_lineage_id for item in binding_items}
+            model_payload = adapter.parse_variant_payload(variant.routing_payload, stage=variant.stage)
+            errors.extend(
+                adapter.validate_variant_payload(
+                    model_payload,
+                    stage=variant.stage,
+                    feature_set=feature_set,
+                    binding_tool_ids=binding_tool_ids,
+                    binding_source_lineages=source_lineages,
+                )
+            )
+            descriptors = tuple(adapter.variant_tool_descriptors(model_payload, stage=variant.stage))
+            descriptor_by_tool: dict[str, Mapping[str, Any]] = {}
+            for descriptor in descriptors:
+                tool_id = _ensure_safe_ref(descriptor.get("tool_id"), "v2_model_tool_id")
+                if tool_id in descriptor_by_tool:
+                    errors.append(f"v2_model_tool_descriptor_duplicate:{tool_id}")
+                descriptor_by_tool[tool_id] = descriptor
+                if str(descriptor.get("stage") or variant.stage) != variant.stage:
+                    errors.append(f"v2_model_tool_stage_mismatch:{tool_id}")
+                if bool(descriptor.get("source_add", False)):
+                    provenance = next((item for item in variant.source_add_provenance if item.tool_id == tool_id), None)
+                    if provenance is None:
+                        errors.append(f"v2_source_add_provenance_missing:{tool_id}")
+                    else:
+                        if provenance.stage != variant.stage:
+                            errors.append(f"v2_source_add_provenance_stage_mismatch:{tool_id}")
+                        if provenance.artifact_commit_sha != variant.artifact.commit_sha:
+                            errors.append(f"v2_source_add_provenance_artifact_mismatch:{tool_id}")
+                        binding = next((item for item in binding_items if item.tool_id == tool_id), None)
+                        if binding is None:
+                            errors.append(f"v2_source_add_binding_missing:{tool_id}")
+                        else:
+                            errors.extend(_validate_v2_source_add_provenance(provenance, descriptor=descriptor, binding=binding))
+                        descriptor_request_hash = str(descriptor.get("request_hash") or "")
+                        if descriptor_request_hash and descriptor_request_hash != provenance.request_hash:
+                            errors.append(f"v2_source_add_request_mismatch:{tool_id}")
+            for tool_id in variant.new_tool_ids:
+                descriptor = descriptor_by_tool.get(tool_id)
+                if descriptor is None:
+                    descriptor = adapter.lookup_tool_descriptor(tool_id, stage=variant.stage)
+                    if descriptor is not None:
+                        descriptor_by_tool[tool_id] = descriptor
+                if descriptor is None:
+                    errors.append(f"v2_new_tool_absent_from_variant_artifact:{tool_id}")
+                    continue
+                if not bool(descriptor.get("source_add", False)):
+                    errors.append(f"v2_new_tool_is_not_source_add:{tool_id}")
+                provenance = next((item for item in variant.source_add_provenance if item.tool_id == tool_id), None)
+                binding = next((item for item in binding_items if item.tool_id == tool_id), None)
+                if provenance is None:
+                    errors.append(f"v2_source_add_provenance_missing:{tool_id}")
+                elif binding is None:
+                    errors.append(f"v2_source_add_binding_missing:{tool_id}")
+                else:
+                    errors.extend(_validate_v2_source_add_provenance(provenance, descriptor=descriptor, binding=binding))
+            for provenance in variant.source_add_provenance:
+                if provenance.tool_id not in descriptor_by_tool and provenance.tool_id not in set(variant.new_tool_ids):
+                    errors.append(f"v2_source_add_tool_not_in_variant:{provenance.tool_id}")
+            for binding_id in variant.binding_ids:
+                binding = binding_by_id.get(binding_id)
+                if binding is not None:
+                    errors.extend(adapter.validate_provider_binding(binding, stage=variant.stage))
+        except RoutingExperimentError as exc:
+            errors.append(f"v2_variant_validation_failed:{variant.variant_id}:{exc}")
+        except Exception as exc:
+            errors.append(f"v2_variant_validation_failed:{variant.variant_id}:{type(exc).__name__}")
+    return sorted(set(errors))
+
+
+@dataclass(frozen=True)
+class RoutingDecisionReceiptV2:
+    """Redacted per-unit route decision and provider outcome projection."""
+
+    receipt_id: str
+    experiment_id: str
+    variant_id: str
+    artifact_key: str
+    stage: str
+    unit_ref: str
+    plan_hash: str
+    route_hash: str
+    attempted_tool_ids: tuple[str, ...]
+    skipped_tool_reasons: tuple[tuple[str, str], ...]
+    outcome_reasons: tuple[tuple[str, str], ...]
+    provider_receipt_refs: tuple[str, ...]
+    total_credit_microunits: int
+    latency_ms: int
+    execution_mode: str
+    immutable: bool = True
+    contract_version: str = ROUTING_DECISION_RECEIPT_V2_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "receipt_id": self.receipt_id,
+            "experiment_id": self.experiment_id,
+            "variant_id": self.variant_id,
+            "artifact_key": self.artifact_key,
+            "stage": self.stage,
+            "unit_ref": self.unit_ref,
+            "plan_hash": self.plan_hash,
+            "route_hash": self.route_hash,
+            "attempted_tool_ids": list(self.attempted_tool_ids),
+            "skipped_tool_reasons": [list(item) for item in self.skipped_tool_reasons],
+            "outcome_reasons": [list(item) for item in self.outcome_reasons],
+            "provider_receipt_refs": list(self.provider_receipt_refs),
+            "total_credit_microunits": self.total_credit_microunits,
+            "latency_ms": self.latency_ms,
+            "execution_mode": self.execution_mode,
+            "immutable": self.immutable,
+        }
+
+
+class RoutingDecisionReceiptStore:
+    """Append-only decision receipt store, separate from provider receipts."""
+
+    def __init__(self) -> None:
+        self._rows: dict[str, RoutingDecisionReceiptV2] = {}
+
+    def put(self, receipt: RoutingDecisionReceiptV2) -> RoutingDecisionReceiptV2:
+        if receipt.receipt_id in self._rows and self._rows[receipt.receipt_id].to_dict() != receipt.to_dict():
+            raise RoutingExperimentError("v2_decision_receipt_id_collision")
+        self._rows[receipt.receipt_id] = receipt
+        return receipt
+
+    def get(self, receipt_id: str) -> RoutingDecisionReceiptV2 | None:
+        return self._rows.get(str(receipt_id))
+
+    def values(self) -> tuple[RoutingDecisionReceiptV2, ...]:
+        return tuple(self._rows[key] for key in sorted(self._rows))
+
+
+@dataclass(frozen=True)
+class RoutingExperimentV2VariantEvaluation:
+    variant_id: str
+    artifact_key: str
+    stage: str
+    calibration: RoutingEvaluationMetrics
+    holdout: RoutingEvaluationMetrics
+    passed_precision_gate: bool
+    passed_recall_gate: bool
+    passed_cost_gate: bool
+    passed_efficiency_gate: bool
+    passed: bool
+    decision_receipt_refs: tuple[str, ...]
+    provider_receipt_refs: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["calibration"] = self.calibration.to_dict()
+        data["holdout"] = self.holdout.to_dict()
+        data["decision_receipt_refs"] = list(self.decision_receipt_refs)
+        data["provider_receipt_refs"] = list(self.provider_receipt_refs)
+        return data
+
+
+@dataclass(frozen=True)
+class RoutingExperimentV2Evaluation:
+    receipt_id: str
+    experiment_id: str
+    experiment_hash: str
+    variants: tuple[RoutingExperimentV2VariantEvaluation, ...]
+    baseline_variant_id: str
+    selected_variant_id: str
+    decision_receipt_refs: tuple[str, ...]
+    provider_receipt_refs: tuple[str, ...]
+    provider_cache_hits: int
+    provider_cache_misses: int
+    billing_rollup_id: str = ""
+    billing_rollup_hash: str = ""
+    billing_rollup_total_credit_microunits: int = 0
+    live_credit_spend: bool = False
+    immutable: bool = True
+    contract_version: str = ROUTING_EXPERIMENT_V2_CONTRACT_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "receipt_id": self.receipt_id,
+            "experiment_id": self.experiment_id,
+            "experiment_hash": self.experiment_hash,
+            "variants": [item.to_dict() for item in self.variants],
+            "baseline_variant_id": self.baseline_variant_id,
+            "selected_variant_id": self.selected_variant_id,
+            "decision_receipt_refs": list(self.decision_receipt_refs),
+            "provider_receipt_refs": list(self.provider_receipt_refs),
+            "provider_cache_hits": self.provider_cache_hits,
+            "provider_cache_misses": self.provider_cache_misses,
+            "billing_rollup_id": self.billing_rollup_id,
+            "billing_rollup_hash": self.billing_rollup_hash,
+            "billing_rollup_total_credit_microunits": self.billing_rollup_total_credit_microunits,
+            "live_credit_spend": self.live_credit_spend,
+            "immutable": self.immutable,
+        }
+
+
+def _v2_labels(
+    experiment_input: RoutingExperimentV2Input,
+    gold_labels: Mapping[str, bool],
+) -> None:
+    units = set(experiment_input.calibration_unit_refs).union(experiment_input.holdout_unit_refs)
+    if set(gold_labels) != units:
+        raise RoutingExperimentError("v2_gold_labels_must_cover_exact_units")
+    normalized = {str(key): bool(value) for key, value in gold_labels.items()}
+    if sha256_json({"labels": sorted(normalized.items())}) != experiment_input.gold_label_set_hash:
+        raise RoutingExperimentError("v2_gold_label_set_hash_mismatch")
+
+
+def _v2_projection_pairs(value: Any, field_name: str) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, Mapping):
+        raise RoutingExperimentError(f"v2_{field_name}_must_be_an_object")
+    pairs: list[tuple[str, str]] = []
+    for key, reason in sorted(value.items(), key=lambda item: str(item[0])):
+        pairs.append((_ensure_safe_ref(key, f"v2_{field_name}_key"), _ensure_safe_ref(reason, f"v2_{field_name}_reason")))
+    return tuple(pairs)
+
+
+def _v2_failure_receipt(
+    *,
+    binding: ProviderBindingIdentity,
+    unit_ref: str,
+    request_fingerprint: str,
+    execution_mode: str,
+    error: BaseException,
+) -> ProviderReceipt:
+    """Turn an adapter/timeout failure into redacted, fail-closed evidence."""
+
+    payload = {
+        "binding_id": binding.binding_id,
+        "tool_id": binding.tool_id,
+        "unit_ref": unit_ref,
+        "request_fingerprint": request_fingerprint,
+        "outcome": ProviderOutcome.ADAPTER_FAILURE.value,
+        "error_type": type(error).__name__,
+    }
+    identity = {
+        "binding_id": binding.binding_id,
+        "tool_id": binding.tool_id,
+        "binding_version": binding.adapter_version,
+        "source_lineage_id": binding.source_lineage_id,
+        "unit_ref": unit_ref,
+        "request_fingerprint": request_fingerprint,
+        "outcome": ProviderOutcome.ADAPTER_FAILURE.value,
+        "evidence_hash": sha256_json(payload),
+        "credit_microunits": 0,
+        "latency_ms": 0,
+        "execution_mode": execution_mode,
+    }
+    return ProviderReceipt(
+        receipt_ref="provider_receipt:" + sha256_json(identity).split(":", 1)[1][:16],
+        **identity,
+    )
+
+
+def _v2_call_runner(
+    runner: Callable[..., ProviderReceipt | Mapping[str, Any]],
+    binding: ProviderBindingIdentity,
+    unit_ref: str,
+    request_fingerprint: str,
+) -> ProviderReceipt | Mapping[str, Any]:
+    """Pass the v2 request identity without breaking the v1 two-arg seam."""
+
+    try:
+        signature = inspect.signature(runner)
+        positional = [
+            item
+            for item in signature.parameters.values()
+            if item.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+        ]
+        accepts_varargs = any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in signature.parameters.values())
+    except (TypeError, ValueError):
+        positional = []
+        accepts_varargs = True
+    if accepts_varargs or len(positional) >= 3:
+        return runner(binding, unit_ref, request_fingerprint)
+    return runner(binding, unit_ref)
+
+
+def _v2_run_unit(
+    spec: RoutingExperimentV2Spec,
+    variant: RoutingExperimentV2Variant,
+    *,
+    adapter: RoutingExperimentV2Adapter,
+    feature_set: Any,
+    bindings: Mapping[str, ProviderBindingIdentity],
+    store: ProviderReceiptStore,
+    decision_store: RoutingDecisionReceiptStore,
+    runner: Callable[[ProviderBindingIdentity, str], ProviderReceipt | Mapping[str, Any]],
+    unit_ref: str,
+    spent_total: list[int],
+    spent_by_binding: dict[str, int],
+    reserved_total: list[int],
+    reserved_by_binding: dict[str, int],
+) -> tuple[list[ProviderReceipt], bool, RoutingDecisionReceiptV2]:
+    variant_bindings: dict[str, ProviderBindingIdentity] = {}
+    for binding_id in variant.binding_ids:
+        binding = bindings.get(binding_id)
+        if binding is None:
+            raise RoutingExperimentError(f"v2_variant_binding_missing:{binding_id}")
+        variant_bindings[binding.tool_id] = binding
+    availability = spec.availability.get(variant.variant_id, {})
+    available_tools = {
+        tool_id: bool(availability.get(tool_id, True))
+        for tool_id in variant_bindings
+    }
+    plan = adapter.compile_variant(
+        adapter.parse_variant_payload(variant.routing_payload, stage=variant.stage),
+        stage=variant.stage,
+        feature_set=feature_set,
+        available_tools=available_tools,
+        remaining_seconds=MAX_LATENCY_MS / 1000,
+        remaining_calls=MAX_TOOLS_PER_VARIANT,
+        credit_cap=spec.credit_budget.total_credit_microunits / 1_000_000,
+    )
+    payload = adapter.plan_as_payload(plan)
+    if not isinstance(payload, Mapping):
+        raise RoutingExperimentError("v2_model_plan_payload_is_not_an_object")
+    try:
+        parsed = adapter.parse_plan(payload)
+        if adapter.plan_hash(parsed) != adapter.plan_hash(plan):
+            raise RoutingExperimentError("v2_model_plan_hash_is_not_stable")
+    except RoutingExperimentError:
+        raise
+    except Exception as exc:
+        raise RoutingExperimentError("v2_model_plan_is_malformed") from exc
+    plan_hash = adapter.plan_hash(plan)
+    route_hash = adapter.route_hash(plan)
+    receipts: list[ProviderReceipt] = []
+    attempt_by_tool: dict[str, int] = {}
+    attempt_order: list[str] = []
+
+    def invoke(tool_id: str) -> ProviderReceipt:
+        binding = variant_bindings.get(tool_id)
+        if binding is None:
+            raise RoutingExperimentError(f"v2_model_plan_references_unbound_tool:{tool_id}")
+        attempt = attempt_by_tool.get(tool_id, 0)
+        attempt_by_tool[tool_id] = attempt + 1
+        attempt_order.append(tool_id)
+        request_fingerprint = sha256_json(
+            {
+                "contract_version": ROUTING_EXPERIMENT_V2_CONTRACT_VERSION,
+                "experiment_id": spec.experiment_id,
+                "variant_id": variant.variant_id,
+                "artifact_key": _v2_variant_artifact_key(variant),
+                "stage": variant.stage,
+                "tool_id": tool_id,
+                "unit_ref": unit_ref,
+                "attempt": attempt,
+            }
+        )
+        key = provider_receipt_key(
+            tool_id=tool_id,
+            binding_version=binding.adapter_version,
+            request_fingerprint=request_fingerprint,
+        )
+        receipt = store.get(key)
+        if receipt is None:
+            try:
+                value = _v2_call_runner(runner, binding, unit_ref, request_fingerprint)
+                receipt = _receipt_for_runner_result(
+                    value,
+                    binding=binding,
+                    unit_ref=unit_ref,
+                    request_fingerprint=request_fingerprint,
+                )
+            except Exception as exc:
+                receipt = _v2_failure_receipt(
+                    binding=binding,
+                    unit_ref=unit_ref,
+                    request_fingerprint=request_fingerprint,
+                    execution_mode=spec.receipt_execution_mode,
+                    error=exc,
+                )
+            next_total = spent_total[0] + receipt.credit_microunits
+            next_provider = spent_by_binding.get(binding.binding_id, 0) + receipt.credit_microunits
+            if next_total > spec.credit_budget.total_credit_microunits:
+                raise RoutingExperimentError("v2_total_credit_budget_exceeded")
+            ceiling = spec.credit_budget.provider_credit_ceilings.get(binding.binding_id)
+            if ceiling is not None and next_provider > ceiling:
+                raise RoutingExperimentError(f"v2_provider_credit_budget_exceeded:{binding.binding_id}")
+            store.put(key, receipt)
+        spent_total[0] += receipt.credit_microunits
+        spent_by_binding[binding.binding_id] = spent_by_binding.get(binding.binding_id, 0) + receipt.credit_microunits
+        receipts.append(receipt)
+        return receipt
+
+    reservation: dict[str, int] = {}
+    for budget in adapter.plan_step_budgets(plan):
+        if budget.execution_mode != "invoke" or budget.max_calls <= 0:
+            continue
+        binding = variant_bindings.get(budget.tool_id)
+        if binding is None:
+            raise RoutingExperimentError(f"v2_model_plan_references_unbound_tool:{budget.tool_id}")
+        reservation[binding.binding_id] = reservation.get(binding.binding_id, 0) + budget.credit_microunits
+    requested_total = sum(reservation.values())
+    if spent_total[0] + reserved_total[0] + requested_total > spec.credit_budget.total_credit_microunits:
+        raise RoutingExperimentError("v2_total_credit_budget_would_be_exceeded")
+    for binding_id, requested in reservation.items():
+        ceiling = spec.credit_budget.provider_credit_ceilings.get(binding_id)
+        if ceiling is not None and spent_by_binding.get(binding_id, 0) + reserved_by_binding.get(binding_id, 0) + requested > ceiling:
+            raise RoutingExperimentError(f"v2_provider_credit_budget_would_be_exceeded:{binding_id}")
+    reserved_total[0] += requested_total
+    for binding_id, requested in reservation.items():
+        reserved_by_binding[binding_id] = reserved_by_binding.get(binding_id, 0) + requested
+    try:
+        _results, predicted = adapter.execute_plan(plan, invoke)
+    except RoutingExperimentError:
+        raise
+    except Exception as exc:
+        # A model execution failure is recorded as an explicit route failure,
+        # never converted into a positive signal or an unrecorded fallback.
+        raise RoutingExperimentError(f"v2_model_plan_execution_failed:{type(exc).__name__}") from exc
+    finally:
+        reserved_total[0] -= requested_total
+        for binding_id, requested in reservation.items():
+            remaining = reserved_by_binding.get(binding_id, 0) - requested
+            if remaining > 0:
+                reserved_by_binding[binding_id] = remaining
+            else:
+                reserved_by_binding.pop(binding_id, None)
+    try:
+        projection = adapter.plan_decision_projection(plan)
+    except Exception as exc:
+        raise RoutingExperimentError("v2_model_plan_decision_projection_failed") from exc
+    attempted = tuple(_ensure_safe_ref(item, "v2_attempted_tool_id") for item in attempt_order)
+    planned_tools = tuple(item.tool_id for item in (adapter.plan_step_budgets(plan) or ()) if item.execution_mode == "invoke")
+    skipped_projection = dict(projection.get("skipped_tool_reasons") or {})
+    for tool_id in planned_tools:
+        if tool_id not in attempt_by_tool:
+            skipped_projection.setdefault(tool_id, "runtime_unavailable" if not available_tools.get(tool_id, True) else "model_route_stopped")
+    skipped = _v2_projection_pairs(skipped_projection, "skipped_tool_reasons")
+    outcomes = _v2_projection_pairs(projection.get("outcome_reasons"), "outcome_reasons")
+    decision_draft = RoutingDecisionReceiptV2(
+        receipt_id="routing_decision:pending",
+        experiment_id=spec.experiment_id,
+        variant_id=variant.variant_id,
+        artifact_key=_v2_variant_artifact_key(variant),
+        stage=variant.stage,
+        unit_ref=unit_ref,
+        plan_hash=_v2_model_or_lab_hash(plan_hash, "v2_plan_hash"),
+        route_hash=_v2_hash(route_hash, "v2_route_hash"),
+        attempted_tool_ids=tuple(sorted(set(attempted))),
+        skipped_tool_reasons=skipped,
+        outcome_reasons=outcomes,
+        provider_receipt_refs=tuple(sorted(set(item.receipt_ref for item in receipts))),
+        total_credit_microunits=sum(item.credit_microunits for item in receipts),
+        latency_ms=sum(item.latency_ms for item in receipts),
+        execution_mode=spec.receipt_execution_mode,
+    )
+    decision_payload = decision_draft.to_dict()
+    decision_payload["receipt_id"] = "routing_decision:" + sha256_json(decision_payload).split(":", 1)[1][:16]
+    decision = replace(decision_draft, receipt_id=decision_payload["receipt_id"])
+    decision_store.put(decision)
+    return receipts, bool(predicted), decision
+
+
+def _v2_metrics(
+    *,
+    split: str,
+    unit_refs: Sequence[str],
+    gold_labels: Mapping[str, bool],
+    predictions: Mapping[str, bool],
+    receipts_by_unit: Mapping[str, Sequence[ProviderReceipt]],
+    baseline_positive_units: set[str],
+) -> RoutingEvaluationMetrics:
+    predicted_positive = sum(1 for unit_ref in unit_refs if predictions.get(unit_ref, False))
+    true_positive = sum(1 for unit_ref in unit_refs if predictions.get(unit_ref, False) and gold_labels[unit_ref])
+    false_positive = sum(1 for unit_ref in unit_refs if predictions.get(unit_ref, False) and not gold_labels[unit_ref])
+    false_negative = sum(1 for unit_ref in unit_refs if not predictions.get(unit_ref, False) and gold_labels[unit_ref])
+    verified = rejected = misses = failures = total_credit = no_signal_credit = rescues = rescue_credit = latency = receipt_count = overlap = 0
+    for unit_ref in unit_refs:
+        receipts = tuple(receipts_by_unit.get(unit_ref, ()))
+        receipt_count += len(receipts)
+        total_credit += sum(item.credit_microunits for item in receipts)
+        latency += sum(item.latency_ms for item in receipts)
+        lineages = [item.source_lineage_id for item in receipts]
+        overlap += len(lineages) - len(set(lineages))
+        for receipt in receipts:
+            if receipt.outcome == ProviderOutcome.VERIFIED.value:
+                verified += 1
+            elif receipt.outcome == ProviderOutcome.REJECTED.value:
+                rejected += 1
+            elif receipt.outcome == ProviderOutcome.SOURCE_MISS.value:
+                misses += 1
+            elif receipt.outcome == ProviderOutcome.ADAPTER_FAILURE.value:
+                failures += 1
+        if not predictions.get(unit_ref, False):
+            no_signal_credit += sum(item.credit_microunits for item in receipts)
+        if predictions.get(unit_ref, False) and unit_ref not in baseline_positive_units:
+            rescues += 1
+            rescue_credit += sum(item.credit_microunits for item in receipts)
+    positive_count = sum(1 for unit_ref in unit_refs if gold_labels[unit_ref])
+    precision = true_positive / predicted_positive if predicted_positive else 1.0
+    recall = true_positive / positive_count if positive_count else 1.0
+    return RoutingEvaluationMetrics(
+        split=split,
+        unit_count=len(unit_refs),
+        predicted_positive_count=predicted_positive,
+        true_positive_count=true_positive,
+        false_positive_count=false_positive,
+        false_negative_count=false_negative,
+        verified_positive_count=verified,
+        rejected_count=rejected,
+        source_miss_count=misses,
+        adapter_failure_count=failures,
+        total_credit_microunits=total_credit,
+        no_signal_credit_microunits=no_signal_credit,
+        unique_rescue_count=rescues,
+        unique_rescue_credit_microunits=rescue_credit,
+        marginal_verified_positives_per_credit=(true_positive / total_credit if total_credit else 0.0),
+        precision=round(precision, 8),
+        recall=round(recall, 8),
+        mean_latency_ms=round(latency / receipt_count, 8) if receipt_count else 0.0,
+        source_lineage_overlap_count=overlap,
+        source_lineage_overlap_rate=round(overlap / receipt_count, 8) if receipt_count else 0.0,
+    )
+
+
+def evaluate_routing_experiment_v2(
+    spec: RoutingExperimentV2Spec | Mapping[str, Any],
+    *,
+    gold_labels: Mapping[str, bool],
+    runner: Callable[..., ProviderReceipt | Mapping[str, Any]],
+    adapters: Mapping[str, RoutingExperimentV2Adapter | IsolatedRoutingAdapter],
+    receipt_store: ProviderReceiptStore | None = None,
+    decision_store: RoutingDecisionReceiptStore | None = None,
+    authoritative_billing_rollup: Callable[[ProviderReceiptStore], Mapping[str, Any]] | None = None,
+    require_isolation: bool = True,
+) -> RoutingExperimentV2Evaluation:
+    """Evaluate route/tool combinations without changing a live model pointer."""
+
+    if not isinstance(spec, RoutingExperimentV2Spec):
+        spec = RoutingExperimentV2Spec.from_mapping(spec)
+    adapters = _v2_unwrap_adapters(adapters, variants=spec.variants, require_isolation=require_isolation)
+    errors = validate_routing_experiment_v2_spec(spec, adapters=adapters)
+    if errors:
+        raise RoutingExperimentError("invalid v2 routing experiment: " + "; ".join(errors))
+    _v2_labels(spec.input, gold_labels)
+    if spec.allow_live_credit_spend:
+        if spec.receipt_execution_mode != ReceiptExecutionMode.MEASURED_LAB.value:
+            raise RoutingExperimentError("v2_live_spend_requires_measured_lab_execution_mode")
+        if receipt_store is None or isinstance(receipt_store.repository, InMemoryProviderReceiptRepository):
+            raise RoutingExperimentError("v2_live_spend_requires_durable_receipt_repository")
+        if authoritative_billing_rollup is None:
+            raise RoutingExperimentError("v2_live_spend_requires_authoritative_billing_rollup")
+    elif spec.receipt_execution_mode == ReceiptExecutionMode.MEASURED_LAB.value:
+        raise RoutingExperimentError("v2_measured_lab_receipts_require_explicit_live_spend")
+    store = receipt_store if receipt_store is not None else ProviderReceiptStore()
+    initial_cache_hits = store.cache_hits
+    initial_cache_misses = store.cache_misses
+    decisions = decision_store if decision_store is not None else RoutingDecisionReceiptStore()
+    bindings = {item.binding_id: item for item in spec.provider_bindings}
+    feature_sets: dict[str, Any] = {}
+    for variant in spec.variants:
+        feature_sets[variant.variant_id] = adapters[variant.variant_id].parse_feature_set(spec.input.feature_set_payload)
+    spent_total = [0]
+    spent_by_binding: dict[str, int] = {}
+    reserved_total = [0]
+    reserved_by_binding: dict[str, int] = {}
+    per_variant_predictions: dict[str, dict[str, bool]] = {}
+    per_variant_receipts: dict[str, dict[str, tuple[ProviderReceipt, ...]]] = {}
+    per_variant_decisions: dict[str, list[str]] = {}
+    per_variant_provider_refs: dict[str, set[str]] = {}
+    baseline_predictions: dict[str, dict[str, bool]] = {"calibration": {}, "holdout": {}}
+    ordered_units = tuple(spec.input.calibration_unit_refs) + tuple(spec.input.holdout_unit_refs)
+    for variant in spec.variants:
+        adapter = adapters[variant.variant_id]
+        predictions: dict[str, bool] = {}
+        receipts_by_unit: dict[str, tuple[ProviderReceipt, ...]] = {}
+        decision_refs: list[str] = []
+        provider_refs: set[str] = set()
+        for unit_ref in ordered_units:
+            receipts, predicted, decision = _v2_run_unit(
+                spec,
+                variant,
+                adapter=adapter,
+                feature_set=feature_sets[variant.variant_id],
+                bindings=bindings,
+                store=store,
+                decision_store=decisions,
+                runner=runner,
+                unit_ref=unit_ref,
+                spent_total=spent_total,
+                spent_by_binding=spent_by_binding,
+                reserved_total=reserved_total,
+                reserved_by_binding=reserved_by_binding,
+            )
+            predictions[unit_ref] = predicted
+            receipts_by_unit[unit_ref] = tuple(receipts)
+            decision_refs.append(decision.receipt_id)
+            provider_refs.update(item.receipt_ref for item in receipts)
+            if variant.variant_id == spec.baseline_variant_id:
+                split = "calibration" if unit_ref in spec.input.calibration_unit_refs else "holdout"
+                baseline_predictions[split][unit_ref] = predicted
+        per_variant_predictions[variant.variant_id] = predictions
+        per_variant_receipts[variant.variant_id] = receipts_by_unit
+        per_variant_decisions[variant.variant_id] = decision_refs
+        per_variant_provider_refs[variant.variant_id] = provider_refs
+    evaluations: list[RoutingExperimentV2VariantEvaluation] = []
+    for variant in spec.variants:
+        predictions = per_variant_predictions[variant.variant_id]
+        receipts_by_unit = per_variant_receipts[variant.variant_id]
+        calibration = _v2_metrics(
+            split="calibration",
+            unit_refs=spec.input.calibration_unit_refs,
+            gold_labels=gold_labels,
+            predictions=predictions,
+            receipts_by_unit=receipts_by_unit,
+            baseline_positive_units={unit for unit, value in baseline_predictions["calibration"].items() if value},
+        )
+        holdout = _v2_metrics(
+            split="holdout",
+            unit_refs=spec.input.holdout_unit_refs,
+            gold_labels=gold_labels,
+            predictions=predictions,
+            receipts_by_unit=receipts_by_unit,
+            baseline_positive_units={unit for unit, value in baseline_predictions["holdout"].items() if value},
+        )
+        passed_precision = calibration.precision >= spec.gates.min_calibration_precision and holdout.precision >= spec.gates.min_holdout_precision
+        passed_recall = holdout.recall >= spec.gates.min_holdout_recall
+        passed_cost = holdout.no_signal_credit_microunits <= spec.gates.max_holdout_no_signal_credit_microunits
+        passed_efficiency = holdout.marginal_verified_positives_per_credit >= spec.gates.min_marginal_verified_positives_per_credit
+        evaluations.append(
+            RoutingExperimentV2VariantEvaluation(
+                variant_id=variant.variant_id,
+                artifact_key=_v2_variant_artifact_key(variant),
+                stage=variant.stage,
+                calibration=calibration,
+                holdout=holdout,
+                passed_precision_gate=passed_precision,
+                passed_recall_gate=passed_recall,
+                passed_cost_gate=passed_cost,
+                passed_efficiency_gate=passed_efficiency,
+                passed=passed_precision and passed_recall and passed_cost and passed_efficiency,
+                decision_receipt_refs=tuple(sorted(set(per_variant_decisions[variant.variant_id]))),
+                provider_receipt_refs=tuple(sorted(per_variant_provider_refs[variant.variant_id])),
+            )
+        )
+    passing = [item for item in evaluations if item.passed]
+    selected = ""
+    if passing:
+        selected = sorted(
+            passing,
+            key=lambda item: (
+                item.holdout.total_credit_microunits,
+                len(item.provider_receipt_refs),
+                -item.holdout.unique_rescue_count,
+                -item.holdout.recall,
+                item.variant_id,
+            ),
+        )[0].variant_id
+    billing_id = billing_hash = ""
+    billing_total = 0
+    if spec.allow_live_credit_spend:
+        rollup = authoritative_billing_rollup(store) if authoritative_billing_rollup is not None else None
+        if not isinstance(rollup, Mapping):
+            raise RoutingExperimentError("v2_authoritative_billing_rollup_must_be_an_object")
+        billing_id = _ensure_safe_ref(rollup.get("rollup_id"), "v2_billing_rollup_id")
+        billing_hash = _ensure_hash(rollup.get("rollup_hash"), "v2_billing_rollup_hash")
+        billing_total = int(rollup.get("total_credit_microunits", -1))
+        if billing_total != spent_total[0]:
+            raise RoutingExperimentError("v2_authoritative_billing_delta_mismatch")
+    decision_refs = tuple(sorted({ref for item in evaluations for ref in item.decision_receipt_refs}))
+    provider_refs = tuple(sorted({ref for item in evaluations for ref in item.provider_receipt_refs}))
+    draft = RoutingExperimentV2Evaluation(
+        receipt_id="routing_evaluation_v2:pending",
+        experiment_id=spec.experiment_id,
+        experiment_hash=spec.experiment_hash(),
+        variants=tuple(evaluations),
+        baseline_variant_id=spec.baseline_variant_id,
+        selected_variant_id=selected,
+        decision_receipt_refs=decision_refs,
+        provider_receipt_refs=provider_refs,
+        provider_cache_hits=store.cache_hits - initial_cache_hits,
+        provider_cache_misses=store.cache_misses - initial_cache_misses,
+        billing_rollup_id=billing_id,
+        billing_rollup_hash=billing_hash,
+        billing_rollup_total_credit_microunits=billing_total,
+        live_credit_spend=spec.allow_live_credit_spend,
+    )
+    payload = draft.to_dict()
+    return replace(
+        draft,
+        receipt_id="routing_evaluation_v2:" + sha256_json(payload).split(":", 1)[1][:16],
+    )
+
+
+def promote_routing_experiment_v2_to_lab(
+    evaluation: RoutingExperimentV2Evaluation,
+) -> str:
+    """Return an immutable Lab reference; never promote a live pointer."""
+
+    if not isinstance(evaluation, RoutingExperimentV2Evaluation):
+        raise RoutingExperimentError("v2_evaluation_must_be_typed")
+    if evaluation.live_credit_spend:
+        raise RoutingExperimentError("v2_live_evaluation_cannot_auto_promote")
+    if not evaluation.selected_variant_id:
+        raise RoutingExperimentError("v2_evaluation_has_no_passing_variant")
+    return sha256_json(
+        {
+            "contract_version": "leadpoet.routing_experiment_v2_lab_reference:v1",
+            "evaluation_receipt_id": evaluation.receipt_id,
+            "experiment_hash": evaluation.experiment_hash,
+            "selected_variant_id": evaluation.selected_variant_id,
+        }
+    )
+
+
 __all__ = [
     "MAX_CREDIT_MICROUNITS_PER_VARIANT",
     "MAX_PROFILE_VARIANTS",
+    "ROUTING_EXPERIMENT_V2_CONTRACT_VERSION",
+    "ROUTING_DECISION_RECEIPT_V2_VERSION",
+    "ROUTING_EXPERIMENT_STAGES",
     "ProviderBindingIdentity",
     "ProviderOutcome",
     "ProviderReceipt",
@@ -2830,6 +4344,17 @@ __all__ = [
     "RoutingEvaluationReceipt",
     "RoutingExperimentError",
     "RoutingExperimentSpec",
+    "RoutingExperimentV2Input",
+    "RoutingExperimentV2Variant",
+    "RoutingExperimentV2Spec",
+    "RoutingExperimentV2Adapter",
+    "IsolatedRoutingAdapter",
+    "RoutingExperimentV2AdapterFactory",
+    "SourceAddProvenance",
+    "RoutingDecisionReceiptV2",
+    "RoutingDecisionReceiptStore",
+    "RoutingExperimentV2VariantEvaluation",
+    "RoutingExperimentV2Evaluation",
     "LabRoutingProfile",
     "RoutingAdmissionPlanAdapter",
     "RoutingPlanStepBudget",
@@ -2841,7 +4366,9 @@ __all__ = [
     "VariantEvaluation",
     "admit_llm_routing_profile_proposal",
     "evaluate_routing_experiment",
+    "evaluate_routing_experiment_v2",
     "promote_routing_profile_to_lab",
+    "promote_routing_experiment_v2_to_lab",
     "provider_receipt_key",
     "select_smallest_passing_variant",
     "validate_frozen_routing_input",
@@ -2852,6 +4379,7 @@ __all__ = [
     "validate_routing_evaluation_receipt",
     "validate_routing_evaluation_gates",
     "validate_routing_experiment_spec",
+    "validate_routing_experiment_v2_spec",
     "validate_experiment_credit_budget",
     "validate_sourcing_model_artifact_identity",
     "verify_lab_routing_artifact_lineage",

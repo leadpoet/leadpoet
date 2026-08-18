@@ -4041,6 +4041,13 @@ def _routing_decision_receipt_from_mapping(
         "execution_mode",
         "immutable",
     )
+    if any(not isinstance(key, str) for key in data):
+        raise RoutingExperimentError("v2_decision_receipt_keys_must_be_strings")
+    unknown = sorted(set(data) - set(required))
+    if unknown:
+        raise RoutingExperimentError(
+            "v2_decision_receipt_unknown_fields:" + ",".join(str(item) for item in unknown)
+        )
     missing = [field_name for field_name in required if field_name not in data]
     if missing:
         raise RoutingExperimentError(
@@ -4132,7 +4139,11 @@ def validate_routing_decision_receipt(
                 _ensure_safe_ref(item, f"v2_decision_{field_name[:-4]}_id")
             except RoutingExperimentError as exc:
                 errors.append(str(exc))
-    if len(set(receipt.considered_tool_ids)) != len(receipt.considered_tool_ids):
+    if (
+        isinstance(receipt.considered_tool_ids, tuple)
+        and all(isinstance(item, str) for item in receipt.considered_tool_ids)
+        and len(set(receipt.considered_tool_ids)) != len(receipt.considered_tool_ids)
+    ):
         errors.append("v2_decision_considered_tool_ids_must_be_unique")
     for field_name, pairs in (
         ("skipped_tool_reasons", receipt.skipped_tool_reasons),
@@ -4154,6 +4165,74 @@ def validate_routing_decision_receipt(
                 _ensure_safe_ref(pair[1], f"v2_decision_{field_name[:-8]}_reason")
             except RoutingExperimentError as exc:
                 errors.append(str(exc))
+    considered = receipt.considered_tool_ids
+    attempted = receipt.attempted_tool_ids
+    skipped_tools = tuple(
+        item[0]
+        for item in (
+            receipt.skipped_tool_reasons
+            if isinstance(receipt.skipped_tool_reasons, tuple)
+            else ()
+        )
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    )
+    outcome_tools = tuple(
+        item[0]
+        for item in (
+            receipt.outcome_reasons
+            if isinstance(receipt.outcome_reasons, tuple)
+            else ()
+        )
+        if isinstance(item, tuple) and len(item) == 2
+    )
+    if (
+        isinstance(considered, tuple)
+        and all(isinstance(item, str) for item in considered)
+        and isinstance(attempted, tuple)
+        and all(isinstance(item, str) for item in attempted)
+    ):
+        if any(tool_id not in set(considered) for tool_id in attempted):
+            errors.append("v2_decision_attempted_tools_must_be_considered")
+        expected_skipped = tuple(
+            tool_id for tool_id in considered if tool_id not in set(attempted)
+        )
+        if len(skipped_tools) != len(set(skipped_tools)):
+            errors.append("v2_decision_skipped_tool_ids_must_be_unique")
+        if skipped_tools != expected_skipped:
+            errors.append("v2_decision_skipped_tools_must_match_considered_minus_attempted")
+    if (
+        isinstance(outcome_tools, tuple)
+        and isinstance(attempted, tuple)
+        and outcome_tools != attempted
+    ):
+        errors.append("v2_decision_outcome_tools_must_match_attempted")
+    outcome_values = [
+        pair[1]
+        for pair in (
+            receipt.outcome_reasons
+            if isinstance(receipt.outcome_reasons, tuple)
+            else ()
+        )
+        if isinstance(pair, tuple) and len(pair) == 2
+    ]
+    if any(
+        not isinstance(item, str)
+        or item not in {outcome.value for outcome in ProviderOutcome}
+        for item in outcome_values
+    ):
+        errors.append("v2_decision_outcomes_are_invalid")
+    if (
+        isinstance(receipt.provider_receipt_refs, tuple)
+        and isinstance(attempted, tuple)
+        and len(receipt.provider_receipt_refs) != len(attempted)
+    ):
+        errors.append("v2_decision_provider_receipt_refs_must_match_attempts")
+    if (
+        isinstance(receipt.provider_receipt_refs, tuple)
+        and all(isinstance(item, str) for item in receipt.provider_receipt_refs)
+        and len(receipt.provider_receipt_refs) != len(set(receipt.provider_receipt_refs))
+    ):
+        errors.append("v2_decision_provider_receipt_refs_must_be_unique")
     try:
         _bounded_int(
             receipt.total_credit_microunits,
@@ -4191,6 +4270,16 @@ class RoutingDecisionReceiptRepository(Protocol):
     def append(self, key: str, receipt: RoutingDecisionReceiptV2) -> RoutingDecisionReceiptV2: ...
 
     def keys(self) -> Iterable[str]: ...
+
+
+def _routing_decision_repository_shape_errors(repository: Any) -> list[str]:
+    errors: list[str] = []
+    if type(getattr(repository, "durable", None)) is not bool:
+        errors.append("v2_decision_receipt_repository_durable_must_be_boolean")
+    for method_name in ("get", "append", "keys"):
+        if not callable(getattr(repository, method_name, None)):
+            errors.append(f"v2_decision_receipt_repository_{method_name}_must_be_callable")
+    return errors
 
 
 class InMemoryRoutingDecisionReceiptRepository:
@@ -4247,6 +4336,12 @@ class JsonlRoutingDecisionReceiptRepository:
                     record = json.loads(line)
                     if not isinstance(record, Mapping):
                         raise RoutingExperimentError("v2_decision_receipt_repository_record_is_invalid")
+                    unknown = sorted(set(record) - {"key", "receipt"})
+                    if unknown:
+                        raise RoutingExperimentError(
+                            "v2_decision_receipt_repository_unknown_fields:"
+                            + ",".join(str(item) for item in unknown)
+                        )
                     key = record.get("key")
                     receipt = RoutingDecisionReceiptV2.from_mapping(record.get("receipt") or {})
                     if not isinstance(key, str) or not key:
@@ -4302,11 +4397,20 @@ class RoutingDecisionReceiptStore:
     """Append-only decision receipt store, separate from provider receipts."""
 
     def __init__(self, repository: RoutingDecisionReceiptRepository | None = None) -> None:
-        self.repository = repository if repository is not None else InMemoryRoutingDecisionReceiptRepository()
+        candidate = repository if repository is not None else InMemoryRoutingDecisionReceiptRepository()
+        errors = _routing_decision_repository_shape_errors(candidate)
+        if errors:
+            raise RoutingExperimentError("v2_decision_receipt_repository_invalid: " + "; ".join(errors))
+        self.repository = candidate
+
+    def readiness_errors(self) -> list[str]:
+        """Check the repository seam without reading or writing receipt data."""
+
+        return _routing_decision_repository_shape_errors(self.repository)
 
     @property
     def is_durable(self) -> bool:
-        return getattr(self.repository, "durable", False) is True
+        return type(self.repository.durable) is bool and self.repository.durable is True
 
     def put(self, receipt: RoutingDecisionReceiptV2 | Mapping[str, Any]) -> RoutingDecisionReceiptV2:
         normalized = receipt if isinstance(receipt, RoutingDecisionReceiptV2) else RoutingDecisionReceiptV2.from_mapping(receipt)
@@ -4414,8 +4518,57 @@ def _v2_projection_pairs(value: Any, field_name: str) -> tuple[tuple[str, str], 
         raise RoutingExperimentError(f"v2_{field_name}_must_be_an_object")
     pairs: list[tuple[str, str]] = []
     for key, reason in value.items():
+        if not isinstance(key, str) or not isinstance(reason, str):
+            raise RoutingExperimentError(f"v2_{field_name}_must_use_string_pairs")
         pairs.append((_ensure_safe_ref(key, f"v2_{field_name}_key"), _ensure_safe_ref(reason, f"v2_{field_name}_reason")))
     return tuple(pairs)
+
+
+def _v2_prepare_decision_projection(
+    projection: Any,
+    *,
+    considered_tool_ids: tuple[str, ...],
+    variant_bindings: Mapping[str, ProviderBindingIdentity],
+) -> dict[str, str]:
+    if not isinstance(projection, Mapping):
+        raise RoutingExperimentError("v2_model_plan_decision_projection_must_be_an_object")
+    if any(not isinstance(key, str) for key in projection):
+        raise RoutingExperimentError("v2_model_plan_decision_projection_keys_must_be_strings")
+    unknown = sorted(set(projection) - {"attempted_tool_ids", "skipped_tool_reasons", "outcome_reasons"})
+    if unknown:
+        raise RoutingExperimentError(
+            "v2_model_plan_decision_projection_unknown_fields:" + ",".join(str(item) for item in unknown)
+        )
+    considered = set(considered_tool_ids)
+    skipped_value = projection.get("skipped_tool_reasons", {})
+    if skipped_value is None:
+        raise RoutingExperimentError("v2_skipped_tool_reasons_must_be_an_object")
+    skipped = _v2_projection_pairs(skipped_value, "skipped_tool_reasons")
+    outcome_value = projection.get("outcome_reasons", {})
+    if outcome_value is None:
+        raise RoutingExperimentError("v2_outcome_reasons_must_be_an_object")
+    outcomes = _v2_projection_pairs(outcome_value, "outcome_reasons")
+    if "attempted_tool_ids" in projection:
+        attempted = projection.get("attempted_tool_ids")
+        if not isinstance(attempted, (list, tuple)) or isinstance(attempted, (str, bytes)):
+            raise RoutingExperimentError("v2_attempted_tool_ids_must_be_an_array")
+        for tool_id in attempted:
+            if not isinstance(tool_id, str):
+                raise RoutingExperimentError("v2_attempted_tool_ids_must_use_strings")
+            _ensure_safe_ref(tool_id, "v2_attempted_tool_id")
+    projected_tool_ids = [tool_id for tool_id, _reason in (*skipped, *outcomes)]
+    if "attempted_tool_ids" in projection:
+        projected_tool_ids.extend(projection["attempted_tool_ids"])
+    for tool_id in projected_tool_ids:
+        if tool_id not in considered:
+            raise RoutingExperimentError(
+                f"v2_model_plan_projection_tool_is_not_considered:{tool_id}"
+            )
+        if tool_id not in variant_bindings:
+            raise RoutingExperimentError(
+                f"v2_model_plan_projection_tool_is_unbound:{tool_id}"
+            )
+    return dict(skipped)
 
 
 def _v2_failure_receipt(
@@ -4466,10 +4619,20 @@ def _v2_runner_accepts_authorization(
         (item for item in parameters if item.name == "authorization"),
         None,
     )
-    return authorization is not None and authorization.kind in {
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    }
+    positional = tuple(
+        item
+        for item in parameters
+        if item.kind in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }
+    )
+    has_varargs = any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in parameters)
+    if authorization is None or has_varargs or len(positional) < 3:
+        return False
+    if authorization.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD:
+        return parameters.index(authorization) >= 3
+    return authorization.kind == inspect.Parameter.KEYWORD_ONLY
 
 
 def _v2_call_runner(
@@ -4588,6 +4751,52 @@ def _v2_run_unit(
         raise RoutingExperimentError("v2_model_plan_total_call_cap_exceeded")
     if planned_seconds_cap > MAX_LATENCY_MS / 1000:
         raise RoutingExperimentError("v2_model_plan_total_time_cap_exceeded")
+    try:
+        raw_considered_tool_ids = adapter.considered_tool_ids(plan, stage=variant.stage)
+        if isinstance(raw_considered_tool_ids, (str, bytes)):
+            raise RoutingExperimentError("v2_considered_tool_ids_must_be_an_array")
+        normalized_considered_tool_ids: list[str] = []
+        for item in raw_considered_tool_ids:
+            if not isinstance(item, str):
+                raise RoutingExperimentError("v2_considered_tool_ids_must_use_strings")
+            normalized_considered_tool_ids.append(
+                _ensure_safe_ref(item, "v2_considered_tool_id")
+            )
+        considered_tool_ids = tuple(normalized_considered_tool_ids)
+    except RoutingExperimentError:
+        raise
+    except Exception as exc:
+        raise RoutingExperimentError("v2_model_plan_considered_tools_failed") from exc
+    if len(set(considered_tool_ids)) != len(considered_tool_ids):
+        raise RoutingExperimentError("v2_model_plan_considered_tool_ids_must_be_unique")
+    considered_tool_set = set(considered_tool_ids)
+    unbound_considered = considered_tool_set.difference(variant_bindings)
+    if unbound_considered:
+        raise RoutingExperimentError(
+            "v2_model_plan_considered_tool_is_unbound:" + ",".join(sorted(unbound_considered))
+        )
+    planned_invoke_tools = {
+        item.tool_id
+        for item in step_budgets
+        if item.execution_mode == "invoke" and item.max_calls > 0
+    }
+    unconsidered_planned = planned_invoke_tools.difference(considered_tool_set)
+    if unconsidered_planned:
+        raise RoutingExperimentError(
+            "v2_model_plan_invoke_tool_is_not_considered:"
+            + ",".join(sorted(unconsidered_planned))
+        )
+    try:
+        projection = adapter.plan_decision_projection(plan)
+        projected_skipped = _v2_prepare_decision_projection(
+            projection,
+            considered_tool_ids=considered_tool_ids,
+            variant_bindings=variant_bindings,
+        )
+    except RoutingExperimentError:
+        raise
+    except Exception as exc:
+        raise RoutingExperimentError("v2_model_plan_decision_projection_failed") from exc
     planned_credit_by_tool = {
         item.tool_id: item.credit_microunits
         for item in budget_by_tool.values()
@@ -4602,6 +4811,10 @@ def _v2_run_unit(
         binding = variant_bindings.get(tool_id)
         if binding is None:
             raise RoutingExperimentError(f"v2_model_plan_references_unbound_tool:{tool_id}")
+        if tool_id not in considered_tool_set:
+            raise RoutingExperimentError(
+                f"v2_model_plan_invoked_tool_is_not_considered:{tool_id}"
+            )
         budget = budget_by_tool.get(tool_id)
         if budget is None:
             raise RoutingExperimentError(f"v2_model_plan_invoked_unplanned_tool:{tool_id}")
@@ -4765,28 +4978,11 @@ def _v2_run_unit(
                 reserved_by_binding[binding_id] = remaining
             else:
                 reserved_by_binding.pop(binding_id, None)
-    try:
-        projection = adapter.plan_decision_projection(plan)
-    except Exception as exc:
-        raise RoutingExperimentError("v2_model_plan_decision_projection_failed") from exc
-    try:
-        considered_tool_ids = tuple(
-            _ensure_safe_ref(item, "v2_considered_tool_id")
-            for item in adapter.considered_tool_ids(plan, stage=variant.stage)
-        )
-    except Exception as exc:
-        raise RoutingExperimentError("v2_model_plan_considered_tools_failed") from exc
-    considered_tool_set = set(considered_tool_ids)
-    unbound_considered = considered_tool_set.difference(variant_bindings)
-    if unbound_considered:
-        raise RoutingExperimentError(
-            "v2_model_plan_considered_tool_is_unbound:" + ",".join(sorted(unbound_considered))
-        )
     attempted = tuple(_ensure_safe_ref(item, "v2_attempted_tool_id") for item in attempt_order)
     skipped_projection = {
         tool_id: reason
-        for tool_id, reason in dict(projection.get("skipped_tool_reasons") or {}).items()
-        if tool_id in considered_tool_set and tool_id in variant_bindings and tool_id not in attempt_by_tool
+        for tool_id, reason in projected_skipped.items()
+        if tool_id not in attempt_by_tool
     }
     for tool_id in considered_tool_ids:
         if tool_id not in attempt_by_tool:
@@ -4910,7 +5106,9 @@ def evaluate_routing_experiment_v2(
             raise RoutingExperimentError("v2_live_spend_requires_authorization_aware_runner")
         if receipt_store is None or isinstance(receipt_store.repository, InMemoryProviderReceiptRepository):
             raise RoutingExperimentError("v2_live_spend_requires_durable_receipt_repository")
-        if decision_store is None or getattr(decision_store, "is_durable", False) is not True:
+        if not isinstance(decision_store, RoutingDecisionReceiptStore):
+            raise RoutingExperimentError("v2_live_spend_requires_durable_decision_receipt_store")
+        if decision_store.readiness_errors() or decision_store.is_durable is not True:
             raise RoutingExperimentError("v2_live_spend_requires_durable_decision_receipt_store")
         if authoritative_billing_rollup is None:
             raise RoutingExperimentError("v2_live_spend_requires_authoritative_billing_rollup")

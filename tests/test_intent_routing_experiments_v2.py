@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 import os
 
 import pytest
@@ -332,6 +333,76 @@ def test_v2_intent_route_only_and_combined_source_add_run_with_decision_receipts
     assert promote_routing_experiment_v2_to_lab(evaluation).startswith("sha256:")
 
 
+@pytest.mark.parametrize(
+    "considered, expected",
+    [
+        (("intent.baseline", "intent.unbound"), "considered_tool_is_unbound"),
+        (("intent.baseline", "intent.baseline"), "considered_tool_ids_must_be_unique"),
+    ],
+    ids=["unbound", "duplicate"],
+)
+def test_v2_invalid_considered_tools_fail_before_provider_calls(considered, expected):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    calls = []
+
+    class InvalidConsideredAdapter(FakeV2Adapter):
+        def considered_tool_ids(self, plan, *, stage):
+            del plan, stage
+            return considered
+
+    def recording_runner(binding, unit, request):
+        calls.append(binding.tool_id)
+        return _runner(binding, unit, request)
+
+    invalid_adapters = {
+        key: InvalidConsideredAdapter(value.manifests) for key, value in adapters.items()
+    }
+    with pytest.raises(RoutingExperimentError, match=expected):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=invalid_adapters,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_empty_considered_no_call_plan_is_allowed():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    calls = []
+
+    class EmptyPlanAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del payload, kwargs
+            return Plan({"feature_set_sha256": FEATURE_HASH.split(":", 1)[1], "steps": []}, ())
+
+        def plan_step_budgets(self, plan):
+            del plan
+            return ()
+
+        def considered_tool_ids(self, plan, *, stage):
+            del plan, stage
+            return ()
+
+    def recording_runner(binding, unit, request):
+        calls.append((binding.tool_id, unit, request))
+        return _runner(binding, unit, request)
+
+    decisions = RoutingDecisionReceiptStore()
+    evaluate_routing_experiment_v2(
+        spec,
+        gold_labels=labels,
+        runner=recording_runner,
+        adapters={key: EmptyPlanAdapter(value.manifests) for key, value in adapters.items()},
+        decision_store=decisions,
+        require_isolation=False,
+    )
+    assert calls == []
+    assert decisions.values()
+    assert all(item.considered_tool_ids == () for item in decisions.values())
+
+
 @pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
 def test_v2_decision_receipts_round_trip_considered_tools_for_both_stages(tmp_path, stage):
     spec, adapters, labels, _tool, source_tool = _spec(stage, with_source_add=True)
@@ -362,6 +433,67 @@ def test_v2_decision_receipts_round_trip_considered_tools_for_both_stages(tmp_pa
     malformed = original[0].to_dict()
     malformed["considered_tool_ids"] = "not-an-array"
     assert any("must_be_an_array" in error for error in validate_routing_decision_receipt(malformed))
+    malformed = original[0].to_dict()
+    malformed["ignored_secret_extra"] = "Bearer secret"
+    with pytest.raises(RoutingExperimentError, match="unknown_fields"):
+        RoutingDecisionReceiptV2.from_mapping(malformed)
+    assert any("unknown_fields" in error for error in validate_routing_decision_receipt(malformed))
+    tampered_record = {
+        "key": "receipt-key",
+        "receipt": original[0].to_dict(),
+        "ignored_secret_extra": "Bearer secret",
+    }
+    path.write_text(path.read_text() + json.dumps(tampered_record) + "\n")
+    with pytest.raises(RoutingExperimentError, match="repository_unknown_fields"):
+        JsonlRoutingDecisionReceiptRepository(path)
+
+    relationship_invalid = original[0].to_dict()
+    relationship_invalid["considered_tool_ids"] = []
+    relationship_invalid["attempted_tool_ids"] = ["intent.unconsidered"]
+    relationship_invalid["skipped_tool_reasons"] = [["intent.unconsidered", "model_route_stopped"]]
+    relationship_invalid["outcome_reasons"] = [["intent.unconsidered", ProviderOutcome.SOURCE_MISS.value]]
+    relationship_invalid["provider_receipt_refs"] = []
+    relationship_invalid["receipt_id"] = "routing_decision:" + sha256_json(
+        {**relationship_invalid, "receipt_id": "routing_decision:pending"}
+    ).split(":", 1)[1][:16]
+    relationship_errors = validate_routing_decision_receipt(relationship_invalid)
+    assert any("attempted_tools_must_be_considered" in error for error in relationship_errors)
+    assert any("skipped_tools_must_match" in error for error in relationship_errors)
+
+    valid_receipt = next(item for item in original if item.attempted_tool_ids)
+    tool_id = valid_receipt.attempted_tool_ids[0]
+    provider_ref = valid_receipt.provider_receipt_refs[0]
+    duplicate_refs = valid_receipt.to_dict()
+    duplicate_refs["attempted_tool_ids"] = [tool_id, tool_id]
+    duplicate_refs["skipped_tool_reasons"] = []
+    duplicate_refs["outcome_reasons"] = [[tool_id, ProviderOutcome.VERIFIED.value]] * 2
+    duplicate_refs["provider_receipt_refs"] = [provider_ref, provider_ref]
+    duplicate_refs["receipt_id"] = "routing_decision:" + sha256_json(
+        {**duplicate_refs, "receipt_id": "routing_decision:pending"}
+    ).split(":", 1)[1][:16]
+    duplicate_errors = validate_routing_decision_receipt(duplicate_refs)
+    assert any("provider_receipt_refs_must_be_unique" in error for error in duplicate_errors)
+
+    duplicate_skips = valid_receipt.to_dict()
+    duplicate_skips["considered_tool_ids"] = [tool_id]
+    duplicate_skips["attempted_tool_ids"] = []
+    duplicate_skips["skipped_tool_reasons"] = [[tool_id, "first"], [tool_id, "second"]]
+    duplicate_skips["outcome_reasons"] = []
+    duplicate_skips["provider_receipt_refs"] = []
+    duplicate_skips["receipt_id"] = "routing_decision:" + sha256_json(
+        {**duplicate_skips, "receipt_id": "routing_decision:pending"}
+    ).split(":", 1)[1][:16]
+    assert any(
+        "skipped_tool_ids_must_be_unique" in error
+        for error in validate_routing_decision_receipt(duplicate_skips)
+    )
+
+    invalid_outcome = valid_receipt.to_dict()
+    invalid_outcome["outcome_reasons"] = [[tool_id, "invented_outcome"]]
+    invalid_outcome["receipt_id"] = "routing_decision:" + sha256_json(
+        {**invalid_outcome, "receipt_id": "routing_decision:pending"}
+    ).split(":", 1)[1][:16]
+    assert any("outcomes_are_invalid" in error for error in validate_routing_decision_receipt(invalid_outcome))
 
 
 def test_v2_live_requires_durable_decision_store_before_provider_calls(tmp_path):
@@ -372,9 +504,13 @@ def test_v2_live_requires_durable_decision_store_before_provider_calls(tmp_path)
         receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
     )
 
-    for index, decision_store in enumerate((None, RoutingDecisionReceiptStore())):
+    class ForgedDurableStore:
+        is_durable = True
+
+    for index, decision_store in enumerate((None, RoutingDecisionReceiptStore(), ForgedDurableStore())):
         if decision_store is not None:
-            assert decision_store.is_durable is False
+            if isinstance(decision_store, RoutingDecisionReceiptStore):
+                assert decision_store.is_durable is False
         calls = []
 
         def measured_runner(binding, unit, request, authorization):
@@ -404,6 +540,35 @@ def test_v2_live_requires_durable_decision_store_before_provider_calls(tmp_path)
                 require_isolation=False,
             )
         assert calls == []
+
+
+def test_v2_decision_store_requires_structural_repository_and_keeps_custom_seam():
+    class InvalidRepository:
+        durable = True
+
+    with pytest.raises(RoutingExperimentError, match="repository_invalid"):
+        RoutingDecisionReceiptStore(InvalidRepository())
+
+    class CustomRepository:
+        durable = True
+
+        def __init__(self):
+            self.rows = {}
+
+        def get(self, key):
+            return self.rows.get(key)
+
+        def append(self, key, receipt):
+            self.rows[key] = receipt
+            return receipt
+
+        def keys(self):
+            return tuple(self.rows)
+
+    custom = CustomRepository()
+    store = RoutingDecisionReceiptStore(custom)
+    assert store.readiness_errors() == []
+    assert store.is_durable is True
 
 
 def test_v2_signal_type_is_frozen_and_rejected_before_provider_calls():
@@ -618,8 +783,10 @@ def test_v2_receipt_mode_is_exact_and_live_requires_authorization_aware_runner(t
         lambda calls: lambda binding, unit, request: calls.append(
             (binding, unit, request)
         ),
+        lambda calls: lambda *, authorization: calls.append(authorization),
+        lambda calls: lambda *args, authorization: calls.append((args, authorization)),
     ],
-    ids=["varargs_only", "kwargs_only", "three_args"],
+    ids=["varargs_only", "kwargs_only", "three_args", "authorization_only", "varargs_with_authorization"],
 )
 def test_v2_live_runner_requires_named_authorization_parameter(tmp_path, runner_factory):
     spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
@@ -760,6 +927,13 @@ def test_v2_fail_closed_on_timeout_malformed_retry_and_budget():
         unavailable_calls.append(binding.tool_id)
         return _runner(binding, unit, request)
     unavailable_decisions = RoutingDecisionReceiptStore()
+    class AvailabilityAwareAdapter(FakeV2Adapter):
+        def considered_tool_ids(self, plan, *, stage):
+            del stage
+            return tuple(dict.fromkeys((*plan.tools, *plan.payload.get("skipped", {}).keys())))
+    unavailable_adapters["candidate"] = AvailabilityAwareAdapter(
+        unavailable_adapters["candidate"].manifests
+    )
     evaluate_routing_experiment_v2(unavailable_spec, gold_labels=unavailable_labels, runner=unavailable_runner, adapters=unavailable_adapters, decision_store=unavailable_decisions, require_isolation=False)
     candidate_decisions = [item for item in unavailable_decisions.values() if item.variant_id == "candidate"]
     assert candidate_decisions and all("intent.baseline" not in item.attempted_tool_ids for item in candidate_decisions)
@@ -782,11 +956,9 @@ def test_v2_decision_outcomes_ignore_adversarial_model_projection():
             return {
                 "skipped_tool_reasons": {
                     "intent.baseline": "fabricated_skip",
-                    "intent.unattempted": "model_skip",
                 },
                 "outcome_reasons": {
                     "intent.baseline": "invented_success",
-                    "intent.unattempted": "invented_verified",
                 },
             }
 
@@ -812,7 +984,34 @@ def test_v2_decision_outcomes_ignore_adversarial_model_projection():
     assert all("fabricated_skip" not in dict(item).values() for item in skips)
 
 
-def test_v2_preserves_bound_model_exclusions_and_drops_unconsidered_projection_tools():
+def test_v2_rejects_unconsidered_outcome_projection_before_provider_calls():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+
+    class InvalidOutcomeProjectionAdapter(FakeV2Adapter):
+        def plan_decision_projection(self, plan):
+            del plan
+            return {"outcome_reasons": {"intent.unconsidered": "invented_verified"}}
+
+    calls = []
+    def recording_runner(binding, unit, request):
+        calls.append(binding.tool_id)
+        return _runner(binding, unit, request)
+
+    with pytest.raises(RoutingExperimentError, match="projection_tool_is_not_considered"):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters={
+                "baseline": InvalidOutcomeProjectionAdapter(adapters["baseline"].manifests),
+                "candidate": adapters["candidate"],
+            },
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_rejects_unconsidered_projection_tools_before_provider_calls():
     spec, adapters, labels, tool, _source_tool = _spec("intent_evidence")
 
     class ExclusionAdapter(FakeV2Adapter):
@@ -835,22 +1034,23 @@ def test_v2_preserves_bound_model_exclusions_and_drops_unconsidered_projection_t
             del plan
             return ()
 
-    decisions = RoutingDecisionReceiptStore()
-    evaluate_routing_experiment_v2(
-        spec,
-        gold_labels=labels,
-        runner=_runner,
-        adapters={
-            "baseline": ExclusionAdapter(adapters["baseline"].manifests),
-            "candidate": adapters["candidate"],
-        },
-        decision_store=decisions,
-        require_isolation=False,
-    )
-    baseline_decisions = [item for item in decisions.values() if item.variant_id == "baseline"]
-    assert baseline_decisions
-    assert all(dict(item.skipped_tool_reasons).get(tool) == "model_exclusion" for item in baseline_decisions)
-    assert all("intent.unconsidered" not in dict(item.skipped_tool_reasons) for item in baseline_decisions)
+    calls = []
+    def recording_runner(binding, unit, request):
+        calls.append(binding.tool_id)
+        return _runner(binding, unit, request)
+    with pytest.raises(RoutingExperimentError, match="projection_tool_is_not_considered"):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters={
+                "baseline": ExclusionAdapter(adapters["baseline"].manifests),
+                "candidate": adapters["candidate"],
+            },
+            decision_store=RoutingDecisionReceiptStore(),
+            require_isolation=False,
+        )
+    assert calls == []
 
 
 def test_v2_enforces_compiled_plan_availability_calls_time_and_credit_caps():
@@ -871,7 +1071,7 @@ def test_v2_enforces_compiled_plan_availability_calls_time_and_credit_caps():
             return (), False
 
     unplanned_calls = []
-    with pytest.raises(RoutingExperimentError, match="invoked_unplanned_tool"):
+    with pytest.raises(RoutingExperimentError, match="invoked_tool_is_not_considered"):
         evaluate_routing_experiment_v2(
             spec,
             gold_labels=labels,

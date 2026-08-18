@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatchcase
 import json
 import os
 from pathlib import Path
@@ -1407,6 +1408,78 @@ def _simulation_context(values: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _normalize_simulation_results(
+    results: Any, *, action: str
+) -> tuple[dict[str, str], set[str]]:
+    if not isinstance(results, list) or not results:
+        raise SetupError("controller IAM simulation response differs")
+
+    decisions: dict[str, str] = {}
+    missing_context: set[str] = set()
+    representation: str | None = None
+    valid_decisions = {"allowed", "explicitDeny", "implicitDeny"}
+
+    def add_missing(values: Any) -> None:
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value for value in values
+        ):
+            raise SetupError("controller IAM simulation response differs")
+        missing_context.update(values)
+
+    def add_decision(resource: Any, decision: Any) -> str:
+        resource_name = str(resource or "")
+        decision_name = str(decision or "")
+        if (
+            not resource_name
+            or decision_name not in valid_decisions
+            or resource_name in decisions
+        ):
+            raise SetupError("controller IAM simulation response differs")
+        decisions[resource_name] = decision_name
+        return decision_name
+
+    for result in results:
+        if (
+            not isinstance(result, Mapping)
+            or str(result.get("EvalActionName") or "") != action
+        ):
+            raise SetupError("controller IAM simulation response differs")
+        specific = result.get("ResourceSpecificResults", [])
+        if not isinstance(specific, list):
+            raise SetupError("controller IAM simulation response differs")
+        current = "nested" if specific else "flat"
+        if representation is not None and representation != current:
+            raise SetupError("controller IAM simulation response differs")
+        representation = current
+        add_missing(result.get("MissingContextValues", []))
+
+        if current == "flat":
+            add_decision(
+                result.get("EvalResourceName"), result.get("EvalDecision")
+            )
+            continue
+        if len(results) != 1:
+            raise SetupError("controller IAM simulation response differs")
+        aggregate = str(result.get("EvalDecision") or "")
+        if aggregate not in valid_decisions:
+            raise SetupError("controller IAM simulation response differs")
+        nested_decisions: set[str] = set()
+        for item in specific:
+            if not isinstance(item, Mapping):
+                raise SetupError("controller IAM simulation response differs")
+            nested_decisions.add(add_decision(
+                item.get("EvalResourceName"),
+                item.get("EvalResourceDecision"),
+            ))
+            add_missing(item.get("MissingContextValues", []))
+        if nested_decisions != {aggregate}:
+            raise SetupError("controller IAM simulation response differs")
+
+    if not decisions:
+        raise SetupError("controller IAM simulation response differs")
+    return decisions, missing_context
+
+
 def _simulate_controller_policy(
     iam: Any,
     *,
@@ -1415,6 +1488,7 @@ def _simulate_controller_policy(
     controller_arn: str,
     runner_arn: str,
     session_cutoff: str,
+    policy_documents: Sequence[Mapping[str, Any]],
 ) -> None:
     ec2_prefix = f"arn:aws:ec2:{region}:{account_id}"
     instance = ec2_prefix + ":instance/i-0123456789abcdef0"
@@ -1474,6 +1548,34 @@ def _simulate_controller_policy(
         "ec2:VolumeSize": "512",
         "ec2:VolumeType": "gp3",
     }
+    policy_statements = [
+        statement
+        for document in policy_documents
+        for statement in document.get("Statement", [])
+    ]
+    if not policy_statements:
+        raise SetupError("controller IAM simulation policy set is empty")
+    all_condition_keys = {
+        str(key)
+        for statement in policy_statements
+        for conditions in statement.get("Condition", {}).values()
+        for key in conditions
+    }
+
+    def applicable_condition_keys(action: str) -> set[str]:
+        keys: set[str] = set()
+        for statement in policy_statements:
+            raw_actions = statement.get("Action", [])
+            actions = raw_actions if isinstance(raw_actions, list) else [raw_actions]
+            if not any(
+                fnmatchcase(action.lower(), str(pattern).lower())
+                for pattern in actions
+            ):
+                continue
+            for conditions in statement.get("Condition", {}).values():
+                keys.update(str(key) for key in conditions)
+        return keys
+
     cases: list[tuple[str, str, list[str], Mapping[str, Any], str]] = [
         (
             "launch-positive",
@@ -1782,28 +1884,25 @@ def _simulate_controller_policy(
         )
         if response.get("IsTruncated"):
             raise SetupError(f"controller IAM simulation {name} was truncated")
-        results = response.get("EvaluationResults", [])
-        decisions = {
-            str(item.get("EvalResourceName") or ""): str(
-                item.get("EvalDecision") or ""
+        try:
+            decisions, missing_context = _normalize_simulation_results(
+                response.get("EvaluationResults"), action=action
             )
-            for item in results
-            if str(item.get("EvalActionName") or "") == action
-        }
-        missing_context = {
-            str(value)
-            for item in results
-            for value in item.get("MissingContextValues", [])
-        }
+        except SetupError as exc:
+            raise SetupError(
+                f"controller IAM simulation {name} differs"
+            ) from exc
         expected_missing = (
             {"aws:RequestTag/leadpoet:candidate-sha"}
             if name == "launch-missing-request-tag"
             else set()
         )
+        applicable_missing = missing_context & applicable_condition_keys(action)
         if (
             set(decisions) != set(resources)
             or set(decisions.values()) != {expected}
-            or missing_context != expected_missing
+            or not missing_context.issubset(all_condition_keys)
+            or applicable_missing != expected_missing
         ):
             raise SetupError(f"controller IAM simulation {name} differs")
 
@@ -2641,6 +2740,10 @@ def setup_iam_only(args: argparse.Namespace) -> dict[str, Any]:
             controller_arn=controller_arn,
             runner_arn=runner_arn,
             session_cutoff=controller_session_cutoff,
+            policy_documents=[
+                *controller_slices.values(),
+                controller_revoke_policy,
+            ],
         )
 
         # Never reuse an assumable bootstrap role across runs.  Ownership and

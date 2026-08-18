@@ -481,6 +481,10 @@ def test_controller_managed_policy_partition_and_adversarial_boundaries():
 
 def test_setup_simulator_executes_positive_and_adversarial_policy_matrix():
     policy = _controller_policy()
+    revoke_policy = setup._revoke_older_sessions_policy(
+        cutoff="2026-08-18T12:00:00Z"
+    )
+    policy_documents = [policy, revoke_policy]
 
     class IAM:
         calls = 0
@@ -526,8 +530,58 @@ def test_setup_simulator_executes_positive_and_adversarial_policy_matrix():
         controller_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.CONTROLLER_ROLE}",
         runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
         session_cutoff="2026-08-18T12:00:00Z",
+        policy_documents=policy_documents,
     )
     assert iam.calls >= 30
+
+    class AWSShaped(IAM):
+        first_specific_count = 0
+
+        def simulate_principal_policy(self, **kwargs):
+            response = super().simulate_principal_policy(**kwargs)
+            flat = response["EvaluationResults"]
+            decisions = {item["EvalDecision"] for item in flat}
+            assert len(decisions) == 1
+            if self.calls == 1:
+                self.first_specific_count = len(flat)
+            unrelated = (
+                {"ssm:resourceTag/Name"}
+                if self.calls == 2 else set()
+            )
+            missing = {
+                value
+                for item in flat
+                for value in item["MissingContextValues"]
+            } | unrelated
+            return {
+                "IsTruncated": False,
+                "EvaluationResults": [{
+                    "EvalActionName": kwargs["ActionNames"][0],
+                    "EvalResourceName": "*",
+                    "EvalDecision": decisions.pop(),
+                    "MissingContextValues": sorted(missing),
+                    "ResourceSpecificResults": [{
+                        "EvalResourceName": item["EvalResourceName"],
+                        "EvalResourceDecision": item["EvalDecision"],
+                        "MissingContextValues": sorted(
+                            set(item["MissingContextValues"]) | unrelated
+                        ),
+                    } for item in flat],
+                }],
+            }
+
+    aws_shaped = AWSShaped()
+    setup._simulate_controller_policy(
+        aws_shaped,
+        account_id=ACCOUNT,
+        region=setup.EXPECTED_REGION,
+        controller_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.CONTROLLER_ROLE}",
+        runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
+        session_cutoff="2026-08-18T12:00:00Z",
+        policy_documents=policy_documents,
+    )
+    assert aws_shaped.calls >= 30
+    assert aws_shaped.first_specific_count == 6
 
     class Broken(IAM):
         def simulate_principal_policy(self, **kwargs):
@@ -546,6 +600,121 @@ def test_setup_simulator_executes_positive_and_adversarial_policy_matrix():
             ),
             runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
             session_cutoff="2026-08-18T12:00:00Z",
+            policy_documents=policy_documents,
+        )
+
+
+def test_simulator_normalizes_aws_resource_specific_results():
+    image = f"arn:aws:ec2:{setup.EXPECTED_REGION}::image/{setup.PRODUCTION_AMI_ID}"
+    instance = (
+        f"arn:aws:ec2:{setup.EXPECTED_REGION}:{ACCOUNT}:"
+        "instance/i-0123456789abcdef0"
+    )
+    decisions, missing = setup._normalize_simulation_results(
+        [{
+            "EvalActionName": "ec2:RunInstances",
+            "EvalResourceName": "*",
+            "EvalDecision": "allowed",
+            "MissingContextValues": [],
+            "ResourceSpecificResults": [
+                {
+                    "EvalResourceName": image,
+                    "EvalResourceDecision": "allowed",
+                    "MissingContextValues": [],
+                },
+                {
+                    "EvalResourceName": instance,
+                    "EvalResourceDecision": "allowed",
+                    "MissingContextValues": [],
+                },
+            ],
+        }],
+        action="ec2:RunInstances",
+    )
+    assert decisions == {image: "allowed", instance: "allowed"}
+    assert missing == set()
+
+
+@pytest.mark.parametrize(
+    "results",
+    (
+        [],
+        [{
+            "EvalActionName": "ec2:RunInstances",
+            "EvalDecision": "allowed",
+            "MissingContextValues": [],
+            "ResourceSpecificResults": "invalid",
+        }],
+        [{
+            "EvalActionName": "ec2:RunInstances",
+            "EvalDecision": "allowed",
+            "MissingContextValues": [],
+            "ResourceSpecificResults": [{
+                "EvalResourceName": "arn:aws:ec2:us-east-1:1:instance/i-1",
+                "MissingContextValues": [],
+            }],
+        }],
+    ),
+)
+def test_simulator_rejects_malformed_results(results):
+    with pytest.raises(setup.SetupError, match="simulation response differs"):
+        setup._normalize_simulation_results(
+            results, action="ec2:RunInstances"
+        )
+
+
+def test_simulator_rejects_duplicate_resource_results():
+    resource = "arn:aws:ec2:us-east-1:1:instance/i-1"
+    with pytest.raises(setup.SetupError, match="simulation response differs"):
+        setup._normalize_simulation_results(
+            [{
+                "EvalActionName": "ec2:RunInstances",
+                "EvalDecision": "allowed",
+                "MissingContextValues": [],
+                "ResourceSpecificResults": [
+                    {
+                        "EvalResourceName": resource,
+                        "EvalResourceDecision": "allowed",
+                        "MissingContextValues": [],
+                    },
+                    {
+                        "EvalResourceName": resource,
+                        "EvalResourceDecision": "allowed",
+                        "MissingContextValues": [],
+                    },
+                ],
+            }],
+            action="ec2:RunInstances",
+        )
+
+
+@pytest.mark.parametrize("mixed", ("representation", "decision"))
+def test_simulator_rejects_mixed_results(mixed):
+    resource = "arn:aws:ec2:us-east-1:1:instance/i-1"
+    aggregate = {
+        "EvalActionName": "ec2:RunInstances",
+        "EvalResourceName": "*",
+        "EvalDecision": "allowed",
+        "MissingContextValues": [],
+        "ResourceSpecificResults": [{
+            "EvalResourceName": resource,
+            "EvalResourceDecision": (
+                "implicitDeny" if mixed == "decision" else "allowed"
+            ),
+            "MissingContextValues": [],
+        }],
+    }
+    results = [aggregate]
+    if mixed == "representation":
+        results.append({
+            "EvalActionName": "ec2:RunInstances",
+            "EvalResourceName": "arn:aws:ec2:us-east-1:1:volume/vol-1",
+            "EvalDecision": "allowed",
+            "MissingContextValues": [],
+        })
+    with pytest.raises(setup.SetupError, match="simulation response differs"):
+        setup._normalize_simulation_results(
+            results, action="ec2:RunInstances"
         )
 
 

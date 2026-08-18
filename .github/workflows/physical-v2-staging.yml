@@ -252,6 +252,10 @@ jobs:
           aws s3 cp {q(f"s3://{artifact_bucket}/{prefix}/candidate.bundle")} {q(root + "/candidate.bundle")} --region {q(required['AWS_REGION'])} --only-show-errors
           git clone {q(root + "/candidate.bundle")} {q(root + "/repo")}
           cd {q(root + "/repo")}
+          git remote set-url origin https://github.com/leadpoet/leadpoet.git
+          test "$(git remote get-url origin)" = https://github.com/leadpoet/leadpoet.git
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = {q(required['CANDIDATE_SHA'])}
           git checkout --detach {q(required['CANDIDATE_SHA'])}
           test "$(git rev-parse HEAD)" = {q(required['CANDIDATE_SHA'])}
           status=0

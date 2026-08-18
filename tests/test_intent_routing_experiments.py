@@ -58,6 +58,7 @@ FEATURE_SET_HASH = sha256_json(FEATURE_SET_PAYLOAD)
 class FakeModelPlan:
     payload: dict[str, object]
     steps: tuple[str, ...] = ()
+    conditional: tuple[str, ...] = ()
     dormant: tuple[str, ...] = ()
 
 
@@ -89,6 +90,10 @@ class FakeRoutingAdmissionPlanAdapter:
             errors.append("model_feature_set_payload_features_mismatch")
         return errors
 
+    def validate_artifact_identity(self, artifact):
+        del artifact
+        return []
+
     def validate_profile(self, profile, *, signal_type, feature_set, binding_tool_ids, binding_source_lineages):
         del feature_set, binding_source_lineages
         errors = []
@@ -114,15 +119,26 @@ class FakeRoutingAdmissionPlanAdapter:
         del signal_type, feature_set, remaining_seconds, remaining_calls, credit_cap
         steps = profile.payload["steps"]
         active = tuple(step["tool_id"] for step in steps if step["phase"] == "primary" and step["tool_id"] in available_tools)
+        conditional = tuple(step["tool_id"] for step in steps if step["phase"] == "confirmation" and step["tool_id"] in available_tools)
         dormant = tuple(step["tool_id"] for step in steps if step["phase"] == "challenger" and step["tool_id"] in available_tools)
-        return FakeModelPlan({"feature_set_sha256": FEATURE_SET_HASH.split(":", 1)[1], "steps": list(active), "dormant": list(dormant)}, active, dormant)
+        return FakeModelPlan({"feature_set_sha256": FEATURE_SET_HASH.split(":", 1)[1], "steps": list(active), "conditional": list(conditional), "dormant": list(dormant)}, active, conditional, dormant)
 
     def compile_challenger(self, parent_plan, *, profile, feature_set, available_tools, attempted_tool_ids, attempted_source_lineages, remaining_seconds, remaining_calls, credit_cap):
         del feature_set, available_tools, attempted_source_lineages, remaining_seconds, remaining_calls, credit_cap
         remaining = tuple(tool for tool in parent_plan.dormant if tool not in attempted_tool_ids)
         if not remaining:
             raise ValueError("no distinct dormant challenger remains")
-        return FakeModelPlan({"feature_set_sha256": FEATURE_SET_HASH.split(":", 1)[1], "steps": [remaining[0]], "dormant": []}, (remaining[0],), ())
+        return FakeModelPlan({"feature_set_sha256": FEATURE_SET_HASH.split(":", 1)[1], "steps": [remaining[0]], "conditional": [], "dormant": []}, (remaining[0],), (), ())
+
+    def has_conditional_confirmation(self, plan):
+        return bool(plan.conditional)
+
+    def compile_confirmation(self, parent_plan, *, profile, feature_set, available_tools, remaining_seconds, remaining_calls, credit_cap):
+        del profile, feature_set, available_tools, remaining_seconds, remaining_calls, credit_cap
+        if not parent_plan.conditional:
+            raise ValueError("no conditional confirmation remains")
+        selected = parent_plan.conditional[0]
+        return FakeModelPlan({"feature_set_sha256": FEATURE_SET_HASH.split(":", 1)[1], "steps": [selected], "conditional": [], "dormant": list(parent_plan.dormant)}, (selected,), (), parent_plan.dormant)
 
     def execute_plan(self, plan, invoke):
         results = [invoke(tool) for tool in plan.steps]
@@ -132,10 +148,16 @@ class FakeRoutingAdmissionPlanAdapter:
         return dict(plan.payload)
 
     def parse_plan(self, payload):
-        return FakeModelPlan(dict(payload), tuple(payload.get("steps") or ()), tuple(payload.get("dormant") or ()))
+        return FakeModelPlan(dict(payload), tuple(payload.get("steps") or ()), tuple(payload.get("conditional") or ()), tuple(payload.get("dormant") or ()))
 
     def plan_hash(self, plan):
         return sha256_json({"payload": plan.payload, "steps": plan.steps, "dormant": plan.dormant}).split(":", 1)[1]
+
+
+class ConfirmationUnavailableAdapter(FakeRoutingAdmissionPlanAdapter):
+    def compile_confirmation(self, *args, **kwargs):
+        del args, kwargs
+        raise ValueError("confirmation unavailable")
 
 
 ADAPTER: RoutingAdmissionPlanAdapter = FakeRoutingAdmissionPlanAdapter()
@@ -187,7 +209,16 @@ def _binding(binding_id: str, tool_id: str, provider_id: str, lineage: str) -> P
     )
 
 
-def _profile(profile_id: str, tools: tuple[str, ...]) -> LabRoutingProfile:
+def _profile(
+    profile_id: str,
+    tools: tuple[str, ...],
+    phases: tuple[str, ...] | None = None,
+) -> LabRoutingProfile:
+    phases = phases or tuple(
+        "primary" if index == 0 else "challenger"
+        for index in range(len(tools))
+    )
+    assert len(phases) == len(tools)
     return LabRoutingProfile(
         profile_payload={
             "profile_id": profile_id,
@@ -199,12 +230,16 @@ def _profile(profile_id: str, tools: tuple[str, ...]) -> LabRoutingProfile:
             "steps": [
                 {
                     "tool_id": tool,
-                    "phase": "primary" if index == 0 else "challenger",
+                    "phase": phases[index],
                     "order": index,
                     "source_lineage_id": (
                         "lineage:jobs.scrapingdog"
                         if "scrapingdog" in tool
-                        else "lineage:jobs.bloomberry"
+                        else (
+                            "lineage:jobs.bloomberry"
+                            if "bloomberry" in tool
+                            else "lineage:jobs.confirmation"
+                        )
                     ),
                     "required": False,
                 }
@@ -249,6 +284,34 @@ def _spec() -> tuple[RoutingExperimentSpec, dict[str, bool]]:
     return spec, labels
 
 
+def _confirmation_spec() -> tuple[RoutingExperimentSpec, dict[str, bool]]:
+    spec, labels = _spec()
+    confirmation_binding = _binding(
+        "binding:confirmation",
+        "intent.jobs.confirmation",
+        "company-search",
+        "lineage:jobs.confirmation",
+    )
+    candidate = _profile(
+        "profile:confirmation",
+        (
+            "intent.jobs.bloomberry",
+            "intent.jobs.confirmation",
+            "intent.jobs.scrapingdog",
+        ),
+        phases=("primary", "confirmation", "challenger"),
+    )
+    return (
+        replace(
+            spec,
+            provider_bindings=(*spec.provider_bindings, confirmation_binding),
+            variants=(candidate,),
+            baseline_profile_id="profile:confirmation",
+        ),
+        labels,
+    )
+
+
 def _receipt(binding: ProviderBindingIdentity, unit_ref: str, outcome: ProviderOutcome, *, execution_mode: str = ReceiptExecutionMode.FIXTURE.value) -> ProviderReceipt:
     fingerprint = sha256_json({"experiment_request": "intent-route-v1", "tool_id": binding.tool_id, "unit_ref": unit_ref})
     payload = {
@@ -289,6 +352,21 @@ def test_actual_pinned_model_profile_feature_and_admission_contract() -> None:
     if not model_root:
         pytest.skip("set LEADPOET_PINNED_SOURCING_MODEL_ROOT for exact model integration")
     adapter = PinnedSourcingModelRoutingAdapter.from_model_root(model_root)
+    observed_identity = adapter.observed_artifact_identity()
+    bound_artifact = replace(
+        _artifact(),
+        commit_sha=observed_identity["commit_sha"],
+        model_artifact_hash=observed_identity["model_artifact_hash"],
+        routing_catalog_hash=observed_identity["routing_catalog_hash"],
+        routing_policy_hash=observed_identity["routing_policy_hash"],
+    )
+    assert adapter.validate_artifact_identity(bound_artifact) == []
+    assert "model_artifact_commit_sha_mismatch" in adapter.validate_artifact_identity(
+        replace(bound_artifact, commit_sha="2" * 40)
+    )
+    assert "model_artifact_model_artifact_hash_mismatch" in adapter.validate_artifact_identity(
+        replace(bound_artifact, model_artifact_hash=HASH_A)
+    )
     feature_payload = {
         "schema_version": "routing-feature-set:v1",
         "features": ["icp.company_size.201_500"],
@@ -307,6 +385,13 @@ def test_actual_pinned_model_profile_feature_and_admission_contract() -> None:
                 "phase": "primary",
                 "order": 0,
                 "source_lineage_id": "bloomberry-jobs",
+                "required": False,
+            },
+            {
+                "tool_id": "intent.company_search",
+                "phase": "confirmation",
+                "order": 0,
+                "source_lineage_id": "company-search",
                 "required": False,
             },
             {
@@ -338,10 +423,15 @@ def test_actual_pinned_model_profile_feature_and_admission_contract() -> None:
         signal_type="hiring",
         feature_set=feature_set,
         binding_tool_ids=frozenset(
-            {"intent.source_add.bloomberry_jobs", "intent.jobs_feed"}
+            {
+                "intent.source_add.bloomberry_jobs",
+                "intent.company_search",
+                "intent.jobs_feed",
+            }
         ),
         binding_source_lineages={
             "intent.source_add.bloomberry_jobs": "bloomberry-jobs",
+            "intent.company_search": "company-search",
             "intent.jobs_feed": "scrapingdog-jobs",
         },
     ) == []
@@ -351,6 +441,7 @@ def test_actual_pinned_model_profile_feature_and_admission_contract() -> None:
         feature_set=feature_set,
         available_tools={
             "intent.source_add.bloomberry_jobs": True,
+            "intent.company_search": True,
             "intent.jobs_feed": True,
         },
         remaining_seconds=60.0,
@@ -361,12 +452,29 @@ def test_actual_pinned_model_profile_feature_and_admission_contract() -> None:
     assert adapter.plan_hash(restored) == adapter.plan_hash(plan)
     assert plan.profile_version == "v1"
     assert plan.feature_set_sha256 == feature_set.sha256()
+    assert plan.conditional_tool_ids == ("intent.company_search",)
+    confirmation = adapter.compile_confirmation(
+        plan,
+        profile=profile,
+        feature_set=feature_set,
+        available_tools={
+            "intent.source_add.bloomberry_jobs": True,
+            "intent.company_search": True,
+            "intent.jobs_feed": True,
+        },
+        remaining_seconds=60.0,
+        remaining_calls=2,
+        credit_cap=1.0,
+    )
+    assert confirmation.active_tool_ids == ("intent.company_search",)
+    assert confirmation.parent_plan_sha256 == plan.sha256()
     challenger = adapter.compile_challenger(
         plan,
         profile=profile,
         feature_set=feature_set,
         available_tools={
             "intent.source_add.bloomberry_jobs": True,
+            "intent.company_search": True,
             "intent.jobs_feed": True,
         },
         attempted_tool_ids=plan.active_tool_ids,
@@ -377,6 +485,116 @@ def test_actual_pinned_model_profile_feature_and_admission_contract() -> None:
     )
     assert challenger.challenge_index == 1
     assert challenger.active_tool_ids == ("intent.jobs_feed",)
+
+
+def test_primary_hit_runs_model_confirmation_and_retains_typed_receipts() -> None:
+    spec, labels = _confirmation_spec()
+    calls = []
+    store = ProviderReceiptStore()
+
+    def runner(binding, unit_ref):
+        calls.append((binding.tool_id, unit_ref))
+        outcome = (
+            ProviderOutcome.VERIFIED
+            if binding.tool_id == "intent.jobs.bloomberry"
+            else ProviderOutcome.SOURCE_MISS
+        )
+        return _receipt(binding, unit_ref, outcome)
+
+    evaluation = evaluate_routing_experiment(
+        spec,
+        gold_labels=labels,
+        runner=runner,
+        adapter=ADAPTER,
+        receipt_store=store,
+    )
+    assert any(tool_id == "intent.jobs.confirmation" for tool_id, _unit in calls)
+    confirmation_receipts = [
+        receipt
+        for key in store.repository.keys()
+        if (receipt := store.repository.get(key)) is not None
+        and receipt.tool_id == "intent.jobs.confirmation"
+    ]
+    assert confirmation_receipts
+    assert all(item.outcome == ProviderOutcome.SOURCE_MISS.value for item in confirmation_receipts)
+    assert evaluation.provider_receipt_refs
+
+
+def test_primary_miss_skips_confirmation_and_uses_bounded_model_challenger() -> None:
+    spec, labels = _confirmation_spec()
+    calls = []
+
+    def runner(binding, unit_ref):
+        calls.append((binding.tool_id, unit_ref))
+        outcome = (
+            ProviderOutcome.VERIFIED
+            if binding.tool_id == "intent.jobs.scrapingdog"
+            else ProviderOutcome.SOURCE_MISS
+        )
+        return _receipt(binding, unit_ref, outcome)
+
+    evaluate_routing_experiment(
+        spec,
+        gold_labels=labels,
+        runner=runner,
+        adapter=ADAPTER,
+    )
+    assert not any(tool_id == "intent.jobs.confirmation" for tool_id, _unit in calls)
+    assert any(tool_id == "intent.jobs.scrapingdog" for tool_id, _unit in calls)
+
+
+def test_confirmation_compile_failure_is_explicit_and_does_not_fall_through() -> None:
+    spec, labels = _confirmation_spec()
+    calls = []
+
+    def runner(binding, unit_ref):
+        calls.append((binding.tool_id, unit_ref))
+        return _receipt(binding, unit_ref, ProviderOutcome.VERIFIED)
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="model confirmation compilation failed:confirmation unavailable",
+    ):
+        evaluate_routing_experiment(
+            spec,
+            gold_labels=labels,
+            runner=runner,
+            adapter=ConfirmationUnavailableAdapter(),
+        )
+    assert calls == [("intent.jobs.bloomberry", "unit:cal-1")]
+
+
+def test_confirmation_provider_failure_is_retained_as_typed_evidence() -> None:
+    spec, labels = _confirmation_spec()
+    store = ProviderReceiptStore()
+
+    def runner(binding, unit_ref):
+        outcome = (
+            ProviderOutcome.VERIFIED
+            if binding.tool_id == "intent.jobs.bloomberry"
+            else ProviderOutcome.ADAPTER_FAILURE
+        )
+        return _receipt(binding, unit_ref, outcome)
+
+    evaluation = evaluate_routing_experiment(
+        spec,
+        gold_labels=labels,
+        runner=runner,
+        adapter=ADAPTER,
+        receipt_store=store,
+    )
+    confirmation = [
+        receipt
+        for key in store.repository.keys()
+        if (receipt := store.repository.get(key)) is not None
+        and receipt.tool_id == "intent.jobs.confirmation"
+    ]
+    assert confirmation
+    assert all(item.outcome == ProviderOutcome.ADAPTER_FAILURE.value for item in confirmation)
+    assert all(
+        item.holdout.adapter_failure_count > 0
+        for item in evaluation.variants
+    )
 
 
 def test_artifact_and_model_payload_are_exact_branch_bound() -> None:

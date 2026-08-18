@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
+import hashlib
 import importlib
 import json
 import math
@@ -28,6 +29,7 @@ import os
 from pathlib import Path
 import sys
 import re
+import subprocess
 import types
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
@@ -428,6 +430,11 @@ class RoutingAdmissionPlanAdapter(Protocol):
         expected_features: Sequence[str],
     ) -> Sequence[str]: ...
 
+    def validate_artifact_identity(
+        self,
+        artifact: SourcingModelArtifactIdentity,
+    ) -> Sequence[str]: ...
+
     def validate_profile(
         self,
         profile: Any,
@@ -470,6 +477,20 @@ class RoutingAdmissionPlanAdapter(Protocol):
         credit_cap: float,
     ) -> Any: ...
 
+    def has_conditional_confirmation(self, plan: Any) -> bool: ...
+
+    def compile_confirmation(
+        self,
+        parent_plan: Any,
+        *,
+        profile: Any,
+        feature_set: Any,
+        available_tools: Mapping[str, bool],
+        remaining_seconds: float,
+        remaining_calls: int,
+        credit_cap: float,
+    ) -> Any: ...
+
     def execute_plan(
         self,
         plan: Any,
@@ -483,6 +504,115 @@ class RoutingAdmissionPlanAdapter(Protocol):
     def plan_hash(self, plan: Any) -> str: ...
 
 
+_MODEL_TREE_EXCLUDED_PARTS = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".venv",
+    "venv",
+}
+_MODEL_TREE_EXCLUDED_SUFFIXES = (".pyc", ".pyo", ".env", ".pem", ".key")
+
+
+def _model_tree_path_excluded(relative_path: str) -> bool:
+    parts = relative_path.split("/")
+    return (
+        any(part in _MODEL_TREE_EXCLUDED_PARTS for part in parts)
+        or relative_path.endswith(_MODEL_TREE_EXCLUDED_SUFFIXES)
+        or relative_path == ".env"
+        or relative_path.startswith(".env.")
+    )
+
+
+def _compute_model_source_tree_hash(root: Path) -> str:
+    digest_inputs: list[tuple[str, str]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(root).as_posix()
+        if _model_tree_path_excluded(relative_path):
+            continue
+        digest_inputs.append(
+            (
+                relative_path,
+                "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        )
+    return sha256_json(digest_inputs)
+
+
+def _observe_model_artifact_identity(
+    root: Path,
+    *,
+    runtime: Any,
+) -> Mapping[str, str]:
+    """Observe identity fields without inventing unavailable manifest data."""
+
+    observed: dict[str, str] = {
+        "model_artifact_hash": _compute_model_source_tree_hash(root),
+    }
+    try:
+        observed["commit_sha"] = (
+            subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            .strip()
+            .lower()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    try:
+        metadata = runtime.runtime_routing_metadata()
+    except Exception:
+        metadata = {}
+    if isinstance(metadata, Mapping):
+        for metadata_field, artifact_field in (
+            ("catalog_sha256", "routing_catalog_hash"),
+            ("policy_sha256", "routing_policy_hash"),
+        ):
+            value = str(metadata.get(metadata_field) or "").strip().lower()
+            if _RAW_SHA256_RE.fullmatch(value):
+                observed[artifact_field] = model_hash_to_lab(value, metadata_field)
+
+    # A signed build manifest is external to the source checkout.  If a local
+    # manifest is supplied by the artifact builder, bind every identity field
+    # that it exposes; otherwise leave those fields absent rather than
+    # fabricating a hash with a different model meaning.
+    for manifest_path in (
+        root / "research_lab_manifest.json",
+        root / "artifact_manifest.json",
+        root / "manifest.json",
+    ):
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(manifest, Mapping):
+            continue
+        for manifest_field, artifact_field in (
+            ("git_commit_sha", "commit_sha"),
+            ("model_artifact_hash", "model_artifact_hash"),
+            ("manifest_hash", "manifest_hash"),
+            ("routing_contract_hash", "routing_contract_hash"),
+            ("routing_catalog_hash", "routing_catalog_hash"),
+            ("routing_policy_hash", "routing_policy_hash"),
+            ("feature_schema_hash", "feature_schema_hash"),
+            ("verifier_contract_hash", "verifier_contract_hash"),
+        ):
+            value = str(manifest.get(manifest_field) or "").strip().lower()
+            if _SHA256_RE.fullmatch(value) or (
+                artifact_field == "commit_sha" and _GIT_SHA_RE.fullmatch(value)
+            ):
+                observed[artifact_field] = value
+        break
+    return observed
+
+
 class PinnedSourcingModelRoutingAdapter:
     """Concrete adapter for one exact Sourcing_model checkout/artifact.
 
@@ -491,12 +621,20 @@ class PinnedSourcingModelRoutingAdapter:
     Lab never falls back to a site-local routing implementation.
     """
 
-    def __init__(self, *, runtime: Any, profiles: Any, features: Any) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: Any,
+        profiles: Any,
+        features: Any,
+        observed_artifact_identity: Mapping[str, str] | None = None,
+    ) -> None:
         self.runtime = runtime
         self.profiles = profiles
         self.features = features
         self.catalog = runtime.runtime_catalog({})
         self.policy = runtime.runtime_policy()
+        self._observed_artifact_identity = dict(observed_artifact_identity or {})
 
     @classmethod
     def from_model_root(cls, model_root: str | os.PathLike[str]) -> "PinnedSourcingModelRoutingAdapter":
@@ -539,7 +677,15 @@ class PinnedSourcingModelRoutingAdapter:
             features = importlib.import_module("sourcing_model.routing.features")
         except Exception as exc:
             raise RoutingExperimentError(f"pinned_sourcing_model_import_failed:{exc}") from exc
-        return cls(runtime=runtime, profiles=profiles, features=features)
+        return cls(
+            runtime=runtime,
+            profiles=profiles,
+            features=features,
+            observed_artifact_identity=_observe_model_artifact_identity(
+                root,
+                runtime=runtime,
+            ),
+        )
 
     def parse_profile(self, payload: Mapping[str, Any]) -> Any:
         return self.profiles.RoutingProfile.from_payload(payload)
@@ -560,6 +706,31 @@ class PinnedSourcingModelRoutingAdapter:
         if tuple(feature_set.features) != tuple(sorted(set(expected_features))):
             errors.append("model_feature_set_payload_features_mismatch")
         return errors
+
+    def validate_artifact_identity(
+        self,
+        artifact: SourcingModelArtifactIdentity,
+    ) -> Sequence[str]:
+        errors: list[str] = []
+        for artifact_field, observed_field in (
+            ("commit_sha", "commit_sha"),
+            ("model_artifact_hash", "model_artifact_hash"),
+            ("manifest_hash", "manifest_hash"),
+            ("routing_contract_hash", "routing_contract_hash"),
+            ("routing_catalog_hash", "routing_catalog_hash"),
+            ("routing_policy_hash", "routing_policy_hash"),
+            ("feature_schema_hash", "feature_schema_hash"),
+            ("verifier_contract_hash", "verifier_contract_hash"),
+        ):
+            observed = self._observed_artifact_identity.get(observed_field)
+            if observed and str(getattr(artifact, artifact_field)) != observed:
+                errors.append(f"model_artifact_{artifact_field}_mismatch")
+        return errors
+
+    def observed_artifact_identity(self) -> Mapping[str, str]:
+        """Return hashes observed from the pinned checkout for test/admission."""
+
+        return dict(self._observed_artifact_identity)
 
     def validate_profile(
         self,
@@ -657,6 +828,37 @@ class PinnedSourcingModelRoutingAdapter:
             registry=self._registry(profile),
             attempted_tool_ids=tuple(attempted_tool_ids),
             attempted_source_lineages=tuple(attempted_source_lineages),
+        )
+
+    def has_conditional_confirmation(self, plan: Any) -> bool:
+        return bool(plan.conditional_tool_ids)
+
+    def compile_confirmation(
+        self,
+        parent_plan: Any,
+        *,
+        profile: Any,
+        feature_set: Any,
+        available_tools: Mapping[str, bool],
+        remaining_seconds: float,
+        remaining_calls: int,
+        credit_cap: float,
+    ) -> Any:
+        return self.profiles.compile_confirmation_admission_plan(
+            parent_plan=parent_plan,
+            catalog=self.runtime.runtime_catalog(available_tools),
+            policy=self.runtime.runtime_policy(),
+            context=self.runtime.RouteContext(
+                stage=self.runtime.STAGE_INTENT_EVIDENCE,
+                features=tuple(feature_set.features),
+                intent_category=parent_plan.intent_category,
+                remaining_seconds=remaining_seconds,
+                remaining_calls=remaining_calls,
+                remaining_results=1,
+                credit_cap=credit_cap,
+            ),
+            feature_set=feature_set,
+            registry=self._registry(profile),
         )
 
     def execute_plan(self, plan: Any, invoke: Callable[[str], Any]) -> tuple[Sequence[Any], bool]:
@@ -977,6 +1179,13 @@ def validate_routing_experiment_spec(
     except RoutingExperimentError as exc:
         errors.append(str(exc))
     errors.extend(validate_sourcing_model_artifact_identity(spec.artifact))
+    try:
+        errors.extend(
+            str(item)
+            for item in adapter.validate_artifact_identity(spec.artifact)
+        )
+    except Exception as exc:
+        errors.append(f"model_artifact_identity_validation_failed:{exc}")
     errors.extend(validate_frozen_routing_input(spec.frozen_input))
     feature_set = None
     try:
@@ -1595,6 +1804,36 @@ def _run_variant_unit(
 
     _initial_results, predicted = adapter.execute_plan(plan, invoke)
     if predicted:
+        if adapter.has_conditional_confirmation(plan):
+            try:
+                confirmation = adapter.compile_confirmation(
+                    plan,
+                    profile=profile,
+                    feature_set=feature_set,
+                    available_tools=available_tools,
+                    remaining_seconds=60.0,
+                    remaining_calls=MAX_TOOLS_PER_VARIANT,
+                    credit_cap=MAX_CREDIT_MICROUNITS_PER_VARIANT / 1_000_000,
+                )
+            except Exception as exc:
+                # A primary hit must not silently skip a model-admitted
+                # confirmation wave or fall through to an unrelated
+                # challenger.  Keep the failure explicit and fail closed.
+                if isinstance(exc, RoutingExperimentError):
+                    raise
+                raise RoutingExperimentError(
+                    f"model confirmation compilation failed:{exc}"
+                ) from exc
+            _validate_compiled_admission_plan(
+                confirmation,
+                adapter=adapter,
+                feature_set_hash=spec.frozen_input.feature_set_hash,
+            )
+            # The adapter executes the exact model-owned confirmation route;
+            # its typed receipts are already appended by invoke().  The
+            # primary verification remains the route prediction, while a
+            # confirmation adapter failure is retained as explicit evidence.
+            adapter.execute_plan(confirmation, invoke)
         return receipts, True
     try:
         challenger = adapter.compile_challenger(
@@ -1842,7 +2081,10 @@ def evaluate_routing_experiment(
     label_errors = _validate_gold_labels(spec.frozen_input, gold_labels)
     if label_errors:
         raise RoutingExperimentError("invalid gold labels: " + "; ".join(label_errors))
-    store = receipt_store or ProviderReceiptStore()
+    # An empty durable store is intentionally false-y via ``__len__``.  Keep
+    # the caller's repository when it is supplied so confirmation receipts and
+    # cross-variant reuse remain observable in the same persistence seam.
+    store = receipt_store if receipt_store is not None else ProviderReceiptStore()
     baseline = next(
         item for item in spec.variants if _profile_id(item, adapter) == spec.baseline_profile_id
     )

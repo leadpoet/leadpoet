@@ -72,6 +72,50 @@ None reach the store. The gateway ships no OTLP log exporter, and error
 capture goes to Sentry instead (see below) — a different destination, so
 Sentry events are not queryable alongside these spans.
 
+## Deploy signal
+
+**Nothing in the store marks a deploy, and as of 2026-08-18 no signal is
+pinned.** This section records why, so the question does not get re-asked.
+
+**What ships the gateway.** Production rollout is a host operation:
+`gw_restart.sh` (and `validator_restart.sh` for validators), run on the box
+against the exact-commit channel. No GitHub workflow performs a rollout —
+`Attested V2 Release` (push to `main`) builds the parent images and publishes
+the immutable exact-commit release artifacts to S3; `Production Parity
+Fast`/`Full` and `Production Parity Cleanup` validate an already-attested
+commit; `Deploy Checks` is a gate. A green release build means an artifact
+exists, not that a host is running it — so treating it as a deploy would be
+wrong in exactly the expensive direction.
+
+**GitHub Deployments exist, but only for staging and only briefly.** 39
+deployments were created against the `physical-v2-staging` environment between
+2026-08-13 and 2026-08-15, all by hand, all with an empty payload, and **every
+one of them went `queued` → `error`**. None have been created since 2026-08-15.
+That is the API a deploy signal would normally be pinned to, and here it
+describes a three-day staging experiment that never succeeded, not the gateway
+in production.
+
+**Separately, the events never arrive.** The store has received **zero** CI/CD
+event records for this repo, ever. Repository activity does land — pushes and
+pull requests, under `scope_name = 'onepatch.github'` — but workflow runs,
+workflow jobs, deployment statuses and commit statuses do not. So even the
+staging signal above could not be pinned today; the evidence is not in the
+store to pin against. This is an ingest-side gap on OnePatch's end, not a
+change this repo needs.
+
+**Consequence, and the one thing that reads as a deploy.** Automated
+change-verification soaks cannot start: they wait for a successful deploy that
+is never observed, so a merged pull request is never confirmed against
+production telemetry. The only rollout-shaped event visible in this repo's own
+telemetry is the **gateway restart signature** — a release-verification poll
+sweep (`GET /build-info`, `GET /weights/v2/release-evidence/{commit_sha}`,
+`GET /health/v2-authority` in lockstep), then a total span gap across every
+route, then a short fail-closed 503 burst on `/health/v2-authority` and
+`/_unmatched` as the worker authority comes back up. That is a proxy for "the
+gateway process was replaced", not for "this commit shipped" — it carries no
+commit sha — and a clean restart can be short enough to miss. Useful for
+reading history; too weak to gate a soak on.
+
 ## Service map
 
 One service reports telemetry: **`leadpoet-gateway`**. By design it emits a

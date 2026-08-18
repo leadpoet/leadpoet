@@ -8,25 +8,81 @@ runs:
       uses: actions/setup-python@v5
       with:
         python-version: "3.11"
-        cache: pip
-        cache-dependency-path: requirements.txt
 
     - name: Install candidate-derived controller dependencies
       shell: bash
       run: |
         set -Eeuo pipefail
-        python3 scripts/resolve_production_parity_controller_requirements.py \
+        umask 077
+        [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
+        [[ "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+        case "$RUNNER_TEMP" in
+          /*) ;;
+          *) exit 1 ;;
+        esac
+        test -d "$RUNNER_TEMP"
+        test ! -L "$RUNNER_TEMP"
+
+        if [ -n "${PARITY_TEMP:-}" ]; then
+          expected="$RUNNER_TEMP/production-parity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test "$PARITY_TEMP" = "$expected"
+          test -d "$PARITY_TEMP"
+          test ! -L "$PARITY_TEMP"
+          test "$(stat -c '%u' "$PARITY_TEMP")" = "$(id -u)"
+          test "$(stat -c '%a' "$PARITY_TEMP")" = "700"
+          controller_root="$PARITY_TEMP/controller"
+        else
+          controller_root="$RUNNER_TEMP/production-parity-controller-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+        fi
+        test ! -e "$controller_root"
+        test ! -L "$controller_root"
+        mkdir -m 700 "$controller_root"
+
+        venv_root="$controller_root/venv"
+        requirements_file="$controller_root/requirements.txt"
+        python3 -m venv "$venv_root"
+        venv_python="$venv_root/bin/python"
+        test -x "$venv_python"
+        grep -Fx 'include-system-site-packages = false' "$venv_root/pyvenv.cfg"
+        "$venv_python" scripts/resolve_production_parity_controller_requirements.py \
           --requirements requirements.txt \
-          --output "$RUNNER_TEMP/production-parity-controller-requirements.txt"
-        python3 -m pip install \
+          --output "$requirements_file"
+        "$venv_python" -m pip install \
           --disable-pip-version-check \
-          --requirement "$RUNNER_TEMP/production-parity-controller-requirements.txt"
-        python3 -m pip check
+          --no-cache-dir \
+          --requirement "$requirements_file"
+        "$venv_python" -m pip check
+
+        printf '%s\n' "$venv_root/bin" >> "$GITHUB_PATH"
+        {
+          printf 'VIRTUAL_ENV=%s\n' "$venv_root"
+          printf 'PYTHONNOUSERSITE=1\n'
+        } >> "$GITHUB_ENV"
 
     - name: Prove clean-runner controller imports
       shell: bash
       run: |
         set -Eeuo pipefail
+        if [ -n "${PARITY_TEMP:-}" ]; then
+          expected_venv="$PARITY_TEMP/controller/venv"
+        else
+          expected_venv="$RUNNER_TEMP/production-parity-controller-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/venv"
+        fi
+        test "${VIRTUAL_ENV:-}" = "$expected_venv"
+        venv_python="$VIRTUAL_ENV/bin/python"
+        test -x "$venv_python"
+        test "$(command -v python3)" = "$VIRTUAL_ENV/bin/python3"
+        "$venv_python" - <<'PY'
+        import os
+        import pathlib
+        import sys
+
+        expected = pathlib.Path(os.environ["VIRTUAL_ENV"]).resolve()
+        if pathlib.Path(sys.prefix).resolve() != expected:
+            raise SystemExit("controller Python is outside the per-run virtualenv")
+        if sys.base_prefix == sys.prefix:
+            raise SystemExit("controller Python is not isolated")
+        PY
         scripts=(
           scripts/build_production_parity_contract.py
           scripts/capture_production_parity_runtime_config.py
@@ -39,5 +95,5 @@ runs:
           scripts/setup_production_parity_staging.py
         )
         for script in "${scripts[@]}"; do
-          python3 "$script" --help >/dev/null
+          "$venv_python" "$script" --help >/dev/null
         done

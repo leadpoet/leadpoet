@@ -835,6 +835,34 @@ def test_full_workflow_uses_self_hosted_bounded_windows_and_exact_volume():
     )
 
 
+def test_controller_dependencies_use_a_scrubbed_per_run_virtualenv():
+    root = Path(__file__).parents[1]
+    action = (
+        root / ".github/actions/setup-production-parity-controller/action.yml"
+    ).read_text(encoding="utf-8")
+    full = (
+        root / ".github/workflows/physical-v2-staging.yml"
+    ).read_text(encoding="utf-8")
+
+    assert 'controller_root="$PARITY_TEMP/controller"' in action
+    assert (
+        'controller_root="$RUNNER_TEMP/production-parity-controller-'
+        '$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"' in action
+    )
+    assert 'python3 -m venv "$venv_root"' in action
+    assert '"$venv_python" -m pip install' in action
+    assert "--no-cache-dir" in action
+    assert "python3 -m pip install" not in action
+    assert "cache: pip" not in action
+    assert 'include-system-site-packages = false' in action
+    assert 'printf \'%s\\n\' "$venv_root/bin" >> "$GITHUB_PATH"' in action
+    assert 'printf \'VIRTUAL_ENV=%s\\n\' "$venv_root"' in action
+    assert 'test "$(command -v python3)" = "$VIRTUAL_ENV/bin/python3"' in action
+    assert '"$venv_python" "$script" --help' in action
+    assert 'PARITY_TEMP: ${{ runner.temp }}/production-parity-' in full
+    assert 'rm -rf -- "$PARITY_TEMP"' in full
+
+
 def test_fast_and_cleanup_pin_account_and_reject_stale_cleanup_code():
     root = Path(__file__).parents[1]
     fast = (root / ".github/workflows/production-parity-fast.yml").read_text(

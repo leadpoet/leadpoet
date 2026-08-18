@@ -2402,6 +2402,17 @@ def test_fast_and_cleanup_pin_account_and_reject_stale_cleanup_code():
 
     fast = sources[".github/workflows/production-parity-fast.yml"]
     cleanup = sources[".github/workflows/production-parity-cleanup.yml"]
+    host_export = fast.index(
+        'export LEADPOET_PARITY_PRODUCTION_DB_HOST="$production_host"'
+    )
+    snapshot_capture = fast.index(
+        "python3 scripts/production_parity_snapshot.py capture"
+    )
+    host_unset = fast.index(
+        "unset LEADPOET_PARITY_PRODUCTION_READONLY_DSN "
+        "LEADPOET_PARITY_PRODUCTION_DB_HOST"
+    )
+    assert host_export < snapshot_capture < host_unset
     cleanup_gate = cleanup.index("name: Require exact current main before credentials")
     cleanup_action = cleanup.index(
         "uses: ./.github/actions/setup-production-parity-controller"

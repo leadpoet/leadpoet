@@ -144,6 +144,7 @@ jobs:
           print(value.hostname.lower())
           PY
           )"
+          export LEADPOET_PARITY_PRODUCTION_DB_HOST="$production_host"
           python3 scripts/production_parity_snapshot.py capture \
             --contract "$RUNNER_TEMP/candidate-contract.json" \
             --archive "$RUNNER_TEMP/production.dump" \
@@ -153,7 +154,7 @@ jobs:
             --source-sha "$(python3 scripts/resolve_production_parity_deployed_sha.py \
               --gateway-url "$PRODUCTION_GATEWAY_URL" \
               --candidate-sha "${{ steps.inputs.outputs.candidate }}")"
-          unset LEADPOET_PARITY_PRODUCTION_READONLY_DSN
+          unset LEADPOET_PARITY_PRODUCTION_READONLY_DSN LEADPOET_PARITY_PRODUCTION_DB_HOST
           python3 scripts/run_production_parity_fast.py \
             --contract "$RUNNER_TEMP/candidate-contract.json" \
             --snapshot-manifest "$RUNNER_TEMP/snapshot-manifest.json" \
@@ -182,7 +183,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          unset LEADPOET_PARITY_PRODUCTION_READONLY_DSN
+          unset LEADPOET_PARITY_PRODUCTION_READONLY_DSN LEADPOET_PARITY_PRODUCTION_DB_HOST
           if [ -f "$RUNNER_TEMP/production.dump" ]; then
             shred -u "$RUNNER_TEMP/production.dump" 2>/dev/null || rm -f "$RUNNER_TEMP/production.dump"
           fi

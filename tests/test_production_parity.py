@@ -450,7 +450,74 @@ def test_pinned_postgres_client_interrupt_removes_exact_container(
     assert calls[1][1]["env"] == {
         "PATH": os.environ.get("PATH") or os.defpath
     }
+    assert calls[2][0] == [
+        "docker",
+        "container",
+        "ls",
+        "--all",
+        "--quiet",
+        "--filter",
+        f"name=^/{container_name}$",
+    ]
+    assert calls[2][1]["env"] == {
+        "PATH": os.environ.get("PATH") or os.defpath
+    }
     assert "cleanup-password-sentinel" not in calls[1][0]
+    assert "cleanup-password-sentinel" not in calls[2][0]
+
+
+@pytest.mark.parametrize(
+    ("remove_result", "probe_result", "probe_error", "cleanup_proven"),
+    (
+        (1, 0, None, True),
+        (0, 1, None, False),
+        (0, 0, b"still-present\n", False),
+        (0, None, OSError("docker unavailable"), False),
+    ),
+)
+def test_pinned_postgres_client_interrupt_requires_proven_absence(
+    monkeypatch,
+    remove_result: int,
+    probe_result: int | None,
+    probe_error: BaseException | bytes | None,
+    cleanup_proven: bool,
+):
+    interruption = subprocess.TimeoutExpired(cmd=["docker"], timeout=1)
+    calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(list(command))
+        if len(calls) == 1:
+            raise interruption
+        if len(calls) == 2:
+            return subprocess.CompletedProcess(
+                command,
+                remove_result,
+                stdout=b"",
+                stderr=b"remove failed" if remove_result else b"",
+            )
+        if isinstance(probe_error, BaseException):
+            raise probe_error
+        return subprocess.CompletedProcess(
+            command,
+            int(probe_result or 0),
+            stdout=probe_error if isinstance(probe_error, bytes) else b"",
+            stderr=b"probe failed" if probe_result else b"",
+        )
+
+    monkeypatch.setattr(parity_snapshot.subprocess, "run", fake_run)
+    expected = subprocess.TimeoutExpired if cleanup_proven else ProductionParityError
+    with pytest.raises(expected):
+        parity_snapshot._run_postgres(
+            ["psql", "-c", "SELECT 1"],
+            env={"PGPASSWORD": "cleanup-password-sentinel"},
+            timeout=1,
+            postgres_image="postgres@sha256:" + "c" * 64,
+        )
+
+    assert len(calls) == 3
+    assert calls[1][:3] == ["docker", "rm", "-f"]
+    assert calls[2][:5] == ["docker", "container", "ls", "--all", "--quiet"]
 
 
 def test_capture_snapshot_routes_every_postgres_call_through_pinned_image(

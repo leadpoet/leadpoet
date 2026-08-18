@@ -228,6 +228,46 @@ def _redact_postgres_client_diagnostic(
     return redacted
 
 
+def _cleanup_interrupted_postgres_client(container_name: str) -> None:
+    cleanup_env = _postgres_client_environment({}, include_postgres=False)
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            cwd=ROOT,
+            env=cleanup_env,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError, KeyboardInterrupt):
+        pass
+    try:
+        absence = subprocess.run(
+            [
+                "docker",
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--filter",
+                f"name=^/{container_name}$",
+            ],
+            cwd=ROOT,
+            env=cleanup_env,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
+        raise ProductionParityError(
+            "pinned PostgreSQL client cleanup could not be proven"
+        ) from exc
+    if absence.returncode != 0 or absence.stdout.strip():
+        raise ProductionParityError(
+            "pinned PostgreSQL client cleanup could not be proven"
+        )
+
+
 def _run_postgres(
     command: Sequence[str],
     *,
@@ -315,17 +355,7 @@ def _run_postgres(
             timeout=timeout,
         )
     except (subprocess.TimeoutExpired, KeyboardInterrupt):
-        try:
-            subprocess.run(
-                ["docker", "rm", "-f", container_name],
-                cwd=ROOT,
-                env=_postgres_client_environment({}, include_postgres=False),
-                capture_output=True,
-                check=False,
-                timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
+        _cleanup_interrupted_postgres_client(container_name)
         raise
     if result.returncode == 0:
         return result

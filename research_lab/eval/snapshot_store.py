@@ -143,6 +143,28 @@ _SNAPSHOT_SECRET_VALUE_PATTERNS = (
     re.compile(r"\bsk-or-[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
     re.compile(r"\bsb_secret_[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
 )
+_SAFE_STORE_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+
+
+def _bounded_store_error_code(exc: BaseException) -> str:
+    """Return a non-secret object-store code from a bounded exception chain."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 8:
+        seen.add(id(current))
+        explicit = str(getattr(current, "error_code", "") or "")
+        if _SAFE_STORE_ERROR_CODE_RE.fullmatch(explicit):
+            return explicit
+        response = getattr(current, "response", None)
+        if isinstance(response, Mapping):
+            error = response.get("Error")
+            if isinstance(error, Mapping):
+                code = str(error.get("Code") or "")
+                if _SAFE_STORE_ERROR_CODE_RE.fullmatch(code):
+                    return code
+        current = current.__cause__ or current.__context__
+    return ""
 
 
 def _snapshot_runtime_secret_values() -> tuple[str, ...]:
@@ -363,7 +385,8 @@ def load_snapshot_pointer_document(pointer_uri: str) -> dict[str, Any]:
             response = _s3_client().get_object(Bucket=bucket, Key=key)
         except Exception as exc:
             raise DevSnapshotStoreError(
-                f"snapshot pointer could not be loaded: {type(exc).__name__}"
+                f"snapshot pointer could not be loaded: {type(exc).__name__}",
+                error_code=_bounded_store_error_code(exc),
             ) from exc
         raw = response["Body"].read().decode("utf-8")
     else:
@@ -391,6 +414,7 @@ def verify_snapshot_pointer_document(
         return {
             "passed": False,
             "errors": [f"pointer_load_error:{type(exc).__name__}"],
+            "error_code": _bounded_store_error_code(exc),
             "snapshot_uri": "",
         }
     signature_fields = {"signature_b64", "kms_key_id", "signing_algorithm"}
@@ -465,7 +489,8 @@ def resolve_snapshot_uri(root_uri: str) -> dict[str, Any]:
     if not verification.get("passed"):
         raise DevSnapshotStoreError(
             "snapshot pointer verification failed: "
-            + "; ".join(verification.get("errors") or ())
+            + "; ".join(verification.get("errors") or ()),
+            error_code=str(verification.get("error_code") or ""),
         )
     return verification
 
@@ -495,6 +520,12 @@ SNAPSHOT_MISS_SENTINEL = "RESEARCH_LAB_DEV_SNAPSHOT_MISS:"
 
 class DevSnapshotStoreError(RuntimeError):
     """Raised when the snapshot store cannot operate safely."""
+
+    def __init__(self, message: str, *, error_code: str = "") -> None:
+        super().__init__(message)
+        self.error_code = (
+            error_code if _SAFE_STORE_ERROR_CODE_RE.fullmatch(error_code) else ""
+        )
 
 
 class SnapshotMiss(DevSnapshotStoreError):

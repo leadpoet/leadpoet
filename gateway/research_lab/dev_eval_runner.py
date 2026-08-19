@@ -293,6 +293,9 @@ def _snapshot_preflight_error_code(exc: BaseException) -> str:
     while current is not None and id(current) not in seen and len(seen) < 8:
         seen.add(id(current))
         fallback = type(current).__name__
+        explicit = str(getattr(current, "error_code", "") or "")
+        if _SAFE_ERROR_CODE_RE.fullmatch(explicit):
+            return explicit
         response = getattr(current, "response", None)
         if isinstance(response, Mapping):
             error = response.get("Error")

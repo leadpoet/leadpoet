@@ -35,6 +35,7 @@ from gateway.research_lab.dev_eval_runner import (
 from gateway.tee.source_bundle_v2 import build_source_bundle_v2
 from research_lab.canonical import sha256_json
 from research_lab.eval import PrivateModelArtifactManifest
+from research_lab.eval import snapshot_store as snapshot_store_module
 from research_lab.eval.dev_eval import (
     DEV_SCORE_VERSION,
     build_current_day_dev_bank,
@@ -150,6 +151,33 @@ def test_snapshot_readiness_reports_wrapped_object_store_error_code(
     )
     assert readiness["error_code"] == "NoSuchKey"
     assert "private-bucket" not in readiness["error_code"]
+
+
+def test_snapshot_readiness_preserves_real_pointer_store_error_code(monkeypatch):
+    class ObjectStoreError(RuntimeError):
+        def __init__(self):
+            super().__init__("private object location is unavailable")
+            self.response = {"Error": {"Code": "NoSuchKey"}}
+
+    class MissingPointerClient:
+        def get_object(self, **_kwargs):
+            raise ObjectStoreError()
+
+    monkeypatch.setattr(
+        snapshot_store_module,
+        "_s3_client",
+        lambda: MissingPointerClient(),
+    )
+
+    readiness = snapshot_readiness("s3://private-bucket/current.json")
+
+    assert readiness["ready"] is False
+    assert readiness["reason"] == (
+        "snapshot_preflight_error:DevSnapshotStoreError"
+    )
+    assert readiness["error_code"] == "NoSuchKey"
+    assert "private-bucket" not in readiness["error_code"]
+    assert "private object location" not in readiness["error"]
 
 
 def _write_snapshot_set(

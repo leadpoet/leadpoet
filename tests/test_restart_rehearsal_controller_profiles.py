@@ -1397,7 +1397,7 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
         "--cap-add",
         "CHOWN",
         "--cap-add",
-        "DAC_READ_SEARCH",
+        "DAC_OVERRIDE",
         "--read-only",
         "--mount",
         f"type=bind,src={evidence_root},dst=/evidence",
@@ -1409,6 +1409,7 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
         f"{os.getuid()}:{os.getgid()}",
         "/evidence",
     ]]
+    assert "DAC_READ_SEARCH" not in commands[0]
 
 
 def test_fixture_seed_normalizes_before_host_inspection_and_copy(
@@ -1575,6 +1576,42 @@ def test_fixture_seed_normalizes_after_generation_failure(
     assert events == ["generate-failed", "normalize"]
 
 
+def test_fixture_seed_normalization_failure_keeps_generation_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    generation_error = subprocess.CalledProcessError(17, ["fixture-generation"])
+    normalization_error = subprocess.CalledProcessError(18, ["ownership-handoff"])
+    monkeypatch.setattr(
+        controller,
+        "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(generation_error),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(normalization_error),
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        with controller._prepared_fixture_seed(
+            "rehearsal-image",
+            source_root=tmp_path / "source",
+            candidate_sha="d" * 40,
+            drand_artifact_root=tmp_path / "drand",
+            docker_platform="linux/amd64",
+            profile="prepush",
+        ):
+            pytest.fail("fixture generation failure must not yield a seed")
+
+    assert raised.value is generation_error
+    captured = capsys.readouterr().err
+    assert "normalize:CalledProcessError" in captured
+    assert "ownership-handoff" in captured
+
+
 def test_outer_evidence_normalizes_post_workflow_component_and_join_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1678,6 +1715,83 @@ def test_workflow_normalizes_evidence_before_preserving_failure(
         "/evidence",
     ]
     assert events == ["preserved"]
+
+
+def test_workflow_normalization_failure_keeps_workflow_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    workflow_error = subprocess.CalledProcessError(19, ["workflow"])
+    normalization_error = subprocess.CalledProcessError(20, ["ownership-handoff"])
+    monkeypatch.setattr(
+        controller,
+        "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(workflow_error),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(normalization_error),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_preserve_failure_evidence",
+        lambda **_kwargs: pytest.fail(
+            "unnormalized evidence must not be copied"
+        ),
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        controller._run_workflow(
+            "rehearsal-image",
+            source_root=tmp_path / "source",
+            evidence_root=tmp_path / "evidence",
+            from_sha="a" * 40,
+            candidate_sha="b" * 40,
+            profile="prepush",
+            docker_platform="linux/amd64",
+        )
+
+    assert raised.value is workflow_error
+    captured = capsys.readouterr().err
+    assert "normalize:CalledProcessError" in captured
+    assert "ownership-handoff" in captured
+
+
+def test_preservation_failure_is_annotated_without_replacing_source_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    source_error = subprocess.CalledProcessError(21, ["source-stage"])
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        controller,
+        "_preserve_failure_evidence",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            PermissionError("preserve denied")
+        ),
+    )
+
+    controller._normalize_and_preserve_failure_evidence(
+        "rehearsal-image",
+        evidence_root=tmp_path,
+        docker_platform="linux/amd64",
+        candidate_sha="c" * 40,
+        stage="workflow-prepush",
+        command=["source-stage"],
+        original=source_error,
+    )
+
+    captured = capsys.readouterr().err
+    assert "preserve:PermissionError:preserve denied" in captured
 
 
 def test_instruction_files_define_fast_default_and_match() -> None:

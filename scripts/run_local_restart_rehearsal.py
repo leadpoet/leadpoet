@@ -1296,10 +1296,10 @@ def _normalize_evidence_ownership(
             "--cap-add",
             "CHOWN",
             # TemporaryDirectory is mode 0700 and owned by the host runner.
-            # After dropping all capabilities, container root cannot traverse
-            # that bind mount without this read/search-only DAC override.
+            # Keep Docker's default DAC_OVERRIDE capability so container root
+            # can traverse root-owned descendants on native Linux runners.
             "--cap-add",
-            "DAC_READ_SEARCH",
+            "DAC_OVERRIDE",
             "--read-only",
             "--mount",
             f"type=bind,src={evidence_root},dst=/evidence",
@@ -1313,6 +1313,63 @@ def _normalize_evidence_ownership(
         ],
         timeout_seconds=_EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS,
     )
+
+
+def _normalize_evidence_after_failure(
+    tag: str,
+    *,
+    evidence_root: Path,
+    docker_platform: str,
+    original: BaseException,
+) -> bool:
+    """Best-effort ownership handoff without replacing the source failure."""
+
+    try:
+        _normalize_evidence_ownership(
+            tag,
+            evidence_root=evidence_root,
+            docker_platform=docker_platform,
+        )
+    except BaseException as cleanup_exc:
+        _annotate_worker_cleanup_errors(
+            original,
+            [f"normalize:{type(cleanup_exc).__name__}:{cleanup_exc}"],
+        )
+        return False
+    return True
+
+
+def _normalize_and_preserve_failure_evidence(
+    tag: str,
+    *,
+    evidence_root: Path,
+    docker_platform: str,
+    candidate_sha: str,
+    stage: str,
+    command: Sequence[str],
+    original: BaseException,
+) -> None:
+    """Retain diagnostics when possible while keeping the source exception."""
+
+    if not _normalize_evidence_after_failure(
+        tag,
+        evidence_root=evidence_root,
+        docker_platform=docker_platform,
+        original=original,
+    ):
+        return
+    try:
+        _preserve_failure_evidence(
+            evidence_root=evidence_root,
+            candidate_sha=candidate_sha,
+            stage=stage,
+            command=command,
+        )
+    except BaseException as cleanup_exc:
+        _annotate_worker_cleanup_errors(
+            original,
+            [f"preserve:{type(cleanup_exc).__name__}:{cleanup_exc}"],
+        )
 
 
 @contextmanager
@@ -1530,17 +1587,15 @@ def _run_component(
             raise subprocess.CalledProcessError(returncode, command)
     except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
         raise
-    except BaseException:
-        _normalize_evidence_ownership(
+    except BaseException as original:
+        _normalize_and_preserve_failure_evidence(
             tag,
             evidence_root=evidence_root,
             docker_platform=docker_platform,
-        )
-        _preserve_failure_evidence(
-            evidence_root=evidence_root,
             candidate_sha=candidate_sha,
             stage=f"{component}-{transition}-{run_ordinal}",
             command=command,
+            original=original,
         )
         raise
 
@@ -2044,7 +2099,15 @@ def _prepared_fixture_seed(
                     candidate_sha,
                 ]
             )
-        finally:
+        except BaseException as original:
+            _normalize_evidence_after_failure(
+                tag,
+                evidence_root=root,
+                docker_platform=docker_platform,
+                original=original,
+            )
+            raise
+        else:
             _normalize_evidence_ownership(
                 tag,
                 evidence_root=root,
@@ -2172,17 +2235,15 @@ def _run_workflow(
         _run(command)
     except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
         raise
-    except BaseException:
-        _normalize_evidence_ownership(
+    except BaseException as original:
+        _normalize_and_preserve_failure_evidence(
             tag,
             evidence_root=evidence_root,
             docker_platform=docker_platform,
-        )
-        _preserve_failure_evidence(
-            evidence_root=evidence_root,
             candidate_sha=candidate_sha,
             stage=f"workflow-{profile}",
             command=command,
+            original=original,
         )
         raise
 
@@ -2241,17 +2302,15 @@ def _join_evidence(
             raise SystemExit(
                 "joined restart rehearsal evidence was not produced"
             )
-    except BaseException:
-        _normalize_evidence_ownership(
+    except BaseException as original:
+        _normalize_and_preserve_failure_evidence(
             tag,
             evidence_root=evidence_root,
             docker_platform=docker_platform,
-        )
-        _preserve_failure_evidence(
-            evidence_root=evidence_root,
             candidate_sha=candidate_sha,
             stage=f"join-{profile}",
             command=command,
+            original=original,
         )
         raise
     return output

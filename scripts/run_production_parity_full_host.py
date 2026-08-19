@@ -252,12 +252,6 @@ def _write_early_failure_evidence(
 ) -> None:
     """Retain a bounded failure identity when run_full exits before its finally."""
 
-    try:
-        output.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        return
     if (
         RUN_RE.fullmatch(run_id) is None
         or SHA_RE.fullmatch(base_sha) is None
@@ -282,11 +276,26 @@ def _write_early_failure_evidence(
         ),
         "finished_at": finished_at.isoformat(),
     }
+    payload = (
+        json.dumps(evidence, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        json.dumps(evidence, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(output, flags, 0o600)
+    except FileExistsError:
+        return
+    try:
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("bounded evidence write made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class _RejectCloneRedirects(HTTPRedirectHandler):

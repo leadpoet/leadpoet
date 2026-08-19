@@ -1554,6 +1554,102 @@ def test_full_main_retains_bounded_early_failure_without_overwrite(
     assert output.read_text(encoding="utf-8") == retained
 
 
+def test_full_main_concurrent_authoritative_evidence_wins_atomically(
+    monkeypatch,
+    tmp_path: Path,
+):
+    output = tmp_path / "full-evidence.json"
+    authoritative = '{"status":"passed"}\n'
+    real_open = full_host.os.open
+
+    def race_open(path, flags, mode=0o777):
+        if Path(path) == output:
+            output.write_text(authoritative, encoding="utf-8")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(full_host.os, "open", race_open)
+    monkeypatch.setattr(
+        full_host,
+        "run_full",
+        lambda **_kwargs: (_ for _ in ()).throw(FullParityError("redacted")),
+    )
+
+    assert full_host.main(_full_host_main_args(output)) == 1
+    assert output.read_text(encoding="utf-8") == authoritative
+
+
+def test_full_main_never_follows_preexisting_evidence_symlink(
+    monkeypatch,
+    tmp_path: Path,
+):
+    output = tmp_path / "full-evidence.json"
+    authoritative = tmp_path / "authoritative.json"
+    retained = '{"status":"passed"}\n'
+    authoritative.write_text(retained, encoding="utf-8")
+    output.symlink_to(authoritative)
+    monkeypatch.setattr(
+        full_host,
+        "run_full",
+        lambda **_kwargs: (_ for _ in ()).throw(FullParityError("redacted")),
+    )
+
+    assert full_host.main(_full_host_main_args(output)) == 1
+    assert output.is_symlink()
+    assert authoritative.read_text(encoding="utf-8") == retained
+
+
+def test_full_main_completes_short_writes_and_closes_descriptor(
+    monkeypatch,
+    tmp_path: Path,
+):
+    output = tmp_path / "full-evidence.json"
+    real_open = full_host.os.open
+    real_write = full_host.os.write
+    descriptors: list[int] = []
+    writes = 0
+
+    def capture_open(path, flags, mode=0o777):
+        descriptor = real_open(path, flags, mode)
+        descriptors.append(descriptor)
+        return descriptor
+
+    def short_write(descriptor, value):
+        nonlocal writes
+        writes += 1
+        return real_write(descriptor, value[:7])
+
+    monkeypatch.setattr(full_host.os, "open", capture_open)
+    monkeypatch.setattr(full_host.os, "write", short_write)
+    monkeypatch.setattr(
+        full_host,
+        "run_full",
+        lambda **_kwargs: (_ for _ in ()).throw(FullParityError("redacted")),
+    )
+
+    assert full_host.main(_full_host_main_args(output)) == 1
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "failed"
+    assert writes > 1
+    assert len(descriptors) == 1
+    with pytest.raises(OSError):
+        os.fstat(descriptors[0])
+
+
+def test_full_main_preserves_keyboard_interrupt(
+    monkeypatch,
+    tmp_path: Path,
+):
+    output = tmp_path / "full-evidence.json"
+    monkeypatch.setattr(
+        full_host,
+        "run_full",
+        lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        full_host.main(_full_host_main_args(output))
+    assert not output.exists()
+
+
 def test_full_main_redacts_unexpected_early_exception(
     monkeypatch,
     tmp_path: Path,

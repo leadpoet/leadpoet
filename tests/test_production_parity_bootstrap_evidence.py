@@ -418,10 +418,13 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     assert "trap finalize_bootstrap EXIT" in execute
     assert "aws s3api put-object" in execute
     assert "--if-none-match '*'" in execute
-    assert 'evidence_parent="$(dirname -- "$evidence")"' in execute
-    assert 'install -d -m 0700 -- "$evidence_parent"' in execute
+    assert 'evidence_parent="$(dirname -- "$evidence")" || return 1' in execute
+    assert 'mkdir -m 0700 -- "$evidence_parent" >/dev/null 2>&1' in execute
+    assert 'test -d "$evidence_parent" || return 1' in execute
+    assert 'test ! -L "$evidence_parent" || return 1' in execute
+    assert 'install -d -m 0700 -- "$evidence_parent"' not in execute
     assert (
-        execute.index('install -d -m 0700 -- "$evidence_parent"')
+        execute.index('mkdir -m 0700 -- "$evidence_parent"')
         < execute.index('/usr/bin/python3.11 -c {q(bootstrap_writer)}')
     )
     ordered = [
@@ -477,24 +480,13 @@ def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
     assert parsed.returncode == 0, parsed.stderr
 
 
-@pytest.mark.parametrize(
-    ("stage", "category"),
-    [
-        ("bootstrap-environment", "CommandFailed"),
-        ("bootstrap-workspace", "CommandFailed"),
-        ("candidate-bundle-download", "CommandFailed"),
-        ("candidate-clone", "CommandFailed"),
-        ("canonical-origin-fetch", "CommandFailed"),
-        ("candidate-checkout", "CommandFailed"),
-        ("host-python-import", "HostImportFailed"),
-        ("host-entrypoint", "HostEntrypointFailed"),
-    ],
-)
-def test_rendered_ssm_uploads_exact_stage_when_early_parent_is_absent(
+def _run_rendered_ssm_failure(
     tmp_path: Path,
+    *,
     stage: str,
     category: str,
-) -> None:
+    early_parent_target: Path | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
     command = _rendered_ssm_command(tmp_path / "render")
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -571,7 +563,10 @@ esac
         marker = f"failure_stage={stage}"
     assert command.count(marker) == 1
     command = command.replace(marker, marker + "\nfalse", 1)
-    assert not early_root.exists()
+    if early_parent_target is None:
+        assert not early_root.exists()
+    else:
+        early_root.symlink_to(early_parent_target, target_is_directory=True)
     environment = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
@@ -587,12 +582,63 @@ esac
         capture_output=True,
         check=False,
     )
+    return result, capture
+
+
+@pytest.mark.parametrize(
+    ("stage", "category"),
+    [
+        ("bootstrap-environment", "CommandFailed"),
+        ("bootstrap-workspace", "CommandFailed"),
+        ("candidate-bundle-download", "CommandFailed"),
+        ("candidate-clone", "CommandFailed"),
+        ("canonical-origin-fetch", "CommandFailed"),
+        ("candidate-checkout", "CommandFailed"),
+        ("host-python-import", "HostImportFailed"),
+        ("host-entrypoint", "HostEntrypointFailed"),
+    ],
+)
+def test_rendered_ssm_uploads_exact_stage_when_early_parent_is_absent(
+    tmp_path: Path,
+    stage: str,
+    category: str,
+) -> None:
+    result, capture = _run_rendered_ssm_failure(
+        tmp_path,
+        stage=stage,
+        category=category,
+    )
 
     assert result.returncode != 0
     retained = json.loads(capture.read_text(encoding="utf-8"))
     assert retained["failure_stage"] == stage
     assert retained["error_type"] == category
     assert "must-never-enter-evidence" not in capture.read_text(encoding="utf-8")
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_rendered_ssm_rejects_early_parent_symlink_without_mutation_or_upload(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "symlink-target"
+    target.mkdir(mode=0o751)
+    sentinel = target / "sentinel"
+    sentinel.write_text("unchanged\n", encoding="utf-8")
+    original_mode = target.stat().st_mode & 0o777
+
+    result, capture = _run_rendered_ssm_failure(
+        tmp_path,
+        stage="bootstrap-environment",
+        category="CommandFailed",
+        early_parent_target=target,
+    )
+
+    assert result.returncode != 0
+    assert not capture.exists()
+    assert target.stat().st_mode & 0o777 == original_mode
+    assert sentinel.read_text(encoding="utf-8") == "unchanged\n"
+    assert not (target / "full-evidence.json").exists()
     assert result.stdout == ""
     assert result.stderr == ""
 

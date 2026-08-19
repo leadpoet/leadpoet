@@ -4238,13 +4238,27 @@ def test_rehearsal_candidate_identity_does_not_invalidate_stable_dependencies():
         "RUN python3.11 /opt/leadpoet/prepare_external_artifacts.py"
     ) < candidate_arg
     assert candidate_arg < dockerfile.index("COPY scoring-lock-aliases.json")
-    assert candidate_arg < dockerfile.index(
-        "COPY harness/prepare_scoring_wheelhouse_aliases.py"
+    assert candidate_arg < dockerfile.index("COPY harness/ /harness/")
+    assert dockerfile.count("COPY harness/ /harness/") == 1
+    assert "COPY harness/prepare_scoring_wheelhouse_aliases.py" not in dockerfile
+    assert "cp /harness/prepare_scoring_wheelhouse_aliases.py" in dockerfile
+    assert (
+        "python3.11 /opt/leadpoet/prepare_scoring_wheelhouse_aliases.py"
+        in dockerfile
     )
     assert candidate_arg < dockerfile.index(
         'scoring-wheelhouses/${REHEARSAL_SCORING_LOCK_SHA256}'
     )
     assert 'sha256sum "${lock}"' in dockerfile
+    assert dockerfile.count("\nENV ") == 1
+    for name in (
+        "HOME=/home/ec2-user",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "PYTHONUNBUFFERED=1",
+        "PIP_DISABLE_PIP_VERSION_CHECK=1",
+        "PIP_NO_INDEX=1",
+    ):
+        assert name in dockerfile
     assert (
         "tests/restart_rehearsal/prepare_scoring_wheelhouse_aliases.py"
         in rehearsal.COMMITTED_HARNESS_PATHS

@@ -63,17 +63,17 @@ RUN python3.11 /opt/leadpoet/prepare_external_artifacts.py \
 
 ARG REHEARSAL_SCORING_LOCK_SHA256
 COPY scoring-lock-aliases.json /opt/leadpoet/scoring-lock-aliases.json
-COPY harness/prepare_scoring_wheelhouse_aliases.py /opt/leadpoet/prepare_scoring_wheelhouse_aliases.py
-RUN python3.11 /opt/leadpoet/prepare_scoring_wheelhouse_aliases.py \
+COPY harness/ /harness/
+RUN cp /harness/prepare_scoring_wheelhouse_aliases.py \
+      /opt/leadpoet/prepare_scoring_wheelhouse_aliases.py \
+    && python3.11 /opt/leadpoet/prepare_scoring_wheelhouse_aliases.py \
       --root /opt/leadpoet/scoring-wheelhouses \
       --aliases /opt/leadpoet/scoring-lock-aliases.json \
     && test -d "/opt/leadpoet/scoring-wheelhouses/${REHEARSAL_SCORING_LOCK_SHA256}" \
     && ln -s \
       "/opt/leadpoet/scoring-wheelhouses/${REHEARSAL_SCORING_LOCK_SHA256}" \
-      /opt/leadpoet/scoring-wheelhouse
-
-COPY harness/ /harness/
-RUN chmod 755 \
+      /opt/leadpoet/scoring-wheelhouse \
+    && chmod 755 \
       /harness/run_inside.sh \
       /harness/contract_adapter.py \
       /harness/gateway_boundary_service.py \
@@ -88,10 +88,10 @@ RUN chmod 755 \
       /harness/tls_connect_proxy_service.py \
       /harness/validator_enclave_service.py
 
-ENV HOME=/home/ec2-user
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
-ENV PIP_NO_INDEX=1
+ENV HOME=/home/ec2-user \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_INDEX=1
 
 ENTRYPOINT ["/harness/run_inside.sh"]

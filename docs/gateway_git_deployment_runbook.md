@@ -95,6 +95,76 @@ The checkout must have no visible tracked, staged, or untracked files. Ignored
 generated enclave/build artifacts are allowed and are rebuilt by the existing
 workflow.
 
+If miner submissions were disabled at the start of an authorized maintenance
+operation, preserve that state in the gateway Secrets Manager source before
+the restart hydrates its environment. Use only the fixed-purpose protected
+operation below, from the exact attested release checkout. It does not change
+the scoring or autoresearch maintenance controls, does not alter the running
+process, and never prints or stores the secret document. Its read-only first
+step returns the existing Secrets Manager VersionId, which is both the apply
+fence and the recoverable backup version. Apply snapshots the complete version-
+label topology, uses one bounded candidate-unique custom label rather than the
+shared `AWSPENDING` label, and removes only that custom label on pre-promotion
+failure. A post-promotion failure restores the original `AWSCURRENT` and
+`AWSPREVIOUS` placement or absence and verifies the entire original topology.
+Existing rotation labels, including `AWSPENDING`, are never borrowed or removed:
+
+```bash
+set -euo pipefail
+cd /home/ec2-user/leadpoet_repo
+: "${EXPECTED_ATTESTED_SHA:?set the full attested release SHA}"
+GATEWAY_PYTHON_BIN="${GATEWAY_PYTHON_BIN:-/home/ec2-user/venv311/bin/python3}"
+[[ "$EXPECTED_ATTESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+test "$(git rev-parse HEAD)" = "$EXPECTED_ATTESTED_SHA"
+git diff --exit-code "$EXPECTED_ATTESTED_SHA" --
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+"$GATEWAY_PYTHON_BIN" -m gateway.tee.protected_workflows \
+  --root . \
+  --manifest gateway/tee/protected_workflows.json
+
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+  AWS_SECURITY_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE \
+  AWS_SHARED_CREDENTIALS_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
+  AWS_ROLE_SESSION_NAME AWS_CONTAINER_CREDENTIALS_FULL_URI \
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
+
+VERIFY_RESULT="$(
+  "$GATEWAY_PYTHON_BIN" \
+    -m gateway.tee.disable_gateway_miner_submissions_secret
+)"
+printf '%s\n' "$VERIFY_RESULT"
+EXPECTED_SECRET_VERSION="$(
+  printf '%s' "$VERIFY_RESULT" \
+    | "$GATEWAY_PYTHON_BIN" -c \
+      'import json,sys; print(json.load(sys.stdin)["current_version_id"])'
+)"
+
+APPLY_RESULT="$(
+  "$GATEWAY_PYTHON_BIN" \
+    -m gateway.tee.disable_gateway_miner_submissions_secret \
+    --apply \
+    --expected-current-version-id "$EXPECTED_SECRET_VERSION"
+)"
+printf '%s\n' "$APPLY_RESULT"
+APPLIED_SECRET_VERSION="$(
+  printf '%s' "$APPLY_RESULT" \
+    | "$GATEWAY_PYTHON_BIN" -c \
+      'import json,sys; print(json.load(sys.stdin)["current_version_id"])'
+)"
+
+"$GATEWAY_PYTHON_BIN" \
+  -m gateway.tee.disable_gateway_miner_submissions_secret \
+  --expected-current-version-id "$APPLIED_SECRET_VERSION"
+```
+
+The final result must be `already_disabled`. Do not place a credential value,
+secret document, or decoded environment in a shell variable, file, log, or
+command argument. The next canonical restart hydrates the explicit `false`
+value; until that restart succeeds, the already-running gateway retains its
+invocation-time environment. Keep scoring and autoresearch in their separately
+recorded invocation-time maintenance states.
+
 ```bash
 cd /home/ec2-user
 bash /home/ec2-user/gw_restart.sh

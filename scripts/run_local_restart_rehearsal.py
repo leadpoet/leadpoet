@@ -49,7 +49,7 @@ _BUILDX_OPERATION_TIMEOUT_SECONDS = 10.0
 _DRAND_SOURCE_DOWNLOAD_TIMEOUT_SECONDS = 120.0
 _DRAND_SOURCE_DOWNLOAD_PROCESS_TIMEOUT_SECONDS = 125.0
 _DRAND_BUILDER_TIMEOUT_SECONDS = 180.0
-_DRAND_COMPILE_TIMEOUT_SECONDS = 180.0
+_DRAND_COMPILE_TIMEOUT_SECONDS = 300.0
 _DRAND_SOURCE_MAX_BYTES = 64 * 1024 * 1024
 _DRAND_INTERNAL_DOWNLOAD_COMMAND = "--internal-download-drand-source"
 _GIT_BLOB_READ_TIMEOUT_SECONDS = 30.0
@@ -1098,7 +1098,7 @@ def _build_image(
     *,
     harness_sha: str,
     docker_platform: str,
-    docker_client_root: Path,
+    buildx_executable: Path,
     wheelhouse_shas: Sequence[str],
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="leadpoet-restart-image-") as raw:
@@ -1157,11 +1157,10 @@ def _build_image(
             destination = harness / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(_git_file(harness_sha, path))
-        buildx = _provision_official_buildx(docker_client_root)
         base_image = _prepare_local_rehearsal_base_image(docker_platform)
         _run(
             [
-                str(buildx),
+                str(buildx_executable),
                 "build",
                 "--builder",
                 "default",
@@ -1451,6 +1450,7 @@ def _prepare_drand_artifact_owned(
     *,
     source_root: Path,
     candidate_sha: str,
+    buildx_executable: Path,
 ) -> Path:
     """Independently rebuild/cache the real measured drand C ABI artifact."""
 
@@ -1547,8 +1547,13 @@ def _prepare_drand_artifact_owned(
         builder_tag = _drand_builder_tag(source_root)
         _run(
             [
-                "docker",
+                str(buildx_executable),
                 "build",
+                "--builder",
+                "default",
+                "--load",
+                "--progress=plain",
+                "--pull=false",
                 "--platform",
                 "linux/amd64",
                 "-f",
@@ -1602,12 +1607,14 @@ def _prepare_drand_artifact(
     *,
     source_root: Path,
     candidate_sha: str,
+    buildx_executable: Path,
 ) -> Path:
     registry = getattr(_WORKER_PROCESS_STATE, "registry", None)
     if registry is not None:
         return _prepare_drand_artifact_owned(
             source_root=source_root,
             candidate_sha=candidate_sha,
+            buildx_executable=buildx_executable,
         )
     owned_registry = _WorkerProcessRegistry()
     with _worker_process_scope(owned_registry):
@@ -1615,6 +1622,7 @@ def _prepare_drand_artifact(
             return _prepare_drand_artifact_owned(
                 source_root=source_root,
                 candidate_sha=candidate_sha,
+                buildx_executable=buildx_executable,
             )
         except BaseException as exc:
             _annotate_worker_cleanup_errors(exc, owned_registry.cancel())
@@ -3520,6 +3528,7 @@ def _run_profile(
     _verify_driver_identity(harness_sha)
 
     docker_platform = _docker_platform(args.profile)
+    buildx_executable = _provision_official_buildx(docker_client_root)
     wheelhouse_shas = (from_sha, candidate_sha)
     tag = _image_tag(
         harness_sha,
@@ -3533,7 +3542,7 @@ def _run_profile(
             tag,
             harness_sha=harness_sha,
             docker_platform=docker_platform,
-            docker_client_root=docker_client_root,
+            buildx_executable=buildx_executable,
             wheelhouse_shas=wheelhouse_shas,
         )
     if args.profile != "prepush" and image_build_required:
@@ -3580,6 +3589,7 @@ def _run_profile(
                         action=lambda target=target: _prepare_drand_artifact(
                             source_root=source_root,
                             candidate_sha=target,
+                            buildx_executable=buildx_executable,
                         ),
                         stages=cold_drand_results,
                     )
@@ -3637,6 +3647,7 @@ def _run_profile(
                             action=lambda target=target: _prepare_drand_artifact(
                                 source_root=source_root,
                                 candidate_sha=target,
+                                buildx_executable=buildx_executable,
                             ),
                             stages=stage_results,
                         )

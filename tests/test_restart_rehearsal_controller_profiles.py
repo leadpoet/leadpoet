@@ -515,7 +515,7 @@ def test_prepush_cold_artifacts_follow_snapshot_and_overlap_image() -> None:
     ("boundary", "command", "owns_container"),
     [
         ("download", [sys.executable, "drand-download"], False),
-        ("builder", ["docker", "build", "drand-builder"], False),
+        ("builder", ["/trusted/docker-buildx", "build", "drand-builder"], False),
         ("compile", ["docker", "run", "drand-compile"], True),
     ],
 )
@@ -570,6 +570,40 @@ def test_prepush_signal_reaps_each_direct_drand_boundary(
         assert removed == [processes[0].command[name_index + 1]]
     else:
         assert removed == []
+
+
+def test_direct_drand_compile_timeout_reaps_named_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    started = threading.Event()
+    processes, removed = _install_blocked_popen(
+        controller,
+        monkeypatch,
+        started,
+        streaming=False,
+    )
+
+    def timeout_immediately(self, timeout=None):
+        started.set()
+        assert timeout == controller._DRAND_COMPILE_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(self.command, timeout)
+
+    monkeypatch.setattr(_BlockedProcess, "communicate", timeout_immediately)
+    registry = controller._WorkerProcessRegistry()
+    with controller._worker_process_scope(registry):
+        with pytest.raises(subprocess.TimeoutExpired):
+            controller._run(
+                ["docker", "run", "--rm", "drand-builder"],
+                timeout_seconds=controller._DRAND_COMPILE_TIMEOUT_SECONDS,
+            )
+
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert processes[0].killed is True
+    assert processes[0].reaped is True
+    name_index = processes[0].command.index("--name")
+    assert removed == [processes[0].command[name_index + 1]]
 
 
 @pytest.mark.parametrize("signum", [signal.SIGALRM, signal.SIGINT])
@@ -781,6 +815,7 @@ def test_drand_preparation_uses_only_direct_owned_boundaries(
     )
     home = tmp_path / "home"
     home.mkdir()
+    buildx = tmp_path / "trusted/docker-buildx"
     monkeypatch.setattr(controller.Path, "home", lambda: home)
     monkeypatch.setattr(controller, "REPO_ROOT", source_root)
     source_payload = b"pinned source"
@@ -834,6 +869,7 @@ def test_drand_preparation_uses_only_direct_owned_boundaries(
     cache_root = controller._prepare_drand_artifact(
         source_root=source_root,
         candidate_sha="a" * 40,
+        buildx_executable=buildx,
     )
     cached = cache_root / "libbittensor_drand_v2.so"
     assert cached.read_bytes() == compiled_payload
@@ -842,16 +878,30 @@ def test_drand_preparation_uses_only_direct_owned_boundaries(
     assert calls[0][0][0] == sys.executable
     assert controller._DRAND_INTERNAL_DOWNLOAD_COMMAND in calls[0][0]
     assert calls[0][1] == controller._DRAND_SOURCE_DOWNLOAD_PROCESS_TIMEOUT_SECONDS
-    assert calls[1][0][:2] == ["docker", "build"]
+    assert calls[1][0][:5] == [
+        str(buildx),
+        "build",
+        "--builder",
+        "default",
+        "--load",
+    ]
+    assert "--pull=false" in calls[1][0]
     assert calls[1][1] == controller._DRAND_BUILDER_TIMEOUT_SECONDS
     assert calls[2][0][:2] == ["docker", "run"]
     assert calls[2][1] == controller._DRAND_COMPILE_TIMEOUT_SECONDS
+    assert controller._DRAND_COMPILE_TIMEOUT_SECONDS == 300.0
+    assert (
+        0
+        < controller._DRAND_COMPILE_TIMEOUT_SECONDS
+        < controller.PROFILE_LIMITS["prepush"]["target_seconds"]
+    )
     assert "--internal-no-docker" in calls[2][0][-1]
     assert not any(command[:1] == ["/bin/bash"] for command, _ in calls)
 
     controller._prepare_drand_artifact(
         source_root=source_root,
         candidate_sha="a" * 40,
+        buildx_executable=buildx,
     )
     assert len(calls) == 3
 

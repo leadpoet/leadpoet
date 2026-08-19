@@ -10,6 +10,8 @@ import pytest
 
 from research_lab.canonical import sha256_json
 from research_lab.routing_experiments import (
+    COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION,
+    CompanyFirstLabReplay,
     ExperimentCreditBudget,
     InMemoryProviderReceiptRepository,
     JsonlProviderReceiptRepository,
@@ -36,6 +38,7 @@ from research_lab.routing_experiments import (
     SourcingModelArtifactIdentity,
     evaluate_routing_experiment_v2,
     promote_routing_experiment_v2_to_lab,
+    replay_company_first_orchestration,
     validate_routing_experiment_v2_spec,
     validate_routing_decision_receipt,
 )
@@ -3346,3 +3349,151 @@ def test_v2_declared_source_add_must_be_invokable_in_compiled_plan_before_calls(
         labels,
         error_match="v2_declared_new_tool_missing_from_compiled_plan",
     )
+class FakeCompanyFirstContinuationAdapter:
+    action_types = (
+        "execute_candidate_tool",
+        "verify_company",
+        "execute_intent_tool",
+        "verify_intent",
+        "execute_contact_tool",
+        "verify_contact",
+    )
+    stages = {
+        "execute_candidate_tool": "candidate_acquisition",
+        "verify_company": "company_qualification",
+        "execute_intent_tool": "intent_evidence",
+        "verify_intent": "intent_verification",
+        "execute_contact_tool": "contact_acquisition",
+        "verify_contact": "contact_verification",
+    }
+
+    def __init__(self, artifact: SourcingModelArtifactIdentity) -> None:
+        self.observed_artifact_key = sha256_json({
+            "model_artifact_hash": artifact.model_artifact_hash,
+            "manifest_hash": artifact.manifest_hash,
+            "commit_sha": artifact.commit_sha,
+        })
+
+    def advance(self, request, *, continuation, completion):
+        assert request["normalized_icp"] == {"segments_any_of": ["software"]}
+        completed = list(
+            continuation["completed_actions"] if continuation else ()
+        )
+        if completion is not None:
+            completed.append(dict(completion))
+        sequence = len(completed)
+        if sequence == len(self.action_types):
+            return {
+                "schema_version": COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION,
+                "status": "completed",
+                "action": None,
+                "continuation": {
+                    "schema_version": COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION,
+                    "input_sha256": "1" * 64,
+                    "completed_actions": completed,
+                    "pending_action": None,
+                    "continuation_sha256": "2" * 64,
+                },
+                "result": {
+                    "leads": [],
+                    "receipt": {"stop_reason": "fixture_complete"},
+                },
+            }
+        action_type = self.action_types[sequence]
+        action = {
+            "schema_version": "company-first-action-request:v1",
+            "action_id": f"{sequence + 3:064x}",
+            "sequence": sequence,
+            "action_type": action_type,
+            "stage": self.stages[action_type],
+            "request_sha256": f"{sequence + 13:064x}",
+            "arguments": {
+                "tool_id": "candidate.fixture"
+                if action_type == "execute_candidate_tool"
+                else "intent.fixture"
+                if action_type == "execute_intent_tool"
+                else "contact.fixture"
+                if action_type == "execute_contact_tool"
+                else None,
+            },
+        }
+        state = {
+            "schema_version": COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION,
+            "input_sha256": "1" * 64,
+            "completed_actions": completed,
+            "pending_action": action,
+            "continuation_sha256": f"{sequence + 23:064x}",
+        }
+        return {
+            "schema_version": COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION,
+            "status": "action_required",
+            "action": action,
+            "continuation": state,
+        }
+
+    def complete_action(self, action, result):
+        return {
+            "schema_version": "company-first-action-completion:v1",
+            "action_id": action["action_id"],
+            "action_type": action["action_type"],
+            "request_sha256": action["request_sha256"],
+            "result_sha256": sha256_json(result).split(":", 1)[1],
+            "result": result,
+        }
+
+
+def test_company_first_lab_replay_preserves_all_model_action_types() -> None:
+    artifact, _authority_manifest = _artifact()
+    adapter = FakeCompanyFirstContinuationAdapter(artifact)
+    invoked: list[str] = []
+
+    replay = replay_company_first_orchestration(
+        {
+            "normalized_icp": {"segments_any_of": ["software"]},
+            "target": 1,
+        },
+        artifact=artifact,
+        adapter=adapter,
+        runner=lambda action: invoked.append(action["action_type"]) or {
+            "outcome": "fixture",
+        },
+    )
+
+    assert isinstance(replay, CompanyFirstLabReplay)
+    assert invoked == list(FakeCompanyFirstContinuationAdapter.action_types)
+    assert [item.action_type for item in replay.actions] == invoked
+    assert replay.result["receipt"]["stop_reason"] == "fixture_complete"
+    assert replay.final_continuation_hash == H("2")
+    assert replay.replay_hash().startswith("sha256:")
+
+
+def test_company_first_lab_replay_fails_closed_on_identity_and_live_mode() -> None:
+    artifact, _authority_manifest = _artifact()
+    adapter = FakeCompanyFirstContinuationAdapter(artifact)
+    request = {
+        "normalized_icp": {"segments_any_of": ["software"]},
+        "target": 1,
+    }
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="company_first_adapter_artifact_mismatch",
+    ):
+        replay_company_first_orchestration(
+            request,
+            artifact=replace(artifact, commit_sha="2" * 40),
+            adapter=adapter,
+            runner=lambda _action: {},
+        )
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="company_first_live_execution_is_not_supported",
+    ):
+        replay_company_first_orchestration(
+            request,
+            artifact=artifact,
+            adapter=adapter,
+            runner=lambda _action: {},
+            execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+        )

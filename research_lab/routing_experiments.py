@@ -9,12 +9,15 @@ activation:
 * LLM output is only a bounded proposal and can never promote itself;
 * calibration and holdout runs use the same content-addressed receipt store;
 * provider results have a small, typed outcome vocabulary;
+* company-first fixture/replay runs advance only exact model-owned actions;
 * promotion creates an immutable receipt and never mutates a live pointer.
 
 The production worker and the Sourcing_model consumer should call the same
 model-owned route compiler.  This module only evaluates bounded route
-variants in the Lab.  The runner seam accepts already-redacted receipts and
-does not know credentials, URLs, prompts, or response bodies.
+variants in the Lab.  The routing runner seam accepts already-redacted receipts
+and does not know credentials, URLs, prompts, or response bodies.  The separate
+company-first replay seam returns typed action results to the pinned model and
+stores only hashes in its Lab audit trace.
 """
 
 from __future__ import annotations
@@ -44,6 +47,16 @@ ROUTING_EVALUATION_RECEIPT_VERSION = "leadpoet.intent_routing_evaluation:v1"
 ROUTING_PROMOTION_RECEIPT_VERSION = "leadpoet.intent_routing_promotion:v1"
 ROUTING_EXPERIMENT_V2_CONTRACT_VERSION = "leadpoet.intent_routing_experiment:v2"
 ROUTING_DECISION_RECEIPT_V2_VERSION = "leadpoet.routing_decision_receipt:v2"
+COMPANY_FIRST_LAB_REPLAY_CONTRACT_VERSION = (
+    "leadpoet.company_first_lab_replay:v1"
+)
+COMPANY_FIRST_ACTION_REQUEST_SCHEMA_VERSION = (
+    "company-first-action-request:v1"
+)
+COMPANY_FIRST_ACTION_COMPLETION_SCHEMA_VERSION = (
+    "company-first-action-completion:v1"
+)
+COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION = "company-first-continuation:v1"
 
 MAX_PROVIDER_BINDINGS = 64
 MAX_PROFILE_VARIANTS = 24
@@ -60,6 +73,22 @@ _SAFE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}$")
 _SAFE_FEATURE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
 _SAFE_PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
 _MODEL_EXECUTION_MODES = frozenset({"invoke", "observe", "virtual"})
+_COMPANY_FIRST_ACTION_TYPES = frozenset({
+    "execute_candidate_tool",
+    "verify_company",
+    "execute_intent_tool",
+    "verify_intent",
+    "execute_contact_tool",
+    "verify_contact",
+})
+_COMPANY_FIRST_ACTION_STAGES = {
+    "execute_candidate_tool": "candidate_acquisition",
+    "verify_company": "company_qualification",
+    "execute_intent_tool": "intent_evidence",
+    "verify_intent": "intent_verification",
+    "execute_contact_tool": "contact_acquisition",
+    "verify_contact": "contact_verification",
+}
 _FORBIDDEN_MARKERS = (
     "api_key",
     "access_token",
@@ -4256,6 +4285,410 @@ def _v2_variant_artifact_key(variant: RoutingExperimentV2Variant) -> str:
             "commit_sha": variant.artifact.commit_sha,
         }
     )
+
+
+def _company_first_artifact_key(
+    artifact: SourcingModelArtifactIdentity,
+) -> str:
+    return sha256_json(
+        {
+            "model_artifact_hash": artifact.model_artifact_hash,
+            "manifest_hash": artifact.manifest_hash,
+            "commit_sha": artifact.commit_sha,
+        }
+    )
+
+
+class CompanyFirstContinuationModelAdapter(Protocol):
+    """Narrow seam to one isolated model artifact continuation contract."""
+
+    observed_artifact_key: str
+
+    def advance(
+        self,
+        request: Mapping[str, Any],
+        *,
+        continuation: Mapping[str, Any] | None,
+        completion: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any]: ...
+
+    def complete_action(
+        self,
+        action: Mapping[str, Any],
+        result: Any,
+    ) -> Mapping[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class PinnedCompanyFirstContinuationAdapter:
+    """Bind the Lab bridge to the exact company-first model module in a worker.
+
+    The caller must import the module inside its artifact-isolated worker and
+    pass the worker's observed artifact key. This class does not load a second
+    model tree into the Lab process.
+    """
+
+    module: Any
+    observed_artifact_key: str
+
+    def __post_init__(self) -> None:
+        _ensure_hash(
+            self.observed_artifact_key,
+            "company_first_observed_artifact_key",
+        )
+        expected_constants = {
+            "COMPANY_FIRST_ACTION_REQUEST_SCHEMA_VERSION":
+                COMPANY_FIRST_ACTION_REQUEST_SCHEMA_VERSION,
+            "COMPANY_FIRST_ACTION_COMPLETION_SCHEMA_VERSION":
+                COMPANY_FIRST_ACTION_COMPLETION_SCHEMA_VERSION,
+            "COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION":
+                COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION,
+        }
+        for name, expected in expected_constants.items():
+            if getattr(self.module, name, None) != expected:
+                raise RoutingExperimentError(
+                    f"company_first_model_contract_mismatch:{name}"
+                )
+        for name in (
+            "continue_company_first_orchestration",
+            "build_company_first_action_completion",
+        ):
+            if not callable(getattr(self.module, name, None)):
+                raise RoutingExperimentError(
+                    f"company_first_model_function_missing:{name}"
+                )
+
+    def advance(
+        self,
+        request: Mapping[str, Any],
+        *,
+        continuation: Mapping[str, Any] | None,
+        completion: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any]:
+        arguments = dict(request)
+        normalized_icp = arguments.pop("normalized_icp", None)
+        if not isinstance(normalized_icp, Mapping):
+            raise RoutingExperimentError(
+                "company_first_normalized_icp_is_required"
+            )
+        try:
+            return self.module.continue_company_first_orchestration(
+                normalized_icp,
+                **arguments,
+                continuation=continuation,
+                completion=completion,
+            )
+        except RoutingExperimentError:
+            raise
+        except Exception as exc:
+            raise RoutingExperimentError(
+                "company_first_model_advance_failed"
+            ) from exc
+
+    def complete_action(
+        self,
+        action: Mapping[str, Any],
+        result: Any,
+    ) -> Mapping[str, Any]:
+        try:
+            return self.module.build_company_first_action_completion(
+                action, result,
+            )
+        except RoutingExperimentError:
+            raise
+        except Exception as exc:
+            raise RoutingExperimentError(
+                "company_first_model_completion_failed"
+            ) from exc
+
+
+@dataclass(frozen=True)
+class CompanyFirstLabActionReceipt:
+    sequence: int
+    action_type: str
+    stage: str
+    action_id: str
+    request_hash: str
+    result_hash: str
+
+    def __post_init__(self) -> None:
+        _bounded_int(
+            self.sequence,
+            "company_first_action_sequence",
+            minimum=0,
+            maximum=9_999,
+        )
+        if self.action_type not in _COMPANY_FIRST_ACTION_TYPES:
+            raise RoutingExperimentError(
+                "company_first_action_type_is_invalid"
+            )
+        if self.stage != _COMPANY_FIRST_ACTION_STAGES[self.action_type]:
+            raise RoutingExperimentError(
+                "company_first_action_stage_is_invalid"
+            )
+        _ensure_hash(self.action_id, "company_first_action_id")
+        _ensure_hash(self.request_hash, "company_first_request_hash")
+        _ensure_hash(self.result_hash, "company_first_result_hash")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CompanyFirstLabReplay:
+    artifact: SourcingModelArtifactIdentity
+    actions: tuple[CompanyFirstLabActionReceipt, ...]
+    result: Mapping[str, Any]
+    final_continuation_hash: str
+    execution_mode: str
+    contract_version: str = COMPANY_FIRST_LAB_REPLAY_CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        errors = validate_sourcing_model_artifact_identity(self.artifact)
+        if errors:
+            raise RoutingExperimentError(
+                "company_first_artifact_is_invalid:" + ";".join(errors)
+            )
+        if self.execution_mode not in {
+            ReceiptExecutionMode.FIXTURE.value,
+            ReceiptExecutionMode.REPLAY.value,
+        }:
+            raise RoutingExperimentError(
+                "company_first_replay_execution_mode_is_invalid"
+            )
+        if not isinstance(self.result, Mapping):
+            raise RoutingExperimentError("company_first_result_is_invalid")
+        _ensure_hash(
+            self.final_continuation_hash,
+            "company_first_final_continuation_hash",
+        )
+        if self.contract_version != COMPANY_FIRST_LAB_REPLAY_CONTRACT_VERSION:
+            raise RoutingExperimentError(
+                "company_first_replay_contract_version_is_invalid"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "artifact": self.artifact.to_dict(),
+            "actions": [item.to_dict() for item in self.actions],
+            "result": dict(self.result),
+            "final_continuation_hash": self.final_continuation_hash,
+            "execution_mode": self.execution_mode,
+        }
+
+    def replay_hash(self) -> str:
+        return sha256_json(self.to_dict())
+
+
+def _company_first_exact_mapping(
+    value: Any,
+    *,
+    fields: frozenset[str],
+    label: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise RoutingExperimentError(
+            f"company_first_{label}_contract_is_invalid"
+        )
+    return value
+
+
+def replay_company_first_orchestration(
+    request: Mapping[str, Any],
+    *,
+    artifact: SourcingModelArtifactIdentity,
+    adapter: CompanyFirstContinuationModelAdapter,
+    runner: Callable[[Mapping[str, Any]], Any],
+    execution_mode: str = ReceiptExecutionMode.FIXTURE.value,
+    max_actions: int = 10_000,
+) -> CompanyFirstLabReplay:
+    """Replay one company-first run through exact model-owned actions.
+
+    This Lab path is fixture/replay only. It cannot spend live credits or move
+    a model pointer. The returned audit trace excludes action arguments and
+    result payloads; the model-owned result keeps the canonical receipts.
+    """
+
+    if not isinstance(request, Mapping):
+        raise RoutingExperimentError("company_first_request_is_invalid")
+    if "continuation" in request or "completion" in request:
+        raise RoutingExperimentError(
+            "company_first_state_is_owned_by_the_lab_bridge"
+        )
+    errors = validate_sourcing_model_artifact_identity(artifact)
+    if errors:
+        raise RoutingExperimentError(
+            "company_first_artifact_is_invalid:" + ";".join(errors)
+        )
+    if adapter.observed_artifact_key != _company_first_artifact_key(artifact):
+        raise RoutingExperimentError(
+            "company_first_adapter_artifact_mismatch"
+        )
+    if execution_mode not in {
+        ReceiptExecutionMode.FIXTURE.value,
+        ReceiptExecutionMode.REPLAY.value,
+    }:
+        raise RoutingExperimentError(
+            "company_first_live_execution_is_not_supported"
+        )
+    _bounded_int(
+        max_actions,
+        "company_first_max_actions",
+        minimum=1,
+        maximum=10_000,
+    )
+
+    continuation: Mapping[str, Any] | None = None
+    completion: Mapping[str, Any] | None = None
+    action_receipts: list[CompanyFirstLabActionReceipt] = []
+    for _cycle in range(max_actions + 1):
+        sequence = len(action_receipts)
+        state = adapter.advance(
+            request,
+            continuation=continuation,
+            completion=completion,
+        )
+        if not isinstance(state, Mapping):
+            raise RoutingExperimentError(
+                "company_first_model_state_is_invalid"
+            )
+        if state.get("schema_version") != COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION:
+            raise RoutingExperimentError(
+                "company_first_model_state_schema_is_invalid"
+            )
+        status = state.get("status")
+        if status == "completed":
+            completed = _company_first_exact_mapping(
+                state,
+                fields=frozenset({
+                    "schema_version", "status", "action", "continuation",
+                    "result",
+                }),
+                label="completed_state",
+            )
+            if completed["action"] is not None:
+                raise RoutingExperimentError(
+                    "company_first_completed_action_must_be_empty"
+                )
+            final_state = _company_first_exact_mapping(
+                completed["continuation"],
+                fields=frozenset({
+                    "schema_version", "input_sha256", "completed_actions",
+                    "pending_action", "continuation_sha256",
+                }),
+                label="final_continuation",
+            )
+            if final_state["pending_action"] is not None:
+                raise RoutingExperimentError(
+                    "company_first_final_pending_action_must_be_empty"
+                )
+            return CompanyFirstLabReplay(
+                artifact=artifact,
+                actions=tuple(action_receipts),
+                result=completed["result"],
+                final_continuation_hash=model_hash_to_lab(
+                    final_state["continuation_sha256"],
+                    "company_first_final_continuation_hash",
+                ),
+                execution_mode=execution_mode,
+            )
+        if status != "action_required":
+            raise RoutingExperimentError(
+                "company_first_model_status_is_invalid"
+            )
+        if sequence >= max_actions:
+            raise RoutingExperimentError(
+                "company_first_action_limit_exceeded"
+            )
+        required = _company_first_exact_mapping(
+            state,
+            fields=frozenset({
+                "schema_version", "status", "action", "continuation",
+            }),
+            label="required_state",
+        )
+        action = _company_first_exact_mapping(
+            required["action"],
+            fields=frozenset({
+                "schema_version", "action_id", "sequence", "action_type",
+                "stage", "request_sha256", "arguments",
+            }),
+            label="action",
+        )
+        action_type = str(action.get("action_type") or "")
+        if action.get("schema_version") != COMPANY_FIRST_ACTION_REQUEST_SCHEMA_VERSION:
+            raise RoutingExperimentError(
+                "company_first_action_schema_is_invalid"
+            )
+        if action.get("sequence") != sequence:
+            raise RoutingExperimentError(
+                "company_first_action_sequence_is_invalid"
+            )
+        if (
+            action_type not in _COMPANY_FIRST_ACTION_TYPES
+            or action.get("stage") != _COMPANY_FIRST_ACTION_STAGES[action_type]
+        ):
+            raise RoutingExperimentError(
+                "company_first_action_identity_is_invalid"
+            )
+        continuation_state = _company_first_exact_mapping(
+            required["continuation"],
+            fields=frozenset({
+                "schema_version", "input_sha256", "completed_actions",
+                "pending_action", "continuation_sha256",
+            }),
+            label="continuation",
+        )
+        if continuation_state.get("pending_action") != action:
+            raise RoutingExperimentError(
+                "company_first_pending_action_mismatch"
+            )
+        try:
+            action_result = runner(dict(action))
+        except RoutingExperimentError:
+            raise
+        except Exception as exc:
+            raise RoutingExperimentError(
+                "company_first_action_runner_failed"
+            ) from exc
+        completion = _company_first_exact_mapping(
+            adapter.complete_action(action, action_result),
+            fields=frozenset({
+                "schema_version", "action_id", "action_type",
+                "request_sha256", "result_sha256", "result",
+            }),
+            label="completion",
+        )
+        if (
+            completion.get("schema_version")
+            != COMPANY_FIRST_ACTION_COMPLETION_SCHEMA_VERSION
+            or completion.get("action_id") != action.get("action_id")
+            or completion.get("action_type") != action_type
+            or completion.get("request_sha256")
+            != action.get("request_sha256")
+        ):
+            raise RoutingExperimentError(
+                "company_first_completion_identity_is_invalid"
+            )
+        action_receipts.append(CompanyFirstLabActionReceipt(
+            sequence=sequence,
+            action_type=action_type,
+            stage=str(action["stage"]),
+            action_id=model_hash_to_lab(
+                action["action_id"], "company_first_action_id",
+            ),
+            request_hash=model_hash_to_lab(
+                action["request_sha256"], "company_first_request_hash",
+            ),
+            result_hash=model_hash_to_lab(
+                completion["result_sha256"],
+                "company_first_result_hash",
+            ),
+        ))
+        continuation = continuation_state
+
+    raise RoutingExperimentError("company_first_model_did_not_complete")
 
 
 def validate_routing_experiment_v2_spec(

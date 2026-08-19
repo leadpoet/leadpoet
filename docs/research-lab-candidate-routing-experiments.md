@@ -15,8 +15,10 @@ This PR adds four candidate-only parts:
    receipt.
 2. `evaluate_candidate_waterfall_metrics` derives calibration and holdout
    metrics for raw, normalized, unique, verified-qualified, and published
-   companies. These metrics are sidecars. They do not select or promote a
-   route.
+   companies. It requires complete sidecar coverage for every provider and
+   decision receipt in the shared evaluation, so omitted misses or failures
+   cannot improve the metrics. These metrics are sidecars. They do not select
+   or promote a route.
 3. `validate_candidate_routing_model_runtime` compares the isolated Model
    runtime's candidate waterfall contract hash with the exact artifact hash
    in the V2 experiment variant. A partial, unsafe, or different runtime fails
@@ -24,6 +26,7 @@ This PR adds four candidate-only parts:
 4. `scripts/156-research-lab-candidate-routing-experiments.sql` stores only
    the Model receipt sidecars and candidate metric sidecars. Both tables are
    append-only, service-role-only, and protected by forced row-level security.
+   Each stored JSON document must exactly match its indexed scalar columns.
 
 The adapter never compiles a route, calls a provider, selects an unrecorded
 fallback, or writes a second promotion decision. Use PR 93's

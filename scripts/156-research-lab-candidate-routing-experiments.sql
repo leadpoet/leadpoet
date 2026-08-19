@@ -40,7 +40,15 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
     execution_mode                TEXT NOT NULL CHECK (
         execution_mode IN ('fixture', 'replay', 'measured_lab')
     ),
-    provider_outcome              TEXT NOT NULL,
+    provider_outcome              TEXT NOT NULL CHECK (
+        provider_outcome IN (
+            'verified',
+            'rejected',
+            'source_miss',
+            'adapter_failure',
+            'skipped'
+        )
+    ),
     decision_plan_hash            TEXT NOT NULL CHECK (
         decision_plan_hash ~ '^sha256:[0-9a-f]{64}$'
     ),
@@ -100,15 +108,42 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
             AND provider_outcome <> 'skipped'
         )
     ),
-    CHECK (receipt_doc->>'receipt_id' = receipt_id),
-    CHECK (receipt_doc->>'receipt_hash' = receipt_hash),
-    CHECK (receipt_doc->>'contract_version' = contract_version),
-    CHECK (receipt_doc->>'experiment_id' = experiment_id),
-    CHECK (receipt_doc->>'experiment_hash' = experiment_hash),
-    CHECK (receipt_doc->>'variant_id' = variant_id),
-    CHECK (receipt_doc->>'decision_receipt_id' = decision_receipt_id),
-    CHECK (receipt_doc->>'provider_receipt_ref' = provider_receipt_ref),
-    CHECK (receipt_doc->>'attempt_receipt_sha256' = attempt_receipt_sha256)
+    CHECK (receipt_doc = jsonb_build_object(
+        'receipt_id', receipt_id,
+        'receipt_hash', receipt_hash,
+        'contract_version', contract_version,
+        'experiment_id', experiment_id,
+        'experiment_hash', experiment_hash,
+        'variant_id', variant_id,
+        'artifact_key', artifact_key,
+        'decision_receipt_id', decision_receipt_id,
+        'provider_receipt_ref', provider_receipt_ref,
+        'unit_ref', unit_ref,
+        'binding_id', binding_id,
+        'tool_id', tool_id,
+        'execution_mode', execution_mode,
+        'provider_outcome', provider_outcome,
+        'decision_plan_hash', decision_plan_hash,
+        'decision_route_hash', decision_route_hash,
+        'model_contract_sha256', model_contract_sha256,
+        'model_plan_sha256', model_plan_sha256,
+        'stop_policy_sha256', stop_policy_sha256,
+        'attempt_receipt_sha256', attempt_receipt_sha256,
+        'verification_receipt_sha256', verification_receipt_sha256,
+        'step_order', step_order,
+        'attempt_sequence', attempt_sequence,
+        'disposition', disposition,
+        'outcome_code', outcome_code,
+        'provider_call_count', provider_call_count,
+        'cost_microusd', cost_microusd,
+        'latency_ms', latency_ms,
+        'raw_count', raw_count,
+        'normalized_count', normalized_count,
+        'unique_count', unique_count,
+        'verified_qualified_count', verified_qualified_count,
+        'published_count', published_count,
+        'immutable', TRUE
+    ))
 );
 
 CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
@@ -172,14 +207,41 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
     CHECK (normalized_count >= unique_count),
     CHECK (unique_count >= verified_qualified_count),
     CHECK (verified_qualified_count >= published_count),
-    CHECK (metric_doc->>'metric_id' = metric_id),
-    CHECK (metric_doc->>'metric_hash' = metric_hash),
-    CHECK (metric_doc->>'contract_version' = contract_version),
-    CHECK (metric_doc->>'evaluation_receipt_id' = evaluation_receipt_id),
-    CHECK (metric_doc->>'experiment_id' = experiment_id),
-    CHECK (metric_doc->>'experiment_hash' = experiment_hash),
-    CHECK (metric_doc->>'variant_id' = variant_id),
-    CHECK (metric_doc->>'split' = split)
+    CHECK (jsonb_typeof(metric_doc->'waterfall_receipt_refs') = 'array'),
+    CHECK (jsonb_typeof(metric_doc->'provider_receipt_refs') = 'array'),
+    CHECK (jsonb_typeof(metric_doc->'decision_receipt_refs') = 'array'),
+    CHECK (metric_doc = jsonb_build_object(
+        'metric_id', metric_id,
+        'metric_hash', metric_hash,
+        'contract_version', contract_version,
+        'evaluation_receipt_id', evaluation_receipt_id,
+        'experiment_id', experiment_id,
+        'experiment_hash', experiment_hash,
+        'variant_id', variant_id,
+        'split', split,
+        'target_verified_qualified_count', target_verified_qualified_count,
+        'unit_count', unit_count,
+        'fulfilled_unit_count', fulfilled_unit_count,
+        'waterfall_attempt_count', waterfall_attempt_count,
+        'provider_call_count', provider_call_count,
+        'total_cost_microusd', total_cost_microusd,
+        'total_latency_ms', total_latency_ms,
+        'raw_count', raw_count,
+        'normalized_count', normalized_count,
+        'unique_count', unique_count,
+        'verified_qualified_count', verified_qualified_count,
+        'published_count', published_count,
+        'failed_attempt_count', failed_attempt_count,
+        'missed_attempt_count', missed_attempt_count,
+        'fulfillment_rate', fulfillment_rate,
+        'verification_rate', verification_rate,
+        'publication_rate', publication_rate,
+        'verified_qualified_per_usd', verified_qualified_per_usd,
+        'waterfall_receipt_refs', metric_doc->'waterfall_receipt_refs',
+        'provider_receipt_refs', metric_doc->'provider_receipt_refs',
+        'decision_receipt_refs', metric_doc->'decision_receipt_refs',
+        'immutable', TRUE
+    ))
 );
 
 CREATE INDEX IF NOT EXISTS idx_research_lab_candidate_waterfall_receipts_evaluation

@@ -45,6 +45,8 @@ _SAFE_REF_RE = re.compile(r"^[A-Za-z0-9_.:@/-]{1,300}$")
 _CANDIDATE_TOOL_RE = re.compile(r"^candidate\.[A-Za-z0-9_.:-]{1,160}$")
 _DECISION_RECEIPT_RE = re.compile(r"^routing_decision:[0-9a-f]{16}$")
 _PROVIDER_RECEIPT_RE = re.compile(r"^provider_receipt:[0-9a-f]{16}$")
+_EVALUATION_RECEIPT_RE = re.compile(r"^routing_evaluation_v2:[0-9a-f]{16}$")
+_WATERFALL_RECEIPT_RE = re.compile(r"^candidate_waterfall:[0-9a-f]{24}$")
 _DISPOSITIONS = frozenset({"succeeded", "missed", "failed", "deferred", "skipped"})
 
 
@@ -484,6 +486,8 @@ class CandidateWaterfallMetric:
     def __post_init__(self) -> None:
         for field_name in ("evaluation_receipt_id", "experiment_id", "variant_id", "split"):
             _safe_ref(getattr(self, field_name), field_name)
+        if not _EVALUATION_RECEIPT_RE.fullmatch(self.evaluation_receipt_id):
+            raise RoutingExperimentError("candidate_evaluation_receipt_id_is_invalid")
         _lab_hash(self.experiment_hash, "experiment_hash")
         for field_name in (
             "target_verified_qualified_count",
@@ -533,6 +537,27 @@ class CandidateWaterfallMetric:
                 raise RoutingExperimentError(f"candidate_metric_{field_name}_is_invalid")
             for value in refs:
                 _safe_ref(value, f"metric_{field_name}")
+        if any(
+            not _WATERFALL_RECEIPT_RE.fullmatch(value)
+            for value in self.waterfall_receipt_refs
+        ):
+            raise RoutingExperimentError(
+                "candidate_metric_waterfall_receipt_ref_is_invalid"
+            )
+        if any(
+            not _PROVIDER_RECEIPT_RE.fullmatch(value)
+            for value in self.provider_receipt_refs
+        ):
+            raise RoutingExperimentError(
+                "candidate_metric_provider_receipt_ref_is_invalid"
+            )
+        if any(
+            not _DECISION_RECEIPT_RE.fullmatch(value)
+            for value in self.decision_receipt_refs
+        ):
+            raise RoutingExperimentError(
+                "candidate_metric_decision_receipt_ref_is_invalid"
+            )
         for field_name in (
             "fulfillment_rate",
             "verification_rate",
@@ -637,6 +662,35 @@ def evaluate_candidate_waterfall_metrics(
         if key in receipt_keys:
             raise RoutingExperimentError("candidate_waterfall_attempt_is_duplicated")
         receipt_keys.add(key)
+
+    for variant_id, variant_evaluation in evaluation_by_variant.items():
+        if len(set(variant_evaluation.provider_receipt_refs)) != len(
+            variant_evaluation.provider_receipt_refs
+        ) or len(set(variant_evaluation.decision_receipt_refs)) != len(
+            variant_evaluation.decision_receipt_refs
+        ):
+            raise RoutingExperimentError(
+                "candidate_evaluation_receipt_references_are_duplicated"
+            )
+        variant_receipts = tuple(
+            item for item in receipts if item.variant_id == variant_id
+        )
+        sidecar_provider_refs = {
+            item.provider_receipt_ref
+            for item in variant_receipts
+            if item.provider_receipt_ref
+        }
+        if sidecar_provider_refs != set(variant_evaluation.provider_receipt_refs):
+            raise RoutingExperimentError(
+                "candidate_provider_sidecar_coverage_differs_from_evaluation"
+            )
+        sidecar_decision_refs = {
+            item.decision_receipt_id for item in variant_receipts
+        }
+        if sidecar_decision_refs != set(variant_evaluation.decision_receipt_refs):
+            raise RoutingExperimentError(
+                "candidate_decision_sidecar_coverage_differs_from_evaluation"
+            )
 
     all_units = set(spec.input.calibration_unit_refs) | set(spec.input.holdout_unit_refs)
     if any(item.unit_ref not in all_units for item in receipts):

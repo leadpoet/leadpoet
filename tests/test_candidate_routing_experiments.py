@@ -288,7 +288,7 @@ def _evaluation(
             )
         )
     return RoutingExperimentV2Evaluation(
-        receipt_id="routing_evaluation_v2:test",
+        receipt_id="routing_evaluation_v2:" + "f" * 16,
         experiment_id=spec.experiment_id,
         experiment_hash=spec.experiment_hash(),
         variants=tuple(variants),
@@ -473,6 +473,18 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(monkeypat
     assert receipt.attempt_receipt_sha256 == model_receipt.sha256()
     assert receipt.verification_receipt_sha256 == "e" * 64
 
+    malformed_payload = model_receipt.as_payload()
+    malformed_payload["unknown_provider_field"] = "not-admitted"
+    with pytest.raises(RoutingExperimentError, match="attempt_receipt_is_invalid"):
+        candidate_waterfall_receipt_from_model(
+            spec=spec,
+            variant_id="baseline",
+            decision_receipt=_decision(spec, provider),
+            provider_receipt=provider,
+            receipt_payload=malformed_payload,
+            model_runtime=model_runtime,
+        )
+
 
 def test_candidate_metrics_are_sidecars_on_shared_evaluation():
     spec = _spec()
@@ -530,6 +542,68 @@ def test_candidate_metrics_reject_duplicate_attempts():
         )
 
 
+def test_candidate_metrics_reject_partial_provider_sidecar_coverage():
+    spec = _spec()
+    provider = _provider_receipt()
+    receipt = candidate_waterfall_receipt_from_model(
+        spec=spec,
+        variant_id="baseline",
+        decision_receipt=_decision(spec, provider),
+        provider_receipt=provider,
+        receipt_payload={},
+        model_runtime=_runtime(),
+    )
+    evaluation = _evaluation(spec, receipt)
+
+    with pytest.raises(RoutingExperimentError, match="provider_sidecar_coverage"):
+        evaluate_candidate_waterfall_metrics(
+            spec=spec,
+            evaluation=evaluation,
+            receipts=(),
+            target_verified_qualified_count=1,
+        )
+
+
+def test_candidate_metrics_reject_partial_decision_sidecar_coverage():
+    spec = _spec()
+    provider = _provider_receipt()
+    skipped_model_receipt = SimpleNamespace(
+        plan_sha256="a" * 64,
+        stop_policy_sha256="b" * 64,
+        step_order=0,
+        attempt=0,
+        tool_id=provider.tool_id,
+        disposition="skipped",
+        outcome_code="runtime_unavailable",
+        provider_call_count=0,
+        estimated_cost_usd=0.0,
+        latency_seconds=0.0,
+        raw_candidate_count=0,
+        normalized_candidate_count=0,
+        unique_candidate_count=0,
+        verified_qualified_count=0,
+        verification_receipt_sha256="",
+        sha256=lambda: "8" * 64,
+    )
+    skipped_receipt = candidate_waterfall_receipt_from_model(
+        spec=spec,
+        variant_id="baseline",
+        decision_receipt=_decision(spec, provider, skipped=True),
+        provider_receipt=None,
+        receipt_payload={},
+        model_runtime=_runtime(receipt=skipped_model_receipt),
+    )
+    evaluation = _evaluation(spec, skipped_receipt)
+
+    with pytest.raises(RoutingExperimentError, match="decision_sidecar_coverage"):
+        evaluate_candidate_waterfall_metrics(
+            spec=spec,
+            evaluation=evaluation,
+            receipts=(),
+            target_verified_qualified_count=1,
+        )
+
+
 def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     sql = (
         Path(__file__).parents[1]
@@ -552,6 +626,9 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "FOR INSERT TO service_role WITH CHECK (true)" in sql
     assert "provider_receipt_ref = ''" in sql
     assert "disposition = 'skipped'" in sql
+    assert sql.count("= jsonb_build_object(") == 2
+    assert "provider_outcome IN (" in sql
+    assert sql.count("jsonb_typeof(metric_doc->") == 3
     assert "auth.role()" not in sql
     assert "DROP TABLE" not in sql
     assert "DROP TRIGGER" not in sql

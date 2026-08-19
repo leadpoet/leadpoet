@@ -245,25 +245,97 @@ jobs:
           origin = "${{ steps.stack.outputs.supabase_origin }}"
           artifact_bucket = "${{ steps.stack.outputs.artifact_bucket }}"
           root = f"/opt/leadpoet-production-parity/{run_id}"
+          bootstrap_writer = Path(
+              "scripts/production_parity_bootstrap_evidence.py"
+          ).read_text(encoding="utf-8")
+          compile(
+              bootstrap_writer,
+              "production_parity_bootstrap_evidence.py",
+              "exec",
+          )
           q = shlex.quote
           command = f"""
           set -Eeuo pipefail
           umask 077
+          failure_stage=bootstrap-environment
+          failure_category=CommandFailed
+          evidence=/run/leadpoet-production-parity/full-evidence.json
+          authoritative_evidence={q(root + "/full-evidence.json")}
+          candidate_bundle={q(root + "/candidate.bundle")}
+          retain_failure() {{
+            /usr/bin/python3.11 -c {q(bootstrap_writer)} \
+              --output "$evidence" \
+              --run-id {q(run_id)} \
+              --base-sha {q(base)} \
+              --candidate-sha {q(required['CANDIDATE_SHA'])} \
+              --stage "$failure_stage" \
+              --error-category "$failure_category" >/dev/null 2>&1
+          }}
+          finalize_bootstrap() {{
+            final_status=$?
+            trap - EXIT HUP INT TERM
+            set +e
+            if [ "$final_status" -ne 0 ]; then
+              retain_failure || true
+            fi
+            if [ "$final_status" -eq 0 ] && \
+               {{ [ ! -f "$evidence" ] || [ -L "$evidence" ]; }}; then
+              retain_failure || true
+              final_status=1
+            fi
+            upload_status=0
+            if [ -f "$evidence" ] && [ ! -L "$evidence" ]; then
+              aws s3api put-object \
+                --bucket {q(artifact_bucket)} \
+                --key {q(prefix + "/full-evidence.json")} \
+                --body "$evidence" \
+                --content-type application/json \
+                --if-none-match '*' \
+                --region {q(required['AWS_REGION'])} >/dev/null 2>&1 || \
+                upload_status=$?
+            else
+              upload_status=1
+            fi
+            if [ "$upload_status" -ne 0 ] && [ "$final_status" -eq 0 ]; then
+              failure_stage=evidence-upload
+              failure_category=EvidenceUploadFailed
+              retain_failure || true
+              final_status="$upload_status"
+            fi
+            rm -f "$candidate_bundle" >/dev/null 2>&1 || true
+            exit "$final_status"
+          }}
+          trap finalize_bootstrap EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
           export AWS_REGION={q(required['AWS_REGION'])}
           export AWS_DEFAULT_REGION={q(required['AWS_REGION'])}
           test "$AWS_REGION" = "us-east-1"
           test "$AWS_DEFAULT_REGION" = "us-east-1"
+          failure_stage=bootstrap-workspace
           sudo mkdir -p {q(root)}
           sudo chown ec2-user:ec2-user {q(root)}
+          failure_stage=candidate-bundle-download
           aws s3 cp {q(f"s3://{artifact_bucket}/{prefix}/candidate.bundle")} {q(root + "/candidate.bundle")} --region {q(required['AWS_REGION'])} --only-show-errors
+          failure_stage=candidate-clone
           git clone {q(root + "/candidate.bundle")} {q(root + "/repo")}
           cd {q(root + "/repo")}
           git remote set-url origin https://github.com/leadpoet/leadpoet.git
           test "$(git remote get-url origin)" = https://github.com/leadpoet/leadpoet.git
+          failure_stage=canonical-origin-fetch
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse origin/main)" = {q(required['CANDIDATE_SHA'])}
+          failure_stage=candidate-checkout
           git checkout --detach {q(required['CANDIDATE_SHA'])}
           test "$(git rev-parse HEAD)" = {q(required['CANDIDATE_SHA'])}
+          failure_stage=host-python-import
+          failure_category=HostImportFailed
+          /home/ec2-user/venv311/bin/python3 \
+            scripts/run_production_parity_full_host.py --help >/dev/null 2>&1
+          evidence="$authoritative_evidence"
+          failure_stage=host-entrypoint
+          failure_category=HostEntrypointFailed
           status=0
           /home/ec2-user/venv311/bin/python3 scripts/run_production_parity_full_host.py \
             --region {q(required['AWS_REGION'])} \
@@ -279,10 +351,6 @@ jobs:
             --postgrest-image {q(required['POSTGREST_IMAGE'])} \
             --output {q(root + "/full-evidence.json")} \
             --timeout-seconds {q(required['FULL_TIMEOUT_SECONDS'])} >{q(root + "/runner.log")} 2>&1 || status=$?
-          if [ -f {q(root + "/full-evidence.json")} ]; then
-            aws s3 cp {q(root + "/full-evidence.json")} {q(f"s3://{artifact_bucket}/{prefix}/full-evidence.json")} --region {q(required['AWS_REGION'])} --only-show-errors
-          fi
-          rm -f {q(root + "/candidate.bundle")}
           exit "$status"
           """
           Path(sys.argv[1]).write_text(
@@ -325,6 +393,11 @@ jobs:
             --command-id "${{ steps.execute.outputs.command_id }}" \
             --instance-id "${{ steps.stack.outputs.instance_id }}" \
             --max-wait-seconds 16200 \
+            --evidence-output "$PARITY_TEMP/full-evidence.json" \
+            --artifact-bucket "${{ steps.stack.outputs.artifact_bucket }}" \
+            --run-id "${{ steps.inputs.outputs.run_id }}" \
+            --base-sha "${{ steps.inputs.outputs.base }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Refresh parity AWS role for poll window 2
@@ -354,6 +427,11 @@ jobs:
             --command-id "${{ steps.execute.outputs.command_id }}" \
             --instance-id "${{ steps.stack.outputs.instance_id }}" \
             --max-wait-seconds 16200 \
+            --evidence-output "$PARITY_TEMP/full-evidence.json" \
+            --artifact-bucket "${{ steps.stack.outputs.artifact_bucket }}" \
+            --run-id "${{ steps.inputs.outputs.run_id }}" \
+            --base-sha "${{ steps.inputs.outputs.base }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Refresh parity AWS role for poll window 3
@@ -383,6 +461,11 @@ jobs:
             --command-id "${{ steps.execute.outputs.command_id }}" \
             --instance-id "${{ steps.stack.outputs.instance_id }}" \
             --max-wait-seconds 16200 \
+            --evidence-output "$PARITY_TEMP/full-evidence.json" \
+            --artifact-bucket "${{ steps.stack.outputs.artifact_bucket }}" \
+            --run-id "${{ steps.inputs.outputs.run_id }}" \
+            --base-sha "${{ steps.inputs.outputs.base }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Refresh parity AWS role for poll window 4
@@ -412,6 +495,11 @@ jobs:
             --command-id "${{ steps.execute.outputs.command_id }}" \
             --instance-id "${{ steps.stack.outputs.instance_id }}" \
             --max-wait-seconds 16200 \
+            --evidence-output "$PARITY_TEMP/full-evidence.json" \
+            --artifact-bucket "${{ steps.stack.outputs.artifact_bucket }}" \
+            --run-id "${{ steps.inputs.outputs.run_id }}" \
+            --base-sha "${{ steps.inputs.outputs.base }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Refresh parity AWS role for poll window 5
@@ -441,6 +529,11 @@ jobs:
             --command-id "${{ steps.execute.outputs.command_id }}" \
             --instance-id "${{ steps.stack.outputs.instance_id }}" \
             --max-wait-seconds 12600 \
+            --evidence-output "$PARITY_TEMP/full-evidence.json" \
+            --artifact-bucket "${{ steps.stack.outputs.artifact_bucket }}" \
+            --run-id "${{ steps.inputs.outputs.run_id }}" \
+            --base-sha "${{ steps.inputs.outputs.base }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Require terminal SSM success within the full deadline

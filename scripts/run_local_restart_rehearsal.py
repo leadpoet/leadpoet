@@ -1145,48 +1145,27 @@ def _verify_driver_identity(harness_sha: str) -> None:
         )
 
 
-@contextmanager
-def _isolated_source_snapshot(
+def _populate_isolated_source_snapshot(
     *,
+    source: Path,
     harness_sha: str,
     required_shas: Sequence[str],
-) -> Iterator[Path]:
-    """Copy frozen Git objects so sequential containers cannot share mutations."""
+) -> None:
+    """Populate one frozen source root using registry-owned subprocesses."""
 
-    with tempfile.TemporaryDirectory(
-        prefix="leadpoet-restart-source-"
-    ) as raw:
-        source = Path(raw) / "source"
-        _run(
-            [
-                "git",
-                "clone",
-                "--quiet",
-                "--no-hardlinks",
-                "--no-checkout",
-                str(REPO_ROOT),
-                str(source),
-            ]
-        )
-        for commit in required_shas:
-            present = subprocess.run(
-                ["git", "-C", str(source), "cat-file", "-e", f"{commit}^{{commit}}"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if present.returncode != 0:
-                _run(
-                    [
-                        "git",
-                        "-C",
-                        str(source),
-                        "fetch",
-                        "--quiet",
-                        str(REPO_ROOT),
-                        commit,
-                    ]
-                )
+    _run(
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            "--no-checkout",
+            str(REPO_ROOT),
+            str(source),
+        ]
+    )
+    for commit in required_shas:
+        try:
             _run(
                 [
                     "git",
@@ -1195,6 +1174,19 @@ def _isolated_source_snapshot(
                     "cat-file",
                     "-e",
                     f"{commit}^{{commit}}",
+                ],
+                capture=True,
+            )
+        except subprocess.CalledProcessError:
+            _run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "fetch",
+                    "--quiet",
+                    str(REPO_ROOT),
+                    commit,
                 ]
             )
         _run(
@@ -1202,21 +1194,57 @@ def _isolated_source_snapshot(
                 "git",
                 "-C",
                 str(source),
-                "checkout",
-                "--quiet",
-                "--detach",
-                harness_sha,
+                "cat-file",
+                "-e",
+                f"{commit}^{{commit}}",
             ]
         )
-        _run(
-            [
-                "git",
-                "-C",
-                str(source),
-                "fsck",
-                "--strict",
-                "--no-dangling",
-            ]
+    _run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "checkout",
+            "--quiet",
+            "--detach",
+            harness_sha,
+        ]
+    )
+    _run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "fsck",
+            "--strict",
+            "--no-dangling",
+        ]
+    )
+
+
+@contextmanager
+def _isolated_source_snapshot_root() -> Iterator[Path]:
+    """Own the source directory independently from its population schedule."""
+
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-restart-source-"
+    ) as raw:
+        yield Path(raw) / "source"
+
+
+@contextmanager
+def _isolated_source_snapshot(
+    *,
+    harness_sha: str,
+    required_shas: Sequence[str],
+) -> Iterator[Path]:
+    """Copy frozen Git objects so sequential containers cannot share mutations."""
+
+    with _isolated_source_snapshot_root() as source:
+        _populate_isolated_source_snapshot(
+            source=source,
+            harness_sha=harness_sha,
+            required_shas=required_shas,
         )
         yield source
 
@@ -2382,6 +2410,44 @@ def _run_independent_stage(
     return True, value
 
 
+_PREPUSH_PHASES = frozenset(("exact-image-build", "source-snapshot"))
+
+
+def _run_prepush_phase(
+    *,
+    phase: str,
+    action: Callable[[], Any],
+) -> Any:
+    """Emit bounded diagnostics without exposing command or exception text."""
+
+    if phase not in _PREPUSH_PHASES:
+        raise ValueError(f"unsupported prepush phase: {phase!r}")
+    started = time.monotonic()
+    print(
+        f"REHEARSAL_PREPUSH_PHASE phase={phase} status=started",
+        flush=True,
+    )
+    try:
+        result = action()
+    except BaseException as exc:
+        duration = round(time.monotonic() - started, 3)
+        print(
+            "REHEARSAL_PREPUSH_PHASE "
+            f"phase={phase} status=failed duration_seconds={duration} "
+            f"error_type={type(exc).__name__}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
+    duration = round(time.monotonic() - started, 3)
+    print(
+        "REHEARSAL_PREPUSH_PHASE "
+        f"phase={phase} status=passed duration_seconds={duration}",
+        flush=True,
+    )
+    return result
+
+
 def _run_prepush_image_and_probe(
     *,
     image_action: Callable[[], Any],
@@ -2410,6 +2476,30 @@ def _run_prepush_image_and_probe(
             _annotate_worker_cleanup_errors(exc, registry.cancel())
             raise
     return image_result, probe_result
+
+
+def _run_prepush_image_snapshot_and_probe(
+    *,
+    image_action: Callable[[], Any],
+    snapshot_action: Callable[[], Any],
+    probe_action: Callable[[], Any],
+) -> tuple[Any, Any]:
+    """Build on main while one masked worker snapshots then probes source."""
+
+    def snapshot_then_probe() -> Any:
+        _run_prepush_phase(
+            phase="source-snapshot",
+            action=snapshot_action,
+        )
+        return probe_action()
+
+    return _run_prepush_image_and_probe(
+        image_action=lambda: _run_prepush_phase(
+            phase="exact-image-build",
+            action=image_action,
+        ),
+        probe_action=snapshot_then_probe,
+    )
 
 
 def _run_prepush_runtime_stages(
@@ -3085,10 +3175,18 @@ def _run_profile(
     if args.profile != "prepush" and image_build_required:
         build_image()
 
-    with _isolated_source_snapshot(
-        harness_sha=harness_sha,
-        required_shas=(from_sha, candidate_sha),
-    ) as source_root:
+    overlap_source_snapshot = (
+        args.profile == "prepush" and image_build_required
+    )
+    if overlap_source_snapshot:
+        source_snapshot_context = _isolated_source_snapshot_root()
+    else:
+        source_snapshot_context = _isolated_source_snapshot(
+            harness_sha=harness_sha,
+            required_shas=(from_sha, candidate_sha),
+        )
+
+    with source_snapshot_context as source_root:
         stage_results: list[dict[str, Any]] = []
         print(
             "Running validator enclave finalization proof under CPython 3.7",
@@ -3102,9 +3200,14 @@ def _run_profile(
                 stages=stage_results,
             )
 
-        if args.profile == "prepush" and image_build_required:
-            _run_prepush_image_and_probe(
+        if overlap_source_snapshot:
+            _run_prepush_image_snapshot_and_probe(
                 image_action=build_image,
+                snapshot_action=lambda: _populate_isolated_source_snapshot(
+                    source=source_root,
+                    harness_sha=harness_sha,
+                    required_shas=(from_sha, candidate_sha),
+                ),
                 probe_action=run_python37_probe,
             )
         else:

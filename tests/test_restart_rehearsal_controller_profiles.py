@@ -403,6 +403,100 @@ def test_prepush_image_build_stays_main_thread_while_probe_overlaps() -> None:
     ) == ("image", "probe")
 
 
+def test_prepush_source_snapshot_then_probe_share_one_masked_worker(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    image_started = threading.Event()
+    snapshot_started = threading.Event()
+    snapshot_release = threading.Event()
+    worker_idents: list[int] = []
+    order: list[str] = []
+
+    def image() -> str:
+        assert threading.current_thread() is threading.main_thread()
+        image_started.set()
+        assert snapshot_started.wait(timeout=5)
+        order.append("image-overlapped-snapshot")
+        snapshot_release.set()
+        return "image"
+
+    def snapshot() -> str:
+        assert threading.current_thread() is not threading.main_thread()
+        worker_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        assert signal.SIGALRM in worker_mask
+        assert signal.SIGINT in worker_mask
+        worker_idents.append(threading.get_ident())
+        snapshot_started.set()
+        assert image_started.wait(timeout=5)
+        assert snapshot_release.wait(timeout=5)
+        order.append("snapshot")
+        return "snapshot"
+
+    def probe() -> str:
+        assert threading.current_thread() is not threading.main_thread()
+        worker_idents.append(threading.get_ident())
+        assert order[-1] == "snapshot"
+        order.append("probe")
+        return "probe"
+
+    assert controller._run_prepush_image_snapshot_and_probe(
+        image_action=image,
+        snapshot_action=snapshot,
+        probe_action=probe,
+    ) == ("image", "probe")
+    assert order == ["image-overlapped-snapshot", "snapshot", "probe"]
+    assert len(set(worker_idents)) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert (
+        "REHEARSAL_PREPUSH_PHASE phase=exact-image-build status=passed"
+        in captured.out
+    )
+    assert (
+        "REHEARSAL_PREPUSH_PHASE phase=source-snapshot status=passed"
+        in captured.out
+    )
+
+
+def test_prepush_source_snapshot_failure_is_redacted_and_skips_probe(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    snapshot_started = threading.Event()
+    probe_called = False
+    private_error = "must-not-emit-private-source-path"
+
+    def image() -> str:
+        assert snapshot_started.wait(timeout=5)
+        return "image"
+
+    def snapshot() -> None:
+        snapshot_started.set()
+        raise RuntimeError(private_error)
+
+    def probe() -> None:
+        nonlocal probe_called
+        probe_called = True
+
+    with pytest.raises(RuntimeError, match=private_error):
+        controller._run_prepush_image_snapshot_and_probe(
+            image_action=image,
+            snapshot_action=snapshot,
+            probe_action=probe,
+        )
+
+    assert probe_called is False
+    captured = capsys.readouterr()
+    assert private_error not in captured.out
+    assert private_error not in captured.err
+    assert (
+        "REHEARSAL_PREPUSH_PHASE phase=source-snapshot status=failed "
+        in captured.err
+    )
+    assert "error_type=RuntimeError" in captured.err
+
+
 class _BlockedProcess:
     pid = 12345
 
@@ -1189,6 +1283,56 @@ def test_prepush_main_alarm_cancels_and_reaps_blocked_probe(
     name_index = processes[0].command.index("--name")
     assert removed_containers == [processes[0].command[name_index + 1]]
     assert "REHEARSAL_WORKER_CLEANUP_FAILED" in capsys.readouterr().err
+
+
+def test_prepush_main_alarm_cancels_registered_source_snapshot_before_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    snapshot_started = threading.Event()
+    snapshot_finished = threading.Event()
+    probe_called = False
+    processes, removed_containers = _install_blocked_popen(
+        controller,
+        monkeypatch,
+        snapshot_started,
+        streaming=False,
+    )
+
+    def snapshot() -> None:
+        try:
+            controller._run(["git", "clone", "source", "snapshot"])
+        finally:
+            snapshot_finished.set()
+
+    def probe() -> None:
+        nonlocal probe_called
+        probe_called = True
+
+    def alarm_image() -> None:
+        assert snapshot_started.wait(timeout=1)
+        signal.raise_signal(signal.SIGALRM)
+
+    began = controller.time.monotonic()
+    with pytest.raises(
+        controller.RehearsalTimeBudgetExceeded,
+        match="600-second wall-clock budget",
+    ):
+        with controller._profile_time_limit(600):
+            controller._run_prepush_image_snapshot_and_probe(
+                image_action=alarm_image,
+                snapshot_action=snapshot,
+                probe_action=probe,
+            )
+
+    assert controller.time.monotonic() - began < 1
+    assert snapshot_finished.is_set()
+    assert probe_called is False
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert processes[0].killed is True
+    assert processes[0].reaped is True
+    assert removed_containers == []
 
 
 def test_prepush_workflow_alarm_cleans_both_named_runtime_containers(

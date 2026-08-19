@@ -142,6 +142,26 @@ SAFE_REHEARSAL_ERROR_TYPES = frozenset(
         "ValueError",
     }
 )
+SAFE_WORKFLOW_PROJECTION_ERROR_TYPES = SAFE_REHEARSAL_ERROR_TYPES | {
+    "None",
+    "OtherError",
+    "TimeoutError",
+}
+SAFE_WORKFLOW_STAGE_KINDS = frozenset(
+    {
+        "allocation",
+        "behavior",
+        "boundary",
+        "concurrency",
+        "diagnostic",
+        "epoch",
+        "fault",
+        "input",
+        "source_identity",
+        "unknown",
+        "validation",
+    }
+)
 SAFE_REHEARSAL_STAGE_PATTERNS = (
     r"python37-finalization",
     r"drand-artifact-[0-9a-f]{12}",
@@ -1283,7 +1303,7 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
         "systemctl",
     }
     for raw_line in output_tail.splitlines():
-        if len(diagnostics) >= 12:
+        if len(diagnostics) >= 32:
             break
         line = raw_line.strip()
         if not line or len(line) > 2048 or SECRET_LIKE_DIAGNOSTIC_RE.search(line):
@@ -1300,6 +1320,88 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
                 "component": match.group(1),
                 "status": int(match.group(2)),
             }
+        if projected is None:
+            match = re.fullmatch(
+                r"REHEARSAL_EVIDENCE_NORMALIZATION_FAILED "
+                r"phase=(container|host) "
+                r"category=(permission|not_found|resource|unknown) "
+                r"status=([0-9]{1,3})",
+                line,
+            )
+            if match and 1 <= int(match.group(3)) <= 255:
+                projected = {
+                    "marker": "evidence_normalization_failure",
+                    "phase": match.group(1),
+                    "category": match.group(2),
+                    "status": int(match.group(3)),
+                }
+        if projected is None:
+            match = re.fullmatch(
+                r"REHEARSAL_FIXTURE_GENERATION_FAILED "
+                r"category=(permission|not_found|resource|unknown) "
+                r"status=([0-9]{1,3})",
+                line,
+            )
+            if match and 1 <= int(match.group(2)) <= 255:
+                projected = {
+                    "marker": "fixture_generation_failure",
+                    "category": match.group(1),
+                    "status": int(match.group(2)),
+                }
+        if projected is None:
+            match = re.fullmatch(
+                r"REHEARSAL_WORKFLOW_FAILURE_SUMMARY "
+                r"failed=([0-9]{1,3}) unexercised=([0-9]{1,3}) "
+                r"emitted=([0-9]{1,2}) truncated=([01])",
+                line,
+            )
+            if (
+                match
+                and int(match.group(1)) <= 512
+                and int(match.group(2)) <= 512
+                and int(match.group(3)) <= 16
+            ):
+                projected = {
+                    "marker": "workflow_failure_summary",
+                    "failed_count": int(match.group(1)),
+                    "unexercised_count": int(match.group(2)),
+                    "emitted_count": int(match.group(3)),
+                    "truncated": match.group(4) == "1",
+                }
+        if projected is None:
+            match = re.fullmatch(
+                r"REHEARSAL_WORKFLOW_STAGE_RESULT "
+                r"status=(failed|unexercised) "
+                r"stage_kind=([a-z_]+) "
+                r"stage_id_sha256=([0-9a-f]{64}) "
+                r"error_type=([A-Za-z0-9_]+)",
+                line,
+            )
+            if (
+                match
+                and match.group(2) in SAFE_WORKFLOW_STAGE_KINDS
+                and match.group(4) in SAFE_WORKFLOW_PROJECTION_ERROR_TYPES
+            ):
+                projected = {
+                    "marker": "workflow_stage_result",
+                    "status": match.group(1),
+                    "stage_kind": match.group(2),
+                    "stage_id_sha256": match.group(3),
+                    "error_type": match.group(4),
+                }
+        if projected is None:
+            match = re.fullmatch(
+                r"REHEARSAL_WORKFLOW_DIAGNOSTIC_UNAVAILABLE "
+                r"category=(permission|not_found|resource|unknown) "
+                r"status=([0-9]{1,3})",
+                line,
+            )
+            if match and 1 <= int(match.group(2)) <= 255:
+                projected = {
+                    "marker": "workflow_diagnostic_unavailable",
+                    "category": match.group(1),
+                    "status": int(match.group(2)),
+                }
         if projected is None:
             match = re.fullmatch(
                 r"REHEARSAL_HTTP_DIAGNOSTIC "
@@ -1350,6 +1452,69 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
         if projected is not None and projected not in diagnostics:
             diagnostics.append(projected)
     return diagnostics
+
+
+def _sanitize_workflow_failure_projection(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping) or type(value.get("available")) is not bool:
+        return None
+    if value["available"] is False:
+        if (
+            value.get("category")
+            not in {"permission", "not_found", "resource", "unknown"}
+            or type(value.get("status")) is not int
+            or not 1 <= value["status"] <= 255
+        ):
+            return None
+        return {
+            "available": False,
+            "category": value["category"],
+            "status": value["status"],
+        }
+    counts = (
+        value.get("failed_count"),
+        value.get("unexercised_count"),
+        value.get("emitted_count"),
+    )
+    raw_stages = value.get("stages")
+    if (
+        any(type(item) is not int or not 0 <= item <= 512 for item in counts)
+        or type(value.get("truncated")) is not bool
+        or not isinstance(raw_stages, list)
+        or len(raw_stages) > 16
+        or value["emitted_count"] != len(raw_stages)
+    ):
+        return None
+    stages: list[dict[str, Any]] = []
+    for item in raw_stages:
+        if (
+            not isinstance(item, Mapping)
+            or item.get("status") not in {"failed", "unexercised"}
+            or item.get("stage_kind") not in SAFE_WORKFLOW_STAGE_KINDS
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(item.get("stage_id_sha256") or ""),
+            )
+            is None
+            or item.get("error_type")
+            not in SAFE_WORKFLOW_PROJECTION_ERROR_TYPES
+        ):
+            return None
+        stages.append(
+            {
+                "status": item["status"],
+                "stage_kind": item["stage_kind"],
+                "stage_id_sha256": item["stage_id_sha256"],
+                "error_type": item["error_type"],
+            }
+        )
+    return {
+        "available": True,
+        "failed_count": value["failed_count"],
+        "unexercised_count": value["unexercised_count"],
+        "emitted_count": value["emitted_count"],
+        "truncated": value["truncated"],
+        "stages": stages,
+    }
 
 
 def _rehearsal_failure_diagnostics(
@@ -1421,6 +1586,48 @@ def _rehearsal_failure_diagnostics(
             duration = item.get("duration_seconds")
             if type(duration) in {int, float} and 0 <= float(duration) <= 3600:
                 sanitized["duration_seconds"] = round(float(duration), 3)
+            fixture = item.get("fixture_generation_diagnostic")
+            if (
+                isinstance(fixture, Mapping)
+                and fixture.get("category")
+                in {"permission", "not_found", "resource", "unknown"}
+                and type(fixture.get("status")) is int
+                and 1 <= fixture["status"] <= 255
+            ):
+                sanitized["fixture_generation_diagnostic"] = {
+                    "category": fixture["category"],
+                    "status": fixture["status"],
+                }
+            normalization = item.get("evidence_normalization_diagnostics")
+            if isinstance(normalization, list) and len(normalization) <= 2:
+                safe_normalization = []
+                for diagnostic in normalization:
+                    if (
+                        not isinstance(diagnostic, Mapping)
+                        or diagnostic.get("phase") not in {"container", "host"}
+                        or diagnostic.get("category")
+                        not in {"permission", "not_found", "resource", "unknown"}
+                        or type(diagnostic.get("status")) is not int
+                        or not 1 <= diagnostic["status"] <= 255
+                    ):
+                        safe_normalization = []
+                        break
+                    safe_normalization.append(
+                        {
+                            "phase": diagnostic["phase"],
+                            "category": diagnostic["category"],
+                            "status": diagnostic["status"],
+                        }
+                    )
+                if safe_normalization:
+                    sanitized["evidence_normalization_diagnostics"] = (
+                        safe_normalization
+                    )
+            workflow = _sanitize_workflow_failure_projection(
+                item.get("workflow_failure_projection")
+            )
+            if workflow is not None:
+                sanitized["workflow_failure_projection"] = workflow
             stages.append(sanitized)
         projection.update(
             {

@@ -2356,6 +2356,33 @@ def test_rehearsal_failure_diagnostics_are_bounded_and_redacted(
                 "duration_seconds": 12.3456,
                 "error": secret,
                 "command": ["gateway", "--credential", secret],
+                "fixture_generation_diagnostic": {
+                    "category": "resource",
+                    "status": 137,
+                },
+                "evidence_normalization_diagnostics": [
+                    {
+                        "phase": "container",
+                        "category": "permission",
+                        "status": 23,
+                    }
+                ],
+                "workflow_failure_projection": {
+                    "available": True,
+                    "failed_count": 1,
+                    "unexercised_count": 1,
+                    "emitted_count": 1,
+                    "truncated": True,
+                    "stages": [
+                        {
+                            "status": "failed",
+                            "stage_kind": "behavior",
+                            "stage_id_sha256": "a" * 64,
+                            "error_type": "RuntimeError",
+                        }
+                    ],
+                    "raw": secret,
+                },
             },
             {
                 "stage": "evidence-join-prepush",
@@ -2411,6 +2438,32 @@ def test_rehearsal_failure_diagnostics_are_bounded_and_redacted(
             "error_type": "CalledProcessError",
             "returncode": 1,
             "duration_seconds": 12.346,
+            "fixture_generation_diagnostic": {
+                "category": "resource",
+                "status": 137,
+            },
+            "evidence_normalization_diagnostics": [
+                {
+                    "phase": "container",
+                    "category": "permission",
+                    "status": 23,
+                }
+            ],
+            "workflow_failure_projection": {
+                "available": True,
+                "failed_count": 1,
+                "unexercised_count": 1,
+                "emitted_count": 1,
+                "truncated": True,
+                "stages": [
+                    {
+                        "status": "failed",
+                        "stage_kind": "behavior",
+                        "stage_id_sha256": "a" * 64,
+                        "error_type": "RuntimeError",
+                    }
+                ],
+            },
         },
         {
             "stage": "evidence-join-prepush",
@@ -2421,9 +2474,71 @@ def test_rehearsal_failure_diagnostics_are_bounded_and_redacted(
     assert "command" not in encoded
     assert '"error":' not in encoded
     assert "launcher failed" not in encoded
-    assert "permission" not in encoded
+    assert "permission denied" not in encoded
     assert "unknown operation" not in encoded
     assert len(encoded) < 4096
+
+
+def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
+    secret = "must-not-escape-fixed-marker"
+    stage_hash = "a" * 64
+    output = "\n".join(
+        [
+            "REHEARSAL_EVIDENCE_NORMALIZATION_FAILED "
+            "phase=container category=permission status=23",
+            "REHEARSAL_FIXTURE_GENERATION_FAILED category=resource status=137",
+            "REHEARSAL_WORKFLOW_FAILURE_SUMMARY "
+            "failed=1 unexercised=2 emitted=3 truncated=0",
+            "REHEARSAL_WORKFLOW_STAGE_RESULT "
+            f"status=failed stage_kind=behavior stage_id_sha256={stage_hash} "
+            "error_type=RuntimeError",
+            "REHEARSAL_WORKFLOW_DIAGNOSTIC_UNAVAILABLE "
+            "category=not_found status=127",
+            "REHEARSAL_EVIDENCE_NORMALIZATION_FAILED "
+            f"phase=host category=permission status=1 token={secret}",
+            "REHEARSAL_FIXTURE_GENERATION_FAILED category=secret status=1",
+            "REHEARSAL_WORKFLOW_STAGE_RESULT "
+            f"status=failed stage_kind=behavior stage_id_sha256={stage_hash} "
+            f"error_type=RuntimeError bearer={secret}",
+            "REHEARSAL_WORKFLOW_FAILURE_SUMMARY "
+            "failed=999 unexercised=0 emitted=0 truncated=0",
+        ]
+    )
+
+    diagnostics = fast_parity._rehearsal_output_diagnostics(output)
+    assert diagnostics == [
+        {
+            "marker": "evidence_normalization_failure",
+            "phase": "container",
+            "category": "permission",
+            "status": 23,
+        },
+        {
+            "marker": "fixture_generation_failure",
+            "category": "resource",
+            "status": 137,
+        },
+        {
+            "marker": "workflow_failure_summary",
+            "failed_count": 1,
+            "unexercised_count": 2,
+            "emitted_count": 3,
+            "truncated": False,
+        },
+        {
+            "marker": "workflow_stage_result",
+            "status": "failed",
+            "stage_kind": "behavior",
+            "stage_id_sha256": stage_hash,
+            "error_type": "RuntimeError",
+        },
+        {
+            "marker": "workflow_diagnostic_unavailable",
+            "category": "not_found",
+            "status": 127,
+        },
+    ]
+    assert secret not in json.dumps(diagnostics, sort_keys=True)
 
 
 def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():

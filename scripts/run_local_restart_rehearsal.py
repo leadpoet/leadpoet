@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+import errno
 import fcntl
 from functools import partial
 import hashlib
@@ -30,6 +31,7 @@ from pathlib import Path
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -382,8 +384,41 @@ _WORKER_DOCKER_CONVERGENCE_SECONDS = 6.0
 _WORKER_DOCKER_ABSENCE_OBSERVATIONS = 3
 _WORKER_DOCKER_POLL_SECONDS = 0.05
 _EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS = 30.0
+_EVIDENCE_NORMALIZATION_MAX_PASSES = 32
+_WORKFLOW_FAILURE_PROJECTION_MAX_BYTES = 16 * 1024 * 1024
+_WORKFLOW_FAILURE_PROJECTION_MAX_STAGES = 16
+_SAFE_WORKFLOW_PROJECTION_ERROR_TYPES = frozenset(
+    {
+        "AssertionError",
+        "CalledProcessError",
+        "FileNotFoundError",
+        "OSError",
+        "PermissionError",
+        "RuntimeError",
+        "SystemExit",
+        "TimeoutError",
+        "TypeError",
+        "ValueError",
+    }
+)
 _SCHEDULER_WORKER_READY_SECONDS = 2.0
 _DEFERRED_PROCESS_SIGNALS = frozenset((signal.SIGALRM, signal.SIGINT))
+
+
+class _EvidenceNormalizationError(RuntimeError):
+    """Safe categorical failure for the host evidence handoff."""
+
+    def __init__(self, *, phase: str, category: str, status: int) -> None:
+        self.phase = phase
+        self.category = category
+        self.status = status
+        self.diagnostics = [
+            {"category": category, "phase": phase, "status": status}
+        ]
+        super().__init__(
+            "evidence normalization failed "
+            f"phase={phase} category={category} status={status}"
+        )
 
 
 def _terminate_worker_process(process: subprocess.Popen[Any]) -> None:
@@ -1271,48 +1306,445 @@ def _normalize_evidence_ownership(
     *,
     evidence_root: Path,
     docker_platform: str,
-) -> None:
-    """Return every candidate-container artifact to the invoking host user."""
+) -> list[dict[str, Any]]:
+    """Make descendants host-accessible without changing their ownership."""
 
-    _run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--platform",
-            docker_platform,
-            "--network",
-            "none",
-            "--cpus",
-            "1",
-            "--memory",
-            "128m",
-            "--pids-limit",
-            "32",
-            "--security-opt",
-            "no-new-privileges",
-            "--cap-drop",
-            "ALL",
-            "--cap-add",
-            "CHOWN",
-            # TemporaryDirectory is mode 0700 and owned by the host runner.
-            # Keep Docker's default DAC_OVERRIDE capability so container root
-            # can traverse root-owned descendants on native Linux runners.
-            "--cap-add",
-            "DAC_OVERRIDE",
-            "--read-only",
-            "--mount",
-            f"type=bind,src={evidence_root},dst=/evidence",
-            "--entrypoint",
-            "/usr/bin/chown",
-            tag,
-            "--recursive",
-            "--no-dereference",
-            f"{os.getuid()}:{os.getgid()}",
-            "/evidence",
-        ],
-        timeout_seconds=_EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS,
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        docker_platform,
+        "--network",
+        "none",
+        "--cpus",
+        "1",
+        "--memory",
+        "128m",
+        "--pids-limit",
+        "32",
+        "--security-opt",
+        "no-new-privileges",
+        "--cap-drop",
+        "ALL",
+        # The host owns the mode-0700 bind root while candidate containers can
+        # own its descendants.  Request only the traversal/chmod capabilities;
+        # a daemon may still reject them under its user-namespace mapping, so
+        # the host verifier below remains the sole handoff authority.
+        "--cap-add",
+        "DAC_OVERRIDE",
+        "--cap-add",
+        "FOWNER",
+        "--read-only",
+        "--mount",
+        f"type=bind,src={evidence_root},dst=/evidence",
+        "--entrypoint",
+        "/usr/bin/find",
+        tag,
+        "/evidence",
+        "-xdev",
+        "-mindepth",
+        "1",
+        "(",
+        "-type",
+        "d",
+        "-o",
+        "(",
+        "-type",
+        "f",
+        "-links",
+        "1",
+        ")",
+        ")",
+        "-exec",
+        "/usr/bin/chmod",
+        "--",
+        "a+rwX",
+        "{}",
+        "+",
+    ]
+    deadline = time.monotonic() + _EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS
+    last_container_failure: BaseException | None = None
+    last_host_failure: BaseException | None = None
+    for _pass in range(_EVIDENCE_NORMALIZATION_MAX_PASSES):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last_container_failure = subprocess.TimeoutExpired(
+                command,
+                _EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS,
+            )
+            break
+        container_failure: BaseException | None = None
+        try:
+            _run(
+                command,
+                capture=True,
+                timeout_seconds=remaining,
+            )
+        except (KeyboardInterrupt, RehearsalTimeBudgetExceeded) as exc:
+            _report_evidence_normalization_failure(
+                phase="container",
+                error=exc,
+            )
+            raise
+        except BaseException as exc:
+            container_failure = exc
+            last_container_failure = exc
+
+        try:
+            _verify_host_evidence_access(evidence_root)
+        except (KeyboardInterrupt, RehearsalTimeBudgetExceeded) as exc:
+            _report_evidence_normalization_failure(phase="host", error=exc)
+            raise
+        except BaseException as exc:
+            last_host_failure = exc
+            if (
+                _normalization_failure_category(exc) == "permission"
+                and _pass + 1 < _EVIDENCE_NORMALIZATION_MAX_PASSES
+                and time.monotonic() < deadline
+            ):
+                continue
+            break
+        else:
+            if container_failure is None:
+                return []
+            reported = _report_evidence_normalization_failure(
+                phase="container",
+                error=container_failure,
+            )
+            return reported.diagnostics
+
+    diagnostics: list[dict[str, Any]] = []
+    if last_container_failure is not None:
+        reported = _report_evidence_normalization_failure(
+            phase="container",
+            error=last_container_failure,
+        )
+        diagnostics.extend(reported.diagnostics)
+    if last_host_failure is None:
+        last_host_failure = TimeoutError("host evidence verification timed out")
+    reported = _report_evidence_normalization_failure(
+        phase="host",
+        error=last_host_failure,
     )
+    reported.diagnostics = [*diagnostics, *reported.diagnostics]
+    raise reported from None
+
+
+def _normalization_failure_category(error: BaseException) -> str:
+    if isinstance(error, PermissionError) or (
+        isinstance(error, OSError)
+        and error.errno in {errno.EACCES, errno.EPERM, errno.EROFS}
+    ):
+        return "permission"
+    if isinstance(error, FileNotFoundError) or (
+        isinstance(error, OSError) and error.errno == errno.ENOENT
+    ):
+        return "not_found"
+    if isinstance(
+        error,
+        (MemoryError, subprocess.TimeoutExpired, RehearsalTimeBudgetExceeded),
+    ) or (
+        isinstance(error, OSError)
+        and error.errno
+        in {errno.EAGAIN, errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.ENOSPC}
+    ):
+        return "resource"
+    diagnostic = "\n".join(
+        value.lower()
+        for value in (
+            str(getattr(error, "stderr", "") or ""),
+            str(getattr(error, "stdout", "") or ""),
+        )
+    )
+    if "permission denied" in diagnostic or "operation not permitted" in diagnostic:
+        return "permission"
+    if "no such file" in diagnostic or "not found" in diagnostic:
+        return "not_found"
+    if any(
+        marker in diagnostic
+        for marker in (
+            "cannot allocate memory",
+            "no space left",
+            "out of memory",
+            "resource temporarily unavailable",
+        )
+    ):
+        return "resource"
+    return "unknown"
+
+
+def _normalization_failure_status(error: BaseException) -> int:
+    if isinstance(error, subprocess.CalledProcessError):
+        returncode = error.returncode
+        if isinstance(returncode, int):
+            if 1 <= returncode <= 255:
+                return returncode
+            if -127 <= returncode < 0:
+                return 128 + abs(returncode)
+    if isinstance(error, KeyboardInterrupt):
+        return 130
+    if isinstance(
+        error,
+        (subprocess.TimeoutExpired, RehearsalTimeBudgetExceeded),
+    ):
+        return 124
+    if isinstance(error, FileNotFoundError):
+        return 127
+    if isinstance(error, PermissionError):
+        return 126
+    return 1
+
+
+def _report_evidence_normalization_failure(
+    *,
+    phase: str,
+    error: BaseException,
+) -> _EvidenceNormalizationError:
+    category = _normalization_failure_category(error)
+    status = _normalization_failure_status(error)
+    try:
+        print(
+            "REHEARSAL_EVIDENCE_NORMALIZATION_FAILED "
+            f"phase={phase} category={category} status={status}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except BaseException:
+        pass
+    return _EvidenceNormalizationError(
+        phase=phase,
+        category=category,
+        status=status,
+    )
+
+
+def _report_fixture_generation_failure(error: BaseException) -> dict[str, Any]:
+    category = _normalization_failure_category(error)
+    status = _normalization_failure_status(error)
+    try:
+        print(
+            "REHEARSAL_FIXTURE_GENERATION_FAILED "
+            f"category={category} status={status}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except BaseException:
+        pass
+    return {"category": category, "status": status}
+
+
+def _attach_normalization_diagnostics(
+    error: BaseException,
+    diagnostics: Sequence[dict[str, Any]],
+) -> None:
+    if not diagnostics:
+        return
+    try:
+        existing = getattr(
+            error,
+            "_rehearsal_evidence_normalization_diagnostics",
+            [],
+        )
+        if not isinstance(existing, list):
+            existing = []
+        setattr(
+            error,
+            "_rehearsal_evidence_normalization_diagnostics",
+            [*existing, *diagnostics],
+        )
+    except BaseException:
+        pass
+
+
+def _verify_host_evidence_access(evidence_root: Path) -> None:
+    """Prove the private root and every supported descendant are accessible."""
+
+    root_stat = evidence_root.lstat()
+    if (
+        not stat.S_ISDIR(root_stat.st_mode)
+        or root_stat.st_uid != os.geteuid()
+        or stat.S_IMODE(root_stat.st_mode) != 0o700
+    ):
+        raise PermissionError("evidence root identity or mode differs")
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for current, directory_names, file_names in os.walk(
+        evidence_root,
+        topdown=True,
+        onerror=raise_walk_error,
+        followlinks=False,
+    ):
+        current_path = Path(current)
+        for name in (*directory_names, *file_names):
+            path = current_path / name
+            path_stat = path.lstat()
+            if stat.S_ISLNK(path_stat.st_mode):
+                raise OSError("evidence tree contains a symbolic link")
+            if path_stat.st_dev != root_stat.st_dev:
+                raise OSError("evidence tree crosses a device boundary")
+            mode = stat.S_IMODE(path_stat.st_mode)
+            if stat.S_ISDIR(path_stat.st_mode):
+                if mode & 0o007 != 0o007 or not os.access(
+                    path,
+                    os.R_OK | os.W_OK | os.X_OK,
+                ):
+                    raise PermissionError("evidence directory is inaccessible")
+                continue
+            if stat.S_ISREG(path_stat.st_mode):
+                if path_stat.st_nlink != 1:
+                    raise OSError("evidence tree contains a hard-linked file")
+                if mode & 0o006 != 0o006 or not os.access(
+                    path,
+                    os.R_OK | os.W_OK,
+                ):
+                    raise PermissionError("evidence file is inaccessible")
+                continue
+            raise OSError("evidence tree contains an unsupported file type")
+
+
+def _workflow_projection_stage_kind(stage: str) -> str:
+    if stage == "input-contract":
+        return "input"
+    if stage == "production-allocation-input":
+        return "allocation"
+    if stage.startswith("source-identity:"):
+        return "source_identity"
+    if stage.startswith("behavior:"):
+        return "behavior"
+    if stage.startswith("diagnostic:"):
+        return "diagnostic"
+    if stage.startswith("fault:"):
+        return "fault"
+    if stage == "concurrency":
+        return "concurrency"
+    if stage in {"boundary-start", "boundary-cleanup"}:
+        return "boundary"
+    if re.fullmatch(r"epoch-[0-9]+", stage):
+        return "epoch"
+    if stage == "workflow-evidence-validation":
+        return "validation"
+    return "unknown"
+
+
+def _print_safe_rehearsal_marker(marker: str) -> None:
+    try:
+        print(marker, file=sys.stderr, flush=True)
+    except BaseException:
+        pass
+
+
+def _project_workflow_failure_diagnostics(
+    *,
+    evidence_root: Path,
+    candidate_sha: str,
+    profile: str,
+) -> dict[str, Any]:
+    """Emit and return a bounded, hash-only workflow failure projection."""
+
+    try:
+        path = evidence_root / "workflow.json"
+        root_stat = evidence_root.lstat()
+        path_stat = path.lstat()
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or path_stat.st_dev != root_stat.st_dev
+            or not 0 < path_stat.st_size <= _WORKFLOW_FAILURE_PROJECTION_MAX_BYTES
+        ):
+            raise ValueError("workflow evidence file identity differs")
+        document = json.loads(path.read_bytes().decode("utf-8"))
+        if (
+            not isinstance(document, dict)
+            or document.get("schema_version")
+            != "leadpoet.local_v2_workflow_evidence.v1"
+            or document.get("status") != "failed"
+            or document.get("release_sha") != candidate_sha
+            or document.get("profile") != profile
+        ):
+            raise ValueError("workflow evidence identity differs")
+        raw_stages = document.get("stages")
+        if not isinstance(raw_stages, list) or len(raw_stages) > 512:
+            raise ValueError("workflow evidence stage set is invalid")
+
+        projected: list[dict[str, Any]] = []
+        for item in raw_stages:
+            if not isinstance(item, dict):
+                raise ValueError("workflow evidence stage is invalid")
+            status = item.get("status")
+            if status not in {"failed", "unexercised"}:
+                continue
+            stage = item.get("stage")
+            if not isinstance(stage, str) or not 0 < len(stage) <= 1024:
+                raise ValueError("workflow evidence stage identity is invalid")
+            error_type = "None"
+            if status == "failed":
+                raw_error_type = item.get("error_type")
+                error_type = (
+                    raw_error_type
+                    if raw_error_type in _SAFE_WORKFLOW_PROJECTION_ERROR_TYPES
+                    else "OtherError"
+                )
+            projected.append(
+                {
+                    "error_type": error_type,
+                    "stage_id_sha256": hashlib.sha256(
+                        stage.encode("utf-8")
+                    ).hexdigest(),
+                    "stage_kind": _workflow_projection_stage_kind(stage),
+                    "status": status,
+                }
+            )
+
+        ordered = [
+            item for item in projected if item["status"] == "failed"
+        ] + [item for item in projected if item["status"] == "unexercised"]
+        emitted = ordered[:_WORKFLOW_FAILURE_PROJECTION_MAX_STAGES]
+        projection = {
+            "available": True,
+            "emitted_count": len(emitted),
+            "failed_count": sum(
+                item["status"] == "failed" for item in projected
+            ),
+            "stages": emitted,
+            "truncated": len(emitted) != len(projected),
+            "unexercised_count": sum(
+                item["status"] == "unexercised" for item in projected
+            ),
+        }
+    except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+        raise
+    except Exception as exc:
+        category = _normalization_failure_category(exc)
+        status = _normalization_failure_status(exc)
+        projection = {
+            "available": False,
+            "category": category,
+            "status": status,
+        }
+        _print_safe_rehearsal_marker(
+            "REHEARSAL_WORKFLOW_DIAGNOSTIC_UNAVAILABLE "
+            f"category={category} status={status}"
+        )
+        return projection
+
+    _print_safe_rehearsal_marker(
+        "REHEARSAL_WORKFLOW_FAILURE_SUMMARY "
+        f"failed={projection['failed_count']} "
+        f"unexercised={projection['unexercised_count']} "
+        f"emitted={projection['emitted_count']} "
+        f"truncated={int(projection['truncated'])}"
+    )
+    for item in projection["stages"]:
+        _print_safe_rehearsal_marker(
+            "REHEARSAL_WORKFLOW_STAGE_RESULT "
+            f"status={item['status']} "
+            f"stage_kind={item['stage_kind']} "
+            f"stage_id_sha256={item['stage_id_sha256']} "
+            f"error_type={item['error_type']}"
+        )
+    return projection
 
 
 def _normalize_evidence_after_failure(
@@ -1325,17 +1757,23 @@ def _normalize_evidence_after_failure(
     """Best-effort ownership handoff without replacing the source failure."""
 
     try:
-        _normalize_evidence_ownership(
+        diagnostics = _normalize_evidence_ownership(
             tag,
             evidence_root=evidence_root,
             docker_platform=docker_platform,
         )
     except BaseException as cleanup_exc:
+        if isinstance(cleanup_exc, _EvidenceNormalizationError):
+            _attach_normalization_diagnostics(
+                original,
+                cleanup_exc.diagnostics,
+            )
         _annotate_worker_cleanup_errors(
             original,
-            [f"normalize:{type(cleanup_exc).__name__}:{cleanup_exc}"],
+            [f"normalize:{type(cleanup_exc).__name__}"],
         )
         return False
+    _attach_normalization_diagnostics(original, diagnostics)
     return True
 
 
@@ -1348,6 +1786,7 @@ def _normalize_and_preserve_failure_evidence(
     stage: str,
     command: Sequence[str],
     original: BaseException,
+    after_normalization: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     """Retain diagnostics when possible while keeping the source exception."""
 
@@ -1358,6 +1797,17 @@ def _normalize_and_preserve_failure_evidence(
         original=original,
     ):
         return
+    if after_normalization is not None:
+        try:
+            projection = after_normalization()
+            setattr(original, "_rehearsal_workflow_projection", projection)
+        except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+            raise
+        except Exception as cleanup_exc:
+            _annotate_worker_cleanup_errors(
+                original,
+                [f"diagnostic:{type(cleanup_exc).__name__}"],
+            )
     try:
         _preserve_failure_evidence(
             evidence_root=evidence_root,
@@ -1368,7 +1818,7 @@ def _normalize_and_preserve_failure_evidence(
     except BaseException as cleanup_exc:
         _annotate_worker_cleanup_errors(
             original,
-            [f"preserve:{type(cleanup_exc).__name__}:{cleanup_exc}"],
+            [f"preserve:{type(cleanup_exc).__name__}"],
         )
 
 
@@ -1390,7 +1840,7 @@ def _temporary_evidence_directory(
                 "REHEARSAL_EVIDENCE_RETAINED "
                 f"path={evidence_root} "
                 f"error_type={type(reason).__name__} "
-                f"error={str(reason)[:2000]!r}",
+                "error='normalization-or-delete-failed'",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1414,7 +1864,7 @@ def _temporary_evidence_directory(
             normalize()
         except BaseException as cleanup_exc:
             cleanup_errors.append(
-                f"normalize:{type(cleanup_exc).__name__}:{cleanup_exc}"
+                f"normalize:{type(cleanup_exc).__name__}"
             )
             report_retained(cleanup_exc)
         else:
@@ -1422,7 +1872,7 @@ def _temporary_evidence_directory(
                 shutil.rmtree(evidence_root)
             except BaseException as cleanup_exc:
                 cleanup_errors.append(
-                    f"delete:{type(cleanup_exc).__name__}:{cleanup_exc}"
+                    f"delete:{type(cleanup_exc).__name__}"
                 )
                 report_retained(cleanup_exc)
         _annotate_worker_cleanup_errors(original, cleanup_errors)
@@ -1713,7 +2163,191 @@ def _stage_result_from_exception(
     if isinstance(exc, subprocess.CalledProcessError):
         result.update(_stage_failure(stage=stage, exc=exc))
         result["status"] = "failed"
+    result.update(_safe_exception_diagnostic_projection(exc))
     return result
+
+
+def _safe_exception_diagnostic_projection(
+    exc: BaseException,
+) -> dict[str, Any]:
+    projection: dict[str, Any] = {}
+    fixture = getattr(
+        exc,
+        "_rehearsal_fixture_generation_diagnostic",
+        None,
+    )
+    if (
+        isinstance(fixture, dict)
+        and fixture.get("category")
+        in {"permission", "not_found", "resource", "unknown"}
+        and type(fixture.get("status")) is int
+        and 1 <= fixture["status"] <= 255
+    ):
+        projection["fixture_generation_diagnostic"] = {
+            "category": fixture["category"],
+            "status": fixture["status"],
+        }
+
+    normalization = getattr(
+        exc,
+        "_rehearsal_evidence_normalization_diagnostics",
+        None,
+    )
+    if isinstance(exc, _EvidenceNormalizationError):
+        normalization = exc.diagnostics
+    if isinstance(normalization, list) and len(normalization) <= 2:
+        normalized: list[dict[str, Any]] = []
+        for item in normalization:
+            if (
+                not isinstance(item, dict)
+                or item.get("phase") not in {"container", "host"}
+                or item.get("category")
+                not in {"permission", "not_found", "resource", "unknown"}
+                or type(item.get("status")) is not int
+                or not 1 <= item["status"] <= 255
+            ):
+                normalized = []
+                break
+            normalized.append(
+                {
+                    "category": item["category"],
+                    "phase": item["phase"],
+                    "status": item["status"],
+                }
+            )
+        if normalized:
+            projection["evidence_normalization_diagnostics"] = normalized
+
+    workflow = getattr(exc, "_rehearsal_workflow_projection", None)
+    safe_workflow = _safe_workflow_projection(workflow)
+    if safe_workflow is not None:
+        projection["workflow_failure_projection"] = safe_workflow
+    return projection
+
+
+def _safe_workflow_projection(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or type(value.get("available")) is not bool:
+        return None
+    if value["available"] is False:
+        if (
+            value.get("category")
+            not in {"permission", "not_found", "resource", "unknown"}
+            or type(value.get("status")) is not int
+            or not 1 <= value["status"] <= 255
+        ):
+            return None
+        return {
+            "available": False,
+            "category": value["category"],
+            "status": value["status"],
+        }
+
+    counts = (
+        value.get("failed_count"),
+        value.get("unexercised_count"),
+        value.get("emitted_count"),
+    )
+    if (
+        any(type(item) is not int or not 0 <= item <= 512 for item in counts)
+        or type(value.get("truncated")) is not bool
+        or not isinstance(value.get("stages"), list)
+        or len(value["stages"]) > _WORKFLOW_FAILURE_PROJECTION_MAX_STAGES
+        or value["emitted_count"] != len(value["stages"])
+    ):
+        return None
+    stage_kinds = {
+        "allocation",
+        "behavior",
+        "boundary",
+        "concurrency",
+        "diagnostic",
+        "epoch",
+        "fault",
+        "input",
+        "source_identity",
+        "unknown",
+        "validation",
+    }
+    stages: list[dict[str, Any]] = []
+    for item in value["stages"]:
+        if (
+            not isinstance(item, dict)
+            or item.get("status") not in {"failed", "unexercised"}
+            or item.get("stage_kind") not in stage_kinds
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(item.get("stage_id_sha256") or ""),
+            )
+            is None
+            or item.get("error_type")
+            not in {*_SAFE_WORKFLOW_PROJECTION_ERROR_TYPES, "None", "OtherError"}
+        ):
+            return None
+        stages.append(
+            {
+                "error_type": item["error_type"],
+                "stage_id_sha256": item["stage_id_sha256"],
+                "stage_kind": item["stage_kind"],
+                "status": item["status"],
+            }
+        )
+    return {
+        "available": True,
+        "emitted_count": value["emitted_count"],
+        "failed_count": value["failed_count"],
+        "stages": stages,
+        "truncated": value["truncated"],
+        "unexercised_count": value["unexercised_count"],
+    }
+
+
+def _emit_terminal_stage_diagnostics(
+    stages: Sequence[dict[str, Any]],
+) -> None:
+    """Re-emit only bounded fixed diagnostics at the aggregate failure tail."""
+
+    for item in stages:
+        fixture = item.get("fixture_generation_diagnostic")
+        if isinstance(fixture, dict):
+            _print_safe_rehearsal_marker(
+                "REHEARSAL_FIXTURE_GENERATION_FAILED "
+                f"category={fixture['category']} status={fixture['status']}"
+            )
+        normalization = item.get("evidence_normalization_diagnostics")
+        if isinstance(normalization, list):
+            for diagnostic in normalization:
+                _print_safe_rehearsal_marker(
+                    "REHEARSAL_EVIDENCE_NORMALIZATION_FAILED "
+                    f"phase={diagnostic['phase']} "
+                    f"category={diagnostic['category']} "
+                    f"status={diagnostic['status']}"
+                )
+        workflow = _safe_workflow_projection(
+            item.get("workflow_failure_projection")
+        )
+        if workflow is None:
+            continue
+        if workflow["available"] is False:
+            _print_safe_rehearsal_marker(
+                "REHEARSAL_WORKFLOW_DIAGNOSTIC_UNAVAILABLE "
+                f"category={workflow['category']} status={workflow['status']}"
+            )
+            continue
+        _print_safe_rehearsal_marker(
+            "REHEARSAL_WORKFLOW_FAILURE_SUMMARY "
+            f"failed={workflow['failed_count']} "
+            f"unexercised={workflow['unexercised_count']} "
+            f"emitted={workflow['emitted_count']} "
+            f"truncated={int(workflow['truncated'])}"
+        )
+        for diagnostic in workflow["stages"]:
+            _print_safe_rehearsal_marker(
+                "REHEARSAL_WORKFLOW_STAGE_RESULT "
+                f"status={diagnostic['status']} "
+                f"stage_kind={diagnostic['stage_kind']} "
+                f"stage_id_sha256={diagnostic['stage_id_sha256']} "
+                f"error_type={diagnostic['error_type']}"
+            )
 
 
 def _run_independent_stage(
@@ -2097,9 +2731,19 @@ def _prepared_fixture_seed(
                     "/fixture-config",
                     "--candidate-sha",
                     candidate_sha,
-                ]
+                ],
+                capture=True,
             )
         except BaseException as original:
+            fixture_diagnostic = _report_fixture_generation_failure(original)
+            try:
+                setattr(
+                    original,
+                    "_rehearsal_fixture_generation_diagnostic",
+                    fixture_diagnostic,
+                )
+            except BaseException:
+                pass
             _normalize_evidence_after_failure(
                 tag,
                 evidence_root=root,
@@ -2244,6 +2888,11 @@ def _run_workflow(
             stage=f"workflow-{profile}",
             command=command,
             original=original,
+            after_normalization=lambda: _project_workflow_failure_diagnostics(
+                evidence_root=evidence_root,
+                candidate_sha=candidate_sha,
+                profile=profile,
+            ),
         )
         raise
 
@@ -2777,6 +3426,7 @@ def _run_profile(
                 if item.get("status") != "passed"
             ]
             if incomplete:
+                _emit_terminal_stage_diagnostics(stage_results)
                 # Every container writer is terminal. Normalize before the
                 # host copies a failed tree; the outer context normalizes
                 # again immediately before TemporaryDirectory removes it.

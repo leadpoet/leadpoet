@@ -774,6 +774,7 @@ def test_real_timer_waits_for_masked_worker_and_registered_spawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _load_controller()
+    main_thread_ident = threading.get_ident()
     worker_started = threading.Event()
     worker_release = threading.Event()
     register_entered = threading.Event()
@@ -786,7 +787,7 @@ def test_real_timer_waits_for_masked_worker_and_registered_spawn(
     def popen(command, **_kwargs):
         process = _BlockedProcess(process_started, command, streaming=False)
         processes.append(process)
-        signal.setitimer(signal.ITIMER_REAL, 0.01)
+        signal.pthread_kill(main_thread_ident, signal.SIGALRM)
         return process
 
     original_register = controller._WorkerProcessRegistry.register
@@ -1360,7 +1361,8 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
     commands: list[list[str]] = []
     timeouts: list[float | None] = []
 
-    def fake_run(command, *, timeout_seconds=None):
+    def fake_run(command, *, capture=False, timeout_seconds=None):
+        assert capture is True
         commands.append(command)
         timeouts.append(timeout_seconds)
 
@@ -1375,7 +1377,8 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
     )
 
     assert evidence_root.stat().st_mode & 0o777 == 0o700
-    assert timeouts == [controller._EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS]
+    assert len(timeouts) == 1
+    assert 0 < timeouts[0] <= controller._EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS
     assert commands == [[
         "docker",
         "run",
@@ -1395,21 +1398,218 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
         "--cap-drop",
         "ALL",
         "--cap-add",
-        "CHOWN",
-        "--cap-add",
         "DAC_OVERRIDE",
+        "--cap-add",
+        "FOWNER",
         "--read-only",
         "--mount",
         f"type=bind,src={evidence_root},dst=/evidence",
         "--entrypoint",
-        "/usr/bin/chown",
+        "/usr/bin/find",
         "rehearsal-image",
-        "--recursive",
-        "--no-dereference",
-        f"{os.getuid()}:{os.getgid()}",
         "/evidence",
+        "-xdev",
+        "-mindepth",
+        "1",
+        "(",
+        "-type",
+        "d",
+        "-o",
+        "(",
+        "-type",
+        "f",
+        "-links",
+        "1",
+        ")",
+        ")",
+        "-exec",
+        "/usr/bin/chmod",
+        "--",
+        "a+rwX",
+        "{}",
+        "+",
     ]]
+    assert "CHOWN" not in commands[0]
+    assert "/usr/bin/chown" not in commands[0]
     assert "DAC_READ_SEARCH" not in commands[0]
+
+
+def test_evidence_normalizer_tolerates_container_error_only_after_host_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    root = tmp_path / "evidence"
+    child = root / "child"
+    root.mkdir(mode=0o700)
+    child.mkdir(mode=0o777)
+    child.chmod(0o777)
+    artifact = child / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    artifact.chmod(0o666)
+    secret = "must-not-escape-normalizer"
+
+    def fail_container(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(
+            23,
+            ["docker", "run"],
+            stderr=f"permission denied token={secret}",
+        )
+
+    monkeypatch.setattr(controller, "_run", fail_container)
+    diagnostics = controller._normalize_evidence_ownership(
+        "rehearsal-image",
+        evidence_root=root,
+        docker_platform="linux/arm64",
+    )
+
+    assert diagnostics == [
+        {"category": "permission", "phase": "container", "status": 23}
+    ]
+    captured = capsys.readouterr().err
+    assert captured.strip() == (
+        "REHEARSAL_EVIDENCE_NORMALIZATION_FAILED "
+        "phase=container category=permission status=23"
+    )
+    assert secret not in captured
+    assert root.stat().st_mode & 0o777 == 0o700
+
+
+def test_evidence_normalizer_physical_docker_bind_volume(
+    tmp_path: Path,
+) -> None:
+    image = os.environ.get("LEADPOET_REHEARSAL_PHYSICAL_IMAGE")
+    platform_name = os.environ.get("LEADPOET_REHEARSAL_PHYSICAL_PLATFORM")
+    if not image or not platform_name:
+        pytest.skip("physical rehearsal image/platform not selected")
+    controller = _load_controller()
+    root = tmp_path / "evidence"
+    root.mkdir(mode=0o700)
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--platform",
+            platform_name,
+            "--network",
+            "none",
+            "--mount",
+            f"type=bind,src={root},dst=/evidence",
+            "--entrypoint",
+            "/bin/bash",
+            image,
+            "-c",
+            "mkdir -p /evidence/nested && "
+            "printf '%s\\n' physical > /evidence/nested/artifact && "
+            "chmod 000 /evidence/nested/artifact /evidence/nested",
+        ],
+        check=True,
+        timeout=30,
+    )
+
+    assert controller._normalize_evidence_ownership(
+        image,
+        evidence_root=root,
+        docker_platform=platform_name,
+    ) == []
+    assert root.stat().st_mode & 0o777 == 0o700
+    assert (root / "nested").stat().st_mode & 0o007 == 0o007
+    assert (root / "nested/artifact").stat().st_mode & 0o006 == 0o006
+    assert (root / "nested/artifact").read_text(encoding="utf-8") == "physical\n"
+
+    outside = tmp_path / "outside"
+    outside.write_text("unchanged\n", encoding="utf-8")
+    outside.chmod(0o600)
+    (root / "unsafe-link").symlink_to(outside)
+    with pytest.raises(controller._EvidenceNormalizationError):
+        controller._normalize_evidence_ownership(
+            image,
+            evidence_root=root,
+            docker_platform=platform_name,
+        )
+    assert outside.read_text(encoding="utf-8") == "unchanged\n"
+    assert outside.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "hardlink", "fifo"])
+def test_host_evidence_verifier_rejects_aliases_and_special_files(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    controller = _load_controller()
+    root = tmp_path / "evidence"
+    root.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.write_text("sentinel\n", encoding="utf-8")
+    outside.chmod(0o600)
+    unsafe = root / "unsafe"
+    if unsafe_kind == "symlink":
+        unsafe.symlink_to(outside)
+    elif unsafe_kind == "hardlink":
+        os.link(outside, unsafe)
+    else:
+        os.mkfifo(unsafe, mode=0o600)
+
+    with pytest.raises(OSError):
+        controller._verify_host_evidence_access(root)
+
+    assert outside.read_text(encoding="utf-8") == "sentinel\n"
+    assert outside.stat().st_mode & 0o777 == 0o600
+
+
+def test_workflow_failure_projection_is_hash_only_and_bounded(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    root = tmp_path / "evidence"
+    root.mkdir(mode=0o700)
+    secret = "must-not-escape-workflow"
+    stage = "behavior:canonical-weight-publication"
+    (root / "workflow.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "leadpoet.local_v2_workflow_evidence.v1",
+                "status": "failed",
+                "release_sha": "b" * 40,
+                "profile": "prepush",
+                "stages": [
+                    {
+                        "stage": stage,
+                        "status": "failed",
+                        "error_type": "RuntimeError",
+                        "error": secret,
+                        "traceback": secret,
+                    },
+                    {
+                        "stage": "workflow-evidence-validation",
+                        "status": "unexercised",
+                        "blocked_by": [secret],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    projection = controller._project_workflow_failure_diagnostics(
+        evidence_root=root,
+        candidate_sha="b" * 40,
+        profile="prepush",
+    )
+
+    assert projection["failed_count"] == 1
+    assert projection["unexercised_count"] == 1
+    assert projection["stages"][0]["stage_id_sha256"] == controller.hashlib.sha256(
+        stage.encode("utf-8")
+    ).hexdigest()
+    encoded = json.dumps(projection, sort_keys=True)
+    captured = capsys.readouterr().err
+    assert secret not in encoded
+    assert secret not in captured
+    assert stage not in encoded
+    assert stage not in captured
 
 
 def test_fixture_seed_normalizes_before_host_inspection_and_copy(
@@ -1432,7 +1632,7 @@ def test_fixture_seed_normalizes_before_host_inspection_and_copy(
         )
         return Path(mount.removeprefix("type=bind,src=").removesuffix(suffix))
 
-    def fake_run(command: list[str]) -> None:
+    def fake_run(command: list[str], **_kwargs) -> None:
         nonlocal fixture_root
         events.append("generate")
         generated_state = bind_source(command, "/rehearsal-state")
@@ -1542,7 +1742,7 @@ def test_fixture_seed_normalizes_after_generation_failure(
     controller = _load_controller()
     events: list[str] = []
 
-    def fail_generation(command: list[str]) -> None:
+    def fail_generation(command: list[str], **_kwargs) -> None:
         assert command[:3] == ["docker", "run", "--rm"]
         events.append("generate-failed")
         raise subprocess.CalledProcessError(17, command)
@@ -1609,7 +1809,7 @@ def test_fixture_seed_normalization_failure_keeps_generation_error(
     assert raised.value is generation_error
     captured = capsys.readouterr().err
     assert "normalize:CalledProcessError" in captured
-    assert "ownership-handoff" in captured
+    assert "ownership-handoff" not in captured
 
 
 def test_outer_evidence_normalizes_post_workflow_component_and_join_artifacts(
@@ -1680,6 +1880,8 @@ def test_workflow_normalizes_evidence_before_preserving_failure(
     controller = _load_controller()
     commands: list[list[str]] = []
     events: list[str] = []
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
 
     def fake_run(command, **_kwargs):
         commands.append(command)
@@ -1701,19 +1903,14 @@ def test_workflow_normalizes_evidence_before_preserving_failure(
         controller._run_workflow(
             "rehearsal-image",
             source_root=tmp_path / "source",
-            evidence_root=tmp_path / "evidence",
+            evidence_root=evidence_root,
             from_sha="a" * 40,
             candidate_sha="b" * 40,
             profile="prepush",
             docker_platform="linux/arm64",
         )
 
-    assert commands[1][-4:] == [
-        "--recursive",
-        "--no-dereference",
-        f"{os.getuid()}:{os.getgid()}",
-        "/evidence",
-    ]
+    assert commands[1][-4:] == ["--", "a+rwX", "{}", "+"]
     assert events == ["preserved"]
 
 
@@ -1757,7 +1954,54 @@ def test_workflow_normalization_failure_keeps_workflow_error(
     assert raised.value is workflow_error
     captured = capsys.readouterr().err
     assert "normalize:CalledProcessError" in captured
-    assert "ownership-handoff" in captured
+    assert "ownership-handoff" not in captured
+
+
+def test_workflow_projection_and_preservation_failures_keep_source_error_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    workflow_error = subprocess.CalledProcessError(19, ["workflow"])
+    secret = "must-not-escape-cleanup"
+    monkeypatch.setattr(
+        controller,
+        "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(workflow_error),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        controller,
+        "_project_workflow_failure_diagnostics",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError(secret)),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_preserve_failure_evidence",
+        lambda **_kwargs: (_ for _ in ()).throw(PermissionError(secret)),
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        controller._run_workflow(
+            "rehearsal-image",
+            source_root=tmp_path / "source",
+            evidence_root=tmp_path / "evidence",
+            from_sha="a" * 40,
+            candidate_sha="b" * 40,
+            profile="prepush",
+            docker_platform="linux/amd64",
+        )
+
+    assert raised.value is workflow_error
+    captured = capsys.readouterr().err
+    assert "diagnostic:RuntimeError" in captured
+    assert "preserve:PermissionError" in captured
+    assert secret not in captured
 
 
 def test_preservation_failure_is_annotated_without_replacing_source_error(
@@ -1791,7 +2035,41 @@ def test_preservation_failure_is_annotated_without_replacing_source_error(
     )
 
     captured = capsys.readouterr().err
-    assert "preserve:PermissionError:preserve denied" in captured
+    assert "preserve:PermissionError" in captured
+    assert "preserve denied" not in captured
+
+
+def test_diagnostic_projection_deadline_is_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    source_error = subprocess.CalledProcessError(21, ["source-stage"])
+    deadline = controller.RehearsalTimeBudgetExceeded("deadline")
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        controller,
+        "_preserve_failure_evidence",
+        lambda **_kwargs: pytest.fail("deadline must stop preservation"),
+    )
+
+    with pytest.raises(controller.RehearsalTimeBudgetExceeded) as raised:
+        controller._normalize_and_preserve_failure_evidence(
+            "rehearsal-image",
+            evidence_root=tmp_path,
+            docker_platform="linux/amd64",
+            candidate_sha="c" * 40,
+            stage="workflow-prepush",
+            command=["source-stage"],
+            original=source_error,
+            after_normalization=lambda: (_ for _ in ()).throw(deadline),
+        )
+
+    assert raised.value is deadline
 
 
 def test_instruction_files_define_fast_default_and_match() -> None:

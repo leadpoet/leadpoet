@@ -210,15 +210,29 @@ jobs:
           PY
 
       - name: Transfer exact candidate into the retained transient bucket
+        id: candidate_bundle
         shell: bash
         run: |
           set -Eeuo pipefail
           umask 077
-          git bundle create "$PARITY_TEMP/candidate.bundle" --all
-          git bundle verify "$PARITY_TEMP/candidate.bundle"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git bundle create "$PARITY_TEMP/candidate.bundle" HEAD
+          test "$(git bundle list-heads "$PARITY_TEMP/candidate.bundle")" = \
+            "$CANDIDATE_SHA HEAD"
+          git bundle verify "$PARITY_TEMP/candidate.bundle" >/dev/null
+          bundle_size_bytes="$(stat -c '%s' -- "$PARITY_TEMP/candidate.bundle")"
+          bundle_sha256="$(sha256sum -- "$PARITY_TEMP/candidate.bundle" | awk '{print $1}')"
+          test "$bundle_size_bytes" -gt 0
+          case "$bundle_sha256" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "${#bundle_sha256}" -eq 64
           aws s3 cp "$PARITY_TEMP/candidate.bundle" \
             "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/candidate.bundle" \
+            --metadata "candidate-sha=$CANDIDATE_SHA,bundle-sha256=$bundle_sha256,bundle-size-bytes=$bundle_size_bytes" \
             --only-show-errors
+          printf 'sha256=%s\nsize_bytes=%s\n' \
+            "$bundle_sha256" "$bundle_size_bytes" >> "$GITHUB_OUTPUT"
 
       - name: Start candidate production paths
         id: execute
@@ -247,6 +261,15 @@ jobs:
           prefix = "${{ steps.inputs.outputs.prefix }}"
           origin = "${{ steps.stack.outputs.supabase_origin }}"
           artifact_bucket = "${{ steps.stack.outputs.artifact_bucket }}"
+          candidate_bundle_sha256 = "${{ steps.candidate_bundle.outputs.sha256 }}"
+          candidate_bundle_size_bytes = "${{ steps.candidate_bundle.outputs.size_bytes }}"
+          if (
+              len(candidate_bundle_sha256) != 64
+              or any(character not in "0123456789abcdef" for character in candidate_bundle_sha256)
+              or not candidate_bundle_size_bytes.isdigit()
+              or int(candidate_bundle_size_bytes) <= 0
+          ):
+              raise SystemExit("candidate bundle transfer metadata is invalid")
           root = f"/opt/leadpoet-production-parity/{run_id}"
           bootstrap_writer = Path(
               "scripts/production_parity_bootstrap_evidence.py"
@@ -269,6 +292,10 @@ jobs:
           evidence=/run/leadpoet-production-parity/full-evidence.json
           authoritative_evidence={q(root + "/full-evidence.json")}
           candidate_bundle={q(root + "/candidate.bundle")}
+          candidate_bundle_verifier={q(root + "/candidate-bundle-verifier.git")}
+          candidate_repo={q(root + "/repo")}
+          candidate_bundle_sha256={q(candidate_bundle_sha256)}
+          candidate_bundle_size_bytes={q(candidate_bundle_size_bytes)}
           failure_response_code() {{
             case "$failure_stage" in
           {failure_response_cases}
@@ -343,17 +370,51 @@ jobs:
           sudo chown ec2-user:ec2-user {q(root)}
           failure_stage=candidate-bundle-download
           aws s3 cp {q(f"s3://{artifact_bucket}/{prefix}/candidate.bundle")} {q(root + "/candidate.bundle")} --region {q(required['AWS_REGION'])} --only-show-errors
-          failure_stage=candidate-clone
-          git clone {q(root + "/candidate.bundle")} {q(root + "/repo")}
-          cd {q(root + "/repo")}
-          git remote set-url origin https://github.com/leadpoet/leadpoet.git
-          test "$(git remote get-url origin)" = https://github.com/leadpoet/leadpoet.git
-          failure_stage=canonical-origin-fetch
-          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-          test "$(git rev-parse origin/main)" = {q(required['CANDIDATE_SHA'])}
+          failure_stage=candidate-bundle-integrity
+          candidate_bundle_metadata="$(aws s3api head-object \
+            --bucket {q(artifact_bucket)} \
+            --key {q(prefix + "/candidate.bundle")} \
+            --query '[Metadata."candidate-sha",Metadata."bundle-sha256",Metadata."bundle-size-bytes"]' \
+            --output text \
+            --region {q(required['AWS_REGION'])})"
+          test "$candidate_bundle_metadata" = "$(printf '%s\t%s\t%s' \
+            {q(required['CANDIDATE_SHA'])} \
+            "$candidate_bundle_sha256" \
+            "$candidate_bundle_size_bytes")"
+          test -f "$candidate_bundle"
+          test ! -L "$candidate_bundle"
+          test "$(stat -c '%s' -- "$candidate_bundle")" = \
+            "$candidate_bundle_size_bytes"
+          test "$(sha256sum -- "$candidate_bundle" | awk '{{print $1}}')" = \
+            "$candidate_bundle_sha256"
+          test "$(git bundle list-heads "$candidate_bundle")" = \
+            {q(required['CANDIDATE_SHA'] + " HEAD")}
+          git init --bare "$candidate_bundle_verifier" >/dev/null 2>&1
+          git -C "$candidate_bundle_verifier" bundle verify \
+            "$candidate_bundle" >/dev/null 2>&1
+          failure_stage=candidate-repository-init
+          git init "$candidate_repo" >/dev/null 2>&1
+          failure_stage=candidate-bundle-fetch
+          git -C "$candidate_repo" fetch --no-tags \
+            "$candidate_bundle" HEAD >/dev/null 2>&1
+          test "$(git -C "$candidate_repo" rev-parse FETCH_HEAD)" = \
+            {q(required['CANDIDATE_SHA'])}
           failure_stage=candidate-checkout
-          git checkout --detach {q(required['CANDIDATE_SHA'])}
-          test "$(git rev-parse HEAD)" = {q(required['CANDIDATE_SHA'])}
+          git -C "$candidate_repo" checkout --detach \
+            {q(required['CANDIDATE_SHA'])} >/dev/null 2>&1
+          test "$(git -C "$candidate_repo" rev-parse HEAD)" = \
+            {q(required['CANDIDATE_SHA'])}
+          failure_stage=candidate-remote-rebind
+          git -C "$candidate_repo" remote add origin \
+            https://github.com/leadpoet/leadpoet.git
+          test "$(git -C "$candidate_repo" remote get-url origin)" = \
+            https://github.com/leadpoet/leadpoet.git
+          failure_stage=canonical-origin-fetch
+          git -C "$candidate_repo" fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1
+          test "$(git -C "$candidate_repo" rev-parse origin/main)" = \
+            {q(required['CANDIDATE_SHA'])}
+          cd "$candidate_repo"
           failure_stage=host-python-import
           failure_category=HostImportFailed
           /home/ec2-user/venv311/bin/python3 \

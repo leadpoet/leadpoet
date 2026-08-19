@@ -957,30 +957,53 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert '!= "blocked-production-parity"' in source
 
 
-def test_full_workflow_rebinds_bundle_clone_to_canonical_current_main():
+def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     source = (
         ROOT / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
-    clone = source.index('git clone {q(root + "/candidate.bundle")}')
+    initialize = source.index('git init "$candidate_repo"')
+    bundle_fetch = source.index(
+        'git -C "$candidate_repo" fetch --no-tags'
+    )
+    exact_fetch = source.index(
+        'test "$(git -C "$candidate_repo" rev-parse FETCH_HEAD)" ='
+    )
+    checkout = source.index(
+        'git -C "$candidate_repo" checkout --detach'
+    )
+    exact_checkout = source.index(
+        'test "$(git -C "$candidate_repo" rev-parse HEAD)" ='
+    )
     canonical_origin = source.index(
-        "git remote set-url origin https://github.com/leadpoet/leadpoet.git"
+        'git -C "$candidate_repo" remote add origin'
     )
     exact_origin = source.index(
-        'test "$(git remote get-url origin)" = '
-        "https://github.com/leadpoet/leadpoet.git"
+        'test "$(git -C "$candidate_repo" remote get-url origin)" ='
     )
     fetch = source.index(
-        "git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main"
+        'git -C "$candidate_repo" fetch --no-tags origin'
     )
     exact_main = source.index(
-        'test "$(git rev-parse origin/main)" = {q(required[\'CANDIDATE_SHA\'])}'
+        'test "$(git -C "$candidate_repo" rev-parse origin/main)" ='
     )
     runner = source.index(
         "/home/ec2-user/venv311/bin/python3 "
         "scripts/run_production_parity_full_host.py"
     )
 
-    assert clone < canonical_origin < exact_origin < fetch < exact_main < runner
+    assert (
+        initialize
+        < bundle_fetch
+        < exact_fetch
+        < checkout
+        < exact_checkout
+        < canonical_origin
+        < exact_origin
+        < fetch
+        < exact_main
+        < runner
+    )
+    assert "git clone" not in source
 
 
 def test_parity_workflows_reject_non_main_code_before_aws_credentials():

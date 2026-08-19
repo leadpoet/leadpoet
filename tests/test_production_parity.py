@@ -41,6 +41,7 @@ from scripts.materialize_production_parity_secrets import (
 )
 from scripts import production_parity_snapshot as parity_snapshot
 from scripts import check_production_parity_rebenchmark as parity_readiness
+from scripts import run_local_restart_rehearsal as restart_rehearsal
 from scripts import run_production_parity_fast as fast_parity
 from scripts import run_production_parity_full_host as full_host
 from scripts.production_parity_snapshot import (
@@ -2637,6 +2638,145 @@ def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
     assert secret not in json.dumps(diagnostics, sort_keys=True)
 
 
+def test_fast_rehearsal_parent_waits_for_inner_budget_failure_evidence(
+    monkeypatch,
+    tmp_path: Path,
+):
+    candidate_sha = "c" * 40
+    secret = "must-not-escape-inner-timeout-evidence"
+    durable_root = tmp_path / (
+        f"leadpoet-rehearsal-failure-{candidate_sha[:12]}-full-path-timeout"
+    )
+    durable_root.mkdir()
+    summary = {
+        "candidate_sha": candidate_sha,
+        "status": "failed",
+        "stages": [
+            {
+                "duration_seconds": 600,
+                "error": secret,
+                "error_type": "RehearsalTimeBudgetExceeded",
+                "stage": "time-budget",
+                "status": "failed",
+            },
+            {
+                "blocked_by": ["time-budget"],
+                "stage": "evidence-join-prepush",
+                "status": "unexercised",
+            },
+        ],
+    }
+    (durable_root / "failure-summary.json").write_text(
+        json.dumps(summary), encoding="utf-8"
+    )
+    observed: dict[str, int] = {}
+
+    def inner_budget_failure(command, *, timeout, **_kwargs):
+        observed["timeout"] = timeout
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr=(
+                "REHEARSAL_TIME_BUDGET_EXCEEDED profile=prepush "
+                "error='prepush rehearsal exceeded its 600-second wall-clock budget'\n"
+                f"REHEARSAL_BATCH_FAILURE_EVIDENCE {durable_root}\n"
+            ),
+        )
+
+    monkeypatch.setattr(fast_parity, "_run", inner_budget_failure)
+    monkeypatch.setattr(fast_parity.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        fast_parity,
+        "_rehearsal_evidence_path",
+        lambda _candidate_sha: tmp_path / "joined-evidence.json",
+    )
+
+    with pytest.raises(ProductionParityError) as raised:
+        fast_parity._run_rehearsal(
+            base_sha="b" * 40,
+            candidate_sha=candidate_sha,
+        )
+
+    message = str(raised.value)
+    assert observed == {"timeout": 720}
+    assert "candidate-derived N-1 rehearsal failed" in message
+    assert "parent watchdog timed out" not in message
+    assert '"failure_summary_available":true' in message
+    assert '"stage":"time-budget"' in message
+    assert '"stage":"evidence-join-prepush"' in message
+    assert secret not in message
+
+
+@pytest.mark.parametrize(
+    ("stream_kind", "expects_safe_markers"),
+    (("bytes", True), ("str", True), ("malformed", False)),
+)
+def test_fast_parent_timeout_projects_only_sanitized_child_evidence(
+    monkeypatch,
+    tmp_path: Path,
+    stream_kind: str,
+    expects_safe_markers: bool,
+):
+    candidate_sha = "d" * 40
+    secret = "must-not-escape-parent-timeout-output"
+
+    stdout_text = (
+        "REHEARSAL_FAILURE_DIAGNOSTICS component=workflow status=124\n"
+        f"raw={secret}\n"
+    )
+    stderr_text = (
+        "REHEARSAL_WORKFLOW_DIAGNOSTIC_UNAVAILABLE "
+        "category=resource status=124\n"
+        f"ERROR: bearer token={secret} permission denied\n"
+    )
+    if stream_kind == "bytes":
+        timeout_stdout = stdout_text.encode()
+        timeout_stderr = stderr_text.encode()
+    elif stream_kind == "str":
+        timeout_stdout = stdout_text
+        timeout_stderr = stderr_text
+    else:
+        timeout_stdout = {"malformed": secret}
+        timeout_stderr = ["malformed", secret]
+
+    def parent_timeout(command, *, timeout, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=timeout_stdout,
+            stderr=timeout_stderr,
+        )
+
+    monkeypatch.setattr(fast_parity, "_run", parent_timeout)
+    monkeypatch.setattr(
+        fast_parity,
+        "_rehearsal_evidence_path",
+        lambda _candidate_sha: tmp_path / "joined-evidence.json",
+    )
+
+    with pytest.raises(ProductionParityError) as raised:
+        fast_parity._run_rehearsal(
+            base_sha="b" * 40,
+            candidate_sha=candidate_sha,
+        )
+
+    message = str(raised.value)
+    assert "parent watchdog timed out" in message
+    assert '"parent_watchdog_timeout_seconds":720' in message
+    if expects_safe_markers:
+        assert '"component":"workflow"' in message
+        assert '"category":"resource"' in message
+    else:
+        assert '"component":"workflow"' not in message
+        assert '"category":"resource"' not in message
+    assert '"returncode":124' in message
+    assert secret not in message
+    assert "malformed" not in message
+    assert "raw=" not in message
+    assert "bearer token" not in message
+
+
 def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/production-parity-fast.yml").read_text(
@@ -2665,13 +2805,37 @@ def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():
         len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 3
     )
     assert fast_parity.FAST_CANDIDATE_MIGRATION_HEADROOM_COUNT == 2
+    terminate_bound = 2 * restart_rehearsal._WORKER_TERMINATE_GRACE_SECONDS
+    container_bound = (
+        2 * restart_rehearsal._WORKER_DOCKER_CLEANUP_SECONDS
+        + restart_rehearsal._WORKER_DOCKER_CONVERGENCE_SECONDS
+        + 2 * restart_rehearsal._WORKER_DOCKER_CLEANUP_SECONDS
+    )
+    process_cleanup_bound = 2 * terminate_bound + container_bound
+    scheduler_cleanup_bound = 2 * process_cleanup_bound
+    normalization_cleanup_bound = (
+        restart_rehearsal._EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS
+        + process_cleanup_bound
+    )
+    bounded_external_cleanup = (
+        scheduler_cleanup_bound + normalization_cleanup_bound
+    )
+    assert restart_rehearsal.PROFILE_LIMITS["prepush"]["target_seconds"] == 600
+    assert fast_parity.FAST_REHEARSAL_INNER_TIMEOUT_SECONDS == 600
+    assert bounded_external_cleanup == 96
+    assert fast_parity.FAST_REHEARSAL_PARENT_CLEANUP_HEADROOM_SECONDS == 120
+    assert (
+        fast_parity.FAST_REHEARSAL_PARENT_CLEANUP_HEADROOM_SECONDS
+        > bounded_external_cleanup
+    )
+    assert fast_parity.FAST_REHEARSAL_TIMEOUT_SECONDS == 720
     assert fast_parity._fast_job_minimum_timeout_seconds(2) == expected_minimum
     assert fast_parity.FAST_JOB_MINIMUM_TIMEOUT_SECONDS == expected_minimum
     assert outer_seconds == fast_parity.FAST_JOB_OUTER_TIMEOUT_SECONDS
     assert outer_seconds - expected_minimum >= 10 * 60
     assert fast_parity._fast_job_minimum_timeout_seconds(5) >= outer_seconds
     assert role_duration_seconds == fast_parity.FAST_AWS_ROLE_DURATION_SECONDS
-    assert role_duration_seconds - outer_seconds >= 20 * 60
+    assert role_duration_seconds - outer_seconds >= 19 * 60
 
 
 def test_fast_workflow_freezes_snapshot_source_to_contract_base():

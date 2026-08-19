@@ -92,7 +92,17 @@ CHAIN_REALIZED_ACTIVATION_COLUMNS = (
     "source_bundle_epoch_id",
     "source_finalized_block",
 )
-FAST_REHEARSAL_TIMEOUT_SECONDS = 600
+# The candidate controller keeps the authoritative prepush wall-clock cap at
+# 600 seconds.  Its parent must leave enough time for the controller's bounded
+# worker cancellation, evidence normalization, local unwind, and sanitized
+# failure handoff; otherwise the parent wins the deadline race and destroys the
+# exact stage diagnostics produced at the inner limit.
+FAST_REHEARSAL_INNER_TIMEOUT_SECONDS = 600
+FAST_REHEARSAL_PARENT_CLEANUP_HEADROOM_SECONDS = 120
+FAST_REHEARSAL_TIMEOUT_SECONDS = (
+    FAST_REHEARSAL_INNER_TIMEOUT_SECONDS
+    + FAST_REHEARSAL_PARENT_CLEANUP_HEADROOM_SECONDS
+)
 FAST_SCHEMA_PREFLIGHT_TIMEOUT_SECONDS = 20
 # Fast validates every schema table plus OpenAPI and two contract RPCs. The
 # activation value is validated from the strict live read instead of another
@@ -125,7 +135,7 @@ FAST_JOB_FIXED_TIMEOUT_SECONDS = (
 FAST_JOB_MINIMUM_TIMEOUT_SECONDS = (
     FAST_JOB_FIXED_TIMEOUT_SECONDS + FAST_CANDIDATE_MIGRATION_HEADROOM_SECONDS
 )
-FAST_JOB_OUTER_TIMEOUT_SECONDS = 100 * 60
+FAST_JOB_OUTER_TIMEOUT_SECONDS = 101 * 60
 FAST_AWS_ROLE_DURATION_SECONDS = 7200
 SAFE_REHEARSAL_ERROR_TYPES = frozenset(
     {
@@ -1647,6 +1657,32 @@ def _rehearsal_failure_diagnostics(
     return projection
 
 
+def _timeout_stream_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def _rehearsal_timeout_diagnostics(
+    exc: subprocess.TimeoutExpired, *, candidate_sha: str
+) -> dict[str, Any]:
+    """Project only the existing secret-safe child diagnostic contract."""
+
+    result = subprocess.CompletedProcess(
+        args=(),
+        returncode=124,
+        stdout=_timeout_stream_text(exc.stdout),
+        stderr=_timeout_stream_text(exc.stderr),
+    )
+    projection = _rehearsal_failure_diagnostics(
+        result, candidate_sha=candidate_sha
+    )
+    projection["parent_watchdog_timeout_seconds"] = int(exc.timeout)
+    return projection
+
+
 def _run_rehearsal(*, base_sha: str, candidate_sha: str) -> dict[str, Any]:
     evidence_path = _rehearsal_evidence_path(candidate_sha)
     evidence_path.unlink(missing_ok=True)
@@ -1667,9 +1703,12 @@ def _run_rehearsal(*, base_sha: str, candidate_sha: str) -> dict[str, Any]:
             timeout=FAST_REHEARSAL_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
+        diagnostics = _rehearsal_timeout_diagnostics(
+            exc, candidate_sha=candidate_sha
+        )
         raise ProductionParityError(
-            "candidate-derived N-1 rehearsal timed out after "
-            f"{int(exc.timeout)} seconds"
+            "candidate-derived N-1 rehearsal parent watchdog timed out: "
+            + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
         ) from None
     if result.returncode != 0:
         diagnostics = _rehearsal_failure_diagnostics(

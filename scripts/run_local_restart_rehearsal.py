@@ -27,6 +27,7 @@ import json
 import os
 import platform
 from pathlib import Path
+import re
 import signal
 import shutil
 import subprocess
@@ -40,6 +41,8 @@ from urllib.request import urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_REPOSITORY = "leadpoet-local-restart-rehearsal"
+_LOCAL_IMAGE_OPERATION_TIMEOUT_SECONDS = 10.0
+_REHEARSAL_BASE_PULL_TIMEOUT_SECONDS = 120.0
 REHEARSAL_LOCK_PATH = (
     Path.home()
     / ".cache"
@@ -724,6 +727,102 @@ def _rehearsal_base_image(docker_platform: str) -> str:
         ) from exc
 
 
+def _inspect_local_image(reference: str) -> dict[str, Any] | None:
+    try:
+        result = _run(
+            ["docker", "image", "inspect", reference],
+            capture=True,
+            timeout_seconds=_LOCAL_IMAGE_OPERATION_TIMEOUT_SECONDS,
+        )
+    except subprocess.CalledProcessError as exc:
+        missing_messages = {
+            f"Error response from daemon: No such image: {reference}",
+            f"Error response from daemon: No such object: {reference}",
+            f"Error: No such object: {reference}",
+        }
+        if str(exc.stderr or "").strip() in missing_messages:
+            return None
+        raise SystemExit("unable to inspect local Docker image") from exc
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise SystemExit("local Docker image inspection is malformed") from exc
+    if not isinstance(payload, list) or len(payload) != 1:
+        raise SystemExit("local Docker image inspection is ambiguous")
+    image = payload[0]
+    if not isinstance(image, dict):
+        raise SystemExit("local Docker image inspection is malformed")
+    return image
+
+
+def _prepare_local_rehearsal_base_image(docker_platform: str) -> str:
+    """Bind the pinned base digest to a validated local no-pull alias.
+
+    Resolve or pull the pinned platform image once, prove its immutable
+    repository digest and platform, then build from a full-digest local alias
+    with Docker's explicit no-pull policy.  An existing mismatched alias is
+    treated as tampering instead of being overwritten.
+    """
+
+    pinned = _rehearsal_base_image(docker_platform)
+    match = re.fullmatch(r".+@sha256:([0-9a-f]{64})", pinned)
+    if match is None:
+        raise SystemExit("rehearsal base image is not digest pinned")
+    expected_digest = f"sha256:{match.group(1)}"
+    expected_os, expected_arch = docker_platform.split("/", 1)
+
+    image = _inspect_local_image(pinned)
+    if image is None:
+        _run(
+            ["docker", "pull", "--platform", docker_platform, pinned],
+            timeout_seconds=_REHEARSAL_BASE_PULL_TIMEOUT_SECONDS,
+        )
+        image = _inspect_local_image(pinned)
+    if image is None:
+        raise SystemExit("pinned rehearsal base image is unavailable locally")
+
+    repo_digests = image.get("RepoDigests")
+    if not isinstance(repo_digests, list) or pinned not in repo_digests:
+        raise SystemExit("local rehearsal base repository digest differs")
+    if image.get("Os") != expected_os or image.get("Architecture") != expected_arch:
+        raise SystemExit("local rehearsal base platform differs")
+    image_id = image.get("Id")
+    if not isinstance(image_id, str) or re.fullmatch(
+        r"sha256:[0-9a-f]{64}", image_id
+    ) is None:
+        raise SystemExit("local rehearsal base image ID is malformed")
+
+    alias = (
+        f"{IMAGE_REPOSITORY}-base:"
+        f"{expected_arch}-{expected_digest.removeprefix('sha256:')}"
+    )
+    alias_image = _inspect_local_image(alias)
+    if alias_image is not None and alias_image.get("Id") != image_id:
+        raise SystemExit("local rehearsal base alias differs from pinned image")
+    if alias_image is None:
+        _run(
+            ["docker", "image", "tag", pinned, alias],
+            timeout_seconds=_LOCAL_IMAGE_OPERATION_TIMEOUT_SECONDS,
+        )
+        alias_image = _inspect_local_image(alias)
+    if alias_image is None or alias_image.get("Id") != image_id:
+        raise SystemExit("local rehearsal base alias was not installed exactly")
+    alias_repo_digests = alias_image.get("RepoDigests")
+    if not isinstance(alias_repo_digests, list) or pinned not in alias_repo_digests:
+        raise SystemExit("local rehearsal base alias lost the pinned digest")
+    if (
+        alias_image.get("Os") != expected_os
+        or alias_image.get("Architecture") != expected_arch
+    ):
+        raise SystemExit("local rehearsal base alias platform differs")
+    # The outer controller lock serializes this validation and the immediately
+    # following build across every canonical rehearsal.  A plain local tag is
+    # deliberately used here because classic Docker stores cannot resolve a
+    # newly tagged image as alias@digest without first pushing that repository;
+    # the exact ID and original pinned RepoDigest above are the local authority.
+    return alias
+
+
 def _image_tag(
     harness_sha: str,
     *,
@@ -815,15 +914,16 @@ def _build_image(
             destination = harness / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(_git_file(harness_sha, path))
+        base_image = _prepare_local_rehearsal_base_image(docker_platform)
         _run(
             [
                 "docker",
                 "build",
+                "--pull=false",
                 "--platform",
                 docker_platform,
                 "--build-arg",
-                "REHEARSAL_BASE_IMAGE="
-                + _rehearsal_base_image(docker_platform),
+                "REHEARSAL_BASE_IMAGE=" + base_image,
                 "--build-arg",
                 "REHEARSAL_SCORING_LOCK_SHA256="
                 + candidate_scoring_lock_sha256,

@@ -4134,6 +4134,289 @@ def test_rehearsal_base_images_are_immutable_platform_children() -> None:
         rehearsal._rehearsal_base_image("linux/unknown")
 
 
+def test_rehearsal_local_image_inspection_is_bounded_and_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = "leadpoet-test:exact"
+    calls: list[tuple[list[str], bool, float | None]] = []
+    payload = {"Id": "sha256:" + "1" * 64}
+
+    def fake_run(command, *, capture=False, timeout_seconds=None):
+        calls.append((list(command), capture, timeout_seconds))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps([payload]),
+            stderr="",
+        )
+
+    monkeypatch.setattr(rehearsal, "_run", fake_run)
+
+    assert rehearsal._inspect_local_image(reference) == payload
+    assert calls == [
+        (
+            ["docker", "image", "inspect", reference],
+            True,
+            rehearsal._LOCAL_IMAGE_OPERATION_TIMEOUT_SECONDS,
+        )
+    ]
+
+
+@pytest.mark.parametrize("payload", ("{}", "[]", "[1]", "not-json"))
+def test_rehearsal_local_image_inspection_rejects_malformed_output(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: str,
+) -> None:
+    monkeypatch.setattr(
+        rehearsal,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=payload, stderr=""
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="inspection is"):
+        rehearsal._inspect_local_image("leadpoet-test:malformed")
+
+
+def test_rehearsal_local_image_inspection_distinguishes_absence_from_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = "leadpoet-test:missing"
+
+    def missing(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            [],
+            stderr=f"Error response from daemon: No such image: {reference}\n",
+        )
+
+    monkeypatch.setattr(rehearsal, "_run", missing)
+    assert rehearsal._inspect_local_image(reference) is None
+
+    def denied(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            [],
+            stderr="permission denied\n",
+        )
+
+    monkeypatch.setattr(rehearsal, "_run", denied)
+    with pytest.raises(SystemExit, match="unable to inspect"):
+        rehearsal._inspect_local_image(reference)
+
+
+def test_rehearsal_local_image_inspection_preserves_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeout = subprocess.TimeoutExpired([], 1.0)
+    monkeypatch.setattr(
+        rehearsal,
+        "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(timeout),
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        rehearsal._inspect_local_image("leadpoet-test:timeout")
+    assert raised.value is timeout
+
+
+def test_rehearsal_local_base_alias_binds_exact_pinned_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pinned = rehearsal.REHEARSAL_BASE_IMAGES["linux/arm64"]
+    image_id = "sha256:" + "1" * 64
+    image = {
+        "Architecture": "arm64",
+        "Id": image_id,
+        "Os": "linux",
+        "RepoDigests": [pinned],
+    }
+    installed: dict[str, dict[str, Any]] = {pinned: image}
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        rehearsal,
+        "_inspect_local_image",
+        lambda reference: installed.get(reference),
+    )
+
+    def fake_run(command, **_kwargs):
+        commands.append(list(command))
+        assert command[:3] == ["docker", "image", "tag"]
+        alias = str(command[4])
+        installed[alias] = dict(image)
+
+    monkeypatch.setattr(rehearsal, "_run", fake_run)
+
+    actual_alias = rehearsal._prepare_local_rehearsal_base_image("linux/arm64")
+
+    alias = (
+        "leadpoet-local-restart-rehearsal-base:arm64-"
+        + pinned.rsplit("@sha256:", 1)[1]
+    )
+    assert actual_alias == alias
+    assert commands == [["docker", "image", "tag", pinned, alias]]
+
+
+def test_rehearsal_local_base_alias_pulls_absent_pinned_image_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pinned = rehearsal.REHEARSAL_BASE_IMAGES["linux/arm64"]
+    image = {
+        "Architecture": "arm64",
+        "Id": "sha256:" + "1" * 64,
+        "Os": "linux",
+        "RepoDigests": [pinned],
+    }
+    installed: dict[str, dict[str, Any]] = {}
+    commands: list[tuple[list[str], float | None]] = []
+
+    monkeypatch.setattr(
+        rehearsal,
+        "_inspect_local_image",
+        lambda reference: installed.get(reference),
+    )
+
+    def fake_run(command, *, timeout_seconds=None, **_kwargs):
+        commands.append((list(command), timeout_seconds))
+        if command[1] == "pull":
+            installed[pinned] = dict(image)
+        else:
+            alias = str(command[4])
+            installed[alias] = dict(image)
+
+    monkeypatch.setattr(rehearsal, "_run", fake_run)
+
+    alias = rehearsal._prepare_local_rehearsal_base_image("linux/arm64")
+
+    assert alias.startswith("leadpoet-local-restart-rehearsal-base:arm64-")
+    assert commands[0] == (
+        ["docker", "pull", "--platform", "linux/arm64", pinned],
+        rehearsal._REHEARSAL_BASE_PULL_TIMEOUT_SECONDS,
+    )
+    assert commands[1][0][:3] == ["docker", "image", "tag"]
+    assert commands[1][1] == rehearsal._LOCAL_IMAGE_OPERATION_TIMEOUT_SECONDS
+
+
+def test_rehearsal_local_base_alias_reuses_exact_existing_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pinned = rehearsal.REHEARSAL_BASE_IMAGES["linux/arm64"]
+    digest = pinned.rsplit("@sha256:", 1)[1]
+    alias = f"leadpoet-local-restart-rehearsal-base:arm64-{digest}"
+    image = {
+        "Architecture": "arm64",
+        "Id": "sha256:" + "1" * 64,
+        "Os": "linux",
+        "RepoDigests": [pinned],
+    }
+    monkeypatch.setattr(
+        rehearsal,
+        "_inspect_local_image",
+        lambda reference: image if reference in {pinned, alias} else None,
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("exact alias must be reused"),
+    )
+
+    assert rehearsal._prepare_local_rehearsal_base_image("linux/arm64") == alias
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("Architecture", "amd64", "platform differs"),
+        ("RepoDigests", [], "repository digest differs"),
+        ("Id", "not-a-digest", "image ID is malformed"),
+    ),
+)
+def test_rehearsal_local_base_alias_rejects_invalid_pinned_image(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: Any,
+    message: str,
+) -> None:
+    pinned = rehearsal.REHEARSAL_BASE_IMAGES["linux/arm64"]
+    image = {
+        "Architecture": "arm64",
+        "Id": "sha256:" + "1" * 64,
+        "Os": "linux",
+        "RepoDigests": [pinned],
+    }
+    image[field] = value
+    monkeypatch.setattr(
+        rehearsal,
+        "_inspect_local_image",
+        lambda reference: image if reference == pinned else None,
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("invalid base must not be tagged"),
+    )
+
+    with pytest.raises(SystemExit, match=message):
+        rehearsal._prepare_local_rehearsal_base_image("linux/arm64")
+
+
+def test_rehearsal_local_base_alias_rejects_existing_wrong_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pinned = rehearsal.REHEARSAL_BASE_IMAGES["linux/arm64"]
+    pinned_image = {
+        "Architecture": "arm64",
+        "Id": "sha256:" + "1" * 64,
+        "Os": "linux",
+        "RepoDigests": [pinned],
+    }
+
+    def inspect(reference: str):
+        if reference == pinned:
+            return pinned_image
+        return {**pinned_image, "Id": "sha256:" + "2" * 64}
+
+    monkeypatch.setattr(rehearsal, "_inspect_local_image", inspect)
+    monkeypatch.setattr(
+        rehearsal,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("wrong alias must not be replaced"),
+    )
+
+    with pytest.raises(SystemExit, match="alias differs"):
+        rehearsal._prepare_local_rehearsal_base_image("linux/arm64")
+
+
+def test_rehearsal_local_base_alias_rejects_wrong_post_tag_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pinned = rehearsal.REHEARSAL_BASE_IMAGES["linux/arm64"]
+    pinned_image = {
+        "Architecture": "arm64",
+        "Id": "sha256:" + "1" * 64,
+        "Os": "linux",
+        "RepoDigests": [pinned],
+    }
+    alias_reads = 0
+
+    def inspect(reference: str):
+        nonlocal alias_reads
+        if reference == pinned:
+            return pinned_image
+        alias_reads += 1
+        if alias_reads == 1:
+            return None
+        return {**pinned_image, "Id": "sha256:" + "2" * 64}
+
+    monkeypatch.setattr(rehearsal, "_inspect_local_image", inspect)
+    monkeypatch.setattr(rehearsal, "_run", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(SystemExit, match="not installed exactly"):
+        rehearsal._prepare_local_rehearsal_base_image("linux/arm64")
+
+
 def test_rehearsal_dockerfile_has_valid_immutable_default_image() -> None:
     dockerfile = (
         Path(__file__).resolve().parent / "Dockerfile"
@@ -4153,6 +4436,8 @@ def test_rehearsal_build_binds_the_platform_specific_base(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    local_base = "leadpoet-local-rehearsal-base:amd64-exact"
+
     @contextmanager
     def temporary_directory(*, prefix: str):
         assert prefix == "leadpoet-restart-image-"
@@ -4184,6 +4469,15 @@ def test_rehearsal_build_binds_the_platform_specific_base(
             (list(argv), cwd)
         ),
     )
+    monkeypatch.setattr(
+        rehearsal,
+        "_prepare_local_rehearsal_base_image",
+        lambda docker_platform: (
+            local_base
+            if docker_platform == "linux/amd64"
+            else pytest.fail("unexpected Docker platform")
+        ),
+    )
 
     rehearsal._build_image(
         "leadpoet-test:platform",
@@ -4197,11 +4491,11 @@ def test_rehearsal_build_binds_the_platform_specific_base(
             [
                 "docker",
                 "build",
+                "--pull=false",
                 "--platform",
                 "linux/amd64",
                 "--build-arg",
-                "REHEARSAL_BASE_IMAGE="
-                + rehearsal.REHEARSAL_BASE_IMAGES["linux/amd64"],
+                "REHEARSAL_BASE_IMAGE=" + local_base,
                 "--build-arg",
                 "REHEARSAL_SCORING_LOCK_SHA256="
                 + hashlib.sha256(b"same-scoring-lock").hexdigest(),
@@ -4293,6 +4587,11 @@ def test_rehearsal_build_maps_both_transition_commits_to_exact_lock_content(
     )
     monkeypatch.setattr(rehearsal, "_git_file", git_file)
     monkeypatch.setattr(rehearsal, "_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        rehearsal,
+        "_prepare_local_rehearsal_base_image",
+        lambda _docker_platform: "leadpoet-local-rehearsal-base:exact",
+    )
 
     rehearsal._build_image(
         "leadpoet-test:transition-locks",
@@ -4470,6 +4769,11 @@ def test_rehearsal_build_stages_compact_weight_readiness_dependency(
         lambda _sha, path: (repository_root / path).read_bytes(),
     )
     monkeypatch.setattr(rehearsal, "_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        rehearsal,
+        "_prepare_local_rehearsal_base_image",
+        lambda _docker_platform: "leadpoet-local-rehearsal-base:exact",
+    )
 
     candidate_sha = "a" * 40
     rehearsal._build_image(

@@ -4397,7 +4397,7 @@
       "symbol": "build_snapshot_pointer_document"
     },
     {
-      "ast_sha256": "sha256:0c154783bc6f11ac4169c7c538d2e1066fa72262b385103bbbb1c51e3b245955",
+      "ast_sha256": "sha256:0e641a62cc22d4c56a01a512267a698473933a3a5795ab328576f9918d297455",
       "path": "research_lab/eval/snapshot_store.py",
       "symbol": "verify_snapshot_pointer_document"
     },
@@ -4847,7 +4847,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:c690a1e2011df5b7f6940f8a47dade4a8e4c5985d9b99dfa6b00e4f64251f095",
-  "protected_source_commit": "6379937c1229087e5c179271986e6d2b1ce3205a",
+  "manifest_hash": "sha256:91d1d7be23c5086f3be7869edc15be8d5057e577c6a5b60a648e659e291d0b75",
+  "protected_source_commit": "683d7d1403f6f9eddec37e745b88fae707e9cd70",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

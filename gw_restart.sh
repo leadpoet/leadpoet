@@ -3173,3 +3173,44 @@ GATEWAY_DEPLOY_COMPLETED=1
 rm -f "$GATEWAY_DEPLOY_PLAN_FILE"
 record_gateway_restart_timing "completed" "passed"
 echo "Gateway restart command completed; tail logs with: tail -f $GATEWAY_LOG_FILE"
+
+# --- OnePatch deploy beacon --------------------------------------------------
+# Announce "the gateway just finished deploying <sha>" as one OTLP/HTTP JSON log
+# record, so automated post-deploy checks have a marker to anchor on. It runs
+# only after the deployment record is already stamped complete, is hard-bounded
+# by `timeout` plus short curl timeouts, and is fail-open: it can never change
+# this script's exit status. It is inert unless GATEWAY_OTEL_ENDPOINT and
+# GATEWAY_OTEL_TOKEN are present in the gateway env secret (the same pair the
+# gateway's existing tracing uses). Deleting this block turns the beacon off.
+emit_gateway_deploy_beacon() {
+  local endpoint token logs_endpoint payload now_ns sha branch invocation stage
+  endpoint="${GATEWAY_OTEL_ENDPOINT:-}"
+  token="${GATEWAY_OTEL_TOKEN:-}"
+  [ -n "$endpoint" ] || return 0
+  [ -n "$token" ] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  command -v timeout >/dev/null 2>&1 || return 0
+  case "$endpoint" in
+    */v1/traces) logs_endpoint="${endpoint%/v1/traces}/v1/logs" ;;
+    *) return 0 ;;
+  esac
+  sha="${GATEWAY_DEPLOY_SHA:-}"
+  branch="${GATEWAY_DEPLOY_BRANCH:-}"
+  invocation="${GATEWAY_RESTART_INVOCATION_ID:-}"
+  stage="${GATEWAY_DEPLOY_STAGE:-completed}"
+  sha="${sha//[^A-Za-z0-9._\/-]/_}"
+  branch="${branch//[^A-Za-z0-9._\/-]/_}"
+  invocation="${invocation//[^A-Za-z0-9._\/-]/_}"
+  stage="${stage//[^A-Za-z0-9._\/-]/_}"
+  now_ns="$(date -u +%s)000000000"
+  payload="$(printf '{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"leadpoet-gateway"}}]},"scopeLogs":[{"scope":{"name":"onepatch.deploy.beacon"},"logRecords":[{"timeUnixNano":"%s","severityText":"INFO","body":{"stringValue":"gateway deploy completed"},"attributes":[{"key":"deploy.component","value":{"stringValue":"gateway"}},{"key":"deploy.stage","value":{"stringValue":"%s"}},{"key":"deploy.commit.sha","value":{"stringValue":"%s"}},{"key":"deploy.branch","value":{"stringValue":"%s"}},{"key":"deploy.invocation_id","value":{"stringValue":"%s"}}]}]}]}]}' \
+    "$now_ns" "$stage" "$sha" "$branch" "$invocation")"
+  timeout 6 curl -sS -o /dev/null -X POST "$logs_endpoint" \
+    --connect-timeout 2 --max-time 5 \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $token" \
+    --data-raw "$payload" >/dev/null 2>&1 || true
+  return 0
+}
+
+emit_gateway_deploy_beacon || true

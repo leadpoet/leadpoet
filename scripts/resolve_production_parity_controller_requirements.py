@@ -10,7 +10,7 @@ import sys
 from typing import Sequence
 
 
-REQUIRED_PACKAGES = ("boto3", "cryptography", "httpx", "supabase")
+REQUIRED_PACKAGES = ("bittensor", "boto3", "cryptography", "httpx", "supabase")
 NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)")
 
 
@@ -30,7 +30,7 @@ def resolve_controller_requirements(requirements_path: Path) -> tuple[str, ...]:
             "candidate requirements are unreadable"
         ) from exc
 
-    selected: dict[str, str] = {}
+    selected: dict[str, list[str]] = {}
     required = {_normalized_name(name) for name in REQUIRED_PACKAGES}
     for raw_line in raw_lines:
         line = re.split(r"\s+#", raw_line, maxsplit=1)[0].strip()
@@ -42,12 +42,16 @@ def resolve_controller_requirements(requirements_path: Path) -> tuple[str, ...]:
         name = _normalized_name(match.group(1))
         if name not in required:
             continue
-        previous = selected.get(name)
-        if previous is not None and previous != line:
+        previous = selected.setdefault(name, [])
+        if line in previous:
+            continue
+        if previous and (
+            ";" not in line or any(";" not in item for item in previous)
+        ):
             raise ControllerRequirementsError(
                 f"candidate requirements define {name} more than once"
             )
-        selected[name] = line
+        previous.append(line)
 
     missing = sorted(required.difference(selected))
     if missing:
@@ -55,7 +59,11 @@ def resolve_controller_requirements(requirements_path: Path) -> tuple[str, ...]:
             "candidate requirements omit parity controller dependencies: "
             + ", ".join(missing)
         )
-    return tuple(selected[_normalized_name(name)] for name in REQUIRED_PACKAGES)
+    return tuple(
+        line
+        for name in REQUIRED_PACKAGES
+        for line in selected[_normalized_name(name)]
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -3008,7 +3008,8 @@ def test_full_gateway_restart_reasserts_run_owned_path_authority():
 def test_controller_dependency_closure_includes_gateway_database_client():
     selected = resolve_controller_requirements(ROOT / "requirements.txt")
     names = {re.split(r"[<>=!~ ]", item, maxsplit=1)[0].lower() for item in selected}
-    assert names == {"boto3", "cryptography", "httpx", "supabase"}
+    assert names == {"bittensor", "boto3", "cryptography", "httpx", "supabase"}
+    assert 'bittensor==10.5.0; python_version >= "3.10"' in selected
 
 
 def test_full_baseline_checkpoint_is_run_scoped_and_production_default_is_unchanged(

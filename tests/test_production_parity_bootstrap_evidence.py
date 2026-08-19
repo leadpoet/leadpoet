@@ -357,6 +357,56 @@ def test_terminal_upload_never_replaces_existing_s3_evidence(
     )
 
 
+def _rendered_ssm_command(tmp_path: Path) -> str:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = Path(__file__).parents[1] / ".github/workflows/physical-v2-staging.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["validate"]["steps"]
+    execute = next(
+        step for step in steps if step.get("name") == "Start candidate production paths"
+    )["run"]
+    controller = execute.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    replacements = {
+        "${{ steps.inputs.outputs.run_id }}": RUN_ID,
+        "${{ steps.inputs.outputs.base }}": BASE_SHA,
+        "${{ steps.inputs.outputs.prefix }}": f"production-parity/runs/{RUN_ID}",
+        "${{ steps.stack.outputs.supabase_origin }}": (
+            "https://example.cloudfront.net"
+        ),
+        "${{ steps.stack.outputs.artifact_bucket }}": BUCKET,
+    }
+    for source, replacement in replacements.items():
+        controller = controller.replace(source, replacement)
+    assert "${{" not in controller
+    output = tmp_path / "ssm-parameters.json"
+    environment = {
+        **os.environ,
+        "AWS_REGION": "us-east-1",
+        "CANDIDATE_SHA": CANDIDATE_SHA,
+        "PRODUCTION_GATEWAY_SECRET_ID": "gateway-secret-id",
+        "READONLY_DSN_SECRET_ID": "readonly-secret-id",
+        "MINER_INTAKE_SECRET_ID": "miner-secret-id",
+        "POSTGRES_IMAGE": "postgres@sha256:" + "c" * 64,
+        "POSTGREST_IMAGE": "postgrest@sha256:" + "d" * 64,
+        "FULL_TIMEOUT_SECONDS": "72000",
+        "SSM_TIMEOUT_SECONDS": "77400",
+    }
+    rendered = subprocess.run(
+        [sys.executable, "-", str(output)],
+        input=controller,
+        text=True,
+        capture_output=True,
+        cwd=path.parents[2],
+        env=environment,
+        check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert document["executionTimeout"] == ["77400"]
+    assert len(document["commands"]) == 1
+    return document["commands"][0]
+
+
 def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     path = Path(__file__).parents[1] / ".github/workflows/physical-v2-staging.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -368,6 +418,12 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     assert "trap finalize_bootstrap EXIT" in execute
     assert "aws s3api put-object" in execute
     assert "--if-none-match '*'" in execute
+    assert 'evidence_parent="$(dirname -- "$evidence")"' in execute
+    assert 'install -d -m 0700 -- "$evidence_parent"' in execute
+    assert (
+        execute.index('install -d -m 0700 -- "$evidence_parent"')
+        < execute.index('/usr/bin/python3.11 -c {q(bootstrap_writer)}')
+    )
     ordered = [
         "failure_stage=bootstrap-environment",
         "failure_stage=bootstrap-workspace",
@@ -409,50 +465,7 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
 
 
 def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
-    path = Path(__file__).parents[1] / ".github/workflows/physical-v2-staging.yml"
-    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["validate"]["steps"]
-    execute = next(
-        step for step in steps if step.get("name") == "Start candidate production paths"
-    )["run"]
-    controller = execute.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    replacements = {
-        "${{ steps.inputs.outputs.run_id }}": RUN_ID,
-        "${{ steps.inputs.outputs.base }}": BASE_SHA,
-        "${{ steps.inputs.outputs.prefix }}": f"production-parity/runs/{RUN_ID}",
-        "${{ steps.stack.outputs.supabase_origin }}": "https://example.cloudfront.net",
-        "${{ steps.stack.outputs.artifact_bucket }}": BUCKET,
-    }
-    for source, replacement in replacements.items():
-        controller = controller.replace(source, replacement)
-    assert "${{" not in controller
-    output = tmp_path / "ssm-parameters.json"
-    environment = {
-        **os.environ,
-        "AWS_REGION": "us-east-1",
-        "CANDIDATE_SHA": CANDIDATE_SHA,
-        "PRODUCTION_GATEWAY_SECRET_ID": "gateway-secret-id",
-        "READONLY_DSN_SECRET_ID": "readonly-secret-id",
-        "MINER_INTAKE_SECRET_ID": "miner-secret-id",
-        "POSTGRES_IMAGE": "postgres@sha256:" + "c" * 64,
-        "POSTGREST_IMAGE": "postgrest@sha256:" + "d" * 64,
-        "FULL_TIMEOUT_SECONDS": "72000",
-        "SSM_TIMEOUT_SECONDS": "77400",
-    }
-    rendered = subprocess.run(
-        [sys.executable, "-", str(output)],
-        input=controller,
-        text=True,
-        capture_output=True,
-        cwd=path.parents[2],
-        env=environment,
-        check=False,
-    )
-    assert rendered.returncode == 0, rendered.stderr
-    document = json.loads(output.read_text(encoding="utf-8"))
-    assert document["executionTimeout"] == ["77400"]
-    assert len(document["commands"]) == 1
-    command = document["commands"][0]
+    command = _rendered_ssm_command(tmp_path)
     assert len(command.encode("utf-8")) < 24_000
     parsed = subprocess.run(
         ["bash", "-n"],
@@ -462,6 +475,126 @@ def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
         check=False,
     )
     assert parsed.returncode == 0, parsed.stderr
+
+
+@pytest.mark.parametrize(
+    ("stage", "category"),
+    [
+        ("bootstrap-environment", "CommandFailed"),
+        ("bootstrap-workspace", "CommandFailed"),
+        ("candidate-bundle-download", "CommandFailed"),
+        ("candidate-clone", "CommandFailed"),
+        ("canonical-origin-fetch", "CommandFailed"),
+        ("candidate-checkout", "CommandFailed"),
+        ("host-python-import", "HostImportFailed"),
+        ("host-entrypoint", "HostEntrypointFailed"),
+    ],
+)
+def test_rendered_ssm_uploads_exact_stage_when_early_parent_is_absent(
+    tmp_path: Path,
+    stage: str,
+    category: str,
+) -> None:
+    command = _rendered_ssm_command(tmp_path / "render")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "uploaded-evidence.json"
+    aws_stub = fake_bin / "aws"
+    aws_stub.write_text(
+        """#!/usr/bin/env python3
+import os
+from pathlib import Path
+import shutil
+import sys
+
+arguments = sys.argv[1:]
+if arguments[:2] == ["s3", "cp"]:
+    destination = Path(arguments[3])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(b"candidate-bundle")
+elif arguments[:2] == ["s3api", "put-object"]:
+    body = Path(arguments[arguments.index("--body") + 1])
+    shutil.copyfile(body, os.environ["CAPTURE_EVIDENCE"])
+else:
+    raise SystemExit(2)
+""",
+        encoding="utf-8",
+    )
+    git_stub = fake_bin / "git"
+    git_stub.write_text(
+        """#!/bin/sh
+set -eu
+case "$1 $2" in
+  "clone "*) mkdir -p "$3" ;;
+  "remote get-url") printf '%s\\n' 'https://github.com/leadpoet/leadpoet.git' ;;
+  "rev-parse "*) printf '%s\\n' "$CANDIDATE_SHA" ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    sudo_stub = fake_bin / "sudo"
+    sudo_stub.write_text(
+        """#!/bin/sh
+set -eu
+operation="$1"
+shift
+case "$operation" in
+  mkdir) exec mkdir "$@" ;;
+  chown) exit 0 ;;
+  *) exit 2 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    host_python = fake_bin / "host-python"
+    host_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for executable in (aws_stub, git_stub, sudo_stub, host_python):
+        executable.chmod(0o700)
+
+    early_root = tmp_path / "missing-early-parent"
+    work_root = tmp_path / "work"
+    command = command.replace("/usr/bin/python3.11", sys.executable)
+    command = command.replace(
+        "/run/leadpoet-production-parity", str(early_root)
+    )
+    command = command.replace(
+        f"/opt/leadpoet-production-parity/{RUN_ID}", str(work_root)
+    )
+    command = command.replace(
+        "/home/ec2-user/venv311/bin/python3", str(host_python)
+    )
+    if stage == "bootstrap-environment":
+        marker = "trap 'exit 143' TERM"
+    elif stage in {"host-python-import", "host-entrypoint"}:
+        marker = f"failure_category={category}"
+    else:
+        marker = f"failure_stage={stage}"
+    assert command.count(marker) == 1
+    command = command.replace(marker, marker + "\nfalse", 1)
+    assert not early_root.exists()
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "CAPTURE_EVIDENCE": str(capture),
+        "CANDIDATE_SHA": CANDIDATE_SHA,
+        "PROVIDER_SECRET": "must-never-enter-evidence",
+    }
+    result = subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    retained = json.loads(capture.read_text(encoding="utf-8"))
+    assert retained["failure_stage"] == stage
+    assert retained["error_type"] == category
+    assert "must-never-enter-evidence" not in capture.read_text(encoding="utf-8")
+    assert result.stdout == ""
+    assert result.stderr == ""
 
 
 def test_bootstrap_evidence_sources_never_capture_raw_process_material() -> None:

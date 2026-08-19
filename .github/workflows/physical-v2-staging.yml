@@ -263,6 +263,10 @@ jobs:
           authoritative_evidence={q(root + "/full-evidence.json")}
           candidate_bundle={q(root + "/candidate.bundle")}
           retain_failure() {{
+            evidence_parent="$(dirname -- "$evidence")"
+            test "$evidence_parent" != "$evidence"
+            install -d -m 0700 -- "$evidence_parent"
+            test -d "$evidence_parent" && test ! -L "$evidence_parent"
             /usr/bin/python3.11 -c {q(bootstrap_writer)} \
               --output "$evidence" \
               --run-id {q(run_id)} \

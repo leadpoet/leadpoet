@@ -403,6 +403,14 @@ _SAFE_WORKFLOW_PROJECTION_ERROR_TYPES = frozenset(
 )
 _SCHEDULER_WORKER_READY_SECONDS = 2.0
 _DEFERRED_PROCESS_SIGNALS = frozenset((signal.SIGALRM, signal.SIGINT))
+_SOURCE_GIT_SAFE_DIRECTORY_DOCKER_ARGS = (
+    "--env",
+    "GIT_CONFIG_COUNT=1",
+    "--env",
+    "GIT_CONFIG_KEY_0=safe.directory",
+    "--env",
+    "GIT_CONFIG_VALUE_0=/source",
+)
 
 
 class _EvidenceNormalizationError(RuntimeError):
@@ -1895,6 +1903,7 @@ def _run_component(
         "/tmp:rw,exec,nosuid,size=2g",
         "--mount",
         f"type=bind,src={source_root},dst=/source,readonly",
+        *_SOURCE_GIT_SAFE_DIRECTORY_DOCKER_ARGS,
         "--mount",
         f"type=bind,src={evidence_root},dst=/evidence",
         "--mount",
@@ -2677,6 +2686,7 @@ def _prepared_fixture_seed(
                     "/tmp:rw,exec,nosuid,size=2g",
                     "--mount",
                     f"type=bind,src={source_root},dst=/source,readonly",
+                    *_SOURCE_GIT_SAFE_DIRECTORY_DOCKER_ARGS,
                     "--mount",
                     (
                         f"type=bind,src={drand_artifact_root},"
@@ -2812,6 +2822,7 @@ def _run_workflow(
         "/tmp:rw,exec,nosuid,size=2g",
         "--mount",
         f"type=bind,src={source_root},dst=/source,readonly",
+        *_SOURCE_GIT_SAFE_DIRECTORY_DOCKER_ARGS,
         "--mount",
         f"type=bind,src={evidence_root},dst=/evidence",
         "--env",
@@ -2893,6 +2904,7 @@ def _join_evidence(
             "no-new-privileges",
             "--mount",
             f"type=bind,src={source_root},dst=/source,readonly",
+            *_SOURCE_GIT_SAFE_DIRECTORY_DOCKER_ARGS,
             "--mount",
             f"type=bind,src={evidence_root},dst=/evidence",
             "--entrypoint",
@@ -2943,6 +2955,7 @@ def _run_python37_finalization_probe(source_root: Path) -> None:
             "no-new-privileges",
             "--mount",
             f"type=bind,src={source_root},dst=/source,readonly",
+            *_SOURCE_GIT_SAFE_DIRECTORY_DOCKER_ARGS,
             "--env",
             "PYTHONPATH=/source",
             "--workdir",

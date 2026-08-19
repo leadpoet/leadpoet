@@ -158,7 +158,6 @@ ln -sf /harness/bin/python3 /home/ec2-user/venv311/bin/python3
 
 git config --global user.email "restart-rehearsal@leadpoet.invalid"
 git config --global user.name "Leadpoet Restart Rehearsal"
-git config --global --add safe.directory '*'
 
 git -C /source cat-file -e "$FROM_SHA^{commit}"
 git -C /source cat-file -e "$CANDIDATE_SHA^{commit}"

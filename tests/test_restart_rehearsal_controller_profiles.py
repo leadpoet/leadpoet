@@ -529,6 +529,229 @@ def _run_test_component(controller, tmp_path: Path, component: str) -> None:
     )
 
 
+def _assert_exact_source_git_trust(command: list[str]) -> None:
+    env_values = [
+        command[index + 1]
+        for index, item in enumerate(command[:-1])
+        if item == "--env"
+    ]
+    git_config_values = [
+        value for value in env_values if value.startswith("GIT_CONFIG_")
+    ]
+    assert git_config_values == [
+        "GIT_CONFIG_COUNT=1",
+        "GIT_CONFIG_KEY_0=safe.directory",
+        "GIT_CONFIG_VALUE_0=/source",
+    ]
+    assert "--global" not in command
+    assert not any("safe.directory=*" in item for item in command)
+
+
+def test_source_mount_consumers_use_exact_process_scoped_git_trust(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    expected_args = (
+        "--env",
+        "GIT_CONFIG_COUNT=1",
+        "--env",
+        "GIT_CONFIG_KEY_0=safe.directory",
+        "--env",
+        "GIT_CONFIG_VALUE_0=/source",
+    )
+    assert controller._SOURCE_GIT_SAFE_DIRECTORY_DOCKER_ARGS == expected_args
+    commands: dict[str, list[str]] = {}
+    source_root = tmp_path / "source"
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    candidate_sha = "b" * 40
+
+    class CompletedComponent:
+        stdout = iter(())
+        returncode = 0
+
+        def wait(self):
+            return self.returncode
+
+    def spawn_component(command: list[str], **_kwargs):
+        commands["component"] = list(command)
+        return CompletedComponent()
+
+    monkeypatch.setattr(controller, "_spawn_registered_process", spawn_component)
+    _run_test_component(controller, evidence_root, "gateway")
+
+    def fail_fixture(command: list[str], **_kwargs):
+        commands["fixture"] = list(command)
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(controller, "_run", fail_fixture)
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_after_failure",
+        lambda *_args, **_kwargs: True,
+    )
+    with pytest.raises(subprocess.CalledProcessError):
+        with controller._prepared_fixture_seed(
+            "rehearsal-image",
+            source_root=source_root,
+            candidate_sha=candidate_sha,
+            drand_artifact_root=tmp_path / "drand",
+            docker_platform="linux/amd64",
+            profile="prepush",
+        ):
+            pytest.fail("failed fixture preparation must not yield")
+
+    captured: list[list[str]] = []
+
+    def capture_run(command: list[str], **_kwargs):
+        captured.append(list(command))
+
+    monkeypatch.setattr(controller, "_run", capture_run)
+    controller._run_workflow(
+        "rehearsal-image",
+        source_root=source_root,
+        evidence_root=evidence_root,
+        from_sha="a" * 40,
+        candidate_sha=candidate_sha,
+        profile="prepush",
+        docker_platform="linux/amd64",
+    )
+    commands["workflow"] = captured.pop()
+
+    joined = evidence_root / (
+        f"leadpoet-restart-rehearsal-{candidate_sha}-prepush.json"
+    )
+    joined.write_text("{}\n", encoding="utf-8")
+    controller._join_evidence(
+        "rehearsal-image",
+        source_root=source_root,
+        evidence_root=evidence_root,
+        from_sha="a" * 40,
+        candidate_sha=candidate_sha,
+        profile="prepush",
+        docker_platform="linux/amd64",
+    )
+    commands["join"] = captured.pop()
+
+    controller._run_python37_finalization_probe(source_root)
+    commands["python37-probe"] = captured.pop()
+
+    assert set(commands) == {
+        "component",
+        "fixture",
+        "workflow",
+        "join",
+        "python37-probe",
+    }
+    for command in commands.values():
+        _assert_exact_source_git_trust(command)
+
+    controller_source = CONTROLLER_PATH.read_text(encoding="utf-8")
+    assert controller_source.count(
+        'f"type=bind,src={source_root},dst=/source,readonly"'
+    ) == len(commands)
+    assert controller_source.count(
+        "*_SOURCE_GIT_SAFE_DIRECTORY_DOCKER_ARGS"
+    ) == len(commands)
+
+    run_inside = (
+        ROOT / "tests" / "restart_rehearsal" / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+    assert "safe.directory" not in run_inside
+    assert 'git config --global user.name "Leadpoet Restart Rehearsal"' in run_inside
+    assert "git config --global user.email" in run_inside
+
+
+def test_source_git_trust_physical_linux_bind(
+    tmp_path: Path,
+) -> None:
+    if sys.platform != "linux":
+        pytest.skip("native Linux bind ownership is required")
+    image = os.environ.get("LEADPOET_REHEARSAL_PHYSICAL_IMAGE")
+    platform_name = os.environ.get("LEADPOET_REHEARSAL_PHYSICAL_PLATFORM")
+    if not image or not platform_name:
+        pytest.skip("physical rehearsal image/platform not selected")
+
+    controller = _load_controller()
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", str(source_root)],
+        check=True,
+        timeout=10,
+    )
+    (source_root / "tracked.txt").write_text("trusted source\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(source_root), "add", "tracked.txt"],
+        check=True,
+        timeout=10,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_root),
+            "-c",
+            "user.name=Leadpoet Rehearsal",
+            "-c",
+            "user.email=restart-rehearsal@leadpoet.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+        timeout=10,
+    )
+    docker_prefix = [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        platform_name,
+        "--network",
+        "none",
+        "--mount",
+        f"type=bind,src={source_root},dst=/source,readonly",
+    ]
+    probe = (
+        "git -C /source show HEAD:tracked.txt >/dev/null && "
+        "git -C /source archive HEAD >/dev/null"
+    )
+    untrusted = subprocess.run(
+        [*docker_prefix, "--entrypoint", "/bin/bash", image, "-c", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if untrusted.returncode == 0:
+        pytest.skip("bind ownership mismatch was not reproduced")
+    if "dubious ownership" not in (
+        (untrusted.stdout or "") + (untrusted.stderr or "")
+    ).lower():
+        pytest.fail(
+            "untrusted Git probe failed for a reason other than bind ownership"
+        )
+
+    subprocess.run(
+        [
+            *docker_prefix,
+            *controller._SOURCE_GIT_SAFE_DIRECTORY_DOCKER_ARGS,
+            "--entrypoint",
+            "/bin/bash",
+            image,
+            "-c",
+            probe,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 def test_worker_container_cleanup_proves_continuous_full_bound_after_rm_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

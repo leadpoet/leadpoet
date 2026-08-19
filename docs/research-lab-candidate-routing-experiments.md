@@ -1,54 +1,44 @@
-# Candidate-routing experiments
+# Candidate waterfall experiment sidecars
 
-The candidate-routing experiment lane is replay-first and separate from the
-official Research Lab candidate-evaluation and promotion rails.
+This change is stacked on PR 93. PR 93 is the only owner of routing
+experiments, variants, provider bindings, credit budgets, provider receipts,
+route decision receipts, evaluation gates, and Lab promotion references.
+Company sourcing and intent experiments therefore use one lifecycle and one
+set of safety rules.
 
-`Sourcing_model` remains the only owner of route compilation, tool IDs,
-profile policy, and route-plan hashes. This repository records the signed model
-and catalog hashes, stores normalized route-step outcomes, and evaluates a
-frozen provider snapshot. It must not compile a second waterfall or select an
-unrecorded provider fallback.
+This PR adds four candidate-only parts:
 
-Model-owned routing, catalog, profile, plan, stop-policy, attempt-receipt, and
-verification-receipt hashes stay as the model's exact 64-character lowercase
-SHA-256 values. Lab-owned record and snapshot hashes keep the Lab-native
-`sha256:` prefix. This distinction prevents a consumer from silently changing
-an identity at the repository boundary.
+1. `candidate_waterfall_receipt_from_model` parses the exact
+   `Sourcing_model` `CandidateStepAttemptReceipt` and attaches its redacted
+   counts and hashes to the existing V2 provider and decision receipts.
+2. `evaluate_candidate_waterfall_metrics` derives calibration and holdout
+   metrics for raw, normalized, unique, verified-qualified, and published
+   companies. These metrics are sidecars. They do not select or promote a
+   route.
+3. `validate_candidate_routing_model_runtime` compares the isolated Model
+   runtime's candidate waterfall contract hash with the exact artifact hash
+   in the V2 experiment variant. A partial, unsafe, or different runtime fails
+   closed before a receipt is accepted.
+4. `scripts/156-research-lab-candidate-routing-experiments.sql` stores only
+   the Model receipt sidecars and candidate metric sidecars. Both tables are
+   append-only, service-role-only, and protected by forced row-level security.
 
-The stable service boundary is:
+The adapter never compiles a route, calls a provider, selects an unrecorded
+fallback, or writes a second promotion decision. Use PR 93's
+`evaluate_routing_experiment_v2` for provider execution and route evaluation.
+Use `promote_routing_experiment_v2_to_lab` for the immutable Lab reference.
 
-```python
-from research_lab.candidate_routing_experiments import evaluate_routing_replay
-```
+The identity rules are explicit:
 
-Use `candidate_routing_attempt_from_model_receipt` to project a serialized
-attempt. Its `model_runtime` argument must be the exact branch-specific model
-runtime from the private-model runner or an isolated replay environment. The
-Lab host does not import an unpinned model checkout.
+- PR 93 Lab hashes use the `sha256:` prefix.
+- Model route, stop-policy, attempt, and verification hashes are exact
+  64-character lowercase SHA-256 values.
+- The receipt adapter converts the Model plan hash only for comparison with
+  the shared decision receipt. It preserves the original Model hash in the
+  candidate sidecar.
+- Provider payloads, credentials, raw ICP text, scraped text, and secrets are
+  not stored.
 
-Call `validate_candidate_routing_model_runtime` before a replay arm starts.
-It requires the profile compiler, model-owned stop-policy compiler, waterfall
-evaluator, catalog and policy builders, tool catalog, and signed receipt
-parser. A partial or older model runtime fails closed.
-
-`evaluate_routing_replay` accepts immutable experiment, arm, run, and attempt
-contracts. An attempt contains only bounded counts, cost, latency, hashes, and
-status codes. Provider payloads, credentials, raw ICP text, and scraped text
-are not accepted. If a `ProviderSnapshotStore` is supplied, it must be strict
-replay mode and its verified manifest hash must match the experiment.
-
-The evaluator returns one metric and one routing-only decision per arm. The
-decision states are `rejected`, `replay_only`, `eligible_for_shadow`, and
-`eligible_for_canary`. These states do not activate a worker, move a model
-pointer, create an official score bundle, or change rewards.
-
-The additive migration
-`scripts/156-research-lab-candidate-routing-experiments.sql` persists the
-same contracts with append-only triggers, composite lineage foreign keys,
-service-role-only access, and forced row-level security. It does not reference
-official candidate evaluation tables.
-
-Production activation is intentionally separate. A production release must
-resolve the signed model artifact, bind every selected `candidate.*` tool to
-an explicit reviewed provider adapter, apply the receipt migration, and pass
-observe, shadow, and canary gates before it can change live sourcing.
+This PR does not activate a production route, change a model pointer, or add
+a production provider binding. Observe, replay, shadow, canary, and production
+activation remain separate reviewed steps.

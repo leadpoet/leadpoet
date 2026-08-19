@@ -74,6 +74,24 @@ def test_each_bootstrap_failure_is_one_bounded_v3_document(
     assert not list(tmp_path.glob(".full-evidence.*.tmp"))
 
 
+def test_bootstrap_ssm_failure_codes_are_unique_fixed_and_bounded() -> None:
+    values = evidence.BOOTSTRAP_SSM_FAILURE_CODES
+    assert values == (
+        (40, "bootstrap-environment", "CommandFailed"),
+        (41, "bootstrap-workspace", "CommandFailed"),
+        (42, "candidate-bundle-download", "CommandFailed"),
+        (43, "candidate-clone", "CommandFailed"),
+        (44, "canonical-origin-fetch", "CommandFailed"),
+        (45, "candidate-checkout", "CommandFailed"),
+        (46, "host-python-import", "HostImportFailed"),
+        (47, "host-entrypoint", "HostEntrypointFailed"),
+        (48, "evidence-upload", "EvidenceUploadFailed"),
+    )
+    codes = [code for code, _stage, _category in values]
+    assert len(codes) == len(set(codes))
+    assert all(type(code) is int and 1 <= code <= 255 for code in codes)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -266,6 +284,111 @@ def test_terminal_poller_projects_only_allowlisted_bounded_evidence(
     assert b"secret-bearing-service-message" not in output.read_bytes()
 
 
+@pytest.mark.parametrize(
+    ("response_code", "stage", "category"),
+    evidence.BOOTSTRAP_SSM_FAILURE_CODES,
+)
+def test_terminal_poller_projects_authoritative_bootstrap_response_code(
+    tmp_path: Path,
+    response_code: int,
+    stage: str,
+    category: str,
+) -> None:
+    client = _S3()
+    output = _output(tmp_path)
+
+    poller.retain_terminal_failure(
+        client,
+        output=output,
+        artifact_bucket=BUCKET,
+        run_id=RUN_ID,
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        status="Failed",
+        response_code=response_code,
+    )
+
+    retained = json.loads(output.read_text(encoding="utf-8"))
+    assert retained["failure_stage"] == stage
+    assert retained["error_type"] == category
+
+
+@pytest.mark.parametrize(
+    "response_code",
+    [-1, 0, 1, 39, 49, 255, None, "40", True, 40.0, {}, []],
+)
+def test_terminal_poller_falls_back_for_not_started_malformed_or_unknown_code(
+    tmp_path: Path,
+    response_code: object,
+) -> None:
+    output = _output(tmp_path)
+    poller.retain_terminal_failure(
+        _S3(),
+        output=output,
+        artifact_bucket=BUCKET,
+        run_id=RUN_ID,
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        status="Failed",
+        response_code=response_code,
+    )
+
+    retained = json.loads(output.read_text(encoding="utf-8"))
+    assert retained["failure_stage"] == "ssm-command"
+    assert retained["error_type"] == "SsmFailed"
+
+
+@pytest.mark.parametrize(
+    ("raw_response_code", "retained_response_code"),
+    [(40, 40), (-1, -1), (999, 999), ("40", None), (True, None), (40.0, None)],
+)
+def test_poll_retains_only_strict_integer_response_code(
+    raw_response_code: object,
+    retained_response_code: int | None,
+) -> None:
+    class _Ssm:
+        def get_command_invocation(self, **_kwargs):
+            return {"Status": "Failed", "ResponseCode": raw_response_code}
+
+    with pytest.raises(poller.TerminalPollError) as raised:
+        poller.poll(
+            _Ssm(),
+            command_id="d151da94-87e8-4065-bab5-14c2ba6a019f",
+            instance_id="i-0e1583b50da3b6f87",
+            max_wait_seconds=30,
+        )
+    assert raised.value.response_code == retained_response_code
+
+
+@pytest.mark.parametrize(
+    ("status", "category"),
+    sorted(
+        (status, category)
+        for status, category in poller.TERMINAL_ERROR_CATEGORIES.items()
+        if status != "Failed"
+    ),
+)
+def test_mapped_code_never_overrides_other_terminal_statuses(
+    tmp_path: Path,
+    status: str,
+    category: str,
+) -> None:
+    output = _output(tmp_path)
+    poller.retain_terminal_failure(
+        _S3(),
+        output=output,
+        artifact_bucket=BUCKET,
+        run_id=RUN_ID,
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        status=status,
+        response_code=40,
+    )
+    retained = json.loads(output.read_text(encoding="utf-8"))
+    assert retained["failure_stage"] == "ssm-command"
+    assert retained["error_type"] == category
+
+
 def test_terminal_upload_failure_keeps_local_github_artifact_safe(
     tmp_path: Path,
 ) -> None:
@@ -297,7 +420,12 @@ def test_terminal_poller_main_retains_s3_and_github_evidence(
 
     class _Ssm:
         def get_command_invocation(self, **_kwargs):
-            return {"Status": "Failed", "StandardErrorContent": "provider-secret"}
+            return {
+                "Status": "Failed",
+                "ResponseCode": 42,
+                "StandardOutputContent": "provider-secret-output",
+                "StandardErrorContent": "provider-secret",
+            }
 
     monkeypatch.setattr(
         poller.boto3,
@@ -334,11 +462,14 @@ def test_terminal_poller_main_retains_s3_and_github_evidence(
 
     assert result == 1
     assert len(s3.calls) == 1
-    assert json.loads(output.read_text(encoding="utf-8"))["error_type"] == "SsmFailed"
+    retained = json.loads(output.read_text(encoding="utf-8"))
+    assert retained["failure_stage"] == "candidate-bundle-download"
+    assert retained["error_type"] == "CommandFailed"
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.strip() == "ERROR: SSM command reached terminal status Failed"
     assert "provider-secret" not in captured.err
+    assert "provider-secret-output" not in captured.err
 
 
 @pytest.mark.parametrize("code", ["PreconditionFailed", "ConditionalRequestConflict"])
@@ -354,6 +485,7 @@ def test_terminal_upload_never_replaces_existing_s3_evidence(
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
         status="Failed",
+        response_code=42,
     )
 
 
@@ -416,6 +548,11 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
 
     assert "scripts/production_parity_bootstrap_evidence.py" in execute
     assert "trap finalize_bootstrap EXIT" in execute
+    assert "BOOTSTRAP_SSM_FAILURE_CODES" in execute
+    assert "failure_response_code()" in execute
+    assert execute.index('rm -f "$candidate_bundle"') < execute.index(
+        'exit "$final_status"'
+    )
     assert "aws s3api put-object" in execute
     assert "--if-none-match '*'" in execute
     assert 'evidence_parent="$(dirname -- "$evidence")" || return 1' in execute
@@ -478,13 +615,16 @@ def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
         check=False,
     )
     assert parsed.returncode == 0, parsed.stderr
+    for response_code, stage, _category in evidence.BOOTSTRAP_SSM_FAILURE_CODES:
+        assert f"{stage}) printf '%s\\n' {response_code} ;;" in command
 
 
-def _run_rendered_ssm_failure(
+def _run_rendered_ssm(
     tmp_path: Path,
     *,
-    stage: str,
-    category: str,
+    stage: str | None = None,
+    category: str | None = None,
+    upload_fails: bool = False,
     early_parent_target: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     command = _rendered_ssm_command(tmp_path / "render")
@@ -505,6 +645,8 @@ if arguments[:2] == ["s3", "cp"]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(b"candidate-bundle")
 elif arguments[:2] == ["s3api", "put-object"]:
+    if os.environ.get("FAIL_EVIDENCE_UPLOAD") == "1":
+        raise SystemExit(73)
     body = Path(arguments[arguments.index("--body") + 1])
     shutil.copyfile(body, os.environ["CAPTURE_EVIDENCE"])
 else:
@@ -539,7 +681,18 @@ esac
         encoding="utf-8",
     )
     host_python = fake_bin / "host-python"
-    host_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    host_python.write_text(
+        """#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+if "--help" not in sys.argv:
+    output = Path(sys.argv[sys.argv.index("--output") + 1])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text('{"status":"passed","authority":"host"}\\n')
+""",
+        encoding="utf-8",
+    )
     for executable in (aws_stub, git_stub, sudo_stub, host_python):
         executable.chmod(0o700)
 
@@ -555,14 +708,16 @@ esac
     command = command.replace(
         "/home/ec2-user/venv311/bin/python3", str(host_python)
     )
-    if stage == "bootstrap-environment":
-        marker = "trap 'exit 143' TERM"
-    elif stage in {"host-python-import", "host-entrypoint"}:
-        marker = f"failure_category={category}"
-    else:
-        marker = f"failure_stage={stage}"
-    assert command.count(marker) == 1
-    command = command.replace(marker, marker + "\nfalse", 1)
+    if stage is not None:
+        assert category is not None
+        if stage == "bootstrap-environment":
+            marker = "trap 'exit 143' TERM"
+        elif stage in {"host-python-import", "host-entrypoint"}:
+            marker = f"failure_category={category}"
+        else:
+            marker = f"failure_stage={stage}"
+        assert command.count(marker) == 1
+        command = command.replace(marker, marker + "\nfalse", 1)
     if early_parent_target is None:
         assert not early_root.exists()
     else:
@@ -572,6 +727,7 @@ esac
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "CAPTURE_EVIDENCE": str(capture),
         "CANDIDATE_SHA": CANDIDATE_SHA,
+        "FAIL_EVIDENCE_UPLOAD": "1" if upload_fails else "0",
         "PROVIDER_SECRET": "must-never-enter-evidence",
     }
     result = subprocess.run(
@@ -586,34 +742,69 @@ esac
 
 
 @pytest.mark.parametrize(
-    ("stage", "category"),
-    [
-        ("bootstrap-environment", "CommandFailed"),
-        ("bootstrap-workspace", "CommandFailed"),
-        ("candidate-bundle-download", "CommandFailed"),
-        ("candidate-clone", "CommandFailed"),
-        ("canonical-origin-fetch", "CommandFailed"),
-        ("candidate-checkout", "CommandFailed"),
-        ("host-python-import", "HostImportFailed"),
-        ("host-entrypoint", "HostEntrypointFailed"),
-    ],
+    ("response_code", "stage", "category"),
+    evidence.BOOTSTRAP_SSM_FAILURE_CODES[:-1],
 )
-def test_rendered_ssm_uploads_exact_stage_when_early_parent_is_absent(
+def test_rendered_ssm_maps_and_uploads_each_exact_failure_stage(
     tmp_path: Path,
+    response_code: int,
     stage: str,
     category: str,
 ) -> None:
-    result, capture = _run_rendered_ssm_failure(
+    result, capture = _run_rendered_ssm(
         tmp_path,
         stage=stage,
         category=category,
     )
 
-    assert result.returncode != 0
+    assert result.returncode == response_code
     retained = json.loads(capture.read_text(encoding="utf-8"))
     assert retained["failure_stage"] == stage
     assert retained["error_type"] == category
     assert "must-never-enter-evidence" not in capture.read_text(encoding="utf-8")
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_rendered_ssm_preserves_success_and_uploads_host_evidence(
+    tmp_path: Path,
+) -> None:
+    result, capture = _run_rendered_ssm(tmp_path)
+
+    assert result.returncode == 0
+    assert json.loads(capture.read_text(encoding="utf-8")) == {
+        "status": "passed",
+        "authority": "host",
+    }
+    assert not (tmp_path / "work" / "candidate.bundle").exists()
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_rendered_ssm_maps_evidence_upload_failure_without_raw_output(
+    tmp_path: Path,
+) -> None:
+    result, capture = _run_rendered_ssm(tmp_path, upload_fails=True)
+
+    assert result.returncode == 48
+    assert not capture.exists()
+    assert not (tmp_path / "work" / "candidate.bundle").exists()
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_rendered_ssm_preserves_primary_stage_when_its_upload_also_fails(
+    tmp_path: Path,
+) -> None:
+    result, capture = _run_rendered_ssm(
+        tmp_path,
+        stage="candidate-bundle-download",
+        category="CommandFailed",
+        upload_fails=True,
+    )
+
+    assert result.returncode == 42
+    assert not capture.exists()
     assert result.stdout == ""
     assert result.stderr == ""
 
@@ -627,14 +818,14 @@ def test_rendered_ssm_rejects_early_parent_symlink_without_mutation_or_upload(
     sentinel.write_text("unchanged\n", encoding="utf-8")
     original_mode = target.stat().st_mode & 0o777
 
-    result, capture = _run_rendered_ssm_failure(
+    result, capture = _run_rendered_ssm(
         tmp_path,
         stage="bootstrap-environment",
         category="CommandFailed",
         early_parent_target=target,
     )
 
-    assert result.returncode != 0
+    assert result.returncode == 40
     assert not capture.exists()
     assert target.stat().st_mode & 0o777 == original_mode
     assert sentinel.read_text(encoding="utf-8") == "unchanged\n"

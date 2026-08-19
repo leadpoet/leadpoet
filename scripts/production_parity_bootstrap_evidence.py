@@ -44,11 +44,35 @@ ERROR_CATEGORIES = frozenset(
         "SsmDeliveryTimedOut",
     }
 )
+BOOTSTRAP_SSM_FAILURE_CODES = (
+    (40, "bootstrap-environment", "CommandFailed"),
+    (41, "bootstrap-workspace", "CommandFailed"),
+    (42, "candidate-bundle-download", "CommandFailed"),
+    (43, "candidate-clone", "CommandFailed"),
+    (44, "canonical-origin-fetch", "CommandFailed"),
+    (45, "candidate-checkout", "CommandFailed"),
+    (46, "host-python-import", "HostImportFailed"),
+    (47, "host-entrypoint", "HostEntrypointFailed"),
+    (48, "evidence-upload", "EvidenceUploadFailed"),
+)
 MAX_EVIDENCE_BYTES = 1_024
 
 
 class BootstrapEvidenceError(RuntimeError):
     """A bounded bootstrap document could not be validated or retained."""
+
+
+def bootstrap_failure_identity_from_response_code(
+    response_code: object,
+) -> tuple[str, str] | None:
+    """Project only an exact, allowlisted shell failure response code."""
+
+    if type(response_code) is not int:
+        return None
+    for code, stage, category in BOOTSTRAP_SSM_FAILURE_CODES:
+        if response_code == code:
+            return stage, category
+    return None
 
 
 def failure_payload(

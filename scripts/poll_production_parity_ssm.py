@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.production_parity_bootstrap_evidence import (
     BootstrapEvidenceError,
+    bootstrap_failure_identity_from_response_code,
     retain_failure,
 )
 
@@ -47,11 +48,22 @@ class PollError(RuntimeError):
 
 
 class TerminalPollError(PollError):
-    def __init__(self, status: str) -> None:
+    def __init__(self, status: str, *, response_code: object = None) -> None:
         if status not in TERMINAL_FAILURES:
             raise ValueError("terminal SSM status is invalid")
         super().__init__(f"SSM command reached terminal status {status}")
         self.status = status
+        self.response_code = response_code if type(response_code) is int else None
+
+
+def terminal_failure_identity(
+    *, status: str, response_code: object
+) -> tuple[str, str]:
+    if status == "Failed":
+        exact = bootstrap_failure_identity_from_response_code(response_code)
+        if exact is not None:
+            return exact
+    return "ssm-command", TERMINAL_ERROR_CATEGORIES[status]
 
 
 def retain_terminal_failure(
@@ -63,17 +75,22 @@ def retain_terminal_failure(
     base_sha: str,
     candidate_sha: str,
     status: str,
+    response_code: object = None,
 ) -> None:
     if ARTIFACT_BUCKET_RE.fullmatch(artifact_bucket) is None:
         raise PollError("bounded evidence bucket identity is invalid")
     try:
+        stage, error_category = terminal_failure_identity(
+            status=status,
+            response_code=response_code,
+        )
         payload, created = retain_failure(
             output=output,
             run_id=run_id,
             base_sha=base_sha,
             candidate_sha=candidate_sha,
-            stage="ssm-command",
-            error_category=TERMINAL_ERROR_CATEGORIES[status],
+            stage=stage,
+            error_category=error_category,
         )
     except (BootstrapEvidenceError, KeyError, OSError, ValueError) as exc:
         raise PollError("bounded terminal evidence retention failed") from exc
@@ -129,7 +146,10 @@ def poll(
         if status == "Success":
             return "success"
         if status in TERMINAL_FAILURES:
-            raise TerminalPollError(status)
+            raise TerminalPollError(
+                status,
+                response_code=response.get("ResponseCode"),
+            )
         if status not in {
             "Pending",
             "InProgress",
@@ -173,6 +193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 base_sha=args.base_sha,
                 candidate_sha=args.candidate_sha,
                 status=exc.status,
+                response_code=exc.response_code,
             )
         except PollError:
             print(

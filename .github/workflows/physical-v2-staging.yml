@@ -232,6 +232,9 @@ jobs:
           from pathlib import Path
           import shlex
           import sys
+          from scripts.production_parity_bootstrap_evidence import (
+              BOOTSTRAP_SSM_FAILURE_CODES,
+          )
           required = {name: os.environ[name] for name in (
               "AWS_REGION", "CANDIDATE_SHA", "PRODUCTION_GATEWAY_SECRET_ID",
               "READONLY_DSN_SECRET_ID",
@@ -254,6 +257,10 @@ jobs:
               "exec",
           )
           q = shlex.quote
+          failure_response_cases = "\n".join(
+              f"    {q(stage)}) printf '%s\\n' {code} ;;"
+              for code, stage, _category in BOOTSTRAP_SSM_FAILURE_CODES
+          )
           command = f"""
           set -Eeuo pipefail
           umask 077
@@ -262,6 +269,12 @@ jobs:
           evidence=/run/leadpoet-production-parity/full-evidence.json
           authoritative_evidence={q(root + "/full-evidence.json")}
           candidate_bundle={q(root + "/candidate.bundle")}
+          failure_response_code() {{
+            case "$failure_stage" in
+          {failure_response_cases}
+              *) return 1 ;;
+            esac
+          }}
           retain_failure() {{
             evidence_parent="$(dirname -- "$evidence")" || return 1
             test "$evidence_parent" != "$evidence" || return 1
@@ -310,7 +323,9 @@ jobs:
               failure_stage=evidence-upload
               failure_category=EvidenceUploadFailed
               retain_failure || true
-              final_status="$upload_status"
+              final_status="$(failure_response_code)" || final_status=1
+            elif [ "$final_status" -ne 0 ]; then
+              final_status="$(failure_response_code)" || final_status=1
             fi
             rm -f "$candidate_bundle" >/dev/null 2>&1 || true
             exit "$final_status"

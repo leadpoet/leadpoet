@@ -10,12 +10,28 @@ ENV RUSTUP_HOME=/usr/local/rustup
 ENV PATH=/usr/local/cargo/bin:${PATH}
 
 # Link the measured helper against the enclave's Amazon Linux 2 ABI.
-RUN yum install -y \
-        gcc-7.3.1-18.amzn2 \
-        gcc-c++-7.3.1-18.amzn2 \
-        git-2.47.3-1.amzn2.0.1 \
-        gzip-1.5-10.amzn2.0.1 \
-        python3-3.7.16-1.amzn2.0.24 \
-        tar-1.26-35.amzn2.0.4 \
-    && yum clean all \
-    && rm -rf /var/cache/yum/*
+# Amazon Linux mirror discovery can transiently return 5xx responses. Retry
+# only this exact pinned install, then fail closed if all attempts are spent.
+RUN set -eu; \
+    yum_install_succeeded=0; \
+    for yum_attempt in 1 2 3; do \
+        if yum install -y \
+            gcc-7.3.1-18.amzn2 \
+            gcc-c++-7.3.1-18.amzn2 \
+            git-2.47.3-1.amzn2.0.1 \
+            gzip-1.5-10.amzn2.0.1 \
+            python3-3.7.16-1.amzn2.0.24 \
+            tar-1.26-35.amzn2.0.4; then \
+            yum_install_succeeded=1; \
+            break; \
+        fi; \
+        if [ "$yum_attempt" -lt 3 ]; then \
+            if ! yum clean all >/dev/null 2>&1; then :; fi; \
+            rm -rf /var/cache/yum/*; \
+            sleep "$((yum_attempt * 5))"; \
+        fi; \
+    done; \
+    [ "$yum_install_succeeded" -eq 1 ]; \
+    python3 -c 'import sys; assert sys.version_info[:3] == (3, 7, 16)'; \
+    yum clean all; \
+    rm -rf /var/cache/yum/*

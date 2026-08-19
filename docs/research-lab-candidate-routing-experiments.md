@@ -9,8 +9,10 @@ set of safety rules.
 This PR adds four candidate-only parts:
 
 1. `candidate_waterfall_receipt_from_model` parses the exact
-   `Sourcing_model` `CandidateStepAttemptReceipt` and attaches its redacted
-   counts and hashes to the existing V2 provider and decision receipts.
+   `Sourcing_model` `CandidateStepAttemptReceipt`. It attaches attempted steps
+   to the existing V2 provider and decision receipts. It attaches a skipped
+   step to the existing skipped-decision reason without inventing a provider
+   receipt.
 2. `evaluate_candidate_waterfall_metrics` derives calibration and holdout
    metrics for raw, normalized, unique, verified-qualified, and published
    companies. These metrics are sidecars. They do not select or promote a

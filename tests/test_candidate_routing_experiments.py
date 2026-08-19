@@ -280,7 +280,11 @@ def _evaluation(
                 passed_efficiency_gate=True,
                 passed=False,
                 decision_receipt_refs=(receipt.decision_receipt_id,) if has_receipt else (),
-                provider_receipt_refs=(receipt.provider_receipt_ref,) if has_receipt else (),
+                provider_receipt_refs=(
+                    (receipt.provider_receipt_ref,)
+                    if has_receipt and receipt.provider_receipt_ref
+                    else ()
+                ),
             )
         )
     return RoutingExperimentV2Evaluation(
@@ -389,6 +393,14 @@ def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
     assert receipt.provider_outcome == "skipped"
     assert receipt.provider_receipt_ref == ""
     assert receipt.provider_call_count == 0
+    metrics = evaluate_candidate_waterfall_metrics(
+        spec=spec,
+        evaluation=_evaluation(spec, receipt),
+        receipts=(receipt,),
+        target_verified_qualified_count=1,
+    )
+    assert metrics[0].waterfall_attempt_count == 1
+    assert metrics[0].provider_receipt_refs == ()
 
 
 @pytest.mark.skipif(

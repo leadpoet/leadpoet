@@ -453,6 +453,9 @@ jobs:
             test "${{ steps.poll5.outputs.status }}" = "success"
 
       - name: Verify redacted full evidence
+        if: >-
+          always() && steps.stack.outcome == 'success' &&
+          steps.execute.outcome == 'success'
         shell: bash
         run: |
           set -Eeuo pipefail

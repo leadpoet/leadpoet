@@ -2155,6 +2155,36 @@ def test_full_workflow_uses_self_hosted_bounded_windows_and_exact_volume():
     )
 
 
+def test_full_workflow_retains_failed_redacted_evidence_after_poll_failure():
+    workflow_path = (
+        Path(__file__).parents[1]
+        / ".github/workflows/physical-v2-staging.yml"
+    )
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["validate"]["steps"]
+    by_name = {step.get("name"): step for step in steps}
+    names = [step.get("name") for step in steps]
+    verify = by_name["Verify redacted full evidence"]
+
+    assert verify["if"] == (
+        "always() && steps.stack.outcome == 'success' && "
+        "steps.execute.outcome == 'success'"
+    )
+    assert names.index("Poll candidate window 5") < names.index(
+        "Verify redacted full evidence"
+    )
+    assert names.index("Verify redacted full evidence") < names.index(
+        "Validate redacted evidence upload path"
+    ) < names.index("Upload redacted evidence")
+    verify_script = verify["run"]
+    assert verify_script.index("aws s3 cp") < verify_script.index(
+        "full production-parity evidence is incomplete"
+    )
+    upload = by_name["Upload redacted evidence"]
+    assert "always()" in upload["if"]
+    assert upload["with"]["path"].endswith("/full-evidence.json")
+
+
 def test_controller_dependencies_use_a_scrubbed_per_run_virtualenv():
     root = Path(__file__).parents[1]
     action = (

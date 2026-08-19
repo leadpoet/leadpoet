@@ -1485,6 +1485,102 @@ def test_full_snapshot_disk_headroom_fits_512_gib_and_fails_closed(
         )
 
 
+def _full_host_main_args(output: Path) -> list[str]:
+    return [
+        "--region",
+        "us-east-1",
+        "--run-id",
+        "pp-test-1",
+        "--base-sha",
+        "a" * 40,
+        "--candidate-sha",
+        "b" * 40,
+        "--production-gateway-secret-id",
+        "gateway-secret",
+        "--readonly-dsn-secret-id",
+        "readonly-secret",
+        "--miner-intake-secret-id",
+        "miner-secret",
+        "--supabase-origin",
+        ORIGIN,
+        "--artifact-bucket",
+        "parity-artifacts",
+        "--postgres-image",
+        "postgres@sha256:" + "c" * 64,
+        "--postgrest-image",
+        "postgrest@sha256:" + "d" * 64,
+        "--output",
+        str(output),
+    ]
+
+
+def test_full_main_retains_bounded_early_failure_without_overwrite(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+):
+    output = tmp_path / "evidence" / "full-evidence.json"
+    secret = "must-not-escape-early-failure"
+    monkeypatch.setattr(
+        full_host,
+        "run_full",
+        lambda **_kwargs: (_ for _ in ()).throw(FullParityError(secret)),
+    )
+
+    assert full_host.main(_full_host_main_args(output)) == 1
+
+    encoded = output.read_text(encoding="utf-8")
+    evidence = json.loads(encoded)
+    assert evidence == {
+        "schema_version": full_host.SCHEMA_VERSION,
+        "run_id": "pp-test-1",
+        "candidate_sha": "b" * 40,
+        "base_sha": "a" * 40,
+        "started_at": evidence["started_at"],
+        "status": "failed",
+        "failure_stage": "initialization",
+        "error_type": "FullParityError",
+        "cleanup": {},
+        "duration_seconds": evidence["duration_seconds"],
+        "finished_at": evidence["finished_at"],
+    }
+    assert 0 <= evidence["duration_seconds"] < 10
+    assert len(encoded.encode("utf-8")) < 1_024
+    assert secret not in encoded
+    assert capsys.readouterr().err.strip() == "ERROR: full parity failed closed"
+
+    retained = encoded
+    assert full_host.main(_full_host_main_args(output)) == 1
+    assert output.read_text(encoding="utf-8") == retained
+
+
+def test_full_main_redacts_unexpected_early_exception(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+):
+    output = tmp_path / "full-evidence.json"
+    secret = "must-not-escape-unexpected-failure"
+
+    class SecretFailure(Exception):
+        pass
+
+    monkeypatch.setattr(
+        full_host,
+        "run_full",
+        lambda **_kwargs: (_ for _ in ()).throw(SecretFailure(secret)),
+    )
+
+    assert full_host.main(_full_host_main_args(output)) == 1
+
+    encoded = output.read_text(encoding="utf-8")
+    evidence = json.loads(encoded)
+    assert evidence["failure_stage"] == "initialization"
+    assert evidence["error_type"] == "UnexpectedError"
+    assert secret not in encoded
+    assert secret not in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("cleanup_raises", [False, True])
 def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
     monkeypatch,

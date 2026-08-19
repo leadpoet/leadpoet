@@ -240,6 +240,55 @@ def _failure_identity(stage: str, exc: BaseException) -> tuple[str, str]:
     return bounded_stage, bounded_type
 
 
+def _write_early_failure_evidence(
+    *,
+    output: Path,
+    run_id: str,
+    base_sha: str,
+    candidate_sha: str,
+    started_at: datetime,
+    started_monotonic: float,
+    error: BaseException,
+) -> None:
+    """Retain a bounded failure identity when run_full exits before its finally."""
+
+    try:
+        output.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        return
+    if (
+        RUN_RE.fullmatch(run_id) is None
+        or SHA_RE.fullmatch(base_sha) is None
+        or SHA_RE.fullmatch(candidate_sha) is None
+    ):
+        return
+    failure_stage, error_type = _failure_identity("initialization", error)
+    finished_at = datetime.now(timezone.utc)
+    evidence = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "candidate_sha": candidate_sha,
+        "base_sha": base_sha,
+        "started_at": started_at.isoformat(),
+        "status": "failed",
+        "failure_stage": failure_stage,
+        "error_type": error_type,
+        "cleanup": {},
+        "duration_seconds": round(
+            max(0.0, time.monotonic() - started_monotonic),
+            3,
+        ),
+        "finished_at": finished_at.isoformat(),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(evidence, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 class _RejectCloneRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
         raise HTTPError(req.full_url, code, msg, headers, fp)
@@ -2944,12 +2993,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--timeout-seconds", type=int, default=MAX_FULL_TIMEOUT_SECONDS
     )
     args = parser.parse_args(argv)
+    started_at = datetime.now(timezone.utc)
+    started_monotonic = time.monotonic()
+    base_sha = args.base_sha.lower()
+    candidate_sha = args.candidate_sha.lower()
     try:
         result = run_full(
             region=args.region,
             run_id=args.run_id,
-            base_sha=args.base_sha.lower(),
-            candidate_sha=args.candidate_sha.lower(),
+            base_sha=base_sha,
+            candidate_sha=candidate_sha,
             production_gateway_secret_id=args.production_gateway_secret_id,
             readonly_dsn_secret_id=args.readonly_dsn_secret_id,
             miner_intake_secret_id=args.miner_intake_secret_id,
@@ -2960,8 +3013,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             output=args.output,
             timeout_seconds=args.timeout_seconds,
         )
-    except (OSError, ValueError, ProductionParityError, FullParityError, subprocess.TimeoutExpired) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - evidence exposes only fixed fields
+        try:
+            _write_early_failure_evidence(
+                output=args.output,
+                run_id=args.run_id,
+                base_sha=base_sha,
+                candidate_sha=candidate_sha,
+                started_at=started_at,
+                started_monotonic=started_monotonic,
+                error=exc,
+            )
+        except Exception:  # noqa: BLE001 - retention must not expose raw detail
+            pass
+        print("ERROR: full parity failed closed", file=sys.stderr)
         return 1
     print(
         json.dumps(

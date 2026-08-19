@@ -155,10 +155,12 @@ async def test_real_supervisor_spawns_on_event_loop_thread_and_waits_off_thread(
     caller_thread = threading.get_ident()
     popen_threads: list[int] = []
     wait_threads: list[int] = []
+    startup_events: list[str] = []
 
     class ReadyChild:
         def __init__(self, _command, **kwargs):
             popen_threads.append(threading.get_ident())
+            startup_events.append("spawn")
             os.write(int(kwargs["env"]["RESEARCH_LAB_WORKER_READY_FD"]), b"ready\n")
 
         def poll(self):
@@ -177,6 +179,7 @@ async def test_real_supervisor_spawns_on_event_loop_thread_and_waits_off_thread(
 
     def observed_wait(*args, **kwargs):
         wait_threads.append(threading.get_ident())
+        startup_events.append("wait")
         return original_wait(*args, **kwargs)
 
     monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
@@ -195,6 +198,7 @@ async def test_real_supervisor_spawns_on_event_loop_thread_and_waits_off_thread(
     assert popen_threads == [caller_thread, caller_thread]
     assert len(wait_threads) == 2
     assert all(thread_id != caller_thread for thread_id in wait_threads)
+    assert startup_events == ["spawn", "spawn", "wait", "wait"]
 
 
 def test_child_rss_for_bogus_pid_is_none():

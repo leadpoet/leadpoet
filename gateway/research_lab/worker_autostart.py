@@ -428,10 +428,10 @@ class ResearchLabWorkerSupervisor:
 
         ``Popen`` uses a fork/exec path because the readiness descriptor is
         passed explicitly. Forking from an executor thread can stall before
-        ``Popen`` returns in a multithreaded gateway, which also prevents the
-        bounded readiness timeout from starting. Process creation remains
-        brief on the event-loop owner thread; only the blocking readiness wait
-        is delegated.
+        ``Popen`` returns in a multithreaded gateway. Spawn every child before
+        the first ``asyncio.to_thread`` call creates an executor thread; only
+        then delegate the bounded readiness waits. Otherwise the second fleet
+        can deadlock in ``Popen`` after the first fleet's readiness wait.
         """
 
         self._validate_authoritative_plan()
@@ -441,8 +441,37 @@ class ResearchLabWorkerSupervisor:
         print("=" * 80, flush=True)
         print("🧪 STARTING RESEARCH LAB WORKER FLEETS", flush=True)
         print("=" * 80, flush=True)
-        await self._start_fleet_without_blocking_event_loop(self.plan.hosted)
-        await self._start_fleet_without_blocking_event_loop(self.plan.scoring)
+        spawned: list[
+            tuple[
+                ResearchLabWorkerFleetPlan,
+                int,
+                subprocess.Popen[bytes],
+                int,
+            ]
+        ] = []
+        try:
+            for fleet in (self.plan.hosted, self.plan.scoring):
+                spawned.extend(self._spawn_fleet_for_async_start(fleet))
+            for fleet, index, child, read_fd in spawned:
+                ready_child = await self._wait_for_spawned_child_ready(
+                    child,
+                    read_fd,
+                    fleet,
+                    index,
+                )
+                key = f"{fleet.kind}:{index}"
+                self.children[key] = ready_child
+                self._child_specs[key] = (fleet, index)
+                self._ready_children.add(key)
+        except BaseException:
+            for _fleet, _index, child, read_fd in spawned:
+                try:
+                    os.close(read_fd)
+                except OSError:
+                    pass
+                if child.poll() is None:
+                    child.terminate()
+            raise
         if not self.children:
             print("   No Research Lab worker fleets started", flush=True)
         else:
@@ -480,10 +509,12 @@ class ResearchLabWorkerSupervisor:
             self._child_specs[key] = (fleet, index)
             self._ready_children.add(key)
 
-    async def _start_fleet_without_blocking_event_loop(
+    def _spawn_fleet_for_async_start(
         self,
         fleet: ResearchLabWorkerFleetPlan,
-    ) -> None:
+    ) -> list[
+        tuple[ResearchLabWorkerFleetPlan, int, subprocess.Popen[bytes], int]
+    ]:
         role = WORKER_FLEET_ROLE_BY_KIND[fleet.kind]
         if role in self.deferred_worker_fleet_roles:
             print(
@@ -492,35 +523,37 @@ class ResearchLabWorkerSupervisor:
                 % (fleet.kind, fleet.worker_count),
                 flush=True,
             )
-            return
+            return []
         if not fleet.enabled:
             print(f"   {fleet.kind}: skipped ({fleet.reason or 'disabled'})", flush=True)
-            return
+            return []
         print(
             f"   {fleet.kind}: starting {fleet.worker_count} worker(s), "
             f"proxy_refs={list(fleet.proxy_refs)}",
             flush=True,
         )
-        for index in range(fleet.worker_count):
-            child = await self._start_child_without_blocking_event_loop(
-                fleet,
-                index,
-            )
-            key = f"{fleet.kind}:{index}"
-            self.children[key] = child
-            self._child_specs[key] = (fleet, index)
-            self._ready_children.add(key)
+        spawned: list[
+            tuple[ResearchLabWorkerFleetPlan, int, subprocess.Popen[bytes], int]
+        ] = []
+        try:
+            for index in range(fleet.worker_count):
+                child, read_fd = self._spawn_child(fleet, index)
+                spawned.append((fleet, index, child, read_fd))
+        except BaseException:
+            for _fleet, _index, child, read_fd in spawned:
+                os.close(read_fd)
+                if child.poll() is None:
+                    child.terminate()
+            raise
+        return spawned
 
-    def _start_child(self, fleet: ResearchLabWorkerFleetPlan, index: int) -> subprocess.Popen[bytes]:
-        child, read_fd = self._spawn_child(fleet, index)
-        return self._wait_for_child_ready(child, read_fd, fleet, index)
-
-    async def _start_child_without_blocking_event_loop(
+    async def _wait_for_spawned_child_ready(
         self,
+        child: subprocess.Popen[bytes],
+        read_fd: int,
         fleet: ResearchLabWorkerFleetPlan,
         index: int,
     ) -> subprocess.Popen[bytes]:
-        child, read_fd = self._spawn_child(fleet, index)
         readiness_task = asyncio.create_task(
             asyncio.to_thread(
                 self._wait_for_child_ready,
@@ -548,6 +581,10 @@ class ResearchLabWorkerSupervisor:
             if child.poll() is None:
                 child.terminate()
             raise
+
+    def _start_child(self, fleet: ResearchLabWorkerFleetPlan, index: int) -> subprocess.Popen[bytes]:
+        child, read_fd = self._spawn_child(fleet, index)
+        return self._wait_for_child_ready(child, read_fd, fleet, index)
 
     def _spawn_child(
         self,

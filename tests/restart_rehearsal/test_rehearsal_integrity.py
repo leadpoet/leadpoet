@@ -7185,7 +7185,7 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
         lambda **_kwargs: tmp_path,
     )
     monkeypatch.setattr(rehearsal, "_prepared_fixture_seed", fixture_seed)
-    # This test exercises stage ordering after a gateway failure. Ownership
+    # This test exercises independent-stage continuation after failures. Ownership
     # normalization has its own coverage and would otherwise try to run the
     # fake image tag below through Docker.
     monkeypatch.setattr(
@@ -7236,8 +7236,8 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
             ]
         )
 
-    assert set(calls[:2]) == {"gateway", "validator"}
-    assert calls[-1] == "workflow"
+    assert set(calls[:2]) == {"validator", "workflow"}
+    assert calls[-1] == "gateway"
     by_stage = {
         item["stage"]: item for item in captured["stages"]
     }

@@ -18,7 +18,7 @@ the rehearsal contract may be implemented locally.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import as_completed, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 import fcntl
 from functools import partial
@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Iterator, Optional, Sequence
 from urllib.request import urlopen
@@ -218,18 +219,434 @@ def _isolated_docker_client_config() -> Iterator[Path]:
                 os.environ["DOCKER_CONFIG"] = previous
 
 
+_WORKER_PROCESS_STATE = threading.local()
+_WORKER_TERMINATE_GRACE_SECONDS = 2.0
+_WORKER_DOCKER_CLEANUP_SECONDS = 2.0
+_WORKER_DOCKER_CONVERGENCE_SECONDS = 6.0
+_WORKER_DOCKER_ABSENCE_OBSERVATIONS = 3
+_WORKER_DOCKER_POLL_SECONDS = 0.05
+_EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS = 30.0
+_SCHEDULER_WORKER_READY_SECONDS = 2.0
+_DEFERRED_PROCESS_SIGNALS = frozenset((signal.SIGALRM, signal.SIGINT))
+
+
+def _terminate_worker_process(process: subprocess.Popen[Any]) -> None:
+    """Terminate, escalate, and reap one exact worker-owned subprocess."""
+
+    if process.poll() is not None:
+        process.wait(timeout=0)
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=_WORKER_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=_WORKER_TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"worker subprocess pid={process.pid} could not be reaped"
+            ) from exc
+
+
+def _remove_worker_container(container_name: str) -> None:
+    """Force-remove one run-owned container until absence is stably proven."""
+
+    deadline: float | None = None
+    absence_continuous = True
+    absent_observations = 0
+    while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        command_timeout = _WORKER_DOCKER_CLEANUP_SECONDS
+        if deadline is not None:
+            command_timeout = max(
+                0.001,
+                min(command_timeout, deadline - time.monotonic()),
+            )
+        try:
+            subprocess.run(
+                ["docker", "container", "rm", "--force", container_name],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=command_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        command_timeout = _WORKER_DOCKER_CLEANUP_SECONDS
+        if deadline is not None:
+            command_timeout = max(
+                0.001,
+                min(command_timeout, deadline - time.monotonic()),
+            )
+        try:
+            inspected = subprocess.run(
+                ["docker", "container", "inspect", container_name],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=command_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            absence_continuous = False
+        else:
+            error = (inspected.stderr or "").lower()
+            absent = (
+                inspected.returncode != 0
+                and (
+                    "no such container" in error
+                    or "no such object" in error
+                )
+            )
+            if absent:
+                absent_observations += 1
+            else:
+                absence_continuous = False
+        observed_at = time.monotonic()
+        if deadline is None:
+            deadline = observed_at + _WORKER_DOCKER_CONVERGENCE_SECONDS
+        remaining = deadline - observed_at
+        if remaining > 0:
+            time.sleep(min(_WORKER_DOCKER_POLL_SECONDS, remaining))
+    try:
+        subprocess.run(
+            ["docker", "container", "rm", "--force", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_WORKER_DOCKER_CLEANUP_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        final_inspection = subprocess.run(
+            ["docker", "container", "inspect", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_WORKER_DOCKER_CLEANUP_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        final_absent = False
+    else:
+        final_error = (final_inspection.stderr or "").lower()
+        final_absent = (
+            final_inspection.returncode != 0
+            and (
+                "no such container" in final_error
+                or "no such object" in final_error
+            )
+        )
+    if final_absent:
+        absent_observations += 1
+    if (
+        absence_continuous
+        and final_absent
+        and absent_observations >= _WORKER_DOCKER_ABSENCE_OBSERVATIONS
+    ):
+        return
+    raise RuntimeError(
+        "worker container absence did not converge within "
+        f"{_WORKER_DOCKER_CONVERGENCE_SECONDS:g}s name={container_name}"
+    )
+
+
+def _annotate_worker_cleanup_errors(
+    exc: BaseException,
+    errors: Sequence[str],
+) -> None:
+    if not errors:
+        return
+    message = "worker cleanup failed: " + "; ".join(errors)
+    try:
+        print(
+            f"REHEARSAL_WORKER_CLEANUP_FAILED error={message!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except BaseException:
+        pass
+    add_note = getattr(exc, "add_note", None)
+    if callable(add_note):
+        try:
+            add_note(message)
+        except BaseException:
+            pass
+
+
+class _WorkerProcessRegistry:
+    """Own subprocesses launched by one cancellable prepush worker."""
+
+    def __init__(self) -> None:
+        self._cancelled = False
+        self._cleanup_results: dict[
+            subprocess.Popen[Any], tuple[str, ...]
+        ] = {}
+        self._container_ordinal = 0
+        self._lock = threading.Lock()
+        self._processes: dict[subprocess.Popen[Any], str | None] = {}
+        self._run_id = f"{os.getpid()}-{time.monotonic_ns():x}"
+        self._termination_lock = threading.Lock()
+
+    def ensure_accepting(self) -> None:
+        with self._lock:
+            cancelled = self._cancelled
+        if cancelled:
+            raise RehearsalTimeBudgetExceeded(
+                "prepush worker cancelled at the total rehearsal deadline"
+            )
+
+    def prepare_command(self, args: Sequence[str]) -> tuple[list[str], str | None]:
+        command = list(args)
+        with self._lock:
+            cancelled = self._cancelled
+            container_name = None
+            if not cancelled and command[:2] == ["docker", "run"]:
+                if any(
+                    item == "--name" or item.startswith("--name=")
+                    for item in command[2:]
+                ):
+                    raise ValueError("worker docker run already declares --name")
+                self._container_ordinal += 1
+                container_name = (
+                    f"leadpoet-prepush-worker-{self._run_id}-"
+                    f"{self._container_ordinal}"
+                )
+        if cancelled:
+            self.ensure_accepting()
+        if container_name is not None:
+            command[2:2] = ["--name", container_name]
+        return command, container_name
+
+    def register(
+        self,
+        process: subprocess.Popen[Any],
+        container_name: str | None,
+    ) -> None:
+        with self._lock:
+            cancelled = self._cancelled
+            if not cancelled:
+                self._processes[process] = container_name
+        if cancelled:
+            errors = self.terminate(process, container_name)
+            try:
+                self.ensure_accepting()
+            except RehearsalTimeBudgetExceeded as exc:
+                _annotate_worker_cleanup_errors(exc, errors)
+                raise
+
+    def unregister(self, process: subprocess.Popen[Any]) -> None:
+        with self._lock:
+            self._processes.pop(process, None)
+
+    def terminate(
+        self,
+        process: subprocess.Popen[Any],
+        container_name: str | None,
+    ) -> tuple[str, ...]:
+        with self._termination_lock:
+            cached = self._cleanup_results.get(process)
+            if cached is not None:
+                return cached
+            errors = []
+            try:
+                _terminate_worker_process(process)
+            except BaseException as exc:
+                errors.append(f"subprocess:{type(exc).__name__}:{exc}")
+            if container_name is not None:
+                try:
+                    _remove_worker_container(container_name)
+                except BaseException as exc:
+                    errors.append(f"container:{type(exc).__name__}:{exc}")
+            try:
+                if process.poll() is None:
+                    _terminate_worker_process(process)
+            except BaseException as exc:
+                errors.append(f"reap:{type(exc).__name__}:{exc}")
+            result = tuple(errors)
+            self._cleanup_results[process] = result
+            return result
+
+    def cancel(self) -> tuple[str, ...]:
+        with self._lock:
+            self._cancelled = True
+            processes = tuple(self._processes.items())
+        errors = []
+        for process, container_name in processes:
+            errors.extend(self.terminate(process, container_name))
+        return tuple(errors)
+
+
+@contextmanager
+def _worker_process_scope(
+    registry: _WorkerProcessRegistry,
+) -> Iterator[None]:
+    previous = getattr(_WORKER_PROCESS_STATE, "registry", None)
+    _WORKER_PROCESS_STATE.registry = registry
+    try:
+        yield
+    finally:
+        if previous is None:
+            del _WORKER_PROCESS_STATE.registry
+        else:
+            _WORKER_PROCESS_STATE.registry = previous
+
+
+@contextmanager
+def _defer_main_spawn_signals() -> Iterator[None]:
+    """Deliver deadline/interrupt signals only after process registration."""
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.pthread_sigmask(
+        signal.SIG_BLOCK,
+        _DEFERRED_PROCESS_SIGNALS,
+    )
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+@contextmanager
+def _signal_masked_worker_executor() -> Iterator[ThreadPoolExecutor]:
+    """Create one worker with ALRM/INT blocked for its whole lifetime."""
+
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("signal-masked worker executor requires main thread")
+    ready = threading.Event()
+
+    def initialize_worker() -> None:
+        signal.pthread_sigmask(signal.SIG_BLOCK, _DEFERRED_PROCESS_SIGNALS)
+        ready.set()
+
+    executor: ThreadPoolExecutor | None = None
+    try:
+        previous = signal.pthread_sigmask(
+            signal.SIG_BLOCK,
+            _DEFERRED_PROCESS_SIGNALS,
+        )
+        try:
+            executor = ThreadPoolExecutor(
+                max_workers=1,
+                initializer=initialize_worker,
+            )
+            bootstrap = executor.submit(lambda: None)
+            if not ready.wait(timeout=_SCHEDULER_WORKER_READY_SECONDS):
+                raise RuntimeError("signal-masked worker failed readiness")
+            bootstrap.result(timeout=_SCHEDULER_WORKER_READY_SECONDS)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        yield executor
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
+
+
+def _spawn_registered_process(
+    command: Sequence[str],
+    *,
+    registry: _WorkerProcessRegistry | None,
+    container_name: str | None,
+    **kwargs: Any,
+) -> subprocess.Popen[Any]:
+    process: subprocess.Popen[Any] | None = None
+    registered = False
+    try:
+        with _defer_main_spawn_signals():
+            process = subprocess.Popen(list(command), **kwargs)
+            if registry is not None:
+                registry.register(process, container_name)
+                registered = True
+        return process
+    except BaseException as exc:
+        errors = []
+        if process is not None:
+            try:
+                if registry is None:
+                    _terminate_worker_process(process)
+                else:
+                    errors.extend(registry.terminate(process, container_name))
+            except BaseException as cleanup_exc:
+                errors.append(
+                    f"subprocess:{type(cleanup_exc).__name__}:{cleanup_exc}"
+                )
+            if registered and registry is not None:
+                registry.unregister(process)
+        _annotate_worker_cleanup_errors(exc, errors)
+        raise
+
+
 def _run(
     args: Sequence[str],
     *,
     cwd: Path = REPO_ROOT,
     capture: bool = False,
+    timeout_seconds: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    registry = getattr(_WORKER_PROCESS_STATE, "registry", None)
+    if registry is not None:
+        command, container_name = registry.prepare_command(args)
+        process = _spawn_registered_process(
+            command,
+            registry=registry,
+            container_name=container_name,
+            cwd=str(cwd),
+            text=True,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+        )
+        try:
+            try:
+                if timeout_seconds is None:
+                    stdout, stderr = process.communicate()
+                else:
+                    stdout, stderr = process.communicate(
+                        timeout=timeout_seconds
+                    )
+            except BaseException as exc:
+                errors = registry.terminate(process, container_name)
+                try:
+                    registry.ensure_accepting()
+                except RehearsalTimeBudgetExceeded as cancelled:
+                    _annotate_worker_cleanup_errors(cancelled, errors)
+                    raise cancelled from exc
+                _annotate_worker_cleanup_errors(exc, errors)
+                raise
+        finally:
+            registry.unregister(process)
+        registry.ensure_accepting()
+        result = subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout,
+            stderr,
+        )
+        if result.returncode:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                command,
+                output=stdout,
+                stderr=stderr,
+            )
+        return result
     return subprocess.run(
         list(args),
         cwd=str(cwd),
         check=True,
         text=True,
         capture_output=capture,
+        timeout=timeout_seconds,
     )
 
 
@@ -634,7 +1051,8 @@ def _normalize_evidence_ownership(
             "--no-dereference",
             f"{os.getuid()}:{os.getgid()}",
             "/evidence",
-        ]
+        ],
+        timeout_seconds=_EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS,
     )
 
 
@@ -646,18 +1064,60 @@ def _temporary_evidence_directory(
 ) -> Iterator[Path]:
     """Normalize after the last possible writer and before host cleanup."""
 
-    with tempfile.TemporaryDirectory(
-        prefix="leadpoet-restart-evidence-"
-    ) as evidence_raw:
-        evidence_root = Path(evidence_raw)
+    evidence_root = Path(
+        tempfile.mkdtemp(prefix="leadpoet-restart-evidence-")
+    )
+
+    def report_retained(reason: BaseException) -> None:
         try:
-            yield evidence_root
-        finally:
+            print(
+                "REHEARSAL_EVIDENCE_RETAINED "
+                f"path={evidence_root} "
+                f"error_type={type(reason).__name__} "
+                f"error={str(reason)[:2000]!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except BaseException:
+            pass
+
+    def normalize() -> None:
+        registry = _WorkerProcessRegistry()
+        with _worker_process_scope(registry):
             _normalize_evidence_ownership(
                 tag,
                 evidence_root=evidence_root,
                 docker_platform=docker_platform,
             )
+
+    try:
+        yield evidence_root
+    except BaseException as original:
+        cleanup_errors = []
+        try:
+            normalize()
+        except BaseException as cleanup_exc:
+            cleanup_errors.append(
+                f"normalize:{type(cleanup_exc).__name__}:{cleanup_exc}"
+            )
+            report_retained(cleanup_exc)
+        else:
+            try:
+                shutil.rmtree(evidence_root)
+            except BaseException as cleanup_exc:
+                cleanup_errors.append(
+                    f"delete:{type(cleanup_exc).__name__}:{cleanup_exc}"
+                )
+                report_retained(cleanup_exc)
+        _annotate_worker_cleanup_errors(original, cleanup_errors)
+        raise
+    else:
+        try:
+            normalize()
+            shutil.rmtree(evidence_root)
+        except BaseException as cleanup_exc:
+            report_retained(cleanup_exc)
+            raise
 
 
 def _run_component(
@@ -757,10 +1217,16 @@ def _run_component(
         f"REHEARSAL_GATEWAY_WORKER_FLEET_MODE={gateway_worker_fleet_mode}",
         tag,
     ]
+    registry = getattr(_WORKER_PROCESS_STATE, "registry", None)
+    container_name = None
+    if registry is not None:
+        command, container_name = registry.prepare_command(command)
     try:
         with launcher_log.open("w", encoding="utf-8") as output:
-            process = subprocess.Popen(
+            process = _spawn_registered_process(
                 command,
+                registry=registry,
+                container_name=container_name,
                 cwd=str(REPO_ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -774,16 +1240,37 @@ def _run_component(
                     output.flush()
                     print(line, end="", flush=True)
                 returncode = process.wait()
-            except BaseException:
-                process.terminate()
+            except BaseException as exc:
+                errors = []
                 try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                    if registry is None:
+                        _terminate_worker_process(process)
+                    else:
+                        errors.extend(
+                            registry.terminate(process, container_name)
+                        )
+                except BaseException as cleanup_exc:
+                    errors.append(
+                        "subprocess:"
+                        f"{type(cleanup_exc).__name__}:{cleanup_exc}"
+                    )
+                if registry is not None:
+                    try:
+                        registry.ensure_accepting()
+                    except RehearsalTimeBudgetExceeded as cancelled:
+                        _annotate_worker_cleanup_errors(cancelled, errors)
+                        raise cancelled from exc
+                _annotate_worker_cleanup_errors(exc, errors)
                 raise
+            finally:
+                if registry is not None:
+                    registry.unregister(process)
+            if registry is not None:
+                registry.ensure_accepting()
         if returncode:
             raise subprocess.CalledProcessError(returncode, command)
+    except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+        raise
     except BaseException:
         _normalize_evidence_ownership(
             tag,
@@ -959,25 +1446,60 @@ def _run_independent_stage(
     return True, value
 
 
-def _run_prepush_component_and_workflow_stages(
+def _run_prepush_image_and_probe(
     *,
-    component_actions: Sequence[tuple[str, Callable[[], Any]]],
+    image_action: Callable[[], Any],
+    probe_action: Callable[[], Any],
+) -> tuple[Any, Any]:
+    """Keep the exact image build alarm-bound while overlapping its probe."""
+
+    registry = _WorkerProcessRegistry()
+
+    def registered_probe() -> Any:
+        with _worker_process_scope(registry):
+            registry.ensure_accepting()
+            result = probe_action()
+            registry.ensure_accepting()
+            return result
+
+    with _signal_masked_worker_executor() as executor:
+        try:
+            probe_future = executor.submit(registered_probe)
+            with _worker_process_scope(registry):
+                registry.ensure_accepting()
+                image_result = image_action()
+                registry.ensure_accepting()
+            probe_result = probe_future.result()
+        except BaseException as exc:
+            _annotate_worker_cleanup_errors(exc, registry.cancel())
+            raise
+    return image_result, probe_result
+
+
+def _run_prepush_runtime_stages(
+    *,
+    preparation_action: Callable[
+        [], Sequence[tuple[str, Callable[[], Any]]]
+    ],
     workflow_action: tuple[str, Callable[[], Any]],
+    expected_component_stages: Sequence[str],
     stages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Run the bounded prepush stages with at most two live containers.
+    """Schedule fixture -> validator and workflow -> gateway in two slots.
 
-    Gateway and validator begin together.  Once the first component settles,
-    the independent workflow consumes that freed executor slot while the
-    slower component finishes. Component results are appended canonically;
-    workflow results are returned so the caller can preserve fixture-cleanup
-    ordering in the durable stage ledger.
+    Workflow remains on the alarm-owning main thread. The sole worker prepares
+    fixtures and immediately starts the longer validator action. Gateway uses
+    the main slot when workflow settles. Ordinary failures do not suppress an
+    independent stage, and component results retain their declared order. The
+    worker's non-subprocess work is fixed-size fixture bookkeeping bracketed by
+    cancellation checks; every blocking external operation is registry-owned.
     """
 
-    if len(component_actions) != 2:
-        raise ValueError(
-            "prepush component/workflow overlap requires exactly two components"
-        )
+    if (
+        len(expected_component_stages) != 2
+        or len(set(expected_component_stages)) != 2
+    ):
+        raise ValueError("prepush scheduling requires two expected components")
 
     def run_stage(
         item: tuple[str, Callable[[], Any]],
@@ -990,29 +1512,102 @@ def _run_prepush_component_and_workflow_stages(
         )
         return local_stages
 
-    ordered_component_stages = [item[0] for item in component_actions]
+    actions_ready = threading.Event()
+    execution_actions: list[tuple[str, Callable[[], Any]]] = []
     component_results: dict[str, list[dict[str, Any]]] = {}
+    preparation_results: list[dict[str, Any]] = []
     workflow_results: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {
-            executor.submit(run_stage, item): item[0]
-            for item in component_actions
-        }
-        first_future = next(as_completed(tuple(futures)))
-        first_stage = futures.pop(first_future)
-        component_results[first_stage] = first_future.result()
 
-        _run_independent_stage(
-            stage=workflow_action[0],
-            action=workflow_action[1],
-            stages=workflow_results,
-        )
-        for future in as_completed(tuple(futures)):
-            stage = futures[future]
-            component_results[stage] = future.result()
+    def prepare_then_run_validator() -> None:
+        started = time.monotonic()
+        try:
+            registry.ensure_accepting()
+            prepared = list(preparation_action())
+            registry.ensure_accepting()
+            stage_names = [item[0] for item in prepared]
+            if (
+                len(prepared) > 2
+                or len(set(stage_names)) != len(stage_names)
+                or (
+                    prepared
+                    and set(stage_names) != set(expected_component_stages)
+                )
+            ):
+                raise ValueError("prepush preparation returned invalid components")
+            execution_actions.extend(
+                sorted(
+                    prepared,
+                    key=lambda item: (
+                        not item[0].startswith("validator-"),
+                        item[0],
+                    ),
+                )
+            )
+        except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+            raise
+        except BaseException as exc:
+            result = _stage_result_from_exception(
+                stage="fixture-orchestration",
+                exc=exc,
+            )
+            result["duration_seconds"] = round(time.monotonic() - started, 3)
+            preparation_results.append(result)
+            print(
+                "REHEARSAL_STAGE_FAILED_CONTINUING "
+                "stage=fixture-orchestration "
+                f"error_type={result['error_type']} "
+                f"duration_seconds={result['duration_seconds']} "
+                f"error={result['error']!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            for stage in expected_component_stages:
+                local_stages: list[dict[str, Any]] = []
+                _mark_stage_unexercised(
+                    stage=stage,
+                    blocked_by=["fixture-orchestration"],
+                    stages=local_stages,
+                )
+                component_results[stage] = local_stages
+        finally:
+            actions_ready.set()
+        if execution_actions:
+            registry.ensure_accepting()
+            first = execution_actions[0]
+            component_results[first[0]] = run_stage(first)
 
-    for stage in ordered_component_stages:
-        stages.extend(component_results[stage])
+    registry = _WorkerProcessRegistry()
+
+    def registered_preparation() -> None:
+        with _worker_process_scope(registry):
+            registry.ensure_accepting()
+            prepare_then_run_validator()
+            registry.ensure_accepting()
+
+    with _signal_masked_worker_executor() as executor:
+        try:
+            preparation_future = executor.submit(registered_preparation)
+            with _worker_process_scope(registry):
+                registry.ensure_accepting()
+                _run_independent_stage(
+                    stage=workflow_action[0],
+                    action=workflow_action[1],
+                    stages=workflow_results,
+                )
+                actions_ready.wait()
+                if len(execution_actions) == 2:
+                    second = execution_actions[1]
+                    component_results[second[0]] = run_stage(second)
+                registry.ensure_accepting()
+            preparation_future.result()
+        except BaseException as exc:
+            _annotate_worker_cleanup_errors(exc, registry.cancel())
+            raise
+
+    stages.extend(preparation_results)
+    for stage in expected_component_stages:
+        if stage in component_results:
+            stages.extend(component_results[stage])
     return workflow_results
 
 
@@ -1316,6 +1911,8 @@ def _run_workflow(
     command.append(tag)
     try:
         _run(command)
+    except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+        raise
     except BaseException:
         _normalize_evidence_ownership(
             tag,
@@ -1529,32 +2126,47 @@ def _run_profile(args: argparse.Namespace) -> int:
         docker_platform=docker_platform,
         wheelhouse_shas=wheelhouse_shas,
     )
-    if args.rebuild_image or not _image_exists(tag):
+    image_build_required = args.rebuild_image or not _image_exists(tag)
+
+    def build_image() -> None:
         _build_image(
             tag,
             harness_sha=harness_sha,
             docker_platform=docker_platform,
             wheelhouse_shas=wheelhouse_shas,
         )
+    if args.profile != "prepush" and image_build_required:
+        build_image()
 
     with _isolated_source_snapshot(
         harness_sha=harness_sha,
         required_shas=(from_sha, candidate_sha),
     ) as source_root:
-        with _temporary_evidence_directory(
-            tag,
-            docker_platform=docker_platform,
-        ) as evidence_root:
-            stage_results: list[dict[str, Any]] = []
-            print(
-                "Running validator enclave finalization proof under CPython 3.7",
-                flush=True,
-            )
+        stage_results: list[dict[str, Any]] = []
+        print(
+            "Running validator enclave finalization proof under CPython 3.7",
+            flush=True,
+        )
+
+        def run_python37_probe() -> None:
             _run_independent_stage(
                 stage="python37-finalization",
                 action=lambda: _run_python37_finalization_probe(source_root),
                 stages=stage_results,
             )
+
+        if args.profile == "prepush" and image_build_required:
+            _run_prepush_image_and_probe(
+                image_action=build_image,
+                probe_action=run_python37_probe,
+            )
+        else:
+            run_python37_probe()
+
+        with _temporary_evidence_directory(
+            tag,
+            docker_platform=docker_platform,
+        ) as evidence_root:
             transitions = (transition,)
             if args.profile == "release" and transition == "forward":
                 transitions = ("forward", "rollback", "forward")
@@ -1593,7 +2205,10 @@ def _run_profile(args: argparse.Namespace) -> int:
                     )
                     if passed:
                         drand_artifacts[target] = artifact
-                for target in sorted(target_shas):
+                durable_state_root = evidence_root / "durable-boundary-state"
+                durable_state_root.mkdir(mode=0o700)
+
+                def prepare_fixture_seed(target: str) -> None:
                     stage = f"fixture-seed-{target[:12]}"
                     dependency = f"drand-artifact-{target[:12]}"
                     if target not in drand_artifacts:
@@ -1602,7 +2217,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                             blocked_by=[dependency],
                             stages=stage_results,
                         )
-                        continue
+                        return
                     passed, seed = _run_independent_stage(
                         stage=stage,
                         action=lambda target=target: fixture_stack.enter_context(
@@ -1619,9 +2234,11 @@ def _run_profile(args: argparse.Namespace) -> int:
                     )
                     if passed:
                         fixture_seeds[target] = seed
-                durable_state_root = evidence_root / "durable-boundary-state"
-                durable_state_root.mkdir(mode=0o700)
-                for ordinal, run_transition in enumerate(transitions):
+
+                def component_actions_for_transition(
+                    ordinal: int,
+                    run_transition: str,
+                ) -> list[tuple[str, Callable[[], Any]]]:
                     run_from = from_sha
                     run_candidate = candidate_sha
                     if run_transition == "rollback":
@@ -1703,21 +2320,40 @@ def _run_profile(args: argparse.Namespace) -> int:
                                 ),
                             )
                         )
-                    if args.profile == "prepush" and len(component_actions) > 1:
-                        print(
-                            "Running production V2 workflow in the first "
-                            "settled component slot (prepush)",
-                            flush=True,
-                        )
-                        deferred_workflow_results = (
-                            _run_prepush_component_and_workflow_stages(
-                                component_actions=component_actions,
-                                workflow_action=workflow_action,
-                                stages=stage_results,
-                            )
-                        )
-                    else:
-                        for stage, action in component_actions:
+                    return component_actions
+
+                fixture_targets = sorted(target_shas)
+                if args.profile == "prepush":
+
+                    def prepare_prepush_components() -> Sequence[
+                        tuple[str, Callable[[], Any]]
+                    ]:
+                        for target in fixture_targets:
+                            prepare_fixture_seed(target)
+                        return component_actions_for_transition(0, transition)
+
+                    print(
+                        "Running production V2 workflow alongside fixture "
+                        "preparation (prepush)",
+                        flush=True,
+                    )
+                    deferred_workflow_results = _run_prepush_runtime_stages(
+                        preparation_action=prepare_prepush_components,
+                        workflow_action=workflow_action,
+                        expected_component_stages=(
+                            f"gateway-{transition}-1",
+                            f"validator-{transition}-1",
+                        ),
+                        stages=stage_results,
+                    )
+                else:
+                    for target in fixture_targets:
+                        prepare_fixture_seed(target)
+                    for ordinal, run_transition in enumerate(transitions):
+                        for stage, action in component_actions_for_transition(
+                            ordinal,
+                            run_transition,
+                        ):
                             _run_independent_stage(
                                 stage=stage,
                                 action=action,

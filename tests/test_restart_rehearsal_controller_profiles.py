@@ -127,62 +127,849 @@ def test_time_budget_is_not_swallowed_as_an_independent_stage_failure() -> None:
     assert stages == []
 
 
-def test_prepush_workflow_uses_first_settled_component_slot() -> None:
+def test_prepush_image_build_stays_main_thread_while_probe_overlaps() -> None:
+    controller = _load_controller()
+    image_started = threading.Event()
+    probe_started = threading.Event()
+
+    def image() -> str:
+        assert threading.current_thread() is threading.main_thread()
+        image_started.set()
+        assert probe_started.wait(timeout=5)
+        return "image"
+
+    def probe() -> str:
+        assert threading.current_thread() is not threading.main_thread()
+        worker_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        assert signal.SIGALRM in worker_mask
+        assert signal.SIGINT in worker_mask
+        probe_started.set()
+        assert image_started.wait(timeout=5)
+        return "probe"
+
+    assert controller._run_prepush_image_and_probe(
+        image_action=image,
+        probe_action=probe,
+    ) == ("image", "probe")
+
+
+class _BlockedProcess:
+    pid = 12345
+
+    def __init__(
+        self,
+        started: threading.Event,
+        command,
+        *,
+        streaming: bool,
+    ) -> None:
+        self._started = started
+        self.command = list(command)
+        self.stdout = self if streaming else None
+        self.returncode = None
+        self.released = threading.Event()
+        self.terminated = False
+        self.killed = False
+        self.reaped = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self._started.set()
+        assert self.released.wait(timeout=5)
+        raise StopIteration
+
+    def communicate(self):
+        self._started.set()
+        assert self.released.wait(timeout=5)
+        return None, None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        self.released.set()
+
+    def wait(self, timeout=None):
+        if not self.released.wait(timeout=timeout):
+            raise subprocess.TimeoutExpired(["blocked-worker"], timeout)
+        self.reaped = True
+        return self.returncode
+
+
+def _install_blocked_popen(
+    controller,
+    monkeypatch: pytest.MonkeyPatch,
+    started: threading.Event,
+    *,
+    streaming: bool,
+) -> tuple[list[_BlockedProcess], list[str]]:
+    processes: list[_BlockedProcess] = []
+    removed_containers: list[str] = []
+
+    def popen(command, **_kwargs):
+        process = _BlockedProcess(started, command, streaming=streaming)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(controller.subprocess, "Popen", popen)
+    monkeypatch.setattr(controller, "_WORKER_TERMINATE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(
+        controller,
+        "_remove_worker_container",
+        removed_containers.append,
+    )
+    return processes, removed_containers
+
+
+def _install_routed_blocked_popen(
+    controller,
+    monkeypatch: pytest.MonkeyPatch,
+    routes: dict[str, threading.Event],
+) -> tuple[list[_BlockedProcess], list[str]]:
+    processes: list[_BlockedProcess] = []
+    removed_containers: list[str] = []
+
+    def popen(command, **kwargs):
+        matches = [event for marker, event in routes.items() if marker in command]
+        assert len(matches) == 1, command
+        process = _BlockedProcess(
+            matches[0],
+            command,
+            streaming=kwargs.get("bufsize") == 1,
+        )
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(controller.subprocess, "Popen", popen)
+    monkeypatch.setattr(controller, "_WORKER_TERMINATE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(
+        controller,
+        "_remove_worker_container",
+        removed_containers.append,
+    )
+    return processes, removed_containers
+
+
+def _run_test_component(controller, tmp_path: Path, component: str) -> None:
+    controller._run_component(
+        "image",
+        source_root=tmp_path,
+        component=component,
+        from_sha="2" * 40,
+        candidate_sha="3" * 40,
+        transition="forward",
+        evidence_root=tmp_path,
+        drand_artifact_root=tmp_path,
+        profile="prepush",
+        docker_platform="linux/amd64",
+        fixture_seed_root=tmp_path,
+        from_fixture_seed_root=tmp_path,
+        durable_fixture_seed_root=tmp_path,
+        durable_state_root=tmp_path,
+        durable_schema_sha="3" * 40,
+        run_ordinal=1,
+        gateway_worker_fleet_mode="active",
+    )
+
+
+def test_worker_container_cleanup_proves_continuous_full_bound_after_rm_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    calls: list[list[str]] = []
+    inspection_times: list[float] = []
+    clock = [0.0]
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_CONVERGENCE_SECONDS", 0.2)
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_ABSENCE_OBSERVATIONS", 3)
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(controller.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        controller.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert 0 < kwargs["timeout"] <= (
+            controller._WORKER_DOCKER_CLEANUP_SECONDS
+        )
+        if command[2] == "rm":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        inspection_times.append(round(clock[0], 3))
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="Error: No such container: exact-worker",
+        )
+
+    monkeypatch.setattr(controller.subprocess, "run", run)
+
+    controller._remove_worker_container("exact-worker")
+
+    assert calls == [
+        ["docker", "container", "rm", "--force", "exact-worker"],
+        ["docker", "container", "inspect", "exact-worker"],
+        ["docker", "container", "rm", "--force", "exact-worker"],
+        ["docker", "container", "inspect", "exact-worker"],
+        ["docker", "container", "rm", "--force", "exact-worker"],
+        ["docker", "container", "inspect", "exact-worker"],
+    ]
+    assert inspection_times == [0.0, 0.1, 0.2]
+
+
+def test_worker_container_cleanup_fails_if_container_still_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_CONVERGENCE_SECONDS", 0.02)
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(
+        controller.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="container-id",
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="absence did not converge"):
+        controller._remove_worker_container("exact-worker")
+
+
+def test_worker_container_cleanup_fails_on_t025_late_name_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    clock = [0.0]
+    inspection_times: list[float] = []
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_CONVERGENCE_SECONDS", 0.3)
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_ABSENCE_OBSERVATIONS", 3)
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(controller.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        controller.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    def run(command, **_kwargs):
+        if command[2] == "rm":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        observed_at = round(clock[0], 2)
+        inspection_times.append(observed_at)
+        if observed_at == 0.25:
+            return subprocess.CompletedProcess(command, 0, "container-id", "")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            "Error: No such container: exact-worker",
+        )
+
+    monkeypatch.setattr(controller.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="absence did not converge"):
+        controller._remove_worker_container("exact-worker")
+
+    assert 0.0 in inspection_times
+    assert 0.1 in inspection_times
+    assert 0.2 in inspection_times
+    assert 0.25 in inspection_times
+    assert inspection_times[-1] >= 0.3
+
+
+def test_worker_run_communicate_failure_reaps_exact_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    started = threading.Event()
+    removed: list[str] = []
+    processes: list[_BlockedProcess] = []
+
+    class FailedProcess(_BlockedProcess):
+        def communicate(self):
+            raise RuntimeError("pipe failed")
+
+    def popen(command, **_kwargs):
+        process = FailedProcess(started, command, streaming=False)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(controller.subprocess, "Popen", popen)
+    monkeypatch.setattr(controller, "_WORKER_TERMINATE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(controller, "_remove_worker_container", removed.append)
+    registry = controller._WorkerProcessRegistry()
+
+    with controller._worker_process_scope(registry):
+        with pytest.raises(RuntimeError, match="pipe failed"):
+            controller._run(["docker", "run", "worker-image"])
+
+    assert processes[0].terminated is True
+    assert processes[0].killed is True
+    assert processes[0].reaped is True
+    name_index = processes[0].command.index("--name")
+    assert removed == [processes[0].command[name_index + 1]]
+
+
+def test_worker_registration_after_cancel_cleans_launch_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    started = threading.Event()
+    removed: list[str] = []
+    monkeypatch.setattr(controller, "_WORKER_TERMINATE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(controller, "_remove_worker_container", removed.append)
+    registry = controller._WorkerProcessRegistry()
+    command, container_name = registry.prepare_command(
+        ["docker", "run", "worker-image"]
+    )
+    process = _BlockedProcess(started, command, streaming=False)
+    registry.cancel()
+
+    with pytest.raises(controller.RehearsalTimeBudgetExceeded):
+        registry.register(process, container_name)
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.reaped is True
+    assert removed == [container_name]
+
+
+@pytest.mark.parametrize(
+    ("path", "signum"),
+    (("run", signal.SIGALRM), ("component", signal.SIGINT)),
+)
+def test_main_spawn_registration_defers_signal_until_exact_cleanup(
+    path: str,
+    signum: signal.Signals,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    started = threading.Event()
+    processes, removed = _install_blocked_popen(
+        controller,
+        monkeypatch,
+        started,
+        streaming=path == "component",
+    )
+    original_register = controller._WorkerProcessRegistry.register
+    injected = False
+
+    def signal_before_register(registry, process, container_name):
+        nonlocal injected
+        if not injected:
+            injected = True
+            signal.raise_signal(signum)
+        return original_register(registry, process, container_name)
+
+    monkeypatch.setattr(
+        controller._WorkerProcessRegistry,
+        "register",
+        signal_before_register,
+    )
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: pytest.fail(
+            "deadline must bypass ordinary normalization"
+        ),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_preserve_failure_evidence",
+        lambda **_kwargs: pytest.fail(
+            "deadline must bypass ordinary evidence preservation"
+        ),
+    )
+    registry = controller._WorkerProcessRegistry()
+
+    expected_exception = (
+        controller.RehearsalTimeBudgetExceeded
+        if signum == signal.SIGALRM
+        else KeyboardInterrupt
+    )
+    with pytest.raises(expected_exception) as raised:
+        with controller._profile_time_limit(600):
+            with controller._worker_process_scope(registry):
+                if path == "run":
+                    controller._run(["docker", "run", "worker-image"])
+                else:
+                    _run_test_component(controller, tmp_path, "gateway")
+
+    if signum == signal.SIGALRM:
+        assert "600-second wall-clock budget" in str(raised.value)
+    assert injected is True
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert processes[0].killed is True
+    assert processes[0].reaped is True
+    name_index = processes[0].command.index("--name")
+    assert removed == [processes[0].command[name_index + 1]]
+    assert registry.cancel() == ()
+
+
+def test_real_timer_waits_for_masked_worker_and_registered_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+    register_entered = threading.Event()
+    register_completed = threading.Event()
+    process_started = threading.Event()
+    processes: list[_BlockedProcess] = []
+    removed: list[str] = []
+    worker_masks: list[set[signal.Signals]] = []
+
+    def popen(command, **_kwargs):
+        process = _BlockedProcess(process_started, command, streaming=False)
+        processes.append(process)
+        signal.setitimer(signal.ITIMER_REAL, 0.01)
+        return process
+
+    original_register = controller._WorkerProcessRegistry.register
+
+    def delayed_register(registry, process, container_name):
+        register_entered.set()
+        controller.time.sleep(0.05)
+        original_register(registry, process, container_name)
+        register_completed.set()
+
+    def probe() -> None:
+        worker_masks.append(
+            signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        )
+        worker_started.set()
+        assert worker_release.wait(timeout=1)
+
+    def image() -> None:
+        try:
+            assert worker_started.wait(timeout=1)
+            controller._run(["docker", "run", "image-build"])
+        finally:
+            worker_release.set()
+
+    monkeypatch.setattr(controller.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        controller._WorkerProcessRegistry,
+        "register",
+        delayed_register,
+    )
+    monkeypatch.setattr(controller, "_WORKER_TERMINATE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(controller, "_remove_worker_container", removed.append)
+
+    began = controller.time.monotonic()
+    with pytest.raises(
+        controller.RehearsalTimeBudgetExceeded,
+        match="600-second wall-clock budget",
+    ):
+        with controller._profile_time_limit(600):
+            controller._run_prepush_image_and_probe(
+                image_action=image,
+                probe_action=probe,
+            )
+
+    assert controller.time.monotonic() - began < 1
+    assert register_entered.is_set()
+    assert register_completed.is_set()
+    assert worker_masks
+    assert signal.SIGALRM in worker_masks[0]
+    assert signal.SIGINT in worker_masks[0]
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert processes[0].killed is True
+    assert processes[0].reaped is True
+    name_index = processes[0].command.index("--name")
+    assert removed == [processes[0].command[name_index + 1]]
+
+
+def test_workflow_deadline_bypasses_ordinary_failure_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    deadline = controller.RehearsalTimeBudgetExceeded("deadline")
+
+    def fail_deadline(*_args, **_kwargs):
+        raise deadline
+
+    monkeypatch.setattr(controller, "_run", fail_deadline)
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: pytest.fail(
+            "deadline must bypass ordinary normalization"
+        ),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_preserve_failure_evidence",
+        lambda **_kwargs: pytest.fail(
+            "deadline must bypass ordinary evidence preservation"
+        ),
+    )
+
+    with pytest.raises(controller.RehearsalTimeBudgetExceeded) as raised:
+        controller._run_workflow(
+            "image",
+            source_root=tmp_path,
+            evidence_root=tmp_path,
+            from_sha="2" * 40,
+            candidate_sha="3" * 40,
+            profile="prepush",
+            docker_platform="linux/amd64",
+        )
+
+    assert raised.value is deadline
+
+
+def test_outer_evidence_cleanup_retains_path_without_replacing_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    evidence_root = tmp_path / "retained-evidence"
+    evidence_root.mkdir()
+    deadline = controller.RehearsalTimeBudgetExceeded("deadline")
+    monkeypatch.setattr(
+        controller.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: str(evidence_root),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("normalization failed")
+        ),
+    )
+
+    with pytest.raises(controller.RehearsalTimeBudgetExceeded) as raised:
+        with controller._temporary_evidence_directory(
+            "image",
+            docker_platform="linux/amd64",
+        ) as active_root:
+            (active_root / "root-owned-artifact").write_text(
+                "evidence\n",
+                encoding="utf-8",
+            )
+            raise deadline
+
+    assert raised.value is deadline
+    assert evidence_root.is_dir()
+    assert (evidence_root / "root-owned-artifact").is_file()
+    captured = capsys.readouterr().err
+    assert "REHEARSAL_EVIDENCE_RETAINED" in captured
+    assert str(evidence_root) in captured
+
+
+def test_prepush_main_alarm_cancels_and_reaps_blocked_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    started = threading.Event()
+    finished = threading.Event()
+    processes, removed_containers = _install_blocked_popen(
+        controller,
+        monkeypatch,
+        started,
+        streaming=False,
+    )
+
+    def fail_container_cleanup(container_name: str) -> None:
+        removed_containers.append(container_name)
+        raise RuntimeError("docker daemon unavailable")
+
+    monkeypatch.setattr(
+        controller,
+        "_remove_worker_container",
+        fail_container_cleanup,
+    )
+
+    def probe() -> None:
+        try:
+            controller._run(["docker", "run", "probe-image", "probe"])
+        finally:
+            finished.set()
+
+    def alarm_image() -> None:
+        assert started.wait(timeout=1)
+        signal.raise_signal(signal.SIGALRM)
+
+    began = controller.time.monotonic()
+    with pytest.raises(
+        controller.RehearsalTimeBudgetExceeded,
+        match="600-second wall-clock budget",
+    ):
+        with controller._profile_time_limit(600):
+            controller._run_prepush_image_and_probe(
+                image_action=alarm_image,
+                probe_action=probe,
+            )
+
+    assert controller.time.monotonic() - began < 1
+    assert finished.is_set()
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert processes[0].killed is True
+    assert processes[0].reaped is True
+    name_index = processes[0].command.index("--name")
+    assert removed_containers == [processes[0].command[name_index + 1]]
+    assert "REHEARSAL_WORKER_CLEANUP_FAILED" in capsys.readouterr().err
+
+
+def test_prepush_workflow_alarm_cleans_both_named_runtime_containers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     controller = _load_controller()
     validator_started = threading.Event()
     workflow_started = threading.Event()
+    validator_finished = threading.Event()
+    gateway_called = False
+    processes, removed_containers = _install_routed_blocked_popen(
+        controller,
+        monkeypatch,
+        {
+            "REHEARSAL_COMPONENT=validator": validator_started,
+            "workflow-image": workflow_started,
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        controller,
+        "_preserve_failure_evidence",
+        lambda **_kwargs: tmp_path,
+    )
+
+    def gateway() -> None:
+        nonlocal gateway_called
+        gateway_called = True
+
+    def validator() -> None:
+        try:
+            _run_test_component(controller, tmp_path, "validator")
+        finally:
+            validator_finished.set()
+
+    def alarm_workflow() -> None:
+        assert validator_started.wait(timeout=1)
+        signal.setitimer(signal.ITIMER_REAL, 0.02)
+        controller._run(["docker", "run", "workflow-image"])
+
+    began = controller.time.monotonic()
+    with pytest.raises(
+        controller.RehearsalTimeBudgetExceeded,
+        match="600-second wall-clock budget",
+    ):
+        with controller._profile_time_limit(600):
+            controller._run_prepush_runtime_stages(
+                preparation_action=lambda: (
+                    ("gateway-forward-1", gateway),
+                    ("validator-forward-1", validator),
+                ),
+                workflow_action=("workflow-prepush", alarm_workflow),
+                expected_component_stages=(
+                    "gateway-forward-1",
+                    "validator-forward-1",
+                ),
+                stages=[],
+            )
+
+    assert controller.time.monotonic() - began < 1
+    assert validator_finished.is_set()
+    assert workflow_started.is_set()
+    assert gateway_called is False
+    assert len(processes) == 2
+    assert all(process.terminated for process in processes)
+    assert all(process.killed for process in processes)
+    assert all(process.reaped for process in processes)
+    names = {
+        process.command[process.command.index("--name") + 1]
+        for process in processes
+    }
+    assert len(names) == 2
+    assert set(removed_containers) == names
+
+
+def test_prepush_gateway_alarm_cleans_gateway_and_validator_without_next_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    gateway_started = threading.Event()
+    validator_started = threading.Event()
+    gateway_finished = threading.Event()
+    validator_finished = threading.Event()
+    workflow_calls: list[str] = []
+    processes, removed_containers = _install_routed_blocked_popen(
+        controller,
+        monkeypatch,
+        {
+            "REHEARSAL_COMPONENT=gateway": gateway_started,
+            "REHEARSAL_COMPONENT=validator": validator_started,
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        controller,
+        "_preserve_failure_evidence",
+        lambda **_kwargs: tmp_path,
+    )
+
+    def gateway() -> None:
+        try:
+            assert validator_started.wait(timeout=1)
+            signal.setitimer(signal.ITIMER_REAL, 0.02)
+            _run_test_component(controller, tmp_path, "gateway")
+        finally:
+            gateway_finished.set()
+
+    def validator() -> None:
+        try:
+            _run_test_component(controller, tmp_path, "validator")
+        finally:
+            validator_finished.set()
+
+    began = controller.time.monotonic()
+    with pytest.raises(
+        controller.RehearsalTimeBudgetExceeded,
+        match="600-second wall-clock budget",
+    ):
+        with controller._profile_time_limit(600):
+            controller._run_prepush_runtime_stages(
+                preparation_action=lambda: (
+                    ("gateway-forward-1", gateway),
+                    ("validator-forward-1", validator),
+                ),
+                workflow_action=(
+                    "workflow-prepush",
+                    lambda: workflow_calls.append("workflow"),
+                ),
+                expected_component_stages=(
+                    "gateway-forward-1",
+                    "validator-forward-1",
+                ),
+                stages=[],
+            )
+
+    assert controller.time.monotonic() - began < 1
+    assert workflow_calls == ["workflow"]
+    assert gateway_finished.is_set()
+    assert validator_finished.is_set()
+    assert len(processes) == 2
+    assert all(process.terminated for process in processes)
+    assert all(process.killed for process in processes)
+    assert all(process.reaped for process in processes)
+    names = {
+        process.command[process.command.index("--name") + 1]
+        for process in processes
+    }
+    assert len(names) == 2
+    assert set(removed_containers) == names
+
+
+def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak() -> None:
+    controller = _load_controller()
+    validator_started = threading.Event()
+    workflow_started = threading.Event()
+    gateway_started = threading.Event()
     active: set[str] = set()
     peak_active = 0
+    events: list[str] = []
     active_lock = threading.Lock()
 
     def enter(name: str) -> None:
         nonlocal peak_active
         with active_lock:
             active.add(name)
+            events.append(f"{name}-start")
             peak_active = max(peak_active, len(active))
 
     def leave(name: str) -> None:
         with active_lock:
+            events.append(f"{name}-end")
             active.remove(name)
 
     def gateway() -> None:
+        assert threading.current_thread() is threading.main_thread()
         enter("gateway")
-        try:
-            assert validator_started.wait(timeout=5)
-        finally:
-            leave("gateway")
+        gateway_started.set()
+        leave("gateway")
 
     def validator() -> None:
+        assert threading.current_thread() is not threading.main_thread()
         enter("validator")
         validator_started.set()
         try:
-            assert workflow_started.wait(timeout=5)
+            assert gateway_started.wait(timeout=5)
         finally:
             leave("validator")
+
+    def prepare():
+        enter("fixtures")
+        try:
+            assert workflow_started.wait(timeout=5)
+        finally:
+            leave("fixtures")
+        return (
+            ("gateway-forward-1", gateway),
+            ("validator-forward-1", validator),
+        )
 
     def workflow() -> None:
         assert threading.current_thread() is threading.main_thread()
         enter("workflow")
+        workflow_started.set()
         try:
-            with active_lock:
-                assert active == {"validator", "workflow"}
-            workflow_started.set()
+            assert validator_started.wait(timeout=5)
         finally:
             leave("workflow")
 
     stages: list[dict[str, object]] = []
-    with controller._recording_fixture_stack(stages):
-        workflow_results = controller._run_prepush_component_and_workflow_stages(
-            component_actions=(
-                ("gateway-forward-1", gateway),
-                ("validator-forward-1", validator),
-            ),
+    with controller._recording_fixture_stack(stages) as fixture_stack:
+        fixture_stack.callback(lambda: events.append("fixture-close"))
+        workflow_results = controller._run_prepush_runtime_stages(
+            preparation_action=prepare,
             workflow_action=("workflow-prepush", workflow),
+            expected_component_stages=(
+                "gateway-forward-1",
+                "validator-forward-1",
+            ),
             stages=stages,
         )
     stages.extend(workflow_results)
 
     assert peak_active == 2
+    assert events.index("workflow-start") < events.index("fixtures-end")
+    assert events.index("fixtures-end") < events.index("validator-start")
+    assert events.index("validator-start") < events.index("workflow-end")
+    assert events.index("workflow-end") < events.index("gateway-start")
+    assert events.index("gateway-start") < events.index("validator-end")
+    assert events.index("gateway-end") < events.index("fixture-close")
+    assert events.index("validator-end") < events.index("fixture-close")
     assert [item["stage"] for item in stages] == [
         "gateway-forward-1",
         "validator-forward-1",
@@ -190,6 +977,104 @@ def test_prepush_workflow_uses_first_settled_component_slot() -> None:
         "workflow-prepush",
     ]
     assert all(item["status"] == "passed" for item in stages)
+
+
+def test_prepush_scheduler_continues_after_workflow_and_validator_failures() -> None:
+    controller = _load_controller()
+    calls: list[str] = []
+
+    def failed(name: str):
+        def action() -> None:
+            calls.append(name)
+            raise RuntimeError(f"{name} failed")
+
+        return action
+
+    stages: list[dict[str, object]] = []
+    workflow_results = controller._run_prepush_runtime_stages(
+        preparation_action=lambda: (
+            ("gateway-forward-1", lambda: calls.append("gateway")),
+            ("validator-forward-1", failed("validator")),
+        ),
+        workflow_action=("workflow-prepush", failed("workflow")),
+        expected_component_stages=(
+            "gateway-forward-1",
+            "validator-forward-1",
+        ),
+        stages=stages,
+    )
+    stages.extend(workflow_results)
+
+    assert set(calls) == {"gateway", "validator", "workflow"}
+    assert [item["status"] for item in stages] == [
+        "passed",
+        "failed",
+        "failed",
+    ]
+
+
+def test_prepush_scheduler_records_preparation_failure_and_runs_workflow() -> None:
+    controller = _load_controller()
+    calls: list[str] = []
+    stages: list[dict[str, object]] = []
+
+    def fail_preparation():
+        raise RuntimeError("fixture failed")
+
+    workflow_results = controller._run_prepush_runtime_stages(
+        preparation_action=fail_preparation,
+        workflow_action=("workflow-prepush", lambda: calls.append("workflow")),
+        expected_component_stages=(
+            "gateway-forward-1",
+            "validator-forward-1",
+        ),
+        stages=stages,
+    )
+
+    assert calls == ["workflow"]
+    assert [item["stage"] for item in stages] == [
+        "fixture-orchestration",
+        "gateway-forward-1",
+        "validator-forward-1",
+    ]
+    assert stages[0]["status"] == "failed"
+    assert stages[1:] == [
+        {
+            "blocked_by": ["fixture-orchestration"],
+            "stage": "gateway-forward-1",
+            "status": "unexercised",
+        },
+        {
+            "blocked_by": ["fixture-orchestration"],
+            "stage": "validator-forward-1",
+            "status": "unexercised",
+        },
+    ]
+    assert workflow_results[0]["status"] == "passed"
+
+
+def test_prepush_scheduler_does_not_swallow_preparation_budget_failure() -> None:
+    controller = _load_controller()
+    stages: list[dict[str, object]] = []
+
+    def exceed_budget():
+        raise controller.RehearsalTimeBudgetExceeded("budget exhausted")
+
+    with pytest.raises(
+        controller.RehearsalTimeBudgetExceeded,
+        match="budget exhausted",
+    ):
+        controller._run_prepush_runtime_stages(
+            preparation_action=exceed_budget,
+            workflow_action=("workflow-prepush", lambda: None),
+            expected_component_stages=(
+                "gateway-forward-1",
+                "validator-forward-1",
+            ),
+            stages=stages,
+        )
+
+    assert stages == []
 
 
 def test_workflow_preserves_distinct_n_minus_one_identity(
@@ -223,7 +1108,13 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
 ) -> None:
     controller = _load_controller()
     commands: list[list[str]] = []
-    monkeypatch.setattr(controller, "_run", lambda command: commands.append(command))
+    timeouts: list[float | None] = []
+
+    def fake_run(command, *, timeout_seconds=None):
+        commands.append(command)
+        timeouts.append(timeout_seconds)
+
+    monkeypatch.setattr(controller, "_run", fake_run)
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
 
@@ -234,6 +1125,7 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
     )
 
     assert evidence_root.stat().st_mode & 0o777 == 0o700
+    assert timeouts == [controller._EVIDENCE_NORMALIZATION_TIMEOUT_SECONDS]
     assert commands == [[
         "docker",
         "run",
@@ -502,7 +1394,7 @@ def test_workflow_normalizes_evidence_before_preserving_failure(
     commands: list[list[str]] = []
     events: list[str] = []
 
-    def fake_run(command):
+    def fake_run(command, **_kwargs):
         commands.append(command)
         if len(commands) == 1:
             raise subprocess.CalledProcessError(1, command)

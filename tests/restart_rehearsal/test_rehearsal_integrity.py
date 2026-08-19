@@ -4437,6 +4437,8 @@ def test_rehearsal_build_binds_the_platform_specific_base(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     local_base = "leadpoet-local-rehearsal-base:amd64-exact"
+    buildx = Path("/validated/docker-buildx")
+    docker_client_root = tmp_path / "docker-client"
 
     @contextmanager
     def temporary_directory(*, prefix: str):
@@ -4478,19 +4480,33 @@ def test_rehearsal_build_binds_the_platform_specific_base(
             else pytest.fail("unexpected Docker platform")
         ),
     )
+    monkeypatch.setattr(
+        rehearsal,
+        "_provision_official_buildx",
+        lambda root: (
+            buildx
+            if root == docker_client_root
+            else pytest.fail("unexpected Docker client root")
+        ),
+    )
 
     rehearsal._build_image(
         "leadpoet-test:platform",
         harness_sha="a" * 40,
         docker_platform="linux/amd64",
+        docker_client_root=docker_client_root,
         wheelhouse_shas=("b" * 40, "a" * 40),
     )
 
     assert commands == [
         (
             [
-                "docker",
+                str(buildx),
                 "build",
+                "--builder",
+                "default",
+                "--load",
+                "--progress=plain",
                 "--pull=false",
                 "--platform",
                 "linux/amd64",
@@ -4592,11 +4608,17 @@ def test_rehearsal_build_maps_both_transition_commits_to_exact_lock_content(
         "_prepare_local_rehearsal_base_image",
         lambda _docker_platform: "leadpoet-local-rehearsal-base:exact",
     )
+    monkeypatch.setattr(
+        rehearsal,
+        "_provision_official_buildx",
+        lambda _root: Path("/validated/docker-buildx"),
+    )
 
     rehearsal._build_image(
         "leadpoet-test:transition-locks",
         harness_sha=candidate_sha,
         docker_platform="linux/amd64",
+        docker_client_root=tmp_path / "docker-client",
         wheelhouse_shas=(from_sha, candidate_sha),
     )
 
@@ -4774,12 +4796,18 @@ def test_rehearsal_build_stages_compact_weight_readiness_dependency(
         "_prepare_local_rehearsal_base_image",
         lambda _docker_platform: "leadpoet-local-rehearsal-base:exact",
     )
+    monkeypatch.setattr(
+        rehearsal,
+        "_provision_official_buildx",
+        lambda _root: Path("/validated/docker-buildx"),
+    )
 
     candidate_sha = "a" * 40
     rehearsal._build_image(
         "leadpoet-test:compact-weight-import",
         harness_sha=candidate_sha,
         docker_platform="linux/amd64",
+        docker_client_root=tmp_path / "docker-client",
         wheelhouse_shas=(candidate_sha,),
     )
 

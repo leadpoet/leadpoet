@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import signal
@@ -42,18 +43,267 @@ def test_rehearsal_docker_config_is_private_helper_free_and_restored(
 ) -> None:
     controller = _load_controller()
     monkeypatch.setenv("DOCKER_CONFIG", "/ambient/docker-config")
+    monkeypatch.setenv("DOCKER_BUILDKIT", "0")
+    monkeypatch.setenv("DOCKER_AUTH_CONFIG", "ambient-auth")
+    monkeypatch.setenv(
+        "DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND",
+        "ambient docker command",
+    )
+    monkeypatch.setenv("DOCKER_CLI_PLUGIN_USE_DIAL_STDIO", "1")
+    monkeypatch.setenv("BUILDX_BUILDER", "ambient-remote-builder")
+    monkeypatch.setenv("BUILDKIT_HOST", "tcp://ambient-buildkit")
+    monkeypatch.setenv(
+        "EXPERIMENTAL_BUILDKIT_SOURCE_POLICY",
+        "/ambient/source-policy.json",
+    )
 
     with controller._isolated_docker_client_config() as root:
         config = root / "config.json"
+        buildx_state = root / "buildx"
         assert os.environ["DOCKER_CONFIG"] == str(root)
+        assert os.environ["DOCKER_BUILDKIT"] == "1"
+        assert os.environ["BUILDX_CONFIG"] == str(buildx_state)
+        assert "DOCKER_AUTH_CONFIG" not in os.environ
+        assert "DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND" not in os.environ
+        assert "DOCKER_CLI_PLUGIN_USE_DIAL_STDIO" not in os.environ
+        assert "BUILDX_BUILDER" not in os.environ
+        assert "BUILDKIT_HOST" not in os.environ
+        assert "EXPERIMENTAL_BUILDKIT_SOURCE_POLICY" not in os.environ
         assert root.stat().st_mode & 0o777 == 0o700
+        assert buildx_state.stat().st_mode & 0o777 == 0o700
         assert config.stat().st_mode & 0o777 == 0o600
         assert config.read_text(encoding="utf-8") == '{"auths":{}}\n'
         assert "credsStore" not in config.read_text(encoding="utf-8")
         assert "credentialHelpers" not in config.read_text(encoding="utf-8")
+        monkeypatch.setenv("BUILDX_LATE_OVERRIDE", "must-not-escape")
 
     assert not root.exists()
     assert os.environ["DOCKER_CONFIG"] == "/ambient/docker-config"
+    assert os.environ["DOCKER_BUILDKIT"] == "0"
+    assert os.environ["DOCKER_AUTH_CONFIG"] == "ambient-auth"
+    assert (
+        os.environ["DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND"]
+        == "ambient docker command"
+    )
+    assert os.environ["DOCKER_CLI_PLUGIN_USE_DIAL_STDIO"] == "1"
+    assert os.environ["BUILDX_BUILDER"] == "ambient-remote-builder"
+    assert os.environ["BUILDKIT_HOST"] == "tcp://ambient-buildkit"
+    assert (
+        os.environ["EXPERIMENTAL_BUILDKIT_SOURCE_POLICY"]
+        == "/ambient/source-policy.json"
+    )
+    assert "BUILDX_LATE_OVERRIDE" not in os.environ
+
+
+def test_rehearsal_docker_config_restores_environment_after_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+    monkeypatch.delenv("DOCKER_BUILDKIT", raising=False)
+    monkeypatch.setenv("BUILDX_CONFIG", "/ambient/buildx")
+
+    with pytest.raises(RuntimeError, match="stop"):
+        with controller._isolated_docker_client_config():
+            raise RuntimeError("stop")
+
+    assert "DOCKER_CONFIG" not in os.environ
+    assert "DOCKER_BUILDKIT" not in os.environ
+    assert os.environ["BUILDX_CONFIG"] == "/ambient/buildx"
+
+
+def _write_executable(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("buildx\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_rehearsal_resolves_one_buildx_and_deduplicates_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    docker = tmp_path / "docker-prefix" / "bin" / "docker"
+    buildx = tmp_path / "docker-prefix" / "cli-plugins" / "docker-buildx"
+    alias = tmp_path / "home" / ".docker" / "cli-plugins" / "docker-buildx"
+    _write_executable(docker)
+    _write_executable(buildx)
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(buildx)
+    monkeypatch.setattr(controller.shutil, "which", lambda name: str(docker))
+    monkeypatch.setattr(
+        controller,
+        "_buildx_candidate_paths",
+        lambda _docker: (buildx, alias),
+    )
+
+    assert controller._resolve_official_buildx_executable() == buildx.resolve()
+
+
+def test_rehearsal_rejects_ambiguous_or_writable_buildx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    prefix = tmp_path / "docker-prefix"
+    docker = prefix / "bin" / "docker"
+    first = prefix / "cli-plugins" / "docker-buildx"
+    second = prefix / "lib" / "docker" / "cli-plugins" / "docker-buildx"
+    _write_executable(docker)
+    _write_executable(first)
+    _write_executable(second)
+    monkeypatch.setattr(controller.shutil, "which", lambda name: str(docker))
+    monkeypatch.setattr(
+        controller,
+        "_buildx_candidate_paths",
+        lambda _docker: (first, second),
+    )
+    with pytest.raises(SystemExit, match="exactly one"):
+        controller._resolve_official_buildx_executable()
+
+    second.unlink()
+    first.chmod(0o775)
+    with pytest.raises(SystemExit, match="trusted executable"):
+        controller._resolve_official_buildx_executable()
+
+
+def test_rehearsal_rejects_home_only_buildx_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    docker = tmp_path / "docker-prefix" / "bin" / "docker"
+    home_buildx = tmp_path / "home" / ".docker" / "docker-buildx"
+    _write_executable(docker)
+    _write_executable(home_buildx)
+    monkeypatch.setattr(controller.shutil, "which", lambda name: str(docker))
+    monkeypatch.setattr(
+        controller,
+        "_buildx_candidate_paths",
+        lambda _docker: (home_buildx,),
+    )
+
+    with pytest.raises(SystemExit, match="trusted executable"):
+        controller._resolve_official_buildx_executable()
+
+
+def _official_buildx_metadata(**overrides: str) -> str:
+    payload = {
+        "SchemaVersion": "0.1.0",
+        "Vendor": "Docker Inc.",
+        "Version": "v0.29.1",
+        "ShortDescription": "Docker Buildx",
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
+def test_rehearsal_stages_only_validated_official_buildx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    target = tmp_path / "installed" / "docker-buildx"
+    root = tmp_path / "private"
+    _write_executable(target)
+    root.mkdir(mode=0o700)
+    calls: list[tuple[list[str], bool, float | None]] = []
+    monkeypatch.setattr(
+        controller,
+        "_resolve_official_buildx_executable",
+        lambda: target.resolve(),
+    )
+
+    def run(argv, *, capture=False, timeout_seconds=None, **_kwargs):
+        calls.append((list(argv), capture, timeout_seconds))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=_official_buildx_metadata(),
+            stderr="",
+        )
+
+    monkeypatch.setattr(controller, "_run", run)
+
+    staged = controller._provision_official_buildx(root)
+
+    assert staged == root / "bin" / "docker-buildx"
+    assert staged.is_symlink()
+    assert staged.resolve() == target.resolve()
+    assert (root / "bin").stat().st_mode & 0o777 == 0o700
+    assert list((root / "bin").iterdir()) == [staged]
+    assert calls == [
+        (
+            [str(staged), "docker-cli-plugin-metadata"],
+            True,
+            controller._BUILDX_OPERATION_TIMEOUT_SECONDS,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    (
+        "not-json",
+        _official_buildx_metadata(Vendor="Untrusted"),
+        _official_buildx_metadata(SchemaVersion="0.2.0"),
+        _official_buildx_metadata(Version="not-a-version"),
+    ),
+)
+def test_rehearsal_rejects_untrusted_buildx_metadata(
+    metadata: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    target = tmp_path / "installed" / "docker-buildx"
+    root = tmp_path / "private"
+    _write_executable(target)
+    root.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        controller,
+        "_resolve_official_buildx_executable",
+        lambda: target.resolve(),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=metadata,
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="metadata"):
+        controller._provision_official_buildx(root)
+
+
+def test_rehearsal_buildx_validation_preserves_global_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    target = tmp_path / "installed" / "docker-buildx"
+    root = tmp_path / "private"
+    _write_executable(target)
+    root.mkdir(mode=0o700)
+    deadline = controller.RehearsalTimeBudgetExceeded("deadline")
+    monkeypatch.setattr(
+        controller,
+        "_resolve_official_buildx_executable",
+        lambda: target.resolve(),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(deadline),
+    )
+
+    with pytest.raises(controller.RehearsalTimeBudgetExceeded) as raised:
+        controller._provision_official_buildx(root)
+    assert raised.value is deadline
 
 
 def test_old_release_cli_spelling_is_rejected_before_rehearsal() -> None:

@@ -43,6 +43,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_REPOSITORY = "leadpoet-local-restart-rehearsal"
 _LOCAL_IMAGE_OPERATION_TIMEOUT_SECONDS = 10.0
 _REHEARSAL_BASE_PULL_TIMEOUT_SECONDS = 120.0
+_BUILDX_OPERATION_TIMEOUT_SECONDS = 10.0
+_SYSTEM_BUILDX_PATHS = (
+    Path("/usr/local/lib/docker/cli-plugins/docker-buildx"),
+    Path("/usr/local/libexec/docker/cli-plugins/docker-buildx"),
+    Path("/usr/lib/docker/cli-plugins/docker-buildx"),
+    Path("/usr/libexec/docker/cli-plugins/docker-buildx"),
+)
 REHEARSAL_LOCK_PATH = (
     Path.home()
     / ".cache"
@@ -201,9 +208,26 @@ def _exclusive_rehearsal_lock() -> Iterator[None]:
 
 @contextmanager
 def _isolated_docker_client_config() -> Iterator[Path]:
-    """Keep the exact rehearsal independent of developer Docker helpers."""
+    """Keep Docker credentials and Buildx state private to this rehearsal."""
 
-    previous = os.environ.get("DOCKER_CONFIG")
+    def managed_environment_key(name: str) -> bool:
+        return (
+            name in {
+                "DOCKER_AUTH_CONFIG",
+                "DOCKER_BUILDKIT",
+                "DOCKER_CONFIG",
+                "EXPERIMENTAL_BUILDKIT_SOURCE_POLICY",
+            }
+            or name.startswith("DOCKER_CLI_PLUGIN_")
+            or name.startswith("BUILDX_")
+            or name.startswith("BUILDKIT_")
+        )
+
+    previous = {
+        name: value
+        for name, value in os.environ.items()
+        if managed_environment_key(name)
+    }
     with tempfile.TemporaryDirectory(
         prefix="leadpoet-restart-docker-config-"
     ) as raw:
@@ -212,14 +236,143 @@ def _isolated_docker_client_config() -> Iterator[Path]:
         config = root / "config.json"
         config.write_text('{"auths":{}}\n', encoding="utf-8")
         config.chmod(0o600)
+        buildx_state = root / "buildx"
+        buildx_state.mkdir(mode=0o700)
+        for name in tuple(os.environ):
+            if managed_environment_key(name):
+                os.environ.pop(name, None)
         os.environ["DOCKER_CONFIG"] = str(root)
+        os.environ["DOCKER_BUILDKIT"] = "1"
+        os.environ["BUILDX_CONFIG"] = str(buildx_state)
         try:
             yield root
         finally:
-            if previous is None:
-                os.environ.pop("DOCKER_CONFIG", None)
-            else:
-                os.environ["DOCKER_CONFIG"] = previous
+            for name in tuple(os.environ):
+                if managed_environment_key(name):
+                    os.environ.pop(name, None)
+            os.environ.update(previous)
+
+
+def _buildx_candidate_paths(docker_executable: Path) -> tuple[Path, ...]:
+    """Return only the exact conventional buildx locations for this Docker."""
+
+    prefix = docker_executable.parent.parent
+    paths = (
+        prefix / "cli-plugins" / "docker-buildx",
+        prefix / "lib" / "docker" / "cli-plugins" / "docker-buildx",
+        prefix / "libexec" / "docker" / "cli-plugins" / "docker-buildx",
+        *_SYSTEM_BUILDX_PATHS,
+    )
+    return tuple(dict.fromkeys(paths))
+
+
+def _resolve_official_buildx_executable() -> Path:
+    """Resolve one non-writable executable buildx from the Docker install."""
+
+    docker_command = shutil.which("docker")
+    if docker_command is None:
+        raise SystemExit("Docker CLI is unavailable for the restart rehearsal")
+    try:
+        docker_executable = Path(docker_command).resolve(strict=True)
+    except OSError as exc:
+        raise SystemExit("Docker CLI path is invalid") from exc
+    docker_metadata = docker_executable.stat()
+    if (
+        not docker_executable.is_file()
+        or not os.access(docker_executable, os.X_OK)
+        or docker_metadata.st_uid not in {0, os.getuid()}
+        or docker_metadata.st_mode & 0o022
+    ):
+        raise SystemExit("Docker CLI is not a trusted executable file")
+
+    resolved_by_inode: dict[tuple[int, int], Path] = {}
+    prefix = docker_executable.parent.parent
+    for candidate in _buildx_candidate_paths(docker_executable):
+        if not os.path.lexists(candidate):
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+            metadata = resolved.stat()
+        except OSError as exc:
+            raise SystemExit("installed Docker buildx path is invalid") from exc
+        inode = (metadata.st_dev, metadata.st_ino)
+        if inode in resolved_by_inode:
+            continue
+        try:
+            candidate.relative_to(prefix)
+            resolved.relative_to(prefix)
+            coinstalled = True
+        except ValueError:
+            coinstalled = False
+        if (
+            not resolved.is_file()
+            or not os.access(resolved, os.X_OK)
+            or metadata.st_mode & 0o022
+            or (
+                coinstalled
+                and metadata.st_uid != docker_metadata.st_uid
+            )
+            or (
+                not coinstalled
+                and (
+                    candidate not in _SYSTEM_BUILDX_PATHS
+                    or metadata.st_uid != 0
+                )
+            )
+        ):
+            raise SystemExit("installed Docker buildx is not a trusted executable")
+        resolved_by_inode[inode] = resolved
+
+    if len(resolved_by_inode) != 1:
+        raise SystemExit(
+            "restart rehearsal requires exactly one installed Docker buildx"
+        )
+    return next(iter(resolved_by_inode.values()))
+
+
+def _provision_official_buildx(docker_client_root: Path) -> Path:
+    """Stage and validate exactly one official buildx inside private state."""
+
+    target = _resolve_official_buildx_executable()
+    bin_root = docker_client_root / "bin"
+    try:
+        bin_root.mkdir(mode=0o700)
+        staged = bin_root / "docker-buildx"
+        staged.symlink_to(target)
+        if staged.resolve(strict=True) != target:
+            raise RuntimeError("staged buildx target differs")
+    except OSError as exc:
+        raise SystemExit("unable to stage Docker buildx privately") from exc
+
+    try:
+        result = _run(
+            [str(staged), "docker-cli-plugin-metadata"],
+            capture=True,
+            timeout_seconds=_BUILDX_OPERATION_TIMEOUT_SECONDS,
+        )
+    except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+        raise
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise SystemExit("unable to validate installed Docker buildx") from exc
+    try:
+        metadata = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise SystemExit("installed Docker buildx metadata is malformed") from exc
+    version = metadata.get("Version") if isinstance(metadata, dict) else None
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("SchemaVersion") != "0.1.0"
+        or metadata.get("Vendor") != "Docker Inc."
+        or metadata.get("ShortDescription") != "Docker Buildx"
+        or not isinstance(version, str)
+        or re.fullmatch(
+            r"v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+._][0-9A-Za-z.-]+)*",
+            version,
+        )
+        is None
+    ):
+        raise SystemExit("installed Docker buildx metadata is untrusted")
+    return staged
 
 
 _WORKER_PROCESS_STATE = threading.local()
@@ -856,6 +1009,7 @@ def _build_image(
     *,
     harness_sha: str,
     docker_platform: str,
+    docker_client_root: Path,
     wheelhouse_shas: Sequence[str],
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="leadpoet-restart-image-") as raw:
@@ -914,11 +1068,16 @@ def _build_image(
             destination = harness / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(_git_file(harness_sha, path))
+        buildx = _provision_official_buildx(docker_client_root)
         base_image = _prepare_local_rehearsal_base_image(docker_platform)
         _run(
             [
-                "docker",
+                str(buildx),
                 "build",
+                "--builder",
+                "default",
+                "--load",
+                "--progress=plain",
                 "--pull=false",
                 "--platform",
                 docker_platform,
@@ -2180,11 +2339,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("--production-allocation must be a readable file")
     args.profile = _runtime_profile(args.profile)
 
-    with _exclusive_rehearsal_lock(), _isolated_docker_client_config():
+    with (
+        _exclusive_rehearsal_lock(),
+        _isolated_docker_client_config() as docker_client_root,
+    ):
         target_seconds = PROFILE_LIMITS[args.profile]["target_seconds"]
         try:
             with _profile_time_limit(target_seconds):
-                return _run_profile(args)
+                return _run_profile(
+                    args,
+                    docker_client_root=docker_client_root,
+                )
         except RehearsalTimeBudgetExceeded as exc:
             print(
                 "REHEARSAL_TIME_BUDGET_EXCEEDED "
@@ -2195,7 +2360,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
 
 
-def _run_profile(args: argparse.Namespace) -> int:
+def _run_profile(
+    args: argparse.Namespace,
+    *,
+    docker_client_root: Path,
+) -> int:
     profile_started = time.monotonic()
     target_seconds = PROFILE_LIMITS[args.profile]["target_seconds"]
     print(
@@ -2233,6 +2402,7 @@ def _run_profile(args: argparse.Namespace) -> int:
             tag,
             harness_sha=harness_sha,
             docker_platform=docker_platform,
+            docker_client_root=docker_client_root,
             wheelhouse_shas=wheelhouse_shas,
         )
     if args.profile != "prepush" and image_build_required:

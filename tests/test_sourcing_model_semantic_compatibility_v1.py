@@ -2056,7 +2056,7 @@ def test_signed_legacy_profiles_and_manifest_identities_are_exact(
     assert sum(
         len(value["release_identities"])
         for value in compatibility.reviewed_consumer_snapshots().values()
-    ) == 12
+    ) == 13
     release = snapshot["release_identities"][0]
     assert compatibility._reviewed_consumer_snapshot_for_source_hash(
         legacy_root,

@@ -8,7 +8,10 @@ GATEWAY_HOST="${LEADPOET_GATEWAY_SSH_HOST:-ec2-user@52.91.135.79}"
 VALIDATOR_HOST="${LEADPOET_VALIDATOR_SSH_HOST:-ec2-user@100.59.201.156}"
 GATEWAY_RESTART="${LEADPOET_GATEWAY_RESTART_PATH:-/home/ec2-user/gw_restart.sh}"
 VALIDATOR_RESTART="${LEADPOET_VALIDATOR_RESTART_PATH:-/home/ec2-user/validator_restart.sh}"
+GATEWAY_REPO_ROOT="${LEADPOET_GATEWAY_REPO_ROOT:-/home/ec2-user/leadpoet_repo}"
+GATEWAY_PYTHON_BIN="${LEADPOET_GATEWAY_PYTHON_BIN:-/home/ec2-user/venv311/bin/python3}"
 VALIDATOR_REPO_ROOT="${LEADPOET_VALIDATOR_REPO_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
+GATEWAY_DEPLOY_READINESS_PATH="${LEADPOET_GATEWAY_DEPLOY_READINESS_PATH:-/home/ec2-user/gateway/deploy_readiness.json}"
 GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-}"
 VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-}"
 RELEASE_PREFIX="${LEADPOET_RELEASE_PREFIX:-attested-v2/releases}"
@@ -25,6 +28,12 @@ validator_job=""
 failure_marker_job=""
 temporary_root=""
 coordination_file=""
+gateway_observation=""
+gateway_evidence=""
+validator_observation=""
+validator_evidence=""
+transition_manifest=""
+final_manifest=""
 
 usage() {
   cat <<'EOF'
@@ -160,6 +169,15 @@ for secret_id in "$GATEWAY_ENV_SECRET_ID" "$VALIDATOR_ENV_SECRET_ID"; do
     exit 2
   fi
 done
+for remote_path in \
+  "$GATEWAY_REPO_ROOT" \
+  "$GATEWAY_PYTHON_BIN" \
+  "$GATEWAY_DEPLOY_READINESS_PATH"; do
+  if ! [[ "$remote_path" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    echo "ERROR: readiness authority path contains unsupported characters" >&2
+    exit 2
+  fi
+done
 case "$RELEASE_PREFIX" in
   attested-v2/releases|attested-v2/candidates) ;;
   *)
@@ -170,6 +188,12 @@ esac
 
 temporary_root="$(mktemp -d /tmp/leadpoet-attested-restart.XXXXXX)"
 helper="$temporary_root/exact_commit_restart_v2.py"
+gateway_observation="$temporary_root/gateway-readiness-observation.json"
+gateway_evidence="$temporary_root/gateway-readiness-evidence.json"
+validator_observation="$temporary_root/validator-readiness-observation.json"
+validator_evidence="$temporary_root/validator-readiness-evidence.json"
+transition_manifest="$temporary_root/deploy-readiness-transition.json"
+final_manifest="$temporary_root/deploy-readiness-v2.json"
 
 echo "Fetching current public V2 compatibility authority"
 git -C "$ROOT" fetch origin main
@@ -191,6 +215,78 @@ ssh_common=(
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=20
 )
+
+install_gateway_readiness_manifest() {
+  local action="$1"
+  local source="$2"
+  local payload=""
+  case "$action" in
+    readiness-transition|readiness-final) ;;
+    *)
+      echo "ERROR: unsupported deploy readiness install action" >&2
+      return 2
+      ;;
+  esac
+  payload="$(base64 < "$source" | tr -d '\n')"
+  ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "python3 - '$GATEWAY_DEPLOY_READINESS_PATH' '$payload' '$action' <<'PY'
+import base64
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+destination = Path(sys.argv[1])
+document = json.loads(base64.b64decode(sys.argv[2], validate=True))
+action = sys.argv[3]
+if action not in {'readiness-transition', 'readiness-final'}:
+    raise SystemExit('deploy readiness install action is invalid')
+if not isinstance(document, dict) or document.get('enforce_resume_block') is not True:
+    raise SystemExit('deploy readiness payload is not fail closed')
+if action == 'readiness-transition' and document.get('ok') is not False:
+    raise SystemExit('deploy readiness transition payload is invalid')
+if action == 'readiness-final' and (
+    document.get('schema_version') != 'leadpoet.deploy_readiness.v2'
+    or document.get('ok') is not True
+):
+    raise SystemExit('deploy readiness final payload is invalid')
+destination.parent.mkdir(parents=True, exist_ok=True)
+descriptor, temporary_name = tempfile.mkstemp(
+    prefix='.' + destination.name + '.',
+    dir=str(destination.parent),
+)
+temporary = Path(temporary_name)
+try:
+    with os.fdopen(descriptor, 'wb') as handle:
+        handle.write(
+            (json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n').encode('ascii')
+        )
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+finally:
+    temporary.unlink(missing_ok=True)
+PY"
+}
+
+invalidate_deploy_readiness() {
+  PYTHONPATH="$ROOT" python3 - "$commit" "$transition_manifest" <<'PY'
+import sys
+from gateway.deploy_readiness import (
+    build_deploy_readiness_transition_marker,
+    write_deploy_readiness_manifest,
+)
+
+write_deploy_readiness_manifest(
+    build_deploy_readiness_transition_marker(expected_commit=sys.argv[1]),
+    sys.argv[2],
+)
+PY
+  install_gateway_readiness_manifest readiness-transition "$transition_manifest"
+  echo "Installed fail-closed deploy readiness transition marker for $commit"
+}
 
 coordination_remote_command() {
   local value="$1"
@@ -296,13 +392,19 @@ run_validator_restart() {
 }
 
 verify_gateway_release() {
+  local output="$1"
   ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
-    "python3 - '$commit' <<'PY'
+    "cd '$GATEWAY_REPO_ROOT' && PYTHONPATH='$GATEWAY_REPO_ROOT' \
+      '$GATEWAY_PYTHON_BIN' - '$commit' <<'PY'
+import asyncio
 import json
+import os
+from pathlib import Path
 import sys
 import urllib.request
 
 expected = sys.argv[1]
+# gateway_exact_release_ready: retained as the operator/fault-injection probe label.
 
 def get(path):
     with urllib.request.urlopen(
@@ -317,6 +419,7 @@ def get(path):
 health = get('/health/v2-authority')
 build = get('/build-info')
 release = get('/weights/v2/release-evidence/' + expected)
+attestation = get('/attest')
 if health.get('status') != 'ready':
     raise SystemExit('gateway V2 authority is not ready')
 if str(health.get('commit_sha') or '').lower() != expected:
@@ -327,21 +430,201 @@ if release.get('schema_version') != 'leadpoet.auditor_release_evidence.v2':
     raise SystemExit('gateway release evidence schema differs')
 if str(release.get('commit_sha') or '').lower() != expected:
     raise SystemExit('gateway release evidence commit differs')
-print(json.dumps({
-    'commit_sha': expected,
-    'status': 'gateway_exact_release_ready',
-}, sort_keys=True))
-PY"
+if (
+    not isinstance(health.get('enclaves'), dict)
+    or health['enclaves'].get('status') != 'ready'
+):
+    raise SystemExit('gateway authority endpoint lacks ready enclave evidence')
+
+from gateway.deploy_readiness import read_source_commit
+from gateway.tee.provider_broker_v2 import (
+    measured_retry_policy_hashes,
+    provider_registry_hash,
+)
+from gateway.tee.topology import ROLE_SPECS
+from gateway.tee.release_channel_v2 import fetch_release_channel_v2
+from gateway.tee.verify_v2_runtime_ready import verify_v2_runtime_ready
+from gateway.research_lab.provider_profiles_v2 import (
+    verify_required_worker_proxy_profiles_v2,
+)
+from gateway.tee.research_lab_runtime_config_v2 import (
+    build_research_lab_execution_config,
+)
+from gateway.utils.tee_client import TEEClient
+from gateway.utils.tee_kms_provision_v2 import (
+    load_provider_envelopes,
+    provider_reference_hashes_from_envelopes,
+)
+from gateway.utils.tee_v2_bootstrap import runtime_configuration_documents
+
+processes = []
+for candidate in Path('/proc').iterdir():
+    if not candidate.name.isdigit():
+        continue
+    try:
+        command = candidate.joinpath('cmdline').read_bytes().split(b'\\0')
+    except OSError:
+        continue
+    if b'-m' in command and b'gateway.main' in command:
+        processes.append(candidate)
+if len(processes) != 1:
+    raise SystemExit('exactly one gateway.main process is required')
+runtime_environment = {}
+for item in processes[0].joinpath('environ').read_bytes().split(b'\\0'):
+    if b'=' not in item:
+        continue
+    name, value = item.split(b'=', 1)
+    runtime_environment[name.decode('utf-8')] = value.decode('utf-8')
+os.environ.clear()
+os.environ.update(runtime_environment)
+
+config_dir = Path(
+    runtime_environment.get('GATEWAY_V2_CONFIG_DIR')
+    or '/home/ec2-user/.config/leadpoet/v2'
+)
+gateway_release_path = Path(
+    runtime_environment.get('GATEWAY_V2_RELEASE_MANIFEST')
+    or '/home/ec2-user/tee/gateway-v2-release-manifest.json'
+)
+lineage_path = Path(
+    runtime_environment.get('GATEWAY_V2_RELEASE_LINEAGE')
+    or '/home/ec2-user/tee/gateway-v2-release-lineage.json'
+)
+artifact_policy_path = Path(
+    runtime_environment.get('GATEWAY_V2_ARTIFACT_POLICY')
+    or config_dir / 'encrypted-artifact-policy.json'
+)
+gateway_root = Path(
+    runtime_environment.get('GATEWAY_ROOT')
+    or '$GATEWAY_REPO_ROOT/gateway'
+)
+gateway_release = json.loads(gateway_release_path.read_text(encoding='utf-8'))
+lineage = json.loads(lineage_path.read_text(encoding='utf-8'))
+channel = fetch_release_channel_v2(
+    bucket=(
+        runtime_environment.get('GATEWAY_V2_RELEASE_BUCKET')
+        or 'leadpoet-attested-v2-artifacts-493765492819'
+    ),
+    commit_sha=expected,
+    prefix=(
+        runtime_environment.get('GATEWAY_V2_RELEASE_PREFIX')
+        or 'attested-v2/releases'
+    ),
+)
+if gateway_release != channel['gateway_release_manifest']:
+    raise SystemExit('active gateway release differs from immutable channel')
+validator_release = channel['validator_release_manifest']
+envelopes = load_provider_envelopes([
+    config_dir / name
+    for name in (
+        'artifact_master_key.json',
+        'openrouter.json',
+        'exa.json',
+        'scrapingdog.json',
+        'deepline.json',
+        'supabase_service_role.json',
+        'truelist.json',
+    )
+])
+artifact_envelopes = [
+    item for item in envelopes
+    if item.get('credential_slot') == 'artifact_master_key'
+]
+if len(artifact_envelopes) != 1:
+    raise SystemExit('gateway artifact master-key envelope is not unique')
+protected = json.loads(
+    (gateway_root / '_attested_runtime/protected_workflows.json').read_text(
+        encoding='utf-8'
+    )
+)
+protected_hash = str(protected.get('manifest_hash') or '').lower()
+profiles = verify_required_worker_proxy_profiles_v2(config_dir=config_dir)
+execution_config = build_research_lab_execution_config(
+    environment=runtime_environment
+)
+documents = runtime_configuration_documents(
+    release_manifest=gateway_release,
+    gateway_release_lineage=lineage,
+    provider_ref_hashes=provider_reference_hashes_from_envelopes(envelopes),
+    provider_retry_policy_hashes=measured_retry_policy_hashes(protected_hash),
+    provider_registry_hash=provider_registry_hash(
+        execution_config=execution_config
+    ),
+    protected_workflow_manifest_hash=protected_hash,
+    encrypted_artifact_policy=json.loads(
+        artifact_policy_path.read_text(encoding='utf-8')
+    ),
+    artifact_master_key_ref_hash=str(
+        artifact_envelopes[0]['credential_ref_hash']
+    ),
+    research_lab_execution_config=execution_config,
+    configured_worker_counts=profiles['worker_counts'],
+)
+
+async def collect_runtime():
+    clients = {
+        role: TEEClient(cid=int(spec['cid']))
+        for role, spec in ROLE_SPECS.items()
+    }
+    readiness = await verify_v2_runtime_ready(clients)
+    boots = {}
+    for role in sorted(ROLE_SPECS):
+        boots[role] = await clients[role].v2_get_boot_identity()
+    return readiness, boots
+
+runtime_readiness, boots = asyncio.run(collect_runtime())
+source_commit, _ = read_source_commit()
+observation = {
+    'schema_version': 'leadpoet.gateway_deploy_readiness_observation.v2',
+    'source_commit': source_commit,
+    'build_commit': build.get('git_commit'),
+    'gateway_release_manifest': gateway_release,
+    'validator_release_manifest': validator_release,
+    'compact_lineage': lineage,
+    'boot_identities': boots,
+    'expected_role_config_hashes': {
+        role: documents[role]['configuration_hash']
+        for role in sorted(documents)
+    },
+    'runtime_readiness': runtime_readiness,
+    'coordinator_attestation_pcr0': attestation.get('pcr0'),
+}
+print(json.dumps(observation, sort_keys=True, separators=(',', ':')))
+PY" > "$gateway_observation"
+  PYTHONPATH="$ROOT" python3 - "$commit" "$gateway_observation" "$output" <<'PY'
+import json
+from pathlib import Path
+import sys
+from gateway.deploy_readiness import (
+    build_gateway_v2_readiness_evidence_from_observation,
+)
+
+observation = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+evidence = build_gateway_v2_readiness_evidence_from_observation(
+    expected_commit=sys.argv[1],
+    observation=observation,
+)
+Path(sys.argv[3]).write_text(
+    json.dumps(evidence, sort_keys=True, separators=(',', ':')) + '\n',
+    encoding='ascii',
+)
+PY
+  echo "Verified fresh Nitro identity and runtime configuration for all gateway roles"
 }
 
 verify_validator_release() {
+  local output="$1"
   ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
-    "python3 - '$commit' <<'PY'
+    "cd '$VALIDATOR_REPO_ROOT' && PYTHONPATH='$VALIDATOR_REPO_ROOT' \
+      python3 - '$commit' <<'PY'
 import json
+import os
+from pathlib import Path
 import subprocess
 import sys
 
 expected = sys.argv[1]
+# validator_exact_release_ready: retained as the operator/fault-injection probe label.
 running = subprocess.check_output(
     ['docker', 'inspect', '-f', '{{.State.Running}}', 'leadpoet-validator-main'],
     text=True,
@@ -371,11 +654,116 @@ if values.get('VALIDATOR_V2_DEPLOY_COMMIT') != expected:
     raise SystemExit('validator coordinator commit differs')
 if values.get('VALIDATOR_WEIGHT_PROTOCOL') != 'authoritative_v2':
     raise SystemExit('validator coordinator is not authoritative V2')
-print(json.dumps({
-    'commit_sha': expected,
-    'status': 'validator_exact_release_ready',
-}, sort_keys=True))
-PY"
+
+from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+from leadpoet_canonical.attested_v2 import sha256_json
+from validator_tee.host.runtime_v2_bootstrap import build_runtime_configuration
+from validator_tee.host.vsock_client import ValidatorEnclaveClient
+
+host_commit = subprocess.check_output(
+    ['git', '-C', '$VALIDATOR_REPO_ROOT', 'rev-parse', 'HEAD'],
+    text=True,
+).strip().lower()
+runtime_environment = dict(os.environ)
+runtime_environment.update(values)
+os.environ.clear()
+os.environ.update(runtime_environment)
+gateway_release = json.loads(
+    Path('/home/ec2-user/.config/leadpoet/gateway-v2-release-manifest.json').read_text(
+        encoding='utf-8'
+    )
+)
+validator_release = json.loads(
+    Path('/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json').read_text(
+        encoding='utf-8'
+    )
+)
+lineage = json.loads(
+    Path('/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json').read_text(
+        encoding='utf-8'
+    )
+)
+hotkey_config = json.loads(
+    Path('/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json').read_text(
+        encoding='utf-8'
+    )
+)
+configuration = build_runtime_configuration(
+    validator_release=validator_release,
+    gateway_release=gateway_release,
+    gateway_release_lineage=lineage,
+    hotkey_authority_config=hotkey_config,
+)
+client = ValidatorEnclaveClient()
+enclave_health = client.health_check()
+if (
+    enclave_health.get('status') != 'ok'
+    or enclave_health.get('authoritative_v2_configured') is not True
+    or enclave_health.get('hotkey_authority_v2_configured') is not True
+):
+    raise SystemExit('validator enclave authority is not fully ready')
+boot = client.get_authoritative_v2_boot_identity()
+observation = {
+    'schema_version': 'leadpoet.validator_deploy_readiness_observation.v2',
+    'host_commit': host_commit,
+    'gateway_release_manifest': gateway_release,
+    'validator_release_manifest': validator_release,
+    'compact_lineage': lineage,
+    'boot_identity': boot,
+    'expected_config_hash': sha256_json(configuration),
+}
+print(json.dumps(observation, sort_keys=True, separators=(',', ':')))
+PY" > "$validator_observation"
+  PYTHONPATH="$ROOT" python3 - "$commit" "$validator_observation" "$output" <<'PY'
+import json
+from pathlib import Path
+import sys
+from gateway.deploy_readiness import (
+    build_validator_v2_readiness_evidence_from_observation,
+)
+
+observation = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+evidence = build_validator_v2_readiness_evidence_from_observation(
+    expected_commit=sys.argv[1],
+    observation=observation,
+)
+Path(sys.argv[3]).write_text(
+    json.dumps(evidence, sort_keys=True, separators=(',', ':')) + '\n',
+    encoding='ascii',
+)
+PY
+  echo "Verified fresh Nitro identity and runtime configuration for validator_weights"
+}
+
+finalize_deploy_readiness() {
+  PYTHONPATH="$ROOT" python3 - \
+    "$commit" "$gateway_evidence" "$validator_evidence" "$final_manifest" <<'PY'
+import json
+from pathlib import Path
+import sys
+from gateway.deploy_readiness import (
+    build_v2_deploy_readiness_manifest,
+    validate_v2_deploy_readiness_manifest,
+    write_deploy_readiness_manifest,
+)
+
+commit = sys.argv[1]
+gateway = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+validator = json.loads(Path(sys.argv[3]).read_text(encoding='utf-8'))
+manifest = build_v2_deploy_readiness_manifest(
+    expected_commit=commit,
+    gateway_evidence=gateway,
+    validator_evidence=validator,
+)
+validate_v2_deploy_readiness_manifest(
+    manifest,
+    runtime_source_commit=commit,
+    runtime_build_commit=commit,
+)
+write_deploy_readiness_manifest(manifest, sys.argv[4])
+PY
+  install_gateway_readiness_manifest readiness-final "$final_manifest"
+  echo "Installed schema-v2 deploy readiness authority for $commit"
 }
 
 case "$component" in
@@ -385,7 +773,8 @@ case "$component" in
       echo "ERROR: validator is on $observed_validator, not $commit; use --component all" >&2
       exit 1
     fi
-    verify_validator_release
+    verify_validator_release "$validator_evidence"
+    invalidate_deploy_readiness
     run_gateway_restart
     ;;
   validator)
@@ -394,7 +783,8 @@ case "$component" in
       echo "ERROR: gateway is on $observed_gateway, not $commit; use --component all" >&2
       exit 1
     fi
-    verify_gateway_release
+    verify_gateway_release "$gateway_evidence"
+    invalidate_deploy_readiness
     run_validator_restart
     ;;
   all)
@@ -402,6 +792,7 @@ case "$component" in
     coordination_file="/tmp/leadpoet-coordinated-restart.$(basename "$temporary_root").ready"
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
       "rm -f -- '$coordination_file'"
+    invalidate_deploy_readiness
     echo "Starting validator preparation in parallel with the paired gateway restart"
     (
       VALIDATOR_RESTART_EXEC_SSH=1 run_validator_restart
@@ -436,6 +827,7 @@ case "$component" in
     ;;
 esac
 
-verify_gateway_release
-verify_validator_release
+verify_gateway_release "$gateway_evidence"
+verify_validator_release "$validator_evidence"
+finalize_deploy_readiness
 echo "SUCCESS: gateway and validator are aligned on attested release $commit"

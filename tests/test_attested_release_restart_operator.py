@@ -1,13 +1,99 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 
+import pytest
+
+from gateway.tee.release_channel_v2 import (
+    build_release_channel_v2,
+    build_release_lineage_v2,
+)
+from gateway.tee.topology import ROLE_SPECS
+from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "restart_attested_release_local.sh"
+
+
+def _fake_readiness_observations(tmp_path: Path, commit: str) -> tuple[Path, Path]:
+    gateway_release = _gateway_manifest(commit)
+    validator_release = _validator_manifest(commit)
+    channel = build_release_channel_v2(
+        gateway_release_manifest=gateway_release,
+        validator_release_manifest=validator_release,
+    )
+    lineage = build_release_lineage_v2([channel], current_commit=commit)
+    expectations = lineage["releases"][commit]["roles"]
+
+    def boot(role: str, character: str) -> dict:
+        expectation = expectations[role]
+        return {
+            "role": role,
+            "physical_role": role,
+            "commit_sha": commit,
+            "pcr0": expectation["pcr0"],
+            "build_manifest_hash": expectation["build_manifest_hash"],
+            "dependency_lock_hash": expectation["dependency_lock_hash"],
+            "config_hash": "sha256:" + character * 64,
+            "boot_identity_hash": "sha256:" + character * 64,
+        }
+
+    gateway_boots = {
+        role: boot(role, character)
+        for role, character in zip(sorted(ROLE_SPECS), "567", strict=True)
+    }
+    validator_boot = boot("validator_weights", "8")
+    gateway_observation = {
+        "schema_version": "leadpoet.gateway_deploy_readiness_observation.v2",
+        "source_commit": commit,
+        "build_commit": commit,
+        "gateway_release_manifest": gateway_release,
+        "validator_release_manifest": validator_release,
+        "compact_lineage": lineage,
+        "boot_identities": gateway_boots,
+        "expected_role_config_hashes": {
+            role: value["config_hash"] for role, value in gateway_boots.items()
+        },
+        "runtime_readiness": {
+            "schema_version": "leadpoet.gateway_v2_runtime_readiness.v2",
+            "status": "ready",
+            "provider_registry_hash": "sha256:" + "9" * 64,
+            "roles": [
+                {
+                    "physical_role": role,
+                    "role": ROLE_SPECS[role]["service_role"],
+                    "worker_count": 1,
+                    "configured_worker_count": 1,
+                    "boot_identity_hash": gateway_boots[role][
+                        "boot_identity_hash"
+                    ],
+                }
+                for role in sorted(ROLE_SPECS)
+            ],
+        },
+        "coordinator_attestation_pcr0": gateway_boots[
+            "gateway_coordinator"
+        ]["pcr0"],
+    }
+    validator_observation = {
+        "schema_version": "leadpoet.validator_deploy_readiness_observation.v2",
+        "host_commit": commit,
+        "gateway_release_manifest": gateway_release,
+        "validator_release_manifest": validator_release,
+        "compact_lineage": lineage,
+        "boot_identity": validator_boot,
+        "expected_config_hash": validator_boot["config_hash"],
+    }
+    gateway_path = tmp_path / "gateway-observation.json"
+    validator_path = tmp_path / "validator-observation.json"
+    gateway_path.write_text(json.dumps(gateway_observation), encoding="utf-8")
+    validator_path.write_text(json.dumps(validator_observation), encoding="utf-8")
+    return gateway_path, validator_path
 
 
 def test_attested_release_restart_operator_is_fail_closed() -> None:
@@ -35,8 +121,22 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert "validator_restart.sh" in source
     assert "gateway_exact_release_ready" in source
     assert "validator_exact_release_ready" in source
+    assert "readiness-transition" in source
+    assert "readiness-final" in source
+    assert "leadpoet.deploy_readiness.v2" in source
     assert "/health/v2-authority" in source
+    assert "attestation = get('/attest')" in source
     assert "/weights/v2/release-evidence/" in source
+    assert "verify_v2_runtime_ready(clients)" in source
+    assert "processes[0].joinpath('environ')" in source
+    assert "build_research_lab_execution_config(" in source
+    assert "environment=runtime_environment" in source
+    assert "provider_reference_hashes_from_envelopes(envelopes)" in source
+    assert "verify_required_worker_proxy_profiles_v2(config_dir=config_dir)" in source
+    assert "runtime_configuration_documents(" in source
+    assert "build_runtime_configuration(" in source
+    assert "client.health_check()" in source
+    assert "expected_config_hash': sha256_json(configuration)" in source
     assert "VALIDATOR_V2_DEPLOY_COMMIT" in source
     assert "VALIDATOR_WEIGHT_PROTOCOL" in source
     assert "use --component all" in source
@@ -97,9 +197,19 @@ def _fake_operator_commands(tmp_path: Path, commit: str) -> tuple[Path, Path]:
     barrier = tmp_path / "barrier"
     gateway_started = tmp_path / "gateway-started"
     gateway_complete = tmp_path / "gateway-complete"
+    gateway_observation, validator_observation = _fake_readiness_observations(
+        tmp_path, commit
+    )
+    (tmp_path / "sitecustomize.py").write_text(
+        "from leadpoet_canonical import attested_v2\n"
+        "attested_v2.verify_boot_identity_nitro = lambda *args, **kwargs: {}\n",
+        encoding="utf-8",
+    )
 
     real_git = shutil.which("git")
+    real_python = shutil.which("python3")
     assert real_git
+    assert real_python
     git = bin_dir / "git"
     git.write_text(
         f"""#!/bin/bash
@@ -127,6 +237,12 @@ record() {
   printf '%s\\n' "$1" >> "$FAKE_OPERATOR_EVENTS"
 }
 case "$command" in
+  *"'readiness-transition' <<'PY'"*)
+    record readiness_invalidated
+    ;;
+  *"'readiness-final' <<'PY'"*)
+    record readiness_finalized
+    ;;
   *validator_restart.sh*)
     bash -n -c "$command"
     record validator_command_syntax
@@ -207,12 +323,14 @@ case "$command" in
     if [ "${FAKE_GATEWAY_VERIFY_FAIL:-0}" = "1" ]; then
       exit 74
     fi
+    cat "$FAKE_GATEWAY_OBSERVATION"
     ;;
   *validator_exact_release_ready*)
     record validator_verified
     if [ "${FAKE_VALIDATOR_VERIFY_FAIL:-0}" = "1" ]; then
       exit 75
     fi
+    cat "$FAKE_VALIDATOR_OBSERVATION"
     ;;
   *"docker inspect"*VALIDATOR_V2_DEPLOY_COMMIT*)
     printf '%s\\n' "$FAKE_VALIDATOR_COMMIT"
@@ -237,6 +355,16 @@ esac
     )
     git.chmod(0o755)
     ssh.chmod(0o755)
+    python = bin_dir / "python3"
+    python.write_text(
+        f"""#!/bin/bash
+set -euo pipefail
+export PYTHONPATH="$FAKE_OPERATOR_SITE_ROOT${{PYTHONPATH:+:$PYTHONPATH}}"
+exec {real_python} "$@"
+""",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
 
     for name in ("gateway.pem", "validator.pem"):
         path = tmp_path / name
@@ -254,6 +382,9 @@ esac
                 f"FAKE_OPERATOR_GATEWAY_COMPLETE={gateway_complete}",
                 f"FAKE_GATEWAY_COMMIT={commit}",
                 f"FAKE_VALIDATOR_COMMIT={commit}",
+                f"FAKE_GATEWAY_OBSERVATION={gateway_observation}",
+                f"FAKE_VALIDATOR_OBSERVATION={validator_observation}",
+                f"FAKE_OPERATOR_SITE_ROOT={tmp_path}",
             )
         )
         + "\n",
@@ -272,6 +403,15 @@ def _operator_env(tmp_path: Path, bin_dir: Path, commit: str) -> dict[str, str]:
         "FAKE_VALIDATOR_COMMIT": commit,
         "FAKE_OPERATOR_EXACT_HELPER": str(
             ROOT / "Leadpoet" / "utils" / "exact_commit_restart_v2.py"
+        ),
+        "PYTHONPATH": os.pathsep.join(
+            value
+            for value in (
+                str(tmp_path),
+                str(ROOT),
+                os.environ.get("PYTHONPATH", ""),
+            )
+            if value
         ),
     }
     for line in (tmp_path / "operator-env").read_text(encoding="utf-8").splitlines():
@@ -301,6 +441,7 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     assert result.returncode == 0, result.stderr
     observed = events.read_text(encoding="utf-8").splitlines()
     required = [
+        "readiness_invalidated",
         "validator_forward_handoff",
         "validator_command_syntax",
         "validator_prepare_started",
@@ -313,10 +454,12 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
         "validator_complete",
         "gateway_verified",
         "validator_verified",
+        "readiness_finalized",
     ]
     positions = {event: observed.index(event) for event in required}
     assert (
-        positions["validator_prepare_started"]
+        positions["readiness_invalidated"]
+        < positions["validator_prepare_started"]
         < positions["validator_captured"]
         < positions["gateway_start"]
         < positions["validator_image_prepared"]
@@ -329,6 +472,7 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
         < positions["validator_complete"]
         < positions["gateway_verified"]
         < positions["validator_verified"]
+        < positions["readiness_finalized"]
     )
     assert "barrier_before_gateway" not in observed
     assert "validator_exact_commit_handoff" not in observed
@@ -366,6 +510,7 @@ def test_gateway_only_operator_rejects_mismatched_validator(
     assert "use --component all" in result.stderr
     observed = events.read_text(encoding="utf-8").splitlines()
     assert "validator_active_probe" in observed
+    assert "readiness_invalidated" not in observed
     assert "gateway_start" not in observed
 
 
@@ -399,6 +544,7 @@ def test_gateway_only_operator_requires_healthy_matching_validator(
     required = [
         "validator_active_probe",
         "validator_verified",
+        "readiness_invalidated",
         "gateway_start",
         "gateway_complete",
         "gateway_verified",
@@ -406,6 +552,15 @@ def test_gateway_only_operator_requires_healthy_matching_validator(
     positions = [observed.index(event) for event in required]
     assert positions == sorted(positions)
     assert observed.count("validator_verified") == 2
+    assert observed.index("readiness_invalidated") < observed.index("gateway_start")
+    assert observed.index("validator_verified") < observed.index(
+        "readiness_invalidated"
+    )
+    assert len(observed) - 1 - observed[::-1].index(
+        "validator_verified"
+    ) < observed.index(
+        "readiness_finalized"
+    )
 
 
 def test_gateway_only_operator_rejects_unhealthy_matching_validator(
@@ -438,6 +593,7 @@ def test_gateway_only_operator_rejects_unhealthy_matching_validator(
     assert result.returncode == 75
     observed = events.read_text(encoding="utf-8").splitlines()
     assert "validator_verified" in observed
+    assert "readiness_invalidated" not in observed
     assert "gateway_start" not in observed
 
 
@@ -472,6 +628,7 @@ def test_validator_only_operator_rejects_mismatched_gateway(
     assert "use --component all" in result.stderr
     observed = events.read_text(encoding="utf-8").splitlines()
     assert "gateway_active_probe" in observed
+    assert "readiness_invalidated" not in observed
     assert "validator_start" not in observed
 
 
@@ -505,6 +662,7 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
     required = [
         "gateway_active_probe",
         "gateway_verified",
+        "readiness_invalidated",
         "validator_start",
         "validator_complete",
         "validator_verified",
@@ -512,6 +670,17 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
     positions = [observed.index(event) for event in required]
     assert positions == sorted(positions)
     assert observed.count("gateway_verified") == 2
+    assert observed.index("gateway_verified") < observed.index(
+        "readiness_invalidated"
+    )
+    assert observed.index("readiness_invalidated") < observed.index(
+        "validator_start"
+    )
+    assert len(observed) - 1 - observed[::-1].index(
+        "gateway_verified"
+    ) < observed.index(
+        "readiness_finalized"
+    )
 
 
 def test_validator_only_operator_rejects_unhealthy_matching_gateway(
@@ -544,6 +713,7 @@ def test_validator_only_operator_rejects_unhealthy_matching_gateway(
     assert result.returncode == 74
     observed = events.read_text(encoding="utf-8").splitlines()
     assert "gateway_verified" in observed
+    assert "readiness_invalidated" not in observed
     assert "validator_start" not in observed
 
 
@@ -571,6 +741,7 @@ def test_paired_operator_failure_marker_cleans_prepared_validator(
     assert result.returncode == 73
     observed = events.read_text(encoding="utf-8").splitlines()
     required = [
+        "readiness_invalidated",
         "validator_forward_handoff",
         "validator_prepare_started",
         "validator_captured",
@@ -595,4 +766,42 @@ def test_paired_operator_failure_marker_cleans_prepared_validator(
     assert "validator_complete" not in observed
     assert "gateway_verified" not in observed
     assert "validator_verified" not in observed
+    assert "readiness_finalized" not in observed
     assert "barrier_cleanup" in observed
+
+
+@pytest.mark.parametrize(
+    ("failure_flag", "failed_event"),
+    [
+        ("FAKE_GATEWAY_VERIFY_FAIL", "gateway_verified"),
+        ("FAKE_VALIDATOR_VERIFY_FAIL", "validator_verified"),
+    ],
+)
+def test_paired_operator_final_probe_failure_leaves_resume_blocked(
+    tmp_path: Path,
+    failure_flag: str,
+    failed_event: str,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment[failure_flag] = "1"
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--commit", commit],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode in {74, 75}
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "readiness_invalidated" in observed
+    assert failed_event in observed
+    assert "readiness_finalized" not in observed
+    assert "SUCCESS: gateway and validator are aligned" not in result.stdout

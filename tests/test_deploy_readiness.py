@@ -272,7 +272,7 @@ def _v2_host_evidence(commit: str) -> tuple[dict, dict]:
     current_roles = lineage["releases"][commit]["roles"]
     gateway_boots = {
         role: _boot(role, current_roles[role], character)
-        for role, character in zip(sorted(ROLE_SPECS), "567", strict=True)
+        for role, character in zip(sorted(ROLE_SPECS), "567")
     }
     validator_boot = _boot(
         "validator_weights",
@@ -440,7 +440,7 @@ def test_gateway_evidence_rejects_self_consistent_lineage_not_bound_to_channel()
     roles = lineage["releases"][commit]["roles"]
     gateway_boots = {
         role: _boot(role, roles[role], character)
-        for role, character in zip(sorted(ROLE_SPECS), "567", strict=True)
+        for role, character in zip(sorted(ROLE_SPECS), "567")
     }
 
     with pytest.raises(RuntimeError, match="differs from release channel"):
@@ -470,7 +470,7 @@ def test_gateway_evidence_rejects_runtime_health_boot_identity_drift() -> None:
     roles = lineage["releases"][commit]["roles"]
     gateway_boots = {
         role: _boot(role, roles[role], character)
-        for role, character in zip(sorted(ROLE_SPECS), "567", strict=True)
+        for role, character in zip(sorted(ROLE_SPECS), "567")
     }
     health = _runtime_readiness(gateway_boots)
     next(
@@ -506,7 +506,7 @@ def test_gateway_evidence_rejects_runtime_document_config_drift() -> None:
     roles = lineage["releases"][commit]["roles"]
     gateway_boots = {
         role: _boot(role, roles[role], character)
-        for role, character in zip(sorted(ROLE_SPECS), "567", strict=True)
+        for role, character in zip(sorted(ROLE_SPECS), "567")
     }
     expected_configs = {
         role: boot["config_hash"] for role, boot in gateway_boots.items()
@@ -537,7 +537,7 @@ def test_gateway_evidence_rejects_unsuccessful_runtime_readiness() -> None:
     roles = lineage["releases"][commit]["roles"]
     gateway_boots = {
         role: _boot(role, roles[role], character)
-        for role, character in zip(sorted(ROLE_SPECS), "567", strict=True)
+        for role, character in zip(sorted(ROLE_SPECS), "567")
     }
     runtime_readiness = _runtime_readiness(gateway_boots)
     runtime_readiness["status"] = "not_ready"

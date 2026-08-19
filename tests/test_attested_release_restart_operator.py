@@ -45,7 +45,7 @@ def _fake_readiness_observations(tmp_path: Path, commit: str) -> tuple[Path, Pat
 
     gateway_boots = {
         role: boot(role, character)
-        for role, character in zip(sorted(ROLE_SPECS), "567", strict=True)
+        for role, character in zip(sorted(ROLE_SPECS), "567")
     }
     validator_boot = boot("validator_weights", "8")
     gateway_observation = {

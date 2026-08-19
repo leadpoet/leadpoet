@@ -4403,6 +4403,26 @@ class PinnedCompanyFirstContinuationAdapter:
 
 
 @dataclass(frozen=True)
+class IsolatedCompanyFirstContinuationAdapter:
+    """One company-first model adapter owned by one artifact worker."""
+
+    adapter: CompanyFirstContinuationModelAdapter
+    process_id: str
+    observed_artifact_key: str
+
+    def __post_init__(self) -> None:
+        _ensure_safe_ref(self.process_id, "company_first_model_process_id")
+        _ensure_hash(
+            self.observed_artifact_key,
+            "company_first_observed_artifact_key",
+        )
+        if self.adapter.observed_artifact_key != self.observed_artifact_key:
+            raise RoutingExperimentError(
+                "company_first_worker_adapter_artifact_mismatch"
+            )
+
+
+@dataclass(frozen=True)
 class CompanyFirstLabActionReceipt:
     sequence: int
     action_type: str
@@ -4498,10 +4518,14 @@ def replay_company_first_orchestration(
     request: Mapping[str, Any],
     *,
     artifact: SourcingModelArtifactIdentity,
-    adapter: CompanyFirstContinuationModelAdapter,
+    adapter: (
+        CompanyFirstContinuationModelAdapter
+        | IsolatedCompanyFirstContinuationAdapter
+    ),
     runner: Callable[[Mapping[str, Any]], Any],
     execution_mode: str = ReceiptExecutionMode.FIXTURE.value,
     max_actions: int = 10_000,
+    require_isolation: bool = True,
 ) -> CompanyFirstLabReplay:
     """Replay one company-first run through exact model-owned actions.
 
@@ -4521,7 +4545,20 @@ def replay_company_first_orchestration(
         raise RoutingExperimentError(
             "company_first_artifact_is_invalid:" + ";".join(errors)
         )
-    if adapter.observed_artifact_key != _company_first_artifact_key(artifact):
+    if require_isolation and not isinstance(
+        adapter, IsolatedCompanyFirstContinuationAdapter,
+    ):
+        raise RoutingExperimentError(
+            "company_first_isolated_model_adapter_is_required"
+        )
+    model_adapter = (
+        adapter.adapter
+        if isinstance(adapter, IsolatedCompanyFirstContinuationAdapter)
+        else adapter
+    )
+    if model_adapter.observed_artifact_key != _company_first_artifact_key(
+        artifact,
+    ):
         raise RoutingExperimentError(
             "company_first_adapter_artifact_mismatch"
         )
@@ -4544,7 +4581,7 @@ def replay_company_first_orchestration(
     action_receipts: list[CompanyFirstLabActionReceipt] = []
     for _cycle in range(max_actions + 1):
         sequence = len(action_receipts)
-        state = adapter.advance(
+        state = model_adapter.advance(
             request,
             continuation=continuation,
             completion=completion,
@@ -4653,7 +4690,7 @@ def replay_company_first_orchestration(
                 "company_first_action_runner_failed"
             ) from exc
         completion = _company_first_exact_mapping(
-            adapter.complete_action(action, action_result),
+            model_adapter.complete_action(action, action_result),
             fields=frozenset({
                 "schema_version", "action_id", "action_type",
                 "request_sha256", "result_sha256", "result",

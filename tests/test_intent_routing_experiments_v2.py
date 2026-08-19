@@ -14,6 +14,7 @@ from research_lab.routing_experiments import (
     CompanyFirstLabReplay,
     ExperimentCreditBudget,
     InMemoryProviderReceiptRepository,
+    IsolatedCompanyFirstContinuationAdapter,
     JsonlProviderReceiptRepository,
     JsonlRoutingDecisionReceiptRepository,
     ProviderBindingIdentity,
@@ -3445,6 +3446,11 @@ class FakeCompanyFirstContinuationAdapter:
 def test_company_first_lab_replay_preserves_all_model_action_types() -> None:
     artifact, _authority_manifest = _artifact()
     adapter = FakeCompanyFirstContinuationAdapter(artifact)
+    handle = IsolatedCompanyFirstContinuationAdapter(
+        adapter=adapter,
+        process_id="company-first-worker-1",
+        observed_artifact_key=adapter.observed_artifact_key,
+    )
     invoked: list[str] = []
 
     replay = replay_company_first_orchestration(
@@ -3453,7 +3459,7 @@ def test_company_first_lab_replay_preserves_all_model_action_types() -> None:
             "target": 1,
         },
         artifact=artifact,
-        adapter=adapter,
+        adapter=handle,
         runner=lambda action: invoked.append(action["action_type"]) or {
             "outcome": "fixture",
         },
@@ -3470,6 +3476,11 @@ def test_company_first_lab_replay_preserves_all_model_action_types() -> None:
 def test_company_first_lab_replay_fails_closed_on_identity_and_live_mode() -> None:
     artifact, _authority_manifest = _artifact()
     adapter = FakeCompanyFirstContinuationAdapter(artifact)
+    handle = IsolatedCompanyFirstContinuationAdapter(
+        adapter=adapter,
+        process_id="company-first-worker-1",
+        observed_artifact_key=adapter.observed_artifact_key,
+    )
     request = {
         "normalized_icp": {"segments_any_of": ["software"]},
         "target": 1,
@@ -3482,7 +3493,7 @@ def test_company_first_lab_replay_fails_closed_on_identity_and_live_mode() -> No
         replay_company_first_orchestration(
             request,
             artifact=replace(artifact, commit_sha="2" * 40),
-            adapter=adapter,
+            adapter=handle,
             runner=lambda _action: {},
         )
 
@@ -3493,7 +3504,18 @@ def test_company_first_lab_replay_fails_closed_on_identity_and_live_mode() -> No
         replay_company_first_orchestration(
             request,
             artifact=artifact,
-            adapter=adapter,
+            adapter=handle,
             runner=lambda _action: {},
             execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+        )
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="company_first_isolated_model_adapter_is_required",
+    ):
+        replay_company_first_orchestration(
+            request,
+            artifact=artifact,
+            adapter=adapter,
+            runner=lambda _action: {},
         )

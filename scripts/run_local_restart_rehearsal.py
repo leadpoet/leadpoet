@@ -1762,6 +1762,8 @@ def _normalize_evidence_after_failure(
             evidence_root=evidence_root,
             docker_platform=docker_platform,
         )
+    except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+        raise
     except BaseException as cleanup_exc:
         if isinstance(cleanup_exc, _EvidenceNormalizationError):
             _attach_normalization_diagnostics(
@@ -1777,56 +1779,12 @@ def _normalize_evidence_after_failure(
     return True
 
 
-def _normalize_and_preserve_failure_evidence(
-    tag: str,
-    *,
-    evidence_root: Path,
-    docker_platform: str,
-    candidate_sha: str,
-    stage: str,
-    command: Sequence[str],
-    original: BaseException,
-    after_normalization: Callable[[], dict[str, Any]] | None = None,
-) -> None:
-    """Retain diagnostics when possible while keeping the source exception."""
-
-    if not _normalize_evidence_after_failure(
-        tag,
-        evidence_root=evidence_root,
-        docker_platform=docker_platform,
-        original=original,
-    ):
-        return
-    if after_normalization is not None:
-        try:
-            projection = after_normalization()
-            setattr(original, "_rehearsal_workflow_projection", projection)
-        except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
-            raise
-        except Exception as cleanup_exc:
-            _annotate_worker_cleanup_errors(
-                original,
-                [f"diagnostic:{type(cleanup_exc).__name__}"],
-            )
-    try:
-        _preserve_failure_evidence(
-            evidence_root=evidence_root,
-            candidate_sha=candidate_sha,
-            stage=stage,
-            command=command,
-        )
-    except BaseException as cleanup_exc:
-        _annotate_worker_cleanup_errors(
-            original,
-            [f"preserve:{type(cleanup_exc).__name__}"],
-        )
-
-
 @contextmanager
 def _temporary_evidence_directory(
     tag: str,
     *,
     docker_platform: str,
+    handoff_attempted: Callable[[], bool] | None = None,
 ) -> Iterator[Path]:
     """Normalize after the last possible writer and before host cleanup."""
 
@@ -1848,6 +1806,8 @@ def _temporary_evidence_directory(
             pass
 
     def normalize() -> None:
+        if handoff_attempted is not None and handoff_attempted():
+            return
         registry = _WorkerProcessRegistry()
         with _worker_process_scope(registry):
             _normalize_evidence_ownership(
@@ -1862,6 +1822,8 @@ def _temporary_evidence_directory(
         cleanup_errors = []
         try:
             normalize()
+        except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+            raise
         except BaseException as cleanup_exc:
             cleanup_errors.append(
                 f"normalize:{type(cleanup_exc).__name__}"
@@ -1870,6 +1832,8 @@ def _temporary_evidence_directory(
         else:
             try:
                 shutil.rmtree(evidence_root)
+            except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
+                raise
             except BaseException as cleanup_exc:
                 cleanup_errors.append(
                     f"delete:{type(cleanup_exc).__name__}"
@@ -2037,61 +2001,8 @@ def _run_component(
             raise subprocess.CalledProcessError(returncode, command)
     except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
         raise
-    except BaseException as original:
-        _normalize_and_preserve_failure_evidence(
-            tag,
-            evidence_root=evidence_root,
-            docker_platform=docker_platform,
-            candidate_sha=candidate_sha,
-            stage=f"{component}-{transition}-{run_ordinal}",
-            command=command,
-            original=original,
-        )
+    except BaseException:
         raise
-
-
-def _preserve_failure_evidence(
-    *,
-    evidence_root: Path,
-    candidate_sha: str,
-    stage: str,
-    command: Sequence[str],
-) -> Path:
-    """Keep exact-launcher diagnostics after the temporary run is removed."""
-
-    safe_stage = "".join(
-        character if character.isalnum() or character in {"-", "_"} else "-"
-        for character in stage
-    )
-    durable_root = Path(
-        tempfile.mkdtemp(
-            prefix=(
-                "leadpoet-rehearsal-failure-"
-                f"{candidate_sha[:12]}-{safe_stage}-"
-            )
-        )
-    )
-    copied_evidence = durable_root / "evidence"
-    shutil.copytree(evidence_root, copied_evidence)
-    (durable_root / "failure.json").write_text(
-        json.dumps(
-            {
-                "candidate_sha": candidate_sha,
-                "command": list(command),
-                "stage": stage,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    print(
-        f"REHEARSAL_FAILURE_EVIDENCE {durable_root}",
-        file=sys.stderr,
-        flush=True,
-    )
-    return durable_root
 
 
 def _preserve_batched_failure_evidence(
@@ -2348,6 +2259,62 @@ def _emit_terminal_stage_diagnostics(
                 f"stage_id_sha256={diagnostic['stage_id_sha256']} "
                 f"error_type={diagnostic['error_type']}"
             )
+
+
+def _attach_terminal_workflow_failure_projection(
+    *,
+    stages: Sequence[dict[str, Any]],
+    workflow_stage: str,
+    evidence_root: Path,
+    candidate_sha: str,
+    profile: str,
+) -> None:
+    """Attach bounded workflow detail only after shared writers are terminal."""
+
+    failed = [
+        item
+        for item in stages
+        if item.get("stage") == workflow_stage and item.get("status") == "failed"
+    ]
+    if len(failed) > 1:
+        raise RuntimeError("workflow stage result is duplicated")
+    if not failed:
+        return
+    projection = _project_workflow_failure_diagnostics(
+        evidence_root=evidence_root,
+        candidate_sha=candidate_sha,
+        profile=profile,
+    )
+    safe_projection = _safe_workflow_projection(projection)
+    if safe_projection is None:
+        raise RuntimeError("workflow failure projection is unsafe")
+    failed[0]["workflow_failure_projection"] = safe_projection
+
+
+def _complete_shared_evidence_handoff(
+    tag: str,
+    *,
+    stages: Sequence[dict[str, Any]],
+    workflow_stage: str,
+    evidence_root: Path,
+    candidate_sha: str,
+    profile: str,
+    docker_platform: str,
+) -> None:
+    """Verify the shared tree once, after every candidate writer has joined."""
+
+    _normalize_evidence_ownership(
+        tag,
+        evidence_root=evidence_root,
+        docker_platform=docker_platform,
+    )
+    _attach_terminal_workflow_failure_projection(
+        stages=stages,
+        workflow_stage=workflow_stage,
+        evidence_root=evidence_root,
+        candidate_sha=candidate_sha,
+        profile=profile,
+    )
 
 
 def _run_independent_stage(
@@ -2879,21 +2846,7 @@ def _run_workflow(
         _run(command)
     except (KeyboardInterrupt, RehearsalTimeBudgetExceeded):
         raise
-    except BaseException as original:
-        _normalize_and_preserve_failure_evidence(
-            tag,
-            evidence_root=evidence_root,
-            docker_platform=docker_platform,
-            candidate_sha=candidate_sha,
-            stage=f"workflow-{profile}",
-            command=command,
-            original=original,
-            after_normalization=lambda: _project_workflow_failure_diagnostics(
-                evidence_root=evidence_root,
-                candidate_sha=candidate_sha,
-                profile=profile,
-            ),
-        )
+    except BaseException:
         raise
 
 
@@ -2951,16 +2904,7 @@ def _join_evidence(
             raise SystemExit(
                 "joined restart rehearsal evidence was not produced"
             )
-    except BaseException as original:
-        _normalize_and_preserve_failure_evidence(
-            tag,
-            evidence_root=evidence_root,
-            docker_platform=docker_platform,
-            candidate_sha=candidate_sha,
-            stage=f"join-{profile}",
-            command=command,
-            original=original,
-        )
+    except BaseException:
         raise
     return output
 
@@ -3141,9 +3085,11 @@ def _run_profile(
         else:
             run_python37_probe()
 
+        evidence_handoff_attempted = False
         with _temporary_evidence_directory(
             tag,
             docker_platform=docker_platform,
+            handoff_attempted=lambda: evidence_handoff_attempted,
         ) as evidence_root:
             transitions = (transition,)
             if args.profile == "release" and transition == "forward":
@@ -3388,6 +3334,19 @@ def _run_profile(
                     ),
                     stages=stage_results,
                 )
+            # All workflow, component, and join writers are terminal. This is
+            # the sole authoritative handoff before any shared-tree projection,
+            # durable copy, or joined-evidence read.
+            evidence_handoff_attempted = True
+            _complete_shared_evidence_handoff(
+                tag,
+                stages=stage_results,
+                workflow_stage=workflow_stage,
+                evidence_root=evidence_root,
+                candidate_sha=candidate_sha,
+                profile=args.profile,
+                docker_platform=docker_platform,
+            )
             elapsed_seconds = time.monotonic() - profile_started
             if target_seconds is not None:
                 budget_result = {
@@ -3427,14 +3386,6 @@ def _run_profile(
             ]
             if incomplete:
                 _emit_terminal_stage_diagnostics(stage_results)
-                # Every container writer is terminal. Normalize before the
-                # host copies a failed tree; the outer context normalizes
-                # again immediately before TemporaryDirectory removes it.
-                _normalize_evidence_ownership(
-                    tag,
-                    evidence_root=evidence_root,
-                    docker_platform=docker_platform,
-                )
                 durable_failure = _preserve_batched_failure_evidence(
                     evidence_root=evidence_root,
                     candidate_sha=candidate_sha,

@@ -736,13 +736,6 @@ def test_main_spawn_registration_defers_signal_until_exact_cleanup(
             "deadline must bypass ordinary normalization"
         ),
     )
-    monkeypatch.setattr(
-        controller,
-        "_preserve_failure_evidence",
-        lambda **_kwargs: pytest.fail(
-            "deadline must bypass ordinary evidence preservation"
-        ),
-    )
     registry = controller._WorkerProcessRegistry()
 
     expected_exception = (
@@ -864,14 +857,6 @@ def test_workflow_deadline_bypasses_ordinary_failure_cleanup(
             "deadline must bypass ordinary normalization"
         ),
     )
-    monkeypatch.setattr(
-        controller,
-        "_preserve_failure_evidence",
-        lambda **_kwargs: pytest.fail(
-            "deadline must bypass ordinary evidence preservation"
-        ),
-    )
-
     with pytest.raises(controller.RehearsalTimeBudgetExceeded) as raised:
         controller._run_workflow(
             "image",
@@ -1005,12 +990,6 @@ def test_prepush_workflow_alarm_cleans_both_named_runtime_containers(
         "_normalize_evidence_ownership",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        controller,
-        "_preserve_failure_evidence",
-        lambda **_kwargs: tmp_path,
-    )
-
     def gateway() -> None:
         nonlocal gateway_called
         gateway_called = True
@@ -1084,12 +1063,6 @@ def test_prepush_gateway_alarm_cleans_gateway_and_validator_without_next_stage(
         "_normalize_evidence_ownership",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        controller,
-        "_preserve_failure_evidence",
-        lambda **_kwargs: tmp_path,
-    )
-
     def gateway() -> None:
         try:
             assert validator_started.wait(timeout=1)
@@ -1873,33 +1846,200 @@ def test_outer_evidence_normalizes_post_workflow_component_and_join_artifacts(
     assert not evidence_root.exists()
 
 
-def test_workflow_normalizes_evidence_before_preserving_failure(
+def test_outer_evidence_skips_duplicate_normalization_after_handoff_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    handed_off = False
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: pytest.fail(
+            "completed handoff must not be normalized twice"
+        ),
+    )
+
+    with controller._temporary_evidence_directory(
+        "rehearsal-image",
+        docker_platform="linux/arm64",
+        handoff_attempted=lambda: handed_off,
+    ) as evidence_root:
+        (evidence_root / "host-artifact").write_text(
+            "complete\n", encoding="utf-8"
+        )
+        handed_off = True
+
+    assert not evidence_root.exists()
+
+
+def test_outer_evidence_does_not_retry_handoff_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    handoff_attempted = False
+    deadline = controller.RehearsalTimeBudgetExceeded("deadline")
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: pytest.fail(
+            "consumed one-shot deadline must not retry handoff"
+        ),
+    )
+
+    with pytest.raises(controller.RehearsalTimeBudgetExceeded) as raised:
+        with controller._temporary_evidence_directory(
+            "rehearsal-image",
+            docker_platform="linux/arm64",
+            handoff_attempted=lambda: handoff_attempted,
+        ) as evidence_root:
+            (evidence_root / "host-artifact").write_text(
+                "complete\n", encoding="utf-8"
+            )
+            handoff_attempted = True
+            raise deadline
+
+    assert raised.value is deadline
+    assert not evidence_root.exists()
+
+
+def test_workflow_failure_defers_shared_evidence_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     controller = _load_controller()
-    commands: list[list[str]] = []
-    events: list[str] = []
-    evidence_root = tmp_path / "evidence"
-    evidence_root.mkdir(mode=0o700)
-
-    def fake_run(command, **_kwargs):
-        commands.append(command)
-        if len(commands) == 1:
-            raise subprocess.CalledProcessError(1, command)
-
-    def fake_preserve_failure_evidence(**_kwargs):
-        assert len(commands) == 2
-        events.append("preserved")
-
-    monkeypatch.setattr(controller, "_run", fake_run)
+    workflow_error = subprocess.CalledProcessError(19, ["workflow"])
     monkeypatch.setattr(
         controller,
-        "_preserve_failure_evidence",
-        fake_preserve_failure_evidence,
+        "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(workflow_error),
+    )
+    for operation in (
+        "_normalize_evidence_ownership",
+        "_project_workflow_failure_diagnostics",
+        "_preserve_batched_failure_evidence",
+    ):
+        monkeypatch.setattr(
+            controller,
+            operation,
+            lambda *_args, _operation=operation, **_kwargs: pytest.fail(
+                f"shared-tree {_operation} must wait for writer quiescence"
+            ),
+        )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        controller._run_workflow(
+            "rehearsal-image",
+            source_root=tmp_path / "source",
+            evidence_root=tmp_path / "evidence",
+            from_sha="a" * 40,
+            candidate_sha="b" * 40,
+            profile="prepush",
+            docker_platform="linux/arm64",
+        )
+
+    assert raised.value is workflow_error
+
+
+def test_component_failure_defers_shared_evidence_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+
+    class FailedComponentProcess:
+        stdout = iter(())
+        returncode = 17
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(
+        controller.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: FailedComponentProcess(),
+    )
+    for operation in (
+        "_normalize_evidence_ownership",
+        "_preserve_batched_failure_evidence",
+    ):
+        monkeypatch.setattr(
+            controller,
+            operation,
+            lambda *_args, _operation=operation, **_kwargs: pytest.fail(
+                f"shared-tree {_operation} must wait for writer quiescence"
+            ),
+        )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        _run_test_component(controller, tmp_path, "gateway")
+
+    assert raised.value.returncode == 17
+
+
+def test_shared_evidence_handoff_waits_for_link_mutating_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    workflow_error = subprocess.CalledProcessError(19, ["workflow"])
+    workflow_failed = threading.Event()
+    link_live = threading.Event()
+    release_validator = threading.Event()
+    writers_terminal = threading.Event()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.write_text("must-not-be-copied\n", encoding="utf-8")
+    unsafe = evidence_root / "unsafe"
+    calls: list[str] = []
+
+    def fail_workflow(*_args, **_kwargs):
+        workflow_failed.set()
+        raise workflow_error
+
+    monkeypatch.setattr(
+        controller,
+        "_run",
+        fail_workflow,
     )
 
-    with pytest.raises(subprocess.CalledProcessError):
+    def normalize(*_args, **_kwargs):
+        assert writers_terminal.is_set()
+        assert not unsafe.exists() and not unsafe.is_symlink()
+        calls.append("normalize")
+        return []
+
+    def project(**_kwargs):
+        assert writers_terminal.is_set()
+        calls.append("project")
+        return {"available": False, "category": "not_found", "status": 127}
+
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        normalize,
+    )
+    monkeypatch.setattr(
+        controller,
+        "_project_workflow_failure_diagnostics",
+        project,
+    )
+    def preserve_batch(**_kwargs):
+        assert writers_terminal.is_set()
+        assert not unsafe.exists() and not unsafe.is_symlink()
+        calls.append("preserve")
+        return tmp_path / "durable"
+
+    monkeypatch.setattr(
+        controller,
+        "_preserve_batched_failure_evidence",
+        preserve_batch,
+    )
+
+    def workflow() -> None:
         controller._run_workflow(
             "rehearsal-image",
             source_root=tmp_path / "source",
@@ -1907,166 +2047,92 @@ def test_workflow_normalizes_evidence_before_preserving_failure(
             from_sha="a" * 40,
             candidate_sha="b" * 40,
             profile="prepush",
-            docker_platform="linux/arm64",
-        )
-
-    assert commands[1][-4:] == ["--", "a+rwX", "{}", "+"]
-    assert events == ["preserved"]
-
-
-def test_workflow_normalization_failure_keeps_workflow_error(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    controller = _load_controller()
-    workflow_error = subprocess.CalledProcessError(19, ["workflow"])
-    normalization_error = subprocess.CalledProcessError(20, ["ownership-handoff"])
-    monkeypatch.setattr(
-        controller,
-        "_run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(workflow_error),
-    )
-    monkeypatch.setattr(
-        controller,
-        "_normalize_evidence_ownership",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(normalization_error),
-    )
-    monkeypatch.setattr(
-        controller,
-        "_preserve_failure_evidence",
-        lambda **_kwargs: pytest.fail(
-            "unnormalized evidence must not be copied"
-        ),
-    )
-
-    with pytest.raises(subprocess.CalledProcessError) as raised:
-        controller._run_workflow(
-            "rehearsal-image",
-            source_root=tmp_path / "source",
-            evidence_root=tmp_path / "evidence",
-            from_sha="a" * 40,
-            candidate_sha="b" * 40,
-            profile="prepush",
             docker_platform="linux/amd64",
         )
 
-    assert raised.value is workflow_error
-    captured = capsys.readouterr().err
-    assert "normalize:CalledProcessError" in captured
-    assert "ownership-handoff" not in captured
-
-
-def test_workflow_projection_and_preservation_failures_keep_source_error_safe(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    controller = _load_controller()
-    workflow_error = subprocess.CalledProcessError(19, ["workflow"])
-    secret = "must-not-escape-cleanup"
-    monkeypatch.setattr(
-        controller,
-        "_run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(workflow_error),
-    )
-    monkeypatch.setattr(
-        controller,
-        "_normalize_evidence_ownership",
-        lambda *_args, **_kwargs: [],
-    )
-    monkeypatch.setattr(
-        controller,
-        "_project_workflow_failure_diagnostics",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError(secret)),
-    )
-    monkeypatch.setattr(
-        controller,
-        "_preserve_failure_evidence",
-        lambda **_kwargs: (_ for _ in ()).throw(PermissionError(secret)),
-    )
-
-    with pytest.raises(subprocess.CalledProcessError) as raised:
-        controller._run_workflow(
-            "rehearsal-image",
-            source_root=tmp_path / "source",
-            evidence_root=tmp_path / "evidence",
-            from_sha="a" * 40,
-            candidate_sha="b" * 40,
-            profile="prepush",
-            docker_platform="linux/amd64",
+    def validator() -> None:
+        assert workflow_failed.wait(timeout=1)
+        unsafe.symlink_to(outside)
+        link_live.set()
+        assert release_validator.wait(timeout=1)
+        unsafe.unlink()
+        (evidence_root / "validator-complete").write_text(
+            "complete\n", encoding="utf-8"
         )
 
-    assert raised.value is workflow_error
-    captured = capsys.readouterr().err
-    assert "diagnostic:RuntimeError" in captured
-    assert "preserve:PermissionError" in captured
-    assert secret not in captured
+    def gateway() -> None:
+        try:
+            assert link_live.wait(timeout=1)
+            assert unsafe.is_symlink()
+        finally:
+            release_validator.set()
 
-
-def test_preservation_failure_is_annotated_without_replacing_source_error(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    controller = _load_controller()
-    source_error = subprocess.CalledProcessError(21, ["source-stage"])
-    monkeypatch.setattr(
-        controller,
-        "_normalize_evidence_ownership",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        controller,
-        "_preserve_failure_evidence",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            PermissionError("preserve denied")
+    component_results: list[dict[str, object]] = []
+    workflow_results = controller._run_prepush_runtime_stages(
+        preparation_action=lambda: (
+            ("gateway-forward-1", gateway),
+            ("validator-forward-1", validator),
         ),
+        workflow_action=("workflow-prepush", workflow),
+        expected_component_stages=(
+            "gateway-forward-1",
+            "validator-forward-1",
+        ),
+        stages=component_results,
     )
+    stages = [*component_results, *workflow_results]
+    writers_terminal.set()
 
-    controller._normalize_and_preserve_failure_evidence(
+    controller._complete_shared_evidence_handoff(
         "rehearsal-image",
-        evidence_root=tmp_path,
+        stages=stages,
+        workflow_stage="workflow-prepush",
+        evidence_root=evidence_root,
+        candidate_sha="b" * 40,
+        profile="prepush",
         docker_platform="linux/amd64",
-        candidate_sha="c" * 40,
-        stage="workflow-prepush",
-        command=["source-stage"],
-        original=source_error,
+    )
+    controller._preserve_batched_failure_evidence(
+        evidence_root=evidence_root,
+        candidate_sha="b" * 40,
+        stages=stages,
     )
 
-    captured = capsys.readouterr().err
-    assert "preserve:PermissionError" in captured
-    assert "preserve denied" not in captured
+    workflow_stage = next(
+        item for item in stages if item["stage"] == "workflow-prepush"
+    )
+    assert workflow_stage["workflow_failure_projection"] == {
+        "available": False,
+        "category": "not_found",
+        "status": 127,
+    }
+    assert calls == ["normalize", "project", "preserve"]
 
 
-def test_diagnostic_projection_deadline_is_not_swallowed(
+@pytest.mark.parametrize("deadline_kind", ["interrupt", "rehearsal-deadline"])
+def test_normalization_deadline_is_not_swallowed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    deadline_kind: str,
 ) -> None:
     controller = _load_controller()
+    deadline: BaseException = (
+        KeyboardInterrupt()
+        if deadline_kind == "interrupt"
+        else controller.RehearsalTimeBudgetExceeded("deadline")
+    )
     source_error = subprocess.CalledProcessError(21, ["source-stage"])
-    deadline = controller.RehearsalTimeBudgetExceeded("deadline")
     monkeypatch.setattr(
         controller,
         "_normalize_evidence_ownership",
-        lambda *_args, **_kwargs: [],
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(deadline),
     )
-    monkeypatch.setattr(
-        controller,
-        "_preserve_failure_evidence",
-        lambda **_kwargs: pytest.fail("deadline must stop preservation"),
-    )
-
-    with pytest.raises(controller.RehearsalTimeBudgetExceeded) as raised:
-        controller._normalize_and_preserve_failure_evidence(
+    with pytest.raises(type(deadline)) as raised:
+        controller._normalize_evidence_after_failure(
             "rehearsal-image",
             evidence_root=tmp_path,
             docker_platform="linux/amd64",
-            candidate_sha="c" * 40,
-            stage="workflow-prepush",
-            command=["source-stage"],
             original=source_error,
-            after_normalization=lambda: (_ for _ in ()).throw(deadline),
         )
 
     assert raised.value is deadline

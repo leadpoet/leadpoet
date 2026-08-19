@@ -1168,6 +1168,23 @@ class PinnedSourcingModelRoutingAdapter:
             )
         return tuple(descriptors)
 
+    def registered_source_add_tool_ids(self, *, stage: str) -> Sequence[str]:
+        """Return SourceAdd registrations owned by this exact model artifact."""
+
+        if stage not in {
+            self.runtime.STAGE_INTENT_EVIDENCE,
+            self.runtime.STAGE_CANDIDATE_ACQUISITION,
+        }:
+            raise RoutingExperimentError("v2_source_add_registration_stage_is_invalid")
+        return tuple(
+            sorted(
+                str(getattr(definition, "tool_id", "") or "")
+                for definition in self.catalog.tools
+                if str(getattr(definition, "origin", "") or "") == "source_add"
+                and stage in tuple(getattr(definition, "stages", ()) or ())
+            )
+        )
+
     def lookup_tool_descriptor(self, tool_id: str, *, stage: str) -> Mapping[str, Any] | None:
         definition = next((item for item in self.catalog.tools if item.tool_id == tool_id), None)
         if definition is None or stage not in tuple(getattr(definition, "stages", ())):
@@ -3563,6 +3580,7 @@ class RoutingExperimentV2Adapter(Protocol):
     def routing_change_class(self, payload: Any, *, stage: str) -> str: ...
     def routing_identity(self, payload: Any, *, stage: str, exclude_tool_ids: Sequence[str] = ()) -> str: ...
     def variant_tool_descriptors(self, payload: Any, *, stage: str) -> Sequence[Mapping[str, Any]]: ...
+    def registered_source_add_tool_ids(self, *, stage: str) -> Sequence[str]: ...
     def lookup_tool_descriptor(self, tool_id: str, *, stage: str) -> Mapping[str, Any] | None: ...
     def validate_provider_binding(self, binding: ProviderBindingIdentity, *, stage: str) -> Sequence[str]: ...
     def compile_variant(self, payload: Any, *, stage: str, feature_set: Any, available_tools: Mapping[str, bool], remaining_seconds: float, remaining_calls: int, credit_cap: float, expected_signal_type: str = "") -> Any: ...
@@ -3915,6 +3933,32 @@ def validate_routing_experiment_v2_spec(
         normalized_features = ()
     model_payload_by_variant: dict[str, Any] = {}
     routing_identity_by_variant: dict[str, str] = {}
+    baseline_registered_source_add_ids: frozenset[str] = frozenset()
+    if baseline_variant is not None:
+        baseline_adapter = adapters.get(baseline_variant.variant_id)
+        if baseline_adapter is not None:
+            try:
+                raw_registered_source_add_ids = baseline_adapter.registered_source_add_tool_ids(
+                    stage=baseline_variant.stage,
+                )
+                if isinstance(raw_registered_source_add_ids, (str, bytes)):
+                    raise RoutingExperimentError(
+                        "v2_source_add_registration_ids_must_be_an_array"
+                    )
+                normalized_registered_source_add_ids = {
+                    _ensure_safe_ref(item, "v2_registered_source_add_tool_id")
+                    for item in raw_registered_source_add_ids
+                }
+                baseline_registered_source_add_ids = frozenset(
+                    normalized_registered_source_add_ids
+                )
+            except RoutingExperimentError as exc:
+                errors.append(f"v2_baseline_source_add_registration_invalid:{exc}")
+            except Exception as exc:
+                errors.append(
+                    "v2_baseline_source_add_registration_unavailable:"
+                    + type(exc).__name__
+                )
     for variant in spec.variants:
         if variant.stage != spec.input.stage:
             errors.append(f"v2_variant_stage_mismatch:{variant.variant_id}")
@@ -4019,6 +4063,21 @@ def validate_routing_experiment_v2_spec(
                     errors.append(f"v2_source_add_binding_missing:{tool_id}")
                 else:
                     errors.extend(_validate_v2_source_add_provenance(provenance, descriptor=descriptor, binding=binding))
+            if variant.variant_id != spec.baseline_variant_id:
+                profile_source_add_ids = {
+                    tool_id
+                    for tool_id, descriptor in descriptor_by_tool.items()
+                    if descriptor.get("source_add") is True
+                }
+                undeclared_source_add_ids = profile_source_add_ids.difference(
+                    baseline_registered_source_add_ids,
+                    set(variant.new_tool_ids),
+                )
+                for tool_id in sorted(undeclared_source_add_ids):
+                    errors.append(
+                        "v2_source_add_registration_not_in_baseline_requires_new_tool:"
+                        f"{variant.variant_id}:{tool_id}"
+                    )
             for provenance in variant.source_add_provenance:
                 if provenance.tool_id not in descriptor_by_tool and provenance.tool_id not in set(variant.new_tool_ids):
                     errors.append(f"v2_source_add_tool_not_in_variant:{provenance.tool_id}")
@@ -4767,6 +4826,29 @@ def _v2_prepare_decision_projection(
     return dict(skipped)
 
 
+@dataclass(frozen=True)
+class _V2PreparedVariantPlan:
+    """One fully validated, model-owned plan reused for every unit.
+
+    Compilation and all plan-shape checks happen during experiment admission.
+    Keeping the prepared values together prevents the first variant from
+    spending provider credits before a later variant has been shown to be
+    executable under the same frozen experiment contract.
+    """
+
+    plan: Any
+    variant_bindings: Mapping[str, ProviderBindingIdentity]
+    available_tools: Mapping[str, bool]
+    plan_hash: str
+    route_hash: str
+    step_budgets: tuple[RoutingPlanStepBudget, ...]
+    budget_by_tool: Mapping[str, RoutingPlanStepBudget]
+    planned_call_cap: int
+    planned_seconds_cap: float
+    considered_tool_ids: tuple[str, ...]
+    projected_skipped: Mapping[str, str]
+
+
 def _v2_failure_receipt(
     *,
     binding: ProviderBindingIdentity,
@@ -4888,23 +4970,16 @@ def _v2_call_runner(
     return runner(binding, unit_ref)
 
 
-def _v2_run_unit(
+def _v2_prepare_variant_plan(
     spec: RoutingExperimentV2Spec,
     variant: RoutingExperimentV2Variant,
     *,
     adapter: RoutingExperimentV2Adapter,
     feature_set: Any,
     bindings: Mapping[str, ProviderBindingIdentity],
-    store: ProviderReceiptStore,
-    decision_store: RoutingDecisionReceiptStore,
-    runner: Callable[[ProviderBindingIdentity, str], ProviderReceipt | Mapping[str, Any]],
-    unit_ref: str,
-    spent_total: list[int],
-    spent_by_binding: dict[str, int],
-    new_spend_total: list[int],
-    reserved_total: list[int],
-    reserved_by_binding: dict[str, int],
-) -> tuple[list[ProviderReceipt], bool, RoutingDecisionReceiptV2]:
+) -> _V2PreparedVariantPlan:
+    """Compile and validate one variant before any provider call is allowed."""
+
     variant_bindings: dict[str, ProviderBindingIdentity] = {}
     for binding_id in variant.binding_ids:
         binding = bindings.get(binding_id)
@@ -4918,22 +4993,41 @@ def _v2_run_unit(
     for tool_id in variant_bindings:
         value = availability.get(tool_id, True)
         if not isinstance(value, bool):
-            raise RoutingExperimentError(f"v2_availability_must_be_boolean:{variant.variant_id}:{tool_id}")
+            raise RoutingExperimentError(
+                f"v2_availability_must_be_boolean:{variant.variant_id}:{tool_id}"
+            )
         available_tools[tool_id] = value
-    model_payload = adapter.parse_variant_payload(variant.routing_payload, stage=variant.stage)
-    plan = adapter.compile_variant(
-        model_payload,
-        stage=variant.stage,
-        feature_set=feature_set,
-        available_tools=available_tools,
-        remaining_seconds=MAX_LATENCY_MS / 1000,
-        remaining_calls=MAX_TOOLS_PER_VARIANT,
-        credit_cap=spec.credit_budget.total_credit_microunits / 1_000_000,
-        expected_signal_type=spec.input.signal_type,
-    )
-    payload = adapter.plan_as_payload(plan)
+    try:
+        model_payload = adapter.parse_variant_payload(
+            variant.routing_payload,
+            stage=variant.stage,
+        )
+        plan = adapter.compile_variant(
+            model_payload,
+            stage=variant.stage,
+            feature_set=feature_set,
+            available_tools=available_tools,
+            remaining_seconds=MAX_LATENCY_MS / 1000,
+            remaining_calls=MAX_TOOLS_PER_VARIANT,
+            credit_cap=spec.credit_budget.total_credit_microunits / 1_000_000,
+            expected_signal_type=spec.input.signal_type,
+        )
+    except RoutingExperimentError:
+        raise
+    except Exception as exc:
+        raise RoutingExperimentError(
+            f"v2_variant_plan_preflight_failed:{variant.variant_id}:{type(exc).__name__}"
+        ) from exc
+    try:
+        payload = adapter.plan_as_payload(plan)
+    except Exception as exc:
+        raise RoutingExperimentError(
+            f"v2_variant_plan_payload_failed:{variant.variant_id}:{type(exc).__name__}"
+        ) from exc
     if not isinstance(payload, Mapping):
-        raise RoutingExperimentError("v2_model_plan_payload_is_not_an_object")
+        raise RoutingExperimentError(
+            f"v2_model_plan_payload_is_not_an_object:{variant.variant_id}"
+        )
     try:
         parsed = adapter.parse_plan(payload)
         if adapter.plan_hash(parsed) != adapter.plan_hash(plan):
@@ -4941,34 +5035,69 @@ def _v2_run_unit(
     except RoutingExperimentError:
         raise
     except Exception as exc:
-        raise RoutingExperimentError("v2_model_plan_is_malformed") from exc
-    plan_hash = adapter.plan_hash(plan)
-    route_hash = adapter.route_hash(plan)
-    step_budgets = tuple(adapter.plan_step_budgets(plan) or ())
+        raise RoutingExperimentError(
+            f"v2_variant_plan_validation_failed:{variant.variant_id}:{type(exc).__name__}"
+        ) from exc
+    try:
+        plan_hash = adapter.plan_hash(plan)
+        route_hash = adapter.route_hash(plan)
+        raw_budgets = tuple(adapter.plan_step_budgets(plan) or ())
+        step_budgets = tuple(
+            item
+            if isinstance(item, RoutingPlanStepBudget)
+            else RoutingPlanStepBudget(**dict(item))
+            for item in raw_budgets
+        )
+    except RoutingExperimentError:
+        raise
+    except Exception as exc:
+        raise RoutingExperimentError(
+            f"v2_variant_plan_budget_failed:{variant.variant_id}:{type(exc).__name__}"
+        ) from exc
     budget_by_tool: dict[str, RoutingPlanStepBudget] = {}
     for budget in step_budgets:
         if budget.tool_id not in variant_bindings:
-            raise RoutingExperimentError(f"v2_model_plan_references_unbound_tool:{budget.tool_id}")
+            raise RoutingExperimentError(
+                f"v2_model_plan_references_unbound_tool:{budget.tool_id}"
+            )
         if budget.execution_mode == "invoke":
             if budget.tool_id in budget_by_tool:
-                raise RoutingExperimentError(f"v2_model_plan_repeats_tool_step:{budget.tool_id}")
+                raise RoutingExperimentError(
+                    f"v2_model_plan_repeats_tool_step:{budget.tool_id}"
+                )
             budget_by_tool[budget.tool_id] = budget
     planned_call_cap = sum(item.max_calls for item in budget_by_tool.values())
     planned_seconds_cap = sum(
-        item.timeout_seconds for item in budget_by_tool.values() if item.max_calls > 0
+        item.timeout_seconds
+        for item in budget_by_tool.values()
+        if item.max_calls > 0
+    )
+    planned_credit_cap = sum(
+        item.credit_microunits
+        for item in budget_by_tool.values()
+        if item.max_calls > 0
     )
     if planned_call_cap > MAX_TOOLS_PER_VARIANT:
         raise RoutingExperimentError("v2_model_plan_total_call_cap_exceeded")
     if planned_seconds_cap > MAX_LATENCY_MS / 1000:
         raise RoutingExperimentError("v2_model_plan_total_time_cap_exceeded")
+    if planned_credit_cap > MAX_CREDIT_MICROUNITS_PER_VARIANT:
+        raise RoutingExperimentError("v2_model_plan_total_credit_cap_exceeded")
+    if planned_credit_cap > spec.credit_budget.total_credit_microunits:
+        raise RoutingExperimentError("v2_model_plan_credit_budget_exceeded")
     try:
-        raw_considered_tool_ids = adapter.considered_tool_ids(plan, stage=variant.stage)
+        raw_considered_tool_ids = adapter.considered_tool_ids(
+            plan,
+            stage=variant.stage,
+        )
         if isinstance(raw_considered_tool_ids, (str, bytes)):
             raise RoutingExperimentError("v2_considered_tool_ids_must_be_an_array")
         normalized_considered_tool_ids: list[str] = []
         for item in raw_considered_tool_ids:
             if not isinstance(item, str):
-                raise RoutingExperimentError("v2_considered_tool_ids_must_use_strings")
+                raise RoutingExperimentError(
+                    "v2_considered_tool_ids_must_use_strings"
+                )
             normalized_considered_tool_ids.append(
                 _ensure_safe_ref(item, "v2_considered_tool_id")
             )
@@ -4976,14 +5105,17 @@ def _v2_run_unit(
     except RoutingExperimentError:
         raise
     except Exception as exc:
-        raise RoutingExperimentError("v2_model_plan_considered_tools_failed") from exc
+        raise RoutingExperimentError(
+            f"v2_variant_considered_tools_failed:{variant.variant_id}:{type(exc).__name__}"
+        ) from exc
     if len(set(considered_tool_ids)) != len(considered_tool_ids):
         raise RoutingExperimentError("v2_model_plan_considered_tool_ids_must_be_unique")
     considered_tool_set = set(considered_tool_ids)
     unbound_considered = considered_tool_set.difference(variant_bindings)
     if unbound_considered:
         raise RoutingExperimentError(
-            "v2_model_plan_considered_tool_is_unbound:" + ",".join(sorted(unbound_considered))
+            "v2_model_plan_considered_tool_is_unbound:"
+            + ",".join(sorted(unbound_considered))
         )
     planned_invoke_tools = {
         item.tool_id
@@ -4997,16 +5129,62 @@ def _v2_run_unit(
             + ",".join(sorted(unconsidered_planned))
         )
     try:
-        projection = adapter.plan_decision_projection(plan)
         projected_skipped = _v2_prepare_decision_projection(
-            projection,
+            adapter.plan_decision_projection(plan),
             considered_tool_ids=considered_tool_ids,
             variant_bindings=variant_bindings,
         )
     except RoutingExperimentError:
         raise
     except Exception as exc:
-        raise RoutingExperimentError("v2_model_plan_decision_projection_failed") from exc
+        raise RoutingExperimentError(
+            f"v2_variant_decision_projection_failed:{variant.variant_id}:{type(exc).__name__}"
+        ) from exc
+    return _V2PreparedVariantPlan(
+        plan=plan,
+        variant_bindings=variant_bindings,
+        available_tools=available_tools,
+        plan_hash=plan_hash,
+        route_hash=route_hash,
+        step_budgets=step_budgets,
+        budget_by_tool=budget_by_tool,
+        planned_call_cap=planned_call_cap,
+        planned_seconds_cap=planned_seconds_cap,
+        considered_tool_ids=considered_tool_ids,
+        projected_skipped=projected_skipped,
+    )
+
+
+def _v2_run_unit(
+    spec: RoutingExperimentV2Spec,
+    variant: RoutingExperimentV2Variant,
+    *,
+    adapter: RoutingExperimentV2Adapter,
+    feature_set: Any,
+    bindings: Mapping[str, ProviderBindingIdentity],
+    store: ProviderReceiptStore,
+    decision_store: RoutingDecisionReceiptStore,
+    runner: Callable[[ProviderBindingIdentity, str], ProviderReceipt | Mapping[str, Any]],
+    unit_ref: str,
+    prepared_plan: _V2PreparedVariantPlan,
+    spent_total: list[int],
+    spent_by_binding: dict[str, int],
+    new_spend_total: list[int],
+    reserved_total: list[int],
+    reserved_by_binding: dict[str, int],
+) -> tuple[list[ProviderReceipt], bool, RoutingDecisionReceiptV2]:
+    variant_bindings = dict(prepared_plan.variant_bindings)
+    available_tools = dict(prepared_plan.available_tools)
+    plan = prepared_plan.plan
+    plan_hash = prepared_plan.plan_hash
+    route_hash = prepared_plan.route_hash
+    step_budgets = prepared_plan.step_budgets
+    budget_by_tool = dict(prepared_plan.budget_by_tool)
+    planned_call_cap = prepared_plan.planned_call_cap
+    planned_seconds_cap = prepared_plan.planned_seconds_cap
+    considered_tool_ids = prepared_plan.considered_tool_ids
+    considered_tool_set = set(considered_tool_ids)
+    projected_skipped = dict(prepared_plan.projected_skipped)
     planned_credit_by_tool = {
         item.tool_id: item.credit_microunits
         for item in budget_by_tool.values()
@@ -5194,6 +5372,19 @@ def _v2_run_unit(
                 reserved_by_binding[binding_id] = remaining
             else:
                 reserved_by_binding.pop(binding_id, None)
+    if type(predicted) is not bool:
+        raise RoutingExperimentError("v2_model_prediction_must_be_boolean")
+    receipt_prediction = any(
+        receipt.outcome == ProviderOutcome.VERIFIED.value
+        for receipt in receipts
+    )
+    if predicted != receipt_prediction:
+        raise RoutingExperimentError(
+            "v2_model_prediction_disagrees_with_provider_receipts"
+        )
+    # Provider receipts are the sole positive-signal authority.  The model's
+    # boolean is checked above only to detect a broken or adversarial adapter.
+    predicted = receipt_prediction
     attempted = tuple(_ensure_safe_ref(item, "v2_attempted_tool_id") for item in attempt_order)
     projected_skip_by_tool = dict(projected_skipped)
     skipped_projection: dict[str, str] = {}
@@ -5344,6 +5535,15 @@ def evaluate_routing_experiment_v2(
     feature_sets: dict[str, Any] = {}
     for variant in spec.variants:
         feature_sets[variant.variant_id] = adapters[variant.variant_id].parse_feature_set(spec.input.feature_set_payload)
+    prepared_plans: dict[str, _V2PreparedVariantPlan] = {}
+    for variant in spec.variants:
+        prepared_plans[variant.variant_id] = _v2_prepare_variant_plan(
+            spec,
+            variant,
+            adapter=adapters[variant.variant_id],
+            feature_set=feature_sets[variant.variant_id],
+            bindings=bindings,
+        )
     spent_total = [0]
     spent_by_binding: dict[str, int] = {}
     new_spend_total = [0]
@@ -5372,6 +5572,7 @@ def evaluate_routing_experiment_v2(
                 decision_store=decisions,
                 runner=runner,
                 unit_ref=unit_ref,
+                prepared_plan=prepared_plans[variant.variant_id],
                 spent_total=spent_total,
                 spent_by_binding=spent_by_binding,
                 new_spend_total=new_spend_total,

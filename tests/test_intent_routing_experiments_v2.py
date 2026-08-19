@@ -92,9 +92,18 @@ class Plan:
 class FakeV2Adapter:
     """Fake exact model contract. It supports both model stages."""
 
-    def __init__(self, manifests: dict[str, str], *, available: bool = True):
+    def __init__(
+        self,
+        manifests: dict[str, str],
+        *,
+        available: bool = True,
+        registered_source_add_tool_ids: tuple[str, ...] = (),
+    ):
         self.manifests = manifests
         self.available = available
+        self.registered_source_add_tool_ids_value = tuple(
+            registered_source_add_tool_ids
+        )
 
     def parse_feature_set(self, payload):
         return payload
@@ -155,6 +164,10 @@ class FakeV2Adapter:
             }
             for tool in payload.get("tools", ())
         )
+
+    def registered_source_add_tool_ids(self, *, stage):
+        del stage
+        return self.registered_source_add_tool_ids_value
 
     def lookup_tool_descriptor(self, tool_id, *, stage):
         manifest = self.manifests.get(tool_id)
@@ -568,6 +581,80 @@ def test_v2_declared_new_tool_must_be_in_model_profile_before_provider_calls(sta
     assert calls == []
 
 
+def test_v2_preflights_later_variant_plan_before_provider_calls():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+
+    class LaterCompileFailureAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            if payload.get("route_variant") == "candidate-route":
+                raise RuntimeError("candidate plan is not executable")
+            return super().compile_variant(payload, **kwargs)
+
+    calls = []
+
+    def recording_runner(binding, unit, request):
+        calls.append((binding.tool_id, unit, request))
+        return _runner(binding, unit, request)
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="v2_variant_plan_preflight_failed:candidate:RuntimeError",
+    ):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters={
+                "baseline": adapters["baseline"],
+                "candidate": LaterCompileFailureAdapter(
+                    adapters["candidate"].manifests
+                ),
+            },
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_provider_receipt_is_the_only_positive_signal_authority():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+
+    class LyingPredictionAdapter(FakeV2Adapter):
+        def execute_plan(self, plan, invoke):
+            results = [invoke(tool) for tool in plan.tools]
+            return results, True
+
+    def source_miss_runner(binding, unit, request):
+        value = dict(_runner(binding, unit, request))
+        value["outcome"] = ProviderOutcome.SOURCE_MISS.value
+        value["receipt_ref"] = "provider_receipt:" + sha256_json(
+            {key: item for key, item in value.items() if key != "receipt_ref"}
+        ).split(":", 1)[1][:16]
+        return value
+
+    calls = []
+
+    def recording_runner(binding, unit, request):
+        calls.append((binding.tool_id, unit, request))
+        return source_miss_runner(binding, unit, request)
+
+    lying_adapters = {
+        key: LyingPredictionAdapter(value.manifests)
+        for key, value in adapters.items()
+    }
+    with pytest.raises(
+        RoutingExperimentError,
+        match="v2_model_prediction_disagrees_with_provider_receipts",
+    ):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=lying_adapters,
+            require_isolation=False,
+        )
+    assert calls
+
+
 @pytest.mark.parametrize("case", ["omitted", "extra"])
 def test_v2_source_add_provenance_must_match_declared_new_tools(case):
     spec, adapters, labels, _tool, _source_tool = _spec(
@@ -623,6 +710,93 @@ def test_v2_source_add_provenance_must_match_declared_new_tools(case):
             gold_labels=labels,
             runner=recording_runner,
             adapters=adapters_by_variant,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
+def test_v2_baseline_registered_source_add_can_be_rerouted_without_new_declaration(stage):
+    spec, adapters, _labels, _tool, source_tool = _spec(
+        stage, with_source_add=True
+    )
+    baseline = spec.variants[0]
+    rerouted = replace(
+        spec.variants[1],
+        variant_id="registered-reroute",
+        artifact=baseline.artifact,
+        artifact_authority_manifest=baseline.artifact_authority_manifest,
+        change_kind="route_only",
+        source_add_provenance=(),
+        new_tool_ids=(),
+    )
+    reroute_adapters = {
+        "baseline": FakeV2Adapter(
+            adapters["baseline"].manifests,
+            registered_source_add_tool_ids=(source_tool,),
+        ),
+        "registered-reroute": FakeV2Adapter(
+            adapters["candidate"].manifests,
+            registered_source_add_tool_ids=(source_tool,),
+        ),
+    }
+    reroute_spec = replace(
+        spec,
+        experiment_id=f"{spec.experiment_id}-registered-reroute",
+        variants=(baseline, rerouted),
+    )
+    assert validate_routing_experiment_v2_spec(
+        reroute_spec,
+        adapters=reroute_adapters,
+    ) == []
+
+
+@pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
+def test_v2_new_source_add_registration_requires_new_declaration_before_calls(stage):
+    spec, adapters, labels, _tool, source_tool = _spec(
+        stage, with_source_add=True
+    )
+    undeclared = replace(
+        spec.variants[1],
+        variant_id="undeclared-source-registration",
+        new_tool_ids=(),
+    )
+    undeclared_spec = replace(
+        spec,
+        experiment_id=f"{spec.experiment_id}-undeclared-source-registration",
+        variants=(spec.variants[0], undeclared),
+    )
+    undeclared_adapters = {
+        "baseline": FakeV2Adapter(
+            adapters["baseline"].manifests,
+            registered_source_add_tool_ids=(),
+        ),
+        "undeclared-source-registration": FakeV2Adapter(
+            adapters["candidate"].manifests,
+            registered_source_add_tool_ids=(source_tool,),
+        ),
+    }
+    errors = validate_routing_experiment_v2_spec(
+        undeclared_spec,
+        adapters=undeclared_adapters,
+    )
+    assert any(
+        "v2_source_add_registration_not_in_baseline_requires_new_tool"
+        in error
+        for error in errors
+    )
+    calls = []
+
+    def recording_runner(binding, unit, request):
+        calls.append((binding.tool_id, unit, request))
+        return _runner(binding, unit, request)
+
+    with pytest.raises(RoutingExperimentError, match="invalid v2 routing experiment"):
+        evaluate_routing_experiment_v2(
+            undeclared_spec,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=undeclared_adapters,
             require_isolation=False,
         )
     assert calls == []

@@ -2303,11 +2303,23 @@ def _complete_shared_evidence_handoff(
 ) -> None:
     """Verify the shared tree once, after every candidate writer has joined."""
 
-    _normalize_evidence_ownership(
-        tag,
-        evidence_root=evidence_root,
-        docker_platform=docker_platform,
-    )
+    registry = _WorkerProcessRegistry()
+    try:
+        with _worker_process_scope(registry):
+            _normalize_evidence_ownership(
+                tag,
+                evidence_root=evidence_root,
+                docker_platform=docker_platform,
+            )
+    except BaseException as original:
+        try:
+            cleanup_errors = registry.cancel()
+        except BaseException as cleanup_exc:
+            cleanup_errors = (
+                f"registry:{type(cleanup_exc).__name__}",
+            )
+        _annotate_worker_cleanup_errors(original, cleanup_errors)
+        raise
     _attach_terminal_workflow_failure_projection(
         stages=stages,
         workflow_stage=workflow_stage,

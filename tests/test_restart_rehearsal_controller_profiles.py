@@ -2109,6 +2109,112 @@ def test_shared_evidence_handoff_waits_for_link_mutating_writer(
     assert calls == ["normalize", "project", "preserve"]
 
 
+@pytest.mark.parametrize("signum", [signal.SIGALRM, signal.SIGINT])
+def test_shared_evidence_handoff_signal_reaps_named_normalizer_without_retry(
+    signum: signal.Signals,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    started = threading.Event()
+    processes, removed = _install_blocked_popen(
+        controller,
+        monkeypatch,
+        started,
+        streaming=False,
+    )
+    original_register = controller._WorkerProcessRegistry.register
+    injected = False
+
+    def signal_before_register(registry, process, container_name):
+        nonlocal injected
+        if not injected:
+            injected = True
+            signal.raise_signal(signum)
+        return original_register(registry, process, container_name)
+
+    monkeypatch.setattr(
+        controller._WorkerProcessRegistry,
+        "register",
+        signal_before_register,
+    )
+    handoff_attempted = False
+    expected_exception = (
+        controller.RehearsalTimeBudgetExceeded
+        if signum == signal.SIGALRM
+        else KeyboardInterrupt
+    )
+
+    with pytest.raises(expected_exception):
+        with controller._profile_time_limit(600):
+            with controller._temporary_evidence_directory(
+                "rehearsal-image",
+                docker_platform="linux/amd64",
+                handoff_attempted=lambda: handoff_attempted,
+            ) as evidence_root:
+                handoff_attempted = True
+                controller._complete_shared_evidence_handoff(
+                    "rehearsal-image",
+                    stages=[],
+                    workflow_stage="workflow-prepush",
+                    evidence_root=evidence_root,
+                    candidate_sha="b" * 40,
+                    profile="prepush",
+                    docker_platform="linux/amd64",
+                )
+
+    assert injected is True
+    assert not evidence_root.exists()
+    assert len(processes) == 1
+    process = processes[0]
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.reaped is True
+    name_index = process.command.index("--name")
+    assert removed == [process.command[name_index + 1]]
+
+
+@pytest.mark.parametrize("deadline_kind", ["interrupt", "rehearsal-deadline"])
+def test_shared_evidence_handoff_cleanup_error_keeps_original_signal(
+    deadline_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller = _load_controller()
+    original: BaseException = (
+        KeyboardInterrupt()
+        if deadline_kind == "interrupt"
+        else controller.RehearsalTimeBudgetExceeded("deadline")
+    )
+    secret = "must-not-escape-registry-cleanup"
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(original),
+    )
+    monkeypatch.setattr(
+        controller._WorkerProcessRegistry,
+        "cancel",
+        lambda _self: (_ for _ in ()).throw(RuntimeError(secret)),
+    )
+
+    with pytest.raises(type(original)) as raised:
+        controller._complete_shared_evidence_handoff(
+            "rehearsal-image",
+            stages=[],
+            workflow_stage="workflow-prepush",
+            evidence_root=tmp_path,
+            candidate_sha="b" * 40,
+            profile="prepush",
+            docker_platform="linux/amd64",
+        )
+
+    assert raised.value is original
+    captured = capsys.readouterr().err
+    assert "registry:RuntimeError" in captured
+    assert secret not in captured
+
+
 @pytest.mark.parametrize("deadline_kind", ["interrupt", "rehearsal-deadline"])
 def test_normalization_deadline_is_not_swallowed(
     monkeypatch: pytest.MonkeyPatch,

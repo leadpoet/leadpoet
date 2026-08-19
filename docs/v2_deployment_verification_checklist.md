@@ -227,22 +227,39 @@ cannot be selected accidentally.
 
 ## After Attestation and Restart
 
-Run read-only production probes:
+Run the tracked read-only probe from a pristine worktree whose `HEAD` is the
+exact active candidate. The worktree may contain no additional files,
+including ignored or untracked files, and the interpreter must provide the
+candidate's declared dependencies.
+
+Obtain `FINALIZED_EPOCH_ID` from the first candidate-associated
+`GET /weights/current/71` publication after the completed official baseline,
+retain that epoch, and wait for its compact authority to finalize and reveal.
+Obtain `AUDITOR_HOTKEYS` only from the authoritative active public-auditor
+deployment inventory joined one-to-one to post-restart tracked
+`startup_ready` records. Do not infer configured auditors from IPs, UIDs,
+metagraph membership, historical rows, or vector equality. Fail closed if the
+inventory is absent or incomplete.
 
 ```bash
-bash scripts/_probe_weight_submission_path_local.sh full
-bash scripts/_probe_weight_submission_path_local.sh auditor-bundle
-bash scripts/_probe_weight_submission_path_local.sh signing-only
-bash scripts/_probe_auditor_weight_submission_ready_local.sh
+auditor_args=()
+for hotkey in "${AUDITOR_HOTKEYS[@]}"; do
+  auditor_args+=(--auditor-hotkey "$hotkey")
+done
+
+/Users/pranav/Downloads/Election_Analysis/Bittensor-subnet/venv/bin/python -I \
+  scripts/probe_weight_submission_evidence_v2.py \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --netuid 71 \
+  --epoch-id "$FINALIZED_EPOCH_ID" \
+  "${auditor_args[@]}"
 ```
 
-Require:
-
-- [ ] `PROBE_SUCCESS`, `SIGNING_PROBE_SUCCESS`,
-  `AUDITOR_SUBMISSION_READY`, and `NO_CHAIN_WRITE_CONFIRMED`.
-- [ ] Gateway, primary validator, and every auditor report the same current
-  epoch bundle/vector hash.
-- [ ] Expected `last_update` values advance and finalized chain readback
-  matches.
-- [ ] No publication journal quarantine or weight-path error remains.
-- [ ] Evidence stays valid across the next epoch rollover.
+Require exit zero, schema
+`leadpoet.weight_submission_evidence_probe.v2`, exact candidate/netuid/epoch,
+`auditor_count` equal to the authoritative inventory, one primary plus every
+auditor, identical finalized mechanism-0 vectors, advanced `LastUpdate`
+values, and a finalized head past the reveal period. The probe independently
+verifies the version-pinned COMPLIANCE Object-Locked release channel, compact
+publication authority, signatures, finalization, and chain readback. Confirm
+that no publication quarantine or weight-path terminal error remains.

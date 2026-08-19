@@ -195,7 +195,6 @@ class CandidateWaterfallReceipt:
             "experiment_id",
             "variant_id",
             "decision_receipt_id",
-            "provider_receipt_ref",
             "unit_ref",
             "binding_id",
             "execution_mode",
@@ -207,11 +206,16 @@ class CandidateWaterfallReceipt:
             raise RoutingExperimentError("candidate_tool_id_must_use_candidate_namespace")
         if not _DECISION_RECEIPT_RE.fullmatch(self.decision_receipt_id):
             raise RoutingExperimentError("candidate_decision_receipt_id_is_invalid")
-        if not _PROVIDER_RECEIPT_RE.fullmatch(self.provider_receipt_ref):
+        if self.provider_receipt_ref and not _PROVIDER_RECEIPT_RE.fullmatch(
+            self.provider_receipt_ref
+        ):
             raise RoutingExperimentError("candidate_provider_receipt_ref_is_invalid")
         if self.execution_mode not in {item.value for item in ReceiptExecutionMode}:
             raise RoutingExperimentError("candidate_execution_mode_is_invalid")
-        if self.provider_outcome not in {item.value for item in ProviderOutcome}:
+        if self.provider_outcome not in {
+            *(item.value for item in ProviderOutcome),
+            "skipped",
+        }:
             raise RoutingExperimentError("candidate_provider_outcome_is_invalid")
         for field_name in (
             "experiment_hash",
@@ -247,6 +251,15 @@ class CandidateWaterfallReceipt:
             _nonnegative_int(getattr(self, field_name), field_name)
         if self.disposition not in _DISPOSITIONS:
             raise RoutingExperimentError("candidate_disposition_is_invalid")
+        if self.disposition == "skipped":
+            if self.provider_receipt_ref or self.provider_outcome != "skipped":
+                raise RoutingExperimentError(
+                    "candidate_skipped_attempt_cannot_claim_provider_receipt"
+                )
+        elif not self.provider_receipt_ref:
+            raise RoutingExperimentError(
+                "candidate_attempt_requires_provider_receipt"
+            )
         if not (
             self.raw_count
             >= self.normalized_count
@@ -286,7 +299,7 @@ def candidate_waterfall_receipt_from_model(
     spec: RoutingExperimentV2Spec,
     variant_id: str,
     decision_receipt: RoutingDecisionReceiptV2,
-    provider_receipt: ProviderReceipt,
+    provider_receipt: ProviderReceipt | None,
     receipt_payload: Mapping[str, Any],
     model_runtime: Any,
     published_count: int = 0,
@@ -304,11 +317,6 @@ def candidate_waterfall_receipt_from_model(
         raise RoutingExperimentError(
             "candidate_decision_receipt_is_invalid:" + ";".join(decision_errors)
         )
-    provider_errors = validate_provider_receipt(provider_receipt)
-    if provider_errors:
-        raise RoutingExperimentError(
-            "candidate_provider_receipt_is_invalid:" + ";".join(provider_errors)
-        )
     if (
         decision_receipt.experiment_id != spec.experiment_id
         or decision_receipt.variant_id != variant_id
@@ -324,40 +332,85 @@ def candidate_waterfall_receipt_from_model(
     )
     if decision_receipt.artifact_key != expected_artifact_key:
         raise RoutingExperimentError("candidate_decision_receipt_artifact_differs_from_variant")
-    if provider_receipt.receipt_ref not in decision_receipt.provider_receipt_refs:
-        raise RoutingExperimentError("candidate_provider_receipt_is_not_in_decision")
-    if provider_receipt.unit_ref != decision_receipt.unit_ref:
-        raise RoutingExperimentError("candidate_provider_receipt_unit_differs_from_decision")
-    if provider_receipt.execution_mode != decision_receipt.execution_mode:
-        raise RoutingExperimentError(
-            "candidate_provider_receipt_mode_differs_from_decision"
-        )
-    if provider_receipt.tool_id not in decision_receipt.attempted_tool_ids:
-        raise RoutingExperimentError("candidate_provider_tool_was_not_attempted")
-    binding_by_id = {item.binding_id: item for item in spec.provider_bindings}
-    binding = binding_by_id.get(provider_receipt.binding_id)
-    if binding is None or binding.binding_id not in variant.binding_ids:
-        raise RoutingExperimentError("candidate_provider_binding_is_not_in_variant")
-    if binding.tool_id != provider_receipt.tool_id:
-        raise RoutingExperimentError("candidate_provider_binding_tool_differs_from_receipt")
-    if (
-        binding.adapter_version != provider_receipt.binding_version
-        or binding.source_lineage_id != provider_receipt.source_lineage_id
-    ):
-        raise RoutingExperimentError(
-            "candidate_provider_binding_identity_differs_from_receipt"
-        )
     try:
         model_receipt = model_runtime.CandidateStepAttemptReceipt.from_payload(receipt_payload)
     except Exception as exc:
         raise RoutingExperimentError("model_candidate_attempt_receipt_is_invalid") from exc
-    if model_receipt.tool_id != provider_receipt.tool_id:
-        raise RoutingExperimentError("model_candidate_attempt_tool_differs_from_provider_receipt")
     if (
         model_hash_to_lab(model_receipt.plan_sha256, "candidate_model_plan_hash")
         != decision_receipt.plan_hash
     ):
         raise RoutingExperimentError("model_candidate_attempt_plan_differs_from_decision")
+    variant_bindings = [
+        item
+        for item in spec.provider_bindings
+        if item.binding_id in set(variant.binding_ids)
+    ]
+    if provider_receipt is None:
+        if model_receipt.disposition != "skipped":
+            raise RoutingExperimentError(
+                "model_candidate_attempt_without_provider_receipt_must_be_skipped"
+            )
+        skipped_by_tool = dict(decision_receipt.skipped_tool_reasons)
+        if model_receipt.tool_id not in skipped_by_tool:
+            raise RoutingExperimentError(
+                "model_candidate_skipped_tool_is_not_in_decision"
+            )
+        matching_bindings = [
+            item for item in variant_bindings if item.tool_id == model_receipt.tool_id
+        ]
+        if len(matching_bindings) != 1:
+            raise RoutingExperimentError(
+                "candidate_skipped_tool_binding_must_exist_exactly_once"
+            )
+        binding = matching_bindings[0]
+        provider_receipt_ref = ""
+        execution_mode = decision_receipt.execution_mode
+        provider_outcome = "skipped"
+    else:
+        provider_errors = validate_provider_receipt(provider_receipt)
+        if provider_errors:
+            raise RoutingExperimentError(
+                "candidate_provider_receipt_is_invalid:" + ";".join(provider_errors)
+            )
+        if model_receipt.disposition == "skipped":
+            raise RoutingExperimentError(
+                "model_candidate_skipped_attempt_cannot_claim_provider_receipt"
+            )
+        if provider_receipt.receipt_ref not in decision_receipt.provider_receipt_refs:
+            raise RoutingExperimentError("candidate_provider_receipt_is_not_in_decision")
+        if provider_receipt.unit_ref != decision_receipt.unit_ref:
+            raise RoutingExperimentError(
+                "candidate_provider_receipt_unit_differs_from_decision"
+            )
+        if provider_receipt.execution_mode != decision_receipt.execution_mode:
+            raise RoutingExperimentError(
+                "candidate_provider_receipt_mode_differs_from_decision"
+            )
+        if provider_receipt.tool_id not in decision_receipt.attempted_tool_ids:
+            raise RoutingExperimentError("candidate_provider_tool_was_not_attempted")
+        binding_by_id = {item.binding_id: item for item in variant_bindings}
+        binding = binding_by_id.get(provider_receipt.binding_id)
+        if binding is None:
+            raise RoutingExperimentError("candidate_provider_binding_is_not_in_variant")
+        if binding.tool_id != provider_receipt.tool_id:
+            raise RoutingExperimentError(
+                "candidate_provider_binding_tool_differs_from_receipt"
+            )
+        if (
+            binding.adapter_version != provider_receipt.binding_version
+            or binding.source_lineage_id != provider_receipt.source_lineage_id
+        ):
+            raise RoutingExperimentError(
+                "candidate_provider_binding_identity_differs_from_receipt"
+            )
+        if model_receipt.tool_id != provider_receipt.tool_id:
+            raise RoutingExperimentError(
+                "model_candidate_attempt_tool_differs_from_provider_receipt"
+            )
+        provider_receipt_ref = provider_receipt.receipt_ref
+        execution_mode = provider_receipt.execution_mode
+        provider_outcome = provider_receipt.outcome
     published = _nonnegative_int(published_count, "published_count")
     if published > model_receipt.verified_qualified_count:
         raise RoutingExperimentError("candidate_published_count_exceeds_verified_count")
@@ -367,12 +420,12 @@ def candidate_waterfall_receipt_from_model(
         variant_id=variant_id,
         artifact_key=decision_receipt.artifact_key,
         decision_receipt_id=decision_receipt.receipt_id,
-        provider_receipt_ref=provider_receipt.receipt_ref,
+        provider_receipt_ref=provider_receipt_ref,
         unit_ref=decision_receipt.unit_ref,
-        binding_id=provider_receipt.binding_id,
-        tool_id=provider_receipt.tool_id,
-        execution_mode=provider_receipt.execution_mode,
-        provider_outcome=provider_receipt.outcome,
+        binding_id=binding.binding_id,
+        tool_id=model_receipt.tool_id,
+        execution_mode=execution_mode,
+        provider_outcome=provider_outcome,
         decision_plan_hash=decision_receipt.plan_hash,
         decision_route_hash=decision_receipt.route_hash,
         model_contract_sha256=str(identity["contract_sha256"]),
@@ -567,7 +620,11 @@ def evaluate_candidate_waterfall_metrics(
             variant_evaluation is None
             or receipt.experiment_id != spec.experiment_id
             or receipt.experiment_hash != spec.experiment_hash()
-            or receipt.provider_receipt_ref not in variant_evaluation.provider_receipt_refs
+            or (
+                receipt.provider_receipt_ref
+                and receipt.provider_receipt_ref
+                not in variant_evaluation.provider_receipt_refs
+            )
             or receipt.decision_receipt_id not in variant_evaluation.decision_receipt_refs
         ):
             raise RoutingExperimentError("candidate_waterfall_receipt_is_not_in_evaluation")
@@ -648,7 +705,13 @@ def evaluate_candidate_waterfall_metrics(
                     ),
                     waterfall_receipt_refs=tuple(item.receipt_id for item in selected),
                     provider_receipt_refs=tuple(
-                        sorted({item.provider_receipt_ref for item in selected})
+                        sorted(
+                            {
+                                item.provider_receipt_ref
+                                for item in selected
+                                if item.provider_receipt_ref
+                            }
+                        )
                     ),
                     decision_receipt_refs=tuple(
                         sorted({item.decision_receipt_id for item in selected})

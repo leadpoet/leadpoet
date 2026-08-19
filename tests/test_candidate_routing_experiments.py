@@ -205,6 +205,7 @@ def _decision(
     provider: ProviderReceipt,
     *,
     variant_id: str = "baseline",
+    skipped: bool = False,
 ) -> RoutingDecisionReceiptV2:
     draft = RoutingDecisionReceiptV2(
         receipt_id="routing_decision:pending",
@@ -216,12 +217,14 @@ def _decision(
         plan_hash=H("a"),
         route_hash=H("b"),
         considered_tool_ids=(provider.tool_id,),
-        attempted_tool_ids=(provider.tool_id,),
-        skipped_tool_reasons=(),
-        outcome_reasons=((provider.tool_id, provider.outcome),),
-        provider_receipt_refs=(provider.receipt_ref,),
-        total_credit_microunits=provider.credit_microunits,
-        latency_ms=provider.latency_ms,
+        attempted_tool_ids=() if skipped else (provider.tool_id,),
+        skipped_tool_reasons=(
+            ((provider.tool_id, "runtime_unavailable"),) if skipped else ()
+        ),
+        outcome_reasons=() if skipped else ((provider.tool_id, provider.outcome),),
+        provider_receipt_refs=() if skipped else (provider.receipt_ref,),
+        total_credit_microunits=0 if skipped else provider.credit_microunits,
+        latency_ms=0 if skipped else provider.latency_ms,
         execution_mode=provider.execution_mode,
     )
     payload = draft.to_dict()
@@ -350,6 +353,42 @@ def test_model_receipt_adapter_rejects_unlinked_provider_receipt():
             receipt_payload={},
             model_runtime=_runtime(),
         )
+
+
+def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
+    spec = _spec()
+    provider = _provider_receipt()
+    skipped_model_receipt = SimpleNamespace(
+        plan_sha256="a" * 64,
+        stop_policy_sha256="b" * 64,
+        step_order=0,
+        attempt=0,
+        tool_id=provider.tool_id,
+        disposition="skipped",
+        outcome_code="runtime_unavailable",
+        provider_call_count=0,
+        estimated_cost_usd=0.0,
+        latency_seconds=0.0,
+        raw_candidate_count=0,
+        normalized_candidate_count=0,
+        unique_candidate_count=0,
+        verified_qualified_count=0,
+        verification_receipt_sha256="",
+        sha256=lambda: "8" * 64,
+    )
+    receipt = candidate_waterfall_receipt_from_model(
+        spec=spec,
+        variant_id="baseline",
+        decision_receipt=_decision(spec, provider, skipped=True),
+        provider_receipt=None,
+        receipt_payload={},
+        model_runtime=_runtime(receipt=skipped_model_receipt),
+    )
+
+    assert receipt.disposition == "skipped"
+    assert receipt.provider_outcome == "skipped"
+    assert receipt.provider_receipt_ref == ""
+    assert receipt.provider_call_count == 0
 
 
 @pytest.mark.skipif(
@@ -499,6 +538,8 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "ON DELETE CASCADE" not in sql
     assert "FOR SELECT TO service_role USING (true)" in sql
     assert "FOR INSERT TO service_role WITH CHECK (true)" in sql
+    assert "provider_receipt_ref = ''" in sql
+    assert "disposition = 'skipped'" in sql
     assert "auth.role()" not in sql
     assert "DROP TABLE" not in sql
     assert "DROP TRIGGER" not in sql

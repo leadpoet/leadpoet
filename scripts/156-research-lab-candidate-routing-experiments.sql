@@ -28,8 +28,9 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
     decision_receipt_id           TEXT NOT NULL CHECK (
         decision_receipt_id ~ '^routing_decision:[0-9a-f]{16}$'
     ),
-    provider_receipt_ref          TEXT NOT NULL CHECK (
-        provider_receipt_ref ~ '^provider_receipt:[0-9a-f]{16}$'
+    provider_receipt_ref          TEXT NOT NULL DEFAULT '' CHECK (
+        provider_receipt_ref = ''
+        OR provider_receipt_ref ~ '^provider_receipt:[0-9a-f]{16}$'
     ),
     unit_ref                      TEXT NOT NULL,
     binding_id                    TEXT NOT NULL,
@@ -87,6 +88,18 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
     CHECK (unique_count >= verified_qualified_count),
     CHECK (verified_qualified_count >= published_count),
     CHECK (verified_qualified_count = 0 OR verification_receipt_sha256 <> ''),
+    CHECK (
+        (
+            disposition = 'skipped'
+            AND provider_receipt_ref = ''
+            AND provider_outcome = 'skipped'
+        )
+        OR (
+            disposition <> 'skipped'
+            AND provider_receipt_ref <> ''
+            AND provider_outcome <> 'skipped'
+        )
+    ),
     CHECK (receipt_doc->>'receipt_id' = receipt_id),
     CHECK (receipt_doc->>'receipt_hash' = receipt_hash),
     CHECK (receipt_doc->>'contract_version' = contract_version),

@@ -37,6 +37,7 @@ TAG_RUN = "leadpoet:parity-run"
 TAG_SHA = "leadpoet:candidate-sha"
 TAG_EPHEMERAL = "leadpoet:ephemeral"
 ARTIFACT_RETENTION_DAYS = 1
+CLOUDFRONT_MANAGED_POLICY_MAX_PAGES = 100
 EARLY_BOOT_ISOLATION = """#cloud-boothook
 #!/bin/bash
 set -eu
@@ -306,25 +307,75 @@ def _cloudfront_prefix_list(ec2: Any) -> str:
 
 
 def _managed_policy_id(client: Any, *, policy_type: str, name: str) -> str:
-    paginator = client.get_paginator(f"list_{policy_type}_policies")
-    key = "CachePolicyList" if policy_type == "cache" else "OriginRequestPolicyList"
-    for page in paginator.paginate(Type="managed"):
-        for item in page.get(key, {}).get("Items", []):
-            policy = item.get(
-                "CachePolicy" if policy_type == "cache" else "OriginRequestPolicy",
-                {},
-            )
-            config = policy.get(
-                "CachePolicyConfig"
-                if policy_type == "cache"
-                else "OriginRequestPolicyConfig",
-                {},
-            )
+    policy_shapes = {
+        "cache": (
+            "list_cache_policies",
+            "CachePolicyList",
+            "CachePolicy",
+            "CachePolicyConfig",
+        ),
+        "origin_request": (
+            "list_origin_request_policies",
+            "OriginRequestPolicyList",
+            "OriginRequestPolicy",
+            "OriginRequestPolicyConfig",
+        ),
+    }
+    shape = policy_shapes.get(policy_type)
+    if shape is None or not name:
+        raise ProvisioningError("CloudFront managed policy lookup is invalid")
+    operation, list_key, policy_key, config_key = shape
+    marker: str | None = None
+    seen_markers: set[str] = set()
+    matches: list[str] = []
+
+    for _page_number in range(CLOUDFRONT_MANAGED_POLICY_MAX_PAGES):
+        request = {"Type": "managed"}
+        if marker is not None:
+            request["Marker"] = marker
+        page = getattr(client, operation)(**request)
+        if not isinstance(page, Mapping):
+            raise ProvisioningError("CloudFront managed policy page is invalid")
+        listing = page.get(list_key)
+        if not isinstance(listing, Mapping):
+            raise ProvisioningError("CloudFront managed policy page is invalid")
+        items = listing.get("Items", [])
+        if not isinstance(items, list):
+            raise ProvisioningError("CloudFront managed policy page is invalid")
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise ProvisioningError("CloudFront managed policy page is invalid")
+            policy = item.get(policy_key)
+            if not isinstance(policy, Mapping):
+                raise ProvisioningError("CloudFront managed policy page is invalid")
+            config = policy.get(config_key)
+            if not isinstance(config, Mapping):
+                raise ProvisioningError("CloudFront managed policy page is invalid")
             if config.get("Name") == name:
-                value = str(policy.get("Id") or "")
-                if value:
-                    return value
-    raise ProvisioningError(f"CloudFront managed policy is unavailable: {name}")
+                value = policy.get("Id")
+                if not isinstance(value, str) or not value:
+                    raise ProvisioningError("CloudFront managed policy page is invalid")
+                matches.append(value)
+
+        if "NextMarker" not in listing:
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ProvisioningError(
+                    f"CloudFront managed policy is ambiguous: {name}"
+                )
+            raise ProvisioningError(
+                f"CloudFront managed policy is unavailable: {name}"
+            )
+        next_marker = listing.get("NextMarker")
+        if not isinstance(next_marker, str) or not next_marker.strip():
+            raise ProvisioningError("CloudFront managed policy pagination is invalid")
+        if next_marker == marker or next_marker in seen_markers:
+            raise ProvisioningError("CloudFront managed policy pagination is invalid")
+        seen_markers.add(next_marker)
+        marker = next_marker
+
+    raise ProvisioningError("CloudFront managed policy pagination limit exceeded")
 
 
 def _wait_ssm_online(ssm: Any, instance_id: str, *, timeout_seconds: int = 600) -> None:

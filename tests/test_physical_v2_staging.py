@@ -12,6 +12,7 @@ from scripts.cleanup_production_parity_staging import (
     cleanup_stale,
 )
 from scripts.provision_production_parity_staging import (
+    CLOUDFRONT_MANAGED_POLICY_MAX_PAGES,
     PARITY_VOLUME_GIB,
     PRODUCTION_ACCOUNT_ID,
     PRODUCTION_AMI_ID,
@@ -25,6 +26,7 @@ from scripts.provision_production_parity_staging import (
     ProvisioningError,
     _artifact_bucket_name,
     _distribution_arn,
+    _managed_policy_id,
     _resource_arn,
     _single_production_instance,
     create_stack,
@@ -132,50 +134,44 @@ class _EC2:
         self.deleted_groups.append(kwargs["GroupId"])
 
 
-class _Paginator:
-    def __init__(self, policy_type):
-        self.policy_type = policy_type
-
-    def paginate(self, **_kwargs):
-        if self.policy_type == "cache":
-            yield {
-                "CachePolicyList": {
-                    "Items": [
-                        {
-                            "CachePolicy": {
-                                "Id": "cache-disabled",
-                                "CachePolicyConfig": {
-                                    "Name": "Managed-CachingDisabled"
-                                },
-                            }
-                        }
-                    ]
-                }
-            }
-        else:
-            yield {
-                "OriginRequestPolicyList": {
-                    "Items": [
-                        {
-                            "OriginRequestPolicy": {
-                                "Id": "all-viewer",
-                                "OriginRequestPolicyConfig": {
-                                    "Name": "Managed-AllViewerExceptHostHeader"
-                                },
-                            }
-                        }
-                    ]
-                }
-            }
-
-
 class _CloudFront:
     def __init__(self):
         self.config = None
         self.tags = None
 
-    def get_paginator(self, name):
-        return _Paginator("cache" if name == "list_cache_policies" else "origin")
+    def list_cache_policies(self, **kwargs):
+        assert kwargs == {"Type": "managed"}
+        return {
+            "CachePolicyList": {
+                "Items": [
+                    {
+                        "CachePolicy": {
+                            "Id": "cache-disabled",
+                            "CachePolicyConfig": {
+                                "Name": "Managed-CachingDisabled"
+                            },
+                        }
+                    }
+                ],
+            }
+        }
+
+    def list_origin_request_policies(self, **kwargs):
+        assert kwargs == {"Type": "managed"}
+        return {
+            "OriginRequestPolicyList": {
+                "Items": [
+                    {
+                        "OriginRequestPolicy": {
+                            "Id": "all-viewer",
+                            "OriginRequestPolicyConfig": {
+                                "Name": "Managed-AllViewerExceptHostHeader"
+                            },
+                        }
+                    }
+                ],
+            }
+        }
 
     def create_distribution_with_tags(self, **kwargs):
         value = kwargs["DistributionConfigWithTags"]
@@ -187,6 +183,172 @@ class _CloudFront:
                 "ARN": _distribution_arn(DISTRIBUTION_ID),
             }
         }
+
+
+def _managed_policy_item(policy_type: str, *, policy_id: str, name: str) -> dict:
+    if policy_type == "cache":
+        return {
+            "CachePolicy": {
+                "Id": policy_id,
+                "CachePolicyConfig": {"Name": name},
+            }
+        }
+    return {
+        "OriginRequestPolicy": {
+            "Id": policy_id,
+            "OriginRequestPolicyConfig": {"Name": name},
+        }
+    }
+
+
+class _ManagedPolicyPages:
+    def __init__(self, policy_type: str, pages: list[dict]):
+        self.policy_type = policy_type
+        self.pages = list(pages)
+        self.calls = []
+
+    def _next(self, policy_type: str, kwargs: dict) -> dict:
+        assert policy_type == self.policy_type
+        self.calls.append((policy_type, kwargs))
+        assert self.pages
+        return self.pages.pop(0)
+
+    def list_cache_policies(self, **kwargs):
+        return self._next("cache", kwargs)
+
+    def list_origin_request_policies(self, **kwargs):
+        return self._next("origin_request", kwargs)
+
+
+@pytest.mark.parametrize(
+    ("policy_type", "list_key", "target_name"),
+    (
+        ("cache", "CachePolicyList", "Managed-CachingDisabled"),
+        (
+            "origin_request",
+            "OriginRequestPolicyList",
+            "Managed-AllViewerExceptHostHeader",
+        ),
+    ),
+)
+def test_managed_policy_lookup_uses_manual_marker_pagination(
+    policy_type, list_key, target_name
+):
+    client = _ManagedPolicyPages(
+        policy_type,
+        [
+            {
+                list_key: {
+                    "Items": [
+                        _managed_policy_item(
+                            policy_type,
+                            policy_id="other-policy",
+                            name="Managed-OtherPolicy",
+                        )
+                    ],
+                    "NextMarker": "second-page",
+                }
+            },
+            {
+                list_key: {
+                    "Items": [
+                        _managed_policy_item(
+                            policy_type,
+                            policy_id="target-policy",
+                            name=target_name,
+                        )
+                    ],
+                }
+            },
+        ],
+    )
+
+    assert (
+        _managed_policy_id(
+            client,
+            policy_type=policy_type,
+            name=target_name,
+        )
+        == "target-policy"
+    )
+    assert client.calls == [
+        (policy_type, {"Type": "managed"}),
+        (policy_type, {"Type": "managed", "Marker": "second-page"}),
+    ]
+
+
+@pytest.mark.parametrize(
+    "listing",
+    (
+        {"Items": [], "NextMarker": None},
+        {"Items": [], "NextMarker": ""},
+        {"Items": [], "NextMarker": "   "},
+        {"Items": [], "NextMarker": 2},
+        {"Items": {}, "NextMarker": "next"},
+    ),
+)
+def test_managed_policy_lookup_rejects_malformed_pages(listing):
+    client = _ManagedPolicyPages("cache", [{"CachePolicyList": listing}])
+
+    with pytest.raises(ProvisioningError, match="pagination|page"):
+        _managed_policy_id(
+            client,
+            policy_type="cache",
+            name="Managed-CachingDisabled",
+        )
+
+
+def test_managed_policy_lookup_rejects_repeated_marker():
+    client = _ManagedPolicyPages(
+        "cache",
+        [
+            {
+                "CachePolicyList": {
+                    "Items": [],
+                    "NextMarker": "repeated",
+                }
+            },
+            {
+                "CachePolicyList": {
+                    "Items": [],
+                    "NextMarker": "repeated",
+                }
+            },
+        ],
+    )
+
+    with pytest.raises(ProvisioningError, match="pagination"):
+        _managed_policy_id(
+            client,
+            policy_type="cache",
+            name="Managed-CachingDisabled",
+        )
+    assert len(client.calls) == 2
+
+
+def test_managed_policy_lookup_rejects_excess_pages():
+    class _EndlessManagedPolicies:
+        def __init__(self):
+            self.calls = []
+
+        def list_cache_policies(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "CachePolicyList": {
+                    "Items": [],
+                    "NextMarker": f"page-{len(self.calls)}",
+                }
+            }
+
+    client = _EndlessManagedPolicies()
+    with pytest.raises(ProvisioningError, match="limit exceeded"):
+        _managed_policy_id(
+            client,
+            policy_type="cache",
+            name="Managed-CachingDisabled",
+        )
+    assert len(client.calls) == CLOUDFRONT_MANAGED_POLICY_MAX_PAGES
+
 
 class _SSM:
     def describe_instance_information(self, **_kwargs):

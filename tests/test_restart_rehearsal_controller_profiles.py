@@ -269,6 +269,170 @@ def test_evidence_ownership_normalizer_is_exact_and_bounded(
     ]]
 
 
+def test_fixture_seed_normalizes_before_host_inspection_and_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    candidate_sha = "c" * 40
+    events: list[str] = []
+    fixture_root: Path | None = None
+    normalized = False
+
+    def bind_source(command: list[str], destination: str) -> Path:
+        suffix = f",dst={destination}"
+        mount = next(
+            argument
+            for argument in command
+            if argument.startswith("type=bind,src=")
+            and argument.endswith(suffix)
+        )
+        return Path(mount.removeprefix("type=bind,src=").removesuffix(suffix))
+
+    def fake_run(command: list[str]) -> None:
+        nonlocal fixture_root
+        events.append("generate")
+        generated_state = bind_source(command, "/rehearsal-state")
+        generated_config = bind_source(command, "/fixture-config")
+        fixture_root = generated_state.parent
+        (generated_state / "release-build-input.json").write_text(
+            f'{{"commit_sha":"{candidate_sha}"}}\n',
+            encoding="utf-8",
+        )
+        for name in (
+            "validator-app",
+            "gateway-enclave-build-identities",
+            "gateway-attested-runtime",
+        ):
+            artifact = generated_state / name
+            artifact.mkdir()
+            (artifact / "artifact").write_text("fixture\n", encoding="utf-8")
+        (generated_config / "config.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+
+    def fake_normalize(
+        tag: str,
+        *,
+        evidence_root: Path,
+        docker_platform: str,
+    ) -> None:
+        nonlocal normalized
+        assert tag == "rehearsal-image"
+        assert evidence_root == fixture_root
+        assert docker_platform == "linux/amd64"
+        events.append("normalize")
+        normalized = True
+
+    def is_generated_path(path: Path) -> bool:
+        return fixture_root is not None and (
+            path == fixture_root or fixture_root in path.parents
+        )
+
+    original_is_file = Path.is_file
+    original_is_dir = Path.is_dir
+    original_read_text = Path.read_text
+    original_copytree = controller.shutil.copytree
+    original_copy2 = controller.shutil.copy2
+
+    def guarded_is_file(path: Path) -> bool:
+        if is_generated_path(path):
+            assert normalized
+        return original_is_file(path)
+
+    def guarded_is_dir(path: Path) -> bool:
+        if is_generated_path(path):
+            assert normalized
+        return original_is_dir(path)
+
+    def guarded_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if is_generated_path(path):
+            assert normalized
+        return original_read_text(path, *args, **kwargs)
+
+    def guarded_copytree(
+        source: Path,
+        destination: Path,
+        *args: object,
+        **kwargs: object,
+    ):
+        if is_generated_path(Path(source)):
+            assert normalized
+        return original_copytree(source, destination, *args, **kwargs)
+
+    def guarded_copy2(
+        source: Path,
+        destination: Path,
+        *args: object,
+        **kwargs: object,
+    ):
+        if is_generated_path(Path(source)):
+            assert normalized
+        return original_copy2(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(controller, "_run", fake_run)
+    monkeypatch.setattr(controller, "_normalize_evidence_ownership", fake_normalize)
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    monkeypatch.setattr(controller.shutil, "copytree", guarded_copytree)
+    monkeypatch.setattr(controller.shutil, "copy2", guarded_copy2)
+
+    with controller._prepared_fixture_seed(
+        "rehearsal-image",
+        source_root=tmp_path / "source",
+        candidate_sha=candidate_sha,
+        drand_artifact_root=tmp_path / "drand",
+        docker_platform="linux/amd64",
+        profile="prepush",
+    ) as seed:
+        assert (seed / "fixture-seed.json").is_file()
+
+    assert events == ["generate", "normalize"]
+
+
+def test_fixture_seed_normalizes_after_generation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    events: list[str] = []
+
+    def fail_generation(command: list[str]) -> None:
+        assert command[:3] == ["docker", "run", "--rm"]
+        events.append("generate-failed")
+        raise subprocess.CalledProcessError(17, command)
+
+    def fake_normalize(
+        tag: str,
+        *,
+        evidence_root: Path,
+        docker_platform: str,
+    ) -> None:
+        assert tag == "rehearsal-image"
+        assert evidence_root.is_dir()
+        assert docker_platform == "linux/amd64"
+        events.append("normalize")
+
+    monkeypatch.setattr(controller, "_run", fail_generation)
+    monkeypatch.setattr(controller, "_normalize_evidence_ownership", fake_normalize)
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        with controller._prepared_fixture_seed(
+            "rehearsal-image",
+            source_root=tmp_path / "source",
+            candidate_sha="d" * 40,
+            drand_artifact_root=tmp_path / "drand",
+            docker_platform="linux/amd64",
+            profile="prepush",
+        ):
+            pytest.fail("fixture generation failure must not yield a seed")
+
+    assert raised.value.returncode == 17
+    assert events == ["generate-failed", "normalize"]
+
+
 def test_outer_evidence_normalizes_post_workflow_component_and_join_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

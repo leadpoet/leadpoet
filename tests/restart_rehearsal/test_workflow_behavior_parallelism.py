@@ -254,7 +254,8 @@ def test_behavior_workers_merge_out_of_order_results_canonically(
         captured.err.index(f"stderr:{scenario}") for scenario in scenarios
     )
     tracked = _track(track)
-    assert tracked["maximum"] == 2
+    assert workflow._BEHAVIOR_WORKER_LIMIT == 3
+    assert tracked["maximum"] == 3
     assert tracked["active"] == 0
     assert len({item["state_root"] for item in tracked["events"]}) == 4
     assert {item["source_root"] for item in tracked["events"]} == {
@@ -341,7 +342,12 @@ def test_behavior_worker_timeout_kills_reaps_and_continues(
     behavior_helper,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scenarios = ["hang-timeout", "fast-later"]
+    scenarios = [
+        "hang-timeout-a",
+        "hang-timeout-b",
+        "hang-timeout-c",
+        "fast-later",
+    ]
     track = behavior_helper(scenarios)
     monkeypatch.setattr(
         workflow,
@@ -356,18 +362,31 @@ def test_behavior_worker_timeout_kills_reaps_and_continues(
         worker_timeout_seconds=0.15,
     )
 
-    assert [item["status"] for item in stages] == ["failed", "passed"]
+    assert [item["status"] for item in stages] == [
+        "failed",
+        "failed",
+        "failed",
+        "passed",
+    ]
     assert stages[0]["error_type"] == "_BehaviorWorkerProtocolError"
-    assert stages[0]["duration_seconds"] >= 0.15
+    assert all(item["duration_seconds"] >= 0.15 for item in stages[:3])
     assert list(evidence) == ["fast-later"]
-    _assert_processes_reaped(track, {"hang-timeout"})
+    tracked = _track(track)
+    assert workflow._BEHAVIOR_WORKER_LIMIT == 3
+    event_scenarios = [item["scenario"] for item in tracked["events"]]
+    assert set(event_scenarios[:3]) == set(scenarios[:3])
+    assert event_scenarios[3:] == ["fast-later"]
+    _assert_processes_reaped(
+        track,
+        {"hang-timeout-a", "hang-timeout-b", "hang-timeout-c"},
+    )
 
 
 def test_behavior_scheduler_deadline_cleans_every_worker_and_reraises(
     behavior_helper,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scenarios = ["hang-deadline-a", "hang-deadline-b"]
+    scenarios = ["hang-deadline-a", "hang-deadline-b", "hang-deadline-c"]
     track = behavior_helper(scenarios)
     monkeypatch.setattr(
         workflow,
@@ -391,7 +410,7 @@ def test_behavior_scheduler_signal_cleans_every_worker_and_reraises(
     monkeypatch: pytest.MonkeyPatch,
     signum: int,
 ) -> None:
-    scenarios = ["hang-signal-a", "hang-signal-b"]
+    scenarios = ["hang-signal-a", "hang-signal-b", "hang-signal-c"]
     track = behavior_helper(scenarios)
     monkeypatch.setattr(
         workflow,

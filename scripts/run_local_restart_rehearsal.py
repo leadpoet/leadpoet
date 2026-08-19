@@ -2410,7 +2410,17 @@ def _run_independent_stage(
     return True, value
 
 
-_PREPUSH_PHASES = frozenset(("exact-image-build", "source-snapshot"))
+_PREPUSH_PHASES = frozenset(
+    (
+        "exact-image-build",
+        "fixture-preparation",
+        "gateway-runtime",
+        "runtime-prefix",
+        "source-snapshot",
+        "validator-runtime",
+        "workflow-runtime",
+    )
+)
 
 
 def _run_prepush_phase(
@@ -2424,17 +2434,18 @@ def _run_prepush_phase(
         raise ValueError(f"unsupported prepush phase: {phase!r}")
     started = time.monotonic()
     print(
-        f"REHEARSAL_PREPUSH_PHASE phase={phase} status=started",
+        "REHEARSAL_PREPUSH_PHASE "
+        f"phase={phase} status=started duration_seconds=0.0",
+        file=sys.stderr,
         flush=True,
     )
     try:
         result = action()
-    except BaseException as exc:
+    except BaseException:
         duration = round(time.monotonic() - started, 3)
         print(
             "REHEARSAL_PREPUSH_PHASE "
-            f"phase={phase} status=failed duration_seconds={duration} "
-            f"error_type={type(exc).__name__}",
+            f"phase={phase} status=failed duration_seconds={duration}",
             file=sys.stderr,
             flush=True,
         )
@@ -2443,6 +2454,7 @@ def _run_prepush_phase(
     print(
         "REHEARSAL_PREPUSH_PHASE "
         f"phase={phase} status=passed duration_seconds={duration}",
+        file=sys.stderr,
         flush=True,
     )
     return result
@@ -2543,10 +2555,18 @@ def _run_prepush_runtime_stages(
     def run_stage(
         item: tuple[str, Callable[[], Any]],
     ) -> list[dict[str, Any]]:
+        phase = (
+            "validator-runtime"
+            if item[0].startswith("validator-")
+            else "gateway-runtime"
+        )
         local_stages: list[dict[str, Any]] = []
         _run_independent_stage(
             stage=item[0],
-            action=item[1],
+            action=lambda: _run_prepush_phase(
+                phase=phase,
+                action=item[1],
+            ),
             stages=local_stages,
         )
         return local_stages
@@ -2564,12 +2584,20 @@ def _run_prepush_runtime_stages(
             if worker_prefix_action is not None:
                 _run_independent_stage(
                     stage=worker_prefix_action[0],
-                    action=worker_prefix_action[1],
+                    action=lambda: _run_prepush_phase(
+                        phase="runtime-prefix",
+                        action=worker_prefix_action[1],
+                    ),
                     stages=preparation_results,
                 )
                 registry.ensure_accepting()
             started = time.monotonic()
-            prepared = list(preparation_action())
+            prepared = list(
+                _run_prepush_phase(
+                    phase="fixture-preparation",
+                    action=preparation_action,
+                )
+            )
             registry.ensure_accepting()
             stage_names = [item[0] for item in prepared]
             if (
@@ -2638,7 +2666,10 @@ def _run_prepush_runtime_stages(
                 registry.ensure_accepting()
                 _run_independent_stage(
                     stage=workflow_action[0],
-                    action=workflow_action[1],
+                    action=lambda: _run_prepush_phase(
+                        phase="workflow-runtime",
+                        action=workflow_action[1],
+                    ),
                     stages=workflow_results,
                 )
                 actions_ready.wait()

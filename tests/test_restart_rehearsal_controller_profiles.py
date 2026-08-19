@@ -437,14 +437,24 @@ def test_prepush_source_snapshot_overlaps_image_on_one_masked_worker(
     ) == ("image", "snapshot")
     assert order == ["image-overlapped-snapshot", "snapshot"]
     captured = capsys.readouterr()
-    assert captured.err == ""
+    assert captured.out == ""
+    assert (
+        "REHEARSAL_PREPUSH_PHASE phase=exact-image-build "
+        "status=started duration_seconds=0.0"
+        in captured.err
+    )
+    assert (
+        "REHEARSAL_PREPUSH_PHASE phase=source-snapshot "
+        "status=started duration_seconds=0.0"
+        in captured.err
+    )
     assert (
         "REHEARSAL_PREPUSH_PHASE phase=exact-image-build status=passed"
-        in captured.out
+        in captured.err
     )
     assert (
         "REHEARSAL_PREPUSH_PHASE phase=source-snapshot status=passed"
-        in captured.out
+        in captured.err
     )
 
 
@@ -476,7 +486,7 @@ def test_prepush_source_snapshot_failure_is_redacted(
         "REHEARSAL_PREPUSH_PHASE phase=source-snapshot status=failed "
         in captured.err
     )
-    assert "error_type=RuntimeError" in captured.err
+    assert "error_type=" not in captured.err
 
 
 def test_cold_snapshot_completes_before_deferred_runtime_probe() -> None:
@@ -1622,7 +1632,9 @@ def test_prepush_gateway_alarm_cleans_gateway_and_validator_without_next_stage(
     assert set(removed_containers) == names
 
 
-def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak() -> None:
+def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     controller = _load_controller()
     probe_started = threading.Event()
     validator_started = threading.Event()
@@ -1706,6 +1718,7 @@ def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak() -> None:
             worker_prefix_action=("python37-finalization", probe),
         )
     stages.extend(workflow_results)
+    captured = capsys.readouterr()
 
     assert peak_active == 2
     assert events.index("workflow-start") < events.index("probe-end")
@@ -1725,6 +1738,27 @@ def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak() -> None:
         "workflow-prepush",
     ]
     assert all(item["status"] == "passed" for item in stages)
+    phase_lines = [
+        line
+        for line in captured.err.splitlines()
+        if line.startswith("REHEARSAL_PREPUSH_PHASE ")
+    ]
+    for phase in (
+        "runtime-prefix",
+        "fixture-preparation",
+        "workflow-runtime",
+        "validator-runtime",
+        "gateway-runtime",
+    ):
+        assert sum(
+            f"phase={phase} status=started duration_seconds=0.0" in line
+            for line in phase_lines
+        ) == 1
+        assert sum(
+            f"phase={phase} status=passed duration_seconds=" in line
+            for line in phase_lines
+        ) == 1
+    assert all("error_type=" not in line for line in phase_lines)
 
 
 def test_prepush_scheduler_continues_after_prefix_probe_failure() -> None:

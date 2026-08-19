@@ -2497,6 +2497,10 @@ def test_rehearsal_failure_diagnostics_are_bounded_and_redacted(
         returncode=1,
         stdout="",
         stderr=(
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=started duration_seconds=0.0\n"
+            + ("x" * 9000)
+            + "\n"
             "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=137\n"
             "REHEARSAL_HTTP_DIAGNOSTIC endpoint=/attest status=503\n"
             "REHEARSAL_STAGE_FAILED_CONTINUING stage=gateway-forward-1 "
@@ -2517,6 +2521,12 @@ def test_rehearsal_failure_diagnostics_are_bounded_and_redacted(
     assert diagnostics["failed_stage_count"] == 1
     assert diagnostics["unexercised_stage_count"] == 1
     assert diagnostics["output_markers"] == [
+        {
+            "marker": "prepush_phase",
+            "phase": "workflow-runtime",
+            "status": "started",
+            "duration_seconds": 0.0,
+        },
         {"marker": "component_failure", "component": "gateway", "status": 137},
         {"marker": "http", "endpoint": "/attest", "status": "503"},
         {
@@ -2573,6 +2583,9 @@ def test_rehearsal_failure_diagnostics_are_bounded_and_redacted(
     assert "launcher failed" not in encoded
     assert "permission denied" not in encoded
     assert "unknown operation" not in encoded
+    assert "stdout" not in diagnostics
+    assert "stderr" not in diagnostics
+    assert "x" * 100 not in encoded
     assert len(encoded) < 4096
 
 
@@ -2581,6 +2594,12 @@ def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
     stage_hash = "a" * 64
     output = "\n".join(
         [
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=started duration_seconds=0.0",
+            "REHEARSAL_PREPUSH_PHASE phase=fixture-preparation "
+            "status=started duration_seconds=0.0",
+            "REHEARSAL_PREPUSH_PHASE phase=fixture-preparation "
+            "status=passed duration_seconds=48.123",
             "REHEARSAL_EVIDENCE_NORMALIZATION_FAILED "
             "phase=container category=permission status=23",
             "REHEARSAL_FIXTURE_GENERATION_FAILED category=resource status=137",
@@ -2599,11 +2618,40 @@ def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
             f"error_type=RuntimeError bearer={secret}",
             "REHEARSAL_WORKFLOW_FAILURE_SUMMARY "
             "failed=999 unexercised=0 emitted=0 truncated=0",
+            "REHEARSAL_PREPUSH_PHASE phase=unknown-runtime "
+            "status=started duration_seconds=0.0",
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=unknown duration_seconds=1.0",
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=failed duration_seconds=601.0",
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            f"status=failed duration_seconds=1.0 token={secret}",
         ]
     )
 
-    diagnostics = fast_parity._rehearsal_output_diagnostics(output)
+    phase_diagnostics = fast_parity._prepush_phase_diagnostics(output)
+    ordinary_diagnostics = fast_parity._rehearsal_output_diagnostics(output)
+    diagnostics = [*phase_diagnostics, *ordinary_diagnostics]
+    assert fast_parity.SAFE_PREPUSH_PHASES == restart_rehearsal._PREPUSH_PHASES
     assert diagnostics == [
+        {
+            "marker": "prepush_phase",
+            "phase": "fixture-preparation",
+            "status": "started",
+            "duration_seconds": 0.0,
+        },
+        {
+            "marker": "prepush_phase",
+            "phase": "fixture-preparation",
+            "status": "passed",
+            "duration_seconds": 48.123,
+        },
+        {
+            "marker": "prepush_phase",
+            "phase": "workflow-runtime",
+            "status": "started",
+            "duration_seconds": 0.0,
+        },
         {
             "marker": "evidence_normalization_failure",
             "phase": "container",
@@ -2635,7 +2683,184 @@ def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
             "status": 127,
         },
     ]
+    assert all(item["marker"] != "prepush_phase" for item in ordinary_diagnostics)
     assert secret not in json.dumps(diagnostics, sort_keys=True)
+
+
+def test_prepush_phase_markers_survive_full_stream_beyond_ordinary_tail():
+    candidate_sha = "e" * 40
+    secret = "must-not-escape-phase-cap"
+    stderr = "\n".join(
+        [
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=started duration_seconds=0.0",
+            *(
+                "REHEARSAL_FAILURE_DIAGNOSTICS component=workflow "
+                f"status={status}"
+                for status in range(40)
+            ),
+            "x" * 9000,
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=passed duration_seconds=321.123",
+            "REHEARSAL_FAILURE_DIAGNOSTICS component=workflow status=250",
+            "REHEARSAL_PREPUSH_PHASE phase=validator-runtime "
+            f"status=started duration_seconds=0.0 token={secret}",
+            f"raw={secret}",
+        ]
+    )
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        1,
+        stdout="",
+        stderr=stderr,
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert diagnostics["output_markers"] == [
+        {
+            "marker": "prepush_phase",
+            "phase": "workflow-runtime",
+            "status": "started",
+            "duration_seconds": 0.0,
+        },
+        {
+            "marker": "prepush_phase",
+            "phase": "workflow-runtime",
+            "status": "passed",
+            "duration_seconds": 321.123,
+        },
+        {"marker": "component_failure", "component": "workflow", "status": 250},
+    ]
+    encoded = json.dumps(diagnostics, sort_keys=True)
+    assert secret not in encoded
+    assert "raw=" not in encoded
+    assert "x" * 100 not in encoded
+
+
+@pytest.mark.parametrize(
+    ("spoofed_terminal", "controller_terminal"),
+    (("passed", "failed"), ("failed", "passed")),
+)
+def test_prepush_phase_conflicting_terminal_is_omitted_fail_closed(
+    spoofed_terminal: str,
+    controller_terminal: str,
+):
+    stream = "\n".join(
+        (
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=started duration_seconds=0.0",
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            f"status={spoofed_terminal} duration_seconds=1.0",
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            f"status={controller_terminal} duration_seconds=2.0",
+        )
+    )
+
+    assert fast_parity._prepush_phase_diagnostics(stream) == [
+        {
+            "marker": "prepush_phase",
+            "phase": "workflow-runtime",
+            "status": "started",
+            "duration_seconds": 0.0,
+        }
+    ]
+    assert fast_parity._rehearsal_output_diagnostics(stream) == []
+
+
+def test_stdout_phase_spoof_is_ignored_by_failure_composition():
+    candidate_sha = "f" * 40
+    stdout = (
+        "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+        "status=started duration_seconds=0.0\n"
+        "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+        "status=failed duration_seconds=1.0\n"
+    )
+    stderr = (
+        "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+        "status=started duration_seconds=0.0\n"
+        "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+        "status=passed duration_seconds=2.0\n"
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        subprocess.CompletedProcess(
+            ["rehearsal"],
+            1,
+            stdout=stdout,
+            stderr=stderr,
+        ),
+        candidate_sha=candidate_sha,
+    )
+    assert diagnostics["output_markers"] == [
+        {
+            "marker": "prepush_phase",
+            "phase": "workflow-runtime",
+            "status": "started",
+            "duration_seconds": 0.0,
+        },
+        {
+            "marker": "prepush_phase",
+            "phase": "workflow-runtime",
+            "status": "passed",
+            "duration_seconds": 2.0,
+        },
+    ]
+
+
+def test_duplicate_phase_start_on_controller_stream_is_omitted():
+    stream = "\n".join(
+        (
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=started duration_seconds=0.0",
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=started duration_seconds=0.0",
+            "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+            "status=passed duration_seconds=2.0",
+        )
+    )
+
+    assert fast_parity._prepush_phase_diagnostics(stream) == []
+
+
+def test_high_volume_duplicate_phase_markers_remain_fail_closed_and_bounded():
+    duplicate_count = 10_000
+    stream = "\n".join(
+        (
+            *(
+                "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+                "status=started duration_seconds=0.0"
+                for _ in range(duplicate_count)
+            ),
+            *(
+                "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+                "status=passed duration_seconds=1.0"
+                for _ in range(duplicate_count)
+            ),
+            "REHEARSAL_PREPUSH_PHASE phase=validator-runtime "
+            "status=started duration_seconds=0.0",
+            "REHEARSAL_PREPUSH_PHASE phase=validator-runtime "
+            "status=passed duration_seconds=2.0",
+        )
+    )
+
+    assert fast_parity._prepush_phase_diagnostics(stream) == [
+        {
+            "marker": "prepush_phase",
+            "phase": "validator-runtime",
+            "status": "started",
+            "duration_seconds": 0.0,
+        },
+        {
+            "marker": "prepush_phase",
+            "phase": "validator-runtime",
+            "status": "passed",
+            "duration_seconds": 2.0,
+        },
+    ]
 
 
 def test_fast_rehearsal_parent_waits_for_inner_budget_failure_evidence(
@@ -2726,6 +2951,10 @@ def test_fast_parent_timeout_projects_only_sanitized_child_evidence(
         f"raw={secret}\n"
     )
     stderr_text = (
+        "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
+        "status=started duration_seconds=0.0\n"
+        + ("x" * 9000)
+        + "\n"
         "REHEARSAL_WORKFLOW_DIAGNOSTIC_UNAVAILABLE "
         "category=resource status=124\n"
         f"ERROR: bearer token={secret} permission denied\n"
@@ -2765,6 +2994,9 @@ def test_fast_parent_timeout_projects_only_sanitized_child_evidence(
     assert "parent watchdog timed out" in message
     assert '"parent_watchdog_timeout_seconds":720' in message
     if expects_safe_markers:
+        assert '"marker":"prepush_phase"' in message
+        assert '"phase":"workflow-runtime"' in message
+        assert '"status":"started"' in message
         assert '"component":"workflow"' in message
         assert '"category":"resource"' in message
     else:

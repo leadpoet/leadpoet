@@ -183,6 +183,25 @@ SAFE_REHEARSAL_STAGE_PATTERNS = (
     r"evidence-join-(?:prepush|release)",
     r"time-budget",
 )
+SAFE_PREPUSH_PHASE_ORDER = (
+    "exact-image-build",
+    "source-snapshot",
+    "runtime-prefix",
+    "fixture-preparation",
+    "workflow-runtime",
+    "validator-runtime",
+    "gateway-runtime",
+)
+SAFE_PREPUSH_PHASES = frozenset(SAFE_PREPUSH_PHASE_ORDER)
+SAFE_PREPUSH_PHASE_STATUSES = frozenset({"failed", "passed", "started"})
+SAFE_PREPUSH_PHASE_DURATION_MAX_SECONDS = 600.0
+SAFE_PREPUSH_PHASE_MARKER_MAX = len(SAFE_PREPUSH_PHASES) * 2
+SAFE_PREPUSH_PHASE_MARKER_RE = re.compile(
+    r"^REHEARSAL_PREPUSH_PHASE "
+    r"phase=([a-z-]+) status=([a-z]+) "
+    r"duration_seconds=([0-9]+(?:\.[0-9]{1,3})?)$",
+    re.MULTILINE,
+)
 SECRET_LIKE_DIAGNOSTIC_RE = re.compile(
     r"(?i)(?:authorization|bearer|api[_-]?key|secret|password|token|"
     r"credential|private[_ -]?key|-----begin|://[^/\s]+:[^@\s]+@)"
@@ -1294,6 +1313,52 @@ def _rehearsal_error_category(line: str) -> str | None:
     return None
 
 
+def _prepush_phase_diagnostics(*streams: str) -> list[dict[str, Any]]:
+    """Project a fixed phase lifecycle without retaining either raw stream."""
+
+    starts: dict[str, dict[str, Any]] = {}
+    terminals: dict[str, dict[str, Any]] = {}
+    start_counts = {phase: 0 for phase in SAFE_PREPUSH_PHASE_ORDER}
+    terminal_counts = {phase: 0 for phase in SAFE_PREPUSH_PHASE_ORDER}
+    for stream in streams:
+        for match in SAFE_PREPUSH_PHASE_MARKER_RE.finditer(stream):
+            phase = match.group(1)
+            status = match.group(2)
+            duration = float(match.group(3))
+            if (
+                phase not in SAFE_PREPUSH_PHASES
+                or status not in SAFE_PREPUSH_PHASE_STATUSES
+                or duration > SAFE_PREPUSH_PHASE_DURATION_MAX_SECONDS
+            ):
+                continue
+            projected = {
+                "marker": "prepush_phase",
+                "phase": phase,
+                "status": status,
+                "duration_seconds": round(duration, 3),
+            }
+            if status == "started":
+                if duration != 0.0:
+                    continue
+                if start_counts[phase] == 0:
+                    starts[phase] = projected
+                start_counts[phase] = min(2, start_counts[phase] + 1)
+            else:
+                if terminal_counts[phase] == 0:
+                    terminals[phase] = projected
+                terminal_counts[phase] = min(2, terminal_counts[phase] + 1)
+    diagnostics: list[dict[str, Any]] = []
+    for phase in SAFE_PREPUSH_PHASE_ORDER:
+        if start_counts[phase] != 1:
+            continue
+        diagnostics.append(starts[phase])
+        if terminal_counts[phase] == 1:
+            diagnostics.append(terminals[phase])
+        if len(diagnostics) >= SAFE_PREPUSH_PHASE_MARKER_MAX:
+            return diagnostics[:SAFE_PREPUSH_PHASE_MARKER_MAX]
+    return diagnostics
+
+
 def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
     contract_kinds = {
@@ -1534,10 +1599,15 @@ def _rehearsal_failure_diagnostics(
         "returncode": int(result.returncode),
         "failure_summary_available": False,
     }
-    output_tail = "\n".join(
-        (str(result.stdout or "")[-8192:], str(result.stderr or "")[-8192:])
-    )
-    output_diagnostics = _rehearsal_output_diagnostics(output_tail)
+    stdout_text = _timeout_stream_text(result.stdout)
+    stderr_text = _timeout_stream_text(result.stderr)
+    output_tail = "\n".join((stdout_text[-8192:], stderr_text[-8192:]))
+    output_diagnostics = [
+        # The controller reserves stderr for its phase lifecycle. Stdout may
+        # contain arbitrary action output and is never phase authority.
+        *_prepush_phase_diagnostics(stderr_text),
+        *_rehearsal_output_diagnostics(output_tail),
+    ]
     if output_diagnostics:
         projection["output_markers"] = output_diagnostics
     matches = re.findall(

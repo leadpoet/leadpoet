@@ -323,14 +323,309 @@ def test_v2_intent_route_only_and_combined_source_add_run_with_decision_receipts
     assert all(set(receipt.attempted_tool_ids) <= {"intent.baseline", "intent.source_add.new"} for receipt in decisions.values())
     assert any(dict(receipt.skipped_tool_reasons).get("intent.source_add.new") == "model_route_stopped" for receipt in decisions.values())
     tool_only_payload = dict(spec.variants[1].routing_payload)
-    tool_only_payload["tools"] = ["intent.baseline"]
-    tool_only_payload["manifest_hashes"] = {"intent.baseline": H("4")}
+    tool_only_payload["tools"] = ["intent.baseline", "intent.source_add.new"]
+    tool_only_payload["manifest_hashes"] = {
+        "intent.baseline": H("4"),
+        "intent.source_add.new": tool_only_payload["manifest_hashes"]["intent.source_add.new"],
+    }
     tool_only_payload["route_change_class"] = "default"
     tool_only_payload.pop("skipped", None)
     tool_only = replace(spec.variants[1], variant_id="tool-only", routing_payload=tool_only_payload, change_kind="tool_only")
     tool_only_spec = replace(spec, experiment_id="v2-tool-only", variants=(spec.variants[0], tool_only))
     assert validate_routing_experiment_v2_spec(tool_only_spec, adapters={"baseline": adapters["baseline"], "tool-only": adapters["candidate"]}) == []
     assert promote_routing_experiment_v2_to_lab(evaluation).startswith("sha256:")
+
+
+@pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
+def test_v2_declared_new_tool_positive_for_candidate_and_intent(stage):
+    spec, adapters, labels, _tool, source_tool = _spec(
+        stage, with_source_add=True
+    )
+    assert validate_routing_experiment_v2_spec(spec, adapters=adapters) == []
+    decisions = RoutingDecisionReceiptStore()
+    evaluation = evaluate_routing_experiment_v2(
+        spec,
+        gold_labels=labels,
+        runner=_runner,
+        adapters=adapters,
+        decision_store=decisions,
+        require_isolation=False,
+    )
+    assert evaluation.decision_receipt_refs
+    assert any(source_tool in item.considered_tool_ids for item in decisions.values())
+
+
+@pytest.mark.parametrize(
+    ("field_name", "error_code"),
+    [
+        ("calibration_unit_refs", "v2_calibration_unit_refs_must_not_be_empty"),
+        ("holdout_unit_refs", "v2_holdout_unit_refs_must_not_be_empty"),
+    ],
+)
+def test_v2_empty_split_fails_before_provider_calls(field_name, error_code):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    empty_input = replace(spec.input, **{field_name: ()})
+    invalid = replace(spec, experiment_id=f"empty-{field_name}", input=empty_input)
+    assert error_code in validate_routing_experiment_v2_spec(invalid, adapters=adapters)
+    calls = []
+
+    def recording_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _runner(*args[:3])
+
+    with pytest.raises(RoutingExperimentError, match=error_code):
+        evaluate_routing_experiment_v2(
+            invalid,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=adapters,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_live_requires_structurally_durable_provider_store(tmp_path):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+
+    class ForgedNonDurableRepository:
+        durable = False
+
+        def __init__(self):
+            self.rows = {}
+
+        def get(self, key):
+            return self.rows.get(key)
+
+        def append(self, key, receipt):
+            self.rows[key] = receipt
+            return receipt
+
+        def keys(self):
+            return tuple(self.rows)
+
+    calls = []
+
+    def measured_runner(binding, unit, request, authorization):
+        calls.append((binding, unit, request, authorization))
+        value = dict(_runner(binding, unit, request))
+        value["execution_mode"] = ReceiptExecutionMode.MEASURED_LAB.value
+        value["receipt_ref"] = "provider_receipt:" + sha256_json(
+            {key: item for key, item in value.items() if key != "receipt_ref"}
+        ).split(":", 1)[1][:16]
+        return value
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="v2_live_spend_requires_durable_receipt_repository",
+    ):
+        evaluate_routing_experiment_v2(
+            measured,
+            gold_labels=labels,
+            runner=measured_runner,
+            adapters=adapters,
+            receipt_store=ProviderReceiptStore(ForgedNonDurableRepository()),
+            decision_store=RoutingDecisionReceiptStore(
+                JsonlRoutingDecisionReceiptRepository(tmp_path / "decisions.jsonl")
+            ),
+            authoritative_billing_rollup=lambda _store: {
+                "rollup_id": "unused",
+                "rollup_hash": H("9"),
+                "total_credit_microunits": 0,
+            },
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_live_provider_readiness_probes_empty_repository(tmp_path):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+
+    class EmptyBrokenRepository:
+        durable = True
+
+        def keys(self):
+            return ()
+
+        def get(self, key):
+            del key
+            raise RuntimeError("provider get unavailable")
+
+        def append(self, key, receipt):
+            raise AssertionError("readiness must not append")
+
+    calls = []
+
+    def measured_runner(binding, unit, request, authorization):
+        calls.append((binding, unit, request, authorization))
+        return _runner(binding, unit, request)
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="v2_live_spend_requires_durable_receipt_repository",
+    ):
+        evaluate_routing_experiment_v2(
+            measured,
+            gold_labels=labels,
+            runner=measured_runner,
+            adapters=adapters,
+            receipt_store=ProviderReceiptStore(EmptyBrokenRepository()),
+            decision_store=RoutingDecisionReceiptStore(
+                JsonlRoutingDecisionReceiptRepository(tmp_path / "decisions.jsonl")
+            ),
+            authoritative_billing_rollup=lambda _store: {
+                "rollup_id": "unused",
+                "rollup_hash": H("9"),
+                "total_credit_microunits": 0,
+            },
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_invalid_cached_provider_receipt_fails_before_runner():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    repository = InMemoryProviderReceiptRepository()
+    store = ProviderReceiptStore(repository)
+    evaluate_routing_experiment_v2(
+        spec,
+        gold_labels=labels,
+        runner=_runner,
+        adapters=adapters,
+        receipt_store=store,
+        require_isolation=False,
+    )
+    key, receipt = next(iter(repository._rows.items()))
+    repository._rows[key] = replace(receipt, evidence_hash=H("f"))
+    calls = []
+
+    def should_not_call(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("invalid cached receipt must fail before runner")
+
+    with pytest.raises(RoutingExperimentError, match="cached provider receipt invalid"):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=should_not_call,
+            adapters=adapters,
+            receipt_store=store,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
+def test_v2_declared_new_tool_must_be_in_model_profile_before_provider_calls(stage):
+    spec, adapters, labels, _tool, source_tool = _spec(stage, with_source_add=True)
+    payload = dict(spec.variants[1].routing_payload)
+    baseline_tool = f"{stage.split('_')[0]}.baseline"
+    payload["tools"] = [baseline_tool]
+    payload["manifest_hashes"] = {baseline_tool: H("4")}
+    invalid_variant = replace(
+        spec.variants[1],
+        variant_id="absent-new-tool",
+        routing_payload=payload,
+    )
+    invalid = replace(
+        spec,
+        experiment_id="absent-new-tool",
+        variants=(spec.variants[0], invalid_variant),
+    )
+    assert any(
+        f"v2_new_tool_absent_from_model_profile:{source_tool}" in error
+        for error in validate_routing_experiment_v2_spec(invalid, adapters={
+            "baseline": adapters["baseline"],
+            "absent-new-tool": adapters["candidate"],
+        })
+    )
+    calls = []
+
+    def recording_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _runner(*args[:3])
+
+    with pytest.raises(RoutingExperimentError, match="v2_new_tool_absent_from_model_profile"):
+        evaluate_routing_experiment_v2(
+            invalid,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters={
+                "baseline": adapters["baseline"],
+                "absent-new-tool": adapters["candidate"],
+            },
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize("case", ["omitted", "extra"])
+def test_v2_source_add_provenance_must_match_declared_new_tools(case):
+    spec, adapters, labels, _tool, _source_tool = _spec(
+        "intent_evidence", with_source_add=True
+    )
+    variant = spec.variants[1]
+    if case == "omitted":
+        invalid_variant = replace(
+            variant,
+            variant_id="omitted-new-tool",
+            new_tool_ids=(),
+        )
+    else:
+        extra = SourceAddProvenance(
+            request_ref="extra-source-add-request",
+            request_hash=H("a"),
+            tool_id="intent.source_add.extra",
+            stage="intent_evidence",
+            manifest_hash=H("b"),
+            artifact_commit_sha=variant.artifact.commit_sha,
+        )
+        invalid_variant = replace(
+            variant,
+            variant_id="extra-source-add-provenance",
+            source_add_provenance=variant.source_add_provenance + (extra,),
+        )
+    invalid = replace(
+        spec,
+        experiment_id=f"provenance-{case}",
+        variants=(spec.variants[0], invalid_variant),
+    )
+    adapters_by_variant = {
+        "baseline": adapters["baseline"],
+        invalid_variant.variant_id: adapters["candidate"],
+    }
+    errors = validate_routing_experiment_v2_spec(invalid, adapters=adapters_by_variant)
+    assert any(
+        "v2_source_add_provenance_tool_ids_must_match_new_tool_ids" in error
+        for error in errors
+    )
+    calls = []
+
+    def recording_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _runner(*args[:3])
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="v2_source_add_provenance_tool_ids_must_match_new_tool_ids",
+    ):
+        evaluate_routing_experiment_v2(
+            invalid,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=adapters_by_variant,
+            require_isolation=False,
+        )
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -1544,8 +1839,40 @@ def test_exact_candidate_model_profile_and_plan_contract():
         stage="candidate_acquisition",
         feature_set=feature_set,
         binding_tool_ids=frozenset(item.tool_id for item in adapter.catalog.tools),
-        binding_source_lineages={},
+        binding_source_lineages={
+            item.tool_id: f"lineage.{item.tool_id}"
+            for item in adapter.catalog.tools
+        },
     ) == []
+    missing_lineage_errors = adapter.validate_variant_payload(
+        profile,
+        stage="candidate_acquisition",
+        feature_set=feature_set,
+        binding_tool_ids=frozenset(item.tool_id for item in adapter.catalog.tools),
+        binding_source_lineages={},
+    )
+    assert any("candidate_profile_source_lineage_missing" in error for error in missing_lineage_errors)
+    wrong_stage_payload = dict(default_payload)
+    wrong_stage_payload["steps"] = [
+        {**wrong_stage_payload["steps"][0], "tool_id": "intent.jobs_feed"},
+        *wrong_stage_payload["steps"][1:],
+    ]
+    wrong_stage_profile = adapter.parse_variant_payload(
+        wrong_stage_payload,
+        stage="candidate_acquisition",
+    )
+    wrong_stage_errors = adapter.validate_variant_payload(
+        wrong_stage_profile,
+        stage="candidate_acquisition",
+        feature_set=feature_set,
+        binding_tool_ids=frozenset(item.tool_id for item in adapter.catalog.tools),
+        binding_source_lineages={
+            item.tool_id: f"lineage.{item.tool_id}"
+            for item in adapter.catalog.tools
+        },
+    )
+    assert any("candidate_profile_tool_wrong_stage:intent.jobs_feed" in error for error in wrong_stage_errors)
+    assert any("candidate_profile_tool_not_in_policy:intent.jobs_feed" in error for error in wrong_stage_errors)
     plan = adapter.compile_variant(
         profile,
         stage="candidate_acquisition",

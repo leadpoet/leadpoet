@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 import os
 from pathlib import Path
 import sys
@@ -842,6 +843,30 @@ def test_provider_receipts_are_typed_content_addressed_and_durable(tmp_path) -> 
     alternate_payload["receipt_ref"] = "provider_receipt:" + sha256_json({key: value for key, value in alternate_payload.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
     with pytest.raises(RoutingExperimentError, match="key collision"):
         store.put(key, ProviderReceipt.from_mapping(alternate_payload))
+
+
+def test_provider_receipt_and_jsonl_record_reject_unknown_fields(tmp_path) -> None:
+    spec, _ = _spec()
+    binding = spec.provider_bindings[0]
+    receipt = _receipt(binding, "unit:cal-1", ProviderOutcome.SOURCE_MISS)
+    payload = receipt.to_dict()
+    payload["response_body"] = "secret-shaped data"
+    with pytest.raises(RoutingExperimentError, match="provider_receipt_unknown_fields"):
+        ProviderReceipt.from_mapping(payload)
+
+    key = provider_receipt_key(
+        tool_id=receipt.tool_id,
+        binding_version=receipt.binding_version,
+        request_fingerprint=receipt.request_fingerprint,
+    )
+    path = tmp_path / "unknown-record-field.jsonl"
+    path.write_text(
+        json.dumps({"key": key, "receipt": receipt.to_dict(), "extra": "unexpected"})
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RoutingExperimentError, match="repository unknown fields"):
+        JsonlProviderReceiptRepository(path)
 
 
 def test_shared_calibration_holdout_runs_reuse_receipts() -> None:

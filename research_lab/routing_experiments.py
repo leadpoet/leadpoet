@@ -1050,9 +1050,27 @@ class PinnedSourcingModelRoutingAdapter:
         errors: list[str] = []
         if not payload.matches(feature_set):
             errors.append("candidate_profile_feature_predicate_mismatch")
+        candidate_policy_tools = {
+            step.tool_id
+            for step in self.policy.steps_for(self.runtime.STAGE_CANDIDATE_ACQUISITION)
+        }
         for step in payload.steps:
             if step.tool_id not in binding_tool_ids:
                 errors.append(f"candidate_profile_tool_not_bound:{step.tool_id}")
+                continue
+            definition = next(
+                (item for item in self.catalog.tools if item.tool_id == step.tool_id),
+                None,
+            )
+            if definition is None:
+                errors.append(f"candidate_profile_tool_missing_from_catalog:{step.tool_id}")
+                continue
+            if self.runtime.STAGE_CANDIDATE_ACQUISITION not in definition.stages:
+                errors.append(f"candidate_profile_tool_wrong_stage:{step.tool_id}")
+            if step.tool_id not in candidate_policy_tools:
+                errors.append(f"candidate_profile_tool_not_in_policy:{step.tool_id}")
+            if not str(binding_source_lineages.get(step.tool_id) or "").strip():
+                errors.append(f"candidate_profile_source_lineage_missing:{step.tool_id}")
         return errors
 
     def routing_change_class(self, payload: Any, *, stage: str) -> str:
@@ -1812,6 +1830,29 @@ class ProviderReceipt:
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "ProviderReceipt":
+        if not isinstance(data, Mapping):
+            raise RoutingExperimentError("provider receipt must be an object")
+        if any(not isinstance(key, str) for key in data):
+            raise RoutingExperimentError("provider_receipt_keys_must_be_strings")
+        allowed = {
+            "receipt_ref",
+            "binding_id",
+            "tool_id",
+            "binding_version",
+            "source_lineage_id",
+            "unit_ref",
+            "request_fingerprint",
+            "outcome",
+            "evidence_hash",
+            "credit_microunits",
+            "latency_ms",
+            "execution_mode",
+        }
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            raise RoutingExperimentError(
+                "provider_receipt_unknown_fields:" + ",".join(str(item) for item in unknown)
+            )
         return cls(
             receipt_ref=str(data.get("receipt_ref") or ""),
             binding_id=str(data.get("binding_id") or ""),
@@ -1916,6 +1957,8 @@ class ProviderReceiptRepository(Protocol):
     write these receipts into either production store.
     """
 
+    durable: bool
+
     def get(self, key: str) -> ProviderReceipt | None: ...
 
     def append(self, key: str, receipt: ProviderReceipt) -> ProviderReceipt: ...
@@ -1925,6 +1968,8 @@ class ProviderReceiptRepository(Protocol):
 
 class InMemoryProviderReceiptRepository:
     """Test repository; production must bind the same interface durably."""
+
+    durable = False
 
     def __init__(self) -> None:
         self._rows: dict[str, ProviderReceipt] = {}
@@ -1953,6 +1998,8 @@ class JsonlProviderReceiptRepository:
     locking guarantee.
     """
 
+    durable = True
+
     _lock_guard = threading.Lock()
     _locks: dict[str, threading.RLock] = {}
 
@@ -1972,6 +2019,14 @@ class JsonlProviderReceiptRepository:
                 if not line.strip():
                     continue
                 record = json.loads(line)
+                if not isinstance(record, Mapping):
+                    raise RoutingExperimentError("provider receipt repository record is invalid")
+                unknown = sorted(set(record) - {"key", "receipt"})
+                if unknown:
+                    raise RoutingExperimentError(
+                        "provider receipt repository unknown fields:"
+                        + ",".join(str(item) for item in unknown)
+                    )
                 key = str(record.get("key") or "")
                 receipt = ProviderReceipt.from_mapping(record.get("receipt") or {})
                 if not key:
@@ -2034,11 +2089,85 @@ class ProviderReceiptStore:
         self.cache_hits = 0
         self.cache_misses = 0
 
+    def readiness_errors(self) -> list[str]:
+        """Check the receipt repository without appending or changing state."""
+
+        errors: list[str] = []
+        if type(getattr(self.repository, "durable", None)) is not bool:
+            errors.append("provider_receipt_repository_durable_must_be_boolean")
+        for method_name in ("get", "append", "keys"):
+            if not callable(getattr(self.repository, method_name, None)):
+                errors.append(f"provider_receipt_repository_{method_name}_must_be_callable")
+        if errors:
+            return errors
+        try:
+            raw_keys = self.repository.keys()
+            if isinstance(raw_keys, (str, bytes)):
+                return ["provider_receipt_repository_keys_must_be_iterable"]
+            keys = tuple(raw_keys)
+        except Exception as exc:
+            return ["provider_receipt_repository_keys_failed:" + type(exc).__name__]
+        if len(set(keys)) != len(keys):
+            return ["provider_receipt_repository_keys_must_be_unique"]
+        probe_keys = keys or ("sha256:" + "0" * 64,)
+        for key in probe_keys:
+            if not isinstance(key, str):
+                return ["provider_receipt_repository_key_must_be_a_string"]
+            try:
+                _ensure_hash(key, "provider_receipt_repository_key")
+            except RoutingExperimentError as exc:
+                return [str(exc)]
+            try:
+                receipt = self.repository.get(key)
+            except Exception as exc:
+                return ["provider_receipt_repository_get_failed:" + type(exc).__name__]
+            if receipt is None and keys:
+                return ["provider_receipt_repository_get_missing_existing_receipt"]
+            if receipt is None:
+                continue
+            if not isinstance(receipt, ProviderReceipt):
+                return ["provider_receipt_repository_get_returned_invalid_receipt"]
+            receipt_errors = validate_provider_receipt(receipt)
+            if receipt_errors:
+                return [
+                    "provider_receipt_repository_get_returned_invalid_receipt:"
+                    + ";".join(receipt_errors)
+                ]
+            expected_key = provider_receipt_key(
+                tool_id=receipt.tool_id,
+                binding_version=receipt.binding_version,
+                request_fingerprint=receipt.request_fingerprint,
+            )
+            if key != expected_key:
+                return ["provider_receipt_repository_key_mismatch"]
+        return []
+
+    @property
+    def is_durable(self) -> bool:
+        return (
+            type(getattr(self.repository, "durable", None)) is bool
+            and self.repository.durable is True
+        )
+
     def get(self, key: str) -> ProviderReceipt | None:
         receipt = self.repository.get(str(key))
         if receipt is None:
             self.cache_misses += 1
             return None
+        if not isinstance(receipt, ProviderReceipt):
+            raise RoutingExperimentError("cached provider receipt is not typed")
+        receipt_errors = validate_provider_receipt(receipt)
+        if receipt_errors:
+            raise RoutingExperimentError(
+                "cached provider receipt invalid: " + "; ".join(receipt_errors)
+            )
+        expected_key = provider_receipt_key(
+            tool_id=receipt.tool_id,
+            binding_version=receipt.binding_version,
+            request_fingerprint=receipt.request_fingerprint,
+        )
+        if str(key) != expected_key:
+            raise RoutingExperimentError("cached provider receipt key mismatch")
         self.cache_hits += 1
         return receipt
 
@@ -2601,6 +2730,12 @@ def _run_variant_unit(
             ledger.record_provider_receipt(receipt)
             receipt_store.put(key, receipt)
         else:
+            receipt = _receipt_for_runner_result(
+                receipt,
+                binding=binding,
+                unit_ref=unit_ref,
+                request_fingerprint=request_fingerprint,
+            )
             ledger.before_provider_call(tool_id)
         receipts.append(receipt)
         return receipt
@@ -2905,7 +3040,7 @@ def evaluate_routing_experiment(
             raise RoutingExperimentError(
                 "measured_lab_requires_explicit_durable_receipt_repository"
             )
-        if isinstance(receipt_store.repository, InMemoryProviderReceiptRepository):
+        if receipt_store.readiness_errors() or receipt_store.is_durable is not True:
             raise RoutingExperimentError(
                 "measured_lab_requires_durable_receipt_repository"
             )
@@ -3265,7 +3400,7 @@ class RoutingExperimentV2Variant:
             raise RoutingExperimentError("v2_variant_change_kind_is_invalid")
         if self.change_kind == "route_only" and (self.source_add_provenance or self.new_tool_ids):
             raise RoutingExperimentError("v2_route_only_variant_has_source_add_provenance")
-        if self.change_kind in {"tool_only", "tool_and_route"} and (not self.source_add_provenance or not self.new_tool_ids):
+        if self.change_kind in {"tool_only", "tool_and_route"} and not self.source_add_provenance:
             raise RoutingExperimentError("v2_tool_variant_requires_source_add_provenance")
         if len(set(self.binding_ids)) != len(self.binding_ids):
             raise RoutingExperimentError("v2_variant_binding_ids_must_be_unique")
@@ -3709,6 +3844,10 @@ def validate_routing_experiment_v2_spec(
         errors.append(str(exc))
     if spec.input.stage not in ROUTING_EXPERIMENT_STAGES:
         errors.append("v2_input_stage_is_invalid")
+    if not spec.input.calibration_unit_refs:
+        errors.append("v2_calibration_unit_refs_must_not_be_empty")
+    if not spec.input.holdout_unit_refs:
+        errors.append("v2_holdout_unit_refs_must_not_be_empty")
     if spec.receipt_execution_mode not in {mode.value for mode in ReceiptExecutionMode}:
         errors.append("v2_receipt_execution_mode_is_invalid")
     if not isinstance(spec.allow_live_credit_spend, bool):
@@ -3845,7 +3984,7 @@ def validate_routing_experiment_v2_spec(
                 source_add = descriptor.get("source_add", False)
                 if not isinstance(source_add, bool):
                     errors.append(f"v2_model_tool_source_add_must_be_boolean:{tool_id}")
-                if source_add is True:
+                if source_add is True and tool_id in set(variant.new_tool_ids):
                     provenance = next((item for item in variant.source_add_provenance if item.tool_id == tool_id), None)
                     if provenance is None:
                         errors.append(f"v2_source_add_provenance_missing:{tool_id}")
@@ -3865,11 +4004,7 @@ def validate_routing_experiment_v2_spec(
             for tool_id in variant.new_tool_ids:
                 descriptor = descriptor_by_tool.get(tool_id)
                 if descriptor is None:
-                    descriptor = adapter.lookup_tool_descriptor(tool_id, stage=variant.stage)
-                    if descriptor is not None:
-                        descriptor_by_tool[tool_id] = descriptor
-                if descriptor is None:
-                    errors.append(f"v2_new_tool_absent_from_variant_artifact:{tool_id}")
+                    errors.append(f"v2_new_tool_absent_from_model_profile:{tool_id}")
                     continue
                 source_add = descriptor.get("source_add", False)
                 if not isinstance(source_add, bool):
@@ -3895,6 +4030,16 @@ def validate_routing_experiment_v2_spec(
             errors.append(f"v2_variant_validation_failed:{variant.variant_id}:{exc}")
         except Exception as exc:
             errors.append(f"v2_variant_validation_failed:{variant.variant_id}:{type(exc).__name__}")
+        if variant.change_kind in {"tool_only", "tool_and_route"}:
+            provenance_tool_ids = {
+                item.tool_id for item in variant.source_add_provenance
+            }
+            declared_tool_ids = set(variant.new_tool_ids)
+            if provenance_tool_ids != declared_tool_ids:
+                errors.append(
+                    "v2_source_add_provenance_tool_ids_must_match_new_tool_ids:"
+                    + variant.variant_id
+                )
     baseline_identity = routing_identity_by_variant.get(spec.baseline_variant_id)
     if baseline_identity:
         for variant in spec.variants:
@@ -4990,6 +5135,12 @@ def _v2_run_unit(
             store.put(key, receipt)
             new_spend_total[0] += receipt.credit_microunits
         else:
+            receipt = _receipt_for_runner_result(
+                receipt,
+                binding=binding,
+                unit_ref=unit_ref,
+                request_fingerprint=request_fingerprint,
+            )
             if receipt.request_fingerprint != request_fingerprint:
                 raise RoutingExperimentError("v2_cached_receipt_request_identity_mismatch")
             if receipt.execution_mode != spec.receipt_execution_mode:
@@ -5171,7 +5322,11 @@ def evaluate_routing_experiment_v2(
             raise RoutingExperimentError("v2_live_spend_requires_measured_lab_execution_mode")
         if not _v2_runner_accepts_authorization(runner):
             raise RoutingExperimentError("v2_live_spend_requires_authorization_aware_runner")
-        if receipt_store is None or isinstance(receipt_store.repository, InMemoryProviderReceiptRepository):
+        if (
+            receipt_store is None
+            or receipt_store.readiness_errors()
+            or receipt_store.is_durable is not True
+        ):
             raise RoutingExperimentError("v2_live_spend_requires_durable_receipt_repository")
         if not isinstance(decision_store, RoutingDecisionReceiptStore):
             raise RoutingExperimentError("v2_live_spend_requires_durable_decision_receipt_store")

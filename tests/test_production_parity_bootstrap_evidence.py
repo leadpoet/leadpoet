@@ -34,7 +34,10 @@ def _output(tmp_path: Path) -> Path:
         ("bootstrap-environment", "CommandFailed"),
         ("bootstrap-workspace", "CommandFailed"),
         ("candidate-bundle-download", "CommandFailed"),
-        ("candidate-bundle-integrity", "CommandFailed"),
+        ("candidate-bundle-metadata", "CommandFailed"),
+        ("candidate-bundle-file-integrity", "CommandFailed"),
+        ("candidate-bundle-head", "CommandFailed"),
+        ("candidate-bundle-verify", "CommandFailed"),
         ("candidate-repository-init", "CommandFailed"),
         ("candidate-bundle-fetch", "CommandFailed"),
         ("candidate-checkout", "CommandFailed"),
@@ -87,15 +90,18 @@ def test_bootstrap_ssm_failure_codes_are_unique_fixed_and_bounded() -> None:
         (40, "bootstrap-environment", "CommandFailed"),
         (41, "bootstrap-workspace", "CommandFailed"),
         (42, "candidate-bundle-download", "CommandFailed"),
-        (43, "candidate-bundle-integrity", "CommandFailed"),
-        (44, "candidate-repository-init", "CommandFailed"),
-        (45, "candidate-bundle-fetch", "CommandFailed"),
-        (46, "candidate-checkout", "CommandFailed"),
-        (47, "candidate-remote-rebind", "CommandFailed"),
-        (48, "canonical-origin-fetch", "CommandFailed"),
-        (49, "host-python-import", "HostImportFailed"),
-        (50, "host-entrypoint", "HostEntrypointFailed"),
-        (51, "evidence-upload", "EvidenceUploadFailed"),
+        (43, "candidate-bundle-metadata", "CommandFailed"),
+        (44, "candidate-bundle-file-integrity", "CommandFailed"),
+        (45, "candidate-bundle-head", "CommandFailed"),
+        (46, "candidate-bundle-verify", "CommandFailed"),
+        (47, "candidate-repository-init", "CommandFailed"),
+        (48, "candidate-bundle-fetch", "CommandFailed"),
+        (49, "candidate-checkout", "CommandFailed"),
+        (50, "candidate-remote-rebind", "CommandFailed"),
+        (51, "canonical-origin-fetch", "CommandFailed"),
+        (52, "host-python-import", "HostImportFailed"),
+        (53, "host-entrypoint", "HostEntrypointFailed"),
+        (54, "evidence-upload", "EvidenceUploadFailed"),
     )
     codes = [code for code, _stage, _category in values]
     assert len(codes) == len(set(codes))
@@ -164,7 +170,7 @@ def test_existing_symlink_is_never_followed(tmp_path: Path) -> None:
         run_id=RUN_ID,
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
-        stage="candidate-bundle-integrity",
+        stage="candidate-bundle-file-integrity",
         error_category="CommandFailed",
     )
 
@@ -325,7 +331,7 @@ def test_terminal_poller_projects_authoritative_bootstrap_response_code(
 
 @pytest.mark.parametrize(
     "response_code",
-    [-1, 0, 1, 39, 52, 255, None, "40", True, 40.0, {}, []],
+    [-1, 0, 1, 39, 55, 255, None, "40", True, 40.0, {}, []],
 )
 def test_terminal_poller_falls_back_for_not_started_malformed_or_unknown_code(
     tmp_path: Path,
@@ -584,7 +590,10 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
         "failure_stage=bootstrap-environment",
         "failure_stage=bootstrap-workspace",
         "failure_stage=candidate-bundle-download",
-        "failure_stage=candidate-bundle-integrity",
+        "failure_stage=candidate-bundle-metadata",
+        "failure_stage=candidate-bundle-file-integrity",
+        "failure_stage=candidate-bundle-head",
+        "failure_stage=candidate-bundle-verify",
         "failure_stage=candidate-repository-init",
         "failure_stage=candidate-bundle-fetch",
         "failure_stage=candidate-checkout",
@@ -648,6 +657,21 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert 'printf \'sha256=%s\\nsize_bytes=%s\\n\'' in script
     assert "--all" not in script
 
+    execute = next(
+        step
+        for step in steps
+        if step.get("name") == "Start candidate production paths"
+    )["run"]
+    assert "MAX_METADATA_BYTES = 4096" in execute
+    assert "object_pairs_hook=exact_object" in execute
+    metadata_stage = execute.split(
+        "failure_stage=candidate-bundle-metadata", 1
+    )[1].split("failure_stage=candidate-bundle-file-integrity", 1)[0]
+    assert "--query Metadata" in metadata_stage
+    assert "--output json" in metadata_stage
+    assert "--output text" not in metadata_stage
+    assert "candidate_bundle_metadata=" not in execute
+
 
 def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
     command = _rendered_ssm_command(tmp_path)
@@ -674,9 +698,11 @@ def _run_rendered_ssm(
     bundle_bytes: bytes = CANDIDATE_BUNDLE_BYTES,
     bundle_heads: str | None = None,
     bundle_verify_fails: bool = False,
+    bundle_as_symlink: bool = False,
     metadata_candidate_sha: str = CANDIDATE_SHA,
     metadata_bundle_sha256: str = CANDIDATE_BUNDLE_SHA256,
     metadata_bundle_size_bytes: str = CANDIDATE_BUNDLE_SIZE_BYTES,
+    metadata_raw_json: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     command = _rendered_ssm_command(tmp_path / "render")
     fake_bin = tmp_path / "bin"
@@ -699,17 +725,15 @@ with open(os.environ["AWS_CALLS"], "a", encoding="utf-8") as handle:
 if arguments[:2] == ["s3", "cp"]:
     destination = Path(arguments[3])
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(bytes.fromhex(os.environ["BUNDLE_HEX"]))
+    payload = bytes.fromhex(os.environ["BUNDLE_HEX"])
+    if os.environ.get("BUNDLE_AS_SYMLINK") == "1":
+        symlink_target = destination.with_name(destination.name + ".payload")
+        symlink_target.write_bytes(payload)
+        destination.symlink_to(symlink_target)
+    else:
+        destination.write_bytes(payload)
 elif arguments[:2] == ["s3api", "head-object"]:
-    print(
-        "\\t".join(
-            (
-                os.environ["METADATA_CANDIDATE_SHA"],
-                os.environ["METADATA_BUNDLE_SHA256"],
-                os.environ["METADATA_BUNDLE_SIZE_BYTES"],
-            )
-        )
-    )
+    sys.stdout.write(os.environ["METADATA_RAW_JSON"])
 elif arguments[:2] == ["s3api", "put-object"]:
     if os.environ.get("FAIL_EVIDENCE_UPLOAD") == "1":
         raise SystemExit(73)
@@ -841,6 +865,15 @@ if "--help" not in sys.argv:
         assert not early_root.exists()
     else:
         early_root.symlink_to(early_parent_target, target_is_directory=True)
+    if metadata_raw_json is None:
+        metadata_raw_json = json.dumps(
+            {
+                "candidate-sha": metadata_candidate_sha,
+                "bundle-sha256": metadata_bundle_sha256,
+                "bundle-size-bytes": metadata_bundle_size_bytes,
+            },
+            separators=(",", ":"),
+        )
     environment = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
@@ -848,13 +881,12 @@ if "--help" not in sys.argv:
         "CAPTURE_EVIDENCE": str(capture),
         "CANDIDATE_SHA": CANDIDATE_SHA,
         "BUNDLE_HEX": bundle_bytes.hex(),
+        "BUNDLE_AS_SYMLINK": "1" if bundle_as_symlink else "0",
         "BUNDLE_HEADS": bundle_heads or f"{CANDIDATE_SHA} HEAD",
         "FAIL_BUNDLE_VERIFY": "1" if bundle_verify_fails else "0",
         "FAIL_EVIDENCE_UPLOAD": "1" if upload_fails else "0",
         "GIT_CALLS": str(git_calls),
-        "METADATA_CANDIDATE_SHA": metadata_candidate_sha,
-        "METADATA_BUNDLE_SHA256": metadata_bundle_sha256,
-        "METADATA_BUNDLE_SIZE_BYTES": metadata_bundle_size_bytes,
+        "METADATA_RAW_JSON": metadata_raw_json,
         "PROVIDER_SECRET": "must-never-enter-evidence",
     }
     result = subprocess.run(
@@ -965,20 +997,92 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    ("overrides", "response_code", "failure_stage"),
     [
-        {"metadata_candidate_sha": BASE_SHA},
-        {"metadata_bundle_sha256": "0" * 64},
-        {"metadata_bundle_size_bytes": "999"},
-        {"bundle_bytes": b"candidate-bundlf"},
-        {"bundle_heads": f"{CANDIDATE_SHA} HEAD\n{BASE_SHA} refs/heads/main"},
-        {"bundle_verify_fails": True},
+        ({"metadata_candidate_sha": BASE_SHA}, 43, "candidate-bundle-metadata"),
+        (
+            {"metadata_bundle_sha256": "0" * 64},
+            43,
+            "candidate-bundle-metadata",
+        ),
+        (
+            {"metadata_bundle_size_bytes": "999"},
+            43,
+            "candidate-bundle-metadata",
+        ),
+        ({"metadata_raw_json": "{"}, 43, "candidate-bundle-metadata"),
+        (
+            {
+                "metadata_raw_json": json.dumps(
+                    {
+                        "candidate-sha": CANDIDATE_SHA,
+                        "bundle-sha256": CANDIDATE_BUNDLE_SHA256,
+                        "bundle-size-bytes": CANDIDATE_BUNDLE_SIZE_BYTES,
+                        "extra": "rejected",
+                    },
+                    separators=(",", ":"),
+                )
+            },
+            43,
+            "candidate-bundle-metadata",
+        ),
+        (
+            {
+                "metadata_raw_json": (
+                    '{"candidate-sha":"'
+                    + CANDIDATE_SHA
+                    + '","candidate-sha":"'
+                    + CANDIDATE_SHA
+                    + '","bundle-sha256":"'
+                    + CANDIDATE_BUNDLE_SHA256
+                    + '","bundle-size-bytes":"'
+                    + CANDIDATE_BUNDLE_SIZE_BYTES
+                    + '"}'
+                )
+            },
+            43,
+            "candidate-bundle-metadata",
+        ),
+        (
+            {"metadata_raw_json": "{" + " " * 4096 + "}"},
+            43,
+            "candidate-bundle-metadata",
+        ),
+        ({"metadata_raw_json": "[]"}, 43, "candidate-bundle-metadata"),
+        (
+            {"bundle_bytes": b"candidate-bundlf"},
+            44,
+            "candidate-bundle-file-integrity",
+        ),
+        (
+            {"bundle_bytes": b"short"},
+            44,
+            "candidate-bundle-file-integrity",
+        ),
+        (
+            {"bundle_as_symlink": True},
+            44,
+            "candidate-bundle-file-integrity",
+        ),
+        (
+            {"bundle_heads": f"{CANDIDATE_SHA} HEAD\n{BASE_SHA} refs/heads/main"},
+            45,
+            "candidate-bundle-head",
+        ),
+        ({"bundle_verify_fails": True}, 46, "candidate-bundle-verify"),
     ],
     ids=(
         "metadata-candidate-mismatch",
         "metadata-sha256-mismatch",
         "metadata-size-mismatch",
-        "downloaded-byte-corruption",
+        "metadata-malformed-json",
+        "metadata-extra-key",
+        "metadata-duplicate-key",
+        "metadata-over-bound",
+        "metadata-not-object",
+        "downloaded-same-size-byte-corruption",
+        "downloaded-size-mismatch",
+        "downloaded-symlink",
         "unexpected-extra-head",
         "bundle-verification-failure",
     ),
@@ -986,12 +1090,14 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
 def test_rendered_ssm_rejects_each_bundle_integrity_violation(
     tmp_path: Path,
     overrides: dict[str, object],
+    response_code: int,
+    failure_stage: str,
 ) -> None:
     result, capture = _run_rendered_ssm(tmp_path, **overrides)
 
-    assert result.returncode == 43
+    assert result.returncode == response_code
     retained = json.loads(capture.read_text(encoding="utf-8"))
-    assert retained["failure_stage"] == "candidate-bundle-integrity"
+    assert retained["failure_stage"] == failure_stage
     assert retained["error_type"] == "CommandFailed"
     assert "must-never-enter-evidence" not in capture.read_text(encoding="utf-8")
     assert not (tmp_path / "work" / "candidate.bundle").exists()
@@ -1014,7 +1120,7 @@ def test_rendered_ssm_maps_evidence_upload_failure_without_raw_output(
 ) -> None:
     result, capture = _run_rendered_ssm(tmp_path, upload_fails=True)
 
-    assert result.returncode == 51
+    assert result.returncode == 54
     assert not capture.exists()
     assert not (tmp_path / "work" / "candidate.bundle").exists()
     assert result.stdout == ""

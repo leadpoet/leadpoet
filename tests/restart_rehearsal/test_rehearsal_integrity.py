@@ -7569,14 +7569,20 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
             ]
         )
 
-    assert set(calls[:2]) == {"validator", "workflow"}
-    assert calls[-1] == "gateway"
+    assert sorted(calls) == ["gateway", "validator", "workflow"]
+    assert all(calls.count(component) == 1 for component in calls)
     by_stage = {
         item["stage"]: item for item in captured["stages"]
     }
     assert by_stage["gateway-forward-1"]["status"] == "failed"
+    assert by_stage["gateway-forward-1"]["command"] == ["gateway-restart"]
+    assert by_stage["gateway-forward-1"]["returncode"] == 17
     assert by_stage["validator-forward-1"]["status"] == "passed"
+    assert "command" not in by_stage["validator-forward-1"]
+    assert "returncode" not in by_stage["validator-forward-1"]
     assert by_stage["workflow-prepush"]["status"] == "failed"
+    assert by_stage["workflow-prepush"]["command"] == ["workflow"]
+    assert by_stage["workflow-prepush"]["returncode"] == 23
     assert by_stage["evidence-join-prepush"] == {
         "blocked_by": ["gateway-forward-1", "workflow-prepush"],
         "stage": "evidence-join-prepush",

@@ -279,6 +279,46 @@ jobs:
               "production_parity_bootstrap_evidence.py",
               "exec",
           )
+          candidate_bundle_metadata_validator = r'''import json
+          import sys
+
+          MAX_METADATA_BYTES = 4096
+
+          def exact_object(pairs):
+              value = {}
+              for key, item in pairs:
+                  if type(key) is not str or key in value:
+                      raise ValueError("metadata object keys are not unique strings")
+                  value[key] = item
+              return value
+
+          raw = sys.stdin.buffer.read(MAX_METADATA_BYTES + 1)
+          try:
+              if not raw or len(raw) > MAX_METADATA_BYTES or len(sys.argv) != 4:
+                  raise ValueError("metadata input is outside its bound")
+              actual = json.loads(
+                  raw.decode("utf-8"),
+                  object_pairs_hook=exact_object,
+              )
+          except (UnicodeDecodeError, ValueError):
+              raise SystemExit(1) from None
+          expected = {
+              "candidate-sha": sys.argv[1],
+              "bundle-sha256": sys.argv[2],
+              "bundle-size-bytes": sys.argv[3],
+          }
+          if (
+              type(actual) is not dict
+              or actual != expected
+              or any(type(value) is not str for value in actual.values())
+          ):
+              raise SystemExit(1)
+          '''
+          compile(
+              candidate_bundle_metadata_validator,
+              "candidate_bundle_metadata_validator.py",
+              "exec",
+          )
           q = shlex.quote
           failure_response_cases = "\n".join(
               f"    {q(stage)}) printf '%s\\n' {code} ;;"
@@ -370,25 +410,28 @@ jobs:
           sudo chown ec2-user:ec2-user {q(root)}
           failure_stage=candidate-bundle-download
           aws s3 cp {q(f"s3://{artifact_bucket}/{prefix}/candidate.bundle")} {q(root + "/candidate.bundle")} --region {q(required['AWS_REGION'])} --only-show-errors
-          failure_stage=candidate-bundle-integrity
-          candidate_bundle_metadata="$(aws s3api head-object \
+          failure_stage=candidate-bundle-metadata
+          aws s3api head-object \
             --bucket {q(artifact_bucket)} \
             --key {q(prefix + "/candidate.bundle")} \
-            --query '[Metadata."candidate-sha",Metadata."bundle-sha256",Metadata."bundle-size-bytes"]' \
-            --output text \
-            --region {q(required['AWS_REGION'])})"
-          test "$candidate_bundle_metadata" = "$(printf '%s\t%s\t%s' \
+            --query Metadata \
+            --output json \
+            --region {q(required['AWS_REGION'])} 2>/dev/null | \
+            /usr/bin/python3.11 -c {q(candidate_bundle_metadata_validator)} \
             {q(required['CANDIDATE_SHA'])} \
             "$candidate_bundle_sha256" \
-            "$candidate_bundle_size_bytes")"
+            "$candidate_bundle_size_bytes"
+          failure_stage=candidate-bundle-file-integrity
           test -f "$candidate_bundle"
           test ! -L "$candidate_bundle"
           test "$(stat -c '%s' -- "$candidate_bundle")" = \
             "$candidate_bundle_size_bytes"
           test "$(sha256sum -- "$candidate_bundle" | awk '{{print $1}}')" = \
             "$candidate_bundle_sha256"
-          test "$(git bundle list-heads "$candidate_bundle")" = \
+          failure_stage=candidate-bundle-head
+          test "$(git bundle list-heads "$candidate_bundle" 2>/dev/null)" = \
             {q(required['CANDIDATE_SHA'] + " HEAD")}
+          failure_stage=candidate-bundle-verify
           git init --bare "$candidate_bundle_verifier" >/dev/null 2>&1
           git -C "$candidate_bundle_verifier" bundle verify \
             "$candidate_bundle" >/dev/null 2>&1

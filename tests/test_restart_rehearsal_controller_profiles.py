@@ -458,6 +458,167 @@ def test_prepush_source_snapshot_overlaps_image_on_one_masked_worker(
     )
 
 
+def test_prepush_cold_artifacts_follow_snapshot_and_overlap_image() -> None:
+    controller = _load_controller()
+    image_started = threading.Event()
+    artifact_started = threading.Event()
+    source_ready = threading.Event()
+    active: set[str] = set()
+    peak_active = 0
+    lock = threading.Lock()
+
+    def enter(name: str) -> None:
+        nonlocal peak_active
+        with lock:
+            active.add(name)
+            peak_active = max(peak_active, len(active))
+
+    def leave(name: str) -> None:
+        with lock:
+            active.remove(name)
+
+    def image() -> str:
+        assert threading.current_thread() is threading.main_thread()
+        enter("image")
+        image_started.set()
+        assert artifact_started.wait(timeout=5)
+        leave("image")
+        return "image"
+
+    def snapshot() -> str:
+        assert threading.current_thread() is not threading.main_thread()
+        assert image_started.wait(timeout=5)
+        source_ready.set()
+        return "snapshot"
+
+    def artifacts() -> str:
+        assert threading.current_thread() is not threading.main_thread()
+        assert source_ready.is_set()
+        worker_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        assert signal.SIGALRM in worker_mask
+        assert signal.SIGINT in worker_mask
+        enter("artifact")
+        artifact_started.set()
+        leave("artifact")
+        return "artifacts"
+
+    assert controller._run_prepush_image_snapshot_and_artifacts(
+        image_action=image,
+        snapshot_action=snapshot,
+        artifact_action=artifacts,
+    ) == ("image", "snapshot", "artifacts")
+    assert peak_active == 2
+
+
+@pytest.mark.parametrize("signum", [signal.SIGALRM, signal.SIGINT])
+@pytest.mark.parametrize(
+    ("boundary", "command", "owns_container"),
+    [
+        ("download", [sys.executable, "drand-download"], False),
+        ("builder", ["docker", "build", "drand-builder"], False),
+        ("compile", ["docker", "run", "drand-compile"], True),
+    ],
+)
+def test_prepush_signal_reaps_each_direct_drand_boundary(
+    signum: signal.Signals,
+    boundary: str,
+    command: list[str],
+    owns_container: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    started = threading.Event()
+    processes, removed = _install_blocked_popen(
+        controller,
+        monkeypatch,
+        started,
+        streaming=False,
+    )
+
+    def image() -> None:
+        assert started.wait(timeout=1)
+        signal.raise_signal(signum)
+
+    def artifact() -> None:
+        controller._run(command)
+
+    expected = (
+        controller.RehearsalTimeBudgetExceeded
+        if signum == signal.SIGALRM
+        else KeyboardInterrupt
+    )
+    context = (
+        controller._profile_time_limit(600)
+        if signum == signal.SIGALRM
+        else controller._profile_time_limit(None)
+    )
+    with pytest.raises(expected):
+        with context:
+            controller._run_prepush_image_snapshot_and_artifacts(
+                image_action=image,
+                snapshot_action=lambda: None,
+                artifact_action=artifact,
+            )
+
+    assert boundary
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert processes[0].killed is True
+    assert processes[0].reaped is True
+    if owns_container:
+        name_index = processes[0].command.index("--name")
+        assert removed == [processes[0].command[name_index + 1]]
+    else:
+        assert removed == []
+
+
+@pytest.mark.parametrize("signum", [signal.SIGALRM, signal.SIGINT])
+def test_prepush_signal_reaps_exact_drand_git_blob_read(
+    signum: signal.Signals,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    started = threading.Event()
+    processes, removed = _install_blocked_popen(
+        controller,
+        monkeypatch,
+        started,
+        streaming=False,
+    )
+
+    def image() -> None:
+        assert started.wait(timeout=1)
+        signal.raise_signal(signum)
+
+    expected = (
+        controller.RehearsalTimeBudgetExceeded
+        if signum == signal.SIGALRM
+        else KeyboardInterrupt
+    )
+    context = (
+        controller._profile_time_limit(600)
+        if signum == signal.SIGALRM
+        else controller._profile_time_limit(None)
+    )
+    with pytest.raises(expected):
+        with context:
+            controller._run_prepush_image_snapshot_and_artifacts(
+                image_action=image,
+                snapshot_action=lambda: None,
+                artifact_action=lambda: controller._git_file(
+                    "a" * 40,
+                    "validator_tee/runtime-artifacts-v2.lock.json",
+                ),
+            )
+
+    assert len(processes) == 1
+    assert processes[0].command[:2] == ["git", "show"]
+    assert processes[0].terminated is True
+    assert processes[0].killed is True
+    assert processes[0].reaped is True
+    assert removed == []
+
+
 def test_prepush_source_snapshot_failure_is_redacted(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -527,6 +688,198 @@ def test_cold_snapshot_completes_before_deferred_runtime_probe() -> None:
     assert workflow_results[0]["status"] == "passed"
 
 
+def test_drand_source_download_is_hash_bound_and_cleans_partial(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    payload = b"pinned drand source"
+    expected_hash = controller.hashlib.sha256(payload).hexdigest()
+    lock = tmp_path / "runtime-artifacts-v2.lock.json"
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    lock.write_text(
+        json.dumps(
+            {
+                "schema_version": "leadpoet.validator_runtime_artifacts.v2",
+                "artifacts": {
+                    "bittensor_drand_source": {
+                        "filename": "drand.tar.gz",
+                        "sha256": expected_hash,
+                        "url": "https://example.invalid/drand.tar.gz",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Response:
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size: int) -> bytes:
+            body, self.body = self.body, b""
+            return body
+
+    requests = []
+
+    def urlopen(request, *, timeout):
+        requests.append((request, timeout))
+        return Response(payload)
+
+    monkeypatch.setattr(controller, "urlopen", urlopen)
+    assert controller._download_locked_drand_source(
+        ["--lock", str(lock), "--output-root", str(output_root)]
+    ) == 0
+    assert (output_root / "drand.tar.gz").read_bytes() == payload
+    assert requests[0][1] == controller._DRAND_SOURCE_DOWNLOAD_TIMEOUT_SECONDS
+    assert not list(output_root.glob("*.partial-*"))
+
+    (output_root / "drand.tar.gz").unlink()
+    document = json.loads(lock.read_text(encoding="utf-8"))
+    document["artifacts"]["bittensor_drand_source"]["sha256"] = "0" * 64
+    lock.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SystemExit, match="archive hash differs"):
+        controller._download_locked_drand_source(
+            ["--lock", str(lock), "--output-root", str(output_root)]
+        )
+    assert not (output_root / "drand.tar.gz").exists()
+    assert not list(output_root.glob("*.partial-*"))
+
+
+def test_drand_preparation_uses_only_direct_owned_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    source_root = tmp_path / "source"
+    (source_root / "validator_tee/enclave").mkdir(parents=True)
+    (source_root / "validator_tee/scripts").mkdir()
+    (source_root / "scripts").mkdir()
+    (source_root / "validator_tee/Dockerfile.drand-builder").write_text(
+        "FROM pinned@example\n",
+        encoding="utf-8",
+    )
+    (source_root / "validator_tee/enclave/Cargo.drand-cabi-v2.lock").write_text(
+        "lock\n",
+        encoding="utf-8",
+    )
+    (source_root / "validator_tee/scripts/build_drand_cabi_v2.sh").write_text(
+        "#!/bin/bash\n",
+        encoding="utf-8",
+    )
+    (source_root / "scripts/run_local_restart_rehearsal.py").write_text(
+        "# exact candidate controller\n",
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(controller.Path, "home", lambda: home)
+    monkeypatch.setattr(controller, "REPO_ROOT", source_root)
+    source_payload = b"pinned source"
+    compiled_payload = b"compiled C ABI"
+    expected_source_hash = controller.hashlib.sha256(source_payload).hexdigest()
+    expected_binary_hash = controller.hashlib.sha256(compiled_payload).hexdigest()
+    lock_bytes = json.dumps(
+        {
+            "schema_version": "leadpoet.validator_runtime_artifacts.v2",
+            "artifacts": {
+                "bittensor_drand_source": {
+                    "filename": "drand.tar.gz",
+                    "sha256": expected_source_hash,
+                    "url": "https://example.invalid/drand.tar.gz",
+                }
+            },
+        }
+    ).encode()
+
+    def git_file(_commit: str, path: str) -> bytes:
+        if path.endswith("libbittensor_drand_v2.sha256"):
+            return (expected_binary_hash + "\n").encode()
+        if path.endswith("runtime-artifacts-v2.lock.json"):
+            return lock_bytes
+        raise AssertionError(path)
+
+    calls: list[tuple[list[str], float | None]] = []
+
+    def run(command, **kwargs):
+        assert getattr(controller._WORKER_PROCESS_STATE, "registry", None) is not None
+        command = list(command)
+        calls.append((command, kwargs.get("timeout_seconds")))
+        if controller._DRAND_INTERNAL_DOWNLOAD_COMMAND in command:
+            output_root = Path(command[command.index("--output-root") + 1])
+            (output_root / "drand.tar.gz").write_bytes(source_payload)
+        elif command[:2] == ["docker", "run"]:
+            work_mount = next(
+                item
+                for item in command
+                if item.endswith(":/work")
+            )
+            work_root = Path(work_mount.removesuffix(":/work"))
+            (work_root / "output/libbittensor_drand_v2.so").write_bytes(
+                compiled_payload
+            )
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(controller, "_git_file", git_file)
+    monkeypatch.setattr(controller, "_run", run)
+
+    cache_root = controller._prepare_drand_artifact(
+        source_root=source_root,
+        candidate_sha="a" * 40,
+    )
+    cached = cache_root / "libbittensor_drand_v2.so"
+    assert cached.read_bytes() == compiled_payload
+    assert cached.stat().st_mode & 0o777 == 0o444
+    assert len(calls) == 3
+    assert calls[0][0][0] == sys.executable
+    assert controller._DRAND_INTERNAL_DOWNLOAD_COMMAND in calls[0][0]
+    assert calls[0][1] == controller._DRAND_SOURCE_DOWNLOAD_PROCESS_TIMEOUT_SECONDS
+    assert calls[1][0][:2] == ["docker", "build"]
+    assert calls[1][1] == controller._DRAND_BUILDER_TIMEOUT_SECONDS
+    assert calls[2][0][:2] == ["docker", "run"]
+    assert calls[2][1] == controller._DRAND_COMPILE_TIMEOUT_SECONDS
+    assert "--internal-no-docker" in calls[2][0][-1]
+    assert not any(command[:1] == ["/bin/bash"] for command, _ in calls)
+
+    controller._prepare_drand_artifact(
+        source_root=source_root,
+        candidate_sha="a" * 40,
+    )
+    assert len(calls) == 3
+
+
+def test_cancelled_drand_publication_never_installs_partial_cache(
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    payload = b"compiled C ABI"
+    source = tmp_path / "compiled.so"
+    source.write_bytes(payload)
+    destination = tmp_path / "cache/libbittensor_drand_v2.so"
+    destination.parent.mkdir()
+    registry = controller._WorkerProcessRegistry()
+    registry.cancel()
+
+    with controller._worker_process_scope(registry):
+        with pytest.raises(controller.RehearsalTimeBudgetExceeded):
+            controller._publish_drand_cache(
+                source=source,
+                destination=destination,
+                expected_hash=controller.hashlib.sha256(payload).hexdigest(),
+            )
+
+    assert not destination.exists()
+    assert not list(destination.parent.glob("*.tmp"))
+
+
 class _BlockedProcess:
     pid = 12345
 
@@ -554,7 +907,7 @@ class _BlockedProcess:
         assert self.released.wait(timeout=5)
         raise StopIteration
 
-    def communicate(self):
+    def communicate(self, timeout=None):
         self._started.set()
         assert self.released.wait(timeout=5)
         return None, None

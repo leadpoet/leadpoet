@@ -3,6 +3,97 @@
 
 set -euo pipefail
 
+run_internal_no_docker() {
+    test "$#" -eq 0
+    test -s /work/source.tar.gz
+    test -s /work/Cargo.drand-cabi-v2.lock
+    mkdir -p /work/source /work/output /work/cargo
+    tar -xzf /work/source.tar.gz -C /work/source --strip-components=1
+    cat > /work/source/src/lib.rs <<'RS'
+mod constants;
+mod drand;
+mod epoch_schedule;
+mod ffi;
+RS
+    python3 - <<'PY'
+from pathlib import Path
+
+path = Path('/work/source/Cargo.toml')
+lines = path.read_text().splitlines()
+output = []
+in_features = False
+for line in lines:
+    stripped = line.strip()
+    if stripped == '[features]':
+        in_features = True
+        continue
+    if in_features and stripped.startswith('['):
+        in_features = False
+    if in_features or stripped.startswith('pyo3 ='):
+        continue
+    output.append(line)
+path.write_text('\n'.join(output) + '\n')
+
+PY
+    cp /work/Cargo.drand-cabi-v2.lock /work/source/Cargo.lock
+    cd /work/source
+    export CARGO_HOME=/cargo-cache/home
+    export CARGO_TARGET_DIR=/cargo-cache/target-al2-glibc226
+    export SOURCE_DATE_EPOCH=0
+    export RUSTFLAGS="--remap-path-prefix=/work/source=/usr/src/bittensor-drand -C strip=symbols -C link-arg=-Wl,--build-id=none"
+    cargo build --release --locked --no-default-features
+    LIBRARY=/cargo-cache/target-al2-glibc226/release/libbittensor_drand.so
+
+    cat > /work/load_test.c <<'C'
+#include <dlfcn.h>
+#include <stdio.h>
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        return 2;
+    }
+    void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+    if (handle == NULL) {
+        fprintf(stderr, "drand C ABI load failed: %s\n", dlerror());
+        return 1;
+    }
+    const char *symbols[] = {"cr_generate_commit_v2", "cr_free", "cr_free_str"};
+    for (unsigned int i = 0; i < sizeof(symbols) / sizeof(symbols[0]); ++i) {
+        if (dlsym(handle, symbols[i]) == NULL) {
+            fprintf(stderr, "drand C ABI symbol is unavailable: %s\n", symbols[i]);
+            return 1;
+        }
+    }
+    dlclose(handle);
+    return 0;
+}
+C
+    gcc -O2 -o /work/load_test /work/load_test.c -ldl
+    /work/load_test "$LIBRARY"
+    readelf --version-info "$LIBRARY" | python3 -c '
+import re
+import sys
+
+versions = {
+    tuple(map(int, match))
+    for match in re.findall(r"GLIBC_(\d+)\.(\d+)", sys.stdin.read())
+}
+if versions and max(versions) > (2, 26):
+    rendered = ".".join(map(str, max(versions)))
+    raise SystemExit(
+        f"ERROR: drand C ABI requires GLIBC_{rendered}; enclave maximum is GLIBC_2.26"
+    )
+print(".".join(map(str, max(versions))) if versions else "none")
+' > /work/output/max-glibc.txt
+    cp "$LIBRARY" /work/output/libbittensor_drand_v2.so
+}
+
+if [ "${1:-}" = "--internal-no-docker" ]; then
+    shift
+    run_internal_no_docker "$@"
+    exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATOR_TEE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$VALIDATOR_TEE_DIR")"

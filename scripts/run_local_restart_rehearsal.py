@@ -38,7 +38,7 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable, Iterator, Optional, Sequence
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +46,13 @@ IMAGE_REPOSITORY = "leadpoet-local-restart-rehearsal"
 _LOCAL_IMAGE_OPERATION_TIMEOUT_SECONDS = 10.0
 _REHEARSAL_BASE_PULL_TIMEOUT_SECONDS = 120.0
 _BUILDX_OPERATION_TIMEOUT_SECONDS = 10.0
+_DRAND_SOURCE_DOWNLOAD_TIMEOUT_SECONDS = 120.0
+_DRAND_SOURCE_DOWNLOAD_PROCESS_TIMEOUT_SECONDS = 125.0
+_DRAND_BUILDER_TIMEOUT_SECONDS = 180.0
+_DRAND_COMPILE_TIMEOUT_SECONDS = 180.0
+_DRAND_SOURCE_MAX_BYTES = 64 * 1024 * 1024
+_DRAND_INTERNAL_DOWNLOAD_COMMAND = "--internal-download-drand-source"
+_GIT_BLOB_READ_TIMEOUT_SECONDS = 30.0
 _SYSTEM_BUILDX_PATHS = (
     Path("/usr/local/lib/docker/cli-plugins/docker-buildx"),
     Path("/usr/local/libexec/docker/cli-plugins/docker-buildx"),
@@ -858,13 +865,52 @@ def _git_sha(value: str) -> str:
 
 
 def _git_file(commit_sha: str, path: str) -> bytes:
-    result = subprocess.run(
-        ["git", "show", f"{commit_sha}:{path}"],
+    args = ["git", "show", f"{commit_sha}:{path}"]
+    registry = getattr(_WORKER_PROCESS_STATE, "registry", None)
+    if registry is None:
+        result = subprocess.run(
+            args,
+            cwd=str(REPO_ROOT),
+            check=True,
+            capture_output=True,
+            timeout=_GIT_BLOB_READ_TIMEOUT_SECONDS,
+        )
+        return result.stdout
+
+    command, container_name = registry.prepare_command(args)
+    process = _spawn_registered_process(
+        command,
+        registry=registry,
+        container_name=container_name,
         cwd=str(REPO_ROOT),
-        check=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    return result.stdout
+    try:
+        try:
+            stdout, stderr = process.communicate(
+                timeout=_GIT_BLOB_READ_TIMEOUT_SECONDS
+            )
+        except BaseException as exc:
+            errors = registry.terminate(process, container_name)
+            try:
+                registry.ensure_accepting()
+            except RehearsalTimeBudgetExceeded as cancelled:
+                _annotate_worker_cleanup_errors(cancelled, errors)
+                raise cancelled from exc
+            _annotate_worker_cleanup_errors(exc, errors)
+            raise
+    finally:
+        registry.unregister(process)
+    registry.ensure_accepting()
+    if process.returncode:
+        raise subprocess.CalledProcessError(
+            process.returncode,
+            command,
+            output=stdout,
+            stderr=stderr,
+        )
+    return stdout
 
 
 def _is_ancestor(ancestor: str, descendant: str) -> bool:
@@ -1259,7 +1305,149 @@ def _image_exists(tag: str) -> bool:
     return result.returncode == 0
 
 
-def _prepare_drand_artifact(
+def _drand_source_contract(lock_bytes: bytes) -> dict[str, str]:
+    try:
+        document = json.loads(lock_bytes)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("candidate drand source lock is malformed") from exc
+    artifacts = document.get("artifacts") if isinstance(document, dict) else None
+    contract = (
+        artifacts.get("bittensor_drand_source")
+        if isinstance(artifacts, dict)
+        else None
+    )
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version")
+        != "leadpoet.validator_runtime_artifacts.v2"
+        or not isinstance(contract, dict)
+        or set(contract) != {"filename", "sha256", "url"}
+    ):
+        raise SystemExit("candidate drand source lock is incomplete")
+    filename = contract.get("filename")
+    expected_sha256 = contract.get("sha256")
+    url = contract.get("url")
+    if (
+        not isinstance(filename, str)
+        or Path(filename).name != filename
+        or filename in {"", ".", ".."}
+        or not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_sha256
+        )
+        or not isinstance(url, str)
+        or not url.startswith("https://")
+    ):
+        raise SystemExit("candidate drand source lock is invalid")
+    return {
+        "filename": filename,
+        "sha256": expected_sha256,
+        "url": url,
+    }
+
+
+def _download_locked_drand_source(argv: Sequence[str]) -> int:
+    """Run the public download in a separately cancellable exact process."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--lock", required=True, type=Path)
+    parser.add_argument("--output-root", required=True, type=Path)
+    args = parser.parse_args(argv)
+    lock_path = args.lock.resolve(strict=True)
+    output_root = args.output_root.resolve(strict=True)
+    if not lock_path.is_file() or not output_root.is_dir():
+        raise SystemExit("drand download paths are invalid")
+    contract = _drand_source_contract(lock_path.read_bytes())
+    destination = output_root / contract["filename"]
+    partial = output_root / (
+        f".{contract['filename']}.partial-{os.getpid()}"
+    )
+    request = Request(
+        contract["url"],
+        headers={"User-Agent": "leadpoet-local-restart-rehearsal/1"},
+    )
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        descriptor = os.open(
+            partial,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with (
+            os.fdopen(descriptor, "wb") as output,
+            urlopen(
+                request,
+                timeout=_DRAND_SOURCE_DOWNLOAD_TIMEOUT_SECONDS,
+            ) as response,
+        ):
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > _DRAND_SOURCE_MAX_BYTES:
+                    raise SystemExit("candidate drand source archive is oversized")
+                output.write(chunk)
+                digest.update(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if digest.hexdigest() != contract["sha256"]:
+            raise SystemExit("candidate drand source archive hash differs")
+        os.replace(partial, destination)
+        destination.chmod(0o644)
+    finally:
+        partial.unlink(missing_ok=True)
+    return 0
+
+
+def _drand_builder_tag(source_root: Path) -> str:
+    dockerfile = source_root / "validator_tee/Dockerfile.drand-builder"
+    digest = hashlib.sha256()
+    digest.update(b"leadpoet.rehearsal.drand_builder.v1")
+    digest.update(dockerfile.read_bytes())
+    digest.update(b"linux/amd64")
+    return f"validator-drand-builder:rehearsal-{digest.hexdigest()[:16]}"
+
+
+def _publish_drand_cache(
+    *, source: Path, destination: Path, expected_hash: str
+) -> None:
+    registry = getattr(_WORKER_PROCESS_STATE, "registry", None)
+    if registry is None:
+        raise RuntimeError("drand cache publication lacks process ownership")
+    temporary = destination.parent / (
+        f".{destination.name}.{os.getpid()}-{threading.get_ident()}.tmp"
+    )
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o400,
+        )
+        with source.open("rb") as input_handle, os.fdopen(
+            descriptor, "wb"
+        ) as output_handle:
+            descriptor = -1
+            shutil.copyfileobj(input_handle, output_handle)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+        if hashlib.sha256(temporary.read_bytes()).hexdigest() != expected_hash:
+            raise SystemExit("published drand C ABI cache hash differs")
+        temporary.chmod(0o444)
+        registry.ensure_accepting()
+        os.replace(temporary, destination)
+        registry.ensure_accepting()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _prepare_drand_artifact_owned(
     *,
     source_root: Path,
     candidate_sha: str,
@@ -1294,47 +1482,143 @@ def _prepare_drand_artifact(
         return cache_root
     local = REPO_ROOT / ".validator-tee-artifacts/libbittensor_drand_v2.so"
     if valid(local):
-        shutil.copy2(local, cached)
-        cached.chmod(0o444)
+        _publish_drand_cache(
+            source=local,
+            destination=cached,
+            expected_hash=expected_hash,
+        )
         return cache_root
 
-    lock = json.loads(
-        _git_file(
-            candidate_sha,
-            "validator_tee/runtime-artifacts-v2.lock.json",
-        )
+    lock_bytes = _git_file(
+        candidate_sha,
+        "validator_tee/runtime-artifacts-v2.lock.json",
     )
-    source_contract = lock["artifacts"]["bittensor_drand_source"]
+    source_contract = _drand_source_contract(lock_bytes)
     artifact_root = source_root / ".validator-tee-artifacts"
     artifact_root.mkdir(exist_ok=True)
     source_archive = artifact_root / source_contract["filename"]
-    if not source_archive.is_file():
-        with urlopen(str(source_contract["url"]), timeout=120) as response:
-            source_archive.write_bytes(response.read())
-    if (
-        hashlib.sha256(source_archive.read_bytes()).hexdigest()
-        != source_contract["sha256"]
-    ):
-        raise SystemExit("pinned drand source archive hash differs")
-    output = artifact_root / "libbittensor_drand_v2.so"
-    _run(
-        [
-            "/bin/bash",
-            str(source_root / "validator_tee/scripts/build_drand_cabi_v2.sh"),
-            str(source_archive),
-            str(output),
-            str(
-                source_root
-                / "validator_tee/enclave/libbittensor_drand_v2.sha256"
-            ),
-        ],
-        cwd=source_root,
-    )
-    if not valid(output):
-        raise SystemExit("real drand C ABI rebuild differs from candidate hash")
-    shutil.copy2(output, cached)
-    cached.chmod(0o444)
+    with tempfile.TemporaryDirectory(
+        prefix=".drand-cabi-v2.",
+        dir=source_root,
+    ) as raw:
+        work_root = Path(raw)
+        lock_path = work_root / "runtime-artifacts-v2.lock.json"
+        lock_path.write_bytes(lock_bytes)
+        lock_path.chmod(0o600)
+        if (
+            not source_archive.is_file()
+            or hashlib.sha256(source_archive.read_bytes()).hexdigest()
+            != source_contract["sha256"]
+        ):
+            _run(
+                [
+                    sys.executable,
+                    str(source_root / "scripts/run_local_restart_rehearsal.py"),
+                    _DRAND_INTERNAL_DOWNLOAD_COMMAND,
+                    "--lock",
+                    str(lock_path),
+                    "--output-root",
+                    str(artifact_root),
+                ],
+                cwd=source_root,
+                timeout_seconds=_DRAND_SOURCE_DOWNLOAD_PROCESS_TIMEOUT_SECONDS,
+            )
+        if (
+            not source_archive.is_file()
+            or hashlib.sha256(source_archive.read_bytes()).hexdigest()
+            != source_contract["sha256"]
+        ):
+            raise SystemExit("pinned drand source archive hash differs")
+
+        shutil.copy2(source_archive, work_root / "source.tar.gz")
+        shutil.copy2(
+            source_root / "validator_tee/enclave/Cargo.drand-cabi-v2.lock",
+            work_root / "Cargo.drand-cabi-v2.lock",
+        )
+        (work_root / "output").mkdir()
+        cargo_cache = (
+            Path.home() / ".cache" / "leadpoet" / "drand-cabi-v2"
+        )
+        (cargo_cache / "home").mkdir(parents=True, exist_ok=True)
+        (cargo_cache / "target-al2-glibc226").mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        builder_tag = _drand_builder_tag(source_root)
+        _run(
+            [
+                "docker",
+                "build",
+                "--platform",
+                "linux/amd64",
+                "-f",
+                str(source_root / "validator_tee/Dockerfile.drand-builder"),
+                "-t",
+                builder_tag,
+                str(source_root),
+            ],
+            cwd=source_root,
+            timeout_seconds=_DRAND_BUILDER_TIMEOUT_SECONDS,
+        )
+        _run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--platform",
+                "linux/amd64",
+                "--network",
+                "bridge",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                "-v",
+                f"{work_root}:/work",
+                "-v",
+                f"{cargo_cache}:/cargo-cache",
+                "-v",
+                f"{source_root}:/source:ro",
+                builder_tag,
+                "bash",
+                "/source/validator_tee/scripts/build_drand_cabi_v2.sh",
+                "--internal-no-docker",
+            ],
+            cwd=source_root,
+            timeout_seconds=_DRAND_COMPILE_TIMEOUT_SECONDS,
+        )
+        output = work_root / "output/libbittensor_drand_v2.so"
+        if not valid(output):
+            raise SystemExit(
+                "real drand C ABI rebuild differs from candidate hash"
+            )
+        _publish_drand_cache(
+            source=output,
+            destination=cached,
+            expected_hash=expected_hash,
+        )
     return cache_root
+
+
+def _prepare_drand_artifact(
+    *,
+    source_root: Path,
+    candidate_sha: str,
+) -> Path:
+    registry = getattr(_WORKER_PROCESS_STATE, "registry", None)
+    if registry is not None:
+        return _prepare_drand_artifact_owned(
+            source_root=source_root,
+            candidate_sha=candidate_sha,
+        )
+    owned_registry = _WorkerProcessRegistry()
+    with _worker_process_scope(owned_registry):
+        try:
+            return _prepare_drand_artifact_owned(
+                source_root=source_root,
+                candidate_sha=candidate_sha,
+            )
+        except BaseException as exc:
+            _annotate_worker_cleanup_errors(exc, owned_registry.cancel())
+            raise
 
 
 def _normalize_evidence_ownership(
@@ -2509,6 +2793,31 @@ def _run_prepush_image_and_snapshot(
     )
 
 
+def _run_prepush_image_snapshot_and_artifacts(
+    *,
+    image_action: Callable[[], Any],
+    snapshot_action: Callable[[], Any],
+    artifact_action: Callable[[], Any],
+) -> tuple[Any, Any, Any]:
+    """Populate the frozen source, then prepare artifacts under the image."""
+
+    def prepare_source_and_artifacts() -> tuple[Any, Any]:
+        snapshot_result = _run_prepush_phase(
+            phase="source-snapshot",
+            action=snapshot_action,
+        )
+        return snapshot_result, artifact_action()
+
+    image_result, worker_result = _run_prepush_image_and_probe(
+        image_action=lambda: _run_prepush_phase(
+            phase="exact-image-build",
+            action=image_action,
+        ),
+        probe_action=prepare_source_and_artifacts,
+    )
+    return image_result, worker_result[0], worker_result[1]
+
+
 def _run_prepush_runtime_stages(
     *,
     preparation_action: Callable[
@@ -3110,6 +3419,9 @@ def _run_python37_finalization_probe(source_root: Path) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv[:1] == [_DRAND_INTERNAL_DOWNLOAD_COMMAND]:
+        return _download_locked_drand_source(raw_argv[1:])
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--from-sha",
@@ -3151,7 +3463,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "the canonical workflow stage."
         ),
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     if args.production_allocation is not None:
         args.production_allocation = args.production_allocation.resolve()
         if not args.production_allocation.is_file():
@@ -3240,6 +3552,8 @@ def _run_profile(
 
     with source_snapshot_context as source_root:
         stage_results: list[dict[str, Any]] = []
+        target_shas = tuple(sorted({from_sha, candidate_sha}))
+        drand_artifacts: dict[str, Path] = {}
         # Cold runs defer this probe behind the pre-scheduler drand preparation,
         # but the candidate-bound inventory retains its established position.
         python37_stage_index = len(stage_results)
@@ -3256,14 +3570,32 @@ def _run_profile(
             )
 
         if overlap_source_snapshot:
-            _run_prepush_image_and_snapshot(
+            cold_drand_results: list[dict[str, Any]] = []
+
+            def prepare_cold_drand_artifacts() -> None:
+                for target in target_shas:
+                    stage = f"drand-artifact-{target[:12]}"
+                    passed, artifact = _run_independent_stage(
+                        stage=stage,
+                        action=lambda target=target: _prepare_drand_artifact(
+                            source_root=source_root,
+                            candidate_sha=target,
+                        ),
+                        stages=cold_drand_results,
+                    )
+                    if passed:
+                        drand_artifacts[target] = artifact
+
+            _run_prepush_image_snapshot_and_artifacts(
                 image_action=build_image,
                 snapshot_action=lambda: _populate_isolated_source_snapshot(
                     source=source_root,
                     harness_sha=harness_sha,
                     required_shas=(from_sha, candidate_sha),
                 ),
+                artifact_action=prepare_cold_drand_artifacts,
             )
+            stage_results.extend(cold_drand_results)
         else:
             run_python37_probe()
 
@@ -3295,22 +3627,21 @@ def _run_profile(
             # Candidate startup can reconstruct receipts issued by the
             # deployed release, so both immutable release channels must be
             # available even in the one-way prepush profile.
-            target_shas = {from_sha, candidate_sha}
             with _recording_fixture_stack(stage_results) as fixture_stack:
-                drand_artifacts: dict[str, Path] = {}
                 fixture_seeds: dict[str, Path] = {}
-                for target in sorted(target_shas):
-                    stage = f"drand-artifact-{target[:12]}"
-                    passed, artifact = _run_independent_stage(
-                        stage=stage,
-                        action=lambda target=target: _prepare_drand_artifact(
-                            source_root=source_root,
-                            candidate_sha=target,
-                        ),
-                        stages=stage_results,
-                    )
-                    if passed:
-                        drand_artifacts[target] = artifact
+                if not overlap_source_snapshot:
+                    for target in target_shas:
+                        stage = f"drand-artifact-{target[:12]}"
+                        passed, artifact = _run_independent_stage(
+                            stage=stage,
+                            action=lambda target=target: _prepare_drand_artifact(
+                                source_root=source_root,
+                                candidate_sha=target,
+                            ),
+                            stages=stage_results,
+                        )
+                        if passed:
+                            drand_artifacts[target] = artifact
                 durable_state_root = evidence_root / "durable-boundary-state"
                 durable_state_root.mkdir(mode=0o700)
 

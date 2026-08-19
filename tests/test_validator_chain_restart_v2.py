@@ -101,6 +101,14 @@ def test_validator_drand_helper_is_built_for_the_enclave_abi():
     assert "python3-3.7.16-1.amzn2.0.24" in builder
     assert "target-al2-glibc226" in script
     assert "enclave maximum is GLIBC_2.26" in script
+    internal = script.split("run_internal_no_docker() {", 1)[1].split(
+        "\n}\n\nif [ \"${1:-}\" = \"--internal-no-docker\" ]", 1
+    )[0]
+    assert "docker build" not in internal
+    assert "docker run" not in internal
+    assert "--internal-no-docker" in script
+    assert "docker build --platform linux/amd64" in script
+    assert "docker run --rm --platform linux/amd64" in script
     for symbol in ("cr_generate_commit_v2", "cr_free", "cr_free_str"):
         assert symbol in script
     subprocess.run(

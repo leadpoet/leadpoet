@@ -2478,27 +2478,22 @@ def _run_prepush_image_and_probe(
     return image_result, probe_result
 
 
-def _run_prepush_image_snapshot_and_probe(
+def _run_prepush_image_and_snapshot(
     *,
     image_action: Callable[[], Any],
     snapshot_action: Callable[[], Any],
-    probe_action: Callable[[], Any],
 ) -> tuple[Any, Any]:
-    """Build on main while one masked worker snapshots then probes source."""
-
-    def snapshot_then_probe() -> Any:
-        _run_prepush_phase(
-            phase="source-snapshot",
-            action=snapshot_action,
-        )
-        return probe_action()
+    """Build on main while one masked worker prepares the frozen source."""
 
     return _run_prepush_image_and_probe(
         image_action=lambda: _run_prepush_phase(
             phase="exact-image-build",
             action=image_action,
         ),
-        probe_action=snapshot_then_probe,
+        probe_action=lambda: _run_prepush_phase(
+            phase="source-snapshot",
+            action=snapshot_action,
+        ),
     )
 
 
@@ -2510,15 +2505,18 @@ def _run_prepush_runtime_stages(
     workflow_action: tuple[str, Callable[[], Any]],
     expected_component_stages: Sequence[str],
     stages: list[dict[str, Any]],
+    worker_prefix_action: tuple[str, Callable[[], Any]] | None = None,
+    worker_prefix_stage_index: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Schedule fixture -> validator and workflow -> gateway in two slots.
+    """Schedule probe -> fixture -> validator and workflow -> gateway.
 
     Workflow remains on the alarm-owning main thread. The sole worker prepares
-    fixtures and immediately starts the longer validator action. Gateway uses
-    the main slot when workflow settles. Ordinary failures do not suppress an
-    independent stage, and component results retain their declared order. The
-    worker's non-subprocess work is fixed-size fixture bookkeeping bracketed by
-    cancellation checks; every blocking external operation is registry-owned.
+    any independent prefix stage, fixtures, and then the longer validator
+    action. Gateway uses the main slot when workflow settles. Ordinary failures
+    do not suppress an independent stage, and component results retain their
+    declared order. The worker's non-subprocess work is fixed-size fixture
+    bookkeeping bracketed by cancellation checks; every blocking external
+    operation is registry-owned.
     """
 
     if (
@@ -2526,6 +2524,21 @@ def _run_prepush_runtime_stages(
         or len(set(expected_component_stages)) != 2
     ):
         raise ValueError("prepush scheduling requires two expected components")
+    if worker_prefix_action is None:
+        if worker_prefix_stage_index is not None:
+            raise ValueError("prefix stage index requires a prefix action")
+        preparation_stage_index = len(stages)
+    else:
+        preparation_stage_index = (
+            len(stages)
+            if worker_prefix_stage_index is None
+            else worker_prefix_stage_index
+        )
+        if (
+            type(preparation_stage_index) is not int
+            or not 0 <= preparation_stage_index <= len(stages)
+        ):
+            raise ValueError("prefix stage index is outside the stage ledger")
 
     def run_stage(
         item: tuple[str, Callable[[], Any]],
@@ -2548,6 +2561,14 @@ def _run_prepush_runtime_stages(
         started = time.monotonic()
         try:
             registry.ensure_accepting()
+            if worker_prefix_action is not None:
+                _run_independent_stage(
+                    stage=worker_prefix_action[0],
+                    action=worker_prefix_action[1],
+                    stages=preparation_results,
+                )
+                registry.ensure_accepting()
+            started = time.monotonic()
             prepared = list(preparation_action())
             registry.ensure_accepting()
             stage_names = [item[0] for item in prepared]
@@ -2630,7 +2651,7 @@ def _run_prepush_runtime_stages(
             _annotate_worker_cleanup_errors(exc, registry.cancel())
             raise
 
-    stages.extend(preparation_results)
+    stages[preparation_stage_index:preparation_stage_index] = preparation_results
     for stage in expected_component_stages:
         if stage in component_results:
             stages.extend(component_results[stage])
@@ -3188,6 +3209,9 @@ def _run_profile(
 
     with source_snapshot_context as source_root:
         stage_results: list[dict[str, Any]] = []
+        # Cold runs defer this probe behind the pre-scheduler drand preparation,
+        # but the candidate-bound inventory retains its established position.
+        python37_stage_index = len(stage_results)
         print(
             "Running validator enclave finalization proof under CPython 3.7",
             flush=True,
@@ -3201,14 +3225,13 @@ def _run_profile(
             )
 
         if overlap_source_snapshot:
-            _run_prepush_image_snapshot_and_probe(
+            _run_prepush_image_and_snapshot(
                 image_action=build_image,
                 snapshot_action=lambda: _populate_isolated_source_snapshot(
                     source=source_root,
                     harness_sha=harness_sha,
                     required_shas=(from_sha, candidate_sha),
                 ),
-                probe_action=run_python37_probe,
             )
         else:
             run_python37_probe()
@@ -3397,6 +3420,21 @@ def _run_profile(
                             f"validator-{transition}-1",
                         ),
                         stages=stage_results,
+                        worker_prefix_action=(
+                            (
+                                "python37-finalization",
+                                lambda: _run_python37_finalization_probe(
+                                    source_root
+                                ),
+                            )
+                            if overlap_source_snapshot
+                            else None
+                        ),
+                        worker_prefix_stage_index=(
+                            python37_stage_index
+                            if overlap_source_snapshot
+                            else None
+                        ),
                     )
                 else:
                     for target in fixture_targets:

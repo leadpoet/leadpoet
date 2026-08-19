@@ -403,14 +403,13 @@ def test_prepush_image_build_stays_main_thread_while_probe_overlaps() -> None:
     ) == ("image", "probe")
 
 
-def test_prepush_source_snapshot_then_probe_share_one_masked_worker(
+def test_prepush_source_snapshot_overlaps_image_on_one_masked_worker(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     controller = _load_controller()
     image_started = threading.Event()
     snapshot_started = threading.Event()
     snapshot_release = threading.Event()
-    worker_idents: list[int] = []
     order: list[str] = []
 
     def image() -> str:
@@ -426,27 +425,17 @@ def test_prepush_source_snapshot_then_probe_share_one_masked_worker(
         worker_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
         assert signal.SIGALRM in worker_mask
         assert signal.SIGINT in worker_mask
-        worker_idents.append(threading.get_ident())
         snapshot_started.set()
         assert image_started.wait(timeout=5)
         assert snapshot_release.wait(timeout=5)
         order.append("snapshot")
         return "snapshot"
 
-    def probe() -> str:
-        assert threading.current_thread() is not threading.main_thread()
-        worker_idents.append(threading.get_ident())
-        assert order[-1] == "snapshot"
-        order.append("probe")
-        return "probe"
-
-    assert controller._run_prepush_image_snapshot_and_probe(
+    assert controller._run_prepush_image_and_snapshot(
         image_action=image,
         snapshot_action=snapshot,
-        probe_action=probe,
-    ) == ("image", "probe")
-    assert order == ["image-overlapped-snapshot", "snapshot", "probe"]
-    assert len(set(worker_idents)) == 1
+    ) == ("image", "snapshot")
+    assert order == ["image-overlapped-snapshot", "snapshot"]
     captured = capsys.readouterr()
     assert captured.err == ""
     assert (
@@ -459,12 +448,11 @@ def test_prepush_source_snapshot_then_probe_share_one_masked_worker(
     )
 
 
-def test_prepush_source_snapshot_failure_is_redacted_and_skips_probe(
+def test_prepush_source_snapshot_failure_is_redacted(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     controller = _load_controller()
     snapshot_started = threading.Event()
-    probe_called = False
     private_error = "must-not-emit-private-source-path"
 
     def image() -> str:
@@ -475,18 +463,12 @@ def test_prepush_source_snapshot_failure_is_redacted_and_skips_probe(
         snapshot_started.set()
         raise RuntimeError(private_error)
 
-    def probe() -> None:
-        nonlocal probe_called
-        probe_called = True
-
     with pytest.raises(RuntimeError, match=private_error):
-        controller._run_prepush_image_snapshot_and_probe(
+        controller._run_prepush_image_and_snapshot(
             image_action=image,
             snapshot_action=snapshot,
-            probe_action=probe,
         )
 
-    assert probe_called is False
     captured = capsys.readouterr()
     assert private_error not in captured.out
     assert private_error not in captured.err
@@ -495,6 +477,44 @@ def test_prepush_source_snapshot_failure_is_redacted_and_skips_probe(
         in captured.err
     )
     assert "error_type=RuntimeError" in captured.err
+
+
+def test_cold_snapshot_completes_before_deferred_runtime_probe() -> None:
+    controller = _load_controller()
+    snapshot_started = threading.Event()
+    snapshot_complete = threading.Event()
+
+    def image() -> None:
+        assert snapshot_started.wait(timeout=5)
+
+    def snapshot() -> None:
+        snapshot_started.set()
+        snapshot_complete.set()
+
+    controller._run_prepush_image_and_snapshot(
+        image_action=image,
+        snapshot_action=snapshot,
+    )
+
+    calls: list[str] = []
+
+    def probe() -> None:
+        assert snapshot_complete.is_set()
+        calls.append("probe")
+
+    workflow_results = controller._run_prepush_runtime_stages(
+        preparation_action=lambda: (),
+        workflow_action=("workflow-prepush", lambda: calls.append("workflow")),
+        expected_component_stages=(
+            "gateway-forward-1",
+            "validator-forward-1",
+        ),
+        stages=[],
+        worker_prefix_action=("python37-finalization", probe),
+    )
+
+    assert set(calls) == {"probe", "workflow"}
+    assert workflow_results[0]["status"] == "passed"
 
 
 class _BlockedProcess:
@@ -1285,13 +1305,12 @@ def test_prepush_main_alarm_cancels_and_reaps_blocked_probe(
     assert "REHEARSAL_WORKER_CLEANUP_FAILED" in capsys.readouterr().err
 
 
-def test_prepush_main_alarm_cancels_registered_source_snapshot_before_probe(
+def test_prepush_main_alarm_cancels_registered_source_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _load_controller()
     snapshot_started = threading.Event()
     snapshot_finished = threading.Event()
-    probe_called = False
     processes, removed_containers = _install_blocked_popen(
         controller,
         monkeypatch,
@@ -1305,10 +1324,6 @@ def test_prepush_main_alarm_cancels_registered_source_snapshot_before_probe(
         finally:
             snapshot_finished.set()
 
-    def probe() -> None:
-        nonlocal probe_called
-        probe_called = True
-
     def alarm_image() -> None:
         assert snapshot_started.wait(timeout=1)
         signal.raise_signal(signal.SIGALRM)
@@ -1319,20 +1334,145 @@ def test_prepush_main_alarm_cancels_registered_source_snapshot_before_probe(
         match="600-second wall-clock budget",
     ):
         with controller._profile_time_limit(600):
-            controller._run_prepush_image_snapshot_and_probe(
+            controller._run_prepush_image_and_snapshot(
                 image_action=alarm_image,
                 snapshot_action=snapshot,
-                probe_action=probe,
             )
 
     assert controller.time.monotonic() - began < 1
     assert snapshot_finished.is_set()
-    assert probe_called is False
     assert len(processes) == 1
     assert processes[0].terminated is True
     assert processes[0].killed is True
     assert processes[0].reaped is True
     assert removed_containers == []
+
+
+def test_prepush_image_failure_reaps_snapshot_and_suppresses_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    snapshot_started = threading.Event()
+    snapshot_finished = threading.Event()
+    runtime_called = False
+    processes, removed_containers = _install_blocked_popen(
+        controller,
+        monkeypatch,
+        snapshot_started,
+        streaming=False,
+    )
+
+    def snapshot() -> None:
+        try:
+            controller._run(["git", "clone", "source", "snapshot"])
+        finally:
+            snapshot_finished.set()
+
+    def fail_image() -> None:
+        assert snapshot_started.wait(timeout=1)
+        raise RuntimeError("image build failed")
+
+    with pytest.raises(RuntimeError, match="image build failed"):
+        controller._run_prepush_image_and_snapshot(
+            image_action=fail_image,
+            snapshot_action=snapshot,
+        )
+        runtime_called = True
+
+    assert runtime_called is False
+    assert snapshot_finished.is_set()
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert processes[0].killed is True
+    assert processes[0].reaped is True
+    assert removed_containers == []
+
+
+@pytest.mark.parametrize("signum", [signal.SIGALRM, signal.SIGINT])
+def test_prepush_runtime_signal_reaps_blocked_probe_and_workflow(
+    signum: signal.Signals,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    probe_started = threading.Event()
+    probe_finished = threading.Event()
+    preparation_called = False
+    processes, removed_containers = _install_routed_blocked_popen(
+        controller,
+        monkeypatch,
+        {
+            "probe-image": probe_started,
+            "workflow-image": threading.Event(),
+        },
+    )
+    main_thread_ident = threading.get_ident()
+    original_register = controller._WorkerProcessRegistry.register
+    registration_count = 0
+    registration_lock = threading.Lock()
+
+    def register_then_signal(registry, process, container_name):
+        nonlocal registration_count
+        original_register(registry, process, container_name)
+        with registration_lock:
+            registration_count += 1
+            should_signal = registration_count == 2
+        if should_signal:
+            signal.pthread_kill(main_thread_ident, signum)
+
+    monkeypatch.setattr(
+        controller._WorkerProcessRegistry,
+        "register",
+        register_then_signal,
+    )
+
+    def probe() -> None:
+        try:
+            controller._run(["docker", "run", "probe-image", "probe"])
+        finally:
+            probe_finished.set()
+
+    def prepare():
+        nonlocal preparation_called
+        preparation_called = True
+        return ()
+
+    def workflow() -> None:
+        assert probe_started.wait(timeout=1)
+        controller._run(["docker", "run", "workflow-image", "workflow"])
+
+    began = controller.time.monotonic()
+    expected_exception = (
+        controller.RehearsalTimeBudgetExceeded
+        if signum == signal.SIGALRM
+        else KeyboardInterrupt
+    )
+    with pytest.raises(expected_exception):
+        with controller._profile_time_limit(600):
+            controller._run_prepush_runtime_stages(
+                preparation_action=prepare,
+                workflow_action=("workflow-prepush", workflow),
+                expected_component_stages=(
+                    "gateway-forward-1",
+                    "validator-forward-1",
+                ),
+                stages=[],
+                worker_prefix_action=("python37-finalization", probe),
+            )
+
+    assert controller.time.monotonic() - began < 1
+    assert probe_finished.is_set()
+    assert preparation_called is False
+    assert registration_count == 2
+    assert len(processes) == 2
+    assert all(process.terminated for process in processes)
+    assert all(process.killed for process in processes)
+    assert all(process.reaped for process in processes)
+    names = {
+        process.command[process.command.index("--name") + 1]
+        for process in processes
+    }
+    assert len(names) == 2
+    assert set(removed_containers) == names
 
 
 def test_prepush_workflow_alarm_cleans_both_named_runtime_containers(
@@ -1484,6 +1624,7 @@ def test_prepush_gateway_alarm_cleans_gateway_and_validator_without_next_stage(
 
 def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak() -> None:
     controller = _load_controller()
+    probe_started = threading.Event()
     validator_started = threading.Event()
     workflow_started = threading.Event()
     gateway_started = threading.Event()
@@ -1519,7 +1660,18 @@ def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak() -> None:
         finally:
             leave("validator")
 
+    def probe() -> None:
+        assert threading.current_thread() is not threading.main_thread()
+        enter("probe")
+        probe_started.set()
+        try:
+            assert workflow_started.wait(timeout=5)
+        finally:
+            leave("probe")
+
     def prepare():
+        assert probe_started.is_set()
+        assert "probe-end" in events
         enter("fixtures")
         try:
             assert workflow_started.wait(timeout=5)
@@ -1535,6 +1687,7 @@ def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak() -> None:
         enter("workflow")
         workflow_started.set()
         try:
+            assert probe_started.wait(timeout=5)
             assert validator_started.wait(timeout=5)
         finally:
             leave("workflow")
@@ -1550,10 +1703,13 @@ def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak() -> None:
                 "validator-forward-1",
             ),
             stages=stages,
+            worker_prefix_action=("python37-finalization", probe),
         )
     stages.extend(workflow_results)
 
     assert peak_active == 2
+    assert events.index("workflow-start") < events.index("probe-end")
+    assert events.index("probe-end") < events.index("fixtures-start")
     assert events.index("workflow-start") < events.index("fixtures-end")
     assert events.index("fixtures-end") < events.index("validator-start")
     assert events.index("validator-start") < events.index("workflow-end")
@@ -1562,12 +1718,84 @@ def test_prepush_scheduler_runs_dependency_dag_with_two_slot_peak() -> None:
     assert events.index("gateway-end") < events.index("fixture-close")
     assert events.index("validator-end") < events.index("fixture-close")
     assert [item["stage"] for item in stages] == [
+        "python37-finalization",
         "gateway-forward-1",
         "validator-forward-1",
         "fixture-cleanup",
         "workflow-prepush",
     ]
     assert all(item["status"] == "passed" for item in stages)
+
+
+def test_prepush_scheduler_continues_after_prefix_probe_failure() -> None:
+    controller = _load_controller()
+    calls: list[str] = []
+
+    def failed_probe() -> None:
+        calls.append("probe")
+        raise RuntimeError("probe failed")
+
+    stages: list[dict[str, object]] = []
+    workflow_results = controller._run_prepush_runtime_stages(
+        preparation_action=lambda: (
+            ("gateway-forward-1", lambda: calls.append("gateway")),
+            ("validator-forward-1", lambda: calls.append("validator")),
+        ),
+        workflow_action=("workflow-prepush", lambda: calls.append("workflow")),
+        expected_component_stages=(
+            "gateway-forward-1",
+            "validator-forward-1",
+        ),
+        stages=stages,
+        worker_prefix_action=("python37-finalization", failed_probe),
+    )
+    stages.extend(workflow_results)
+
+    assert set(calls) == {"probe", "gateway", "validator", "workflow"}
+    assert [item["stage"] for item in stages] == [
+        "python37-finalization",
+        "gateway-forward-1",
+        "validator-forward-1",
+        "workflow-prepush",
+    ]
+    assert [item["status"] for item in stages] == [
+        "failed",
+        "passed",
+        "passed",
+        "passed",
+    ]
+
+
+def test_prepush_scheduler_preserves_deferred_prefix_inventory_position() -> None:
+    controller = _load_controller()
+    stages: list[dict[str, object]] = [
+        {"stage": "drand-artifact-base", "status": "passed"},
+        {"stage": "drand-artifact-candidate", "status": "passed"},
+    ]
+    workflow_results = controller._run_prepush_runtime_stages(
+        preparation_action=lambda: (
+            ("gateway-forward-1", lambda: None),
+            ("validator-forward-1", lambda: None),
+        ),
+        workflow_action=("workflow-prepush", lambda: None),
+        expected_component_stages=(
+            "gateway-forward-1",
+            "validator-forward-1",
+        ),
+        stages=stages,
+        worker_prefix_action=("python37-finalization", lambda: None),
+        worker_prefix_stage_index=0,
+    )
+    stages.extend(workflow_results)
+
+    assert [item["stage"] for item in stages] == [
+        "python37-finalization",
+        "drand-artifact-base",
+        "drand-artifact-candidate",
+        "gateway-forward-1",
+        "validator-forward-1",
+        "workflow-prepush",
+    ]
 
 
 def test_prepush_scheduler_continues_after_workflow_and_validator_failures() -> None:

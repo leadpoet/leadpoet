@@ -1924,11 +1924,18 @@ def _rl_dev_lookup_existing(method, url, body, params=None):
         response,
     ):
         return None
-    if _RL_DEV_RECORD_RETRY_TRANSIENT and response.get("outcome") in (
-        _RL_DEV_URLLIB_TRANSPORT_OUTCOME,
-        _RL_DEV_HTTPX_TRANSPORT_OUTCOME,
-    ):
-        return None
+    if _RL_DEV_RECORD_RETRY_TRANSIENT:
+        if response.get("outcome") in (
+            _RL_DEV_URLLIB_TRANSPORT_OUTCOME,
+            _RL_DEV_HTTPX_TRANSPORT_OUTCOME,
+        ):
+            return None
+        try:
+            status = int(response.get("status") or 0)
+        except (TypeError, ValueError):
+            status = 0
+        if status in (408, 425, 429) or status >= 500:
+            return None
     return dict(response)
 
 

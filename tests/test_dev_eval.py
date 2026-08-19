@@ -1066,6 +1066,208 @@ print(json.dumps({"body": body, "hits": len(hits), "stored": stored}))
     }
 
 
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 503])
+def test_record_bootstrap_retry_replaces_existing_transient_http_response(
+    tmp_path,
+    status,
+):
+    snapshot_dir = tmp_path / "record_set"
+    probe = f'''
+import http.server
+import json
+import os
+import threading
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        body = b'{{"results":["recovered"]}}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/retry" % server.server_port
+assert _rl_dev_record(
+    "GET", url, None, {status}, {{"content-type": "application/json"}},
+    '{{"error":"temporary"}}', reason="temporary",
+)
+try:
+    with urllib.request.urlopen(url) as response:
+        result = {{
+            "status": response.status,
+            "body": response.read().decode("utf-8"),
+        }}
+finally:
+    server.shutdown()
+    server.server_close()
+snapshot_path = os.path.join(
+    os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"],
+    "snapshots",
+    os.listdir(os.path.join(
+        os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "snapshots"
+    ))[0],
+)
+with open(snapshot_path, "r", encoding="utf-8") as handle:
+    stored = json.load(handle)["response"]
+print(json.dumps({{"result": result, "hits": len(hits), "stored": stored}}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "result": {"status": 200, "body": '{"results":["recovered"]}'},
+        "hits": 1,
+        "stored": {
+            "body_text": '{"results":["recovered"]}',
+            "headers": {"content-type": "application/json"},
+            "status": 200,
+        },
+    }
+
+
+@pytest.mark.parametrize("status", [400, 403, 404])
+def test_record_bootstrap_retry_reuses_existing_nontransient_http_response(
+    tmp_path,
+    status,
+):
+    snapshot_dir = tmp_path / "record_set"
+    probe = f'''
+import http.server
+import json
+import threading
+import urllib.error
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/no-retry" % server.server_port
+assert _rl_dev_record(
+    "GET", url, None, {status}, {{"content-type": "application/json"}},
+    '{{"error":"terminal"}}', reason="terminal",
+)
+try:
+    urllib.request.urlopen(url)
+except urllib.error.HTTPError as exc:
+    result = {{
+        "status": exc.code,
+        "body": exc.read().decode("utf-8"),
+    }}
+else:
+    raise AssertionError("expected the recorded HTTP error")
+finally:
+    server.shutdown()
+    server.server_close()
+print(json.dumps({{"result": result, "hits": len(hits)}}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "result": {"status": status, "body": '{"error":"terminal"}'},
+        "hits": 0,
+    }
+
+
+def test_record_bootstrap_reuses_existing_transient_http_without_retry(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    probe = r'''
+import http.server
+import json
+import threading
+import urllib.error
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/no-retry" % server.server_port
+assert _rl_dev_record(
+    "GET", url, None, 503, {"content-type": "application/json"},
+    '{"error":"temporary"}', reason="temporary",
+)
+try:
+    urllib.request.urlopen(url)
+except urllib.error.HTTPError as exc:
+    result = {"status": exc.code, "body": exc.read().decode("utf-8")}
+else:
+    raise AssertionError("expected the recorded HTTP error")
+finally:
+    server.shutdown()
+    server.server_close()
+print(json.dumps({"result": result, "hits": len(hits)}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "result": {"status": 503, "body": '{"error":"temporary"}'},
+        "hits": 0,
+    }
+
+
 def test_record_bootstrap_exa_poll_records_only_terminal_response(tmp_path):
     snapshot_dir = tmp_path / "record_set"
     probe = r'''

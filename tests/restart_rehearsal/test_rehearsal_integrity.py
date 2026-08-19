@@ -4494,7 +4494,9 @@ def test_rehearsal_build_binds_the_platform_specific_base(
                 "build",
                 "--builder",
                 "default",
-                "--load",
+                "--output",
+                "type=docker,compression=zstd,compression-level=1,"
+                "force-compression=true",
                 "--progress=plain",
                 "--pull=false",
                 "--platform",
@@ -4528,13 +4530,13 @@ def test_rehearsal_candidate_identity_does_not_invalidate_stable_dependencies():
     ).read_text(encoding="utf-8")
 
     candidate_arg = dockerfile.index("ARG REHEARSAL_SCORING_LOCK_SHA256")
-    assert dockerfile.index("RUN dnf install") < candidate_arg
+    assert dockerfile.index("dnf install") < candidate_arg
     assert dockerfile.index("COPY requirements.txt") < candidate_arg
-    assert dockerfile.index("RUN python3.11 -m pip install") < candidate_arg
+    assert dockerfile.index("python3.11 -m pip install") < candidate_arg
     assert dockerfile.index("COPY scoring-locks/") < candidate_arg
     assert dockerfile.index("python3.11 -m pip download") < candidate_arg
     assert dockerfile.index(
-        "RUN python3.11 /opt/leadpoet/prepare_external_artifacts.py"
+        "python3.11 /opt/leadpoet/prepare_external_artifacts.py"
     ) < candidate_arg
     assert candidate_arg < dockerfile.index("COPY scoring-lock-aliases.json")
     assert candidate_arg < dockerfile.index("COPY harness/ /harness/")
@@ -4550,6 +4552,19 @@ def test_rehearsal_candidate_identity_does_not_invalidate_stable_dependencies():
     )
     assert 'sha256sum "${lock}"' in dockerfile
     assert dockerfile.count("\nENV ") == 1
+    for phase in (
+        "system-packages",
+        "python-dependencies",
+        "scoring-wheelhouses",
+        "external-artifacts",
+        "image-finalization",
+    ):
+        for status in ("started", "passed", "failed"):
+            assert dockerfile.count(
+                f"REHEARSAL_IMAGE_BUILD_PHASE phase={phase} status={status}"
+            ) == 1
+    assert dockerfile.count('phase_status="$?"') == 5
+    assert dockerfile.count('exit "${phase_status}"') == 5
     for name in (
         "HOME=/home/ec2-user",
         "PYTHONDONTWRITEBYTECODE=1",

@@ -202,6 +202,22 @@ SAFE_PREPUSH_PHASE_MARKER_RE = re.compile(
     r"duration_seconds=([0-9]+(?:\.[0-9]{1,3})?)$",
     re.MULTILINE,
 )
+SAFE_IMAGE_BUILD_PHASE_ORDER = (
+    "system-packages",
+    "python-dependencies",
+    "scoring-wheelhouses",
+    "external-artifacts",
+    "image-finalization",
+)
+SAFE_IMAGE_BUILD_PHASES = frozenset(SAFE_IMAGE_BUILD_PHASE_ORDER)
+SAFE_IMAGE_BUILD_PHASE_STATUSES = frozenset({"failed", "passed", "started"})
+SAFE_IMAGE_BUILD_PHASE_MARKER_MAX = len(SAFE_IMAGE_BUILD_PHASE_ORDER) * 2
+SAFE_IMAGE_BUILD_PHASE_MARKER_RE = re.compile(
+    r"^#[0-9]+ [0-9]+(?:\.[0-9]+)? "
+    r"REHEARSAL_IMAGE_BUILD_PHASE "
+    r"phase=([a-z-]+) status=([a-z]+)$",
+    re.MULTILINE,
+)
 SECRET_LIKE_DIAGNOSTIC_RE = re.compile(
     r"(?i)(?:authorization|bearer|api[_-]?key|secret|password|token|"
     r"credential|private[_ -]?key|-----begin|://[^/\s]+:[^@\s]+@)"
@@ -1359,6 +1375,74 @@ def _prepush_phase_diagnostics(*streams: str) -> list[dict[str, Any]]:
     return diagnostics
 
 
+def _image_build_failure_diagnostics(
+    stderr_text: str,
+    *,
+    exact_image_build_failed: bool,
+) -> list[dict[str, Any]]:
+    """Classify one failed cold build from its fixed BuildKit lifecycle."""
+
+    if not exact_image_build_failed:
+        return []
+    current_index = 0
+    active_phase: str | None = None
+    failed_phase: str | None = None
+    marker_count = 0
+    invalid = False
+    for match in SAFE_IMAGE_BUILD_PHASE_MARKER_RE.finditer(stderr_text):
+        marker_count += 1
+        if marker_count > SAFE_IMAGE_BUILD_PHASE_MARKER_MAX:
+            invalid = True
+            break
+        phase = match.group(1)
+        status = match.group(2)
+        if (
+            phase not in SAFE_IMAGE_BUILD_PHASES
+            or status not in SAFE_IMAGE_BUILD_PHASE_STATUSES
+            or failed_phase is not None
+            or current_index >= len(SAFE_IMAGE_BUILD_PHASE_ORDER)
+        ):
+            invalid = True
+            continue
+        expected_phase = SAFE_IMAGE_BUILD_PHASE_ORDER[current_index]
+        if active_phase is None:
+            if phase != expected_phase or status != "started":
+                invalid = True
+                continue
+            active_phase = phase
+            continue
+        if phase != active_phase or status == "started":
+            invalid = True
+            continue
+        if status == "failed":
+            failed_phase = phase
+        else:
+            current_index += 1
+        active_phase = None
+
+    if invalid or active_phase is not None:
+        phase = "unknown"
+        category = "unlocalized"
+    elif failed_phase is not None:
+        phase = failed_phase
+        category = "build_command_failed"
+    elif current_index == len(SAFE_IMAGE_BUILD_PHASE_ORDER):
+        phase = "image-export-load"
+        category = "build_export_or_load_failed"
+    else:
+        # Cached layers do not replay stdout. A partial or marker-free stream
+        # therefore cannot safely distinguish a command, fetch, or export fault.
+        phase = "unknown"
+        category = "unlocalized"
+    return [
+        {
+            "marker": "image_build_failure",
+            "phase": phase,
+            "category": category,
+        }
+    ]
+
+
 def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
     contract_kinds = {
@@ -1602,10 +1686,20 @@ def _rehearsal_failure_diagnostics(
     stdout_text = _timeout_stream_text(result.stdout)
     stderr_text = _timeout_stream_text(result.stderr)
     output_tail = "\n".join((stdout_text[-8192:], stderr_text[-8192:]))
+    phase_diagnostics = _prepush_phase_diagnostics(stderr_text)
+    exact_image_build_failed = any(
+        item.get("phase") == "exact-image-build"
+        and item.get("status") == "failed"
+        for item in phase_diagnostics
+    )
     output_diagnostics = [
         # The controller reserves stderr for its phase lifecycle. Stdout may
         # contain arbitrary action output and is never phase authority.
-        *_prepush_phase_diagnostics(stderr_text),
+        *phase_diagnostics,
+        *_image_build_failure_diagnostics(
+            stderr_text,
+            exact_image_build_failed=exact_image_build_failed,
+        ),
         *_rehearsal_output_diagnostics(output_tail),
     ]
     if output_diagnostics:

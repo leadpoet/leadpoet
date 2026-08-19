@@ -2919,6 +2919,149 @@ def test_high_volume_duplicate_phase_markers_remain_fail_closed_and_bounded():
     ]
 
 
+def test_image_build_failure_projects_only_strict_buildkit_lifecycle():
+    secret = "must-not-escape-image-build-diagnostic"
+    stderr = "\n".join(
+        (
+            "#7 [3/8] RUN echo REHEARSAL_IMAGE_BUILD_PHASE "
+            "phase=image-finalization status=failed",
+            "#7 0.001 REHEARSAL_IMAGE_BUILD_PHASE "
+            "phase=system-packages status=started",
+            "#7 12.345 REHEARSAL_IMAGE_BUILD_PHASE "
+            "phase=system-packages status=passed",
+            "#9 0.002 REHEARSAL_IMAGE_BUILD_PHASE "
+            "phase=python-dependencies status=started",
+            "#9 4.567 REHEARSAL_IMAGE_BUILD_PHASE "
+            "phase=python-dependencies status=failed",
+            f"#9 4.568 raw bearer={secret}",
+        )
+    )
+
+    diagnostics = fast_parity._image_build_failure_diagnostics(
+        stderr,
+        exact_image_build_failed=True,
+    )
+
+    assert diagnostics == [
+        {
+            "marker": "image_build_failure",
+            "phase": "python-dependencies",
+            "category": "build_command_failed",
+        }
+    ]
+    assert secret not in json.dumps(diagnostics, sort_keys=True)
+
+
+def test_image_build_failure_projects_post_phase_export_or_load_boundary():
+    markers = []
+    for index, phase in enumerate(
+        fast_parity.SAFE_IMAGE_BUILD_PHASE_ORDER,
+        start=1,
+    ):
+        markers.extend(
+            (
+                f"#{index} 0.001 REHEARSAL_IMAGE_BUILD_PHASE "
+                f"phase={phase} status=started",
+                f"#{index} 1.234 REHEARSAL_IMAGE_BUILD_PHASE "
+                f"phase={phase} status=passed",
+            )
+        )
+
+    assert fast_parity._image_build_failure_diagnostics(
+        "\n".join(markers),
+        exact_image_build_failed=True,
+    ) == [
+        {
+            "marker": "image_build_failure",
+            "phase": "image-export-load",
+            "category": "build_export_or_load_failed",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "markers",
+    (
+        (
+            ("system-packages", "started"),
+            ("system-packages", "started"),
+            ("system-packages", "failed"),
+        ),
+        (
+            ("system-packages", "started"),
+            ("system-packages", "passed"),
+            ("system-packages", "failed"),
+        ),
+        (
+            ("python-dependencies", "started"),
+            ("python-dependencies", "failed"),
+        ),
+        (("system-packages", "failed"),),
+        (("unknown-phase", "started"),),
+    ),
+)
+def test_image_build_failure_rejects_ambiguous_lifecycle(markers):
+    stderr = "\n".join(
+        f"#{index} 0.001 REHEARSAL_IMAGE_BUILD_PHASE "
+        f"phase={phase} status={status}"
+        for index, (phase, status) in enumerate(markers, start=1)
+    )
+
+    assert fast_parity._image_build_failure_diagnostics(
+        stderr,
+        exact_image_build_failed=True,
+    ) == [
+        {
+            "marker": "image_build_failure",
+            "phase": "unknown",
+            "category": "unlocalized",
+        }
+    ]
+
+
+def test_cached_image_build_failure_without_markers_remains_unlocalized():
+    candidate_sha = "b" * 40
+    stderr = "\n".join(
+        (
+            "REHEARSAL_PREPUSH_PHASE phase=exact-image-build "
+            "status=started duration_seconds=0.0",
+            "#7 CACHED",
+            "REHEARSAL_PREPUSH_PHASE phase=exact-image-build "
+            "status=failed duration_seconds=156.35",
+        )
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        subprocess.CompletedProcess(
+            ["rehearsal"],
+            1,
+            stdout="",
+            stderr=stderr,
+        ),
+        candidate_sha=candidate_sha,
+    )
+
+    assert diagnostics["output_markers"] == [
+        {
+            "marker": "prepush_phase",
+            "phase": "exact-image-build",
+            "status": "started",
+            "duration_seconds": 0.0,
+        },
+        {
+            "marker": "prepush_phase",
+            "phase": "exact-image-build",
+            "status": "failed",
+            "duration_seconds": 156.35,
+        },
+        {
+            "marker": "image_build_failure",
+            "phase": "unknown",
+            "category": "unlocalized",
+        },
+    ]
+
+
 def test_fast_rehearsal_parent_waits_for_inner_budget_failure_evidence(
     monkeypatch,
     tmp_path: Path,

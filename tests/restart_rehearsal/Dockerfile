@@ -1,7 +1,8 @@
 ARG REHEARSAL_BASE_IMAGE=public.ecr.aws/amazonlinux/amazonlinux@sha256:7dfb72e165c7b2f5fd2ee050c202160ee0cced24991f14736b831221f2004eee
 FROM ${REHEARSAL_BASE_IMAGE}
 
-RUN dnf install -y \
+RUN echo "REHEARSAL_IMAGE_BUILD_PHASE phase=system-packages status=started"; \
+    dnf install -y \
       diffutils \
       findutils \
       gawk \
@@ -25,17 +26,33 @@ RUN dnf install -y \
       tar \
       util-linux \
       which \
-    && dnf clean all
+    && dnf clean all; \
+    phase_status="$?"; \
+    if [ "${phase_status}" -eq 0 ]; then \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=system-packages status=passed"; \
+    else \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=system-packages status=failed"; \
+    fi; \
+    exit "${phase_status}"
 
 COPY requirements.txt /opt/leadpoet/requirements.txt
-RUN python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+RUN echo "REHEARSAL_IMAGE_BUILD_PHASE phase=python-dependencies status=started"; \
+    python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python3.11 -m pip install --no-cache-dir \
       --requirement /opt/leadpoet/requirements.txt \
       minio \
-      awscli
+      awscli; \
+    phase_status="$?"; \
+    if [ "${phase_status}" -eq 0 ]; then \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=python-dependencies status=passed"; \
+    else \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=python-dependencies status=failed"; \
+    fi; \
+    exit "${phase_status}"
 
 COPY scoring-locks/ /opt/leadpoet/scoring-locks/
-RUN mkdir -p /opt/leadpoet/scoring-wheelhouses \
+RUN echo "REHEARSAL_IMAGE_BUILD_PHASE phase=scoring-wheelhouses status=started"; \
+    mkdir -p /opt/leadpoet/scoring-wheelhouses \
     && for lock in /opt/leadpoet/scoring-locks/*.lock; do \
       lock_sha256="$(basename "${lock}" .lock)"; \
       test "$(sha256sum "${lock}" | cut -d' ' -f1)" = "${lock_sha256}"; \
@@ -51,20 +68,36 @@ RUN mkdir -p /opt/leadpoet/scoring-wheelhouses \
         --abi cp39 \
         --dest "${destination}" \
         --requirement "${lock}"; \
-    done
+    done; \
+    phase_status="$?"; \
+    if [ "${phase_status}" -eq 0 ]; then \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=scoring-wheelhouses status=passed"; \
+    else \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=scoring-wheelhouses status=failed"; \
+    fi; \
+    exit "${phase_status}"
 
 COPY runsc-runtime.lock.json /opt/leadpoet/runsc-runtime.lock.json
 COPY runtime-artifacts-v2.lock.json /opt/leadpoet/runtime-artifacts-v2.lock.json
 COPY harness/prepare_external_artifacts.py /opt/leadpoet/prepare_external_artifacts.py
-RUN python3.11 /opt/leadpoet/prepare_external_artifacts.py \
+RUN echo "REHEARSAL_IMAGE_BUILD_PHASE phase=external-artifacts status=started"; \
+    python3.11 /opt/leadpoet/prepare_external_artifacts.py \
       --runsc-lock /opt/leadpoet/runsc-runtime.lock.json \
       --validator-runtime-lock /opt/leadpoet/runtime-artifacts-v2.lock.json \
-      --output-root /opt/leadpoet/external-artifacts
+      --output-root /opt/leadpoet/external-artifacts; \
+    phase_status="$?"; \
+    if [ "${phase_status}" -eq 0 ]; then \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=external-artifacts status=passed"; \
+    else \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=external-artifacts status=failed"; \
+    fi; \
+    exit "${phase_status}"
 
 ARG REHEARSAL_SCORING_LOCK_SHA256
 COPY scoring-lock-aliases.json /opt/leadpoet/scoring-lock-aliases.json
 COPY harness/ /harness/
-RUN cp /harness/prepare_scoring_wheelhouse_aliases.py \
+RUN echo "REHEARSAL_IMAGE_BUILD_PHASE phase=image-finalization status=started"; \
+    cp /harness/prepare_scoring_wheelhouse_aliases.py \
       /opt/leadpoet/prepare_scoring_wheelhouse_aliases.py \
     && python3.11 /opt/leadpoet/prepare_scoring_wheelhouse_aliases.py \
       --root /opt/leadpoet/scoring-wheelhouses \
@@ -86,7 +119,14 @@ RUN cp /harness/prepare_scoring_wheelhouse_aliases.py \
       /harness/postgres_v2_contract_probe.py \
       /harness/production_workflow_runner.py \
       /harness/tls_connect_proxy_service.py \
-      /harness/validator_enclave_service.py
+      /harness/validator_enclave_service.py; \
+    phase_status="$?"; \
+    if [ "${phase_status}" -eq 0 ]; then \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=image-finalization status=passed"; \
+    else \
+      echo "REHEARSAL_IMAGE_BUILD_PHASE phase=image-finalization status=failed"; \
+    fi; \
+    exit "${phase_status}"
 
 ENV HOME=/home/ec2-user \
     PYTHONDONTWRITEBYTECODE=1 \

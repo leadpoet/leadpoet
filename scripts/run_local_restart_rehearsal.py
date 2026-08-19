@@ -1164,7 +1164,9 @@ def _build_image(
                 "build",
                 "--builder",
                 "default",
-                "--load",
+                "--output",
+                "type=docker,compression=zstd,compression-level=1,"
+                "force-compression=true",
                 "--progress=plain",
                 "--pull=false",
                 "--platform",

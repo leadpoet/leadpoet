@@ -2589,6 +2589,62 @@ def test_rehearsal_failure_diagnostics_are_bounded_and_redacted(
     assert len(encoded) < 4096
 
 
+def test_rehearsal_failure_diagnostics_retain_marker_before_long_cleanup(
+    monkeypatch,
+    tmp_path: Path,
+):
+    candidate_sha = "e" * 40
+    durable_root = tmp_path / (
+        f"leadpoet-rehearsal-failure-{candidate_sha[:12]}-full-path-cleanup"
+    )
+    durable_root.mkdir()
+    summary = {
+        "candidate_sha": candidate_sha,
+        "status": "failed",
+        "stages": [
+            {
+                "stage": "validator-forward-1",
+                "status": "failed",
+                "error_type": "CalledProcessError",
+                "returncode": 1,
+            }
+        ],
+    }
+    (durable_root / "failure-summary.json").write_text(
+        json.dumps(summary), encoding="utf-8"
+    )
+    monkeypatch.setattr(fast_parity.tempfile, "gettempdir", lambda: str(tmp_path))
+    secret = "must-not-escape-long-cleanup"
+    result = fast_parity.subprocess.CompletedProcess(
+        args=["rehearsal"],
+        returncode=1,
+        stdout="",
+        stderr=(
+            f"REHEARSAL_BATCH_FAILURE_EVIDENCE {durable_root}\n"
+            + (f"cleanup {secret}\n" * 1024)
+        ),
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result, candidate_sha=candidate_sha
+    )
+    encoded = json.dumps(diagnostics, sort_keys=True)
+    assert diagnostics["failure_summary_available"] is True
+    assert diagnostics["failed_stage_count"] == 1
+    assert diagnostics["stages"] == [
+        {
+            "stage": "validator-forward-1",
+            "status": "failed",
+            "error_type": "CalledProcessError",
+            "returncode": 1,
+        }
+    ]
+    assert secret not in encoded
+    assert "stdout" not in diagnostics
+    assert "stderr" not in diagnostics
+    assert len(encoded) < 4096
+
+
 def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
     secret = "must-not-escape-fixed-marker"
     stage_hash = "a" * 64

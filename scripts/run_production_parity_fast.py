@@ -1610,9 +1610,12 @@ def _rehearsal_failure_diagnostics(
     ]
     if output_diagnostics:
         projection["output_markers"] = output_diagnostics
+    # The rehearsal emits this fixed-format authority marker to stderr before
+    # outer cleanup. Cleanup can exceed the bounded diagnostic tail, so locate
+    # the marker in the captured stderr while keeping projected output bounded.
     matches = re.findall(
         r"(?:^|\n)REHEARSAL_BATCH_FAILURE_EVIDENCE ([^\s]+)",
-        output_tail,
+        stderr_text,
     )
     if not matches or re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
         return projection

@@ -138,6 +138,19 @@ REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
                     "sourcing-model@sha256:5539652d47471773ca94221373ce01b5e610715177155a12ae8026da48e2ae52"
                 ),
             },
+            {
+                "source_tree_hash": (
+                    "sha256:946fe12e38efa08c08631c864591bdf99c0538e6c450bdf4c33fbba3e167a969"
+                ),
+                "git_commit_sha": "ec5c0e7c7314e123c9fdafff63d2b809cb254cfd",
+                "manifest_hash": (
+                    "sha256:ee0a1ad40a12d33dabd4d7fb68d4b9507cbfcbf2fe276a69e4a05cb82dc93f52"
+                ),
+                "image_digest": (
+                    "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+                    "sourcing-model@sha256:164cdf6b5c8c37af61d61c2d4b5c0a22fc248014be8289c0db2f242602459607"
+                ),
+            },
         ),
         "positional_exact_signatures": True,
         "variadic_parameters": {

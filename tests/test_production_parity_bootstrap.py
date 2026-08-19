@@ -2249,9 +2249,13 @@ def test_full_workflow_derives_temp_before_use_and_cleans_safe_exact_path():
     absent = 'test ! -e "$expected"'
     create = 'mkdir -m 700 "$expected"'
     marker = 'printf \'%s\\n\' "$owner_token" > "$owner_marker"'
+    mask = 'printf \'::add-mask::%s\\n\' "$owner_token"'
+    owner_export = (
+        'printf \'PARITY_OWNER_TOKEN=%s\\n\' "$owner_token" >> "$GITHUB_ENV"'
+    )
     assert prepare.index(absent) < prepare.index(create)
     assert prepare.index(create) < prepare.index(marker) < prepare.index(export)
-    assert "PARITY_OWNER_TOKEN=%s" in prepare
+    assert prepare.index(mask) < prepare.index(owner_export) < prepare.index(create)
     assert ".leadpoet-production-parity-owner" in prepare
 
     for name in (

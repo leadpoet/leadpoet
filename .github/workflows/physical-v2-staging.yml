@@ -61,6 +61,7 @@ jobs:
           )"
           test "${#owner_token}" -eq 64
           printf '%s' "$owner_token" | grep -Eq '^[0-9a-f]{64}$'
+          printf '::add-mask::%s\n' "$owner_token"
           printf 'PARITY_OWNER_TOKEN=%s\n' "$owner_token" >> "$GITHUB_ENV"
           test ! -e "$expected"
           created=false

@@ -22,7 +22,9 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -367,6 +369,7 @@ def _run_workflow_stage(
     stage: str,
     action: Callable[[], Any],
     stages: list[dict[str, Any]],
+    duration_seconds: float | None = None,
 ) -> tuple[bool, Any]:
     """Fail one stage while allowing independent downstream probes to run."""
 
@@ -382,6 +385,8 @@ def _run_workflow_stage(
             "status": "failed",
             "traceback": traceback.format_exc(limit=20)[-12000:],
         }
+        if duration_seconds is not None:
+            result["duration_seconds"] = duration_seconds
         stages.append(result)
         print(
             "PRODUCTION_WORKFLOW_STAGE_FAILED_CONTINUING "
@@ -391,9 +396,568 @@ def _run_workflow_stage(
             flush=True,
         )
         return False, None
-    stages.append({"stage": stage, "status": "passed"})
+    result = {"stage": stage, "status": "passed"}
+    if duration_seconds is not None:
+        result["duration_seconds"] = duration_seconds
+    stages.append(result)
     print(f"PRODUCTION_WORKFLOW_STAGE_PASSED stage={stage}", flush=True)
     return True, value
+
+
+_BEHAVIOR_WORKER_SCHEMA = "leadpoet.workflow_behavior_worker.v1"
+_BEHAVIOR_WORKER_LIMIT = 2
+_BEHAVIOR_WORKER_POLL_SECONDS = 0.005
+_BEHAVIOR_WORKER_TERMINATE_GRACE_SECONDS = 2.0
+_BEHAVIOR_WORKER_RESULT_MAX_BYTES = 16 * 1024 * 1024
+_BEHAVIOR_WORKER_DURATION_MAX_SECONDS = 600.0
+_BEHAVIOR_WORKER_ERROR_MAX_CHARS = 2000
+_BEHAVIOR_WORKER_ERROR_TYPE_MAX_CHARS = 200
+_BEHAVIOR_WORKER_TRACEBACK_MAX_CHARS = 12000
+
+
+class _BehaviorWorkerSignal(SystemExit):
+    """Preserve the invoking signal exit status after child cleanup."""
+
+    def __init__(self, signum: int) -> None:
+        self.signum = int(signum)
+        super().__init__(128 + self.signum)
+
+
+class _BehaviorWorkerProtocolError(RuntimeError):
+    """A behavior subprocess did not return one exact bound result."""
+
+
+def _behavior_worker_command(
+    *,
+    scenario: str,
+    result_path: Path,
+    token: str,
+    ordinal: int,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--behavior-worker",
+        "--scenario",
+        scenario,
+        "--result",
+        str(result_path),
+        "--token",
+        token,
+        "--ordinal",
+        str(ordinal),
+    ]
+
+
+def _write_behavior_worker_result(path: Path, payload: Mapping[str, Any]) -> None:
+    encoded = _canonical(dict(payload)) + b"\n"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(encoded)
+            handle.flush()
+    finally:
+        os.close(descriptor)
+
+
+def _behavior_worker_main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--scenario", required=True)
+    parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument("--token", required=True)
+    parser.add_argument("--ordinal", type=int, required=True)
+    args = parser.parse_args(list(argv))
+    state_root = os.environ.get("REHEARSAL_STATE_ROOT")
+    source_root = os.environ.get("REHEARSAL_SOURCE_ROOT")
+    common = {
+        "ordinal": args.ordinal,
+        "scenario": args.scenario,
+        "schema_version": _BEHAVIOR_WORKER_SCHEMA,
+        "source_root": source_root,
+        "state_root": state_root,
+        "token": args.token,
+    }
+    action_started_at = time.monotonic()
+    try:
+        if not state_root:
+            raise RuntimeError("behavior worker state root is unavailable")
+        if not source_root:
+            raise RuntimeError("behavior worker source root is unavailable")
+        action = BEHAVIOR_ACTIONS.get(args.scenario)
+        if action is None:
+            raise RuntimeError(
+                f"candidate behavior scenario has no runner: {args.scenario}"
+            )
+        value = action()
+        duration_seconds = time.monotonic() - action_started_at
+        _write_behavior_worker_result(
+            args.result,
+            {
+                **common,
+                "duration_seconds": duration_seconds,
+                "status": "passed",
+                "value": value,
+            },
+        )
+    except Exception as exc:
+        duration_seconds = time.monotonic() - action_started_at
+        _write_behavior_worker_result(
+            args.result,
+            {
+                **common,
+                "duration_seconds": duration_seconds,
+                "error": str(exc)[:_BEHAVIOR_WORKER_ERROR_MAX_CHARS],
+                "error_type": type(exc).__name__[
+                    :_BEHAVIOR_WORKER_ERROR_TYPE_MAX_CHARS
+                ],
+                "status": "failed",
+                "traceback": traceback.format_exc(limit=20)[
+                    -_BEHAVIOR_WORKER_TRACEBACK_MAX_CHARS:
+                ],
+            },
+        )
+    return 0
+
+
+def _terminate_behavior_worker(process: subprocess.Popen[Any]) -> None:
+    """TERM, bounded KILL, and reap one action-owned process group."""
+
+    if process.poll() is not None:
+        process.wait(timeout=0)
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=_BEHAVIOR_WORKER_TERMINATE_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=_BEHAVIOR_WORKER_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"behavior worker pid={process.pid} could not be reaped"
+        ) from exc
+
+
+@contextmanager
+def _behavior_worker_signal_handlers():
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("behavior worker scheduler requires the main thread")
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def interrupt(signum: int, _frame: Any) -> None:
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise _BehaviorWorkerSignal(signum)
+
+    for signum in previous:
+        signal.signal(signum, interrupt)
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+@contextmanager
+def _defer_behavior_worker_signals():
+    previous = signal.pthread_sigmask(
+        signal.SIG_BLOCK,
+        {signal.SIGINT, signal.SIGTERM},
+    )
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def _read_behavior_worker_result(
+    *,
+    result_path: Path,
+    scenario: str,
+    token: str,
+    ordinal: int,
+    state_root: Path,
+    source_root: str,
+) -> dict[str, Any]:
+    try:
+        size = result_path.stat().st_size
+    except FileNotFoundError as exc:
+        raise _BehaviorWorkerProtocolError(
+            "behavior worker result is missing"
+        ) from exc
+    if size <= 0 or size > _BEHAVIOR_WORKER_RESULT_MAX_BYTES:
+        raise _BehaviorWorkerProtocolError(
+            f"behavior worker result size is invalid: {size}"
+        )
+    lines = result_path.read_text(encoding="utf-8").splitlines()
+    if len(lines) != 1:
+        raise _BehaviorWorkerProtocolError(
+            f"behavior worker emitted {len(lines)} results instead of one"
+        )
+    try:
+        payload = json.loads(lines[0])
+    except json.JSONDecodeError as exc:
+        raise _BehaviorWorkerProtocolError(
+            "behavior worker result is malformed"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise _BehaviorWorkerProtocolError(
+            "behavior worker result must be an object"
+        )
+    common = {
+        "ordinal": ordinal,
+        "scenario": scenario,
+        "schema_version": _BEHAVIOR_WORKER_SCHEMA,
+        "source_root": source_root,
+        "state_root": str(state_root),
+        "token": token,
+    }
+    for field, expected in common.items():
+        if payload.get(field) != expected:
+            raise _BehaviorWorkerProtocolError(
+                f"behavior worker result has wrong {field}"
+            )
+    duration_seconds = payload.get("duration_seconds")
+    if (
+        isinstance(duration_seconds, bool)
+        or not isinstance(duration_seconds, (int, float))
+        or not math.isfinite(float(duration_seconds))
+        or not 0.0 < float(duration_seconds) <= _BEHAVIOR_WORKER_DURATION_MAX_SECONDS
+    ):
+        raise _BehaviorWorkerProtocolError(
+            "behavior worker result has invalid duration_seconds"
+        )
+    status = payload.get("status")
+    if status == "passed":
+        expected_fields = {*common, "duration_seconds", "status", "value"}
+    elif status == "failed":
+        expected_fields = {
+            *common,
+            "duration_seconds",
+            "error",
+            "error_type",
+            "status",
+            "traceback",
+        }
+        if not all(
+            isinstance(payload.get(field), str)
+            for field in ("error", "error_type", "traceback")
+        ):
+            raise _BehaviorWorkerProtocolError(
+                "behavior worker failure result is malformed"
+            )
+        if (
+            len(payload["error"]) > _BEHAVIOR_WORKER_ERROR_MAX_CHARS
+            or not re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_.]*",
+                payload["error_type"],
+            )
+            or len(payload["error_type"])
+            > _BEHAVIOR_WORKER_ERROR_TYPE_MAX_CHARS
+            or len(payload["traceback"])
+            > _BEHAVIOR_WORKER_TRACEBACK_MAX_CHARS
+        ):
+            raise _BehaviorWorkerProtocolError(
+                "behavior worker failure result exceeds its bounds"
+            )
+    else:
+        raise _BehaviorWorkerProtocolError(
+            "behavior worker result has invalid status"
+        )
+    if set(payload) != expected_fields:
+        raise _BehaviorWorkerProtocolError(
+            "behavior worker result has an unexpected field inventory"
+        )
+    return payload
+
+
+def _observed_behavior_duration(started_at: float) -> float:
+    return min(
+        _BEHAVIOR_WORKER_DURATION_MAX_SECONDS,
+        max(sys.float_info.epsilon, time.monotonic() - started_at),
+    )
+
+
+def _replay_behavior_worker_payload(
+    *,
+    stage: str,
+    payload: Mapping[str, Any],
+    stages: list[dict[str, Any]],
+) -> tuple[bool, Any]:
+    duration_seconds = float(payload["duration_seconds"])
+    if payload["status"] == "passed":
+        stages.append(
+            {
+                "duration_seconds": duration_seconds,
+                "stage": stage,
+                "status": "passed",
+            }
+        )
+        print(f"PRODUCTION_WORKFLOW_STAGE_PASSED stage={stage}", flush=True)
+        return True, payload["value"]
+    result = {
+        "duration_seconds": duration_seconds,
+        "error": payload["error"],
+        "error_type": payload["error_type"],
+        "stage": stage,
+        "status": "failed",
+        "traceback": payload["traceback"],
+    }
+    stages.append(result)
+    print(
+        "PRODUCTION_WORKFLOW_STAGE_FAILED_CONTINUING "
+        f"stage={stage} error_type={result['error_type']} "
+        f"error={result['error']!r}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return False, None
+
+
+def _cleanup_behavior_workers(
+    active: Mapping[int, Mapping[str, Any]],
+    original: BaseException,
+) -> None:
+    errors = []
+    with _defer_behavior_worker_signals():
+        for ordinal in sorted(active):
+            process = active[ordinal]["process"]
+            try:
+                _terminate_behavior_worker(process)
+            except BaseException as exc:
+                errors.append(
+                    f"pid={process.pid} error_type={type(exc).__name__} "
+                    f"error={exc!s}"
+                )
+    if not errors:
+        return
+    message = "behavior worker cleanup failed: " + "; ".join(errors)
+    print(message, file=sys.stderr, flush=True)
+    add_note = getattr(original, "add_note", None)
+    if callable(add_note):
+        add_note(message)
+
+
+def _run_behavior_actions(
+    *,
+    scenarios: Sequence[str],
+    stages: list[dict[str, Any]],
+    deadline_monotonic: float | None = None,
+    worker_timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Run independent behavior probes in isolated execs and merge canonically."""
+
+    if worker_timeout_seconds is not None and worker_timeout_seconds <= 0:
+        raise ValueError("behavior worker timeout must be positive")
+    source_root = os.environ.get("REHEARSAL_SOURCE_ROOT") or str(SOURCE_ROOT)
+    pending = list(enumerate(str(item) for item in scenarios))
+    active: dict[int, dict[str, Any]] = {}
+    completed: dict[int, dict[str, Any]] = {}
+
+    with tempfile.TemporaryDirectory(prefix="leadpoet-workflow-behavior-") as raw:
+        worker_root = Path(raw)
+        with _behavior_worker_signal_handlers():
+            try:
+                while pending or active:
+                    if (
+                        deadline_monotonic is not None
+                        and time.monotonic() >= deadline_monotonic
+                    ):
+                        raise TimeoutError(
+                            "behavior worker scheduler deadline exceeded"
+                        )
+                    while pending and len(active) < _BEHAVIOR_WORKER_LIMIT:
+                        ordinal, scenario = pending.pop(0)
+                        token = hashlib.sha256(
+                            f"{os.getpid()}:{time.monotonic_ns()}:{ordinal}:"
+                            f"{scenario}".encode("utf-8")
+                        ).hexdigest()
+                        state_root = worker_root / f"state-{ordinal:02d}-{token[:12]}"
+                        result_path = worker_root / f"result-{ordinal:02d}.jsonl"
+                        stdout_path = worker_root / f"stdout-{ordinal:02d}.log"
+                        stderr_path = worker_root / f"stderr-{ordinal:02d}.log"
+                        env = os.environ.copy()
+                        env["REHEARSAL_SOURCE_ROOT"] = source_root
+                        env["REHEARSAL_STATE_ROOT"] = str(state_root)
+                        entry = {
+                            "ordinal": ordinal,
+                            "result_path": result_path,
+                            "scenario": scenario,
+                            "source_root": source_root,
+                            "state_root": state_root,
+                            "stderr_path": stderr_path,
+                            "stdout_path": stdout_path,
+                            "token": token,
+                        }
+                        entry["started_at"] = time.monotonic()
+                        if scenario not in BEHAVIOR_ACTIONS:
+                            completed[ordinal] = {
+                                **entry,
+                                "observed_duration_seconds": (
+                                    _observed_behavior_duration(
+                                        entry["started_at"]
+                                    )
+                                ),
+                                "error": (
+                                    "candidate behavior scenario has no runner: "
+                                    f"{scenario}"
+                                ),
+                            }
+                            continue
+                        with (
+                            stdout_path.open("xb") as stdout_handle,
+                            stderr_path.open("xb") as stderr_handle,
+                        ):
+                            with _defer_behavior_worker_signals():
+                                process = subprocess.Popen(
+                                    _behavior_worker_command(
+                                        scenario=scenario,
+                                        result_path=result_path,
+                                        token=token,
+                                        ordinal=ordinal,
+                                    ),
+                                    env=env,
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=stdout_handle,
+                                    stderr=stderr_handle,
+                                    start_new_session=True,
+                                )
+                                entry["process"] = process
+                                active[ordinal] = entry
+
+                    now = time.monotonic()
+                    if (
+                        deadline_monotonic is not None
+                        and now >= deadline_monotonic
+                    ):
+                        raise TimeoutError(
+                            "behavior worker scheduler deadline exceeded"
+                        )
+                    ready = [
+                        ordinal
+                        for ordinal, entry in active.items()
+                        if entry["process"].poll() is not None
+                    ]
+                    if worker_timeout_seconds is not None:
+                        timed_out = [
+                            ordinal
+                            for ordinal, entry in active.items()
+                            if ordinal not in ready
+                            and now - entry["started_at"]
+                            >= worker_timeout_seconds
+                        ]
+                    else:
+                        timed_out = []
+                    for ordinal in timed_out:
+                        entry = active[ordinal]
+                        _terminate_behavior_worker(entry["process"])
+                        active.pop(ordinal)
+                        entry["observed_duration_seconds"] = (
+                            _observed_behavior_duration(entry["started_at"])
+                        )
+                        entry["error"] = "behavior worker timed out"
+                        completed[ordinal] = entry
+                    for ordinal in ready:
+                        if ordinal not in active:
+                            continue
+                        entry = active.pop(ordinal)
+                        process = entry["process"]
+                        process.wait(timeout=0)
+                        if process.returncode != 0:
+                            entry["error"] = (
+                                "behavior worker crashed "
+                                f"returncode={process.returncode}"
+                            )
+                        else:
+                            try:
+                                entry["payload"] = _read_behavior_worker_result(
+                                    result_path=entry["result_path"],
+                                    scenario=entry["scenario"],
+                                    token=entry["token"],
+                                    ordinal=entry["ordinal"],
+                                    state_root=entry["state_root"],
+                                    source_root=entry["source_root"],
+                                )
+                            except Exception as exc:
+                                entry["error"] = (
+                                    f"{type(exc).__name__}: {exc!s}"
+                                )
+                        entry["observed_duration_seconds"] = (
+                            _observed_behavior_duration(entry["started_at"])
+                        )
+                        completed[ordinal] = entry
+                    if not ready and not timed_out and active:
+                        sleep_seconds = _BEHAVIOR_WORKER_POLL_SECONDS
+                        if deadline_monotonic is not None:
+                            sleep_seconds = min(
+                                sleep_seconds,
+                                max(0.0, deadline_monotonic - time.monotonic()),
+                            )
+                        if worker_timeout_seconds is not None:
+                            sleep_seconds = min(
+                                sleep_seconds,
+                                max(
+                                    0.0,
+                                    min(
+                                        entry["started_at"]
+                                        + worker_timeout_seconds
+                                        - time.monotonic()
+                                        for entry in active.values()
+                                    ),
+                                ),
+                            )
+                        if sleep_seconds > 0:
+                            time.sleep(sleep_seconds)
+            except BaseException as original:
+                _cleanup_behavior_workers(active, original)
+                raise
+
+        evidence: dict[str, Any] = {}
+        for ordinal, scenario in enumerate(scenarios):
+            entry = completed[ordinal]
+            stdout = entry["stdout_path"].read_text(
+                encoding="utf-8", errors="replace"
+            ) if entry["stdout_path"].exists() else ""
+            stderr = entry["stderr_path"].read_text(
+                encoding="utf-8", errors="replace"
+            ) if entry["stderr_path"].exists() else ""
+            if stdout:
+                sys.stdout.write(stdout)
+                sys.stdout.flush()
+            if stderr:
+                sys.stderr.write(stderr)
+                sys.stderr.flush()
+            if "error" in entry:
+                action = lambda entry=entry: (_ for _ in ()).throw(
+                    _BehaviorWorkerProtocolError(str(entry["error"]))
+                )
+                duration_seconds = entry["observed_duration_seconds"]
+                passed, value = _run_workflow_stage(
+                    stage=f"behavior:{scenario}",
+                    action=action,
+                    stages=stages,
+                    duration_seconds=duration_seconds,
+                )
+            else:
+                passed, value = _replay_behavior_worker_payload(
+                    stage=f"behavior:{scenario}",
+                    payload=entry["payload"],
+                    stages=stages,
+                )
+            if passed:
+                evidence[str(scenario)] = value
+        return evidence
 
 
 def _mark_workflow_stage_unexercised(
@@ -14577,7 +15141,10 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
 }
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv[:1] == ["--behavior-worker"]:
+        return _behavior_worker_main(raw_argv[1:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=("prepush", "release"), required=True)
     parser.add_argument("--candidate-sha", required=True)
@@ -14586,7 +15153,7 @@ def main() -> int:
     parser.add_argument("--boundary-contract", type=Path, required=True)
     parser.add_argument("--production-allocation", type=Path)
     parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(raw_argv)
     if len(args.candidate_sha) != 40 or any(
         value not in "0123456789abcdef" for value in args.candidate_sha
     ):
@@ -14676,32 +15243,15 @@ def main() -> int:
         if passed:
             identities.append(identity)
 
-    behavior_evidence: dict[str, Any] = {}
     behavior_scenarios = (
         list(behavior_contract["behavior_scenarios"])
         if behavior_contract is not None
         else []
     )
-    for scenario in behavior_scenarios:
-        action = BEHAVIOR_ACTIONS.get(scenario)
-        if action is None:
-            _run_workflow_stage(
-                stage=f"behavior:{scenario}",
-                action=lambda scenario=scenario: (_ for _ in ()).throw(
-                    RuntimeError(
-                        f"candidate behavior scenario has no runner: {scenario}"
-                    )
-                ),
-                stages=stages,
-            )
-            continue
-        passed, result = _run_workflow_stage(
-            stage=f"behavior:{scenario}",
-            action=action,
-            stages=stages,
-        )
-        if passed:
-            behavior_evidence[scenario] = result
+    behavior_evidence = _run_behavior_actions(
+        scenarios=behavior_scenarios,
+        stages=stages,
+    )
 
     _run_independent_epoch_diagnostics(
         candidate_sha=args.candidate_sha,

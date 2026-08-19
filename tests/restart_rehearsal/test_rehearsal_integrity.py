@@ -7393,22 +7393,32 @@ def test_rehearsal_preserves_exact_failure_evidence(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    durable = rehearsal._preserve_failure_evidence(
+    stages = [
+        {
+            "command": ["docker", "run", "candidate"],
+            "stage": "validator-forward-1",
+            "status": "failed",
+        }
+    ]
+    durable = rehearsal._preserve_batched_failure_evidence(
         evidence_root=evidence,
         candidate_sha=COMMIT,
-        stage="validator-forward-1",
-        command=["docker", "run", "candidate"],
+        stages=stages,
     )
 
     assert (
         durable / "evidence" / "validator-main.log"
     ).read_text(encoding="utf-8").startswith("coordinator failed")
     assert json.loads(
-        (durable / "failure.json").read_text(encoding="utf-8")
+        (durable / "failure-summary.json").read_text(encoding="utf-8")
     ) == {
         "candidate_sha": COMMIT,
-        "command": ["docker", "run", "candidate"],
-        "stage": "validator-forward-1",
+        "failure_count": 1,
+        "failures": stages,
+        "stage_count": 1,
+        "stages": stages,
+        "status": "failed",
+        "unexercised_count": 0,
     }
 
 

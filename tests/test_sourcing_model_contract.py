@@ -24,6 +24,7 @@ from research_lab.sourcing_model_contract_check import (
     CONTRACT_V46_PATH,
     CONTRACT_V47_PATH,
     CONTRACT_V52_PATH,
+    CONTRACT_V55_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
     PARITY_FIXTURE_V11_PATH,
@@ -33,6 +34,7 @@ from research_lab.sourcing_model_contract_check import (
     PARITY_FIXTURE_V46_PATH,
     PARITY_FIXTURE_V47_PATH,
     PARITY_FIXTURE_V52_PATH,
+    PARITY_FIXTURE_V55_PATH,
     PARITY_FIXTURE_V7_PATH,
     _resolve_reviewed_consumer_contract_pair,
     load_wrapper_contract,
@@ -455,6 +457,7 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
         "leadpoet-sourcing-wrapper-contract-v46",
         "leadpoet-sourcing-wrapper-contract-v47",
         "leadpoet-sourcing-wrapper-contract-v52",
+        "leadpoet-sourcing-wrapper-contract-v55",
     }
 
 
@@ -681,6 +684,48 @@ def test_exact_v52_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
 
     parity_path.write_text("{}\n", encoding="utf-8")
     assert _resolve_reviewed_consumer_contract_pair(tmp_path) is None
+
+
+def test_exact_v55_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
+    contract = json.loads(CONTRACT_V55_PATH.read_text(encoding="utf-8"))
+    contract_path = tmp_path / contract["canonical_path"]
+    parity_path = tmp_path / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V55_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V55_PATH.read_bytes())
+
+    resolved = _resolve_reviewed_consumer_contract_pair(tmp_path)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v55"
+    )
+    assert resolved["contract_sha256"] == (
+        "sha256:02fcbcd84b2c887d0f6ba1515fba280267fc5d2571876f990acc865f4a038d2a"
+    )
+    assert resolved["parity_sha256"] == (
+        "sha256:fe0e1faff8e45b432459dda2d5f5bf131aef2b5f60935d48395a814c7ed59573"
+    )
+    assert resolved["required_source_constants"] == {
+        "sourcing_model/runtime_capabilities.py": {
+            "CAPABILITY_CONTRACT_VERSION": "sourcing-model-runtime-capabilities:v3"
+        }
+    }
+    assert resolved["release_identities"] == (
+        {
+            "source_tree_hash": (
+                "sha256:a34a9158480dff89a53a7a5a3df27325239b7b64f476cb6f48c593520eca3858"
+            ),
+            "git_commit_sha": "0be5905ee24a4d8bb3ec6f316af3e8891f763919",
+            "manifest_hash": (
+                "sha256:2f4876077475c7c33135ec9b727e010d7e7845e3591d9edc9101e045dcaa8c01"
+            ),
+            "image_digest": (
+                "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+                "sourcing-model@sha256:ed7c03e744ba9bccd13e7608a6eabf7bcdd828dabaf02e09efd2774d7187d6a5"
+            ),
+        },
+    )
 
 
 def test_exact_v12_contact_contract_and_parity_pair_is_reviewed(

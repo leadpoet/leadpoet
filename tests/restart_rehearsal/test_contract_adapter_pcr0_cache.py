@@ -14,6 +14,7 @@ from tests.restart_rehearsal.artifact_identity import (
     normalized_image_id,
     pcr0,
 )
+from validator_tee.enclave.runtime_v2 import compute_app_manifest_hash
 from validator_tee.host.docker_image_normalizer_v2 import normalize_saved_image
 
 
@@ -363,6 +364,63 @@ def test_redundant_normalized_tag_tolerates_transient_checkout(
             str(tmp_path / "restored-head.eif"),
         ]
     ) == 0
+
+
+def test_candidate_validator_app_restores_measured_copy_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = "a" * 40
+    state_root = tmp_path / "state"
+    validator_app = state_root / "validator-app"
+    package = validator_app / "validator_tee" / "enclave"
+    package.mkdir(parents=True)
+    (package / "runtime_v2.py").write_text("VALUE = 1\n", encoding="utf-8")
+    for path in validator_app.rglob("*"):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    expected = compute_app_manifest_hash(validator_app)
+
+    # Evidence ownership handoff deliberately grants write access. The exact
+    # Nitro boundary must restore the production Docker-context modes before
+    # the enclave computes its signed application manifest.
+    for path in validator_app.rglob("*"):
+        path.chmod(0o777 if path.is_dir() else 0o666)
+
+    adapter = _load_adapter(
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        build_root=tmp_path / "build",
+        candidate=candidate,
+    )
+    runtime_app = tmp_path / "runtime-app"
+    monkeypatch.setattr(
+        adapter,
+        "Path",
+        lambda value: runtime_app if value == "/app" else Path(value),
+    )
+    handle, state = adapter._locked_state()
+    state["images"]["validator-tee-enclave:latest"] = {
+        "commit": candidate,
+        "id": normalized_image_id(candidate, VALIDATOR_ROLE),
+        "role": VALIDATOR_ROLE,
+    }
+    adapter._save_state(handle, state)
+    eif_path = tmp_path / "validator.eif"
+
+    assert adapter.command_nitro(
+        [
+            "build-enclave",
+            "--docker-uri",
+            "validator-tee-enclave:latest",
+            "--output-file",
+            str(eif_path),
+        ]
+    ) == 0
+    assert compute_app_manifest_hash(runtime_app) == expected
+    assert all(
+        (path.stat().st_mode & 0o777) == (0o755 if path.is_dir() else 0o644)
+        for path in runtime_app.rglob("*")
+    )
 
 
 def test_pcr0_cache_adapter_rejects_near_miss_builds_and_provenance(

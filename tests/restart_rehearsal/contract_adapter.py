@@ -1748,6 +1748,8 @@ def command_nitro(argv: list[str]) -> int:
                 runtime_app = Path("/app")
                 shutil.rmtree(runtime_app, ignore_errors=True)
                 shutil.copytree(validator_app, runtime_app)
+                for path in runtime_app.rglob("*"):
+                    path.chmod(0o755 if path.is_dir() else 0o644)
             destination.write_bytes(
                 eif_bytes(str(record["commit"]), str(record["role"]))
             )

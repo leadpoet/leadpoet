@@ -19,7 +19,9 @@ from typing import Any, Mapping, Sequence
 
 from research_lab.canonical import sha256_json
 from research_lab.routing_experiments import (
+    ProviderOutcome,
     ProviderReceipt,
+    ReceiptExecutionMode,
     RoutingDecisionReceiptV2,
     RoutingExperimentError,
     RoutingExperimentV2Evaluation,
@@ -41,6 +43,8 @@ _LAB_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MODEL_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_REF_RE = re.compile(r"^[A-Za-z0-9_.:@/-]{1,300}$")
 _CANDIDATE_TOOL_RE = re.compile(r"^candidate\.[A-Za-z0-9_.:-]{1,160}$")
+_DECISION_RECEIPT_RE = re.compile(r"^routing_decision:[0-9a-f]{16}$")
+_PROVIDER_RECEIPT_RE = re.compile(r"^provider_receipt:[0-9a-f]{16}$")
 _DISPOSITIONS = frozenset({"succeeded", "missed", "failed", "deferred", "skipped"})
 
 
@@ -201,6 +205,14 @@ class CandidateWaterfallReceipt:
             _safe_ref(getattr(self, field_name), field_name)
         if not _CANDIDATE_TOOL_RE.fullmatch(str(self.tool_id or "")):
             raise RoutingExperimentError("candidate_tool_id_must_use_candidate_namespace")
+        if not _DECISION_RECEIPT_RE.fullmatch(self.decision_receipt_id):
+            raise RoutingExperimentError("candidate_decision_receipt_id_is_invalid")
+        if not _PROVIDER_RECEIPT_RE.fullmatch(self.provider_receipt_ref):
+            raise RoutingExperimentError("candidate_provider_receipt_ref_is_invalid")
+        if self.execution_mode not in {item.value for item in ReceiptExecutionMode}:
+            raise RoutingExperimentError("candidate_execution_mode_is_invalid")
+        if self.provider_outcome not in {item.value for item in ProviderOutcome}:
+            raise RoutingExperimentError("candidate_provider_outcome_is_invalid")
         for field_name in (
             "experiment_hash",
             "artifact_key",
@@ -439,8 +451,35 @@ class CandidateWaterfallMetric:
             _nonnegative_int(getattr(self, field_name), field_name)
         if self.target_verified_qualified_count < 1:
             raise RoutingExperimentError("candidate_metric_target_must_be_positive")
+        if self.unit_count < 1:
+            raise RoutingExperimentError("candidate_metric_unit_count_must_be_positive")
+        if self.split not in {"calibration", "holdout"}:
+            raise RoutingExperimentError("candidate_metric_split_is_invalid")
         if self.fulfilled_unit_count > self.unit_count:
             raise RoutingExperimentError("candidate_metric_fulfilled_units_exceed_units")
+        if not (
+            self.raw_count
+            >= self.normalized_count
+            >= self.unique_count
+            >= self.verified_qualified_count
+            >= self.published_count
+        ):
+            raise RoutingExperimentError(
+                "candidate_metric_counts_must_decrease_from_raw_to_published"
+            )
+        if self.failed_attempt_count + self.missed_attempt_count > self.waterfall_attempt_count:
+            raise RoutingExperimentError(
+                "candidate_metric_failed_and_missed_attempts_exceed_attempts"
+            )
+        for field_name, refs in (
+            ("waterfall_receipt_refs", self.waterfall_receipt_refs),
+            ("provider_receipt_refs", self.provider_receipt_refs),
+            ("decision_receipt_refs", self.decision_receipt_refs),
+        ):
+            if not isinstance(refs, tuple) or len(set(refs)) != len(refs):
+                raise RoutingExperimentError(f"candidate_metric_{field_name}_is_invalid")
+            for value in refs:
+                _safe_ref(value, f"metric_{field_name}")
         for field_name in (
             "fulfillment_rate",
             "verification_rate",
@@ -506,7 +545,8 @@ def evaluate_candidate_waterfall_metrics(
 
     if not isinstance(evaluation, RoutingExperimentV2Evaluation):
         raise RoutingExperimentError("candidate_metrics_require_routing_experiment_v2_evaluation")
-    _candidate_variant(spec, spec.baseline_variant_id)
+    for variant in spec.variants:
+        _candidate_variant(spec, variant.variant_id)
     if (
         evaluation.experiment_id != spec.experiment_id
         or evaluation.experiment_hash != spec.experiment_hash()

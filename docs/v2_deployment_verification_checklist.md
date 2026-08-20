@@ -5,11 +5,16 @@ attestation, PCR0, or V2 trust-boundary changes.
 
 ## Default Gate
 
-The normal pre-push gate is intentionally bounded to 5-10 minutes. Run the
-unaccelerated profile only when the operator's current request explicitly uses
-`un-accelerated` or `unaccelerated` as the requested test/rehearsal mode.
-Words such as "thorough", "full", "production-equivalent", "end-to-end",
-"all tests", or "release" do not select the long profile.
+The blocking pre-push gate has a 120-second outer deadline. It contains only
+deterministic syntax/format checks, directly affected regressions, and one
+hermetic complete transition for each release class touched by the diff. A
+green process with skipped, collect-only, unexercised, or zero materially
+executed required tests is not a pass. Run broad suites and the legacy
+`prepush` profile asynchronously after push. Run the unaccelerated profile only
+when the operator's current request explicitly uses `un-accelerated` or
+`unaccelerated` as the requested test/rehearsal mode. Words such as
+"thorough", "full", "production-equivalent", "end-to-end", "all tests", or
+"release" do not select the long profile.
 
 ### 1. Synchronize
 
@@ -127,9 +132,20 @@ largest-first Nitro startup, direct authority verification, and the independent
 HTTP validator handoff remain mandatory and serialized at their trust
 boundaries.
 
-### 3. Accelerated Production Rehearsal
+### 3. Deterministic Changed-Seam Transition
 
-Replace `<deployed-sha>` with the exact production N-1 SHA:
+- [ ] Freeze the candidate SHA and exercise deployed N-1 -> candidate for the
+  exact production seam changed by the diff.
+- [ ] Reach every downstream output of that seam under dependency-minimal,
+  production-shaped inputs, including fail-closed negatives and cleanup.
+- [ ] Report materially executed test/stage counts; skipped, collect-only, or
+  unexercised required stages fail the gate.
+- [ ] Finish all blocking checks within 120 seconds.
+
+### 4. Asynchronous Accelerated Production Rehearsal
+
+Start this broad diagnostic after push, concurrently with exact-SHA
+attestation. Replace `<deployed-sha>` with the exact production N-1 SHA:
 
 ```bash
 python3 scripts/run_local_restart_rehearsal.py \
@@ -139,8 +155,8 @@ python3 scripts/run_local_restart_rehearsal.py \
   --profile prepush
 ```
 
-The controller reports each stage duration and enforces a 600-second target.
-It runs one exact forward transition and must prove:
+The controller reports each stage duration and has a 600-second target. It
+runs one exact forward transition and should prove:
 
 - [ ] Candidate Git tree, source blobs, release artifacts, PCR0, roles, and
   exact commit agree.
@@ -163,14 +179,22 @@ It runs one exact forward transition and must prove:
   protected workflows satisfy the candidate-derived behavioral contract.
 - [ ] Every declared stage appears once as `passed`; no critical stage is
   `failed` or `unexercised`.
-- [ ] Total elapsed time is at most 600 seconds.
+- [ ] Total elapsed time is at most 600 seconds, or the retained artifact
+  identifies the exact timed-out stage.
 
 The controller continues independent stages after a failure and writes one
 candidate-bound aggregate ledger. It must never suppress validator or canonical
 workflow diagnostics because gateway failed, or vice versa.
 
-If this gate is expected to exceed ten minutes, tell the operator immediately.
-Do not start the long profile as a substitute.
+Broad-lane status, timeout, missing summary, or a failure before candidate code
+does not by itself veto the release. Only an independently actionable retained
+artifact proving a candidate product/trust failure blocks. Move every required
+invariant unique to a broad lane into the deterministic gate. New or materially
+changed broad lanes remain commissioning-only until 20 consecutive exact-main
+runs reach candidate code, meet time/cleanup contracts, and retain
+machine-readable executed-stage counts and actionable injected-negative
+artifacts. Keep flaky or pre-candidate lanes visible and nonblocking while they
+are repaired or retired.
 
 ## Explicit Unaccelerated Gate
 
@@ -217,8 +241,12 @@ cannot be selected accidentally.
 
 - [ ] `git diff --check` passes.
 - [ ] Touched Python files compile.
-- [ ] Focused tests pass.
-- [ ] `prepush` rehearsal passes within its time budget.
+- [ ] Directly affected regressions and the hermetic changed-seam transition
+  pass with nonzero materially executed counts.
+- [ ] The combined blocking gate finishes within 120 seconds.
+- [ ] Broad suites and `prepush` are queued to run asynchronously after push;
+  their status alone is not a veto without an actionable candidate-failure
+  artifact.
 - [ ] Candidate contains no unintended scoring, reward, payment, allocation,
   emission, canonical-weight, signature, epoch, PCR0, attestation,
   exact-commit, or fail-closed changes.

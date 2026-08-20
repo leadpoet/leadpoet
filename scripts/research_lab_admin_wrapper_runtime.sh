@@ -42,6 +42,22 @@ if [[ -f "$ENV_FILE" ]]; then
   export GATEWAY_ENV_FILE=/dev/null
 fi
 
+CANONICAL_SUBNET_EPOCH_CUTOVER_PATH="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
+if [[ -n "${LEADPOET_SUBNET_EPOCH_CUTOVER_PATH:-}" \
+  && -n "${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" ]]; then
+  echo "research-lab-admin: set only one subnet epoch cutover authority form" >&2
+  exit 2
+fi
+if [[ -z "${LEADPOET_SUBNET_EPOCH_CUTOVER_PATH:-}" \
+  && -z "${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" ]]; then
+  if [[ ! -f "$CANONICAL_SUBNET_EPOCH_CUTOVER_PATH" \
+    || ! -s "$CANONICAL_SUBNET_EPOCH_CUTOVER_PATH" ]]; then
+    echo "research-lab-admin: canonical subnet epoch cutover manifest is not a regular nonempty file" >&2
+    exit 2
+  fi
+  export LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$CANONICAL_SUBNET_EPOCH_CUTOVER_PATH"
+fi
+
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-$AWS_REGION}"
 export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"

@@ -127,6 +127,7 @@ def test_admin_wrapper_overrides_stale_model_and_aws_credentials(tmp_path) -> No
                 "AWS_ACCESS_KEY_ID=stale-access",
                 "AWS_SECRET_ACCESS_KEY=stale-secret",
                 "AWS_PROFILE=stale-profile",
+                "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON={}",
                 "-i",
             )
         ),

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+from types import ModuleType
 
 import pytest
 
@@ -16,6 +17,127 @@ from leadpoet_canonical.attested_v2 import canonical_json
 from research_lab.eval.provider_evidence_cache import (
     canonical_request_fingerprint,
 )
+
+
+def _install_qualification_route_module(monkeypatch, transport_headers):
+    package = ModuleType("sourcing_model")
+    package.__path__ = []
+    module = ModuleType("sourcing_model.qualification_route")
+    module.transport_headers = transport_headers
+    package.qualification_route = module
+    monkeypatch.setitem(sys.modules, "sourcing_model", package)
+    monkeypatch.setitem(
+        sys.modules,
+        "sourcing_model.qualification_route",
+        module,
+    )
+
+
+def test_route_commitment_hook_injects_once_and_overrides_caller_header(
+    monkeypatch,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    calls = []
+    broker_requests = []
+
+    def transport_headers():
+        calls.append("called")
+        return {
+            "X-Leadpoet-Qualification-Route-Commitment": "a" * 64,
+        }
+
+    _install_qualification_route_module(monkeypatch, transport_headers)
+    monkeypatch.setenv(shim.SOCKET_ENV, "/tmp/provider.sock")
+    monkeypatch.setattr(shim, "_snapshot_terminal", lambda **_kwargs: None)
+    monkeypatch.setattr(shim, "_cached_terminal", lambda **_kwargs: None)
+
+    def execute_broker_request(*, socket_path, encoded):
+        assert socket_path == "/tmp/provider.sock"
+        broker_requests.append(json.loads(encoded))
+        return {"terminal_status": "transport_failure"}
+
+    monkeypatch.setattr(
+        shim,
+        "_execute_broker_request",
+        execute_broker_request,
+    )
+
+    shim.execute(
+        method="GET",
+        url="https://api.exa.ai/search",
+        headers={
+            "X-Leadpoet-Qualification-Route-Commitment": "f" * 64,
+            "Accept": "application/json",
+        },
+        body=b"",
+        timeout_ms=1,
+    )
+
+    assert calls == ["called"]
+    assert broker_requests[0]["headers"] == {
+        "Accept": "application/json",
+        "X-Leadpoet-Qualification-Route-Commitment": "a" * 64,
+    }
+
+
+@pytest.mark.parametrize(
+    "transport_headers",
+    [
+        lambda: {
+            "X-Leadpoet-Qualification-Route-Commitment": "A" * 64,
+        },
+        lambda: {"X-Untrusted": "value"},
+        lambda: None,
+    ],
+)
+def test_invalid_route_commitment_hook_rejects_before_broker(
+    monkeypatch,
+    transport_headers,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    _install_qualification_route_module(monkeypatch, transport_headers)
+    monkeypatch.setenv(shim.SOCKET_ENV, "/tmp/provider.sock")
+    monkeypatch.setattr(shim, "_snapshot_terminal", lambda **_kwargs: None)
+    monkeypatch.setattr(shim, "_cached_terminal", lambda **_kwargs: None)
+    broker_calls = []
+    monkeypatch.setattr(
+        shim,
+        "_execute_broker_request",
+        lambda **kwargs: broker_calls.append(kwargs),
+    )
+
+    with pytest.raises(shim.SandboxHTTPShimV2Error, match="headers are invalid"):
+        shim.execute(
+            method="GET",
+            url="https://api.exa.ai/search",
+            headers={},
+            body=b"",
+            timeout_ms=1,
+        )
+
+    assert broker_calls == []
+
+
+def test_absent_hook_is_legacy_safe_but_v2_fails_closed(monkeypatch) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    package = ModuleType("sourcing_model")
+    package.__path__ = []
+    module = ModuleType("sourcing_model.qualification_route")
+    package.qualification_route = module
+    monkeypatch.setitem(sys.modules, "sourcing_model", package)
+    monkeypatch.setitem(
+        sys.modules,
+        "sourcing_model.qualification_route",
+        module,
+    )
+
+    assert shim._qualification_route_transport_headers() == {}
+    monkeypatch.setenv(shim.QUALIFICATION_PROTOCOL_V2_ENV, "1")
+    with pytest.raises(shim.SandboxHTTPShimV2Error, match="hook is invalid"):
+        shim._qualification_route_transport_headers()
 
 
 def test_live_socket_waits_for_measured_operation_completion(monkeypatch) -> None:
@@ -237,6 +359,43 @@ def test_frozen_evidence_miss_emits_bounded_sentinel_before_raise(
             ),
         )
     ]
+
+
+def test_v2_frozen_miss_captures_route_once_and_never_reaches_broker(
+    monkeypatch,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    hook_calls = []
+
+    def transport_headers():
+        hook_calls.append("called")
+        return {
+            "X-Leadpoet-Qualification-Route-Commitment": "e" * 64,
+        }
+
+    _install_qualification_route_module(monkeypatch, transport_headers)
+    monkeypatch.setenv(shim.QUALIFICATION_PROTOCOL_V2_ENV, "1")
+    monkeypatch.setenv(shim.EVIDENCE_MODE_ENV, "frozen")
+    monkeypatch.setenv(shim.SOCKET_ENV, "/tmp/provider.sock")
+    monkeypatch.setattr(shim, "_snapshot_terminal", lambda **_kwargs: None)
+    monkeypatch.setattr(shim, "_evidence_cache", lambda: {})
+    monkeypatch.setattr(
+        shim,
+        "_execute_broker_request",
+        lambda **_kwargs: pytest.fail("frozen replay miss reached broker"),
+    )
+
+    with pytest.raises(shim.SandboxHTTPShimV2Error, match="EVIDENCE_MISS"):
+        shim.execute(
+            method="POST",
+            url="https://api.exa.ai/search",
+            headers={},
+            body=b"{}",
+            timeout_ms=1000,
+        )
+
+    assert hook_calls == ["called"]
 
 
 @pytest.mark.parametrize("write_result", ("short", "error"))

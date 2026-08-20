@@ -42,10 +42,15 @@ from research_lab.eval import (
 from research_lab.eval.private_runtime import (
     _DOCKER_ADAPTER_BOOTSTRAP,
     _docker_adapter_bootstrap_for_qualify_compatibility,
+    _docker_adapter_bootstrap_for_qualification_protocol_v2,
     _raise_on_empty_provider_error,
     PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
     PRIVATE_RUNTIME_FAILURE_MARKER,
     PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION,
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2,
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2,
+    QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1,
+    qualification_outcome_contract_sha256_v2,
     SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS,
     canonicalize_private_model_icp,
     context_with_runtime_options,
@@ -54,14 +59,20 @@ from research_lab.eval.private_runtime import (
     strip_incontainer_trace_lines,
     validate_sourcing_adapter_metadata,
     validate_sourcing_runtime_receipt,
+    validate_qualification_outcome_protocol_metadata_v2,
+    validate_qualification_outcome_protocol_probe_cases_v1,
+    validate_qualification_outcome_envelope_v2,
 )
 from research_lab.eval.provider_evidence_cache import (
     EVIDENCE_CACHE_SCHEMA_VERSION,
     build_evidence_cache_from_trace_entries,
+    canonical_request_fingerprint,
     icp_evidence_cache_key,
     merge_evidence_caches,
 )
 from research_lab.eval.snapshot_store import (
+    MODE_REPLAY,
+    ProviderSnapshotStore,
     SNAPSHOT_MISS_SENTINEL,
     SnapshotMiss,
     container_replay_env,
@@ -70,8 +81,8 @@ from research_lab.eval.snapshot_store import (
 from research_lab.sourcing_model_contract_check import (
     SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
     semantic_compatibility_policy_identity_v1,
-    source_tree_compatibility_admission_v1,
-    validate_source_tree_compatibility_receipt_v1,
+    source_tree_compatibility_admission as source_tree_compatibility_admission_v1,
+    validate_source_tree_compatibility_receipt,
 )
 
 
@@ -728,8 +739,21 @@ def _model_adapter_bootstrap_for_compatibility_receipt_v1(
 ) -> str:
     """Select host-owned adapter bytes from an exact artifact-bound receipt."""
 
+    if compatibility_receipt.get("admission_mode") == "qualification_protocol_v2":
+        try:
+            validate_source_tree_compatibility_receipt(
+                compatibility_receipt,
+                manifest=artifact,
+                source_tree_hash=artifact.model_artifact_hash,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ModelSandboxV2Error(
+                "qualification protocol receipt differs from signed artifact"
+            ) from exc
+        return _docker_adapter_bootstrap_for_qualification_protocol_v2()
+
     try:
-        validated_receipt = validate_source_tree_compatibility_receipt_v1(
+        validated_receipt = validate_source_tree_compatibility_receipt(
             compatibility_receipt,
             manifest=artifact,
             source_tree_hash=artifact.model_artifact_hash,
@@ -763,10 +787,185 @@ def _model_adapter_bootstrap_for_compatibility_receipt_v1(
     )
 
 
+def _validate_qualification_terminal_observation_v1(
+    envelope: Mapping[str, Any],
+    observation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Join producer completion to payload-free host terminal observations."""
+
+    document = dict(observation)
+    fields = {
+        "schema_version",
+        "request_intent_count",
+        "terminal_count",
+        "latest_operation_count",
+        "accepted_latest_terminal_count",
+        "successful_latest_terminal_count",
+        "failed_latest_terminal_count",
+        "unresolved_latest_terminal_count",
+        "latest_terminal_attempt_hashes",
+        "successful_latest_terminal_attempt_hashes",
+        "required_route_commitments",
+        "required_route_count",
+        "successful_required_route_count",
+        "unresolved_required_route_count",
+        "required_route_terminals",
+    }
+    count_fields = {
+        "request_intent_count",
+        "terminal_count",
+        "latest_operation_count",
+        "accepted_latest_terminal_count",
+        "successful_latest_terminal_count",
+        "failed_latest_terminal_count",
+        "unresolved_latest_terminal_count",
+        "required_route_count",
+        "successful_required_route_count",
+        "unresolved_required_route_count",
+    }
+    counts = {name: document.get(name) for name in count_fields}
+    latest_hashes = document.get("latest_terminal_attempt_hashes")
+    successful_hashes = document.get(
+        "successful_latest_terminal_attempt_hashes"
+    )
+    required_commitments = document.get("required_route_commitments")
+    required_terminals = document.get("required_route_terminals")
+    receipt = dict(envelope["route_completion_receipt"])
+    disposition = str(receipt.get("disposition") or "")
+    if (
+        set(document) != fields
+        or document.get("schema_version")
+        != "leadpoet.provider-terminal-observation.v1"
+        or any(type(item) is not int or item < 0 for item in counts.values())
+        or document["request_intent_count"] != document["terminal_count"]
+        or document["latest_operation_count"]
+        != document["accepted_latest_terminal_count"]
+        + document["failed_latest_terminal_count"]
+        or document["successful_latest_terminal_count"]
+        > document["accepted_latest_terminal_count"]
+        or document["unresolved_latest_terminal_count"]
+        != document["latest_operation_count"]
+        - document["successful_latest_terminal_count"]
+        or not isinstance(latest_hashes, list)
+        or latest_hashes != sorted(latest_hashes)
+        or len(set(latest_hashes)) != len(latest_hashes)
+        or len(latest_hashes) != document["latest_operation_count"]
+        or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", str(item or "")) is None
+            for item in latest_hashes
+        )
+        or not isinstance(successful_hashes, list)
+        or successful_hashes != sorted(successful_hashes)
+        or len(set(successful_hashes)) != len(successful_hashes)
+        or len(successful_hashes)
+        != document["successful_latest_terminal_count"]
+        or not set(successful_hashes) <= set(latest_hashes)
+        or not isinstance(required_commitments, list)
+        or required_commitments != sorted(required_commitments)
+        or len(set(required_commitments)) != len(required_commitments)
+        or len(required_commitments)
+        > QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(item or "")) is None
+            for item in required_commitments
+        )
+        or not isinstance(required_terminals, list)
+        or len(required_terminals) != len(required_commitments)
+        or any(
+            not isinstance(item, Mapping)
+            or set(item)
+            != {
+                "route_commitment",
+                "attempt_hash",
+                "terminal_status",
+                "http_status",
+            }
+            or item.get("route_commitment") != required_commitments[index]
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(item.get("attempt_hash") or ""),
+            )
+            is None
+            or item.get("terminal_status")
+            not in {
+                "authenticated_response",
+                "attested_local_response",
+                "transport_failure",
+            }
+            or (
+                item.get("terminal_status") == "transport_failure"
+                and item.get("http_status") is not None
+            )
+            or (
+                item.get("terminal_status") != "transport_failure"
+                and (
+                    type(item.get("http_status")) is not int
+                    or not 100 <= item["http_status"] <= 599
+                )
+            )
+            for index, item in enumerate(required_terminals)
+        )
+        or document["required_route_count"] != len(required_commitments)
+        or document["successful_required_route_count"]
+        != sum(
+            1
+            for item in required_terminals
+            if item["terminal_status"]
+            in {"authenticated_response", "attested_local_response"}
+            and 200 <= item["http_status"] <= 299
+        )
+        or document["unresolved_required_route_count"]
+        != document["required_route_count"]
+        - document["successful_required_route_count"]
+    ):
+        raise ModelSandboxV2Error(
+            "qualification outcome differs from measured provider terminals"
+        )
+    bound_commitments = receipt.get("extensions", {}).get(
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2
+    )
+    if (
+        not isinstance(bound_commitments, list)
+        or bound_commitments != required_commitments
+        or receipt["route_summary"]["attempted"]
+        != len(required_commitments)
+    ):
+        raise ModelSandboxV2Error(
+            "qualification outcome required routes differ from host observation"
+        )
+    if disposition.startswith("complete_") and (
+        not required_commitments
+        or receipt["route_summary"]["attempted"]
+        != len(required_commitments)
+        or document["unresolved_required_route_count"] != 0
+        or document["successful_required_route_count"]
+        != len(required_commitments)
+    ):
+        raise ModelSandboxV2Error(
+            "complete outcome lacks complete required-route authority"
+        )
+    return document
+
+
 def _runtime_invariant_policy_v1(
     compatibility_receipt: Mapping[str, Any],
 ) -> Mapping[str, Any] | None:
     receipt = dict(compatibility_receipt)
+    if receipt.get("admission_mode") == "qualification_protocol_v2":
+        if (
+            receipt.get("consumer_api_version")
+            != "research-lab-qualification-consumer-api:v2"
+            or receipt.get("decision")
+            != SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION
+            or receipt.get("policy_hash")
+            != f"sha256:{qualification_outcome_contract_sha256_v2()}"
+        ):
+            raise ModelSandboxV2Error(
+                "qualification runtime receipt differs from protected policy"
+            )
+        # Protocol-v2 behavior is selected by its nonce probes below. It does
+        # not inherit semantic-v1's exact source-function equality policy.
+        return {"profile": "qualification_protocol_v2"}
     policy, policy_hash = semantic_compatibility_policy_identity_v1()
     if (
         receipt.get("consumer_api_version") != policy["consumer_api_version"]
@@ -789,6 +988,8 @@ def _runtime_probe_expected_invariants(
     if invariant_policy is None:
         return {"profile": "legacy_exact"}
     policy = dict(invariant_policy)
+    if policy == {"profile": "qualification_protocol_v2"}:
+        return dict(policy)
     company = dict(policy.get("company_fit") or {})
     capabilities = dict(policy.get("runtime_capabilities") or {})
     names = sorted(str(item) for item in capabilities.get("names") or ())
@@ -876,6 +1077,13 @@ def _runtime_probe_observation_plan_v1(
         "runtime_invariants": _runtime_invariant_policy_v1(
             compatibility_receipt
         ),
+        "qualification_outcome_probes": [
+            {
+                "case_id": case_id,
+                "nonce": secrets.token_hex(24),
+            }
+            for case_id in QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1
+        ],
     }
 
 
@@ -926,15 +1134,69 @@ def validate_consumer_runtime_probe_v1(
     document = dict(value)
     receipt = dict(compatibility_receipt)
     invariant_policy = _runtime_invariant_policy_v1(receipt)
+    raw_invariants = document.get("invariants")
+    if not isinstance(raw_invariants, Mapping):
+        raise ModelSandboxV2Error(
+            "consumer runtime probe differs from host admission"
+        )
+    observed_invariants = dict(raw_invariants)
+    observed_qualification = observed_invariants.pop(
+        "qualification_outcome_protocol", None
+    )
+    expected_invariants = _runtime_probe_expected_invariants(invariant_policy)
     expected = _consumer_runtime_probe_v1(
         compatibility_receipt=receipt,
         metadata=metadata,
         expected_module_name=expected_module_name,
         expected_callable_name=expected_callable_name,
-        invariants=_runtime_probe_expected_invariants(invariant_policy),
+        invariants={
+            **expected_invariants,
+            **(
+                {"qualification_outcome_protocol": observed_qualification}
+                if observed_qualification is not None
+                else {}
+            ),
+        },
     )
+    metadata_protocol = metadata.get("qualification_outcome_protocol")
+    admitted_protocol_v2 = (
+        receipt.get("admission_mode") == "qualification_protocol_v2"
+    )
+    if (metadata_protocol is not None) != admitted_protocol_v2:
+        raise ModelSandboxV2Error(
+            "consumer qualification protocol differs from source admission"
+        )
+    if (metadata_protocol is None) != (observed_qualification is None):
+        raise ModelSandboxV2Error(
+            "consumer qualification protocol observation is missing"
+        )
+    if metadata_protocol is not None:
+        try:
+            validate_qualification_outcome_protocol_metadata_v2(
+                metadata_protocol
+            )
+            if (
+                not isinstance(observed_qualification, Mapping)
+                or set(observed_qualification) != {"cases", "nonce_sha256s"}
+                or not isinstance(observed_qualification.get("cases"), Mapping)
+                or not isinstance(
+                    observed_qualification.get("nonce_sha256s"), Mapping
+                )
+            ):
+                raise PrivateModelRuntimeError(
+                    "qualification outcome probe observation is invalid"
+                )
+            validate_qualification_outcome_protocol_probe_cases_v1(
+                observed_qualification["cases"],
+                expected_nonce_sha256s=observed_qualification["nonce_sha256s"],
+            )
+        except PrivateModelRuntimeError as exc:
+            raise ModelSandboxV2Error(
+                "consumer qualification protocol observation differs"
+            ) from exc
     if (
         document != expected
+        or observed_invariants != expected_invariants
         or receipt.get("source_tree_hash") != expected_source_tree_hash
         or receipt.get("manifest_hash") != expected_manifest_hash
         or receipt.get("image_digest") != expected_image_digest
@@ -955,21 +1217,83 @@ def _build_consumer_runtime_probe_from_observation_v1(
     expected_image_digest: str,
     expected_module_name: str,
     expected_callable_name: str,
+    observation_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw = dict(observation)
-    if set(raw) != {"invariants"} or not isinstance(
+    if set(raw) != {"invariants", "qualification_outcome_protocol"} or not isinstance(
         raw.get("invariants"), Mapping
     ):
         raise ModelSandboxV2Error(
             "consumer runtime observation fields are invalid"
         )
     metadata_document = dict(metadata)
+    raw_qualification = raw.get("qualification_outcome_protocol")
+    normalized_qualification = None
+    if metadata_document.get("qualification_outcome_protocol") is not None:
+        plan = dict(observation_plan or {})
+        cases = (
+            dict(raw_qualification).get("cases")
+            if isinstance(raw_qualification, Mapping)
+            else None
+        )
+        probe_plan = plan.get("qualification_outcome_probes")
+        if (
+            not isinstance(probe_plan, list)
+            or not isinstance(cases, Mapping)
+            or any(
+                not isinstance(item, Mapping)
+                or re.fullmatch(
+                    r"[A-Za-z0-9._:-]{16,128}",
+                    str(item.get("nonce") or ""),
+                )
+                is None
+                for item in probe_plan
+            )
+        ):
+            raise ModelSandboxV2Error(
+                "consumer qualification protocol probe plan is invalid"
+            )
+        nonce_hashes = {
+            str(item["case_id"]): hashlib.sha256(
+                str(item["nonce"]).encode("ascii")
+            ).hexdigest()
+            for item in probe_plan
+        }
+        try:
+            validate_qualification_outcome_protocol_metadata_v2(
+                metadata_document["qualification_outcome_protocol"]
+            )
+            normalized_cases = (
+                validate_qualification_outcome_protocol_probe_cases_v1(
+                    cases,
+                    expected_nonce_sha256s=nonce_hashes,
+                )
+            )
+        except PrivateModelRuntimeError as exc:
+            raise ModelSandboxV2Error(
+                "consumer qualification protocol probe differs"
+            ) from exc
+        normalized_qualification = {
+            "cases": normalized_cases,
+            "nonce_sha256s": dict(sorted(nonce_hashes.items())),
+        }
+    elif raw_qualification is not None:
+        raise ModelSandboxV2Error(
+            "consumer qualification protocol observation is unexpected"
+        )
     probe = _consumer_runtime_probe_v1(
         compatibility_receipt=compatibility_receipt,
         metadata=metadata_document,
         expected_module_name=expected_module_name,
         expected_callable_name=expected_callable_name,
-        invariants=raw["invariants"],
+        invariants={
+            **dict(raw["invariants"]),
+            **(
+                {"qualification_outcome_protocol": normalized_qualification}
+                if normalized_qualification is not None
+                else {}
+            ),
+        },
     )
     return validate_consumer_runtime_probe_v1(
         probe,
@@ -984,6 +1308,7 @@ def _build_consumer_runtime_probe_from_observation_v1(
 
 
 _MEASURED_METADATA_BOOTSTRAP = r"""
+import contextlib as _lp_contextlib
 import importlib as _lp_importlib
 import json as _lp_json
 import os as _lp_os
@@ -994,7 +1319,15 @@ _lp_payload = _lp_json.load(_lp_sys.stdin)
 _lp_plan = _lp_payload.get("observation_plan")
 if (
     not isinstance(_lp_plan, dict)
-    or set(_lp_plan) != {"schema_version", "runtime_invariants"}
+    or set(_lp_plan)
+    not in (
+        {"schema_version", "runtime_invariants"},
+        {
+            "schema_version",
+            "runtime_invariants",
+            "qualification_outcome_probes",
+        },
+    )
     or _lp_plan.get("schema_version")
     != "leadpoet.consumer-runtime-observation-plan.v1"
 ):
@@ -1037,12 +1370,53 @@ _lp_source_root = _lp_Path(
 if not _lp_source_root.is_dir():
     raise RuntimeError("metadata source root is invalid")
 _lp_sys.path.insert(0, str(_lp_source_root))
-_lp_metadata = getattr(
-    _lp_importlib.import_module(_lp_entry_module), _lp_callable_name
-)()
+_lp_adapter_module = _lp_importlib.import_module(_lp_entry_module)
+_lp_metadata = getattr(_lp_adapter_module, _lp_callable_name)()
+_lp_qualification_outcome_observation = None
+if isinstance(_lp_metadata, dict) and _lp_metadata.get(
+    "qualification_outcome_protocol"
+) is not None:
+    _lp_qualification_route = _lp_importlib.import_module(
+        "sourcing_model.qualification_route"
+    )
+    if not callable(getattr(_lp_qualification_route, "transport_headers", None)):
+        raise RuntimeError("qualification route transport hook is invalid")
+    _lp_probe_cases = _lp_plan.get("qualification_outcome_probes")
+    if (
+        not isinstance(_lp_probe_cases, list)
+        or len(_lp_probe_cases) != 2
+        or any(
+            not isinstance(_lp_case, dict)
+            or set(_lp_case) != {"case_id", "nonce"}
+            for _lp_case in _lp_probe_cases
+        )
+    ):
+        raise RuntimeError("qualification outcome probe plan is invalid")
+    _lp_outcome_entrypoint = getattr(_lp_adapter_module, "run_icp_outcome")
+    _lp_observed_cases = {}
+    for _lp_case in _lp_probe_cases:
+        with _lp_contextlib.redirect_stdout(_lp_sys.stderr):
+            _lp_observed_cases[_lp_case["case_id"]] = _lp_outcome_entrypoint(
+                {},
+                {
+                    "mode": "consumer_qualification_protocol_probe",
+                    "probe": {
+                        "schema_version": (
+                            "sourcing-model.qualification-outcome-probe.v1"
+                        ),
+                        "case_id": _lp_case["case_id"],
+                        "nonce": _lp_case["nonce"],
+                    },
+                },
+            )
+    _lp_qualification_outcome_observation = {
+        "cases": _lp_observed_cases,
+    }
 
 _lp_invariant_policy = _lp_plan["runtime_invariants"]
-if _lp_invariant_policy is None:
+if _lp_invariant_policy == {"profile": "qualification_protocol_v2"}:
+    _lp_invariants = {"profile": "qualification_protocol_v2"}
+elif _lp_invariant_policy is None:
     _lp_invariants = {"profile": "legacy_exact"}
 else:
     _lp_company_policy = dict(_lp_invariant_policy.get("company_fit") or {})
@@ -1226,8 +1600,16 @@ else:
         },
     }
 
+_lp_runtime_observation = {"invariants": _lp_invariants}
+if "qualification_outcome_probes" in _lp_plan:
+    _lp_runtime_observation["qualification_outcome_protocol"] = (
+        _lp_qualification_outcome_observation
+    )
 _lp_sys.stdout.write(_lp_json.dumps(
-    {"metadata": _lp_metadata, "runtime_observation": {"invariants": _lp_invariants}},
+    {
+        "metadata": _lp_metadata,
+        "runtime_observation": _lp_runtime_observation,
+    },
     sort_keys=True,
     separators=(",", ":"),
 ))
@@ -1614,6 +1996,123 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
         "provider_runtime_catalog": provider_runtime_catalog,
         "provider_catalog_evidence": normalized_catalog_evidence,
     }
+
+
+def _local_provider_replay_resolver_v2(
+    *,
+    evidence_mode: str,
+    evidence_cache: Mapping[str, Any],
+    evidence_cache_hash: str,
+    snapshot_root: Path | None,
+    snapshot_manifest_hash: str,
+) -> Callable[[Mapping[str, Any], str], Mapping[str, Any]]:
+    """Resolve sandbox replay hints from exact host-bound evidence only."""
+
+    normalized_mode = str(evidence_mode or "")
+    if normalized_mode not in {"live", "cache_live", "record", "frozen"}:
+        raise ModelSandboxV2Error("provider replay mode is invalid")
+    cache = dict(evidence_cache)
+    if evidence_cache_hash != sha256_json(cache):
+        raise ModelSandboxV2Error("provider replay cache authority differs")
+    if snapshot_root is None:
+        if snapshot_manifest_hash:
+            raise ModelSandboxV2Error("provider replay snapshot authority differs")
+        snapshot_store = None
+    else:
+        if not _HASH_RE.fullmatch(str(snapshot_manifest_hash or "")):
+            raise ModelSandboxV2Error("provider replay snapshot authority is invalid")
+        snapshot_store = ProviderSnapshotStore(
+            str(snapshot_root),
+            mode=MODE_REPLAY,
+        )
+        snapshot_manifest = snapshot_store.load_manifest()
+        snapshot_verification = snapshot_store.verify_manifest(
+            snapshot_manifest
+        )
+        if (
+            not isinstance(snapshot_manifest, Mapping)
+            or snapshot_manifest.get("manifest_hash")
+            != snapshot_manifest_hash
+            or not snapshot_verification.get("passed")
+        ):
+            raise ModelSandboxV2Error(
+                "provider replay snapshot authority differs"
+            )
+
+    def resolve(
+        request: Mapping[str, Any],
+        replay_kind: str,
+    ) -> Mapping[str, Any]:
+        method = str(request.get("method") or "").upper()
+        url = str(request.get("url") or "")
+        body = request.get("body")
+        if not isinstance(body, bytes):
+            raise ModelSandboxV2Error("provider replay request body is invalid")
+        selected_kind = ""
+        selected: dict[str, Any] | None = None
+        authority_hash = ""
+        if snapshot_store is not None:
+            try:
+                response = snapshot_store.replay(method, url, body=body)
+            except SnapshotMiss:
+                response = None
+            if response is not None:
+                selected_kind = "snapshot"
+                selected = {
+                    "terminal_status": "attested_local_response",
+                    "http_status": int(response.get("status") or 0),
+                    "headers": dict(response.get("headers") or {}),
+                    "body_b64": base64.b64encode(
+                        str(response.get("body_text") or "").encode("utf-8")
+                    ).decode("ascii"),
+                    "failure_code": None,
+                }
+                authority_hash = str(snapshot_manifest_hash)
+        if selected is None and normalized_mode != "live":
+            fingerprint = canonical_request_fingerprint(method, url, body)
+            entries = cache.get("entries")
+            record = (
+                entries.get(fingerprint)
+                if isinstance(entries, Mapping)
+                else None
+            )
+            if isinstance(record, Mapping):
+                status = record.get("status")
+                encoded_body = record.get("body_b64")
+                if (
+                    isinstance(status, bool)
+                    or not isinstance(status, int)
+                    or not 100 <= status <= 599
+                    or not isinstance(encoded_body, str)
+                ):
+                    raise ModelSandboxV2Error(
+                        "provider replay cache record is invalid"
+                    )
+                try:
+                    base64.b64decode(encoded_body, validate=True)
+                except Exception as exc:
+                    raise ModelSandboxV2Error(
+                        "provider replay cache body is invalid"
+                    ) from exc
+                selected_kind = "provider_evidence_cache"
+                selected = {
+                    "terminal_status": "attested_local_response",
+                    "http_status": status,
+                    "headers": {"content-type": "application/json"},
+                    "body_b64": encoded_body,
+                    "failure_code": None,
+                }
+                authority_hash = str(evidence_cache_hash)
+        if selected is None or selected_kind != str(replay_kind):
+            raise ModelSandboxV2Error(
+                "provider replay hint has no matching host authority"
+            )
+        return {
+            **selected,
+            "local_authority_sha256": authority_hash,
+        }
+
+    return resolve
 
 
 def _model_sandbox_process_timeout_seconds(value: Mapping[str, Any]) -> int:
@@ -2475,6 +2974,7 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
         errors = validate_private_model_artifact_manifest(artifact)
         if errors:
             raise ModelSandboxV2Error("model artifact is invalid: " + "; ".join(errors))
+        provider_terminal_observation: dict[str, Any] = {}
         # AF_UNIX paths are limited to roughly 108 bytes on Linux. The measured
         # short parent leaves sufficient room for an unpredictable job path.
         with tempfile.TemporaryDirectory(
@@ -2562,6 +3062,17 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                     socket_path=broker_root / "provider.sock",
                     transport=self._transport,
                     execution_scope=provider_scope,
+                    local_replay_resolver=_local_provider_replay_resolver_v2(
+                        evidence_mode=value["provider_evidence_mode"],
+                        evidence_cache=value["provider_evidence_cache"],
+                        evidence_cache_hash=sha256_json(
+                            value["provider_evidence_cache"]
+                        ),
+                        snapshot_root=provider_snapshot_root,
+                        snapshot_manifest_hash=value[
+                            "provider_snapshot_manifest_hash"
+                        ],
+                    ),
                 )
                 server.start()
                 try:
@@ -2589,6 +3100,16 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 finally:
                     server.close()
                 provider_scope.assert_accepted_result_is_complete()
+                provider_terminal_observation = (
+                    provider_scope.completion_observation()
+                )
+                if compatibility_receipt.get("admission_mode") == (
+                    "qualification_protocol_v2"
+                ):
+                    _validate_qualification_terminal_observation_v1(
+                        result,
+                        provider_terminal_observation,
+                    )
         consumer_runtime_probe: dict[str, Any] = {}
         if value["operation"] == "metadata":
             if not isinstance(result, Mapping) or set(result) != {
@@ -2664,6 +3185,18 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             "output": output,
             "trace_entries": trace_entries,
             "generated_provider_evidence_cache": generated_evidence_cache,
+            **(
+                {
+                    "provider_terminal_observation": (
+                        provider_terminal_observation
+                    ),
+                    "provider_terminal_observation_hash": sha256_json(
+                        provider_terminal_observation
+                    ),
+                }
+                if value["operation"] == "run_icp"
+                else {}
+            ),
             **(
                 {
                     "consumer_runtime_probe": consumer_runtime_probe,
@@ -3248,6 +3781,7 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             expected_image_digest=artifact.image_digest,
             expected_module_name=value["module_name"],
             expected_callable_name=value["callable_name"],
+            observation_plan=stdin_payload["observation_plan"],
         )
         return {"metadata": metadata, "consumer_runtime_probe": probe}, []
 
@@ -3315,6 +3849,12 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             },
             **source_add_placeholder_environment_v2(
                 value["provider_runtime_catalog"]
+            ),
+            **(
+                {"LEADPOET_QUALIFICATION_PROTOCOL_V2": "1"}
+                if compatibility_receipt.get("admission_mode")
+                == "qualification_protocol_v2"
+                else {}
             ),
         }
         evidence_cache = dict(value["provider_evidence_cache"])
@@ -3400,6 +3940,37 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
         except json.JSONDecodeError as exc:
             raise ModelSandboxV2Error("model sandbox output is invalid JSON") from exc
         stderr = str(completed.stderr or "")
+        if compatibility_receipt.get("admission_mode") == (
+            "qualification_protocol_v2"
+        ):
+            try:
+                envelope = validate_qualification_outcome_envelope_v2(
+                    decoded
+                )
+            except PrivateModelRuntimeError as exc:
+                raise ModelSandboxV2Error(
+                    "model qualification outcome envelope is invalid"
+                ) from exc
+            if envelope["route_completion_receipt"].get("probe") is not None:
+                raise ModelSandboxV2Error(
+                    "model qualification runtime returned probe authority"
+                )
+            expected_invocation_sha256 = hashlib.sha256(
+                canonical_json(stdin_payload).encode("utf-8")
+            ).hexdigest()
+            if (
+                envelope["route_completion_receipt"].get(
+                    "invocation_sha256"
+                )
+                != expected_invocation_sha256
+            ):
+                raise ModelSandboxV2Error(
+                    "model qualification outcome invocation differs"
+                )
+            return envelope, [
+                *parse_incontainer_trace_lines(stderr),
+                *parse_sourcing_runtime_lines(stderr),
+            ]
         raw_input = value.get("input")
         context = raw_input.get("context") if isinstance(raw_input, Mapping) else None
         defer_retryable_errors = bool(

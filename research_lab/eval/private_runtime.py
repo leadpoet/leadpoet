@@ -24,7 +24,7 @@ import time
 import uuid
 from typing import Any, Iterator, Mapping, Sequence
 
-from research_lab.canonical import sha256_bytes, sha256_json
+from research_lab.canonical import canonical_json, sha256_bytes, sha256_json
 from research_lab.docker_operation_lock_v2 import (
     DockerOperationLockError,
     shared_docker_operation_lock,
@@ -123,6 +123,123 @@ EXPECTED_RUNTIME_CAPABILITIES_BY_CONTRACT_VERSION = {
         }
     ),
 }
+QUALIFICATION_OUTCOME_CONTRACT_V2_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "sourcing_model_qualification_outcome_v2.json"
+)
+QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2 = (
+    "1348bed0207daab8a1ab0bbdce9495c294c7f9e411ce39c0b4aeb1450b9cf8ba"
+)
+_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2 = json.loads(
+    QUALIFICATION_OUTCOME_CONTRACT_V2_PATH.read_text(encoding="utf-8")
+)
+if (
+    not isinstance(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2, Mapping)
+    or sha256_json(dict(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2)).removeprefix(
+        "sha256:"
+    )
+    != QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+):
+    raise RuntimeError("qualification outcome contract differs from protected policy")
+_QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2 = dict(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["extension_evolution"]
+)
+_QUALIFICATION_OUTCOME_ROUTE_POLICY_V2 = dict(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["required_route_commitments"]
+)
+QUALIFICATION_OUTCOME_PROTOCOL_ID_V2 = str(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["protocol_id"]
+)
+QUALIFICATION_OUTCOME_ENVELOPE_SCHEMA_V2 = str(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["result_schema_version"]
+)
+QUALIFICATION_ROUTE_COMPLETION_RECEIPT_SCHEMA_V1 = str(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2[
+        "route_completion_receipt_schema_version"
+    ]
+)
+QUALIFICATION_OUTCOME_PROTOCOL_PROBE_SCHEMA_V1 = str(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["probe"]["schema_version"]
+)
+QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2 = int(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["protocol_major"]
+)
+QUALIFICATION_OUTCOME_REQUIRED_CAPABILITIES_V2 = frozenset(
+    str(item)
+    for item in _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2[
+        "required_capabilities"
+    ]
+)
+QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1 = tuple(
+    sorted(
+        str(item)
+        for item in _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["probe"][
+            "required_cases"
+        ]
+    )
+)
+QUALIFICATION_OUTCOME_ENTRYPOINT_V2 = "run_icp_outcome"
+QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2 = str(
+    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["extension_key"]
+)
+QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2 = int(
+    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["maximum_count"]
+)
+QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2 = str(
+    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["value_regex"]
+)
+_QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_NESTING_DEPTH_V2 = int(
+    _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2["maximum_nesting_depth"]
+)
+_QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_ARRAY_ITEMS_V2 = int(
+    _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2["maximum_array_items"]
+)
+_QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_OBJECT_ENTRIES_V2 = int(
+    _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2["maximum_object_entries"]
+)
+_QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_TOKEN_CHARACTERS_V2 = int(
+    _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2["maximum_token_characters"]
+)
+_QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_FIELD_NAME_CHARACTERS_V2 = int(
+    _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2[
+        "maximum_field_name_characters"
+    ]
+)
+_QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_REVERSE_DNS_SEGMENT_CHARACTERS_V2 = int(
+    _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2[
+        "maximum_reverse_dns_segment_characters"
+    ]
+)
+_QUALIFICATION_OUTCOME_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_RE = re.compile(
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2
+)
+_QUALIFICATION_OUTCOME_SAFE_NAME_RE = re.compile(
+    r"^[a-z][a-z0-9_.:-]{0,127}$"
+)
+_QUALIFICATION_OUTCOME_FAILURE_CLASS_RE = re.compile(
+    str(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["failure_class_policy"]["regex"])
+)
+_QUALIFICATION_OUTCOME_EXTENSION_KEY_RE = re.compile(
+    r"^[a-z][a-z0-9-]{0,%d}(?:\.[a-z][a-z0-9-]{0,%d})+$"
+    % (
+        _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_REVERSE_DNS_SEGMENT_CHARACTERS_V2
+        - 1,
+        _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_REVERSE_DNS_SEGMENT_CHARACTERS_V2
+        - 1,
+    )
+)
+_QUALIFICATION_OUTCOME_EXTENSION_FIELD_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_.-]{0,%d}$"
+    % (_QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_FIELD_NAME_CHARACTERS_V2 - 1)
+)
+_QUALIFICATION_OUTCOME_EXTENSION_TOKEN_RE = re.compile(
+    r"^[A-Za-z0-9._:-]{0,%d}$"
+    % _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_TOKEN_CHARACTERS_V2
+)
+_QUALIFICATION_OUTCOME_PROBE_NONCE_RE = re.compile(
+    str(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["probe"]["nonce_regex"])
+)
 EXPECTED_ROUTING_COMPILER_VERSIONS = frozenset(
     str(
         snapshot["contract"]["exact_constants"]
@@ -409,6 +526,524 @@ def ensure_private_model_outputs(
     if _contains_secret_material(normalized):
         raise PrivateModelRuntimeError(f"{context_label} adapter returned raw secret material")
     return normalized
+
+
+def _qualification_outcome_sha256(value: Mapping[str, Any]) -> str:
+    return sha256_json(dict(value)).removeprefix("sha256:")
+
+
+def qualification_outcome_contract_v2() -> dict[str, Any]:
+    """Load the candidate-bound, cross-repository protocol semantics."""
+
+    try:
+        document = json.loads(
+            QUALIFICATION_OUTCOME_CONTRACT_V2_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PrivateModelRuntimeError(
+            "qualification outcome contract is unavailable"
+        ) from exc
+    if not isinstance(document, Mapping):
+        raise PrivateModelRuntimeError(
+            "qualification outcome contract is invalid"
+        )
+    normalized = dict(document)
+    if (
+        _qualification_outcome_sha256(normalized)
+        != QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+        or normalized.get("protocol_id")
+        != QUALIFICATION_OUTCOME_PROTOCOL_ID_V2
+        or normalized.get("protocol_major")
+        != QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2
+    ):
+        raise PrivateModelRuntimeError(
+            "qualification outcome contract differs from protected policy"
+        )
+    return normalized
+
+
+def qualification_outcome_contract_sha256_v2() -> str:
+    qualification_outcome_contract_v2()
+    return QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+
+
+def _qualification_outcome_extension_limits_v2() -> tuple[int, int]:
+    evolution = qualification_outcome_contract_v2().get("extension_evolution")
+    if not isinstance(evolution, Mapping):
+        raise PrivateModelRuntimeError(
+            "qualification outcome extension policy is invalid"
+        )
+    maximum_entries = evolution.get("maximum_entries")
+    maximum_canonical_bytes = evolution.get("maximum_canonical_bytes")
+    if (
+        type(maximum_entries) is not int
+        or not 1 <= maximum_entries <= 32
+        or type(maximum_canonical_bytes) is not int
+        or not 1024 <= maximum_canonical_bytes <= 64 * 1024
+        or not 1
+        <= _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_NESTING_DEPTH_V2
+        <= 8
+        or not 1
+        <= _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_ARRAY_ITEMS_V2
+        <= 1024
+        or not 1
+        <= _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_OBJECT_ENTRIES_V2
+        <= 256
+        or not 1
+        <= _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_TOKEN_CHARACTERS_V2
+        <= 1024
+        or not 1
+        <= _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_FIELD_NAME_CHARACTERS_V2
+        <= 256
+        or not 1
+        <= _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_REVERSE_DNS_SEGMENT_CHARACTERS_V2
+        <= 128
+    ):
+        raise PrivateModelRuntimeError(
+            "qualification outcome extension policy is invalid"
+        )
+    return maximum_entries, maximum_canonical_bytes
+
+
+def _qualification_outcome_extension_value_valid_v2(
+    value: Any,
+    *,
+    depth: int = 0,
+) -> bool:
+    if depth > _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_NESTING_DEPTH_V2:
+        return False
+    if value is None or type(value) in (bool, int):
+        return True
+    if isinstance(value, str):
+        return _QUALIFICATION_OUTCOME_EXTENSION_TOKEN_RE.fullmatch(value) is not None
+    if isinstance(value, list):
+        return (
+            len(value)
+            <= _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_ARRAY_ITEMS_V2
+            and all(
+                _qualification_outcome_extension_value_valid_v2(
+                    item,
+                    depth=depth + 1,
+                )
+                for item in value
+            )
+        )
+    if isinstance(value, Mapping):
+        return (
+            len(value)
+            <= _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_OBJECT_ENTRIES_V2
+            and all(
+                isinstance(key, str)
+                and _QUALIFICATION_OUTCOME_EXTENSION_FIELD_RE.fullmatch(key)
+                and _qualification_outcome_extension_value_valid_v2(
+                    item,
+                    depth=depth + 1,
+                )
+                for key, item in value.items()
+            )
+        )
+    return False
+
+
+def _qualification_outcome_extensions_valid_v2(
+    value: Any,
+    *,
+    allow_required_route_commitments: bool = False,
+) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    maximum_entries, maximum_canonical_bytes = (
+        _qualification_outcome_extension_limits_v2()
+    )
+    document = dict(value)
+    required_commitments = document.get(
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2
+    )
+    if required_commitments is not None and (
+        not allow_required_route_commitments
+        or not isinstance(required_commitments, list)
+        or required_commitments != sorted(required_commitments)
+        or len(set(required_commitments)) != len(required_commitments)
+        or len(required_commitments)
+        > QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2
+        or any(
+            not isinstance(item, str)
+            or _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_RE.fullmatch(
+                item
+            )
+            is None
+            for item in required_commitments
+        )
+    ):
+        return False
+    generic_extensions = {
+        key: item
+        for key, item in document.items()
+        if key
+        != QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2
+    }
+    return (
+        len(document) <= maximum_entries
+        and len(canonical_json(document).encode("utf-8"))
+        <= maximum_canonical_bytes
+        and not _contains_secret_material(document)
+        and all(
+            isinstance(key, str)
+            and _QUALIFICATION_OUTCOME_EXTENSION_KEY_RE.fullmatch(key)
+            for key in document
+        )
+        and all(
+            _qualification_outcome_extension_value_valid_v2(item)
+            for item in generic_extensions.values()
+        )
+    )
+
+
+def validate_qualification_outcome_protocol_metadata_v2(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the stable protocol surface without pinning a model release.
+
+    The exact artifact remains separately hash/signature/lineage bound.  This
+    validator deliberately admits additive metadata and producer capabilities;
+    only the consumer-required subset is profile-selection authority.
+    """
+
+    if not isinstance(value, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome protocol metadata is invalid"
+        )
+    document = dict(value)
+    required_fields = set(
+        qualification_outcome_contract_v2()["metadata_core_fields"]
+    )
+    if set(document) != required_fields:
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome protocol metadata is incomplete"
+        )
+    if (
+        document.get("protocol_id") != QUALIFICATION_OUTCOME_PROTOCOL_ID_V2
+        or type(document.get("major")) is not int
+        or document.get("major") != QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2
+        or type(document.get("minor")) is not int
+        or int(document["minor"]) < 0
+        or document.get("entrypoint") != QUALIFICATION_OUTCOME_ENTRYPOINT_V2
+        or document.get("result_schema_version")
+        != QUALIFICATION_OUTCOME_ENVELOPE_SCHEMA_V2
+        or document.get("route_completion_receipt_schema_version")
+        != QUALIFICATION_ROUTE_COMPLETION_RECEIPT_SCHEMA_V1
+        or document.get("contract_sha256")
+        != qualification_outcome_contract_sha256_v2()
+    ):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome protocol is unsupported"
+        )
+    capabilities = document.get("capabilities")
+    probe = document.get("probe")
+    extensions = document.get("extensions")
+    if (
+        not isinstance(capabilities, list)
+        or capabilities != sorted(capabilities)
+        or len(set(capabilities)) != len(capabilities)
+        or not QUALIFICATION_OUTCOME_REQUIRED_CAPABILITIES_V2
+        <= set(capabilities)
+        or any(
+            not isinstance(item, str)
+            or not _QUALIFICATION_OUTCOME_SAFE_NAME_RE.fullmatch(item)
+            for item in capabilities
+        )
+        or not isinstance(probe, Mapping)
+        or set(probe) != {"schema_version", "mode", "case_ids"}
+        or probe.get("schema_version")
+        != QUALIFICATION_OUTCOME_PROTOCOL_PROBE_SCHEMA_V1
+        or probe.get("mode") != "consumer_qualification_protocol_probe"
+        or not isinstance(probe.get("case_ids"), list)
+        or probe["case_ids"] != sorted(probe["case_ids"])
+        or len(set(probe["case_ids"])) != len(probe["case_ids"])
+        or not set(QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1)
+        <= set(probe["case_ids"])
+        or any(
+            not isinstance(item, str)
+            or not _QUALIFICATION_OUTCOME_SAFE_NAME_RE.fullmatch(item)
+            for item in probe["case_ids"]
+        )
+        or not _qualification_outcome_extensions_valid_v2(extensions)
+    ):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome requirements are unsupported"
+        )
+    return document
+
+
+def validate_qualification_route_completion_receipt_v1(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one payload-free route disposition and its canonical hash."""
+
+    if not isinstance(value, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model route completion receipt is invalid"
+        )
+    document = dict(value)
+    fields = set(
+        qualification_outcome_contract_v2()["receipt_core_fields"]
+    )
+    summary = document.get("route_summary")
+    failures = document.get("failure_classes")
+    extensions = document.get("extensions")
+    probe = document.get("probe")
+    body = {key: item for key, item in document.items() if key != "receipt_sha256"}
+    if (
+        set(document) != fields
+        or document.get("schema_version")
+        != QUALIFICATION_ROUTE_COMPLETION_RECEIPT_SCHEMA_V1
+        or document.get("outcome_authority") != "sourcing_model"
+        or document.get("contract_sha256")
+        != qualification_outcome_contract_sha256_v2()
+        or document.get("completion_state") not in {"complete", "incomplete"}
+        or document.get("disposition")
+        not in {
+            "complete_nonempty",
+            "complete_confirmed_empty",
+            "incomplete_retryable",
+            "incomplete_terminal",
+        }
+        or type(document.get("retryable")) is not bool
+        or type(document.get("partial")) is not bool
+        or type(document.get("returned_count")) is not int
+        or document["returned_count"] < 0
+        or not _QUALIFICATION_OUTCOME_HASH_RE.fullmatch(
+            str(document.get("invocation_sha256") or "")
+        )
+        or not isinstance(summary, Mapping)
+        or set(summary)
+        != {
+            "attempted",
+            "completed",
+            "confirmed_empty",
+            "retryable_failed",
+            "terminal_failed",
+            "skipped",
+            "retried",
+        }
+        or any(type(item) is not int or item < 0 for item in summary.values())
+        or summary.get("attempted")
+        != summary.get("completed")
+        + summary.get("confirmed_empty")
+        + summary.get("retryable_failed")
+        + summary.get("terminal_failed")
+        or not isinstance(failures, list)
+        or failures != sorted(failures)
+        or len(set(failures)) != len(failures)
+        or len(failures) > 16
+        or any(
+            not isinstance(item, str)
+            or not _QUALIFICATION_OUTCOME_FAILURE_CLASS_RE.fullmatch(item)
+            for item in failures
+        )
+        or not _qualification_outcome_extensions_valid_v2(
+            extensions,
+            allow_required_route_commitments=True,
+        )
+        or document.get("receipt_sha256") != _qualification_outcome_sha256(body)
+    ):
+        raise PrivateModelRuntimeError(
+            "private model route completion receipt differs from protocol"
+        )
+    if probe is not None and (
+        not isinstance(probe, Mapping)
+        or set(probe) != {"schema_version", "case_id", "nonce_sha256"}
+        or probe.get("schema_version")
+        != QUALIFICATION_OUTCOME_PROTOCOL_PROBE_SCHEMA_V1
+        or probe.get("case_id")
+        not in QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1
+        or not _QUALIFICATION_OUTCOME_HASH_RE.fullmatch(
+            str(probe.get("nonce_sha256") or "")
+        )
+    ):
+        raise PrivateModelRuntimeError(
+            "private model route completion probe is invalid"
+        )
+    return document
+
+
+def validate_qualification_outcome_envelope_v2(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate typed model authority without reclassifying its disposition."""
+
+    if not isinstance(value, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome envelope is invalid"
+        )
+    document = dict(value)
+    fields = set(
+        qualification_outcome_contract_v2()["envelope_core_fields"]
+    )
+    companies = document.get("companies")
+    if not isinstance(companies, list):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome companies are invalid"
+        )
+    normalized_companies = list(
+        ensure_private_model_outputs(
+            companies,
+            context_label="qualification outcome",
+            require_non_empty=False,
+        )
+    )
+    receipt = validate_qualification_route_completion_receipt_v1(
+        document.get("route_completion_receipt")
+    )
+    extensions = document.get("extensions")
+    if (
+        set(document) != fields
+        or document.get("schema_version")
+        != QUALIFICATION_OUTCOME_ENVELOPE_SCHEMA_V2
+        or type(document.get("protocol_major")) is not int
+        or document.get("protocol_major") != QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2
+        or type(document.get("protocol_minor")) is not int
+        or document["protocol_minor"] < 0
+        or document.get("completion_state") not in {"complete", "incomplete"}
+        or document.get("contract_sha256")
+        != qualification_outcome_contract_sha256_v2()
+        or document.get("completion_state") != receipt["completion_state"]
+        or receipt.get("returned_count") != len(normalized_companies)
+        or not _qualification_outcome_extensions_valid_v2(extensions)
+    ):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome differs from protocol"
+        )
+
+    complete = document["completion_state"] == "complete"
+    disposition = receipt["disposition"]
+    summary = receipt["route_summary"]
+    if (
+        receipt["partial"] != (
+            not complete and bool(normalized_companies)
+        )
+        or (
+            complete
+            and (
+                receipt["retryable"]
+                or receipt["failure_classes"]
+                or summary["retryable_failed"] != 0
+                or summary["terminal_failed"] != 0
+                or disposition
+                != (
+                    "complete_nonempty"
+                    if normalized_companies
+                    else "complete_confirmed_empty"
+                )
+            )
+        )
+        or (
+            not complete
+            and (
+                not receipt["failure_classes"]
+                or disposition
+                not in {"incomplete_retryable", "incomplete_terminal"}
+                or receipt["retryable"]
+                != (disposition == "incomplete_retryable")
+                or (
+                    disposition == "incomplete_retryable"
+                    and summary["retryable_failed"] <= 0
+                )
+                or (
+                    disposition == "incomplete_terminal"
+                    and summary["terminal_failed"] <= 0
+                )
+            )
+        )
+        or (
+            disposition == "complete_confirmed_empty"
+            and summary["confirmed_empty"] <= 0
+        )
+    ):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome state is inconsistent"
+        )
+    return document
+
+
+def validate_qualification_outcome_protocol_probe_cases_v1(
+    value: Mapping[str, Any],
+    *,
+    expected_nonce_sha256s: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Exercise both sides of the empty/incomplete boundary before activation."""
+
+    if not isinstance(value, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome protocol probe is invalid"
+        )
+    document = {str(key): item for key, item in value.items()}
+    if (
+        set(document) != set(QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1)
+    ):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome protocol probe differs"
+        )
+    complete = validate_qualification_outcome_envelope_v2(
+        document["complete_confirmed_empty"]
+    )
+    incomplete = validate_qualification_outcome_envelope_v2(
+        document["incomplete_retryable"]
+    )
+    complete_receipt = complete["route_completion_receipt"]
+    incomplete_receipt = incomplete["route_completion_receipt"]
+    complete_summary = complete_receipt["route_summary"]
+    incomplete_summary = incomplete_receipt["route_summary"]
+    if (
+        complete["completion_state"] != "complete"
+        or complete["companies"]
+        or complete_receipt["disposition"] != "complete_confirmed_empty"
+        or complete_receipt["retryable"]
+        or complete_receipt["failure_classes"]
+        or complete_summary
+        != {
+            "attempted": 1,
+            "completed": 0,
+            "confirmed_empty": 1,
+            "retryable_failed": 0,
+            "terminal_failed": 0,
+            "skipped": 0,
+            "retried": 0,
+        }
+        or incomplete["completion_state"] != "incomplete"
+        or incomplete["companies"]
+        or incomplete_receipt["disposition"] != "incomplete_retryable"
+        or incomplete_receipt["retryable"] is not True
+        or incomplete_receipt["failure_classes"] != ["retryable_provider"]
+        or incomplete_summary
+        != {
+            "attempted": 1,
+            "completed": 0,
+            "confirmed_empty": 0,
+            "retryable_failed": 1,
+            "terminal_failed": 0,
+            "skipped": 0,
+            "retried": 0,
+        }
+    ):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome protocol probe semantics differ"
+        )
+    expected_hashes = dict(expected_nonce_sha256s or {})
+    for case_id, envelope in document.items():
+        probe = envelope["route_completion_receipt"].get("probe")
+        if (
+            not isinstance(probe, Mapping)
+            or probe.get("case_id") != case_id
+            or (
+                expected_hashes
+                and probe.get("nonce_sha256") != expected_hashes.get(case_id)
+            )
+        ):
+            raise PrivateModelRuntimeError(
+                "private model qualification outcome protocol probe nonce differs"
+            )
+    return document
 
 
 @dataclass(frozen=True)
@@ -1235,12 +1870,30 @@ def validate_sourcing_adapter_metadata(
     """
 
     document = dict(metadata)
+    raw_qualification_protocol = document.get(
+        "qualification_outcome_protocol"
+    )
+    qualification_protocol = (
+        validate_qualification_outcome_protocol_metadata_v2(
+            raw_qualification_protocol
+        )
+        if raw_qualification_protocol is not None
+        else None
+    )
+    versioned_qualification = qualification_protocol is not None
     bindings_provided = expected_semantic_bindings is not None
     semantic_bindings = dict(expected_semantic_bindings or {})
     expected_adapter_version = str(
         semantic_bindings.get("adapter_version") or ""
     )
-    if bindings_provided:
+    if versioned_qualification:
+        adapter_version_valid = bool(
+            re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+                str(document.get("adapter_version") or ""),
+            )
+        )
+    elif bindings_provided:
         adapter_version_valid = bool(
             expected_adapter_version
             and document.get("adapter_version") == expected_adapter_version
@@ -1253,14 +1906,23 @@ def validate_sourcing_adapter_metadata(
         raise PrivateModelRuntimeError(
             "private model does not declare a reviewed adapter contract"
         )
-    if (
-        document.get("component_registry_version")
-        != EXPECTED_COMPONENT_REGISTRY_VERSION
-    ):
+    if versioned_qualification:
+        component_registry_version_valid = bool(
+            re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+                str(document.get("component_registry_version") or ""),
+            )
+        )
+    else:
+        component_registry_version_valid = (
+            document.get("component_registry_version")
+            == EXPECTED_COMPONENT_REGISTRY_VERSION
+        )
+    if not component_registry_version_valid:
         raise PrivateModelRuntimeError(
             "private model does not declare the supported component registry v2"
         )
-    if semantic_bindings and (
+    if not versioned_qualification and semantic_bindings and (
         document.get("component_registry_version")
         != semantic_bindings.get("component_registry_version")
         or document.get("scoring_adapter_version")
@@ -1272,14 +1934,26 @@ def validate_sourcing_adapter_metadata(
     capability_contract_version = str(
         document.get("capability_contract_version") or ""
     )
-    required_capabilities = EXPECTED_RUNTIME_CAPABILITIES_BY_CONTRACT_VERSION.get(
-        capability_contract_version
+    required_capabilities = (
+        frozenset(
+            {
+                "deadline",
+                "emit",
+                "http_fetch",
+                "probe_origin",
+                "resolve_host",
+            }
+        )
+        if versioned_qualification
+        else EXPECTED_RUNTIME_CAPABILITIES_BY_CONTRACT_VERSION.get(
+            capability_contract_version
+        )
     )
     if required_capabilities is None:
         raise PrivateModelRuntimeError(
             "private model does not declare a supported runtime capability contract"
         )
-    if semantic_bindings and capability_contract_version != semantic_bindings.get(
+    if not versioned_qualification and semantic_bindings and capability_contract_version != semantic_bindings.get(
         "capability_contract_version"
     ):
         raise PrivateModelRuntimeError(
@@ -1288,9 +1962,9 @@ def validate_sourcing_adapter_metadata(
     capabilities = {
         str(item) for item in document.get("runtime_capabilities") or ()
     }
-    if capabilities != required_capabilities:
+    if not required_capabilities <= capabilities:
         raise PrivateModelRuntimeError(
-            "private model runtime capability set differs from the Lab contract"
+            "private model runtime capability set is missing a Lab requirement"
         )
     if not str(document.get("resilience_policy_version") or "").startswith(
         "sourcing-model-resilience:"
@@ -1323,7 +1997,14 @@ def validate_sourcing_adapter_metadata(
     expected_compiler_version = str(
         semantic_bindings.get("routing_compiler_version") or ""
     )
-    if semantic_bindings:
+    if versioned_qualification:
+        compiler_version_valid = bool(
+            re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+                str(routing.get("compiler_version") or ""),
+            )
+        )
+    elif semantic_bindings:
         compiler_version_valid = bool(
             expected_compiler_version
             and routing.get("compiler_version") == expected_compiler_version
@@ -3573,6 +4254,53 @@ def _docker_adapter_bootstrap_for_qualify_compatibility(
         "",
         1,
     )
+
+
+def _docker_adapter_bootstrap_for_qualification_protocol_v2() -> str:
+    """Select the versioned outcome entrypoint without a release allowlist."""
+
+    bootstrap = _docker_adapter_bootstrap_for_qualify_compatibility(
+        preserve_native_qualify=True
+    )
+    legacy_capability_patch = (
+        "    _research_lab_patch_affected_runtime_capability_scope(module)\n"
+    )
+    if bootstrap.count(legacy_capability_patch) != 1:
+        raise PrivateModelRuntimeError(
+            "qualification outcome capability bootstrap is invalid"
+        )
+    # The exact-SHA patch is retained solely for historical adapters. A v2
+    # producer owns capability-scope preservation. Admission nonce probes prove
+    # the outcome ABI; the hermetic production-flow transition separately
+    # proves native host-capability preservation/restoration. Tying either to a
+    # reviewed source hash would recreate the release-tuple evolution trap.
+    bootstrap = bootstrap.replace(legacy_capability_patch, "", 1)
+    old = "    fn = getattr(module, callable_name)\n"
+    new = r'''    if callable_name != "run_icp":
+        raise RuntimeError("qualification outcome operation is invalid")
+    _outcome_metadata = module.adapter_metadata()
+    _outcome_protocol = (
+        _outcome_metadata.get("qualification_outcome_protocol")
+        if isinstance(_outcome_metadata, dict)
+        else None
+    )
+    if (
+        not isinstance(_outcome_protocol, dict)
+        or _outcome_protocol.get("protocol_id")
+        != "sourcing-model.qualification-outcome"
+        or _outcome_protocol.get("major") != 2
+        or _outcome_protocol.get("entrypoint") != "run_icp_outcome"
+        or _outcome_protocol.get("result_schema_version")
+        != "sourcing-model.qualification-outcome.v2"
+    ):
+        raise RuntimeError("qualification outcome protocol is unsupported")
+    fn = getattr(module, "run_icp_outcome")
+'''
+    if bootstrap.count(old) != 1:
+        raise PrivateModelRuntimeError(
+            "qualification outcome bootstrap template is invalid"
+        )
+    return bootstrap.replace(old, new, 1)
 
 
 _DOCKER_METADATA_BOOTSTRAP = r"""

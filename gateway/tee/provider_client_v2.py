@@ -6,11 +6,13 @@ import asyncio
 import base64
 from contextlib import contextmanager
 import contextvars
+from datetime import datetime, timezone
 from email.message import Message
 import hashlib
 import io
 import json
 import re
+import secrets
 import sys
 import threading
 from typing import Any, Callable, Dict, Mapping, Optional
@@ -27,11 +29,21 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_ENDPOINT_HOST,
 )
-from leadpoet_canonical.attested_v2 import sha256_bytes, validate_transport_attempt
+from leadpoet_canonical.attested_v2 import (
+    build_transport_attempt,
+    canonical_json,
+    sha256_bytes,
+    sha256_json,
+    validate_transport_attempt,
+)
 from gateway.tee.source_add_runtime_v2 import (
     source_add_dynamic_retry_policy_hash,
     source_add_route_for_url_v2,
     validate_source_add_runtime_catalog_v2,
+)
+from research_lab.eval.private_runtime import (
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2,
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2,
 )
 
 
@@ -238,6 +250,15 @@ _CREDENTIAL_HEADERS = {
     "x-api-key",
     "x-auth-token",
 }
+_QUALIFICATION_ROUTE_COMMITMENT_HEADER = (
+    "x-leadpoet-qualification-route-commitment"
+)
+_QUALIFICATION_ROUTE_COMMITMENT_RE = re.compile(
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2
+)
+_MAX_QUALIFICATION_ROUTE_COMMITMENTS = (
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -262,8 +283,28 @@ def _headers_without_credentials(headers: Mapping[str, Any]) -> Dict[str, str]:
     return {
         str(name): str(value)
         for name, value in headers.items()
-        if str(name).lower() not in _CREDENTIAL_HEADERS
+        if str(name).lower()
+        not in _CREDENTIAL_HEADERS
+        | {_QUALIFICATION_ROUTE_COMMITMENT_HEADER}
     }
+
+
+def _qualification_route_commitment(headers: Mapping[str, Any]) -> str:
+    values = [
+        str(value or "").strip()
+        for name, value in headers.items()
+        if str(name).strip().lower()
+        == _QUALIFICATION_ROUTE_COMMITMENT_HEADER
+    ]
+    if not values:
+        return ""
+    if len(values) != 1 or not _QUALIFICATION_ROUTE_COMMITMENT_RE.fullmatch(
+        values[0]
+    ):
+        raise ProviderClientV2Error(
+            "qualification route commitment header is invalid"
+        )
+    return values[0]
 
 
 def _timeout_ms(value: Any, default_ms: int) -> int:
@@ -352,6 +393,11 @@ class _ExecutionScope:
         self.attempts = {}  # type: Dict[str, int]
         self.request_intents = set()
         self.terminals = {}
+        self.terminal_http_statuses = {}
+        self.terminal_attempt_hashes = {}
+        self.route_commitments = {}
+        self.intent_sequences = {}
+        self.next_intent_sequence = 0
         self.lock = threading.Lock()
 
     def next_attempt(self, fingerprint: str) -> int:
@@ -360,24 +406,88 @@ class _ExecutionScope:
             self.attempts[fingerprint] = value + 1
             return value
 
-    def record_intent(self, logical_operation_id: str, attempt_number: int) -> None:
+    def record_intent(
+        self,
+        logical_operation_id: str,
+        attempt_number: int,
+        qualification_route_commitment: str = "",
+    ) -> None:
         with self.lock:
             key = (str(logical_operation_id), int(attempt_number))
             if key in self.request_intents:
                 raise ProviderClientV2Error("provider attempt intent is duplicated")
+            commitment = str(qualification_route_commitment or "")
+            if commitment and not _QUALIFICATION_ROUTE_COMMITMENT_RE.fullmatch(
+                commitment
+            ):
+                raise ProviderClientV2Error(
+                    "qualification route commitment is invalid"
+                )
+            known_commitments = {
+                item for item in self.route_commitments.values() if item
+            }
+            if commitment and any(
+                existing_commitment == commitment
+                and existing_key not in self.terminals
+                for existing_key, existing_commitment in self.route_commitments.items()
+            ):
+                raise ProviderClientV2Error(
+                    "qualification route commitment already has an in-flight intent"
+                )
+            if (
+                commitment
+                and commitment not in known_commitments
+                and len(known_commitments)
+                >= _MAX_QUALIFICATION_ROUTE_COMMITMENTS
+            ):
+                raise ProviderClientV2Error(
+                    "qualification route commitment limit is exceeded"
+                )
             self.request_intents.add(key)
+            self.route_commitments[key] = commitment
+            self.intent_sequences[key] = self.next_intent_sequence
+            self.next_intent_sequence += 1
 
     def record_terminal(
         self,
         logical_operation_id: str,
         attempt_number: int,
         terminal_status: str,
+        http_status: Any = None,
+        attempt_hash: str = "",
     ) -> None:
         with self.lock:
             key = (str(logical_operation_id), int(attempt_number))
             if key not in self.request_intents or key in self.terminals:
                 raise ProviderClientV2Error("provider terminal does not bind one intent")
+            if isinstance(http_status, bool):
+                raise ProviderClientV2Error("provider terminal HTTP status is invalid")
+            if http_status is None:
+                normalized_http_status = None
+            else:
+                try:
+                    normalized_http_status = int(http_status)
+                except (TypeError, ValueError) as exc:
+                    raise ProviderClientV2Error(
+                        "provider terminal HTTP status is invalid"
+                    ) from exc
+                if not 100 <= normalized_http_status <= 599:
+                    raise ProviderClientV2Error(
+                        "provider terminal HTTP status is invalid"
+                    )
+            normalized_attempt_hash = str(attempt_hash or "")
+            if normalized_attempt_hash and not _HASH_RE.fullmatch(
+                normalized_attempt_hash
+            ):
+                raise ProviderClientV2Error(
+                    "provider terminal attempt hash is invalid"
+                )
+            # Mutate the observation only after every terminal field validates;
+            # a rejected record must not poison a later valid terminal for the
+            # same measured intent.
             self.terminals[key] = str(terminal_status)
+            self.terminal_http_statuses[key] = normalized_http_status
+            self.terminal_attempt_hashes[key] = normalized_attempt_hash
 
     def assert_accepted_result_is_complete(self) -> None:
         with self.lock:
@@ -400,6 +510,111 @@ class _ExecutionScope:
                 raise ProviderClientV2Error(
                     "provider transport did not authenticate a terminal response"
                 )
+
+    def completion_observation(self) -> Dict[str, Any]:
+        """Return a payload-free view of final measured provider terminals."""
+
+        with self.lock:
+            latest: Dict[str, tuple[int, str, Any, str]] = {}
+            for (logical_operation_id, attempt_number), status in self.terminals.items():
+                current = latest.get(logical_operation_id)
+                if current is None or attempt_number > current[0]:
+                    latest[logical_operation_id] = (
+                        attempt_number,
+                        status,
+                        self.terminal_http_statuses.get(
+                            (logical_operation_id, attempt_number)
+                        ),
+                        self.terminal_attempt_hashes.get(
+                            (logical_operation_id, attempt_number), ""
+                        ),
+                    )
+            accepted = sum(
+                1
+                for _attempt, status, _http_status, _hash in latest.values()
+                if status in _ACCEPTED_RESPONSE_TERMINALS
+            )
+            successful = sum(
+                1
+                for _attempt, status, http_status, _hash in latest.values()
+                if status in _ACCEPTED_RESPONSE_TERMINALS
+                and type(http_status) is int
+                and 200 <= http_status <= 299
+            )
+            latest_attempt_hashes = sorted(
+                attempt_hash
+                for _attempt, _status, _http_status, attempt_hash in latest.values()
+                if attempt_hash
+            )
+            successful_attempt_hashes = sorted(
+                attempt_hash
+                for _attempt, status, http_status, attempt_hash in latest.values()
+                if attempt_hash
+                and status in _ACCEPTED_RESPONSE_TERMINALS
+                and type(http_status) is int
+                and 200 <= http_status <= 299
+            )
+            latest_by_route: Dict[
+                str, tuple[int, str, Any, str]
+            ] = {}
+            for key, commitment in self.route_commitments.items():
+                if not commitment or key not in self.terminals:
+                    continue
+                sequence = int(self.intent_sequences[key])
+                current = latest_by_route.get(commitment)
+                if current is None or sequence > current[0]:
+                    latest_by_route[commitment] = (
+                        sequence,
+                        self.terminals[key],
+                        self.terminal_http_statuses.get(key),
+                        self.terminal_attempt_hashes.get(key, ""),
+                    )
+            required_route_terminals = [
+                {
+                    "route_commitment": commitment,
+                    "attempt_hash": attempt_hash,
+                    "terminal_status": status,
+                    "http_status": http_status,
+                }
+                for commitment, (
+                    _sequence,
+                    status,
+                    http_status,
+                    attempt_hash,
+                ) in sorted(latest_by_route.items())
+            ]
+            successful_required_count = sum(
+                1
+                for item in required_route_terminals
+                if item["terminal_status"] in _ACCEPTED_RESPONSE_TERMINALS
+                and type(item["http_status"]) is int
+                and 200 <= item["http_status"] <= 299
+            )
+            return {
+                "schema_version": "leadpoet.provider-terminal-observation.v1",
+                "request_intent_count": len(self.request_intents),
+                "terminal_count": len(self.terminals),
+                "latest_operation_count": len(latest),
+                "accepted_latest_terminal_count": accepted,
+                "successful_latest_terminal_count": successful,
+                "failed_latest_terminal_count": len(latest) - accepted,
+                "unresolved_latest_terminal_count": len(latest) - successful,
+                "latest_terminal_attempt_hashes": latest_attempt_hashes,
+                "successful_latest_terminal_attempt_hashes": (
+                    successful_attempt_hashes
+                ),
+                "required_route_commitments": [
+                    item["route_commitment"]
+                    for item in required_route_terminals
+                ],
+                "required_route_count": len(required_route_terminals),
+                "successful_required_route_count": successful_required_count,
+                "unresolved_required_route_count": (
+                    len(required_route_terminals)
+                    - successful_required_count
+                ),
+                "required_route_terminals": required_route_terminals,
+            }
 
 
 class BrokeredProviderTransportV2:
@@ -505,6 +720,212 @@ class BrokeredProviderTransportV2:
             body=body,
             timeout_ms=timeout_ms,
         )
+
+    def execute_attested_local_http(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: Mapping[str, Any],
+        body: bytes,
+        timeout_ms: Optional[int],
+        replay_kind: str,
+        resolver: Callable[[Mapping[str, Any], str], Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        """Record one host-resolved cache/snapshot replay as a real terminal.
+
+        The sandbox supplies only an untrusted replay-kind hint.  The resolver
+        is owned by the measured host and rekeys the exact run-bound authority
+        from method, URL, and body before this path creates the canonical
+        attested-local transport attempt.
+        """
+
+        scope = self._scope.get()
+        if scope is None:
+            raise ProviderClientV2Error(
+                "attested local response is outside an attested job"
+            )
+        normalized_method = str(method).upper()
+        normalized_url = str(url)
+        parsed = urlsplit(normalized_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ProviderClientV2Error(
+                "attested local response request must use HTTPS"
+            )
+        dynamic_route = None
+        if scope.dynamic_provider_catalog is not None:
+            dynamic_route = source_add_route_for_url_v2(
+                scope.dynamic_provider_catalog,
+                normalized_method,
+                normalized_url,
+            )
+        provider_id = (
+            str(dynamic_route["provider_id"])
+            if dynamic_route is not None
+            else _provider_id(normalized_url)
+        )
+        commitment = _qualification_route_commitment(headers)
+        sanitized_headers = _headers_without_credentials(headers)
+        body_bytes = bytes(body)
+        fingerprint = sha256_bytes(
+            (
+                normalized_method
+                + "\n"
+                + normalized_url
+                + "\n"
+                + sha256_bytes(body_bytes)
+            ).encode("utf-8")
+        )
+        attempt_number = scope.next_attempt(fingerprint)
+        retry_policy_hash = scope.retry_policy_hashes.get(provider_id)
+        if not retry_policy_hash:
+            raise ProviderClientV2Error(
+                "provider retry policy is not configured"
+            )
+        if dynamic_route is not None and retry_policy_hash != (
+            source_add_dynamic_retry_policy_hash(dynamic_route)
+        ):
+            raise ProviderClientV2Error(
+                "dynamic provider retry policy differs from measured route"
+            )
+        logical_operation_id = "%s:%s" % (
+            scope.logical_operation_id,
+            fingerprint.split(":", 1)[1][:16],
+        )
+        scope.record_intent(
+            logical_operation_id,
+            attempt_number,
+            commitment,
+        )
+        resolved = dict(
+            resolver(
+                {
+                    "method": normalized_method,
+                    "url": normalized_url,
+                    "headers": sanitized_headers,
+                    "body": body_bytes,
+                    "timeout_ms": int(timeout_ms or scope.default_timeout_ms),
+                },
+                str(replay_kind),
+            )
+        )
+        if set(resolved) != {
+            "terminal_status",
+            "http_status",
+            "headers",
+            "body_b64",
+            "failure_code",
+            "local_authority_sha256",
+        }:
+            raise ProviderClientV2Error(
+                "attested local response authority fields are invalid"
+            )
+        if (
+            resolved.get("terminal_status") != "attested_local_response"
+            or resolved.get("failure_code") not in {None, ""}
+            or isinstance(resolved.get("http_status"), bool)
+            or not isinstance(resolved.get("http_status"), int)
+            or not 100 <= int(resolved["http_status"]) <= 599
+            or not isinstance(resolved.get("headers"), Mapping)
+            or not _HASH_RE.fullmatch(
+                str(resolved.get("local_authority_sha256") or "")
+            )
+        ):
+            raise ProviderClientV2Error(
+                "attested local response authority is invalid"
+            )
+        try:
+            response_body = base64.b64decode(
+                str(resolved.get("body_b64") or ""),
+                validate=True,
+            )
+        except Exception as exc:
+            raise ProviderClientV2Error(
+                "attested local response body is invalid"
+            ) from exc
+        response_headers = _headers_without_credentials(
+            dict(resolved["headers"])
+        )
+        authority_hash = str(resolved["local_authority_sha256"])
+        request_artifact = {
+            "schema_version": "leadpoet.attested-local-request.v1",
+            "authority_sha256": authority_hash,
+            "request_fingerprint": fingerprint,
+            "route_commitment": commitment,
+        }
+        request_artifact_hash = sha256_bytes(
+            canonical_json(request_artifact).encode("utf-8")
+        )
+        response_artifact_hash = sha256_bytes(response_body)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        attempt = build_transport_attempt(
+            request_id=secrets.token_hex(16),
+            logical_operation_id=logical_operation_id,
+            job_id=scope.job_id,
+            purpose=scope.purpose,
+            provider_id=provider_id,
+            attempt_number=attempt_number,
+            method=normalized_method,
+            destination_host=str(parsed.hostname),
+            destination_port=443,
+            path_hash=sha256_bytes(
+                ((parsed.path or "/") + (
+                    ("?" + parsed.query) if parsed.query else ""
+                )).encode("utf-8")
+            ),
+            nonsecret_headers_hash=sha256_json(sanitized_headers),
+            body_hash=sha256_bytes(body_bytes),
+            credential_ref_hash=sha256_json(
+                {
+                    "schema_version": "leadpoet.attested-local-authority.v1",
+                    "authority_sha256": authority_hash,
+                }
+            ),
+            retry_policy_hash=retry_policy_hash,
+            timeout_ms=int(timeout_ms or scope.default_timeout_ms),
+            started_at=now,
+            terminal_status="attested_local_response",
+            http_status=int(resolved["http_status"]),
+            response_hash=response_artifact_hash,
+            request_artifact_hash=request_artifact_hash,
+            response_artifact_hash=response_artifact_hash,
+            tls_peer_chain_hash=None,
+            tls_protocol=None,
+            failure_code=None,
+            completed_at=now,
+        )
+        validate_transport_attempt(attempt)
+        if scope.terminal_sink is not None:
+            scope.terminal_sink(dict(attempt))
+        if scope.artifact_sink is not None:
+            for artifact_hash in (
+                authority_hash,
+                request_artifact_hash,
+                response_artifact_hash,
+            ):
+                scope.artifact_sink(artifact_hash)
+        scope.record_terminal(
+            logical_operation_id,
+            attempt_number,
+            "attested_local_response",
+            int(resolved["http_status"]),
+            str(attempt["attempt_hash"]),
+        )
+        return {
+            "terminal_status": "attested_local_response",
+            "http_status": int(resolved["http_status"]),
+            "headers": response_headers,
+            "body_b64": base64.b64encode(response_body).decode("ascii"),
+            "failure_code": None,
+            "transport_attempt": attempt,
+            "evidence_artifact_hashes": sorted(
+                {
+                    authority_hash,
+                    request_artifact_hash,
+                    response_artifact_hash,
+                }
+            ),
+        }
 
     def install(self) -> None:
         with self._lock:
@@ -732,6 +1153,9 @@ class BrokeredProviderTransportV2:
             if dynamic_route is not None
             else _provider_id(url)
         )
+        qualification_route_commitment = _qualification_route_commitment(
+            headers
+        )
         sanitized_headers = _headers_without_credentials(headers)
         fingerprint = sha256_bytes(
             (
@@ -756,7 +1180,11 @@ class BrokeredProviderTransportV2:
             scope.logical_operation_id,
             fingerprint.split(":", 1)[1][:16],
         )
-        scope.record_intent(logical_operation_id, attempt_number)
+        scope.record_intent(
+            logical_operation_id,
+            attempt_number,
+            qualification_route_commitment,
+        )
         broker_request = {
             "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
             "logical_operation_id": logical_operation_id,
@@ -823,6 +1251,8 @@ class BrokeredProviderTransportV2:
             logical_operation_id,
             attempt_number,
             str(attempt["terminal_status"]),
+            attempt.get("http_status"),
+            str(attempt["attempt_hash"]),
         )
         if (
             attempt["terminal_status"] in _ACCEPTED_RESPONSE_TERMINALS

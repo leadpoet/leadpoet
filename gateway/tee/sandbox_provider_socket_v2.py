@@ -9,13 +9,17 @@ from pathlib import Path
 import socket
 import threading
 import time
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
 from leadpoet_canonical.attested_v2 import canonical_json
 
 
 SANDBOX_PROVIDER_SCHEMA_VERSION = "leadpoet.sandbox_provider_rpc.v2"
+SANDBOX_PROVIDER_LOCAL_REPLAY_KIND_FIELD = "local_replay_kind"
+SANDBOX_PROVIDER_LOCAL_REPLAY_KINDS = frozenset(
+    {"provider_evidence_cache", "snapshot"}
+)
 MAX_SANDBOX_PROVIDER_FRAME_BYTES = 64 * 1024 * 1024
 DEFAULT_SANDBOX_PROVIDER_DRAIN_TIMEOUT_SECONDS = 30.0
 _TRANSIENT_ACCEPT_ERRNOS = frozenset(
@@ -87,8 +91,19 @@ def _normalize_request(value: Mapping[str, Any]) -> Dict[str, Any]:
         "body_b64",
         "timeout_ms",
     }
-    if set(value) != fields or value.get("schema_version") != SANDBOX_PROVIDER_SCHEMA_VERSION:
+    actual_fields = frozenset(value)
+    if actual_fields not in {
+        frozenset(fields),
+        frozenset(fields | {SANDBOX_PROVIDER_LOCAL_REPLAY_KIND_FIELD}),
+    } or value.get("schema_version") != SANDBOX_PROVIDER_SCHEMA_VERSION:
         raise SandboxProviderSocketV2Error("sandbox provider request fields are invalid")
+    replay_kind = str(
+        value.get(SANDBOX_PROVIDER_LOCAL_REPLAY_KIND_FIELD) or ""
+    )
+    if replay_kind and replay_kind not in SANDBOX_PROVIDER_LOCAL_REPLAY_KINDS:
+        raise SandboxProviderSocketV2Error(
+            "sandbox provider replay kind is invalid"
+        )
     headers = value.get("headers")
     if not isinstance(headers, Mapping):
         raise SandboxProviderSocketV2Error("sandbox provider headers are invalid")
@@ -105,6 +120,7 @@ def _normalize_request(value: Mapping[str, Any]) -> Dict[str, Any]:
         "headers": {str(name): str(item) for name, item in headers.items()},
         "body": body,
         "timeout_ms": timeout_ms,
+        SANDBOX_PROVIDER_LOCAL_REPLAY_KIND_FIELD: replay_kind,
     }
 
 
@@ -117,6 +133,9 @@ class SandboxProviderSocketServerV2:
         socket_path: Path,
         transport: BrokeredProviderTransportV2,
         execution_scope: Any,
+        local_replay_resolver: Optional[
+            Callable[[Mapping[str, Any], str], Mapping[str, Any]]
+        ] = None,
         drain_timeout_seconds: float = DEFAULT_SANDBOX_PROVIDER_DRAIN_TIMEOUT_SECONDS,
     ) -> None:
         if float(drain_timeout_seconds) <= 0:
@@ -126,6 +145,7 @@ class SandboxProviderSocketServerV2:
         self.socket_path = Path(socket_path)
         self._transport = transport
         self._execution_scope = execution_scope
+        self._local_replay_resolver = local_replay_resolver
         self._drain_timeout_seconds = float(drain_timeout_seconds)
         self._listener = None
         self._thread = None
@@ -497,8 +517,22 @@ class SandboxProviderSocketServerV2:
         primary_error = None  # type: Optional[Exception]
         try:
             request = _normalize_request(_read_frame(connection))
+            replay_kind = str(
+                request.pop(SANDBOX_PROVIDER_LOCAL_REPLAY_KIND_FIELD, "")
+            )
             with self._transport.activate_scope(self._execution_scope):
-                result = self._transport.execute_http(**request)
+                if replay_kind:
+                    if self._local_replay_resolver is None:
+                        raise SandboxProviderSocketV2Error(
+                            "sandbox provider replay authority is unavailable"
+                        )
+                    result = self._transport.execute_attested_local_http(
+                        **request,
+                        replay_kind=replay_kind,
+                        resolver=self._local_replay_resolver,
+                    )
+                else:
+                    result = self._transport.execute_http(**request)
             _write_frame(connection, {"result": result})
         except Exception as exc:
             primary_error = exc

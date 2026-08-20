@@ -1286,6 +1286,53 @@ def _budget_event_key(kind: str, reservation_id: str, *parts: str) -> str:
     )
 
 
+def _mark_budget_uncertain_or_defer_legacy(
+    *,
+    store: Any,
+    reservation_id: str,
+    claim: RoutingExperimentExecutionClaim,
+    event_doc: Mapping[str, Any],
+    original: BaseException,
+    event_key: str,
+    expected_credit_microunits: int | None = None,
+) -> None:
+    """Make legacy fixture runners stop at the durable recovery boundary.
+
+    The legacy runner is retained for replay/in-memory fixtures, but it must
+    not turn an uncertain provider outcome into an adapter failure that the
+    model waterfall can retry.  A confirmed uncertainty therefore uses the
+    same typed recovery abort as the reviewed V3 runner.  A missing or
+    malformed uncertainty result remains deferred and fail-closed.
+    """
+
+    try:
+        result = store.mark_budget_uncertain(
+            event_key=event_key,
+            reservation_id=reservation_id,
+            claim=claim,
+            event_doc=dict(event_doc),
+        )
+        if (
+            not isinstance(result, Mapping)
+            or result.get("uncertain") is not True
+            or (
+                expected_credit_microunits is not None
+                and result.get("credit_microunits")
+                != expected_credit_microunits
+            )
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing provider budget uncertainty result is not confirmed"
+            )
+    except Exception:
+        raise RoutingExperimentDeferredRecoveryError(
+            "routing provider budget recovery could not be confirmed"
+        ) from original
+    raise RoutingExperimentDeferredRecoveryError(
+        "routing provider budget was marked uncertain; queue lease must expire"
+    ) from original
+
+
 class ProviderBrokerRoutingRunner:
     """Authorization-first measured runner with conservative settlement."""
 
@@ -1408,33 +1455,21 @@ class ProviderBrokerRoutingRunner:
             # interrupted provider call.  Conservatively preserve it as
             # uncertain before core emits a new retry fingerprint. A failed
             # recovery never opens a provider path.
-            try:
-                result = self.store.mark_budget_uncertain(
-                    event_key=_budget_event_key(
-                        "uncertain", reservation_id, request_fingerprint
-                    ),
-                    reservation_id=reservation_id,
-                    claim=claim,
-                    event_doc={
-                        "schema_version": "leadpoet.research_lab.routing_budget_event.v2",
-                        "request_fingerprint": request_fingerprint,
-                        "billing_state": "uncertain",
-                    },
-                )
-                if (
-                    not isinstance(result, Mapping)
-                    or result.get("uncertain") is not True
-                    or result.get("credit_microunits")
-                    not in (None, authorization.remaining_credit_microunits)
-                ):
-                    raise RoutingExperimentRuntimeError(
-                        "routing provider budget uncertainty result is not confirmed"
-                    )
-            except Exception:
-                raise RoutingExperimentDeferredRecoveryError(
-                    "routing provider budget recovery could not be confirmed"
-                ) from exc
-            raise
+            _mark_budget_uncertain_or_defer_legacy(
+                store=self.store,
+                reservation_id=reservation_id,
+                claim=claim,
+                event_doc={
+                    "schema_version": "leadpoet.research_lab.routing_budget_event.v2",
+                    "request_fingerprint": request_fingerprint,
+                    "billing_state": "uncertain",
+                },
+                original=exc,
+                event_key=_budget_event_key(
+                    "uncertain", reservation_id, request_fingerprint
+                ),
+                expected_credit_microunits=authorization.remaining_credit_microunits,
+            )
         route_family = "deepline" if binding.provider_id == "deepline" else "provider_broker_v2"
         broker_request = {
             "schema_version": "leadpoet.research_lab.routing_broker_request.v2",
@@ -1466,24 +1501,23 @@ class ProviderBrokerRoutingRunner:
                 },
                 claim=claim,
             )
-        except Exception:
-            try:
-                self.store.mark_budget_uncertain(
-                    event_key=_budget_event_key(
-                        "uncertain", reservation_id, request_fingerprint
-                    ),
-                    reservation_id=reservation_id,
-                    claim=claim,
-                    event_doc={
-                        "schema_version": "leadpoet.research_lab.routing_budget_event.v2",
-                        "request_fingerprint": request_fingerprint,
-                        "billing_state": "uncertain",
-                        "recovery_reason": "dispatch_marker_persistence_failed",
-                    },
-                )
-            except Exception:
-                pass
-            raise
+        except Exception as exc:
+            _mark_budget_uncertain_or_defer_legacy(
+                store=self.store,
+                reservation_id=reservation_id,
+                claim=claim,
+                event_doc={
+                    "schema_version": "leadpoet.research_lab.routing_budget_event.v2",
+                    "request_fingerprint": request_fingerprint,
+                    "billing_state": "uncertain",
+                    "recovery_reason": "dispatch_marker_persistence_failed",
+                },
+                original=exc,
+                event_key=_budget_event_key(
+                    "uncertain", reservation_id, request_fingerprint
+                ),
+                expected_credit_microunits=authorization.remaining_credit_microunits,
+            )
         try:
             result = self.broker_executor(broker_request)
             receipt = self._receipt_from_result(
@@ -1524,8 +1558,8 @@ class ProviderBrokerRoutingRunner:
                     },
                 )
             else:
-                self.store.mark_budget_uncertain(
-                    event_key=_budget_event_key("uncertain", reservation_id, key),
+                _mark_budget_uncertain_or_defer_legacy(
+                    store=self.store,
                     reservation_id=reservation_id,
                     claim=claim,
                     event_doc={
@@ -1533,14 +1567,21 @@ class ProviderBrokerRoutingRunner:
                         "attempt_key": key,
                         "billing_state": "uncertain",
                     },
+                    original=RoutingExperimentRuntimeError(
+                        "routing provider billing state is uncertain"
+                    ),
+                    event_key=_budget_event_key("uncertain", reservation_id, key),
+                    expected_credit_microunits=authorization.remaining_credit_microunits,
                 )
             return receipt.to_dict()
-        except Exception:
-            # A timeout or process boundary error may still be billed.  Keep
-            # the reservation as uncertain before allowing the pure runner to
-            # record its typed adapter-failure receipt and retry identity.
-            self.store.mark_budget_uncertain(
-                event_key=_budget_event_key("uncertain", reservation_id, request_fingerprint),
+        except RoutingExperimentDeferredRecoveryError:
+            raise
+        except Exception as exc:
+            # A timeout or process boundary error may still be billed. Keep
+            # the reservation uncertain and abort the model waterfall so no
+            # zero-cost adapter failure or later provider can hide that cost.
+            _mark_budget_uncertain_or_defer_legacy(
+                store=self.store,
                 reservation_id=reservation_id,
                 claim=claim,
                 event_doc={
@@ -1548,8 +1589,12 @@ class ProviderBrokerRoutingRunner:
                     "request_fingerprint": request_fingerprint,
                     "billing_state": "uncertain",
                 },
+                original=exc,
+                event_key=_budget_event_key(
+                    "uncertain", reservation_id, request_fingerprint
+                ),
+                expected_credit_microunits=authorization.remaining_credit_microunits,
             )
-            raise
 
     def for_execution(
         self,
@@ -2154,11 +2199,19 @@ class ReviewedProviderBrokerRoutingRunner:
                 ),
             )
             if projected["billing_state"] != "known":
-                self.store.mark_budget_uncertain(
-                    event_key=_budget_event_key("uncertain", reservation_id, key),
+                self._mark_budget_uncertain_or_defer(
                     reservation_id=reservation_id,
                     claim=execution.claim,
-                    event_doc={**reserve_doc, "attempt_key": key, "billing_state": "uncertain"},
+                    event_doc={
+                        **reserve_doc,
+                        "attempt_key": key,
+                        "billing_state": "uncertain",
+                    },
+                    original=RoutingExperimentRuntimeError(
+                        "routing provider billing state is uncertain"
+                    ),
+                    event_key=_budget_event_key("uncertain", reservation_id, key),
+                    expected_credit_microunits=prepared.credit_ceiling_microunits,
                 )
             else:
                 self.store.settle_budget(
@@ -2169,6 +2222,8 @@ class ReviewedProviderBrokerRoutingRunner:
                     event_doc={**reserve_doc, "attempt_key": key, "billing_state": "known"},
                 )
             return receipt.to_dict()
+        except RoutingExperimentDeferredRecoveryError:
+            raise
         except Exception as exc:
             self._mark_budget_uncertain_or_defer(
                 reservation_id=reservation_id,
@@ -2224,6 +2279,14 @@ class ReviewedProviderBrokerRoutingRunner:
             raise RoutingExperimentDeferredRecoveryError(
                 "routing provider budget recovery could not be confirmed"
             ) from original
+        # A confirmed uncertainty is still a recovery boundary.  The provider
+        # may already have been paid, and the model waterfall must not turn the
+        # original runtime error into a reusable zero-cost adapter failure or
+        # continue to another provider.  The worker/consumer keep this typed
+        # deferred error's claim lease open for SQL expiry and recovery.
+        raise RoutingExperimentDeferredRecoveryError(
+            "routing provider budget was marked uncertain; queue lease must expire"
+        ) from original
 
 
 class RoutingExperimentService:

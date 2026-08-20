@@ -8,6 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway.research_lab.routing_experiment_runtime import (
+    RoutingExperimentDeferredRecoveryError,
+)
 from research_lab.canonical import sha256_json
 from research_lab.routing_experiments import (
     COMPANY_FIRST_CONTINUATION_SCHEMA_VERSION,
@@ -2334,6 +2337,36 @@ def test_v2_fail_closed_on_timeout_malformed_retry_and_budget():
         evaluate_routing_experiment_v2(tiny, gold_labels=labels, runner=budget_runner, adapters=adapters, require_isolation=False)
     assert budget_calls == []
 
+
+def test_v2_runner_abort_stops_waterfall_without_persisting_failure_receipts():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    provider_store = ProviderReceiptStore()
+    decision_store = RoutingDecisionReceiptStore()
+    calls = []
+
+    def recovery_runner(binding, unit, request):
+        calls.append((binding.tool_id, unit, request))
+        raise RoutingExperimentDeferredRecoveryError(
+            "routing provider budget was marked uncertain; queue lease must expire"
+        )
+
+    with pytest.raises(
+        RoutingExperimentDeferredRecoveryError,
+        match="budget was marked uncertain",
+    ):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=recovery_runner,
+            adapters=adapters,
+            receipt_store=provider_store,
+            decision_store=decision_store,
+            require_isolation=False,
+        )
+
+    assert len(calls) == 1
+    assert tuple(provider_store.repository.keys()) == ()
+    assert decision_store.values() == ()
 
 def test_v2_decision_outcomes_ignore_adversarial_model_projection():
     spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")

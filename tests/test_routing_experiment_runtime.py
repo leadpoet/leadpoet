@@ -194,7 +194,10 @@ def test_legacy_v2_executor_rejects_v3_durable_store_at_construction():
 
 def test_invalid_broker_cost_never_becomes_a_provider_attempt_and_marks_budget_uncertain():
     root, bound = _runner(broker=lambda _request: _result(credit=11))
-    with pytest.raises(RoutingExperimentRuntimeError, match="exceeds authorized credit"):
+    with pytest.raises(
+        RoutingExperimentDeferredRecoveryError,
+        match="budget was marked uncertain",
+    ):
         bound(_binding(), "company-1", _hash("6"), _authorization(credit=10))
     assert [name for name, _kwargs in bound.store.calls] == ["reserve", "dispatch", "uncertain"]
 
@@ -210,7 +213,10 @@ def test_reservation_failure_never_reaches_provider_and_conservatively_marks_unc
         broker=lambda request: broker_calls.append(request) or _result(),
         store=_ExpiredReservationStore([]),
     )
-    with pytest.raises(RuntimeError, match="reservation expired"):
+    with pytest.raises(
+        RoutingExperimentDeferredRecoveryError,
+        match="budget was marked uncertain",
+    ):
         bound(_binding(), "company-1", _hash("6"), _authorization())
     assert broker_calls == []
     assert [name for name, _kwargs in bound.store.calls] == ["reserve", "uncertain"]
@@ -248,7 +254,10 @@ def test_malformed_host_reservation_result_never_reaches_provider():
         broker=lambda request: broker_calls.append(request) or _result(),
         store=_MalformedReservationStore([]),
     )
-    with pytest.raises(RoutingExperimentRuntimeError, match="durable budget reservation"):
+    with pytest.raises(
+        RoutingExperimentDeferredRecoveryError,
+        match="budget was marked uncertain",
+    ):
         bound(_binding(), "company-1", _hash("6"), _authorization())
     assert broker_calls == []
     assert [name for name, _kwargs in bound.store.calls] == ["reserve", "uncertain"]
@@ -265,7 +274,10 @@ def test_dispatch_marker_failure_never_reaches_provider_and_keeps_full_reservati
         broker=lambda request: broker_calls.append(request) or _result(),
         store=_DispatchFailureStore([]),
     )
-    with pytest.raises(RuntimeError, match="dispatch marker unavailable"):
+    with pytest.raises(
+        RoutingExperimentDeferredRecoveryError,
+        match="budget was marked uncertain",
+    ):
         bound(_binding(), "company-1", _hash("6"), _authorization())
     assert broker_calls == []
     assert [name for name, _kwargs in bound.store.calls] == ["reserve", "dispatch", "uncertain"]

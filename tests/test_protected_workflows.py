@@ -647,3 +647,70 @@ def test_protected_manifest_detects_policy_constant_change(
 
     with pytest.raises(ProtectedWorkflowError, match="policy.py:POLICY_VERSION"):
         verify_manifest(copied_root, manifest)
+
+
+def test_routing_dispatch_and_budget_contract_tampering_is_protected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    relative_path = "gateway/research_lab/routing_provider_terminal_protected.py"
+    symbols = (
+        "ROUTING_PROVIDER_DISPATCH_OPERATION_V2",
+        "ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2",
+        "ROUTING_PROVIDER_DISPATCH_PURPOSE_V2",
+        "ROUTING_BUDGET_RESERVATION_SCHEMA_V3",
+        "ROUTING_BUDGET_RESERVATION_RESULT_SCHEMA_V3",
+        "ROUTING_BUDGET_RESERVATION_PROOF_SCHEMA_V3",
+        "ROUTING_BUDGET_RESERVATION_PURPOSE_V3",
+        "build_routing_budget_reservation_v3",
+        "validate_routing_budget_reservation_v3",
+        "validate_routing_budget_reservation_result_v3",
+        "routing_budget_reservation_proof_v3",
+    )
+    assert set(symbols) <= set(PROTECTED_SYMBOLS[relative_path])
+    source = (ROOT / relative_path).read_text(encoding="utf-8")
+    copied_root = tmp_path / "repo"
+    copied_path = copied_root / relative_path
+    copied_path.parent.mkdir(parents=True, exist_ok=True)
+    copied_path.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(
+        protected_workflows_module,
+        "PROTECTED_SYMBOLS",
+        {relative_path: symbols},
+    )
+    manifest = build_manifest(
+        copied_root,
+        baseline_commit="1" * 40,
+        protected_source_commit="2" * 40,
+    )
+
+    tampered_sources = (
+        source.replace(
+            'ROUTING_PROVIDER_DISPATCH_OPERATION_V2 = "routing_provider_dispatch_v2"',
+            'ROUTING_PROVIDER_DISPATCH_OPERATION_V2 = "routing_provider_dispatch_tampered_v2"',
+            1,
+        ),
+        source.replace(
+            '"leadpoet.routing_provider_dispatch_request.v2"',
+            '"leadpoet.routing_provider_dispatch_request.tampered.v2"',
+            1,
+        ),
+        source.replace(
+            'ROUTING_PROVIDER_DISPATCH_PURPOSE_V2 = ROUTING_PROVIDER_TERMINAL_PURPOSE_V2',
+            'ROUTING_PROVIDER_DISPATCH_PURPOSE_V2 = "tampered-purpose"',
+            1,
+        ),
+        source.replace(
+            '        "schema_version",\n        "reserved",',
+            '        "tampered_field",\n        "schema_version",\n        "reserved",',
+            1,
+        ),
+    )
+    for tampered in tampered_sources:
+        assert tampered != source
+        copied_path.write_text(tampered, encoding="utf-8")
+        with pytest.raises(
+            ProtectedWorkflowError,
+            match="routing_provider_terminal_protected.py",
+        ):
+            verify_manifest(copied_root, manifest)

@@ -1287,7 +1287,7 @@
       "symbol": "_baseline_runner_for_attempt"
     },
     {
-      "ast_sha256": "sha256:f77224ad1c948cd478d93c0cdc5bfd8c9b2ad99788330b6684da932e45143284",
+      "ast_sha256": "sha256:037f2df7546d39b2ddd1c86ab43cde8b1b373c6829e3f7b0da3954b6d1267675",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "_baseline_scoring_contract_hash"
     },
@@ -2997,7 +2997,12 @@
       "symbol": "MODEL_SANDBOX_VISIBLE_ROOT"
     },
     {
-      "ast_sha256": "sha256:fc7f7e4e4431d590ad36fff55487461174e06bef4ac10d611fc806598e098808",
+      "ast_sha256": "sha256:e20aeeb718bc800a669aaa25e10e7412a5cdbb85e8f7a487968c43177533f9fa",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "NATIVE_QUALIFY_RELEASE_IDENTITY_V1"
+    },
+    {
+      "ast_sha256": "sha256:24e7b0a87aebacd2b5ab0eca8551e946669bf92f7427699fe8337a8333579d73",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
@@ -3055,6 +3060,11 @@
       "ast_sha256": "sha256:bd45e1db5e605bbaf5f83beefe6d11e7e7d9e07bac1b72424520c83516ae2702",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_force_delete_runsc_sandbox"
+    },
+    {
+      "ast_sha256": "sha256:8268aebf87e71bd9734c3bc4b342b91e8c5a1ce6764d83db7363a269a5dca0d0",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_model_adapter_bootstrap_for_compatibility_receipt_v1"
     },
     {
       "ast_sha256": "sha256:934d46f6bee216decf7b0e5c1f40441de7bde03a26066c81641f12717bea1a73",
@@ -5127,6 +5137,16 @@
       "symbol": "EXPECTED_ROUTING_COMPILER_VERSIONS"
     },
     {
+      "ast_sha256": "sha256:9f157697fc7e6d679c8ed0dc5fd4b26f7e4795c000550addf9e0ccfa5a952fba",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_DOCKER_ADAPTER_BOOTSTRAP"
+    },
+    {
+      "ast_sha256": "sha256:69c6f3b0947809c0a921289016036f52f8e01c8fd4f4e421f36cef2eea84090a",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_PROVIDER_DIAGNOSTICS_BOOTSTRAP"
+    },
+    {
       "ast_sha256": "sha256:bd3116d5da7a7b7d9b70a6cce5db1d0142c64d3a98634831a8273018e8be824e",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_PROVIDER_OUTAGE_TEXT_MARKERS"
@@ -5135,6 +5155,11 @@
       "ast_sha256": "sha256:7a2b640c021fbe9bdd52d95f0a42d58fe7c26f1955ea14b6059231afa3e0c184",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_REVIEWED_CONSUMER_MANIFEST_PAIRS"
+    },
+    {
+      "ast_sha256": "sha256:10e44ead51c76b0ea004d2a2fad767b6937e60c116d1940f5a4f838e782cc95d",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_docker_adapter_bootstrap_for_qualify_compatibility"
     },
     {
       "ast_sha256": "sha256:c191686558d7a166ce1fc1674b769d73d63c97be2c94240221878e884ec48d61",
@@ -5837,7 +5862,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:c95f2c7e8427b808bc815163259f86cd7877ca86c88781b9d8fbfce03750f02c",
-  "protected_source_commit": "f71f8b676851269d9cde10ace5b45b58acb6f807",
+  "manifest_hash": "sha256:109865271c625fea876032e76d1e5914b314c18a32f3f270305c7e3b7e13f8b9",
+  "protected_source_commit": "d30bb98b562b138ca6016edb6b7a893b7bdfb4d2",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

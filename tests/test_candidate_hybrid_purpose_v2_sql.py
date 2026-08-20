@@ -15,6 +15,9 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     _role_purpose_pairs_from_constraint_v1,
 )
 from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
+from tests.historical_sql_purpose_contract import (
+    canonical_purposes_before_routing_experiment_v2,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +53,9 @@ def test_candidate_hybrid_purpose_migration_matches_canonical_contract() -> None
             re.DOTALL,
         )
         assert match is not None, role
-        historical_purposes = set(expected_purposes)
+        historical_purposes = canonical_purposes_before_routing_experiment_v2(
+            role
+        )
         if role == "gateway_scoring":
             historical_purposes.difference_update(
                 {
@@ -85,15 +90,11 @@ def test_model_compatibility_purpose_upgrade_matches_canonical_contract() -> Non
             re.DOTALL,
         )
         assert match is not None, role
-        historical_purposes = set(expected_purposes)
+        historical_purposes = canonical_purposes_before_routing_experiment_v2(
+            role
+        )
         if role == "gateway_scoring":
-            historical_purposes.difference_update(
-                {
-                    "research_lab.routing_experiment.v2",
-                    "research_lab.routing_model_binding_observation.v2",
-                    "research_lab.routing_provider_evidence.v2",
-                }
-            )
+            historical_purposes.add("research_lab.model_compatibility.v2")
         assert set(re.findall(r"'([^']+)'", match.group(1))) == historical_purposes
     assert re.search(
         r"GRANT\s+EXECUTE\s+ON\s+FUNCTION[\s\S]+?"

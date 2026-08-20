@@ -32,6 +32,7 @@ SOCKET_ENV = "LEADPOET_SANDBOX_PROVIDER_SOCKET"
 EVIDENCE_CACHE_PATH_ENV = "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH"
 EVIDENCE_MODE_ENV = "RESEARCH_LAB_PROVIDER_EVIDENCE_MODE"
 EVIDENCE_MISS_SENTINEL = "RESEARCH_LAB_PROVIDER_EVIDENCE_MISS:"
+_EVIDENCE_MISS_WRITE = os.write
 SNAPSHOT_DIR_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_DIR"
 PROVIDER_COST_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_SCOPE"
 PROVIDER_COST_CAP_MICROUSD_ENV = "RESEARCH_LAB_PROVIDER_COST_CAP_MICROUSD"
@@ -182,6 +183,11 @@ def _cached_terminal(
             "provider_evidence_fingerprint": fingerprint,
         }
     if mode == "frozen":
+        marker = (EVIDENCE_MISS_SENTINEL + fingerprint + "\n").encode("ascii")
+        try:
+            _EVIDENCE_MISS_WRITE(2, marker)
+        except OSError:
+            pass
         raise SandboxHTTPShimV2Error(EVIDENCE_MISS_SENTINEL + fingerprint)
     return None
 

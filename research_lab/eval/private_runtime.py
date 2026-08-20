@@ -57,6 +57,11 @@ SECRET_MARKERS = (
     "service_role",
 )
 PROVIDER_ERROR_MARKER = "research_lab_private_runtime_provider_error"
+PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION = "research_lab.private_runtime_failure.v1"
+PRIVATE_RUNTIME_FAILURE_MARKER = "research_lab_private_runtime_failure"
+PRIVATE_RUNTIME_FAILURE_EXIT_CODE = 70
+PRIVATE_RUNTIME_FAILURE_FALLBACK_EXIT_CODE = 71
+PRIVATE_RUNTIME_FAILURE_CLASS_IDENTITY_MAX_BYTES = 512
 # In-container trace capture (training-data tee): the diagnostics bootstrap
 # emits one single-line marker per hooked HTTP call (success AND failure) so
 # the host can reconstruct the sourcing model's own LLM/search/fetch behavior.
@@ -3376,43 +3381,101 @@ def _research_lab_patch_strict_qualify(adapter_module):
 """
 
 
-_ADAPTER_BOOTSTRAP = _PROVIDER_DIAGNOSTICS_BOOTSTRAP + r"""
+_PRIVATE_RUNTIME_FAILURE_BOOTSTRAP = r"""
+import hashlib as _research_lab_failure_hashlib
+import os as _research_lab_failure_os
+
+def _research_lab_invoke_adapter_with_failure_observation(
+    operation,
+    _failure_write=_research_lab_failure_os.write,
+    _failure_exit=_research_lab_failure_os._exit,
+    _failure_sha256=_research_lab_failure_hashlib.sha256,
+    _failure_type=type,
+    _failure_str=str,
+    _failure_len=len,
+    _failure_base_exception=BaseException,
+):
+    try:
+        return operation()
+    except _failure_base_exception as exc:
+        try:
+            exception_type = _failure_type(exc)
+            exception_module = exception_type.__module__
+            exception_qualname = exception_type.__qualname__
+            if (
+                _failure_type(exception_module) is not _failure_str
+                or _failure_type(exception_qualname) is not _failure_str
+            ):
+                _failure_exit(71)
+            exception_identity = exception_module + "." + exception_qualname
+            exception_identity_bytes = exception_identity.encode("ascii")
+            if (
+                not exception_identity_bytes
+                or _failure_len(exception_identity_bytes) > 512
+            ):
+                _failure_exit(71)
+            digest = _failure_sha256(exception_identity_bytes).hexdigest()
+            encoded_marker = (
+                b'\nresearch_lab_private_runtime_failure '
+                b'{"exception_class_hash":"sha256:'
+                + digest.encode("ascii")
+                + b'","schema_version":"research_lab.private_runtime_failure.v1"}\n'
+            )
+            written = _failure_write(2, encoded_marker)
+        except _failure_base_exception:
+            _failure_exit(71)
+        if written != _failure_len(encoded_marker):
+            _failure_exit(71)
+        _failure_exit(70)
+"""
+
+
+_ADAPTER_BOOTSTRAP = (
+    _PROVIDER_DIAGNOSTICS_BOOTSTRAP
+    + _PRIVATE_RUNTIME_FAILURE_BOOTSTRAP
+    + r"""
 import contextlib
 import importlib
 import json
 import sys
 import time
 
-source_path, module_name, callable_name = sys.argv[1:4]
-sys.path.insert(0, source_path)
-payload = json.load(sys.stdin)
-module = importlib.import_module(module_name)
-try:
-    from sourcing_model import runtime_capabilities as _sourcing_caps
-    _runtime_options = dict((payload.get("context") or {}).get("runtime_options") or {})
-    _runtime_cap = max(10.0, float(_runtime_options.get("runtime_cap_seconds") or 900.0))
-    _runtime_reserve = max(0.0, float(_runtime_options.get("finalization_reserve_seconds") or 0.0))
-    _runtime_deadline = time.monotonic() + max(1.0, _runtime_cap - _runtime_reserve)
-    _sourcing_caps.register("deadline", lambda: _runtime_deadline)
-    _sourcing_caps.register("resolve_host", lambda _name: _sourcing_caps.HostResolution.TIMEOUT)
-    _sourcing_caps.register("probe_origin", lambda _host: _sourcing_caps.OriginReachability.UNKNOWN)
-    def _emit_sourcing_event(event):
-        if isinstance(event, dict):
-            sys.stderr.write("sourcing_runtime_event " + json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
-    _sourcing_caps.register("emit", _emit_sourcing_event)
-except ImportError:
-    # A non-sourcing adapter may still fail before returning. Successful Lab
-    # sourcing calls are rejected host-side if they do not emit the receipt.
-    pass
-except (AttributeError, TypeError, ValueError) as exc:
-    raise RuntimeError("failed to register sourcing runtime capabilities") from exc
-_research_lab_patch_affected_runtime_capability_scope(module)
-_research_lab_patch_strict_qualify(module)
-fn = getattr(module, callable_name)
-with contextlib.redirect_stdout(sys.stderr):
-    result = fn(payload["icp"], payload.get("context") or {})
-sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")))
+def _research_lab_adapter_transaction():
+    source_path, module_name, callable_name = sys.argv[1:4]
+    sys.path.insert(0, source_path)
+    payload = json.load(sys.stdin)
+    module = importlib.import_module(module_name)
+    try:
+        from sourcing_model import runtime_capabilities as _sourcing_caps
+        _runtime_options = dict((payload.get("context") or {}).get("runtime_options") or {})
+        _runtime_cap = max(10.0, float(_runtime_options.get("runtime_cap_seconds") or 900.0))
+        _runtime_reserve = max(0.0, float(_runtime_options.get("finalization_reserve_seconds") or 0.0))
+        _runtime_deadline = time.monotonic() + max(1.0, _runtime_cap - _runtime_reserve)
+        _sourcing_caps.register("deadline", lambda: _runtime_deadline)
+        _sourcing_caps.register("resolve_host", lambda _name: _sourcing_caps.HostResolution.TIMEOUT)
+        _sourcing_caps.register("probe_origin", lambda _host: _sourcing_caps.OriginReachability.UNKNOWN)
+        def _emit_sourcing_event(event):
+            if isinstance(event, dict):
+                sys.stderr.write("sourcing_runtime_event " + json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+        _sourcing_caps.register("emit", _emit_sourcing_event)
+    except ImportError:
+        # A non-sourcing adapter may still fail before returning. Successful Lab
+        # sourcing calls are rejected host-side if they do not emit the receipt.
+        pass
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError("failed to register sourcing runtime capabilities") from exc
+    _research_lab_patch_affected_runtime_capability_scope(module)
+    _research_lab_patch_strict_qualify(module)
+    fn = getattr(module, callable_name)
+    with contextlib.redirect_stdout(sys.stderr):
+        result = fn(payload["icp"], payload.get("context") or {})
+    sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")))
+
+_research_lab_invoke_adapter_with_failure_observation(
+    _research_lab_adapter_transaction
+)
 """
+)
 
 
 _ADAPTER_METADATA_BOOTSTRAP = r"""
@@ -3429,7 +3492,10 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 """
 
 
-_DOCKER_ADAPTER_BOOTSTRAP = _PROVIDER_DIAGNOSTICS_BOOTSTRAP + r"""
+_DOCKER_ADAPTER_BOOTSTRAP = (
+    _PROVIDER_DIAGNOSTICS_BOOTSTRAP
+    + _PRIVATE_RUNTIME_FAILURE_BOOTSTRAP
+    + r"""
 import contextlib
 import importlib
 import json
@@ -3447,35 +3513,41 @@ for _research_lab_logger_name in (
 ):
     logging.getLogger(_research_lab_logger_name).setLevel(logging.WARNING)
 
-module_name, callable_name = sys.argv[1:3]
-payload = json.load(sys.stdin)
-module = importlib.import_module(module_name)
-try:
-    from sourcing_model import runtime_capabilities as _sourcing_caps
-    _runtime_options = dict((payload.get("context") or {}).get("runtime_options") or {})
-    _runtime_cap = max(10.0, float(_runtime_options.get("runtime_cap_seconds") or 900.0))
-    _runtime_reserve = max(0.0, float(_runtime_options.get("finalization_reserve_seconds") or 0.0))
-    _runtime_deadline = time.monotonic() + max(1.0, _runtime_cap - _runtime_reserve)
-    _sourcing_caps.register("deadline", lambda: _runtime_deadline)
-    _sourcing_caps.register("resolve_host", lambda _name: _sourcing_caps.HostResolution.TIMEOUT)
-    _sourcing_caps.register("probe_origin", lambda _host: _sourcing_caps.OriginReachability.UNKNOWN)
-    def _emit_sourcing_event(event):
-        if isinstance(event, dict):
-            sys.stderr.write("sourcing_runtime_event " + json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
-    _sourcing_caps.register("emit", _emit_sourcing_event)
-except ImportError:
-    # A non-sourcing adapter may still fail before returning. Successful Lab
-    # sourcing calls are rejected host-side if they do not emit the receipt.
-    pass
-except (AttributeError, TypeError, ValueError) as exc:
-    raise RuntimeError("failed to register sourcing runtime capabilities") from exc
-_research_lab_patch_affected_runtime_capability_scope(module)
-_research_lab_patch_strict_qualify(module)
-fn = getattr(module, callable_name)
-with contextlib.redirect_stdout(sys.stderr):
-    result = fn(payload["icp"], payload.get("context") or {})
-sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")))
+def _research_lab_adapter_transaction():
+    module_name, callable_name = sys.argv[1:3]
+    payload = json.load(sys.stdin)
+    module = importlib.import_module(module_name)
+    try:
+        from sourcing_model import runtime_capabilities as _sourcing_caps
+        _runtime_options = dict((payload.get("context") or {}).get("runtime_options") or {})
+        _runtime_cap = max(10.0, float(_runtime_options.get("runtime_cap_seconds") or 900.0))
+        _runtime_reserve = max(0.0, float(_runtime_options.get("finalization_reserve_seconds") or 0.0))
+        _runtime_deadline = time.monotonic() + max(1.0, _runtime_cap - _runtime_reserve)
+        _sourcing_caps.register("deadline", lambda: _runtime_deadline)
+        _sourcing_caps.register("resolve_host", lambda _name: _sourcing_caps.HostResolution.TIMEOUT)
+        _sourcing_caps.register("probe_origin", lambda _host: _sourcing_caps.OriginReachability.UNKNOWN)
+        def _emit_sourcing_event(event):
+            if isinstance(event, dict):
+                sys.stderr.write("sourcing_runtime_event " + json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+        _sourcing_caps.register("emit", _emit_sourcing_event)
+    except ImportError:
+        # A non-sourcing adapter may still fail before returning. Successful Lab
+        # sourcing calls are rejected host-side if they do not emit the receipt.
+        pass
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError("failed to register sourcing runtime capabilities") from exc
+    _research_lab_patch_affected_runtime_capability_scope(module)
+    _research_lab_patch_strict_qualify(module)
+    fn = getattr(module, callable_name)
+    with contextlib.redirect_stdout(sys.stderr):
+        result = fn(payload["icp"], payload.get("context") or {})
+    sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")))
+
+_research_lab_invoke_adapter_with_failure_observation(
+    _research_lab_adapter_transaction
+)
 """
+)
 
 
 def _docker_adapter_bootstrap_for_qualify_compatibility(
@@ -3491,11 +3563,16 @@ def _docker_adapter_bootstrap_for_qualify_compatibility(
             "private model qualify compatibility decision is invalid"
         )
     legacy_patch_call = "_research_lab_patch_strict_qualify(module)\n"
-    if _DOCKER_ADAPTER_BOOTSTRAP.count(legacy_patch_call) != 1:
+    indented_legacy_patch_call = "    " + legacy_patch_call
+    if _DOCKER_ADAPTER_BOOTSTRAP.count(indented_legacy_patch_call) != 1:
         raise PrivateModelRuntimeError(
             "private model qualify compatibility bootstrap is invalid"
         )
-    return _DOCKER_ADAPTER_BOOTSTRAP.replace(legacy_patch_call, "", 1)
+    return _DOCKER_ADAPTER_BOOTSTRAP.replace(
+        indented_legacy_patch_call,
+        "",
+        1,
+    )
 
 
 _DOCKER_METADATA_BOOTSTRAP = r"""

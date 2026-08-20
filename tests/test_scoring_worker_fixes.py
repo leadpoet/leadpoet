@@ -1204,6 +1204,14 @@ def test_stale_claim_recovery_preserves_operator_shards_but_lease_owner_gets_all
             True,
         ),
         (
+            "V2 scoring failed closed: execution_modelsandboxv2error/"
+            "runsc_nonzero/sha256:"
+            + "a" * 64
+            + "/sha256:"
+            + "b" * 64,
+            True,
+        ),
+        (
             "V2 scoring failed closed: execution_providerclientv2error; "
             "retryable_attested_provider_transport_failure",
             True,

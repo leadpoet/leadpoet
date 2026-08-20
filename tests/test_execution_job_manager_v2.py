@@ -23,6 +23,10 @@ from gateway.tee.execution_job_manager_v2 import (
 )
 from gateway.tee import execution_job_manager_v2 as job_manager_v2
 from gateway.tee.host_operation_channel_v2 import HostOperationChannelV2
+from gateway.tee.model_sandbox_v2 import (
+    ModelSandboxFailureProjectionV1,
+    ModelSandboxV2Error,
+)
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     DIRECT_EGRESS_REF_HASH,
@@ -1109,6 +1113,7 @@ def test_executor_failure_has_signed_failure_receipt_and_canonical_terminal_resu
     receipt = manager.receipt("score-job-1")
     validate_signed_execution_receipt(receipt)
     assert receipt["status"] == "failed"
+    assert receipt["failure_code"] == "execution_runtimeerror"
     result = manager.result_chunk(job_id="score-job-1")
     terminal = json.loads(base64.b64decode(result["data_b64"]))
     assert terminal == {
@@ -1118,6 +1123,156 @@ def test_executor_failure_has_signed_failure_receipt_and_canonical_terminal_resu
     assert receipt["output_root"] == sha256_bytes(
         json.dumps(terminal, sort_keys=True, separators=(",", ":")).encode()
     )
+
+
+def _sandbox_failure_projection():
+    return ModelSandboxFailureProjectionV1(
+        launcher_code="runsc_nonzero",
+        stderr_hash=HASH,
+        exception_class_hash=HASH_B,
+    )
+
+
+def test_model_sandbox_failure_projection_is_signed_in_the_existing_code_carrier():
+    raw_secret = "credential-secret-must-not-escape"
+
+    def _executor(_operation, _payload, _context):
+        raise ModelSandboxV2Error(
+            raw_secret,
+            failure_projection=_sandbox_failure_projection(),
+        )
+
+    manager, _ = _manager(_executor)
+    status = _run(manager, _payload())
+    expected_code = (
+        "execution_modelsandboxv2error/runsc_nonzero/%s/%s" % (HASH_B, HASH)
+    )
+    expected_terminal = {
+        "status": "failed",
+        "failure_code": expected_code,
+    }
+    expected_bytes = json.dumps(
+        expected_terminal,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert status["state"] == "failed"
+    assert status["error_code"] == expected_code
+    assert len(expected_code) <= 256
+    assert job_manager_v2._IDENTIFIER_RE.fullmatch(expected_code)
+    assert raw_secret not in str(status)
+    result = manager.result_chunk(job_id="score-job-1")
+    result_bytes = base64.b64decode(result["data_b64"])
+    assert result_bytes == expected_bytes
+    receipt = manager.receipt("score-job-1")
+    validate_signed_execution_receipt(receipt)
+    assert receipt["status"] == "failed"
+    assert receipt["failure_code"] == status["error_code"] == expected_code
+    assert receipt["output_root"] == sha256_bytes(expected_bytes)
+    assert raw_secret not in result_bytes.decode("utf-8")
+
+
+def test_model_sandbox_failure_without_class_observation_uses_none_component():
+    def _executor(_operation, _payload, _context):
+        raise ModelSandboxV2Error(
+            "private launcher detail",
+            failure_projection=ModelSandboxFailureProjectionV1(
+                launcher_code="runsc_permission_denied",
+                stderr_hash=HASH,
+                exception_class_hash=None,
+            ),
+        )
+
+    manager, _ = _manager(_executor)
+    status = _run(manager, _payload())
+
+    assert status["error_code"] == (
+        "execution_modelsandboxv2error/runsc_permission_denied/none/%s" % HASH
+    )
+
+
+@pytest.mark.parametrize("tamper_kind", (None, "unknown_fields", "field_type"))
+def test_bare_or_tampered_model_sandbox_failure_keeps_legacy_generic_code(
+    tamper_kind,
+):
+    error = ModelSandboxV2Error(
+        "credential-secret-must-not-escape",
+        failure_projection=(
+            _sandbox_failure_projection() if tamper_kind else None
+        ),
+    )
+    if tamper_kind == "unknown_fields":
+        error.failure_projection = {
+            "launcher_code": "runsc_nonzero",
+            "stderr_hash": HASH,
+            "exception_class_hash": HASH_B,
+            "unexpected": "forged",
+        }
+    elif tamper_kind == "field_type":
+        class ForgedHash(str):
+            pass
+
+        object.__setattr__(
+            error.failure_projection,
+            "stderr_hash",
+            ForgedHash(HASH),
+        )
+
+    def _executor(_operation, _payload, _context):
+        raise error
+
+    manager, _ = _manager(_executor)
+    status = _run(manager, _payload())
+    receipt = manager.receipt("score-job-1")
+    terminal = json.loads(
+        base64.b64decode(
+            manager.result_chunk(job_id="score-job-1")["data_b64"]
+        )
+    )
+
+    assert status["error_code"] == "execution_modelsandboxv2error"
+    assert receipt["failure_code"] == "execution_modelsandboxv2error"
+    assert terminal == {
+        "status": "failed",
+        "failure_code": "execution_modelsandboxv2error",
+    }
+
+
+@pytest.mark.parametrize("forgery_kind", ("subclass", "duck"))
+def test_forged_model_sandbox_error_exact_type_cannot_upgrade_failure_code(
+    forgery_kind,
+):
+    bases = (
+        (ModelSandboxV2Error,)
+        if forgery_kind == "subclass"
+        else (RuntimeError,)
+    )
+    forged_type = type(
+        "ModelSandboxV2Error",
+        bases,
+        {"__module__": "gateway.tee.model_sandbox_v2"},
+    )
+    if forgery_kind == "subclass":
+        error = forged_type(
+            "credential-secret-must-not-escape",
+            failure_projection=_sandbox_failure_projection(),
+        )
+    else:
+        error = forged_type("credential-secret-must-not-escape")
+        error.failure_projection = _sandbox_failure_projection()
+
+    def _executor(_operation, _payload, _context):
+        raise error
+
+    manager, _ = _manager(_executor)
+    status = _run(manager, _payload())
+    receipt = manager.receipt("score-job-1")
+
+    assert status["error_code"] == "execution_modelsandboxv2error"
+    assert "/" not in status["error_code"]
+    assert receipt["failure_code"] == status["error_code"]
+    validate_signed_execution_receipt(receipt)
 
 
 def test_stage_receipts_form_a_measured_chain_before_root_receipt():

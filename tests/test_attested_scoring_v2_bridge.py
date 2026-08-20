@@ -30,6 +30,10 @@ from gateway.tee.execution_job_manager_v2 import (
     PARENT_RECEIPT_GRAPHS_FIELD,
     unpack_parent_receipt_graph_set_v2,
 )
+from gateway.tee.model_sandbox_v2 import (
+    ModelSandboxFailureProjectionV1,
+    ModelSandboxV2Error,
+)
 from Leadpoet.utils.subnet_epoch import CUTOVER_PATH_ENV
 from gateway.tee.coordinator_executor_v2 import (
     COORDINATOR_OPERATIONS_V2,
@@ -2558,6 +2562,63 @@ async def test_v2_bridge_ignores_uncommitted_orphans_and_persists_failure(
         "failure_code": "execution_valueerror",
     }
     assert persisted[0] == authority["receipt_graph"]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_preserves_signed_safe_sandbox_failure_projection():
+    release = _release()
+    stderr_hash = _hash("7")
+    exception_class_hash = _hash("8")
+    expected_code = (
+        "execution_modelsandboxv2error/runsc_nonzero/%s/%s"
+        % (exception_class_hash, stderr_hash)
+    )
+    raw_secret = "credential-secret-must-not-escape"
+
+    def fail_executor(_operation, _payload, _context):
+        raise ModelSandboxV2Error(
+            raw_secret,
+            failure_projection=ModelSandboxFailureProjectionV1(
+                launcher_code="runsc_nonzero",
+                stderr_hash=stderr_hash,
+                exception_class_hash=exception_class_hash,
+            ),
+        )
+
+    async def persist(graph, *, allowed_failed_receipt_hashes=()):
+        validate_receipt_graph(
+            graph,
+            allowed_failed_receipt_hashes=set(
+                allowed_failed_receipt_hashes
+            ),
+        )
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    with pytest.raises(AttestedScoringV2Error, match="failed closed") as captured:
+        await execute_scoring_v2(
+            operation="benchmark_icp_score",
+            purpose="research_lab.benchmark.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"scores": [1.0]},
+            worker_index=0,
+            release_manifest=release,
+            client=_Client(release, executor=fail_executor),
+            persist_graph=persist,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+    authority = captured.value.authority
+    expected_result = {"status": "failed", "failure_code": expected_code}
+    assert authority is not None
+    assert authority["result"] == expected_result
+    assert authority["execution_receipt"]["failure_code"] == expected_code
+    assert authority["execution_receipt"]["output_root"] == sha256_bytes(
+        attested_scoring_v2._canonical_bytes(expected_result)
+    )
+    assert expected_code in str(captured.value)
+    assert raw_secret not in str(captured.value)
 
 
 @pytest.mark.asyncio

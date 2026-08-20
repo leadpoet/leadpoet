@@ -168,6 +168,41 @@ _CHECKPOINTED_RECEIPT_GRAPH_DESCRIPTOR_FIELDS = (
 )
 
 
+def _execution_failure_code(exc: Exception) -> str:
+    """Project only bounded safe sandbox observations into the signed code."""
+
+    generic = "execution_%s" % type(exc).__name__.lower()[:80]
+    try:
+        exc_type = type(exc)
+        if (
+            exc_type.__module__ != "gateway.tee.model_sandbox_v2"
+            or exc_type.__name__ != "ModelSandboxV2Error"
+        ):
+            return generic
+        from gateway.tee.model_sandbox_v2 import (
+            ModelSandboxV2Error,
+            validate_model_sandbox_failure_projection_v1,
+        )
+
+        if exc_type is not ModelSandboxV2Error:
+            return generic
+        projection = validate_model_sandbox_failure_projection_v1(
+            exc.failure_projection
+        )
+        exception_class_hash = projection.exception_class_hash or "none"
+        projected = "%s/%s/%s/%s" % (
+            generic,
+            projection.launcher_code,
+            exception_class_hash,
+            projection.stderr_hash,
+        )
+        if len(projected) > 256 or not _IDENTIFIER_RE.fullmatch(projected):
+            return generic
+        return projected
+    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError):
+        return generic
+
+
 class ExecutionJobV2Error(RuntimeError):
     """A V2 job is malformed, unmeasured, duplicated, or unavailable."""
 
@@ -2045,7 +2080,7 @@ class ExecutionJobManagerV2:
                 job["input"] = bytearray()
                 job["updated_at"] = self._clock()
         except Exception as exc:
-            failure_code = "execution_%s" % type(exc).__name__.lower()[:80]
+            failure_code = _execution_failure_code(exc)
             failure_bytes = _canonical_bytes(
                 {"status": "failed", "failure_code": failure_code}
             )

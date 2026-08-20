@@ -26,6 +26,7 @@ from gateway.tee.model_sandbox_v2 import (
     MODEL_SANDBOX_SOURCE_DIRECTORY,
     MODEL_SANDBOX_VISIBLE_ROOT,
     ROOTFS_MANIFEST_NAME,
+    ModelSandboxFailureProjectionV1,
     ModelSandboxV2Error,
     RunscModelSandboxV2,
     RunscSandboxConfigV2,
@@ -33,6 +34,8 @@ from gateway.tee.model_sandbox_v2 import (
     _model_sandbox_process_timeout_seconds,
     _oci_config,
     _runsc_failure_evidence,
+    _runsc_model_sandbox_error,
+    _strip_private_runtime_failure_markers_v1,
     _sandbox_visible_workspace,
     model_source_import_bootstrap,
     prepare_model_sandbox_cgroup_v2,
@@ -47,6 +50,7 @@ from gateway.tee.provider_client_v2 import (
     ProviderClientV2Error,
 )
 from gateway.tee.sandbox_http_shim_v2 import (
+    EVIDENCE_MISS_SENTINEL,
     SOCKET_ENV,
     SandboxHTTPShimV2Error,
     execute as execute_sandbox_http,
@@ -60,8 +64,15 @@ from leadpoet_canonical.attested_v2 import (
 )
 from research_lab.eval import build_local_private_artifact_manifest
 import research_lab.eval.private_runtime as private_runtime_module
-from research_lab.eval.private_runtime import canonicalize_private_model_icp
+from research_lab.eval.private_runtime import (
+    PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
+    PRIVATE_RUNTIME_FAILURE_MARKER,
+    PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION,
+    canonicalize_private_model_icp,
+    strip_incontainer_trace_lines,
+)
 from research_lab.eval.provider_evidence_cache import (
+    EVIDENCE_CACHE_SCHEMA_VERSION,
     build_evidence_cache_from_trace_entries,
     icp_evidence_cache_key,
 )
@@ -1300,9 +1311,158 @@ def test_runsc_model_sandbox_self_test_redacts_launcher_stderr(tmp_path):
     ),
 )
 def test_runsc_failure_evidence_is_bounded(stderr, expected):
-    code, digest = _runsc_failure_evidence(stderr)
+    code, digest, exception_class_hash = _runsc_failure_evidence(
+        stderr,
+        returncode=1,
+    )
     assert code == expected
     assert digest.startswith("sha256:")
+    assert exception_class_hash is None
+
+
+def _private_runtime_failure_marker(exception_class_hash, **extra):
+    document = {
+        "exception_class_hash": exception_class_hash,
+        "schema_version": PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION,
+        **extra,
+    }
+    return PRIVATE_RUNTIME_FAILURE_MARKER + " " + json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def test_runsc_failure_observation_uses_only_terminal_marker_and_wrapper_exit():
+    spoofed_hash = "sha256:" + "1" * 64
+    observed_hash = "sha256:" + "2" * 64
+    stderr = "\n".join(
+        (
+            _private_runtime_failure_marker(spoofed_hash),
+            "credential-secret-must-not-escape",
+            _private_runtime_failure_marker(observed_hash),
+        )
+    ) + "\n"
+
+    stripped, parsed_hash = _strip_private_runtime_failure_markers_v1(stderr)
+    assert parsed_hash == observed_hash
+    assert PRIVATE_RUNTIME_FAILURE_MARKER not in stripped
+    assert "credential-secret-must-not-escape" in stripped
+
+    launcher_code, stderr_hash, exception_class_hash = _runsc_failure_evidence(
+        stderr,
+        returncode=PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
+    )
+    assert launcher_code == "runsc_nonzero"
+    assert exception_class_hash == observed_hash
+    assert stderr_hash == sha256_bytes(
+        strip_incontainer_trace_lines(stripped).encode("utf-8")
+    )
+
+    error = _runsc_model_sandbox_error(
+        stderr=stderr,
+        returncode=PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
+    )
+    assert isinstance(error.failure_projection, ModelSandboxFailureProjectionV1)
+    assert error.failure_projection.exception_class_hash == observed_hash
+    assert error.failure_projection.stderr_hash == stderr_hash
+    assert "credential-secret-must-not-escape" not in str(error)
+
+
+@pytest.mark.parametrize("returncode", (0, 1, 71, 137, -11, None))
+def test_runsc_failure_marker_is_not_admitted_without_exact_wrapper_exit(
+    returncode,
+):
+    observed_hash = "sha256:" + "3" * 64
+    stderr = _private_runtime_failure_marker(observed_hash) + "\n"
+
+    _launcher_code, _stderr_hash, exception_class_hash = (
+        _runsc_failure_evidence(stderr, returncode=returncode)
+    )
+
+    assert exception_class_hash is None
+
+
+def test_runsc_failure_marker_unknown_fields_fail_closed_and_are_stripped():
+    earlier_hash = "sha256:" + "4" * 64
+    stderr = "\n".join(
+        (
+            _private_runtime_failure_marker(earlier_hash),
+            _private_runtime_failure_marker(
+                "sha256:" + "5" * 64,
+                unexpected="tampered",
+            ),
+        )
+    ) + "\n"
+
+    stripped, observed_hash = _strip_private_runtime_failure_markers_v1(stderr)
+
+    assert observed_hash is None
+    assert stripped == ""
+    _code, stderr_hash, exception_class_hash = _runsc_failure_evidence(
+        stderr,
+        returncode=PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
+    )
+    assert stderr_hash == sha256_bytes(b"")
+    assert exception_class_hash is None
+
+
+def test_runsc_failure_marker_without_terminal_lf_is_not_admitted():
+    marker = _private_runtime_failure_marker("sha256:" + "5" * 64)
+
+    stripped, observed_hash = _strip_private_runtime_failure_markers_v1(marker)
+
+    assert stripped == ""
+    assert observed_hash is None
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    (
+        "ordinary diagnostic",
+        "ordinary diagnostic\n",
+        "ordinary diagnostic\r\n",
+        "ordinary diagnostic\n\n\n",
+        "first\r\nsecond\n\nthird",
+    ),
+)
+def test_runsc_failure_marker_stripping_preserves_unmarked_stderr(stderr):
+    stripped, observed_hash = _strip_private_runtime_failure_markers_v1(
+        stderr
+    )
+
+    assert stripped == stderr
+    assert observed_hash is None
+
+
+def test_runsc_failure_marker_noncanonical_or_oversized_fails_closed():
+    digest = "sha256:" + "6" * 64
+    noncanonical = (
+        PRIVATE_RUNTIME_FAILURE_MARKER
+        + ' {"schema_version":"'
+        + PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION
+        + '","exception_class_hash":"'
+        + digest
+        + '"}'
+    )
+    oversized = _private_runtime_failure_marker(digest) + (" " * 600)
+
+    for marker in (noncanonical, oversized):
+        _stripped, observed_hash = _strip_private_runtime_failure_markers_v1(
+            marker + "\n"
+        )
+        assert observed_hash is None
+
+
+def test_metadata_style_nonwrapper_failure_keeps_class_observation_absent():
+    spoofed_hash = "sha256:" + "7" * 64
+    error = _runsc_model_sandbox_error(
+        stderr=_private_runtime_failure_marker(spoofed_hash) + "\n",
+        returncode=1,
+    )
+
+    assert error.failure_projection is not None
+    assert error.failure_projection.exception_class_hash is None
 
 
 def test_scoring_manager_runs_model_sandbox_self_test_before_accepting_jobs():
@@ -2242,6 +2402,138 @@ def test_runsc_dev_replay_propagates_typed_snapshot_miss(tmp_path):
             )
     finally:
         transport.restore()
+
+
+def test_runsc_dev_provider_replay_preserves_typed_evidence_miss_after_marker(
+    tmp_path,
+):
+    fingerprint = "exa|GET|api.exa.ai/search|abc"
+
+    def runner(command, **_kwargs):
+        if "run" in command:
+            return SimpleNamespace(
+                returncode=PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
+                stdout="",
+                stderr=(
+                    EVIDENCE_MISS_SENTINEL
+                    + fingerprint
+                    + "\n\n"
+                    + _private_runtime_failure_marker("sha256:" + "9" * 64)
+                    + "\n"
+                ),
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    request = _request(tmp_path)
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=runner,
+    )
+    try:
+        with pytest.raises(
+            SnapshotMiss,
+            match="provider-evidence:" + fingerprint,
+        ):
+            sandbox.execute_dev_provider_replay(
+                artifact_doc=request["artifact"],
+                source_bundle=request["source_bundle"],
+                module_name="research_lab_adapter",
+                callable_name="run_icp",
+                icp={"industry": "Software", "intent_signal": "Hiring"},
+                context={"dev_eval": True},
+                environment={},
+                credential_env_names=[],
+                provider_evidence_cache={
+                    "schema_version": EVIDENCE_CACHE_SCHEMA_VERSION,
+                    "entries": {},
+                },
+                snapshot_root=None,
+                timeout_seconds=30,
+                job_id="dev-provider-replay-miss",
+            )
+    finally:
+        transport.restore()
+
+
+@pytest.mark.parametrize("replay_kind", ("snapshot", "provider"))
+def test_runsc_dev_non_sentinel_failure_is_secret_safe_and_projected(
+    tmp_path,
+    replay_kind,
+):
+    raw_secret = "credential-secret-must-not-escape"
+    exception_hash = "sha256:" + "8" * 64
+
+    def runner(command, **_kwargs):
+        if "run" in command:
+            return SimpleNamespace(
+                returncode=PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
+                stdout="",
+                stderr=(
+                    raw_secret
+                    + "\n"
+                    + _private_runtime_failure_marker(exception_hash)
+                    + "\n"
+                ),
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    request = _request(tmp_path)
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=runner,
+    )
+    try:
+        with pytest.raises(ModelSandboxV2Error) as raised:
+            if replay_kind == "snapshot":
+                sandbox.execute_dev_replay(
+                    artifact_doc=request["artifact"],
+                    source_bundle=request["source_bundle"],
+                    snapshot_root=snapshots,
+                    module_name="research_lab_adapter",
+                    callable_name="run_icp",
+                    icp={"industry": "Software", "intent_signal": "Hiring"},
+                    context={"dev_eval": True},
+                    environment={},
+                    credential_env_names=[],
+                    miss_policy="strict",
+                    timeout_seconds=30,
+                    job_id="dev-replay-failure",
+                )
+            else:
+                sandbox.execute_dev_provider_replay(
+                    artifact_doc=request["artifact"],
+                    source_bundle=request["source_bundle"],
+                    module_name="research_lab_adapter",
+                    callable_name="run_icp",
+                    icp={"industry": "Software", "intent_signal": "Hiring"},
+                    context={"dev_eval": True},
+                    environment={},
+                    credential_env_names=[],
+                    provider_evidence_cache={
+                        "schema_version": EVIDENCE_CACHE_SCHEMA_VERSION,
+                        "entries": {},
+                    },
+                    snapshot_root=None,
+                    timeout_seconds=30,
+                    job_id="dev-provider-replay-failure",
+                )
+    finally:
+        transport.restore()
+
+    projection = raised.value.failure_projection
+    assert raw_secret not in str(raised.value)
+    assert projection is not None
+    assert projection.launcher_code == "runsc_nonzero"
+    assert projection.exception_class_hash == exception_hash
+    assert projection.stderr_hash == sha256_bytes(raw_secret.encode("utf-8"))
 
 
 def test_runsc_dev_replay_logs_cleanup_failure(tmp_path, caplog):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import inspect
 import os
@@ -17,8 +19,13 @@ from gateway.tee.model_sandbox_v2 import (
 )
 from research_lab.eval.artifacts import PrivateModelArtifactManifest
 from research_lab.eval.private_runtime import (
+    _ADAPTER_BOOTSTRAP,
     _DOCKER_ADAPTER_BOOTSTRAP,
     DockerPrivateModelRunner,
+    PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
+    PRIVATE_RUNTIME_FAILURE_FALLBACK_EXIT_CODE,
+    PRIVATE_RUNTIME_FAILURE_MARKER,
+    PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION,
     PrivateModelRuntimeError,
     _raise_on_empty_provider_error,
     validate_sourcing_runtime_receipt,
@@ -27,6 +34,21 @@ import research_lab.sourcing_model_contract_check as compatibility
 
 
 _LEGACY_PATCH_CALL = "_research_lab_patch_strict_qualify(module)\n"
+
+
+def _exception_class_hash(identity: str) -> str:
+    return "sha256:" + hashlib.sha256(identity.encode("ascii")).hexdigest()
+
+
+def _terminal_failure_marker(stderr: str) -> dict:
+    lines = str(stderr or "").splitlines()
+    assert lines
+    prefix = PRIVATE_RUNTIME_FAILURE_MARKER + " "
+    assert lines[-1].startswith(prefix)
+    document = json.loads(lines[-1][len(prefix) :])
+    assert set(document) == {"exception_class_hash", "schema_version"}
+    assert document["schema_version"] == PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION
+    return document
 
 
 def _artifact_and_receipt(
@@ -407,9 +429,11 @@ def test_legacy_qualify_shim_still_propagates_late_failure(tmp_path):
         },
     )
 
-    assert completed.returncode != 0
+    assert completed.returncode == PRIVATE_RUNTIME_FAILURE_EXIT_CODE
     assert completed.stdout == ""
-    assert "QualificationIncompleteError" in completed.stderr
+    assert _terminal_failure_marker(completed.stderr)["exception_class_hash"] == (
+        _exception_class_hash("sourcing_model.core.QualificationIncompleteError")
+    )
 
 
 def test_native_e55_qualify_keeps_zero_progress_failure_terminal(tmp_path):
@@ -423,9 +447,11 @@ def test_native_e55_qualify_keeps_zero_progress_failure_terminal(tmp_path):
         },
     )
 
-    assert completed.returncode != 0
+    assert completed.returncode == PRIVATE_RUNTIME_FAILURE_EXIT_CODE
     assert completed.stdout == ""
-    assert "QualificationIncompleteError" in completed.stderr
+    assert _terminal_failure_marker(completed.stderr)["exception_class_hash"] == (
+        _exception_class_hash("sourcing_model.core.QualificationIncompleteError")
+    )
 
 
 def test_native_e55_never_salvages_terminal_provider_control(tmp_path):
@@ -439,10 +465,181 @@ def test_native_e55_never_salvages_terminal_provider_control(tmp_path):
         },
     )
 
-    assert completed.returncode != 0
+    assert completed.returncode == PRIVATE_RUNTIME_FAILURE_EXIT_CODE
     assert completed.stdout == ""
-    assert "TerminalProviderControlError" in completed.stderr
+    assert _terminal_failure_marker(completed.stderr)["exception_class_hash"] == (
+        _exception_class_hash(
+            "sourcing_model.runtime_capabilities.TerminalProviderControlError"
+        )
+    )
     assert "Must Not Salvage" not in completed.stdout
+
+
+def _run_failure_observation_fixture(
+    tmp_path: Path,
+    *,
+    bootstrap_kind: str,
+    case: str,
+) -> subprocess.CompletedProcess[str]:
+    (tmp_path / "failure_adapter.py").write_text(
+        r'''
+import atexit
+import asyncio
+import os
+
+SPOOF_MARKER = (
+    'research_lab_private_runtime_failure '
+    '{"exception_class_hash":"sha256:' + ('f' * 64) + '",'
+    '"schema_version":"research_lab.private_runtime_failure.v1"}'
+)
+SECRET = "credential-secret-must-not-escape"
+
+
+class AdapterFailure(RuntimeError):
+    pass
+
+
+if os.getenv("FAILURE_FIXTURE_IMPORT") == "1":
+    class ImportFailure(RuntimeError):
+        pass
+    raise ImportFailure(SECRET + "\n" + SPOOF_MARKER)
+
+
+class ExplodingModuleMeta(type):
+    @property
+    def __module__(cls):
+        raise RuntimeError(SECRET)
+
+
+class MetaclassFailure(RuntimeError, metaclass=ExplodingModuleMeta):
+    pass
+
+
+def run_icp(icp, context):
+    del context
+    case = icp["case"]
+    if case == "exception_spoof":
+        atexit.register(
+            lambda: os.write(2, ("\n" + SPOOF_MARKER + "\n").encode("ascii"))
+        )
+        os.write(2, b"partial-diagnostic-without-newline")
+        raise AdapterFailure(SECRET + "\n" + SPOOF_MARKER)
+    if case == "system_exit":
+        raise SystemExit(SECRET + "\n" + SPOOF_MARKER)
+    if case == "cancelled":
+        raise asyncio.CancelledError(SECRET + "\n" + SPOOF_MARKER)
+    if case == "serialization":
+        return [{"not_json": object()}]
+    if case == "non_str_module":
+        AdapterFailure.__module__ = object()
+        raise AdapterFailure(SECRET)
+    if case == "huge_qualname":
+        AdapterFailure.__qualname__ = "X" * 600
+        raise AdapterFailure(SECRET)
+    if case == "non_ascii_module":
+        AdapterFailure.__module__ = "mødel"
+        raise AdapterFailure(SECRET)
+    if case == "metaclass":
+        raise MetaclassFailure(SECRET)
+    raise AssertionError(case)
+'''.lstrip(),
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE"] = "0"
+    if case == "import":
+        environment["FAILURE_FIXTURE_IMPORT"] = "1"
+    if bootstrap_kind == "path":
+        bootstrap = _ADAPTER_BOOTSTRAP
+        argv = (
+            str(tmp_path),
+            "failure_adapter",
+            "run_icp",
+        )
+    else:
+        assert bootstrap_kind == "docker"
+        bootstrap = _DOCKER_ADAPTER_BOOTSTRAP
+        argv = ("failure_adapter", "run_icp")
+    return subprocess.run(
+        [sys.executable, "-c", bootstrap, *argv],
+        cwd=tmp_path,
+        env=environment,
+        input=json.dumps(
+            {
+                "icp": {"case": case},
+                "context": {
+                    "runtime_options": {
+                        "runtime_cap_seconds": 60.0,
+                        "finalization_reserve_seconds": 6.0,
+                    }
+                },
+            }
+        ),
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("bootstrap_kind", ("path", "docker"))
+@pytest.mark.parametrize(
+    ("case", "exception_identity"),
+    (
+        ("exception_spoof", "failure_adapter.AdapterFailure"),
+        ("system_exit", "builtins.SystemExit"),
+        (
+            "cancelled",
+            "%s.%s"
+            % (
+                asyncio.CancelledError.__module__,
+                asyncio.CancelledError.__qualname__,
+            ),
+        ),
+        ("serialization", "builtins.TypeError"),
+        ("import", "failure_adapter.ImportFailure"),
+    ),
+)
+def test_failure_observation_covers_the_complete_adapter_transaction(
+    tmp_path,
+    bootstrap_kind,
+    case,
+    exception_identity,
+):
+    completed = _run_failure_observation_fixture(
+        tmp_path,
+        bootstrap_kind=bootstrap_kind,
+        case=case,
+    )
+
+    assert completed.returncode == PRIVATE_RUNTIME_FAILURE_EXIT_CODE
+    assert completed.stdout == ""
+    assert "credential-secret-must-not-escape" not in completed.stderr
+    assert ("sha256:" + "f" * 64) not in completed.stderr
+    assert completed.stderr.count(PRIVATE_RUNTIME_FAILURE_MARKER) == 1
+    assert _terminal_failure_marker(completed.stderr)["exception_class_hash"] == (
+        _exception_class_hash(exception_identity)
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("non_str_module", "huge_qualname", "non_ascii_module", "metaclass"),
+)
+def test_failure_observation_invalid_class_identity_exits_without_marker(
+    tmp_path,
+    case,
+):
+    completed = _run_failure_observation_fixture(
+        tmp_path,
+        bootstrap_kind="docker",
+        case=case,
+    )
+
+    assert completed.returncode == PRIVATE_RUNTIME_FAILURE_FALLBACK_EXIT_CODE
+    assert completed.stdout == ""
+    assert PRIVATE_RUNTIME_FAILURE_MARKER not in completed.stderr
+    assert "credential-secret-must-not-escape" not in completed.stderr
 
 
 def test_native_e55_segmented_dispatch_remains_receipt_fail_closed(tmp_path):

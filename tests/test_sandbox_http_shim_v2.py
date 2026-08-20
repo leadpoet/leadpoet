@@ -200,6 +200,76 @@ def test_cached_terminal_still_retires_prior_live_socket(monkeypatch) -> None:
     assert shim._RETIRED_CLEANUP_RESOURCES == {}
 
 
+def test_frozen_evidence_miss_emits_bounded_sentinel_before_raise(
+    monkeypatch,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    writes = []
+
+    def capture(fd, data):
+        writes.append((fd, bytes(data)))
+        return len(data)
+
+    monkeypatch.setattr(shim, "_EVIDENCE_MISS_WRITE", capture)
+    method = "POST"
+    url = "https://api.exa.ai/search"
+    body = b'{"query":"bounded"}'
+    fingerprint = canonical_request_fingerprint(method, url, body)
+
+    with pytest.raises(
+        shim.SandboxHTTPShimV2Error,
+        match=shim.EVIDENCE_MISS_SENTINEL + fingerprint,
+    ):
+        shim._cached_terminal(
+            method=method,
+            url=url,
+            body=body,
+            mode="frozen",
+            cache={},
+        )
+
+    assert writes == [
+        (
+            2,
+            (shim.EVIDENCE_MISS_SENTINEL + fingerprint + "\n").encode(
+                "ascii"
+            ),
+        )
+    ]
+
+
+@pytest.mark.parametrize("write_result", ("short", "error"))
+def test_frozen_evidence_miss_write_is_diagnostic_best_effort(
+    monkeypatch,
+    write_result,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    def diagnostic_write(_fd, _data):
+        if write_result == "error":
+            raise OSError("diagnostic sink unavailable")
+        return 0
+
+    monkeypatch.setattr(shim, "_EVIDENCE_MISS_WRITE", diagnostic_write)
+    fingerprint = canonical_request_fingerprint(
+        "GET",
+        "https://api.exa.ai/search",
+        b"",
+    )
+
+    with pytest.raises(shim.SandboxHTTPShimV2Error) as raised:
+        shim._cached_terminal(
+            method="GET",
+            url="https://api.exa.ai/search",
+            body=b"",
+            mode="frozen",
+            cache={},
+        )
+
+    assert str(raised.value) == shim.EVIDENCE_MISS_SENTINEL + fingerprint
+
+
 def test_retired_cleanup_allows_concurrent_owner_transfer(monkeypatch) -> None:
     import gateway.tee.sandbox_http_shim_v2 as shim
 

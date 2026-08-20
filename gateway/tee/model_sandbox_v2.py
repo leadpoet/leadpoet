@@ -43,6 +43,9 @@ from research_lab.eval.private_runtime import (
     _DOCKER_ADAPTER_BOOTSTRAP,
     _docker_adapter_bootstrap_for_qualify_compatibility,
     _raise_on_empty_provider_error,
+    PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
+    PRIVATE_RUNTIME_FAILURE_MARKER,
+    PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION,
     SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS,
     canonicalize_private_model_icp,
     context_with_runtime_options,
@@ -150,16 +153,144 @@ _CREDENTIAL_ENV_NAMES = frozenset(
 )
 _MEASURED_CREDENTIAL_PLACEHOLDER = "leadpoet-coordinator-managed-v2"
 _MODEL_SANDBOX_CGROUP_LOCK = Lock()
+PRIVATE_RUNTIME_FAILURE_MARKER_MAX_BYTES = 512
+RUNSC_FAILURE_CODES_V1 = frozenset(
+    {
+        "runsc_cgroup_setup",
+        "runsc_gofer_chroot",
+        "runsc_gofer_create",
+        "runsc_gofer_exec",
+        "runsc_mount_resolve",
+        "runsc_mount_setup",
+        "runsc_nonzero",
+        "runsc_permission_denied",
+        "runsc_rootfs_setup",
+        "runsc_source_mount_missing",
+        "runsc_source_staging_missing",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ModelSandboxFailureProjectionV1:
+    """Bounded diagnostic observation from one failed sandbox process.
+
+    Every field is an untrusted diagnostic observation derived from a
+    model-controlled process.  Signing binds what was observed; it does not
+    make the observation scoring, retry, admission, or trust authority.
+    """
+
+    launcher_code: str
+    stderr_hash: str
+    exception_class_hash: Optional[str] = None
 
 
 class ModelSandboxV2Error(RuntimeError):
     """A model runtime, bundle, provider path, or output failed validation."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_projection: Optional[ModelSandboxFailureProjectionV1] = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_projection = (
+            validate_model_sandbox_failure_projection_v1(failure_projection)
+            if failure_projection is not None
+            else None
+        )
 
-def _runsc_failure_evidence(stderr: str) -> tuple[str, str]:
-    """Return a fixed launcher code and hash without exposing sandbox output."""
 
-    sanitized = strip_incontainer_trace_lines(str(stderr or ""))
+def validate_model_sandbox_failure_projection_v1(
+    value: ModelSandboxFailureProjectionV1,
+) -> ModelSandboxFailureProjectionV1:
+    if type(value) is not ModelSandboxFailureProjectionV1:
+        raise ModelSandboxV2Error("model sandbox failure projection is invalid")
+    if (
+        type(value.launcher_code) is not str
+        or value.launcher_code not in RUNSC_FAILURE_CODES_V1
+    ):
+        raise ModelSandboxV2Error("model sandbox launcher failure code is invalid")
+    if type(value.stderr_hash) is not str or not _HASH_RE.fullmatch(
+        value.stderr_hash
+    ):
+        raise ModelSandboxV2Error("model sandbox stderr hash is invalid")
+    if value.exception_class_hash is not None and (
+        type(value.exception_class_hash) is not str
+        or not _HASH_RE.fullmatch(value.exception_class_hash)
+    ):
+        raise ModelSandboxV2Error(
+            "model sandbox exception-class observation is invalid"
+        )
+    return value
+
+
+def _validated_private_runtime_failure_marker_v1(line: str) -> Optional[str]:
+    prefix = PRIVATE_RUNTIME_FAILURE_MARKER + " "
+    if not line.startswith(prefix):
+        return None
+    if len(line.encode("utf-8")) > PRIVATE_RUNTIME_FAILURE_MARKER_MAX_BYTES:
+        return None
+    payload = line[len(prefix) :]
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if (
+        not isinstance(document, Mapping)
+        or set(document) != {"exception_class_hash", "schema_version"}
+        or document.get("schema_version")
+        != PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION
+        or not isinstance(document.get("exception_class_hash"), str)
+        or not _HASH_RE.fullmatch(document["exception_class_hash"])
+        or payload != canonical_json(dict(document))
+    ):
+        return None
+    return str(document["exception_class_hash"])
+
+
+def _strip_private_runtime_failure_markers_v1(
+    stderr: str,
+) -> tuple[str, Optional[str]]:
+    """Strip marker lines and accept only one exact terminal observation."""
+
+    raw_stderr = str(stderr or "")
+    lines = raw_stderr.splitlines(keepends=True)
+    terminal = lines[-1] if lines else ""
+    terminal_line = (
+        terminal[:-1]
+        if terminal.endswith("\n") and not terminal.endswith("\r\n")
+        else None
+    )
+    observed_hash = (
+        _validated_private_runtime_failure_marker_v1(terminal_line)
+        if terminal_line is not None
+        else None
+    )
+    prefix = PRIVATE_RUNTIME_FAILURE_MARKER + " "
+    stripped = "".join(line for line in lines if not line.startswith(prefix))
+    return stripped, observed_hash
+
+
+def _runsc_failure_evidence(
+    stderr: str,
+    *,
+    returncode: Any = None,
+) -> tuple[str, str, Optional[str]]:
+    """Return bounded safe observations without exposing sandbox output."""
+
+    marker_stripped, observed_exception_class_hash = (
+        _strip_private_runtime_failure_markers_v1(stderr)
+    )
+    try:
+        wrapper_exit = int(returncode) == PRIVATE_RUNTIME_FAILURE_EXIT_CODE
+    except (TypeError, ValueError):
+        wrapper_exit = False
+    exception_class_hash = (
+        observed_exception_class_hash if wrapper_exit else None
+    )
+    sanitized = strip_incontainer_trace_lines(marker_stripped)
     lowered = sanitized.lower()
     patterns = (
         (
@@ -185,7 +316,31 @@ def _runsc_failure_evidence(stderr: str) -> tuple[str, str]:
         if marker in lowered:
             failure_code = candidate
             break
-    return failure_code, sha256_bytes(sanitized.encode("utf-8"))
+    return (
+        failure_code,
+        sha256_bytes(sanitized.encode("utf-8")),
+        exception_class_hash,
+    )
+
+
+def _runsc_model_sandbox_error(
+    *,
+    stderr: str,
+    returncode: Any,
+) -> ModelSandboxV2Error:
+    launcher_code, stderr_hash, exception_class_hash = _runsc_failure_evidence(
+        stderr,
+        returncode=returncode,
+    )
+    return ModelSandboxV2Error(
+        "model sandbox failed code=%s returncode=%s stderr_hash=%s"
+        % (launcher_code, returncode, stderr_hash),
+        failure_projection=ModelSandboxFailureProjectionV1(
+            launcher_code=launcher_code,
+            stderr_hash=stderr_hash,
+            exception_class_hash=exception_class_hash,
+        ),
+    )
 
 
 def _runsc_run_command(
@@ -2276,7 +2431,14 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
 
             if completed is None or int(completed.returncode) != 0:
                 stderr = "" if completed is None else str(completed.stderr or "")
-                failure_code, stderr_hash = _runsc_failure_evidence(stderr)
+                failure_code, stderr_hash, _exception_class_hash = (
+                    _runsc_failure_evidence(
+                        stderr,
+                        returncode=(
+                            None if completed is None else completed.returncode
+                        ),
+                    )
+                )
                 returncode = "unknown" if completed is None else str(completed.returncode)
                 raise ModelSandboxV2Error(
                     "model sandbox self-test failed code=%s returncode=%s stderr_hash=%s"
@@ -2824,12 +2986,9 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             if EVIDENCE_MISS_SENTINEL in stderr:
                 fingerprint = stderr.rsplit(EVIDENCE_MISS_SENTINEL, 1)[-1].splitlines()[0]
                 raise SnapshotMiss("provider-evidence:" + fingerprint.strip())
-            raise ModelSandboxV2Error(
-                "dev provider replay adapter failed with code %s stderr_hash=%s"
-                % (
-                    completed.returncode,
-                    sha256_bytes(stderr.encode("utf-8")),
-                )
+            raise _runsc_model_sandbox_error(
+                stderr=stderr,
+                returncode=completed.returncode,
             )
         if len(str(completed.stdout).encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
             raise ModelSandboxV2Error("dev provider replay adapter output exceeds limit")
@@ -2936,9 +3095,9 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             if SNAPSHOT_MISS_SENTINEL in stderr:
                 request_key = stderr.rsplit(SNAPSHOT_MISS_SENTINEL, 1)[-1].splitlines()[0]
                 raise SnapshotMiss(request_key.strip())
-            raise ModelSandboxV2Error(
-                "dev replay adapter failed with code %s: %s"
-                % (completed.returncode, stderr[-1200:])
+            raise _runsc_model_sandbox_error(
+                stderr=stderr,
+                returncode=completed.returncode,
             )
         if len(str(completed.stdout).encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
             raise ModelSandboxV2Error("dev replay adapter output exceeds limit")
@@ -3042,12 +3201,9 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 failure_event="model_sandbox_runsc_cleanup_failed",
             )
         if int(completed.returncode) != 0:
-            failure_code, error_hash = _runsc_failure_evidence(
-                str(completed.stderr or "")
-            )
-            raise ModelSandboxV2Error(
-                "model sandbox failed code=%s returncode=%s stderr_hash=%s"
-                % (failure_code, completed.returncode, error_hash)
+            raise _runsc_model_sandbox_error(
+                stderr=str(completed.stderr or ""),
+                returncode=completed.returncode,
             )
         if (
             len(str(completed.stdout).encode("utf-8"))
@@ -3233,12 +3389,9 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 failure_event="model_sandbox_runsc_cleanup_failed",
             )
         if int(completed.returncode) != 0:
-            failure_code, error_hash = _runsc_failure_evidence(
-                str(completed.stderr or "")
-            )
-            raise ModelSandboxV2Error(
-                "model sandbox failed code=%s returncode=%s stderr_hash=%s"
-                % (failure_code, completed.returncode, error_hash)
+            raise _runsc_model_sandbox_error(
+                stderr=str(completed.stderr or ""),
+                returncode=completed.returncode,
             )
         if len(str(completed.stdout).encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
             raise ModelSandboxV2Error("model sandbox output exceeds limit")

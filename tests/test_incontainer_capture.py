@@ -1097,14 +1097,16 @@ def test_subprocess_runner_publishes_entries_and_strips_error_diagnostics(tmp_pa
     finally:
         private_runtime.end_incontainer_trace_collection(token)
     # Entries emitted before the failure are still published (training data
-    # from failed attempts matters), and the marker line never reaches the
-    # exception text bound for diagnostics/audit docs.
+    # from failed attempts matters), while raw model diagnostics and marker
+    # lines never reach the exception text bound for diagnostics/audit docs.
     assert [entry["seq"] for entry in entries] == [1]
     assert INCONTAINER_TRACE_MARKER not in str(excinfo.value)
     failure_text = str(excinfo.value)
     expected_class_hash = hashlib.sha256(b"builtins.RuntimeError").hexdigest()
     assert "adapter exploded for test" not in failure_text
-    assert "research_lab.private_runtime_failure.v1" in failure_text
+    assert '"schema_version":"research_lab.private_runtime_failure.v1"' in (
+        failure_text
+    )
     assert f'"exception_class_hash":"sha256:{expected_class_hash}"' in failure_text
 
 

@@ -13,6 +13,8 @@ import time
 
 import pytest
 
+from tests.readiness_test_venv import build_dependency_complete_readiness_venv
+
 from gateway.tee.release_channel_v2 import (
     build_release_channel_v2,
     build_release_lineage_v2,
@@ -520,7 +522,18 @@ def test_gateway_cleanup_kills_term_ignoring_owned_process_group(
     assert not late_activation.exists()
 
 
-def _fake_operator_commands(tmp_path: Path, commit: str) -> tuple[Path, Path]:
+@pytest.fixture(scope="module")
+def dependency_complete_readiness_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return build_dependency_complete_readiness_venv(
+        tmp_path_factory.mktemp("restart-readiness-venv") / "venv"
+    )
+
+
+def _fake_operator_commands(
+    tmp_path: Path,
+    commit: str,
+    readiness_python: Path,
+) -> tuple[Path, Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     events = tmp_path / "events"
@@ -537,7 +550,7 @@ def _fake_operator_commands(tmp_path: Path, commit: str) -> tuple[Path, Path]:
     )
 
     real_git = shutil.which("git")
-    real_python = sys.executable
+    real_python = str(readiness_python)
     assert real_git
     real_venv = Path(real_python).parent.parent
     real_site_packages = (
@@ -862,12 +875,15 @@ def _operator_argv(
 
 def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
 
     result = subprocess.run(
         _operator_argv(bin_dir, commit),
@@ -921,12 +937,15 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
 
 def test_operator_rejects_non_venv_local_python_before_ssh(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     standalone_dir = tmp_path / "standalone"
     standalone_dir.mkdir()
     standalone_python = standalone_dir / "python3"
@@ -955,12 +974,15 @@ def test_operator_rejects_non_venv_local_python_before_ssh(
 
 def test_operator_rejects_local_python_retarget_before_final_readiness(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_RETARGET_LOCAL_PYTHON_AFTER_TRANSITION"] = "1"
 
@@ -982,12 +1004,15 @@ def test_operator_rejects_local_python_retarget_before_final_readiness(
 
 def test_operator_rejects_candidate_source_drift_before_final_readiness(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_DRIFT_SOURCE_AFTER_TRANSITION"] = "1"
 
@@ -1009,12 +1034,15 @@ def test_operator_rejects_candidate_source_drift_before_final_readiness(
 
 def test_operator_rejects_initial_candidate_source_drift_before_ssh(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     Path(environment["FAKE_OPERATOR_SOURCE_DRIFT_MARKER"]).touch()
 
@@ -1036,12 +1064,15 @@ def test_operator_rejects_initial_candidate_source_drift_before_ssh(
 
 def test_gateway_only_operator_rejects_mismatched_validator(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_VALIDATOR_COMMIT"] = "b" * 40
 
@@ -1064,12 +1095,15 @@ def test_gateway_only_operator_rejects_mismatched_validator(
 
 def test_gateway_only_operator_requires_healthy_matching_validator(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
 
     result = subprocess.run(
         _operator_argv(bin_dir, commit, "--component", "gateway"),
@@ -1106,12 +1140,15 @@ def test_gateway_only_operator_requires_healthy_matching_validator(
 
 def test_gateway_only_operator_rejects_unhealthy_matching_validator(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_VALIDATOR_VERIFY_FAIL"] = "1"
 
@@ -1133,12 +1170,15 @@ def test_gateway_only_operator_rejects_unhealthy_matching_validator(
 
 def test_validator_only_operator_rejects_mismatched_gateway(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_GATEWAY_COMMIT"] = "b" * 40
 
@@ -1161,12 +1201,15 @@ def test_validator_only_operator_rejects_mismatched_gateway(
 
 def test_validator_only_operator_requires_healthy_matching_gateway(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
 
     result = subprocess.run(
         _operator_argv(bin_dir, commit, "--component", "validator"),
@@ -1205,12 +1248,15 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
 
 def test_validator_only_operator_rejects_unhealthy_matching_gateway(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_GATEWAY_VERIFY_FAIL"] = "1"
 
@@ -1232,12 +1278,15 @@ def test_validator_only_operator_rejects_unhealthy_matching_gateway(
 
 def test_paired_operator_failure_marker_cleans_prepared_validator(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_GATEWAY_RESTART_FAIL"] = "1"
     environment["FAKE_FAILURE_MARKER_DELAY_SECONDS"] = "0.5"
@@ -1292,6 +1341,7 @@ def test_paired_operator_failure_marker_cleans_prepared_validator(
 )
 def test_paired_operator_final_probe_failure_leaves_resume_blocked(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
     failure_flag: str,
     failed_event: str,
 ) -> None:
@@ -1299,7 +1349,9 @@ def test_paired_operator_final_probe_failure_leaves_resume_blocked(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment[failure_flag] = "1"
 

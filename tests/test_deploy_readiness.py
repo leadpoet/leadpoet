@@ -17,6 +17,7 @@ from gateway.tee.release_channel_v2 import (
 from gateway.tee.topology import ROLE_SPECS
 from leadpoet_canonical.attested_v2 import sha256_json
 from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+from tests.readiness_test_venv import build_dependency_complete_readiness_venv
 
 
 def _status(role: str, pcr0: str, *, allowed: bool, commits: list[str]) -> dict:
@@ -490,8 +491,10 @@ def test_isolated_dependency_complete_controller_builds_all_readiness_evidence(
         encoding="utf-8",
     )
     repo_root = Path(__file__).resolve().parents[1]
-    venv_root = Path(sys.executable).parent.parent
-    assert (venv_root / "pyvenv.cfg").is_file()
+    readiness_python = build_dependency_complete_readiness_venv(
+        tmp_path / "readiness-venv"
+    )
+    venv_root = readiness_python.parent.parent
     site_packages = (
         venv_root
         / "lib"
@@ -588,7 +591,7 @@ print("full-readiness-ready")
 
     completed = subprocess.run(
         [
-            sys.executable,
+            str(readiness_python),
             "-I",
             "-S",
             "-B",

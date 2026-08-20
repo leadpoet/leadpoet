@@ -218,6 +218,7 @@ def test_routing_authority_migration_has_fenced_append_only_security_contract():
         in sql
     )
     assert "claim_nonce_commitment|claim_capability_commitment" not in sql
+    assert sql.count("ADD COLUMN IF NOT EXISTS claim_capability_commitment") == 3
     assert '"(authorization_job_id|job_id)"' in sql
     assert "sha256:[0-9a-f]{64}" in sql
 

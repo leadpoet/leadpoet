@@ -171,6 +171,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_routing_experiment_claims_v2 (
         OR (request_hash IS NOT NULL AND lease_hash IS NOT NULL AND lease_generation IS NOT NULL))
 );
 ALTER TABLE public.research_lab_routing_experiment_claims_v2
+    ADD COLUMN IF NOT EXISTS claim_capability_commitment TEXT
+        CHECK (claim_capability_commitment IS NULL OR claim_capability_commitment ~ '^sha256:[0-9a-f]{64}$'),
     ADD COLUMN IF NOT EXISTS request_hash TEXT
         CHECK (request_hash IS NULL OR request_hash ~ '^sha256:[0-9a-f]{64}$'),
     ADD COLUMN IF NOT EXISTS lease_hash TEXT
@@ -201,6 +203,9 @@ CREATE TABLE IF NOT EXISTS public.research_lab_routing_experiment_claim_heartbea
     heartbeat_doc JSONB NOT NULL CHECK (pg_catalog.jsonb_typeof(heartbeat_doc) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
+ALTER TABLE public.research_lab_routing_experiment_claim_heartbeats_v2
+    ADD COLUMN IF NOT EXISTS claim_capability_commitment TEXT
+        CHECK (claim_capability_commitment IS NULL OR claim_capability_commitment ~ '^sha256:[0-9a-f]{64}$');
 CREATE INDEX IF NOT EXISTS rl_route_claim_heartbeat_head_idx
     ON public.research_lab_routing_experiment_claim_heartbeats_v2(
         experiment_hash, claim_key, claim_generation, created_at DESC
@@ -216,6 +221,9 @@ CREATE TABLE IF NOT EXISTS public.research_lab_routing_experiment_claim_closures
     close_doc JSONB NOT NULL CHECK (pg_catalog.jsonb_typeof(close_doc) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
+ALTER TABLE public.research_lab_routing_experiment_claim_closures_v2
+    ADD COLUMN IF NOT EXISTS claim_capability_commitment TEXT
+        CHECK (claim_capability_commitment IS NULL OR claim_capability_commitment ~ '^sha256:[0-9a-f]{64}$');
 CREATE UNIQUE INDEX IF NOT EXISTS rl_route_claim_close_once_uq
     ON public.research_lab_routing_experiment_claim_closures_v2(
         experiment_hash, claim_key, claim_generation

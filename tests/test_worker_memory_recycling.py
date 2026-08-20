@@ -149,12 +149,11 @@ async def test_worker_supervisor_cancellation_waits_before_stop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_real_supervisor_spawns_on_event_loop_thread_and_waits_off_thread(
+async def test_real_supervisor_spawns_and_waits_sequentially_on_event_loop(
     monkeypatch,
 ) -> None:
     caller_thread = threading.get_ident()
     popen_threads: list[int] = []
-    wait_threads: list[int] = []
     startup_events: list[str] = []
 
     class ReadyChild:
@@ -175,12 +174,17 @@ async def test_real_supervisor_spawns_on_event_loop_thread_and_waits_off_thread(
         scoring=_fleet("scoring", 1),
     )
     supervisor = ResearchLabWorkerSupervisor(plan)
-    original_wait = supervisor._wait_for_child_ready
+    original_wait = supervisor._wait_for_spawned_child_ready
 
-    def observed_wait(*args, **kwargs):
-        wait_threads.append(threading.get_ident())
+    async def observed_wait(*args, **kwargs):
+        assert threading.get_ident() == caller_thread
         startup_events.append("wait")
-        return original_wait(*args, **kwargs)
+        child = await original_wait(*args, **kwargs)
+        startup_events.append("ready")
+        return child
+
+    async def forbidden_to_thread(*_args, **_kwargs):
+        raise AssertionError("real supervisor startup used an executor thread")
 
     monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
     monkeypatch.setattr(
@@ -189,16 +193,22 @@ async def test_real_supervisor_spawns_on_event_loop_thread_and_waits_off_thread(
         lambda: {},
     )
     monkeypatch.setattr(worker_autostart.subprocess, "Popen", ReadyChild)
-    monkeypatch.setattr(supervisor, "_wait_for_child_ready", observed_wait)
+    monkeypatch.setattr(supervisor, "_wait_for_spawned_child_ready", observed_wait)
     monkeypatch.setattr(supervisor, "_monitor_children", lambda: None)
+    monkeypatch.setattr(asyncio, "to_thread", forbidden_to_thread)
 
     health = await start_worker_supervisor_without_blocking_event_loop(supervisor)
 
     assert health["status"] == "ready"
     assert popen_threads == [caller_thread, caller_thread]
-    assert len(wait_threads) == 2
-    assert all(thread_id != caller_thread for thread_id in wait_threads)
-    assert startup_events == ["spawn", "spawn", "wait", "wait"]
+    assert startup_events == [
+        "spawn",
+        "wait",
+        "ready",
+        "spawn",
+        "wait",
+        "ready",
+    ]
 
 
 def test_child_rss_for_bogus_pid_is_none():

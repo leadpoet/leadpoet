@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import hashlib
+import math
 import os
 from pathlib import Path
 import select
@@ -39,10 +40,33 @@ WORKER_FLEET_ROLE_BY_KIND = {
     "hosted": "gateway_autoresearch",
     "scoring": "gateway_scoring",
 }
+DEFAULT_WORKER_STARTUP_TIMEOUT_SECONDS = 120.0
+MIN_WORKER_STARTUP_TIMEOUT_SECONDS = 5.0
+MAX_WORKER_STARTUP_TIMEOUT_SECONDS = 180.0
+WORKER_FLEET_STARTUP_SECONDS_PER_PROCESS = 12.0
+MIN_WORKER_FLEET_STARTUP_TIMEOUT_SECONDS = 120.0
+MAX_WORKER_FLEET_STARTUP_TIMEOUT_SECONDS = 480.0
+WORKER_STARTUP_ATTEMPTS = 2
+WORKER_READY_STABILITY_SECONDS = 0.01
+WORKER_STARTUP_TERMINATE_GRACE_SECONDS = 5.0
+WORKER_STARTUP_KILL_GRACE_SECONDS = 2.0
 
 
 class ResearchLabWorkerStartupError(RuntimeError):
     """An authoritative worker failed before entering its poll loop."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str = "worker_startup_failed",
+        fleet_kind: str | None = None,
+        worker_index: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.fleet_kind = fleet_kind
+        self.worker_index = worker_index
 
 
 class DeferredWorkerFleetConfigurationError(ValueError):
@@ -171,13 +195,56 @@ def _rss_telemetry_seconds() -> float:
 
 
 def _startup_timeout_seconds() -> float:
+    """Return the bounded per-child cold-start allowance.
+
+    The first child imports the full scoring stack on a CPU-constrained host,
+    so 30 seconds is not a realistic cold-start contract.  The whole-fleet
+    deadline below remains authoritative; this bound only prevents one broken
+    child from consuming all of it.
+    """
+
     try:
-        return max(
-            1.0,
-            float(os.getenv("RESEARCH_LAB_WORKER_STARTUP_TIMEOUT_SECONDS", "30")),
+        value = float(
+            os.getenv(
+                "RESEARCH_LAB_WORKER_STARTUP_TIMEOUT_SECONDS",
+                str(DEFAULT_WORKER_STARTUP_TIMEOUT_SECONDS),
+            )
         )
     except ValueError:
-        return 30.0
+        value = DEFAULT_WORKER_STARTUP_TIMEOUT_SECONDS
+    if not math.isfinite(value):
+        value = DEFAULT_WORKER_STARTUP_TIMEOUT_SECONDS
+    return min(
+        MAX_WORKER_STARTUP_TIMEOUT_SECONDS,
+        max(MIN_WORKER_STARTUP_TIMEOUT_SECONDS, value),
+    )
+
+
+def _fleet_startup_timeout_seconds(worker_count: int) -> float:
+    """Return one bounded budget shared by initial startup and its retry."""
+
+    configured = os.getenv("RESEARCH_LAB_WORKER_FLEET_STARTUP_TIMEOUT_SECONDS")
+    if configured is None or not configured.strip():
+        value = max(
+            MIN_WORKER_FLEET_STARTUP_TIMEOUT_SECONDS,
+            max(1, int(worker_count))
+            * WORKER_FLEET_STARTUP_SECONDS_PER_PROCESS,
+        )
+    else:
+        try:
+            value = float(configured)
+        except ValueError:
+            value = max(
+                MIN_WORKER_FLEET_STARTUP_TIMEOUT_SECONDS,
+                max(1, int(worker_count))
+                * WORKER_FLEET_STARTUP_SECONDS_PER_PROCESS,
+            )
+    if not math.isfinite(value):
+        value = MIN_WORKER_FLEET_STARTUP_TIMEOUT_SECONDS
+    return min(
+        MAX_WORKER_FLEET_STARTUP_TIMEOUT_SECONDS,
+        max(MIN_WORKER_FLEET_STARTUP_TIMEOUT_SECONDS, value),
+    )
 
 
 def _int_env(env: Mapping[str, str], name: str, default: int = 0) -> int:
@@ -381,6 +448,8 @@ class ResearchLabWorkerSupervisor:
         self._package_parent = Path(__file__).resolve().parents[2]
         self._worker_script = Path(__file__).resolve().parent / "worker_process.py"
         self._ready_children: set[str] = set()
+        self._startup_attempts = 0
+        self._last_startup_failure: dict[str, object] | None = None
 
     def _full_topology_required(self) -> bool:
         return os.getenv("GATEWAY_TEE_TOPOLOGY_MODE", "full").strip() == "full"
@@ -424,14 +493,15 @@ class ResearchLabWorkerSupervisor:
         print("=" * 80 + "\n", flush=True)
 
     async def start_without_blocking_event_loop(self) -> dict[str, object]:
-        """Spawn on the event-loop thread and wait for readiness off-thread.
+        """Start workers sequentially without blocking gateway HTTP I/O.
 
         ``Popen`` uses a fork/exec path because the readiness descriptor is
         passed explicitly. Forking from an executor thread can stall before
-        ``Popen`` returns in a multithreaded gateway. Spawn every child before
-        the first ``asyncio.to_thread`` call creates an executor thread; only
-        then delegate the bounded readiness waits. Otherwise the second fleet
-        can deadlock in ``Popen`` after the first fleet's readiness wait.
+        ``Popen`` returns in a multithreaded gateway, while spawning every
+        worker at once creates a cold-import storm. Spawn on the event-loop
+        owner thread, then use its file-descriptor reader for readiness before
+        spawning the next child. Initial startup and one atomic retry share a
+        whole-fleet deadline below the outer V2 readiness gate.
         """
 
         self._validate_authoritative_plan()
@@ -441,37 +511,62 @@ class ResearchLabWorkerSupervisor:
         print("=" * 80, flush=True)
         print("🧪 STARTING RESEARCH LAB WORKER FLEETS", flush=True)
         print("=" * 80, flush=True)
-        spawned: list[
-            tuple[
-                ResearchLabWorkerFleetPlan,
-                int,
-                subprocess.Popen[bytes],
-                int,
-            ]
-        ] = []
-        try:
-            for fleet in (self.plan.hosted, self.plan.scoring):
-                spawned.extend(self._spawn_fleet_for_async_start(fleet))
-            for fleet, index, child, read_fd in spawned:
-                ready_child = await self._wait_for_spawned_child_ready(
-                    child,
-                    read_fd,
-                    fleet,
-                    index,
+        configured_workers = sum(
+            fleet.worker_count
+            for fleet in (self.plan.hosted, self.plan.scoring)
+            if fleet.enabled
+            and WORKER_FLEET_ROLE_BY_KIND[fleet.kind]
+            not in self.deferred_worker_fleet_roles
+        )
+        loop = asyncio.get_running_loop()
+        fleet_deadline = loop.time() + _fleet_startup_timeout_seconds(
+            configured_workers
+        )
+        for attempt in range(1, WORKER_STARTUP_ATTEMPTS + 1):
+            self._startup_attempts = attempt
+            try:
+                for fleet in (self.plan.hosted, self.plan.scoring):
+                    await self._start_fleet_without_blocking_event_loop(
+                        fleet,
+                        fleet_deadline=fleet_deadline,
+                    )
+            except asyncio.CancelledError:
+                await self._cleanup_after_startup_cancellation()
+                raise
+            except ResearchLabWorkerStartupError as exc:
+                retrying = attempt < WORKER_STARTUP_ATTEMPTS
+                self._record_startup_failure(
+                    exc,
+                    attempt=attempt,
+                    retrying=retrying,
                 )
-                key = f"{fleet.kind}:{index}"
-                self.children[key] = ready_child
-                self._child_specs[key] = (fleet, index)
-                self._ready_children.add(key)
-        except BaseException:
-            for _fleet, _index, child, read_fd in spawned:
                 try:
-                    os.close(read_fd)
-                except OSError:
-                    pass
-                if child.poll() is None:
-                    child.terminate()
-            raise
+                    await self._cleanup_failed_async_start()
+                except ResearchLabWorkerStartupError as cleanup_exc:
+                    self._record_startup_failure(
+                        cleanup_exc,
+                        attempt=attempt,
+                        retrying=False,
+                    )
+                    raise cleanup_exc from exc
+                if not retrying:
+                    raise
+                if loop.time() >= fleet_deadline:
+                    deadline_error = ResearchLabWorkerStartupError(
+                        "Research Lab worker fleet startup deadline exhausted",
+                        reason="worker_fleet_startup_timeout",
+                    )
+                    self._record_startup_failure(
+                        deadline_error,
+                        attempt=attempt + 1,
+                        retrying=False,
+                    )
+                    raise deadline_error from exc
+            except BaseException:
+                await self._cleanup_failed_async_start()
+                raise
+            else:
+                break
         if not self.children:
             print("   No Research Lab worker fleets started", flush=True)
         else:
@@ -509,12 +604,12 @@ class ResearchLabWorkerSupervisor:
             self._child_specs[key] = (fleet, index)
             self._ready_children.add(key)
 
-    def _spawn_fleet_for_async_start(
+    async def _start_fleet_without_blocking_event_loop(
         self,
         fleet: ResearchLabWorkerFleetPlan,
-    ) -> list[
-        tuple[ResearchLabWorkerFleetPlan, int, subprocess.Popen[bytes], int]
-    ]:
+        *,
+        fleet_deadline: float,
+    ) -> None:
         role = WORKER_FLEET_ROLE_BY_KIND[fleet.kind]
         if role in self.deferred_worker_fleet_roles:
             print(
@@ -523,29 +618,52 @@ class ResearchLabWorkerSupervisor:
                 % (fleet.kind, fleet.worker_count),
                 flush=True,
             )
-            return []
+            return
         if not fleet.enabled:
             print(f"   {fleet.kind}: skipped ({fleet.reason or 'disabled'})", flush=True)
-            return []
+            return
         print(
             f"   {fleet.kind}: starting {fleet.worker_count} worker(s), "
             f"proxy_refs={list(fleet.proxy_refs)}",
             flush=True,
         )
-        spawned: list[
-            tuple[ResearchLabWorkerFleetPlan, int, subprocess.Popen[bytes], int]
-        ] = []
-        try:
-            for index in range(fleet.worker_count):
-                child, read_fd = self._spawn_child(fleet, index)
-                spawned.append((fleet, index, child, read_fd))
-        except BaseException:
-            for _fleet, _index, child, read_fd in spawned:
-                os.close(read_fd)
-                if child.poll() is None:
-                    child.terminate()
-            raise
-        return spawned
+        loop = asyncio.get_running_loop()
+        for index in range(fleet.worker_count):
+            remaining_seconds = fleet_deadline - loop.time()
+            if remaining_seconds <= 0:
+                raise ResearchLabWorkerStartupError(
+                    "Research Lab worker fleet startup deadline exhausted",
+                    reason="worker_fleet_startup_timeout",
+                    fleet_kind=fleet.kind,
+                    worker_index=index,
+                )
+            child, read_fd = self._spawn_child(fleet, index)
+            key = f"{fleet.kind}:{index}"
+            self.children[key] = child
+            self._child_specs[key] = (fleet, index)
+            remaining_seconds = fleet_deadline - loop.time()
+            if remaining_seconds <= 0:
+                try:
+                    os.close(read_fd)
+                except OSError:
+                    pass
+                raise ResearchLabWorkerStartupError(
+                    "Research Lab worker fleet startup deadline exhausted",
+                    reason="worker_fleet_startup_timeout",
+                    fleet_kind=fleet.kind,
+                    worker_index=index,
+                )
+            await self._wait_for_spawned_child_ready(
+                child,
+                read_fd,
+                fleet,
+                index,
+                timeout_seconds=min(
+                    _startup_timeout_seconds(),
+                    remaining_seconds,
+                ),
+            )
+            self._ready_children.add(key)
 
     async def _wait_for_spawned_child_ready(
         self,
@@ -553,34 +671,196 @@ class ResearchLabWorkerSupervisor:
         read_fd: int,
         fleet: ResearchLabWorkerFleetPlan,
         index: int,
+        *,
+        timeout_seconds: float,
     ) -> subprocess.Popen[bytes]:
-        readiness_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._wait_for_child_ready,
-                child,
-                read_fd,
-                fleet,
-                index,
-            )
-        )
+        """Await one exact readiness marker; this method solely owns read_fd."""
+
+        loop = asyncio.get_running_loop()
+        marker_future: asyncio.Future[tuple[bytes, bool]] = loop.create_future()
+        marker = bytearray()
+        reader_registered = False
+
+        def _read_marker() -> None:
+            if marker_future.done():
+                return
+            try:
+                chunk = os.read(read_fd, max(1, 64 - len(marker)))
+            except BlockingIOError:
+                return
+            except OSError:
+                marker_future.set_result((bytes(marker), True))
+                return
+            marker.extend(chunk)
+            if not chunk or b"\n" in marker or len(marker) >= 64:
+                marker_future.set_result((bytes(marker), not chunk))
+
         try:
-            return await asyncio.shield(readiness_task)
-        except asyncio.CancelledError:
-            while not readiness_task.done():
+            os.set_blocking(read_fd, False)
+            loop.add_reader(read_fd, _read_marker)
+            reader_registered = True
+            try:
+                ready_marker, marker_eof = await asyncio.wait_for(
+                    marker_future,
+                    timeout=max(0.001, float(timeout_seconds)),
+                )
+            except TimeoutError as exc:
+                raise ResearchLabWorkerStartupError(
+                    "%s worker %d readiness timed out"
+                    % (fleet.kind, index + 1),
+                    reason="worker_readiness_timeout",
+                    fleet_kind=fleet.kind,
+                    worker_index=index,
+                ) from exc
+        finally:
+            if reader_registered:
                 try:
-                    await asyncio.shield(readiness_task)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
-            if readiness_task.done() and not readiness_task.cancelled():
-                try:
-                    readiness_task.result()
+                    loop.remove_reader(read_fd)
                 except Exception:
                     pass
+            try:
+                os.close(read_fd)
+            except OSError:
+                pass
+        if ready_marker == b"ready\n":
+            # A child that writes the marker and exits immediately never owned
+            # a usable poll loop. Give that terminal state one event-loop turn
+            # plus a tiny bounded scheduling window before accepting it.
+            await asyncio.sleep(WORKER_READY_STABILITY_SECONDS)
+        child_code = child.poll()
+        if ready_marker != b"ready\n" or marker_eof or child_code is not None:
+            reason = (
+                "worker_exited_before_readiness"
+                if child_code is not None
+                else (
+                    "worker_readiness_pipe_closed"
+                    if marker_eof
+                    else "worker_invalid_readiness_marker"
+                )
+            )
+            raise ResearchLabWorkerStartupError(
+                "%s worker %d failed to signal readiness"
+                % (fleet.kind, index + 1),
+                reason=reason,
+                fleet_kind=fleet.kind,
+                worker_index=index,
+            )
+        return child
+
+    def _record_startup_failure(
+        self,
+        exc: ResearchLabWorkerStartupError,
+        *,
+        attempt: int,
+        retrying: bool,
+    ) -> None:
+        diagnostic: dict[str, object] = {
+            "schema_version": "leadpoet.research_lab_worker_startup_failure.v1",
+            "exception_class": type(exc).__name__,
+            "reason": exc.reason,
+            "attempt": attempt,
+            "attempts": WORKER_STARTUP_ATTEMPTS,
+            "retrying": retrying,
+        }
+        if exc.fleet_kind in WORKER_FLEET_ROLE_BY_KIND:
+            diagnostic["fleet"] = exc.fleet_kind
+        if exc.worker_index is not None and exc.worker_index >= 0:
+            diagnostic["worker_index"] = exc.worker_index + 1
+        self._last_startup_failure = diagnostic
+        print(
+            "research_lab_worker_startup_failed "
+            + " ".join(
+                "%s=%s" % (key, str(value).lower() if isinstance(value, bool) else value)
+                for key, value in diagnostic.items()
+                if key != "schema_version"
+            ),
+            flush=True,
+        )
+
+    async def _cleanup_failed_async_start(self) -> None:
+        """Atomically terminate and reap every child before a retry or exit."""
+
+        unique_children = list({id(child): child for child in self.children.values()}.values())
+        for child in unique_children:
             if child.poll() is None:
-                child.terminate()
-            raise
+                try:
+                    child.terminate()
+                except ProcessLookupError:
+                    pass
+        pending = await self._wait_for_children_exit(
+            unique_children,
+            timeout_seconds=WORKER_STARTUP_TERMINATE_GRACE_SECONDS,
+        )
+        for child in pending:
+            try:
+                child.kill()
+            except ProcessLookupError:
+                pass
+        pending = await self._wait_for_children_exit(
+            pending,
+            timeout_seconds=WORKER_STARTUP_KILL_GRACE_SECONDS,
+        )
+        self.children.clear()
+        self._child_specs.clear()
+        self._ready_children.clear()
+        if pending:
+            raise ResearchLabWorkerStartupError(
+                "Research Lab worker startup cleanup did not reap every child",
+                reason="worker_startup_cleanup_timeout",
+            )
+
+    async def _cleanup_after_startup_cancellation(self) -> None:
+        """Finish child cleanup even when the owning startup task is cancelled."""
+
+        cleanup_task = asyncio.create_task(self._cleanup_failed_async_start())
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                continue
+        if cleanup_task.cancelled():
+            return
+        try:
+            cleanup_task.result()
+        except ResearchLabWorkerStartupError as exc:
+            self._record_startup_failure(
+                exc,
+                attempt=max(1, self._startup_attempts),
+                retrying=False,
+            )
+        except BaseException as exc:
+            print(
+                "research_lab_worker_startup_cleanup_failed "
+                "exception_class=%s" % type(exc).__name__,
+                flush=True,
+            )
+
+    @staticmethod
+    async def _wait_for_children_exit(
+        children: list[subprocess.Popen[bytes]],
+        *,
+        timeout_seconds: float,
+    ) -> list[subprocess.Popen[bytes]]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout_seconds)
+        pending = list(children)
+        while pending:
+            alive: list[subprocess.Popen[bytes]] = []
+            for child in pending:
+                if child.poll() is None:
+                    alive.append(child)
+                    continue
+                wait = getattr(child, "wait", None)
+                if callable(wait):
+                    try:
+                        wait(timeout=0)
+                    except (subprocess.TimeoutExpired, ProcessLookupError):
+                        alive.append(child)
+            pending = alive
+            if not pending or loop.time() >= deadline:
+                break
+            await asyncio.sleep(0.05)
+        return pending
 
     def _start_child(self, fleet: ResearchLabWorkerFleetPlan, index: int) -> subprocess.Popen[bytes]:
         child, read_fd = self._spawn_child(fleet, index)
@@ -633,9 +913,14 @@ class ResearchLabWorkerSupervisor:
                 env=env,
                 pass_fds=(write_fd,),
             )
-        except Exception:
+        except Exception as exc:
             os.close(read_fd)
-            raise
+            raise ResearchLabWorkerStartupError(
+                "%s worker %d could not be spawned" % (fleet.kind, index + 1),
+                reason="worker_spawn_failed",
+                fleet_kind=fleet.kind,
+                worker_index=index,
+            ) from exc
         finally:
             os.close(write_fd)
         return child, read_fd
@@ -714,6 +999,12 @@ class ResearchLabWorkerSupervisor:
             "scoring_configured": self.plan.scoring.worker_count,
             "scoring_expected_running": expected_scoring,
             "scoring_running": scoring_running,
+            "startup_attempts": getattr(self, "_startup_attempts", 0),
+            "last_startup_failure": (
+                dict(self._last_startup_failure)
+                if getattr(self, "_last_startup_failure", None) is not None
+                else None
+            ),
         }
 
     def _monitor_children(self) -> None:

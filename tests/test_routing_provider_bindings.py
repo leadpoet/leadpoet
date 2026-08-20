@@ -63,6 +63,7 @@ def _binding(*, tool_id: str = "intent.source_add.bloomberry_jobs") -> ProviderB
         "intent.source_add.predictleads_news": "predictleads_news",
         "intent.source_add.predictleads_technology": "predictleads_technology",
         "intent.source_add.builtwith": "builtwith",
+        "intent.source_add.sumble": "sumble",
     }.get(tool_id, "unreviewed")
     return ProviderBindingIdentity(
         binding_id="deepline-bloomberry-jobs-v1",
@@ -1820,15 +1821,18 @@ def test_builtwith_rejects_history_outside_signed_detection_range():
 
 
 @pytest.mark.parametrize(
-    "tool_id",
+    ("tool_id", "message"),
     (
-        "intent.source_add.predictleads_connections",
-        "intent.source_add.predictleads_news",
-        "intent.source_add.predictleads_technology",
-        "candidate.source_add.unreviewed",
+        ("intent.source_add.predictleads_connections", "unreviewed action"),
+        ("intent.source_add.predictleads_news", "unreviewed action"),
+        ("intent.source_add.predictleads_technology", "unreviewed action"),
+        ("intent.source_add.sumble", "explicitly unavailable"),
+        ("candidate.source_add.unreviewed", "unreviewed action"),
     ),
 )
-def test_composite_and_unknown_source_tools_are_rejected_at_catalog_admission(tool_id):
+def test_composite_and_unknown_source_tools_are_rejected_at_catalog_admission(
+    tool_id, message
+):
     binding = _binding(tool_id=tool_id)
     uri = "s3://lab-routing/bindings/unavailable.json"
     row = {
@@ -1858,7 +1862,7 @@ def test_composite_and_unknown_source_tools_are_rejected_at_catalog_admission(to
             "signature_ref": "s3://lab-routing/signatures/unavailable.sig",
         }
     )
-    with pytest.raises(RoutingProviderBindingError, match="unreviewed action"):
+    with pytest.raises(RoutingProviderBindingError, match=message):
         SignedRoutingBindingCatalogLoader(
             manifest_uri=uri,
             key_id="kms-binding-key",

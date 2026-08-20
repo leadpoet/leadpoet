@@ -1982,6 +1982,16 @@
       "symbol": "_FORBIDDEN_RESTART_AUTHORITY_NAMES"
     },
     {
+      "ast_sha256": "sha256:898c46661b97fc243d2010f8f42dfcbc2dc31706a106ba9e00019268f151cd68",
+      "path": "gateway/tee/disable_gateway_miner_submissions_secret.py",
+      "symbol": "_LEGACY_IDENTICAL_SHELL_DUPLICATE_NAME"
+    },
+    {
+      "ast_sha256": "sha256:154d463ebfb43af120f193590fff0451401820550486f5c8349b5b9e39e81c6a",
+      "path": "gateway/tee/disable_gateway_miner_submissions_secret.py",
+      "symbol": "_LEGACY_PRESERVED_AWS_ENV_NAMES"
+    },
+    {
       "ast_sha256": "sha256:375715b4182ccea05f1abe76d7a671a55ebb23e5ce14becfacb0167a1cef6dd3",
       "path": "gateway/tee/disable_gateway_miner_submissions_secret.py",
       "symbol": "_N_MINUS_ONE_HYDRATION_SKIP_NAMES"
@@ -2020,6 +2030,11 @@
       "ast_sha256": "sha256:5ab9d3fe81d795bba8edaed4db7f6855c1f503ee692c62da0fdb50a458f5436e",
       "path": "gateway/tee/disable_gateway_miner_submissions_secret.py",
       "symbol": "_custom_stage_label"
+    },
+    {
+      "ast_sha256": "sha256:c8e4be31a2289b65c65c2b3138a6b071e3bebbd933c59a13b6f0d4aa50be9d8c",
+      "path": "gateway/tee/disable_gateway_miner_submissions_secret.py",
+      "symbol": "_decode_legacy_duplicate_value"
     },
     {
       "ast_sha256": "sha256:821ba05b9829896d1b4a49c90ed4bf97cf767df8dd903ca8a43b25b768412510",
@@ -5737,6 +5752,11 @@
       "symbol": "_require_unmodified_git_authority"
     },
     {
+      "ast_sha256": "sha256:4f3a43aa029e7886ddb9e24a93725df872749c27c963ecabce98ba23fbe5edff",
+      "path": "scripts/verify_installed_gateway_controller_v1.py",
+      "symbol": "_reviewed_controller_parent_paths"
+    },
+    {
       "ast_sha256": "sha256:655483b7974fe42e14eac1165db11e1256908756aec04e3a41975eb46a06514d",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "_safe_git_environment"
@@ -5777,7 +5797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:7f010399637d947c6d0e001eacb131c376aaf0ab217367d5f782220dea076ded",
-  "protected_source_commit": "372855d664ef895cc7a8be94d2afe0cce0a86b50",
+  "manifest_hash": "sha256:4d53d8ff72aaa8bb6e0dc9f7267466973295dc110bfdcaf6a0c65929e3838ca5",
+  "protected_source_commit": "ee9fddc32df94912af863c765d09de60dabd969e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -1978,11 +1978,15 @@ if [ "$miner_maintenance_bootstrap_count" -eq 4 ]; then
   GATEWAY_DEPLOY_STAGE="miner_maintenance_pre_hydration"
   export GATEWAY_DEPLOY_STAGE
   echo "Preparing disabled miner submissions from the exact candidate under the canonical restart lock"
-  cd "$bootstrap_candidate_root"
+  export GATEWAY_RESTART_STARTED_EPOCH
+  export GATEWAY_RESTART_TIMING_DIR
+  export GATEWAY_RESTART_TIMING_FILE
+  export GATEWAY_RESTART_TIMING_INITIALIZED
   export PYTHONDONTWRITEBYTECODE=1
   export PYTHONPATH="$bootstrap_candidate_root"
+  cd /
   exec "$GATEWAY_PYTHON_BIN" \
-    -m gateway.tee.gateway_miner_maintenance_restart_v1 \
+    -P -m gateway.tee.gateway_miner_maintenance_restart_v1 \
     --bootstrap-exec \
     --expected-commit "$REQUESTED_GATEWAY_DEPLOY_COMMIT" \
     --repo-root "$LEADPOET_REPO_ROOT" \

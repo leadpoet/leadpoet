@@ -924,6 +924,7 @@ PROTECTED_SYMBOLS = {
         "_read_handoff_marker",
         "_wait_for_handoff_marker",
         "_close_bootstrap_tree",
+        "_leave_and_close_bootstrap_tree",
         "_install_controller_bundle_memfds",
         "bootstrap_gateway_miner_maintenance_restart",
         "_fetch_runtime_status",

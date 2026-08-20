@@ -334,6 +334,49 @@ class ExactModelRoutingRunInputs:
     authoritative_billing_rollup: Callable[..., Mapping[str, Any]]
 
 
+def _validate_exact_unit_and_label_identity(
+    *,
+    spec: RoutingExperimentV2Spec,
+    unit_dataset: VerifiedRoutingUnitDataset,
+    gold_labels: Mapping[str, bool],
+) -> dict[str, bool]:
+    """Bind signed units and labels to the spec before its first SQL write."""
+
+    refs = tuple(spec.input.calibration_unit_refs) + tuple(
+        spec.input.holdout_unit_refs
+    )
+    if set(refs) != set(unit_dataset.units):
+        raise RoutingExperimentWorkerError(
+            "reviewed routing unit dataset differs from the spec"
+        )
+    if (
+        not spec.input.unit_input_set_hash
+        or unit_dataset.unit_set_hash != spec.input.unit_input_set_hash
+    ):
+        raise RoutingExperimentWorkerError(
+            "reviewed routing unit dataset hash differs from the spec"
+        )
+    if (
+        not isinstance(gold_labels, Mapping)
+        or set(gold_labels) != set(refs)
+        or any(
+            not isinstance(key, str) or type(value) is not bool
+            for key, value in gold_labels.items()
+        )
+    ):
+        raise RoutingExperimentWorkerError(
+            "reviewed routing labels differ from the spec"
+        )
+    normalized = dict(gold_labels)
+    if sha256_json({"labels": sorted(normalized.items())}) != (
+        spec.input.gold_label_set_hash
+    ):
+        raise RoutingExperimentWorkerError(
+            "reviewed routing label hash differs from the spec"
+        )
+    return normalized
+
+
 class RoutingExperimentRunFactory(Protocol):
     """A reviewed, named factory; never a user-supplied import path."""
 
@@ -435,17 +478,11 @@ class ExactModelRoutingRunFactory:
                     "exact Model artifact is duplicated across variants"
                 )
             artifact_keys.add(registration.key)
-        refs = tuple(spec.input.calibration_unit_refs) + tuple(
-            spec.input.holdout_unit_refs
+        labels = _validate_exact_unit_and_label_identity(
+            spec=spec,
+            unit_dataset=self.unit_dataset,
+            gold_labels=self.gold_labels,
         )
-        if set(refs) != set(self.unit_dataset.units):
-            raise RoutingExperimentWorkerError(
-                "reviewed routing unit dataset differs from the spec"
-            )
-        if set(self.gold_labels) != set(refs):
-            raise RoutingExperimentWorkerError(
-                "reviewed routing labels differ from the spec"
-            )
         runner = self.reviewed_runner_factory(spec)
         if not isinstance(runner, ReviewedProviderBrokerRoutingRunner):
             raise RoutingExperimentWorkerError(
@@ -470,7 +507,7 @@ class ExactModelRoutingRunFactory:
             )
         return ExactModelRoutingRunInputs(
             registry=self.registry,
-            gold_labels=dict(self.gold_labels),
+            gold_labels=labels,
             unit_dataset=self.unit_dataset,
             reviewed_runner=runner,
             verifier=self.verifier,

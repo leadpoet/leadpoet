@@ -1700,6 +1700,28 @@ def test_closed_or_tampered_proof_fd_fails_closed(
         maintenance._validate_proof_document(proof)
 
 
+def test_bootstrap_cleanup_leaves_a_valid_exec_working_directory() -> None:
+    bootstrap_root = Path(
+        f"/tmp/gateway-miner-maintenance-bootstrap.{os.getpid()}cwd"
+    )
+    candidate_root = bootstrap_root / "candidate"
+    original_cwd = os.open(".", os.O_RDONLY)
+    try:
+        bootstrap_root.mkdir(mode=0o700)
+        candidate_root.mkdir()
+        os.chdir(candidate_root)
+
+        maintenance._leave_and_close_bootstrap_tree(bootstrap_root)
+
+        assert Path.cwd() == Path("/")
+        assert not bootstrap_root.exists()
+    finally:
+        os.fchdir(original_cwd)
+        os.close(original_cwd)
+        if bootstrap_root.exists():
+            maintenance.shutil.rmtree(bootstrap_root)
+
+
 def test_unexpected_cli_failure_never_renders_exception_detail(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

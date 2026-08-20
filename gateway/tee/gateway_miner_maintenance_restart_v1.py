@@ -2528,6 +2528,18 @@ def _close_bootstrap_tree(path: Path) -> None:
         )
 
 
+def _leave_and_close_bootstrap_tree(path: Path) -> None:
+    """Remove the bootstrap tree without leaving the exec process in it."""
+
+    try:
+        os.chdir("/")
+    except OSError as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "miner-maintenance bootstrap working directory is unavailable"
+        ) from exc
+    _close_bootstrap_tree(path)
+
+
 def _install_controller_bundle_memfds(
     controller_bundle: Mapping[str, Any],
 ) -> None:
@@ -2652,7 +2664,7 @@ def bootstrap_gateway_miner_maintenance_restart(
         ):
             os.set_inheritable(descriptor, True)
         _require_canonical_restart_lock_fd()
-        _close_bootstrap_tree(bootstrap_root)
+        _leave_and_close_bootstrap_tree(bootstrap_root)
         cleaned = True
         environment = dict(os.environ)
         environment.update(

@@ -121,6 +121,34 @@ def test_routing_authority_migration_has_fenced_append_only_security_contract():
         "research_lab_routing_promote_v3",
     ):
         assert f"CREATE OR REPLACE FUNCTION public.{function_name}" in sql
+    decision_v3 = sql[
+        sql.index(
+            "CREATE OR REPLACE FUNCTION public."
+            "research_lab_routing_append_decision_receipt_v3"
+        ) : sql.index(
+            "CREATE OR REPLACE FUNCTION public."
+            "research_lab_routing_append_evaluation_v3"
+        )
+    ]
+    evaluation_v3 = sql[
+        sql.index(
+            "CREATE OR REPLACE FUNCTION public."
+            "research_lab_routing_append_evaluation_v3"
+        ) : sql.index(
+            "CREATE OR REPLACE FUNCTION public."
+            "research_lab_routing_reserve_budget_v3"
+        )
+    ]
+    for immutable_receipt_rpc in (decision_v3, evaluation_v3):
+        assert "existing.claim_key IS DISTINCT FROM p_claim_key" not in (
+            immutable_receipt_rpc
+        )
+        assert "existing.claim_generation IS DISTINCT FROM p_claim_generation" not in (
+            immutable_receipt_rpc
+        )
+        assert "PERFORM public.research_lab_routing_assert_claim_v3" in (
+            immutable_receipt_rpc
+        )
     assert "authorization_request_hash" in sql
     assert "authorization_job_id" in sql
     assert "admission_job_id" in sql

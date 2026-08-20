@@ -4862,8 +4862,6 @@ BEGIN
            OR existing.unit_ref IS DISTINCT FROM p_unit_ref
            OR existing.plan_hash IS DISTINCT FROM p_plan_hash
            OR existing.route_hash IS DISTINCT FROM p_route_hash
-           OR existing.claim_key IS DISTINCT FROM p_claim_key
-           OR existing.claim_generation IS DISTINCT FROM p_claim_generation
            OR existing.decision_doc IS DISTINCT FROM p_decision_doc
         THEN
             RAISE EXCEPTION 'research_lab_routing_decision_v3_conflict'
@@ -4981,8 +4979,6 @@ BEGIN
         IF existing.experiment_hash IS DISTINCT FROM p_experiment_hash
            OR existing.evaluation_hash IS DISTINCT FROM p_evaluation_hash
            OR existing.selected_variant_id IS DISTINCT FROM p_selected_variant_id
-           OR existing.claim_key IS DISTINCT FROM p_claim_key
-           OR existing.claim_generation IS DISTINCT FROM p_claim_generation
            OR existing.evaluation_doc IS DISTINCT FROM p_evaluation_doc
         THEN
             RAISE EXCEPTION 'research_lab_routing_evaluation_v3_conflict'

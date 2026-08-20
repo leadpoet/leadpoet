@@ -1260,9 +1260,10 @@ def _build_consumer_runtime_probe_from_observation_v1(
 ) -> dict[str, Any]:
     raw = dict(observation)
     metadata_document = dict(metadata)
-    expected_observation_fields = {"invariants"}
-    if metadata_document.get("qualification_outcome_protocol") is not None:
-        expected_observation_fields.add("qualification_outcome_protocol")
+    expected_observation_fields = {
+        "invariants",
+        "qualification_outcome_protocol",
+    }
     if set(raw) != expected_observation_fields or not isinstance(
         raw.get("invariants"), Mapping
     ):
@@ -1662,11 +1663,10 @@ else:
         },
     }
 
-_lp_runtime_observation = {"invariants": _lp_invariants}
-if "qualification_outcome_probes" in _lp_plan:
-    _lp_runtime_observation["qualification_outcome_protocol"] = (
-        _lp_qualification_outcome_observation
-    )
+_lp_runtime_observation = {
+    "invariants": _lp_invariants,
+    "qualification_outcome_protocol": _lp_qualification_outcome_observation,
+}
 _lp_sys.stdout.write(_lp_json.dumps(
     {
         "metadata": _lp_metadata,

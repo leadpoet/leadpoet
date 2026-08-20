@@ -3617,7 +3617,7 @@
       "symbol": "_BoundedPipeCapture"
     },
     {
-      "ast_sha256": "sha256:00c62a8b88d780a78f3a39843ab5a37e2badeefb02ad2b31fa936ad567a620a2",
+      "ast_sha256": "sha256:f2a40db9b1d0088d0803c4a5f6698fe3ededcf67f5f67e08c29d7079093088f4",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_MEASURED_METADATA_BOOTSTRAP"
     },
@@ -3627,7 +3627,7 @@
       "symbol": "_bounded_metadata_process_runner"
     },
     {
-      "ast_sha256": "sha256:a8a6215f5573792f5ee700fc4fea0e04bcc62e6cfe86d26f580495381dc1dd78",
+      "ast_sha256": "sha256:8b8078475d5c64f0d3e8d8b83e0c1451eacec7d370feb0dfa723aefd257c16d2",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_build_consumer_runtime_probe_from_observation_v1"
     },
@@ -6867,7 +6867,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:50d5c53a73d9d23d134dfb43a2d21ed269c4e61e25541c9740e11220f7f3642d",
-  "protected_source_commit": "1776c2fcac42e44fabaaa9c729926973f367d5a3",
+  "manifest_hash": "sha256:55c813e02a7f926e02b0fdc9b4e85c99eaa34a413c2318ce0f7d7294d37ca26b",
+  "protected_source_commit": "edc170b11426d77ef2fd303e0cee7774becbde77",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

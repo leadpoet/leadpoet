@@ -1809,7 +1809,10 @@ def test_metadata_observer_allows_unlisted_harmless_dependencies(
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {
         "metadata": {},
-        "runtime_observation": {"invariants": {"profile": "legacy_exact"}},
+        "runtime_observation": {
+            "invariants": {"profile": "legacy_exact"},
+            "qualification_outcome_protocol": None,
+        },
     }
 
 

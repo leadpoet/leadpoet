@@ -2116,6 +2116,40 @@ def test_measured_v2_metadata_cannot_execute_under_legacy_admission() -> None:
         )
 
 
+def test_legacy_runtime_observation_cannot_spoof_qualification_protocol() -> None:
+    policy, policy_hash = semantic_compatibility_policy_identity_v1()
+    receipt = {
+        "admission_mode": "legacy_exact",
+        "consumer_api_version": policy["consumer_api_version"],
+        "decision": "accepted",
+        "policy_hash": policy_hash,
+        "source_tree_hash": "sha256:" + "1" * 64,
+        "manifest_hash": "sha256:" + "2" * 64,
+        "image_digest": "example.invalid/model@sha256:" + "3" * 64,
+    }
+
+    with pytest.raises(ModelSandboxV2Error, match="observation is unexpected"):
+        _build_consumer_runtime_probe_from_observation_v1(
+            {
+                "invariants": {"profile": "legacy_exact"},
+                "qualification_outcome_protocol": {"cases": {}},
+            },
+            compatibility_receipt=receipt,
+            metadata={},
+            expected_source_tree_hash=receipt["source_tree_hash"],
+            expected_manifest_hash=receipt["manifest_hash"],
+            expected_image_digest=receipt["image_digest"],
+            expected_module_name="research_lab_adapter",
+            expected_callable_name="adapter_metadata",
+            observation_plan={
+                "schema_version": (
+                    "leadpoet.consumer-runtime-observation-plan.v1"
+                ),
+                "runtime_invariants": None,
+            },
+        )
+
+
 def test_behavior_probe_rejects_failure_to_empty_semantic_drift() -> None:
     complete_nonce = "complete-probe-nonce-0001"
     incomplete_nonce = "incomplete-probe-nonce-01"

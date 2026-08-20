@@ -20,6 +20,7 @@ def test_readiness_venv_removes_collaborative_umask_write_bits(
     assert python.is_file()
     if sys.platform != "darwin":
         assert not python.is_symlink()
+        assert python.resolve(strict=True).is_relative_to(root.resolve(strict=True))
     assert all(
         path.is_symlink() or path.stat().st_mode & 0o022 == 0
         for path in (root, *root.rglob("*"))

@@ -571,7 +571,7 @@ validator_active_commit() {
 build_gateway_restart_command() {
   local secret_environment=""
   local bootstrap_command=""
-  local bootstrap_command_quoted=""
+  local bootstrap_command_b64=""
   gateway_restart_command=()
   if [ -n "$GATEWAY_ENV_SECRET_ID" ]; then
     secret_environment="LEADPOET_GATEWAY_ENV_SECRET_ID='$GATEWAY_ENV_SECRET_ID'"
@@ -621,10 +621,18 @@ build_gateway_restart_command() {
           --miner-maintenance-bootstrap-root \"\$bootstrap_root\" \\
           --miner-maintenance-handoff-file '$gateway_handoff_file' \\
           --miner-maintenance-handoff-nonce '$gateway_handoff_nonce'"
-    printf -v bootstrap_command_quoted '%q' "$bootstrap_command"
+    bootstrap_command_b64="$(
+      printf '%s' "$bootstrap_command" | base64 | tr -d '\n'
+    )"
+    case "$bootstrap_command_b64" in
+      *[!A-Za-z0-9+/=]*|'')
+        echo "ERROR: miner-maintenance bootstrap transport encoding failed" >&2
+        return 1
+        ;;
+    esac
     gateway_restart_command=(
       ssh -tt "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST"
-      "exec bash -c $bootstrap_command_quoted"
+      "exec bash -c \"\$(printf '%s' '$bootstrap_command_b64' | base64 --decode)\""
     )
     return
   fi

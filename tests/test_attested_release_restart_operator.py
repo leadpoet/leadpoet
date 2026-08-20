@@ -146,6 +146,13 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert "trap cleanup EXIT" in source
     assert "trap 'exit 130' INT" in source
     assert "trap 'exit 143' TERM" in source
+    assert "printf -v bootstrap_command_quoted '%q'" not in source
+    assert "bootstrap_command_b64=" in source
+    assert (
+        "exec bash -c \\\"\\$(printf '%s' '$bootstrap_command_b64' | "
+        "base64 --decode)\\\""
+        in source
+    )
     assert 'if [ "$commit" != "$branch_commit" ]; then' in source
     assert 'restart_arguments="--commit \'$commit\'"' in source
     assert "VALIDATOR_COORDINATED_EXPECTED_COMMIT" in source

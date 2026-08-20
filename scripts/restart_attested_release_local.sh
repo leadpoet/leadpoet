@@ -43,6 +43,7 @@ coordination_file=""
 gateway_handoff_file=""
 gateway_handoff_nonce=""
 controller_verifier_b64=""
+expected_controller_commit=""
 gateway_restart_log=""
 gateway_observation=""
 gateway_evidence=""
@@ -385,6 +386,13 @@ python3 "$helper" \
   --branch-ref origin/main
 echo "Selected release is compatible with current public auditors: $commit"
 echo "Current public V2 authority commit: $branch_commit"
+ssh_common=(
+  -n
+  -o BatchMode=yes
+  -o ConnectTimeout=15
+  -o ServerAliveInterval=30
+  -o ServerAliveCountMax=20
+)
 if [ "$disable_miner_submissions_before_restart" = "1" ]; then
   selected_operator_blob="$(
     git -C "$ROOT" rev-parse \
@@ -410,6 +418,22 @@ if [ "$disable_miner_submissions_before_restart" = "1" ]; then
     echo "ERROR: installed-controller verifier is not the exact candidate Git blob" >&2
     exit 1
   fi
+  installed_controller_target="$(
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "readlink -- '$PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT'"
+  )"
+  if [[ "$installed_controller_target" =~ ^releases/([0-9a-f]{40})$ ]]; then
+    expected_controller_commit="${BASH_REMATCH[1]}"
+  else
+    echo "ERROR: installed gateway controller target is invalid" >&2
+    exit 1
+  fi
+  python3 "$ROOT/scripts/verify_installed_gateway_controller_v1.py" \
+    --repo-root "$ROOT" \
+    --expected-controller-commit "$expected_controller_commit" \
+    --expected-commit "$commit" \
+    --verify-lineage-only
+  echo "Candidate-bound installed gateway controller: $expected_controller_commit"
   controller_verifier_b64="$(
     base64 < "$ROOT/scripts/verify_installed_gateway_controller_v1.py" \
       | tr -d '\n'
@@ -424,14 +448,6 @@ if [ "$disable_miner_submissions_before_restart" = "1" ]; then
     exit 1
   fi
 fi
-
-ssh_common=(
-  -n
-  -o BatchMode=yes
-  -o ConnectTimeout=15
-  -o ServerAliveInterval=30
-  -o ServerAliveCountMax=20
-)
 
 install_gateway_readiness_manifest() {
   local action="$1"
@@ -598,7 +614,7 @@ build_gateway_restart_command() {
       mkdir -m 700 "\$candidate_root"
       controller_current='$PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT'
       run_verified_gateway_git_helper() {
-        printf '%s' '$controller_verifier_b64' | '$GATEWAY_PYTHON_BIN' -I -S -c 'import base64,sys; source=base64.b64decode(sys.stdin.buffer.read(), validate=True); exec(compile(source, \"<exact-installed-controller-verifier>\", \"exec\"))' --repo-root '$GATEWAY_REPO_ROOT' --controller-current "\$controller_current" --host-restart-path '$GATEWAY_RESTART' --expected-commit '$commit' --exec-helper scripts/gateway_git_deploy.py -- "\$@"
+        printf '%s' '$controller_verifier_b64' | '$GATEWAY_PYTHON_BIN' -I -S -c 'import base64,sys; source=base64.b64decode(sys.stdin.buffer.read(), validate=True); exec(compile(source, \"<exact-installed-controller-verifier>\", \"exec\"))' --repo-root '$GATEWAY_REPO_ROOT' --controller-current "\$controller_current" --host-restart-path '$GATEWAY_RESTART' --expected-controller-commit '$expected_controller_commit' --expected-commit '$commit' --exec-helper scripts/gateway_git_deploy.py -- "\$@"
       }
       prepared_sha=\$(run_verified_gateway_git_helper prepare --repo-root '$GATEWAY_REPO_ROOT' --repo-url https://github.com/leadpoet/leadpoet.git --branch main --deploy-commit '$commit' --plan-file "\$bootstrap_root/plan.json" --manifest-file "\$bootstrap_root/manifest.json" --last-good-file "\$bootstrap_root/last-good-unused.json")
       test "\$prepared_sha" = '$commit'

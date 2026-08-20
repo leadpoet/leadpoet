@@ -15,6 +15,7 @@ import sys
 from typing import Any, Iterator, Mapping, Sequence
 
 
+# These are minimum compatible ancestry floors, not an exhaustive release list.
 SUPPORTED_CONTROLLER_COMMITS = frozenset(
     {"0dd3a385a23a3af0fa17210bfe02a39cc4023952"}
 )
@@ -103,6 +104,35 @@ def _git_commit_exists(repo_root: Path, commit: str) -> bool:
         raise InstalledGatewayControllerError(
             "installed controller Git authority is unavailable"
         ) from exc
+    return result.returncode == 0
+
+
+def _git_is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=_safe_git_environment(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise InstalledGatewayControllerError(
+            "installed controller Git authority is unavailable"
+        ) from exc
+    if result.returncode not in (0, 1):
+        raise InstalledGatewayControllerError(
+            "installed controller Git authority is unavailable"
+        )
     return result.returncode == 0
 
 
@@ -365,16 +395,53 @@ def _reviewed_controller_parent_paths(release_dir: Path) -> frozenset[Path]:
     )
 
 
+def verify_candidate_bound_controller_lineage(
+    *,
+    repo_root: Path,
+    expected_controller_commit: str,
+    expected_candidate_commit: str,
+) -> str:
+    repository = Path(repo_root).expanduser().resolve()
+    controller_commit = str(expected_controller_commit).lower()
+    candidate_commit = str(expected_candidate_commit).lower()
+    if not _COMMIT_RE.fullmatch(controller_commit) or not _COMMIT_RE.fullmatch(
+        candidate_commit
+    ):
+        raise InstalledGatewayControllerError(
+            "installed controller lineage identity is invalid"
+        )
+    _require_unmodified_git_authority(repository)
+    if not _git_commit_exists(repository, controller_commit) or not _git_commit_exists(
+        repository, candidate_commit
+    ):
+        raise InstalledGatewayControllerError(
+            "installed controller lineage Git object is unavailable"
+        )
+    if not any(
+        _git_is_ancestor(repository, floor, controller_commit)
+        for floor in SUPPORTED_CONTROLLER_COMMITS
+    ) or not _git_is_ancestor(repository, controller_commit, candidate_commit):
+        raise InstalledGatewayControllerError(
+            "installed controller lineage is incompatible with the candidate"
+        )
+    _require_unmodified_git_authority(repository)
+    return controller_commit
+
+
 def verify_installed_controller_bundle(
     *,
     repo_root: Path,
     controller_current: Path,
     host_restart_path: Path,
     expected_commit: str,
+    expected_controller_commit: str,
 ) -> dict[str, Any]:
     repository = Path(repo_root).expanduser().resolve()
     commit = str(expected_commit).lower()
-    if not _COMMIT_RE.fullmatch(commit):
+    expected_controller = str(expected_controller_commit).lower()
+    if not _COMMIT_RE.fullmatch(commit) or not _COMMIT_RE.fullmatch(
+        expected_controller
+    ):
         raise InstalledGatewayControllerError("candidate commit is invalid")
     _require_unmodified_git_authority(repository)
     current = Path(controller_current)
@@ -397,26 +464,22 @@ def verify_installed_controller_bundle(
             "installed controller link identity is unsafe"
         )
     controller_commit = match.group(1)
-    if controller_commit not in (SUPPORTED_CONTROLLER_COMMITS | {commit}):
+    if controller_commit != expected_controller:
+        raise InstalledGatewayControllerError(
+            "installed controller differs from the candidate-bound expectation"
+        )
+    controller_object_present = _git_commit_exists(repository, controller_commit)
+    if not controller_object_present:
+        raise InstalledGatewayControllerError(
+            "installed controller Git object is unavailable"
+        )
+    if not any(
+        _git_is_ancestor(repository, floor, controller_commit)
+        for floor in SUPPORTED_CONTROLLER_COMMITS
+    ):
         raise InstalledGatewayControllerError(
             "installed controller commit is unsupported"
         )
-    candidate_object_present = _git_commit_exists(repository, commit)
-    if controller_commit not in SUPPORTED_CONTROLLER_COMMITS:
-        if controller_commit != commit or not candidate_object_present:
-            raise InstalledGatewayControllerError(
-                "installed candidate controller object is unavailable"
-            )
-        if _git(
-            repository,
-            "merge-base",
-            "--is-ancestor",
-            controller_commit,
-            commit,
-        ):
-            raise InstalledGatewayControllerError(
-                "installed controller is not an ancestor of the candidate"
-            )
     release_dir = releases_root / controller_commit
     release_identity = _verify_directory(release_dir, modes=frozenset({0o700}))
     allowed_group_writable_paths = frozenset(ancestry) | (
@@ -452,9 +515,7 @@ def verify_installed_controller_bundle(
         )
         observed[relative_path] = payload
     host_wrapper = _read_exact_file(Path(host_restart_path), expected_mode=0o700)
-    host_candidates = set(SUPPORTED_CONTROLLER_COMMITS)
-    if candidate_object_present:
-        host_candidates.add(commit)
+    host_candidates = set(SUPPORTED_CONTROLLER_COMMITS) | {controller_commit}
     host_controller_commits = {
         candidate
         for candidate in host_candidates
@@ -575,17 +636,42 @@ def _exec_verified_helper(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True)
-    parser.add_argument("--controller-current", type=Path, required=True)
-    parser.add_argument("--host-restart-path", type=Path, required=True)
+    parser.add_argument("--controller-current", type=Path)
+    parser.add_argument("--host-restart-path", type=Path)
     parser.add_argument("--expected-commit", required=True)
+    parser.add_argument("--expected-controller-commit", required=True)
+    parser.add_argument("--verify-lineage-only", action="store_true")
     parser.add_argument(
         "--exec-helper",
         choices=("scripts/gateway_git_deploy.py",),
-        required=True,
     )
     parser.add_argument("helper_arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(list(argv) if argv is not None else None)
     try:
+        if args.verify_lineage_only:
+            if (
+                args.controller_current is not None
+                or args.host_restart_path is not None
+                or args.exec_helper is not None
+                or args.helper_arguments
+            ):
+                raise InstalledGatewayControllerError(
+                    "controller lineage-only request is invalid"
+                )
+            verify_candidate_bound_controller_lineage(
+                repo_root=args.repo_root,
+                expected_controller_commit=args.expected_controller_commit,
+                expected_candidate_commit=args.expected_commit,
+            )
+            return 0
+        if (
+            args.controller_current is None
+            or args.host_restart_path is None
+            or args.exec_helper is None
+        ):
+            raise InstalledGatewayControllerError(
+                "installed controller verification request is incomplete"
+            )
         helper_arguments = list(args.helper_arguments)
         if helper_arguments[:1] == ["--"]:
             helper_arguments = helper_arguments[1:]
@@ -594,6 +680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             controller_current=args.controller_current,
             host_restart_path=args.host_restart_path,
             expected_commit=args.expected_commit,
+            expected_controller_commit=args.expected_controller_commit,
         )
         _exec_verified_helper(
             bundle=result,

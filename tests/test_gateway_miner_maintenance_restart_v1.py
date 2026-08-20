@@ -25,6 +25,9 @@ RELEASE_HASH = "sha256:" + "c" * 64
 CHANNEL_HASH = "sha256:" + "d" * 64
 BLOB_HASH = "e" * 64
 CONTROLLER_COMMIT = next(iter(maintenance.SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS))
+REAL_REPOSITORY = Path(__file__).resolve().parents[1]
+SEQUENTIAL_N_MINUS_ONE_COMMIT = "d649562b8c1e0077f670431cd9b22714eb686cd5"
+SEQUENTIAL_CANDIDATE_COMMIT = "d72e475381e127aa209be33deed763d44a8289e6"
 RECOVERY_VERSION = "33333333-3333-4333-8333-333333333333"
 PREVIOUS_VERSION = "44444444-4444-4444-8444-444444444444"
 PENDING_VERSION = "55555555-5555-4555-8555-555555555555"
@@ -230,6 +233,43 @@ def _installed_controller_fixture(
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
     )
     return controller_parent, controller_root, releases_root, release, current, host_restart
+
+
+def _real_installed_controller_fixture(
+    tmp_path: Path,
+    *,
+    controller_commit: str,
+) -> tuple[Path, Path]:
+    controller_parent = tmp_path / "restart-controller"
+    controller_root = controller_parent / "gateway"
+    releases_root = controller_root / "releases"
+    release = releases_root / controller_commit
+    for directory in (controller_parent, controller_root, releases_root):
+        directory.mkdir(exist_ok=True)
+        directory.chmod(0o700)
+    controller_files = {
+        "gw_restart.sh": 0o700,
+        "scripts/gateway_git_deploy.py": 0o600,
+        "Leadpoet/utils/exact_commit_restart_v2.py": 0o600,
+        "gateway/tee/host_memory_guard_v2.py": 0o600,
+    }
+    for relative_path, installed_mode in controller_files.items():
+        destination = release / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(
+            subprocess.check_output(
+                ["git", "show", f"{controller_commit}:{relative_path}"],
+                cwd=REAL_REPOSITORY,
+            )
+        )
+        destination.chmod(installed_mode)
+    release.chmod(0o700)
+    current = controller_root / "current"
+    current.symlink_to(f"releases/{controller_commit}")
+    host_restart = tmp_path / "gw_restart.sh"
+    host_restart.write_bytes((release / "gw_restart.sh").read_bytes())
+    host_restart.chmod(0o700)
+    return current, host_restart
 
 
 class FakeSecretsClient:
@@ -2066,6 +2106,152 @@ def test_exact_candidate_controller_is_allowed_for_post_install_retry(
         host_restart_path=host_restart,
         expected_commit=CANDIDATE_COMMIT,
     ) == CANDIDATE_COMMIT
+
+
+def test_real_sequential_release_accepts_d649_controller_for_d72(
+    tmp_path: Path,
+) -> None:
+    current, host_restart = _real_installed_controller_fixture(
+        tmp_path,
+        controller_commit=SEQUENTIAL_N_MINUS_ONE_COMMIT,
+    )
+
+    assert maintenance._verify_installed_controller(
+        repo_root=REAL_REPOSITORY,
+        controller_current=current,
+        host_restart_path=host_restart,
+        expected_commit=SEQUENTIAL_CANDIDATE_COMMIT,
+    ) == SEQUENTIAL_N_MINUS_ONE_COMMIT
+
+
+def test_real_controller_lineage_rejects_pre_floor_commit(
+    tmp_path: Path,
+) -> None:
+    controller_commit = subprocess.check_output(
+        ["git", "rev-parse", f"{CONTROLLER_COMMIT}^"],
+        cwd=REAL_REPOSITORY,
+        text=True,
+    ).strip()
+    current, host_restart = _real_installed_controller_fixture(
+        tmp_path,
+        controller_commit=controller_commit,
+    )
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="not compatible",
+    ):
+        maintenance._verify_installed_controller(
+            repo_root=REAL_REPOSITORY,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=SEQUENTIAL_CANDIDATE_COMMIT,
+        )
+
+
+@pytest.mark.parametrize("floor_is_ancestor", (False, True))
+def test_unrelated_and_non_ancestor_controllers_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    floor_is_ancestor: bool,
+) -> None:
+    lineage_controller = "e" * 40
+    (
+        _controller_parent,
+        _controller_root,
+        _releases_root,
+        _release,
+        current,
+        host_restart,
+    ) = _installed_controller_fixture(
+        tmp_path,
+        monkeypatch,
+        controller_commit=lineage_controller,
+    )
+
+    def lineage(_repository: Path, ancestor: str, descendant: str) -> bool:
+        if ancestor == CONTROLLER_COMMIT and descendant == lineage_controller:
+            return floor_is_ancestor
+        if ancestor == lineage_controller and descendant == CANDIDATE_COMMIT:
+            return False
+        raise AssertionError((ancestor, descendant))
+
+    monkeypatch.setattr(maintenance, "_git_is_ancestor", lineage)
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="not compatible",
+    ):
+        maintenance._verify_installed_controller(
+            repo_root=tmp_path,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+        )
+
+
+def test_missing_installed_controller_object_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_commit = "f" * 40
+    (
+        _controller_parent,
+        _controller_root,
+        _releases_root,
+        _release,
+        current,
+        host_restart,
+    ) = _installed_controller_fixture(
+        tmp_path,
+        monkeypatch,
+        controller_commit=missing_commit,
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_git_commit_exists",
+        lambda _repository, commit: commit != missing_commit,
+    )
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="Git object is unavailable",
+    ):
+        maintenance._verify_installed_controller(
+            repo_root=tmp_path,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+        )
+
+
+def test_missing_candidate_object_fails_closed_after_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        _controller_parent,
+        _controller_root,
+        _releases_root,
+        _release,
+        current,
+        host_restart,
+    ) = _installed_controller_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        maintenance,
+        "_git_commit_exists",
+        lambda _repository, commit: commit != CANDIDATE_COMMIT,
+    )
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="Git object is unavailable",
+    ):
+        maintenance._verify_installed_controller(
+            repo_root=tmp_path,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+        )
 
 
 def test_partial_controller_cutover_reconciles_exact_old_host_under_lock(

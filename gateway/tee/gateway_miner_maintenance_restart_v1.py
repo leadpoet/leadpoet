@@ -80,6 +80,7 @@ MAX_PROOF_BYTES = 32 * 1024
 MAX_RELEASE_CHANNEL_BYTES = 4 * 1024 * 1024
 MAX_RUNTIME_STATUS_BYTES = 256 * 1024
 DEFAULT_RUNTIME_STATUS_URL = "http://127.0.0.1:8000/research-lab/status"
+# These are minimum compatible ancestry floors, not an exhaustive release list.
 SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS = frozenset(
     {"0dd3a385a23a3af0fa17210bfe02a39cc4023952"}
 )
@@ -908,6 +909,57 @@ def _run_git_bytes(repo_root: Path, *arguments: str) -> bytes:
     return result.stdout
 
 
+def _git_commit_exists(repo_root: Path, commit: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(Path(repo_root)),
+                "cat-file",
+                "-e",
+                f"{commit}^{{commit}}",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=120,
+            env=_safe_git_environment(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "candidate Git object is unavailable"
+        ) from exc
+    return result.returncode == 0
+
+
+def _git_is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(Path(repo_root)),
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+            ],
+            check=False,
+            capture_output=True,
+            timeout=120,
+            env=_safe_git_environment(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "candidate Git identity is unavailable"
+        ) from exc
+    if result.returncode not in (0, 1):
+        raise GatewayMinerMaintenanceRestartError(
+            "candidate Git identity is unavailable"
+        )
+    return result.returncode == 0
+
+
 def _canonical_remote(value: str) -> str:
     normalized = str(value or "").strip().rstrip("/")
     return normalized[:-4] if normalized.endswith(".git") else normalized
@@ -1449,27 +1501,18 @@ def _verified_installed_controller_bundle(
     release_identity = _verified_installed_controller_release_directory(
         expected_resolved
     )
-    if (
-        controller_commit
-        not in (SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS | {expected_commit})
-        or not _COMMIT_RE.fullmatch(expected_commit)
-        or subprocess.run(
-            [
-                "git",
-                "-C",
-                str(Path(repo_root)),
-                "merge-base",
-                "--is-ancestor",
-                controller_commit,
-                expected_commit,
-            ],
-            check=False,
-            capture_output=True,
-            timeout=30,
-            env=_safe_git_environment(),
-        ).returncode
-        != 0
+    if not _COMMIT_RE.fullmatch(expected_commit):
+        raise GatewayMinerMaintenanceRestartError("candidate commit is invalid")
+    if not _git_commit_exists(repo_root, expected_commit) or not _git_commit_exists(
+        repo_root, controller_commit
     ):
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 controller Git object is unavailable"
+        )
+    if not any(
+        _git_is_ancestor(repo_root, floor, controller_commit)
+        for floor in SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS
+    ) or not _git_is_ancestor(repo_root, controller_commit, expected_commit):
         raise GatewayMinerMaintenanceRestartError(
             "installed N-1 controller is not compatible with the candidate"
         )
@@ -1527,7 +1570,10 @@ def _verified_installed_controller_bundle(
     if host_restart != controller_restart:
         compatible_host_commits = {
             commit
-            for commit in (SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS | {expected_commit})
+            for commit in (
+                SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS
+                | {controller_commit, expected_commit}
+            )
             if host_restart
             == _run_git_bytes(repo_root, "show", f"{commit}:gw_restart.sh")
         }

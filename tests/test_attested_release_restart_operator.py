@@ -185,6 +185,7 @@ commit={shlex.quote(commit)}
 disable_miner_submissions_before_restart=1
 GATEWAY_ENV_SECRET_ID=''
 controller_verifier_b64='YQ=='
+expected_controller_commit='{'3' * 40}'
 GATEWAY_PYTHON_BIN='/usr/bin/python3.11'
 GATEWAY_REPO_ROOT='/home/ec2-user/leadpoet_repo'
 PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT='/controller/current'
@@ -221,6 +222,8 @@ printf '%s\\0' "${{gateway_restart_command[@]}}"
         'exec(compile(source, "<exact-installed-controller-verifier>", "exec"))'
         in bootstrap_command
     )
+    assert "--expected-controller-commit" in bootstrap_command
+    assert "3" * 40 in bootstrap_command
     syntax = subprocess.run(
         ["bash", "-n", "-c", bootstrap_command],
         check=False,

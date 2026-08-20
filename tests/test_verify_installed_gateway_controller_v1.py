@@ -18,6 +18,9 @@ from scripts import verify_installed_gateway_controller_v1 as verifier
 
 CANDIDATE_COMMIT = "a" * 40
 N_MINUS_ONE_COMMIT = next(iter(verifier.SUPPORTED_CONTROLLER_COMMITS))
+REAL_REPOSITORY = Path(__file__).resolve().parents[1]
+SEQUENTIAL_N_MINUS_ONE_COMMIT = "d649562b8c1e0077f670431cd9b22714eb686cd5"
+SEQUENTIAL_CANDIDATE_COMMIT = "d72e475381e127aa209be33deed763d44a8289e6"
 
 
 def _source_candidate_commit(source_repository: Path) -> str:
@@ -57,6 +60,40 @@ def test_stale_repository_fixture_uses_resolvable_committed_ancestry() -> None:
                 f"{commit}^{{commit}}",
             ],
             check=True,
+        )
+
+
+def test_candidate_bound_lineage_accepts_real_d649_to_d72() -> None:
+    assert verifier.verify_candidate_bound_controller_lineage(
+        repo_root=REAL_REPOSITORY,
+        expected_controller_commit=SEQUENTIAL_N_MINUS_ONE_COMMIT,
+        expected_candidate_commit=SEQUENTIAL_CANDIDATE_COMMIT,
+    ) == SEQUENTIAL_N_MINUS_ONE_COMMIT
+
+
+def test_candidate_bound_lineage_rejects_side_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    side_branch = "e" * 40
+    monkeypatch.setattr(verifier, "_require_unmodified_git_authority", lambda *_: None)
+    monkeypatch.setattr(verifier, "_git_commit_exists", lambda *_: True)
+
+    def lineage(_repository: Path, ancestor: str, descendant: str) -> bool:
+        if ancestor == N_MINUS_ONE_COMMIT and descendant == side_branch:
+            return True
+        if ancestor == side_branch and descendant == CANDIDATE_COMMIT:
+            return False
+        raise AssertionError((ancestor, descendant))
+
+    monkeypatch.setattr(verifier, "_git_is_ancestor", lineage)
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="incompatible",
+    ):
+        verifier.verify_candidate_bound_controller_lineage(
+            repo_root=REAL_REPOSITORY,
+            expected_controller_commit=side_branch,
+            expected_candidate_commit=CANDIDATE_COMMIT,
         )
 
 
@@ -138,7 +175,159 @@ def _controller_fixture(
 
     monkeypatch.setattr(verifier, "_git", fake_git)
     monkeypatch.setattr(verifier, "_git_commit_exists", lambda *_args: True)
+    monkeypatch.setattr(verifier, "_git_is_ancestor", lambda *_args: True)
     return repository, current, host_restart, release, installed_payloads
+
+
+def _real_controller_fixture(
+    tmp_path: Path,
+    *,
+    controller_commit: str,
+) -> tuple[Path, Path]:
+    controller_parent = tmp_path / "restart-controller"
+    controller_root = controller_parent / "gateway"
+    releases = controller_root / "releases"
+    release = releases / controller_commit
+    for directory in (controller_parent, controller_root, releases):
+        directory.mkdir(exist_ok=True)
+        directory.chmod(0o700)
+    for relative_path, (installed_mode, _git_mode) in verifier.CONTROLLER_FILES.items():
+        destination = release / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = subprocess.check_output(
+            ["git", "show", f"{controller_commit}:{relative_path}"],
+            cwd=REAL_REPOSITORY,
+        )
+        destination.write_bytes(payload)
+        destination.chmod(installed_mode)
+    release.chmod(0o700)
+    current = controller_root / "current"
+    current.symlink_to(f"releases/{controller_commit}")
+    host_restart = tmp_path / "gw_restart.sh"
+    host_restart.write_bytes((release / "gw_restart.sh").read_bytes())
+    host_restart.chmod(0o700)
+    return current, host_restart
+
+
+def test_real_sequential_prefetch_accepts_d649_when_d72_object_is_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, host_restart = _real_controller_fixture(
+        tmp_path,
+        controller_commit=SEQUENTIAL_N_MINUS_ONE_COMMIT,
+    )
+    real_commit_exists = verifier._git_commit_exists
+    observed_object_checks: list[str] = []
+
+    def prefetch_object_inventory(repository: Path, commit: str) -> bool:
+        observed_object_checks.append(commit)
+        if commit == SEQUENTIAL_CANDIDATE_COMMIT:
+            return False
+        return real_commit_exists(repository, commit)
+
+    monkeypatch.setattr(
+        verifier,
+        "_git_commit_exists",
+        prefetch_object_inventory,
+    )
+
+    result = verifier.verify_installed_controller_bundle(
+        repo_root=REAL_REPOSITORY,
+        controller_current=current,
+        host_restart_path=host_restart,
+        expected_commit=SEQUENTIAL_CANDIDATE_COMMIT,
+        expected_controller_commit=SEQUENTIAL_N_MINUS_ONE_COMMIT,
+    )
+
+    assert result["controller_commit"] == SEQUENTIAL_N_MINUS_ONE_COMMIT
+    assert result["host_controller_commits"] == [SEQUENTIAL_N_MINUS_ONE_COMMIT]
+    assert observed_object_checks == [SEQUENTIAL_N_MINUS_ONE_COMMIT]
+
+
+def test_real_controller_lineage_rejects_pre_floor_commit(
+    tmp_path: Path,
+) -> None:
+    controller_commit = subprocess.check_output(
+        ["git", "rev-parse", f"{N_MINUS_ONE_COMMIT}^"],
+        cwd=REAL_REPOSITORY,
+        text=True,
+    ).strip()
+    current, host_restart = _real_controller_fixture(
+        tmp_path,
+        controller_commit=controller_commit,
+    )
+
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="unsupported",
+    ):
+        verifier.verify_installed_controller_bundle(
+            repo_root=REAL_REPOSITORY,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=SEQUENTIAL_CANDIDATE_COMMIT,
+            expected_controller_commit=controller_commit,
+        )
+
+
+def test_controller_unrelated_to_compatibility_floor_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lineage_controller = "e" * 40
+    repository, current, host_restart, _release, _payloads = _controller_fixture(
+        tmp_path,
+        monkeypatch,
+        controller_commit=lineage_controller,
+    )
+
+    def lineage(_repository: Path, ancestor: str, descendant: str) -> bool:
+        if ancestor == N_MINUS_ONE_COMMIT and descendant == lineage_controller:
+            return False
+        raise AssertionError((ancestor, descendant))
+
+    monkeypatch.setattr(verifier, "_git_is_ancestor", lineage)
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="unsupported",
+    ):
+        verifier.verify_installed_controller_bundle(
+            repo_root=repository,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+            expected_controller_commit=lineage_controller,
+        )
+
+
+def test_missing_installed_controller_object_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_commit = "f" * 40
+    repository, current, host_restart, _release, _payloads = _controller_fixture(
+        tmp_path,
+        monkeypatch,
+        controller_commit=missing_commit,
+    )
+    monkeypatch.setattr(
+        verifier,
+        "_git_commit_exists",
+        lambda _repository, commit: commit != missing_commit,
+    )
+
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="Git object is unavailable",
+    ):
+        verifier.verify_installed_controller_bundle(
+            repo_root=repository,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+            expected_controller_commit=missing_commit,
+        )
 
 
 def _installed_controller_directories(
@@ -175,6 +364,7 @@ def test_valid_bundle_allows_exact_partial_cutover_host_identity(
         controller_current=current,
         host_restart_path=host_restart,
         expected_commit=CANDIDATE_COMMIT,
+        expected_controller_commit=CANDIDATE_COMMIT,
     )
 
     assert result["controller_commit"] == CANDIDATE_COMMIT
@@ -184,6 +374,28 @@ def test_valid_bundle_allows_exact_partial_cutover_host_identity(
         stat.S_IMODE(directory.stat().st_mode) == 0o700
         for directory in _installed_controller_directories(current, release)
     )
+
+
+def test_candidate_bound_controller_mismatch_fails_before_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, current, host_restart, _release, _payloads = _controller_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="candidate-bound expectation",
+    ):
+        verifier.verify_installed_controller_bundle(
+            repo_root=repository,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+            expected_controller_commit=CANDIDATE_COMMIT,
+        )
 
 
 def test_exact_supported_n_minus_one_bundle_does_not_require_candidate_object(
@@ -207,6 +419,7 @@ def test_exact_supported_n_minus_one_bundle_does_not_require_candidate_object(
         controller_current=current,
         host_restart_path=host_restart,
         expected_commit=CANDIDATE_COMMIT,
+        expected_controller_commit=N_MINUS_ONE_COMMIT,
     )
 
     assert result["controller_commit"] == N_MINUS_ONE_COMMIT
@@ -241,6 +454,7 @@ def test_controller_directory_hardening_is_retry_safe_and_idempotent(
             controller_current=current,
             host_restart_path=host_restart,
             expected_commit=CANDIDATE_COMMIT,
+            expected_controller_commit=N_MINUS_ONE_COMMIT,
         )
 
     controller_root = current.parent
@@ -269,12 +483,14 @@ def test_controller_directory_hardening_is_retry_safe_and_idempotent(
         controller_current=current,
         host_restart_path=host_restart,
         expected_commit=CANDIDATE_COMMIT,
+        expected_controller_commit=N_MINUS_ONE_COMMIT,
     )
     second_retry = verifier.verify_installed_controller_bundle(
         repo_root=repository,
         controller_current=current,
         host_restart_path=host_restart,
         expected_commit=CANDIDATE_COMMIT,
+        expected_controller_commit=N_MINUS_ONE_COMMIT,
     )
 
     assert first_retry["controller_commit"] == N_MINUS_ONE_COMMIT
@@ -304,6 +520,7 @@ def test_reviewed_nested_controller_directory_rejects_mode_777(
             controller_current=current,
             host_restart_path=host_restart,
             expected_commit=CANDIDATE_COMMIT,
+            expected_controller_commit=N_MINUS_ONE_COMMIT,
         )
 
 
@@ -384,6 +601,8 @@ def test_tampered_installed_helper_never_reaches_execution(
             str(host_restart),
             "--expected-commit",
             CANDIDATE_COMMIT,
+            "--expected-controller-commit",
+            N_MINUS_ONE_COMMIT,
             "--exec-helper",
             "scripts/gateway_git_deploy.py",
             "--",
@@ -499,6 +718,8 @@ def test_exact_operator_python_c_shape_reaches_only_verified_helper(
             "--host-restart-path",
             str(host_restart),
             "--expected-commit",
+            commit,
+            "--expected-controller-commit",
             commit,
             "--exec-helper",
             "scripts/gateway_git_deploy.py",
@@ -662,6 +883,8 @@ def test_exact_operator_shape_fetches_candidate_missing_from_deployed_repo(
             str(host_restart),
             "--expected-commit",
             real_candidate_commit,
+            "--expected-controller-commit",
+            N_MINUS_ONE_COMMIT,
             "--exec-helper",
             "scripts/gateway_git_deploy.py",
             "--",
@@ -743,6 +966,7 @@ def test_verified_helper_exec_uses_sealed_snapshot_after_source_mutation(
         controller_current=current,
         host_restart_path=host_restart,
         expected_commit=CANDIDATE_COMMIT,
+        expected_controller_commit=N_MINUS_ONE_COMMIT,
     )
     (release / "scripts/gateway_git_deploy.py").write_bytes(b"TAMPERED = True\n")
     observed: dict[str, object] = {}

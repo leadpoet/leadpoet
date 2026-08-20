@@ -208,6 +208,16 @@ protect_exact_host_gateway_runtime() {
   fi
 }
 
+require_exact_host_gateway_absent() {
+  local phase="$1"
+
+  inspect_exact_host_gateway_runtime "$phase"
+  if [ "$HOST_GATEWAY_LIVE" -ne 0 ]; then
+    echo "ERROR: exact host gateway state changed during absent-runtime Docker reconciliation: phase=$phase" >&2
+    return 1
+  fi
+}
+
 protect_exact_host_gateway_runtime "entry"
 
 run_bounded_subprocess() {
@@ -285,6 +295,51 @@ run_bounded_daemon_control() {
 
 run_bounded_daemon_command() {
   run_bounded_subprocess "$DAEMON_COMMAND_TIMEOUT_SECONDS" "$@"
+}
+
+reconcile_empty_docker_runtime() {
+  local reconcile_result
+
+  if ! reconcile_result="$(
+    run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+      "$REPO_ROOT/validator_tee/host/docker_zero_runtime_reconciler_v2.py" \
+      --docker-lock-file "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
+      --docker-admission-lock-file "$LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE" \
+      --docker-lock-owner-pid "$LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID" \
+      --ready-attempts "$DAEMON_READY_ATTEMPTS" \
+      --timeout-seconds 480
+  )"; then
+    echo "ERROR: guarded empty-runtime dockerd reconciliation failed" >&2
+    return 1
+  fi
+  printf '%s\n' "$reconcile_result"
+  if ! printf '%s' "$reconcile_result" | python3 -c '
+import json
+import re
+import sys
+
+document = json.load(sys.stdin)
+if document.get("schema_version") != "leadpoet.docker_zero_runtime_reconcile.v1":
+    raise SystemExit("invalid dockerd reconciliation schema")
+if document.get("status") != "ready" or document.get("restart_performed") is not True:
+    raise SystemExit("dockerd reconciliation did not report ready")
+if document.get("docker_root") != "/var/lib/docker":
+    raise SystemExit("dockerd reconciliation returned an invalid data-root")
+for field in ("container_count", "containerd_container_count", "containerd_task_count", "moby_shim_count"):
+    if type(document.get(field)) is not int or document[field] != 0:
+        raise SystemExit("dockerd reconciliation returned a nonempty runtime")
+if type(document.get("image_count")) is not int or document["image_count"] < 0:
+    raise SystemExit("dockerd reconciliation returned malformed image count")
+for field in ("root_device", "root_inode"):
+    if type(document.get(field)) is not int or document[field] <= 0:
+        raise SystemExit("dockerd reconciliation returned malformed root identity")
+manifest = document.get("image_manifest_hash")
+if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest) is None:
+    raise SystemExit("dockerd reconciliation returned malformed image identity")
+'; then
+    echo "ERROR: guarded empty-runtime dockerd reconciliation returned malformed evidence" >&2
+    return 1
+  fi
 }
 
 docker_daemons_ready() {
@@ -484,17 +539,9 @@ require_same_online_gateway() {
   local phase="$1"
 
   inspect_exact_host_gateway_runtime "$phase"
-  if [ "$HOST_GATEWAY_LIVE" -ne "$ONLINE_GATEWAY_LIVE" ]; then
-    if [ "$ONLINE_GATEWAY_LIVE" -eq 1 ]; then
-      echo "ERROR: exact host gateway identity changed during online Docker reclaim: phase=$phase" >&2
-    else
-      echo "ERROR: exact host gateway state changed during online Docker reclaim: phase=$phase" >&2
-    fi
-    return 1
-  fi
-  if [ "$ONLINE_GATEWAY_LIVE" -eq 1 ] \
-      && { [ "$HOST_GATEWAY_PID" -ne "$ONLINE_GATEWAY_PID" ] \
-        || [ "$HOST_GATEWAY_START_TIME_TICKS" -ne "$ONLINE_GATEWAY_START_TIME_TICKS" ]; }; then
+  if [ "$HOST_GATEWAY_LIVE" -ne 1 ] \
+      || [ "$HOST_GATEWAY_PID" -ne "$ONLINE_GATEWAY_PID" ] \
+      || [ "$HOST_GATEWAY_START_TIME_TICKS" -ne "$ONLINE_GATEWAY_START_TIME_TICKS" ]; then
     echo "ERROR: exact host gateway identity changed during online Docker reclaim: phase=$phase" >&2
     return 1
   fi
@@ -742,9 +789,7 @@ if before["active_manifest_hash"] != after["active_manifest_hash"]:
 '
 }
 
-if [ "$HOST_GATEWAY_LIVE" -eq 1 ] \
-    || [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
-  ONLINE_GATEWAY_LIVE="$HOST_GATEWAY_LIVE"
+if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
   ONLINE_GATEWAY_PID="$HOST_GATEWAY_PID"
   ONLINE_GATEWAY_START_TIME_TICKS="$HOST_GATEWAY_START_TIME_TICKS"
   inventory_empty_online_runtime "pre-prune"
@@ -832,46 +877,7 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ] \
         --interval-seconds 3 \
         --proc-root "$PROC_ROOT"
       echo "Reconciling dockerd metadata under the guarded empty runtime"
-      if ! ONLINE_RECONCILE_RESULT="$(
-        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
-          "$REPO_ROOT/validator_tee/host/docker_zero_runtime_reconciler_v2.py" \
-          --docker-lock-file "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
-          --docker-admission-lock-file "$LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE" \
-          --docker-lock-owner-pid "$LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID" \
-          --ready-attempts "$DAEMON_READY_ATTEMPTS" \
-          --timeout-seconds 480
-      )"; then
-        echo "ERROR: guarded empty-runtime dockerd reconciliation failed" >&2
-        exit 1
-      fi
-      printf '%s\n' "$ONLINE_RECONCILE_RESULT"
-      if ! printf '%s' "$ONLINE_RECONCILE_RESULT" | python3 -c '
-import json
-import re
-import sys
-
-document = json.load(sys.stdin)
-if document.get("schema_version") != "leadpoet.docker_zero_runtime_reconcile.v1":
-    raise SystemExit("invalid dockerd reconciliation schema")
-if document.get("status") != "ready" or document.get("restart_performed") is not True:
-    raise SystemExit("dockerd reconciliation did not report ready")
-if document.get("docker_root") != "/var/lib/docker":
-    raise SystemExit("dockerd reconciliation returned an invalid data-root")
-for field in ("container_count", "containerd_container_count", "containerd_task_count", "moby_shim_count"):
-    if type(document.get(field)) is not int or document[field] != 0:
-        raise SystemExit("dockerd reconciliation returned a nonempty runtime")
-if type(document.get("image_count")) is not int or document["image_count"] < 0:
-    raise SystemExit("dockerd reconciliation returned malformed image count")
-for field in ("root_device", "root_inode"):
-    if type(document.get(field)) is not int or document[field] <= 0:
-        raise SystemExit("dockerd reconciliation returned malformed root identity")
-manifest = document.get("image_manifest_hash")
-if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest) is None:
-    raise SystemExit("dockerd reconciliation returned malformed image identity")
-'; then
-        echo "ERROR: guarded empty-runtime dockerd reconciliation returned malformed evidence" >&2
-        exit 1
-      fi
+      reconcile_empty_docker_runtime
       inventory_empty_online_runtime "post-daemon-reconcile"
       require_same_online_gateway "post-daemon-reconcile"
       require_same_online_docker_root "post-daemon-reconcile"
@@ -940,12 +946,7 @@ if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifes
     echo "ERROR: refusing daemon stop or data-root reset while the exact host gateway is live" >&2
     exit 1
   fi
-  if [ "$ONLINE_GATEWAY_LIVE" -eq 1 ]; then
-    ONLINE_RUNTIME_MODE="host-gateway-live"
-  else
-    ONLINE_RUNTIME_MODE="host-gateway-absent"
-  fi
-  echo "Docker storage ready after bounded online reclaim: free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES runtime_mode=$ONLINE_RUNTIME_MODE"
+  echo "Docker storage ready after bounded online reclaim: free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES runtime_mode=host-gateway-live"
   exit 0
 fi
 
@@ -1145,6 +1146,30 @@ fi
 echo "Docker storage requirement: runtime_mode=$RUNTIME_MODE required_free_bytes=$REQUIRED_FREE_BYTES"
 if [ "$AVAILABLE" -ge "$REQUIRED_FREE_BYTES" ] \
     && [ "$ORPHANED_DOCKER_STATE" -eq 0 ]; then
+  if [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
+    if [ "$RUNTIME_MODE" != "empty" ]; then
+      echo "ERROR: required Docker reconciliation reached a nonempty runtime" >&2
+      exit 1
+    fi
+    inventory_empty_online_runtime "pre-absent-daemon-reconcile"
+    require_exact_host_gateway_absent "pre-absent-daemon-reconcile"
+    PYTHONPATH="$REPO_ROOT" python3 \
+      -m validator_tee.host.docker_operation_guard_v2 \
+      --wait \
+      --timeout-seconds 1800 \
+      --interval-seconds 3 \
+      --proc-root "$PROC_ROOT"
+    require_exact_host_gateway_absent "pre-absent-daemon-reconcile-apply"
+    echo "Reconciling dockerd metadata under the guarded absent empty runtime"
+    reconcile_empty_docker_runtime
+    inventory_empty_online_runtime "post-absent-daemon-reconcile"
+    require_exact_host_gateway_absent "post-absent-daemon-reconcile"
+    AVAILABLE="$(available_bytes)"
+    if [ "$AVAILABLE" -lt "$REQUIRED_FREE_BYTES" ]; then
+      echo "ERROR: required absent-runtime Docker reconciliation left only $AVAILABLE free bytes; $REQUIRED_FREE_BYTES are required" >&2
+      exit 1
+    fi
+  fi
   echo "Docker storage ready: free_bytes=$AVAILABLE required_free_bytes=$REQUIRED_FREE_BYTES runtime_mode=$RUNTIME_MODE"
   exit 0
 fi

@@ -25,6 +25,9 @@ def _run_recovery(
     layerdb_images: int = 0,
     layerdb_mounts: int = 0,
     overlay_directories: int = 0,
+    layerdb_image_directory_exists: bool = True,
+    layerdb_mount_directory_exists: bool = True,
+    overlay_directory_exists: bool = True,
     containerd_containers: int = 0,
     containerd_tasks: int = 0,
     containerd_running_tasks: int = 0,
@@ -50,6 +53,7 @@ def _run_recovery(
     host_gateway_exits_during_live_prune: bool = False,
     host_gateway_start_time_changes_during_live_prune: bool = False,
     host_gateway_exits_during_daemon_reconcile: bool = False,
+    host_gateway_appears_during_daemon_reconcile: bool = False,
     runtime_appears_after_stale_reclaim: bool = False,
     docker_root: str = "/var/lib/docker",
     docker_root_after_builder_prune: Optional[str] = None,
@@ -294,6 +298,15 @@ case "$command" in
         if [ "$FAKE_HOST_GATEWAY_EXITS_DURING_DAEMON_RECONCILE" = "1" ]; then
           rm -rf "$LEADPOET_PROC_ROOT/200"
         fi
+        if [ "$FAKE_HOST_GATEWAY_APPEARS_DURING_DAEMON_RECONCILE" = "1" ]; then
+          mkdir -p "$LEADPOET_PROC_ROOT/202"
+          printf 'Name:\tpython3\nPPid:\t1\n' \
+            > "$LEADPOET_PROC_ROOT/202/status"
+          printf '/home/ec2-user/venv311/bin/python3\\0-u\\0-m\\0gateway.main\\0' \
+            > "$LEADPOET_PROC_ROOT/202/cmdline"
+          printf '202 (python3) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 78901\n' \
+            > "$LEADPOET_PROC_ROOT/202/stat"
+        fi
         if [ "$FAKE_MALFORMED_ZERO_RUNTIME_RECONCILER" = "1" ]; then
           printf '{}\n'
           exit 0
@@ -454,7 +467,23 @@ case "$command" in
     esac
     ;;
   test)
-    exit 0
+    if [ "${1:-}" != "-d" ]; then
+      exit 2
+    fi
+    case "${2:-}" in
+      */image/overlay2/layerdb/sha256)
+        [ "$FAKE_LAYERDB_IMAGE_DIRECTORY_EXISTS" = "1" ]
+        ;;
+      */image/overlay2/layerdb/mounts)
+        [ "$FAKE_LAYERDB_MOUNT_DIRECTORY_EXISTS" = "1" ]
+        ;;
+      */overlay2)
+        [ "$FAKE_OVERLAY_DIRECTORY_EXISTS" = "1" ]
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
     ;;
   du)
     printf '%s\\t/var/lib/docker\\n' "$FAKE_DOCKER_ROOT_BYTES"
@@ -654,6 +683,15 @@ exit 0
         "FAKE_LAYERDB_IMAGES": str(layerdb_images),
         "FAKE_LAYERDB_MOUNTS": str(layerdb_mounts),
         "FAKE_OVERLAY_DIRECTORIES": str(overlay_directories),
+        "FAKE_LAYERDB_IMAGE_DIRECTORY_EXISTS": (
+            "1" if layerdb_image_directory_exists else "0"
+        ),
+        "FAKE_LAYERDB_MOUNT_DIRECTORY_EXISTS": (
+            "1" if layerdb_mount_directory_exists else "0"
+        ),
+        "FAKE_OVERLAY_DIRECTORY_EXISTS": (
+            "1" if overlay_directory_exists else "0"
+        ),
         "FAKE_CONTAINERD_CONTAINERS": str(containerd_containers),
         "FAKE_CONTAINERD_TASKS": str(containerd_tasks),
         "FAKE_CONTAINERD_RUNNING_TASKS": str(containerd_running_tasks),
@@ -758,6 +796,9 @@ exit 0
         ),
         "FAKE_HOST_GATEWAY_EXITS_DURING_DAEMON_RECONCILE": (
             "1" if host_gateway_exits_during_daemon_reconcile else "0"
+        ),
+        "FAKE_HOST_GATEWAY_APPEARS_DURING_DAEMON_RECONCILE": (
+            "1" if host_gateway_appears_during_daemon_reconcile else "0"
         ),
         "FAKE_RUNTIME_APPEARS_AFTER_STALE_RECLAIM": (
             "1" if runtime_appears_after_stale_reclaim else "0"
@@ -1465,21 +1506,25 @@ def test_required_zero_runtime_reconcile_accepts_stably_absent_gateway(
 ) -> None:
     result, sudo_log = _run_recovery(
         tmp_path,
-        available=25_000_000_000,
-        images=2,
-        layerdb_images=3,
+        available=40_000_000_000,
+        layerdb_image_directory_exists=False,
+        layerdb_mount_directory_exists=False,
+        overlay_directory_exists=False,
         allow_live_host_gateway_prune=True,
         require_zero_runtime_reconcile="1",
     )
 
     assert result.returncode == 0, result.stderr
     assert "exact host gateway absent" in result.stdout
-    assert "runtime_mode=host-gateway-absent" in result.stdout
+    assert "runtime_mode=empty" in result.stdout
+    assert "phase=pre-absent-daemon-reconcile containers=0" in result.stdout
+    assert "phase=post-absent-daemon-reconcile containers=0" in result.stdout
     assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
-    assert (tmp_path / "builder-prune-count").read_text().strip() == "2"
-    assert not (tmp_path / "image-pruned").exists()
-    assert not (tmp_path / "system-prune-attempts").exists()
-    assert "systemctl" not in sudo_log
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert (tmp_path / "daemon-reconciled").is_file()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+    assert (tmp_path / "image-pruned").is_file()
+    assert (tmp_path / "system-prune-attempts").read_text().strip() == "1"
     assert " rm " not in sudo_log
 
 
@@ -1488,21 +1533,55 @@ def test_required_zero_runtime_reconcile_rejects_absent_to_live_gateway_race(
 ) -> None:
     result, sudo_log = _run_recovery(
         tmp_path,
-        available=25_000_000_000,
-        images=2,
-        layerdb_images=3,
+        available=40_000_000_000,
         allow_live_host_gateway_prune=True,
         require_zero_runtime_reconcile="1",
         host_gateway_live_after_inventory=True,
     )
 
     assert result.returncode == 1
-    assert "exact host gateway state changed" in result.stderr
+    assert "exact host gateway state changed during absent-runtime" in result.stderr
     assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
     assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
-    assert not (tmp_path / "image-pruned").exists()
-    assert not (tmp_path / "system-prune-attempts").exists()
+    assert (tmp_path / "image-pruned").is_file()
+    assert (tmp_path / "system-prune-attempts").read_text().strip() == "1"
     assert "systemctl" not in sudo_log
+
+
+def test_required_absent_zero_runtime_reconcile_helper_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        fail_zero_runtime_reconciler=True,
+    )
+
+    assert result.returncode == 1
+    assert "guarded empty-runtime dockerd reconciliation failed" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert not (tmp_path / "daemon-reconciled").exists()
+    assert " rm " not in sudo_log
+
+
+def test_required_absent_zero_runtime_reconcile_rejects_gateway_start_during_helper(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        host_gateway_appears_during_daemon_reconcile=True,
+    )
+
+    assert result.returncode == 1
+    assert "exact host gateway state changed during absent-runtime" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert (tmp_path / "daemon-reconciled").is_file()
+    assert " rm " not in sudo_log
 
 
 @pytest.mark.parametrize(

@@ -73,17 +73,22 @@ def test_exact_host_gateway_guard_is_rechecked_at_the_stop_boundary():
 
 def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
     inventory = SCRIPT.index("inventory_empty_online_runtime()")
-    lane = SCRIPT.index('if [ "$HOST_GATEWAY_LIVE" -eq 1 ] \\', inventory)
+    lane = SCRIPT.index('if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then', inventory)
     offline_image_prune = SCRIPT.index(
         "run_prune_with_retry image docker image prune --all --force",
         lane,
     )
     source = SCRIPT[lane:offline_image_prune]
+    reconcile_function = SCRIPT[
+        SCRIPT.index("reconcile_empty_docker_runtime()") : SCRIPT.index(
+            "docker_daemons_ready()"
+        )
+    ]
 
-    assert '|| [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]' in source
     assert "run_prune_with_retry builder docker builder prune --all --force" in source
     assert "docker_stale_mount_reclaimer_v2.py" in source
-    assert "docker_zero_runtime_reconciler_v2.py" in source
+    assert "reconcile_empty_docker_runtime" in source
+    assert "docker_zero_runtime_reconciler_v2.py" in reconcile_function
     assert "require_same_online_gateway" in source
     assert "require_same_online_images" in source
     assert 'inventory_empty_online_runtime "pre-stale-reclaim"' in source
@@ -92,9 +97,9 @@ def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
     assert "docker system prune" not in source
     assert "docker_live_restore_reconciler_v2.py" not in source
     assert source.count("--audit-only") == 4
-    assert "--docker-lock-file" in source
-    assert "--docker-admission-lock-file" in source
-    assert "--docker-lock-owner-pid" in source
+    assert "--docker-lock-file" in reconcile_function
+    assert "--docker-admission-lock-file" in reconcile_function
+    assert "--docker-lock-owner-pid" in reconcile_function
     assert "systemctl" not in source
     assert "pkill" not in source
     assert "rm -rf" not in source
@@ -107,7 +112,7 @@ def test_required_zero_runtime_reconcile_is_strict_and_builder_first():
     )
     acquire = SCRIPT.index("leadpoet_acquire_docker_operation_lock_v2")
     lane = SCRIPT.index(
-        'if [ "$HOST_GATEWAY_LIVE" -eq 1 ] \\',
+        'if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then',
         SCRIPT.index("inventory_empty_online_runtime()"),
     )
     builder_prune = SCRIPT.index(
@@ -119,7 +124,7 @@ def test_required_zero_runtime_reconcile_is_strict_and_builder_first():
     pre_audit = SCRIPT.index("--audit-only", reconcile_trigger)
     raw_apply = SCRIPT.index("if ! ONLINE_RECLAIM_RESULT", pre_audit)
     post_apply_audit = SCRIPT.index("--audit-only", raw_apply)
-    helper = SCRIPT.index("docker_zero_runtime_reconciler_v2.py", post_apply_audit)
+    helper = SCRIPT.index("reconcile_empty_docker_runtime", post_apply_audit)
     post_helper_builder_prune = SCRIPT.index(
         "run_prune_with_retry builder docker builder prune --all --force", helper
     )
@@ -133,6 +138,25 @@ def test_required_zero_runtime_reconcile_is_strict_and_builder_first():
         '[ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "1" ]'
         in SCRIPT[SCRIPT.index("protect_exact_host_gateway_runtime()"):lane]
     )
+
+
+def test_required_absent_gateway_reconciliation_uses_the_offline_empty_root_lane():
+    offline_image_prune = SCRIPT.index(
+        "run_prune_with_retry image docker image prune --all --force"
+    )
+    ready = SCRIPT.index(
+        'if [ "$AVAILABLE" -ge "$REQUIRED_FREE_BYTES" ]', offline_image_prune
+    )
+    reset = SCRIPT.index('protect_exact_host_gateway_runtime "pre-reset"', ready)
+    source = SCRIPT[ready:reset]
+
+    assert 'if [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]' in source
+    assert 'inventory_empty_online_runtime "pre-absent-daemon-reconcile"' in source
+    assert 'require_exact_host_gateway_absent "pre-absent-daemon-reconcile-apply"' in source
+    assert "reconcile_empty_docker_runtime" in source
+    assert 'inventory_empty_online_runtime "post-absent-daemon-reconcile"' in source
+    assert 'require_exact_host_gateway_absent "post-absent-daemon-reconcile"' in source
+    assert "docker_stale_mount_reclaimer_v2.py" not in source
 
 
 def test_data_root_reset_failure_recovers_daemons_before_exit():

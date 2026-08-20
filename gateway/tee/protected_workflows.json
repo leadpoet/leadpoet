@@ -47,7 +47,7 @@
       "symbol": "submit_weights_v2"
     },
     {
-      "ast_sha256": "sha256:f07022b98e772f46e1c094f93fc59a17cce587f3bb4309676bba1a0f254ad9b3",
+      "ast_sha256": "sha256:142d4ac8ce500afa529ab00f05750ee2c703e688f2e059ee36049f43eef98c21",
       "path": "gateway/main.py",
       "symbol": "_WORKER_STARTUP_DIAGNOSTIC_PATHS"
     },
@@ -57,7 +57,7 @@
       "symbol": "_gateway_worker_startup_ready"
     },
     {
-      "ast_sha256": "sha256:75f234006903305662d7e604f2dcf577b1da847d992630314733b6fb6be26bd3",
+      "ast_sha256": "sha256:7eca67606a39f0a3de1acd544b0ce56536de39d0683ce7ab6e6b81de5af9d75e",
       "path": "gateway/main.py",
       "symbol": "lifespan"
     },
@@ -1242,6 +1242,526 @@
       "symbol": "preflight_gate"
     },
     {
+      "ast_sha256": "sha256:e1ce0ca4c8584b0488019f8e8b23a8caade300c2f7d83f0544c037019f556b5f",
+      "path": "gateway/research_lab/routing_authority_bundle.py",
+      "symbol": "MAX_ROUTING_AUTHORITY_BUNDLE_BYTES"
+    },
+    {
+      "ast_sha256": "sha256:692669f0c290bdeb9f337777af5b05681a2f2291187b800d336fd8711e2a32df",
+      "path": "gateway/research_lab/routing_authority_bundle.py",
+      "symbol": "ROUTING_AUTHORITY_BUNDLE_SCHEMA"
+    },
+    {
+      "ast_sha256": "sha256:fdc859392fa48421e1456feb5d421e86f5601e940f7eaa4d579b1f020eb7e801",
+      "path": "gateway/research_lab/routing_authority_bundle.py",
+      "symbol": "VerifiedRoutingAuthorityBundle"
+    },
+    {
+      "ast_sha256": "sha256:ab03c925d9e016440a858ea73bb1155a2aeebe2ed87362687aff3a7291fe7606",
+      "path": "gateway/research_lab/routing_authority_bundle.py",
+      "symbol": "_DOCUMENT_KEY_ROLES"
+    },
+    {
+      "ast_sha256": "sha256:d3388f2b69215da9df089df645aa60dfb8a5d3f72d79b4681d8050c616eafc65",
+      "path": "gateway/research_lab/routing_authority_bundle.py",
+      "symbol": "_canonical_bundle_size"
+    },
+    {
+      "ast_sha256": "sha256:4497c1a02b3d752b39a8c8b7f5d6087ca1c8815f44c39872fa1d15cfdf44e7e3",
+      "path": "gateway/research_lab/routing_authority_bundle.py",
+      "symbol": "_load_p256_public_key"
+    },
+    {
+      "ast_sha256": "sha256:a6c33bebd9b71c9892d644343f51ff3c58feef4a7c6826ffb5aaeff69025a5ea",
+      "path": "gateway/research_lab/routing_authority_bundle.py",
+      "symbol": "_signature_bytes"
+    },
+    {
+      "ast_sha256": "sha256:aa824af4e10eeedf6646434e473945ce932ef450245250cbd64ece7ef157ecec",
+      "path": "gateway/research_lab/routing_authority_bundle.py",
+      "symbol": "load_verified_routing_authority_bundle"
+    },
+    {
+      "ast_sha256": "sha256:caa1ab7c9904084748dc945506c5f38e39c416d7ab655afd2173eb820916675f",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "ROUTING_PROVIDER_AUTHORIZATION_OPERATION_V2"
+    },
+    {
+      "ast_sha256": "sha256:41b4c7afb5327e2c8de338cadadeba69dd61ec3c61c65111dabe6460b5718a0f",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "ROUTING_PROVIDER_AUTHORIZATION_PURPOSE_V2"
+    },
+    {
+      "ast_sha256": "sha256:26176e613dba5f48f379ab40212670e262dd4267c0a4f335bf6442a8e247c4b6",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "ROUTING_PROVIDER_AUTHORIZATION_REQUEST_SCHEMA_V2"
+    },
+    {
+      "ast_sha256": "sha256:cea38430567fefa6ebad5b3431bdfe0fb8bcb52c5001de097069ca65ccef1884",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "ROUTING_PROVIDER_AUTHORIZATION_RESULT_SCHEMA_V2"
+    },
+    {
+      "ast_sha256": "sha256:d2575dd98e51ef22ceb8314e23e8787e2fd13d98e7abe7e4b395f893b24e137a",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "ROUTING_PROVIDER_AUTHORIZATION_SCHEMA_V2"
+    },
+    {
+      "ast_sha256": "sha256:b3e1ef49a549ce29d0a1e98a77969733c9fe730805635e5cd9496138f82e0510",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "RoutingProviderCallAuthorizationV2"
+    },
+    {
+      "ast_sha256": "sha256:b255a6154bc916a74d442f619b1b614f98b5dd207dc29144560e884f9e3cf6ab",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "build_routing_provider_authorization_request_v2"
+    },
+    {
+      "ast_sha256": "sha256:730ab26ee2cbde2349859fad0352837d81f966fdaf44fab59c8c6f5f6f7decb7",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "execute_routing_provider_call_authorization_v2"
+    },
+    {
+      "ast_sha256": "sha256:1c94e43c7f36494f15b1234cc4fdc23224d71efba38bd56bdb4787cf897ca285",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "routing_provider_logical_operation_id_v2"
+    },
+    {
+      "ast_sha256": "sha256:1b9ece631bf8fd7cd7bbfb4acc5be5104bfbf5b7ab3d2dd595c4fc733f0c3233",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "validate_routing_provider_authorization_context_v2"
+    },
+    {
+      "ast_sha256": "sha256:aa1a1d0fa9543f01562f8cdfb6fb9fb80e925f6efe373585e933bc239e115932",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "validate_routing_provider_authorization_request_v2"
+    },
+    {
+      "ast_sha256": "sha256:117ba730b6302c94c76f260e2c4a6ee6cbb429ef3ad2513ccabd3620c01c8a61",
+      "path": "gateway/research_lab/routing_execution_authorization.py",
+      "symbol": "validate_routing_provider_call_authorization_v2"
+    },
+    {
+      "ast_sha256": "sha256:19349d5290befe7f3ed8874f33621433a12dd69faa5f52d0c49dbb71fc215592",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "_admission_bundle"
+    },
+    {
+      "ast_sha256": "sha256:8489cfbae0564d6b6fb310d716fc96195884e22fe5b50fd64c9b73a48dca8db8",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "_attempts"
+    },
+    {
+      "ast_sha256": "sha256:80cd18cdab7d55143783e0948e8cab05ab093b4e43cc3c0ff184eb9fd3a4fa41",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "_budgets"
+    },
+    {
+      "ast_sha256": "sha256:f1bdeeb98282a4e9db7c16528a72c25b331b0a338876253b24f892791667bd09",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "_decisions"
+    },
+    {
+      "ast_sha256": "sha256:709cdf9b81555a8abb12ea853aa963390936ef1e4001fe4f11b12438f22b7f7a",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "_evaluation"
+    },
+    {
+      "ast_sha256": "sha256:82168abdbab8e62cab10e6ed5700e1003a74a3001cb1b1dd149148fa9fdf7db9",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "_execution_envelope"
+    },
+    {
+      "ast_sha256": "sha256:ff16fcb769cf9ff6c9a75d11828490c36d1d35946272af5216520e7735d4bec6",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "_labels"
+    },
+    {
+      "ast_sha256": "sha256:380397561dd7746f2366e61acc0d991c1176dd2eb9ee3d4cc8f5a26f0d9b91b4",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "_lineage"
+    },
+    {
+      "ast_sha256": "sha256:78356bfca12be6d2982c393509ec079d8063561e82bb227514f9b53c11114fc8",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "_provider_receipt"
+    },
+    {
+      "ast_sha256": "sha256:d6a04d9a8b2dafdf023730d99f06a7eb78e1d9e8f033b27256d5f7a16d9a63da",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "build_input"
+    },
+    {
+      "ast_sha256": "sha256:6fab56a4cf8f3ce6380c0d3581612b0adfcd3abe2c54db60055ae5769f8eb68b",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "execute"
+    },
+    {
+      "ast_sha256": "sha256:6c07304d86b1f52ce23c006f67972f87aa12732b9d84079e768caa34278c01f9",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "receipt_output"
+    },
+    {
+      "ast_sha256": "sha256:bc38e02ce1c88db7f0a52ef69909f0c479cfa87e3cf05f73512cc01848fa7075",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "reconcile"
+    },
+    {
+      "ast_sha256": "sha256:8d0b5a74d1c87f7d43090d898b5c12321b32ce547c06971c4cca6b8b2898765c",
+      "path": "gateway/research_lab/routing_experiment_reconciliation.py",
+      "symbol": "validate_input"
+    },
+    {
+      "ast_sha256": "sha256:ee001fe1634cafa2b5128c5e4bc5c36a6878723b4c5e3bda7f5ba2aac9bd6732",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "ROUTING_MODEL_BINDING_OBSERVATION_PURPOSE_V2"
+    },
+    {
+      "ast_sha256": "sha256:2e18656f5527485d4d2c2629df1518416fcea9d8abf45d8471a6178b222fa4e5",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "ROUTING_MODEL_BINDING_OBSERVATION_REQUEST_SCHEMA_V2"
+    },
+    {
+      "ast_sha256": "sha256:0cd6bcdf98830ed9751467fe72214169be0c0bbd7302056ada3a1a9f701ce22e",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "ROUTING_MODEL_BINDING_OBSERVATION_SCHEMA_V2"
+    },
+    {
+      "ast_sha256": "sha256:555aed1e90791a1dcc9c4b078cec58eb8d2626c7f27202b58e9fcf74cd59b2da",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "ROUTING_MODEL_BINDING_REQUIREMENTS_SCHEMA_V2"
+    },
+    {
+      "ast_sha256": "sha256:0357f95d986d7327f96edfffb111f79ea8666ce5d110631014ea31f5ed6fd440",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "VerifiedRoutingModelBindingRequirements"
+    },
+    {
+      "ast_sha256": "sha256:091933fdbcd87365427338a6d686384799c5b9b19c6585d28c1db59027424d97",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "_validate_binding_manifest_row"
+    },
+    {
+      "ast_sha256": "sha256:21708accbf662aedc86a484ec9219649606f628e4087ef0a7ebb04c7ad1c3243",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "build_routing_model_binding_observation_result_v2"
+    },
+    {
+      "ast_sha256": "sha256:94bf64f7d57a0b7efd953471a653122e336d0772b29583a8037966a7c1d2f09d",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "observe_routing_model_bindings_v2"
+    },
+    {
+      "ast_sha256": "sha256:4ac79d356f1078781d6ef4ce8da18c3650fd85c8c69255509ab3734fdbe34932",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "routing_model_binding_identity_hash"
+    },
+    {
+      "ast_sha256": "sha256:a5b359caa7047e5385112e9f8400c287b4f23e30ea8cb1fe0d61710ae83c3123",
+      "path": "gateway/research_lab/routing_model_binding_observation.py",
+      "symbol": "routing_model_binding_requirements_hash"
+    },
+    {
+      "ast_sha256": "sha256:dd6a8d4d5e4c716eade5a6fded595102324af8b418c0fc6f2a8b0192a74093aa",
+      "path": "gateway/research_lab/routing_model_binding_producer.py",
+      "symbol": "MeasuredModelMetadataExecutionV2"
+    },
+    {
+      "ast_sha256": "sha256:96d652d1fdb9c976f88cca6cfde1a45e8e45a6e7128dab915fa012437a47aaf0",
+      "path": "gateway/research_lab/routing_model_binding_producer.py",
+      "symbol": "ROUTING_MODEL_BINDING_OBSERVATION_OPERATION_V2"
+    },
+    {
+      "ast_sha256": "sha256:8280117297f8c66a9db044aa0a9aede09332ea9794be11d88a12bfdc4d94430f",
+      "path": "gateway/research_lab/routing_model_binding_producer.py",
+      "symbol": "ROUTING_MODEL_BINDING_PRODUCER_RESULT_SCHEMA_V2"
+    },
+    {
+      "ast_sha256": "sha256:5a433747d950edc297f4c31dc120d99a474f2a5670f4ca7104e3bbb39b0f4f89",
+      "path": "gateway/research_lab/routing_model_binding_producer.py",
+      "symbol": "RoutingModelBindingObservationProducerV2"
+    },
+    {
+      "ast_sha256": "sha256:dc3f125e622c7c5b50896b5dfb27df0bef1b5a5b9e281fa2c1cce590f9c2ea16",
+      "path": "gateway/research_lab/routing_model_binding_producer.py",
+      "symbol": "_build_metadata_payload"
+    },
+    {
+      "ast_sha256": "sha256:421c83df5118be0f66def2be11f461302063274f9280b6c3c7a8440fd30a6845",
+      "path": "gateway/research_lab/routing_model_binding_producer.py",
+      "symbol": "_validate_lineage_and_artifact"
+    },
+    {
+      "ast_sha256": "sha256:ffded681dc36259fb56bcd8ee56df6c57348d1a14a9d5497c3145f3f20f2d87e",
+      "path": "gateway/research_lab/routing_model_binding_producer.py",
+      "symbol": "_validate_model_result"
+    },
+    {
+      "ast_sha256": "sha256:29fdfa1496bc30150f05972584d2e6ff17d1a9548e219ecdf154711b8e8109b1",
+      "path": "gateway/research_lab/routing_model_binding_producer.py",
+      "symbol": "_validate_source_bundle"
+    },
+    {
+      "ast_sha256": "sha256:179ea5fa20b29acacb5df20d1668f156a2f22d28cc83cae01b5a94174b6eede3",
+      "path": "gateway/research_lab/routing_model_binding_producer.py",
+      "symbol": "resolve_verified_routing_artifact_lineage_v2"
+    },
+    {
+      "ast_sha256": "sha256:1de5ff40681d7929035c7fdba706aece64b5324e468ecbb50f441f116dbad15b",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "DEEPLINE_ACTION_POLICIES"
+    },
+    {
+      "ast_sha256": "sha256:a4a9aff8c0521dba961ac2c95715d18e30a2dc657d12846085e96896920937b2",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "DEEPLINE_BASE_URL"
+    },
+    {
+      "ast_sha256": "sha256:a20e9901057c71ae33893d478e885ba3ebd9120c87d599a585c9cfe136d9a833",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "DEEPLINE_COMPILER_FAMILY"
+    },
+    {
+      "ast_sha256": "sha256:716abd5d7af2c174f0900f7c573aa359c99cd2c10e245f427ab4e13d5d9fe47d",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "DEEPLINE_PROVIDER_PURPOSE"
+    },
+    {
+      "ast_sha256": "sha256:eda2d2d5b6602b334a8cc2da7239d16e8af7cb5bc90b7bda1def0a5e75546c41",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "DeeplineActionPolicy"
+    },
+    {
+      "ast_sha256": "sha256:67dc71d051b7f861a1c2fe51e79be47a029e630980fa0ea28691492a1c09b5de",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "MEASURED_UNAVAILABLE_COMPOSITE_SOURCE_TOOLS"
+    },
+    {
+      "ast_sha256": "sha256:10bf8356e0ee3e39dcc8760fb4c6bc1f121deb7f7e4ef2b241cfac2c8961c748",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "PreparedRoutingProviderCall"
+    },
+    {
+      "ast_sha256": "sha256:db4a484ad8195c91fdac61f7e7f1f529910e62e986d06da972b165cdecdabc43",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "PreparedRoutingProviderWorkflow"
+    },
+    {
+      "ast_sha256": "sha256:62a76b65e7be1cc482921856969333cdc839b64d9f0f1534b61ef8f0b47f9136",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "ROUTING_BINDING_CATALOG_SCHEMA"
+    },
+    {
+      "ast_sha256": "sha256:a8107079a173dd1d7a3f2f734a5f52ff803191de74e57ca14b7be161d297e447",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "ROUTING_BINDING_SCHEMA"
+    },
+    {
+      "ast_sha256": "sha256:28ea90037219026fed1922eb8a808df8d949f63928780c795ae5b7d2aa92133a",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "ROUTING_UNIT_DATASET_SCHEMA"
+    },
+    {
+      "ast_sha256": "sha256:c796768927473808a51f313c41f4e3703da38a1fb07b76ac28b32aaaaca0066e",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "ReviewedDeeplineActionCompiler"
+    },
+    {
+      "ast_sha256": "sha256:c850703f7a6e7ff9b41106243f4c4a2076eb23f53e41e5ef4c038007f83112ba",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "ReviewedDeeplineWorkflowCompiler"
+    },
+    {
+      "ast_sha256": "sha256:37c65463e38bf05f6444125205c9acb32ef59da2be6f5f265f7268ea6de4b84c",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "RoutingBindingManifest"
+    },
+    {
+      "ast_sha256": "sha256:664ffd2d33b0b868f34be1daf08088ae65cc4013bedff2b0c3d82c5c7ce1b859",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "SignedRoutingBindingCatalogLoader"
+    },
+    {
+      "ast_sha256": "sha256:9a008d1f31dcefdfbbbbee0dd9f39a603d01df92e8b04f8f85a48f9b5ba659da",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "SignedRoutingUnitDatasetLoader"
+    },
+    {
+      "ast_sha256": "sha256:7798ae3a87a83144753a633baa146a5539a7fc658266cc9fdcad48433392e97e",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "UNAVAILABLE_COMPOSITE_SOURCE_TOOLS"
+    },
+    {
+      "ast_sha256": "sha256:d3d0131884765a72bd195b0f5d7ea5430fda8819acc00ccab2ff89cbe1f96cc8",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "VerifiedRoutingBindingCatalog"
+    },
+    {
+      "ast_sha256": "sha256:03ea0a1238370e9cbf6fe263f802c0f95827807fd74f7bd3ce02304ee27933c5",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "VerifiedRoutingUnitDataset"
+    },
+    {
+      "ast_sha256": "sha256:90888b22f73a8f9eaa2a9f81af3105221dc6651f50dfef2430d51598bbc11b94",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "_MODEL_TOOL_ACTIONS"
+    },
+    {
+      "ast_sha256": "sha256:7d71a8873ccb87d82855973148d1c5a46f9411fdc4ab6bb351938c2449c1136e",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "_MODEL_TOOL_PROVIDER_IDS"
+    },
+    {
+      "ast_sha256": "sha256:16eb0865fa77948412c0c573f875a033031438654e39afb2f55ec1ef9c574600",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "_billing"
+    },
+    {
+      "ast_sha256": "sha256:75fab3ff1a445a0f6d047cb096ea4359fea2b9635a539590b7ef0a71e061fef7",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "_normalize_action_payload"
+    },
+    {
+      "ast_sha256": "sha256:54c45a0a47d70dcfcf49d9068c78744134645dcbd45a86adc2444cfe4add44bd",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "_qualifying_direct_rows"
+    },
+    {
+      "ast_sha256": "sha256:3b7667f209fd0b8267147b64a55e01be1a491ec482aecb19b0f42cd1d2380a3c",
+      "path": "gateway/research_lab/routing_provider_bindings.py",
+      "symbol": "_validate_action_context"
+    },
+    {
+      "ast_sha256": "sha256:d80f4ba44883e6e566ab5a6188b18a634d2406358937314ab0dcb95487c39510",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "HOST_PROVIDER_RESPONSE_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:f29c57f108e85aaddaa923d97b59b9b6a0ede9edd5e4fd2145f572466720f9d9",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "MAX_ROUTING_MODEL_RESPONSE_BYTES"
+    },
+    {
+      "ast_sha256": "sha256:3e19da35e795b732d2549cef7048bb06a1ac992e059fd7bd49f78fe67ecc55bb",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "MODEL_PROVIDER_RESPONSE_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:0d75ea0974745dad8a9d2de02f0473aad2191b4a86d3c190374321ca59ab9038",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_BUDGET_RESERVATION_PROOF_SCHEMA_V3"
+    },
+    {
+      "ast_sha256": "sha256:3c1e8ffea85d6e34a0f56952c61f530c2076fc2a59a62f9c7bfa37a7d4436450",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_BUDGET_RESERVATION_PURPOSE_V3"
+    },
+    {
+      "ast_sha256": "sha256:9bff13671aaa0dc4c98b42253ba30750851c7f95c96e1ccaf7af93585c19fcc2",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_BUDGET_RESERVATION_RESULT_SCHEMA_V3"
+    },
+    {
+      "ast_sha256": "sha256:17cc0dd0dc5bff85a5b47f59f8e41006759033702355769aac6f6d0baaedffe7",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_BUDGET_RESERVATION_SCHEMA_V3"
+    },
+    {
+      "ast_sha256": "sha256:9d786ea258bd8204e0c2a1075d55bb209333a1fa30b0b43efc44e100cc9e1ebb",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_MODEL_COMPLETION_CONTRACT_SCHEMA_V1"
+    },
+    {
+      "ast_sha256": "sha256:292d2dd2b3c1c7e9b969dd7f73467fd021a0b877dfa41afda03a2598051f0d82",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_MODEL_COMPLETION_MODE_MODEL_RUNNER"
+    },
+    {
+      "ast_sha256": "sha256:fc2252fdf126296d899382d44981d7ee88609bdfee844adbd495d257ad9da04a",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_MODEL_COMPLETION_MODE_RECEIPT_ONLY"
+    },
+    {
+      "ast_sha256": "sha256:a620b61d35e2081966d6ce100c8b778648aa8069d1639ea442e5a0d57fc63cf1",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_PROVIDER_DISPATCH_OPERATION_V2"
+    },
+    {
+      "ast_sha256": "sha256:589b398228b4ece88b08a5193a7f0a1686f07458e4a1fc1f3c36432c5eb63532",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_PROVIDER_DISPATCH_PURPOSE_V2"
+    },
+    {
+      "ast_sha256": "sha256:59f03031d599da7d99f801748b61c7777e63a90ed8d29398611b371373e54aef",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2"
+    },
+    {
+      "ast_sha256": "sha256:c36c9e740f41f76f45cdeb5d1225406841822ec1451a2f3bf15dcdbd5f2088b1",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_PROVIDER_TERMINAL_OPERATION_V2"
+    },
+    {
+      "ast_sha256": "sha256:c520ee72bba3050797c29fdb0e0691c4b0ebdda52280662eefac6bd9384a2b33",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_PROVIDER_TERMINAL_PURPOSE_V2"
+    },
+    {
+      "ast_sha256": "sha256:f1ee8f32a44d3e7cd7f2c67f44b911c49d53230388f91bfd8b44a514a7c1a6f4",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "ROUTING_PROVIDER_TERMINAL_RESULT_SCHEMA_V2"
+    },
+    {
+      "ast_sha256": "sha256:c32fc3a954e6758a493ec265487e2b054225eaea915307e7106004338280b3ab",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "_validate_transport_identity"
+    },
+    {
+      "ast_sha256": "sha256:4f05d83a1bfdd48278baea7785f0a2dc9e0caab2bdb97ff0f66805876ab9c86b",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "build_routing_budget_reservation_v3"
+    },
+    {
+      "ast_sha256": "sha256:43c546487c8a5075e09dacb9c6c0d4d48ce99b1f0448c822a4a9e5599e119771",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "build_routing_model_completion_contract_v1"
+    },
+    {
+      "ast_sha256": "sha256:48b9e33e325c053a525d9df86d10823d5eb0159a2a4b8bd2057a67cb051e2aad",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "execute_protected_routing_provider_terminal_v2"
+    },
+    {
+      "ast_sha256": "sha256:e9780dff554c443162a5ef4d82ec4b9bbdd87cb0b914a6fdca51d567903d5dbf",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "prepared_routing_provider_call_from_mapping"
+    },
+    {
+      "ast_sha256": "sha256:b2f87a05320ee636dae49c3cb5def04352f0f355c2d88917b87853e2c220ff74",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "routing_budget_reservation_proof_v3"
+    },
+    {
+      "ast_sha256": "sha256:e98477d82084403804d0b7ed5e1036dd38b50cf5e96ce156bab872c352f032c8",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "routing_provider_dispatch_receipt_output_v2"
+    },
+    {
+      "ast_sha256": "sha256:948e71a57091211f5abfb2f80d278b72e106e98239bce4c33a3409850a9de93a",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "validate_routing_budget_reservation_result_v3"
+    },
+    {
+      "ast_sha256": "sha256:ebefbbeeaf65cd67f6b784465628a7d22e3ac3781c53c8b5de0629d1777037f5",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "validate_routing_budget_reservation_v3"
+    },
+    {
+      "ast_sha256": "sha256:b01612c432b841a0e6ada45b623e293088e663c6c9f85cc99b0dba6b844ca956",
+      "path": "gateway/research_lab/routing_provider_terminal_protected.py",
+      "symbol": "validate_routing_model_completion_contract_v1"
+    },
+    {
       "ast_sha256": "sha256:f056ac4b3da93813f2ce18fefc89e5ae4da5cd42056c62d771c6027d7361e504",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._enforce_baseline_wave_preflight_freshness"
@@ -2362,12 +2882,12 @@
       "symbol": "ExecutionContextV2.record_transport"
     },
     {
-      "ast_sha256": "sha256:e17aca1cc5f4a11a5c4eac8975f198d45869261358e831244aa1e03c14b1c547",
+      "ast_sha256": "sha256:1ed1fd91f9168049432b26b7ec52f9b36f8cfad1d005a129c8b6cf5d3c569841",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
     },
     {
-      "ast_sha256": "sha256:b227e46cacdf93a6af979732ca8fdf3176c71fea506ea6f3b380cb3fbfb1cc6d",
+      "ast_sha256": "sha256:cd57fc133ed1b30da9e833dd7e9760ace7e256e841b30b166ce4cfc11906513e",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "_DIRECT_SUPABASE_SIDECAR_NAMESPACES"
     },
@@ -3277,7 +3797,7 @@
       "symbol": "PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION"
     },
     {
-      "ast_sha256": "sha256:bc5553b34c338e188ccfa99b63d5bc67229d31b27dfd020c1a6937c55d62d91e",
+      "ast_sha256": "sha256:b14c769ad09cc23760665cfb72495946408168f886efa958954651042cb8ab75",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -3362,6 +3882,16 @@
       "symbol": "_PROVIDER_TRANSPORT_FAILURE_STAGES"
     },
     {
+      "ast_sha256": "sha256:1d61f8ca744d90f8861f44662c8e71d59aad467872867c6f97363b8ae9b27aa4",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_ROUTING_AUTH_PROOF_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:e287567fe6c5d610da65d0ac8603f85e1988219551bb2575f6ca4bd683b9412a",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_ROUTING_FIXED_REQUEST_HEADERS"
+    },
+    {
       "ast_sha256": "sha256:3a8ab16b7de4e39704ead05096771a86fb59dac924cdd53281939a9bbbf25398",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "_SAFE_ERROR_TYPE_RE"
@@ -3412,6 +3942,11 @@
       "symbol": "_safe_error_type"
     },
     {
+      "ast_sha256": "sha256:b7bc8515fa6dc5333f8b426371e7fe7c9e26eb6271f22ea1bc91e88a066892c3",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "_validate_trusted_routing_authorization_receipt"
+    },
+    {
       "ast_sha256": "sha256:eafa1491629f860518117f7e2543bd6b0bbe61c65d17808d3b670701b243f3fd",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "is_broker_owned_httpx_client"
@@ -3422,9 +3957,19 @@
       "symbol": "provider_registry_document"
     },
     {
+      "ast_sha256": "sha256:739b8c3d920e7c03d14d9c6574b368d3fa2dbbd8b2118be6c1bd29c29f7cf75b",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "trusted_routing_peer_boot_identity"
+    },
+    {
       "ast_sha256": "sha256:7a71fd55a9ff304611ff6911456320024106c6943f85152a80f652a4d0bce6ab",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "validate_provider_transport_failure_diagnostic"
+    },
+    {
+      "ast_sha256": "sha256:9c1be49bf6e779696516993ed9129ef281589daa9f00c69ac50efb2b8739fa28",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "validate_routing_authorization_proof_v2"
     },
     {
       "ast_sha256": "sha256:488e3ef96cc595b849218b2fd98e8847146a878bd675ad07878501168158ffdc",
@@ -3432,7 +3977,7 @@
       "symbol": "BrokeredProviderTransportV2.install"
     },
     {
-      "ast_sha256": "sha256:8f7e5fbf4eb6c44a2feba641a2c79c11be5fbfce454ae75a878bdd9460f16e45",
+      "ast_sha256": "sha256:0f9c48730314b33277e3f480b9777d59439108b2f5c16979412628e1a60e1244",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
     },
@@ -3832,12 +4377,12 @@
       "symbol": "MODEL_COMPATIBILITY_PURPOSE_V2"
     },
     {
-      "ast_sha256": "sha256:eba92dd06b757975c39a396c7899b3c5e5f403ad04c8a3a4b28f48a16935afb6",
+      "ast_sha256": "sha256:9cd99fd391dd815a5806811deab16a06bc04801324cfd9a7f346483d65b1d9f4",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "SCORING_OPERATIONS_V2"
     },
     {
-      "ast_sha256": "sha256:ee8799b457dab62d889c4d8a89af4668d7f2aaaa9179035d978cd458413eea2d",
+      "ast_sha256": "sha256:f9d64631754e553d4325579a8e5880b1f08bc271610c42f2820de65918c78f26",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -3982,6 +4527,11 @@
       "symbol": "build_checkpoint"
     },
     {
+      "ast_sha256": "sha256:7f8a4950aab6090fce2520ea943e8c54ebc95ccfdf11944dd4b9119ff330dab5",
+      "path": "gateway/tee/tee_service.py",
+      "symbol": "configure_v2_scoring_routing_authority_bundle"
+    },
+    {
       "ast_sha256": "sha256:b029886852736a8cb94ec5243514f2445e85a71aff527f4b62704a3e10daf38d",
       "path": "gateway/tee/tee_service.py",
       "symbol": "execute_v2_provider_request"
@@ -3997,7 +4547,12 @@
       "symbol": "get_v2_provider_broker"
     },
     {
-      "ast_sha256": "sha256:47604714f1253b57186e4764ff22a2efa7c5b4c8b7f07cdb6ab50ee28fc5e7f6",
+      "ast_sha256": "sha256:b672e4ce5662aeba05e6f8a7bab6b4b183c840c7a7e24dc4d5e59a139bfc61cc",
+      "path": "gateway/tee/tee_service.py",
+      "symbol": "get_v2_scoring_job_manager"
+    },
+    {
+      "ast_sha256": "sha256:9db1fc268dcb4c9782491fc89042c235d01e689779bfa70b2ff584e950524958",
       "path": "gateway/tee/tee_service.py",
       "symbol": "handle_inter_enclave_rpc"
     },
@@ -5962,7 +6517,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:499abed1970bc7063645b46de3417a7f90144b278b3f0322c85e4367684babc7",
-  "protected_source_commit": "09a334fbacb4cfca572cbbd40cbe61eaadbb30f9",
+  "manifest_hash": "sha256:f4b14f1d6720e4559e5e7ec9efc27858f61e29c7588cf26d03d31fa0ff1a8637",
+  "protected_source_commit": "0a58c6a35566157976d5b534b2d6bc85c93894f4",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

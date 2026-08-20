@@ -205,19 +205,32 @@ unavailable, do not push.
 - Skill invocation is not the push-now override and does not bypass any
   repository, production-safety, test-profile, epoch, or attestation rule.
 
-## Default verification: 5-10 minutes
+## Default verification: deterministic 2-minute gate
 
-The default release gate is the bounded `prepush` profile. Run the long profile
-only when the user's current request explicitly includes `un-accelerated` or
-`unaccelerated` as the requested test/rehearsal mode. Do not infer the long
-profile from words such as "thorough", "full", "production-equivalent",
-"end-to-end", "all tests", or "release".
+The blocking pre-push gate has a 120-second outer deadline. It contains only
+syntax/format checks, directly affected regressions, and one hermetic complete
+transition for every release class touched by the diff. A green process with
+skipped, collect-only, unexercised, or zero materially executed required tests
+is not a pass. Run broad suites and the legacy `prepush` profile asynchronously
+after push.
+
+Run the unaccelerated profile only when the user's current request explicitly
+includes `un-accelerated` or `unaccelerated` as the requested test/rehearsal
+mode. Do not infer it from words such as "thorough", "full",
+"production-equivalent", "end-to-end", "all tests", or "release".
 
 For ordinary changes:
 
 1. Run syntax/format checks and only directly affected unit/regression tests.
-2. For V2, gateway, validator, auditor, restart, durable-state, settlement, or
-   weight changes, freeze the candidate SHA and run:
+2. For V2, gateway, validator, auditor, restart, durable-state, settlement,
+   scoring, or weight changes, freeze the candidate SHA and exercise the exact
+   deployed-N-1 -> candidate transition for the changed production seam. The
+   test must reach every downstream output of that seam under dependency-
+   minimal, production-shaped inputs and include fail-closed negatives.
+3. Require the combined blocking checks to finish within 120 seconds and
+   report materially executed test/stage counts plus cleanup.
+
+After push, start the broad legacy rehearsal concurrently with attestation:
 
 ```bash
 python3 scripts/run_local_restart_rehearsal.py \
@@ -227,7 +240,7 @@ python3 scripts/run_local_restart_rehearsal.py \
   --profile prepush
 ```
 
-The prepush run has a 600-second target and must exercise:
+This asynchronous run has a 600-second target and should exercise:
 
 - Candidate-bound source, artifact, release, PCR0, and role identity.
 - Production N-1 gateway and validator launcher paths.
@@ -242,13 +255,24 @@ The prepush run has a 600-second target and must exercise:
   invariants.
 
 Independent stages continue after a failure and end in one ledger with every
-stage `passed`, `failed`, or `unexercised`. A critical failed or unexercised
-stage fails the gate. Per-stage and total duration must be reported. If the
-scope or expected runtime exceeds ten minutes, tell the user before expanding
-the work; do not silently start the long profile.
+stage `passed`, `failed`, or `unexercised`. Broad-lane status, timeout, or a
+missing failure summary alone has no candidate veto. An independently
+actionable retained artifact proving a candidate product/trust failure blocks;
+every required invariant unique to a broad lane must first move into the
+deterministic gate. A bounded checkout, transfer, fixture, capacity, or
+staging-bootstrap failure before candidate product execution is visible but
+nonblocking after exact classification; it is not green product coverage.
+Per-stage and total duration must be reported.
 
-Do not run the whole repository suite by default when the focused tests and
-prepush contract cover the change. CI may run broader checks after push.
+A new or materially changed broad lane starts commissioning-only. It earns
+status-based veto eligibility only after 20 consecutive exact-main runs reach
+candidate code, meet their time and cleanup contracts, and retain
+machine-readable executed-stage counts plus actionable injected-negative
+artifacts. Even after commissioning, a red status without an actionable
+artifact has no veto. Keep ineligible lanes visible and repair or retire them.
+
+Do not run the whole repository suite before push. Broad CI runs after push and
+must not serialize exact-SHA attestation.
 
 ## Explicit unaccelerated verification
 
@@ -270,8 +294,8 @@ gate. The old `--profile release` CLI spelling is intentionally invalid.
 ## Production-parity staging
 
 `LEADPOET_PARITY_ENABLED` is the single commissioning guard. After every push
-to `main`, `Production Parity Fast` is a mandatory 5-10-minute post-push
-check that runs in parallel with attestation. It uses the exact pushed SHA,
+to `main`, `Production Parity Fast` is an asynchronous post-push diagnostic
+that runs in parallel with attestation. It uses the exact pushed SHA,
 resolves live N-1, restores the exact production schema to disposable
 PostgreSQL, applies candidate migrations, and exercises candidate-generated
 measured-source reads against real production data through a strict GET-only,
@@ -283,8 +307,9 @@ intake models and routes, OpenRouter recipient/privacy verifier, and SOURCE_ADD
 miner helper against the candidate Git blobs and checkout. This prevents stale
 fast-lane evidence without changing measured runtime identity or PCR0.
 
-`Production Parity Full` is the authoritative lane for rebenchmark or weight
-changes. After exact-SHA attestation it creates one encrypted transient Nitro
+`Production Parity Full` provides authoritative-coverage evidence for
+rebenchmark or weight changes when it reaches candidate code and retains an
+actionable stage ledger. After exact-SHA attestation it creates one encrypted transient Nitro
 host derived from the live gateway AMI, runs the exact candidate gateway
 restart against the database clone and real provider/model reads, completes
 every candidate-configured ICP and assignment, verifies the real allocation
@@ -305,8 +330,12 @@ after rebenchmark/weight proof and cannot dispatch SOURCE_ADD or paid loops.
 Autoresearch claims, promotion, fulfillment, and Git/model mutation stay
 disabled. No permanent staging fleet, persistent staging wallet,
 testnet authority, or GitHub Environment is permitted. Missing cleanup or any
-failed/unexercised critical stage fails the lane. See
-`docs/physical_v2_staging.md`.
+failed/unexercised critical stage fails the lane, but lane failure alone does
+not veto the candidate. Only an independently actionable retained artifact
+proving a candidate product/trust defect blocks. An unknown or no-summary
+result remains unproven, never green; move any invariant it uniquely covers
+into the deterministic gate. A conclusively pre-candidate infrastructure
+failure is quarantined and repaired separately. See `docs/physical_v2_staging.md`.
 
 ## Rehearsal contract
 
@@ -344,6 +373,7 @@ failed/unexercised critical stage fails the lane. See
 ```bash
 bash scripts/restart_attested_release_local.sh \
   --commit <full-40-character-attested-sha> \
+  --local-python </absolute/venv/bin/python> \
   --component all
 ```
 
@@ -354,13 +384,25 @@ verified on the same SHA.
 
 For restart, weight, auditor, attestation, cutover, or Research Lab incidents:
 
-1. Trace verification, persistence, handoff, signing, submission,
+1. Within 15 minutes, map every downstream stage as passed, failed, safely
+   exercised, or explicitly unexercised. Record the map before the first source
+   edit; an unexercised product/trust invariant remains blocking.
+2. Trace verification, persistence, handoff, signing, submission,
    finalization, and readback.
-2. Inspect durable failures and statically trace blocked downstream stages.
-3. Exercise independent later stages with sanitized production-shaped inputs.
-4. Report all evidenced blockers and unexercised stages, not only the first
+3. Inspect durable failures and statically trace blocked downstream stages.
+4. Exercise independent later stages with sanitized production-shaped inputs.
+5. Report all evidenced blockers and unexercised stages, not only the first
    exception.
-5. Do not alter intended scoring or trust policy merely to silence a warning.
+6. At T+30 minutes, freeze one forward candidate or choose a compatible exact-
+   attested rollback. At T+90, if the workflow is still unavailable, execute
+   the compatible canonical rollback by default unless a precise migration,
+   data, model, durable-state, or trust incompatibility is recorded, or a fully
+   hermetically proven forward candidate is waiting only on bounded attestation
+   or restart authority.
+7. Preserve the last valid published baseline through a failed refresh. Serve
+   it only while the exact deployed freshness/model/window policy says it is
+   eligible; never extend freshness or cross model lineage during an incident.
+8. Do not alter intended scoring or trust policy merely to silence a warning.
 
 ## Sentry API access for Codex
 

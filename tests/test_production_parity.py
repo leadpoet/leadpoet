@@ -4542,11 +4542,12 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
     assert "production-parity-miner-intake" not in write_statement["Resource"]
 
 
-def test_agent_guides_are_identical_and_require_both_parity_lanes():
+def test_agent_guides_are_identical_and_define_both_parity_lanes():
     agents = (ROOT / "AGENTS.md").read_bytes()
     assert agents == (ROOT / "CLAUDE.md").read_bytes()
     source = agents.decode("utf-8")
-    assert "mandatory 5-10-minute post-push" in source
+    assert "asynchronous post-push diagnostic" in source
+    assert "candidate product/trust failure" in source
     assert "Production Parity Full" in source
     assert "strict non-forwarding chain boundary" in source
     assert "No permanent staging fleet" in source

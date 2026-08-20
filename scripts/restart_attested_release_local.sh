@@ -31,6 +31,15 @@ VALIDATOR_FAILURE_MARKER_ATTEMPTS=20
 
 commit=""
 component="all"
+local_python=""
+local_python_target=""
+local_python_venv_root=""
+local_python_site_packages=""
+local_python_link_identity=""
+local_python_target_identity=""
+local_python_venv_config_identity=""
+local_python_site_identity=""
+local_readiness_candidate_bound=0
 disable_miner_submissions_before_restart=0
 validator_job=""
 gateway_job=""
@@ -58,6 +67,7 @@ Usage:
   bash scripts/restart_attested_release_local.sh \
     --commit <full-40-character-sha> \
     [--component all|gateway|validator] \
+    --local-python </absolute/venv/bin/python> \
     [--disable-miner-submissions-before-restart]
 
 The default "all" mode starts both exact-commit restarts in one invocation.
@@ -216,6 +226,18 @@ while [ "$#" -gt 0 ]; do
       component="${1#--component=}"
       shift
       ;;
+    --local-python)
+      if [ "$#" -lt 2 ]; then
+        echo "ERROR: --local-python requires an absolute venv executable" >&2
+        exit 2
+      fi
+      local_python="$2"
+      shift 2
+      ;;
+    --local-python=*)
+      local_python="${1#--local-python=}"
+      shift
+      ;;
     --disable-miner-submissions-before-restart)
       disable_miner_submissions_before_restart=1
       shift
@@ -243,6 +265,12 @@ case "$component" in
     exit 2
     ;;
 esac
+if [ -z "$local_python" ] \
+    || [[ "$local_python" != /* ]] \
+    || [[ "$local_python" =~ [[:cntrl:]] ]]; then
+  echo "ERROR: --local-python requires one absolute venv/bin/python path" >&2
+  exit 2
+fi
 if [ "$disable_miner_submissions_before_restart" = "1" ] \
     && [ "$component" != "all" ]; then
   echo "ERROR: --disable-miner-submissions-before-restart requires --component all" >&2
@@ -344,6 +372,316 @@ if [ "$disable_miner_submissions_before_restart" = "1" ]; then
   done
 fi
 
+if [ ! -f "$local_python" ] || [ ! -x "$local_python" ]; then
+  echo "ERROR: local readiness Python is not an executable regular target: $local_python" >&2
+  exit 1
+fi
+
+path_identity() {
+  local path="$1"
+  if stat -f '%d:%i' -- "$path" >/dev/null 2>&1; then
+    stat -f '%d:%i' -- "$path"
+  else
+    stat -c '%d:%i' -- "$path"
+  fi
+}
+
+local_python_link_identity="$(path_identity "$local_python")"
+if ! local_python_target="$(
+  "$local_python" -I -S -c \
+    'import os,sys; print(os.path.realpath(sys.argv[1]))' \
+    "$local_python"
+)"; then
+  echo "ERROR: local readiness Python target resolution failed" >&2
+  exit 1
+fi
+if [ -z "$local_python_target" ] \
+    || [[ "$local_python_target" != /* ]] \
+    || [[ "$local_python_target" =~ [[:cntrl:]] ]] \
+    || [ ! -f "$local_python_target" ] \
+    || [ ! -x "$local_python_target" ]; then
+  echo "ERROR: local readiness Python resolved target is invalid" >&2
+  exit 1
+fi
+local_python_target_identity="$(path_identity "$local_python_target")"
+local_python_bin_dir="$(dirname -- "$local_python")"
+local_python_name="$(basename -- "$local_python")"
+if [ "$(basename -- "$local_python_bin_dir")" != "bin" ] \
+    || ! [[ "$local_python_name" =~ ^python([0-9]+([.][0-9]+)*)?$ ]]; then
+  echo "ERROR: local readiness Python must be a venv bin/python executable" >&2
+  exit 2
+fi
+local_python_venv_root="$(cd "$local_python_bin_dir/.." && pwd -P)"
+if [ ! -f "$local_python_venv_root/pyvenv.cfg" ] \
+    || [ -L "$local_python_venv_root/pyvenv.cfg" ]; then
+  echo "ERROR: local readiness Python is not bound to a regular pyvenv.cfg" >&2
+  exit 1
+fi
+local_python_venv_config_identity="$(
+  path_identity "$local_python_venv_root/pyvenv.cfg"
+)"
+if ! local_python_version="$(
+  "$local_python" -I -S -c \
+    'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+)"; then
+  echo "ERROR: local readiness Python version probe failed" >&2
+  exit 1
+fi
+if ! [[ "$local_python_version" =~ ^[0-9]+[.][0-9]+$ ]]; then
+  echo "ERROR: local readiness Python returned an invalid version" >&2
+  exit 1
+fi
+local_python_site_packages="$local_python_venv_root/lib/python$local_python_version/site-packages"
+if [ ! -d "$local_python_site_packages" ] \
+    || [ -L "$local_python_site_packages" ]; then
+  echo "ERROR: local readiness Python site-packages is unavailable or indirect" >&2
+  exit 1
+fi
+local_python_site_identity="$(path_identity "$local_python_site_packages")"
+
+verify_local_readiness_python_binding() {
+  if [ "$(path_identity "$local_python")" != "$local_python_link_identity" ] \
+      || [ "$(path_identity "$local_python_target")" != "$local_python_target_identity" ] \
+      || [ "$(path_identity "$local_python_venv_root/pyvenv.cfg")" != "$local_python_venv_config_identity" ] \
+      || [ "$(path_identity "$local_python_site_packages")" != "$local_python_site_identity" ]; then
+    echo "ERROR: local readiness Python binding changed after preflight" >&2
+    return 1
+  fi
+}
+
+LOCAL_READINESS_CANDIDATE_PATHS=(
+  scripts/restart_attested_release_local.sh
+  gateway/__init__.py
+  gateway/build_info.py
+  gateway/deploy_readiness.py
+  gateway/tee/release_channel_v2.py
+  gateway/tee/release_lineage_v2.py
+  gateway/tee/release_manifest_v2.py
+  gateway/tee/topology.py
+  leadpoet_canonical/__init__.py
+  leadpoet_canonical/attested_v2.py
+  leadpoet_canonical/constants.py
+  leadpoet_canonical/nitro.py
+  leadpoet_observability/__init__.py
+  leadpoet_observability/sentry_bootstrap.py
+  leadpoet_observability/sentry_operations.py
+  leadpoet_observability/sentry_scrubbing.py
+  validator_tee/__init__.py
+  validator_tee/host/__init__.py
+  validator_tee/host/release_v2.py
+  validator_tee/host/vsock_client.py
+)
+
+verify_local_readiness_candidate_sources() {
+  local path=""
+  local expected_blob=""
+  local observed_blob=""
+  if [ "$local_readiness_candidate_bound" != "1" ]; then
+    return 0
+  fi
+  for path in "${LOCAL_READINESS_CANDIDATE_PATHS[@]}"; do
+    if [ ! -f "$ROOT/$path" ] || [ -L "$ROOT/$path" ]; then
+      echo "ERROR: local readiness candidate source is unavailable: $path" >&2
+      return 1
+    fi
+    if ! expected_blob="$(git -C "$ROOT" rev-parse "$commit:$path")"; then
+      echo "ERROR: local readiness candidate Git blob is unavailable: $path" >&2
+      return 1
+    fi
+    if ! observed_blob="$(
+      git -C "$ROOT" hash-object --no-filters "$ROOT/$path"
+    )"; then
+      echo "ERROR: local readiness candidate source could not be hashed: $path" >&2
+      return 1
+    fi
+    if [ "$observed_blob" != "$expected_blob" ]; then
+      echo "ERROR: local readiness candidate source differs from exact commit: $path" >&2
+      return 1
+    fi
+  done
+}
+
+run_local_readiness_python() {
+  verify_local_readiness_python_binding || return 1
+  verify_local_readiness_candidate_sources || return 1
+  "$local_python_target" -I -S -B -c '
+from pathlib import Path
+import sys
+
+root = Path(sys.argv.pop(1)).resolve(strict=True)
+site_packages = Path(sys.argv.pop(1)).resolve(strict=True)
+sys.path.insert(0, str(root))
+sys.path.append(str(site_packages))
+source = sys.stdin.read()
+exec(
+    compile(source, "<leadpoet-local-readiness>", "exec"),
+    {"__name__": "__main__", "__builtins__": __builtins__},
+)
+' "$ROOT" "$local_python_site_packages" "$@"
+}
+
+preflight_local_readiness_python() {
+  local local_python_preflight=""
+  if ! local_python_preflight="$(
+    run_local_readiness_python \
+      "$local_python" "$local_python_venv_root" "$local_python_target" \
+      "$local_python_site_packages" <<'PY'
+import importlib.metadata
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+if (
+    sys.flags.isolated != 1
+    or sys.flags.no_site != 1
+    or sys.flags.no_user_site != 1
+    or "site" in sys.modules
+    or "sitecustomize" in sys.modules
+):
+    raise SystemExit("local readiness Python is not isolated from site configuration")
+
+selected = Path(sys.argv[1])
+venv_root = Path(sys.argv[2]).resolve(strict=True)
+bound_target = Path(sys.argv[3]).resolve(strict=True)
+site_packages = Path(sys.argv[4]).resolve(strict=True)
+if not selected.is_absolute() or selected.parent.name != "bin":
+    raise SystemExit("local readiness Python path is not an absolute venv executable")
+if selected.parent.parent.resolve(strict=True) != venv_root:
+    raise SystemExit("local readiness Python path differs from its venv root")
+if site_packages != (
+    venv_root
+    / "lib"
+    / ("python%d.%d" % sys.version_info[:2])
+    / "site-packages"
+).resolve(strict=True):
+    raise SystemExit("local readiness Python site-packages identity differs")
+if Path(sys.path[-1]).resolve(strict=True) != site_packages or any(
+    Path(entry).resolve() == site_packages for entry in sys.path[:-1]
+):
+    raise SystemExit("local readiness Python site-packages precedes stdlib")
+
+allowed_owners = {0, os.getuid()}
+
+
+def require_safe_stat(path, *, follow=True, allow_symlink_mode=False):
+    details = path.stat() if follow else path.lstat()
+    if details.st_uid not in allowed_owners:
+        raise SystemExit("local readiness Python path has an untrusted owner")
+    if not (allow_symlink_mode and stat.S_ISLNK(details.st_mode)) \
+            and details.st_mode & 0o022:
+        raise SystemExit("local readiness Python path is group/world writable")
+    return details
+
+
+def require_safe_venv_origin(path):
+    current = Path(path).resolve(strict=True)
+    try:
+        current.relative_to(venv_root)
+    except ValueError as exc:
+        raise SystemExit("local readiness dependency is outside the selected venv") from exc
+    while True:
+        require_safe_stat(current)
+        if current == venv_root:
+            break
+        current = current.parent
+
+
+selected_link = require_safe_stat(
+    selected,
+    follow=False,
+    allow_symlink_mode=True,
+)
+selected_target_path = selected.resolve(strict=True)
+if selected_target_path != bound_target:
+    raise SystemExit("local readiness Python resolved target differs")
+selected_target = require_safe_stat(selected_target_path)
+if not stat.S_ISREG(selected_target.st_mode) or not os.access(selected, os.X_OK):
+    raise SystemExit("local readiness Python target is not executable and regular")
+require_safe_venv_origin(venv_root / "pyvenv.cfg")
+require_safe_venv_origin(site_packages)
+
+import cbor2
+import cryptography
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import ec
+import gateway.deploy_readiness as deploy_readiness
+import gateway.tee.release_channel_v2 as release_channel_v2
+import leadpoet_canonical.attested_v2 as attested_v2
+import leadpoet_canonical.nitro as nitro
+import validator_tee
+import validator_tee.host.release_v2 as validator_release_v2
+
+del x509, ec
+if any(
+    name == "bittensor_wallet" or name.startswith("bittensor_wallet.")
+    for name in sys.modules
+):
+    raise SystemExit("pure readiness imports loaded the validator wallet dependency")
+for module in (
+    deploy_readiness,
+    release_channel_v2,
+    attested_v2,
+    nitro,
+    validator_tee,
+    validator_release_v2,
+):
+    origin = Path(module.__file__).resolve(strict=True)
+    try:
+        origin.relative_to(Path(sys.path[0]).resolve(strict=True))
+    except ValueError as exc:
+        raise SystemExit("local readiness candidate module escaped the exact root") from exc
+for dependency in (cbor2, cryptography):
+    require_safe_venv_origin(Path(dependency.__file__))
+for function in (
+    deploy_readiness.build_deploy_readiness_transition_marker,
+    deploy_readiness.build_gateway_v2_readiness_evidence_from_observation,
+    deploy_readiness.build_validator_v2_readiness_evidence_from_observation,
+    deploy_readiness.build_v2_deploy_readiness_manifest,
+    deploy_readiness.validate_v2_deploy_readiness_manifest,
+    release_channel_v2.validate_release_channel_v2,
+    validator_release_v2.validate_validator_release_manifest,
+):
+    if not callable(function):
+        raise SystemExit("local readiness candidate function is unavailable")
+available, diagnostic = nitro.verify_nitro_attestation_full(
+    attestation_b64="!",
+    expected_pcr0="1" * 96,
+)
+if available or "Missing required library" in str(diagnostic.get("error") or ""):
+    raise SystemExit("local readiness Nitro dependencies failed their execution probe")
+if "site" in sys.modules or "sitecustomize" in sys.modules:
+    raise SystemExit("local readiness imports activated mutable site configuration")
+
+print(
+    json.dumps(
+        {
+            "schema_version": "leadpoet.local_readiness_python.v1",
+            "executable": str(selected),
+            "executable_link_device": selected_link.st_dev,
+            "executable_link_inode": selected_link.st_ino,
+            "executable_target": str(selected_target_path),
+            "executable_target_device": selected_target.st_dev,
+            "executable_target_inode": selected_target.st_ino,
+            "python_prefix": sys.prefix,
+            "python_version": "%d.%d.%d" % sys.version_info[:3],
+            "venv_root": str(venv_root),
+            "cbor2_version": importlib.metadata.version("cbor2"),
+            "cryptography_version": importlib.metadata.version("cryptography"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+)
+PY
+)"; then
+    echo "ERROR: local readiness Python preflight failed before production mutation" >&2
+    return 1
+  fi
+  echo "Local readiness Python preflight: $local_python_preflight"
+}
+
 temporary_root="$(mktemp -d /tmp/leadpoet-attested-restart.XXXXXX)"
 helper="$temporary_root/exact_commit_restart_v2.py"
 gateway_observation="$temporary_root/gateway-readiness-observation.json"
@@ -386,6 +724,8 @@ python3 "$helper" \
   --branch-ref origin/main
 echo "Selected release is compatible with current public auditors: $commit"
 echo "Current public V2 authority commit: $branch_commit"
+local_readiness_candidate_bound=1
+preflight_local_readiness_python
 ssh_common=(
   -n
   -o BatchMode=yes
@@ -505,7 +845,7 @@ PY"
 }
 
 invalidate_deploy_readiness() {
-  PYTHONPATH="$ROOT" python3 - "$commit" "$transition_manifest" <<'PY'
+  run_local_readiness_python "$commit" "$transition_manifest" <<'PY'
 import sys
 from gateway.deploy_readiness import (
     build_deploy_readiness_transition_marker,
@@ -970,7 +1310,8 @@ observation = {
 }
 print(json.dumps(observation, sort_keys=True, separators=(',', ':')))
 PY" > "$gateway_observation"
-  PYTHONPATH="$ROOT" python3 - "$commit" "$gateway_observation" "$output" <<'PY'
+  run_local_readiness_python \
+    "$commit" "$gateway_observation" "$output" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -1093,7 +1434,8 @@ observation = {
 }
 print(json.dumps(observation, sort_keys=True, separators=(',', ':')))
 PY" > "$validator_observation"
-  PYTHONPATH="$ROOT" python3 - "$commit" "$validator_observation" "$output" <<'PY'
+  run_local_readiness_python \
+    "$commit" "$validator_observation" "$output" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -1115,7 +1457,7 @@ PY
 }
 
 finalize_deploy_readiness() {
-  PYTHONPATH="$ROOT" python3 - \
+  run_local_readiness_python \
     "$commit" "$gateway_evidence" "$validator_evidence" "$final_manifest" <<'PY'
 import json
 from pathlib import Path

@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
@@ -21,6 +22,7 @@ import time
 from types import SimpleNamespace
 from typing import Any, Optional
 import urllib.request
+import uuid
 
 import pytest
 
@@ -116,6 +118,16 @@ from gateway.research_lab.git_tree_models import (
     derive_child_slot,
     derive_tree_id,
 )
+
+
+@contextmanager
+def _production_named_temp_directory(prefix: str):
+    path = Path("/tmp") / f"{prefix}{uuid.uuid4().hex}"
+    path.mkdir(mode=0o700)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 COMMIT = "1" * 40
@@ -8903,13 +8915,12 @@ def test_module_provenance_follows_prepared_archive_python_path(
 def test_module_provenance_accepts_only_candidate_miner_bootstrap_archive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
     from tests.restart_rehearsal import contract_adapter
 
-    with tempfile.TemporaryDirectory(
-        dir="/tmp",
-        prefix="gateway-miner-maintenance-bootstrap.",
-    ) as raw:
-        bootstrap_root = Path(raw)
+    with _production_named_temp_directory(
+        "gateway-miner-maintenance-bootstrap."
+    ) as bootstrap_root:
         module_path = (
             bootstrap_root
             / "candidate/gateway/tee/gateway_miner_maintenance_restart_v1.py"

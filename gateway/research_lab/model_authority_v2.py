@@ -69,8 +69,12 @@ from research_lab.eval import (
 from research_lab.eval.private_runtime import (
     DockerPrivateModelRunner,
     PROVIDER_COST_EVALUATION_SCOPE_ENV,
-    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2,
-    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2,
+    QUALIFICATION_OUTCOME_MAX_FAILURE_CLASSES_V2,
+    QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2,
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2,
+    qualification_outcome_required_route_terminal_satisfies_v2,
+    qualification_outcome_failure_class_valid_v2,
     context_with_runtime_options,
     validate_sourcing_adapter_metadata,
     validate_sourcing_runtime_receipt_entries,
@@ -188,7 +192,6 @@ MODEL_QUALIFICATION_AUTHORITY_SCHEMA_V1 = (
     "leadpoet.model-qualification-authority.v1"
 )
 _PLAIN_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_SAFE_FAILURE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
 
 
 def validate_model_qualification_authority_v1(
@@ -249,7 +252,7 @@ def validate_model_qualification_authority_v1(
             str(document.get("image_digest") or ""),
         )
         is None
-        or document.get("protocol_major") != 2
+        or document.get("protocol_major") != QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2
         or type(document.get("protocol_minor")) is not int
         or document["protocol_minor"] < 0
         or not _PLAIN_SHA256_RE.fullmatch(
@@ -266,11 +269,10 @@ def validate_model_qualification_authority_v1(
         or type(document.get("retryable")) is not bool
         or not isinstance(failures, list)
         or failures != sorted(failures)
-        or len(failures) > 16
+        or len(failures) > QUALIFICATION_OUTCOME_MAX_FAILURE_CLASSES_V2
         or len(set(failures)) != len(failures)
         or any(
-            not isinstance(item, str)
-            or not _SAFE_FAILURE_CLASS_RE.fullmatch(item)
+            not qualification_outcome_failure_class_valid_v2(item)
             for item in failures
         )
         or type(document.get("partial_company_count")) is not int
@@ -502,7 +504,7 @@ def _host_provider_observation_v1(
         required_commitments != sorted(required_commitments)
         or len(set(required_commitments)) != len(required_commitments)
         or len(required_commitments)
-        > QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2
+        > QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2
         or any(
             re.fullmatch(r"[0-9a-f]{64}", str(item or "")) is None
             for item in required_commitments
@@ -630,25 +632,50 @@ def _model_qualification_authority_v1(
             "model qualification input or execution authority differs"
         )
     disposition = str(receipt["disposition"])
-    bound_commitments = receipt.get("extensions", {}).get(
-        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2
+    bound_outcomes = receipt.get("extensions", {}).get(
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
     )
+    bound_commitments = (
+        [item.get("commitment") for item in bound_outcomes]
+        if isinstance(bound_outcomes, list)
+        and all(isinstance(item, Mapping) for item in bound_outcomes)
+        else []
+    )
+    required_terminals = host_observation["required_route_terminals"]
     if (
         receipt.get("probe") is not None
-        or not isinstance(bound_commitments, list)
+        or not isinstance(bound_outcomes, list)
         or bound_commitments
         != host_observation["required_route_commitments"]
         or receipt["route_summary"]["attempted"]
         != len(bound_commitments)
+        or any(
+            outcome.get("commitment") != terminal.get("route_commitment")
+            or (
+                outcome.get("state") in {"completed", "confirmed_empty"}
+                and not qualification_outcome_required_route_terminal_satisfies_v2(
+                    outcome.get("state"),
+                    terminal.get("terminal_status"),
+                    terminal.get("http_status"),
+                )
+            )
+            for outcome, terminal in zip(bound_outcomes, required_terminals)
+        )
     ):
         raise AttestedPrivateModelRunnerV2Error(
             "qualification outcome lacks exact required-route authority"
         )
     if disposition.startswith("complete_") and (
         host_observation["required_route_count"] <= 0
-        or host_observation["successful_required_route_count"]
-        != host_observation["required_route_count"]
-        or host_observation["unresolved_required_route_count"] != 0
+        or any(
+            outcome.get("state") not in {"completed", "confirmed_empty"}
+            or not qualification_outcome_required_route_terminal_satisfies_v2(
+                outcome.get("state"),
+                terminal.get("terminal_status"),
+                terminal.get("http_status"),
+            )
+            for outcome, terminal in zip(bound_outcomes, required_terminals)
+        )
     ):
         raise AttestedPrivateModelRunnerV2Error(
             "complete outcome lacks successful provider completion"

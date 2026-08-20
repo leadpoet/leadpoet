@@ -34,6 +34,8 @@ from research_lab.employee_buckets import (
     normalize_employee_count_buckets,
 )
 from research_lab.sourcing_model_contract_check import (
+    QUALIFICATION_PROTOCOL_ENTRYPOINT_V2,
+    QUALIFICATION_PROTOCOL_POLICY_SHA256_V2,
     compute_compatibility_source_tree_hash_v1,
     resolve_reviewed_consumer_snapshot,
     reviewed_consumer_profiles,
@@ -128,7 +130,7 @@ QUALIFICATION_OUTCOME_CONTRACT_V2_PATH = (
     / "sourcing_model_qualification_outcome_v2.json"
 )
 QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2 = (
-    "1348bed0207daab8a1ab0bbdce9495c294c7f9e411ce39c0b4aeb1450b9cf8ba"
+    QUALIFICATION_PROTOCOL_POLICY_SHA256_V2.removeprefix("sha256:")
 )
 _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2 = json.loads(
     QUALIFICATION_OUTCOME_CONTRACT_V2_PATH.read_text(encoding="utf-8")
@@ -145,7 +147,7 @@ _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2 = dict(
     _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["extension_evolution"]
 )
 _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2 = dict(
-    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["required_route_commitments"]
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["required_route_outcomes"]
 )
 QUALIFICATION_OUTCOME_PROTOCOL_ID_V2 = str(
     _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["protocol_id"]
@@ -161,6 +163,9 @@ QUALIFICATION_ROUTE_COMPLETION_RECEIPT_SCHEMA_V1 = str(
 QUALIFICATION_OUTCOME_PROTOCOL_PROBE_SCHEMA_V1 = str(
     _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["probe"]["schema_version"]
 )
+QUALIFICATION_OUTCOME_PROTOCOL_PROBE_MODE_V1 = str(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["probe"]["mode"]
+)
 QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2 = int(
     _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["protocol_major"]
 )
@@ -170,24 +175,97 @@ QUALIFICATION_OUTCOME_REQUIRED_CAPABILITIES_V2 = frozenset(
         "required_capabilities"
     ]
 )
+_QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASE_POLICY_V1 = dict(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["probe"]["required_cases"]
+)
 QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1 = tuple(
     sorted(
-        str(item)
-        for item in _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["probe"][
-            "required_cases"
-        ]
+        str(item) for item in _QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASE_POLICY_V1
     )
 )
-QUALIFICATION_OUTCOME_ENTRYPOINT_V2 = "run_icp_outcome"
-QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2 = str(
+QUALIFICATION_OUTCOME_ENTRYPOINT_V2 = QUALIFICATION_PROTOCOL_ENTRYPOINT_V2
+QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2 = str(
     _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["extension_key"]
 )
-QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2 = int(
+QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2 = int(
     _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["maximum_count"]
 )
 QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2 = str(
-    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["value_regex"]
+    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["commitment_regex"]
 )
+QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOME_STATES_V2 = tuple(
+    str(item) for item in _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["states"]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_SORTED_UNIQUE_BY_V2 = str(
+    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["sorted_unique_by"]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_PRODUCTION_REQUIRED_V2 = bool(
+    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["production_required"]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_PROBE_EXEMPT_V2 = bool(
+    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["probe_exempt"]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_HOST_JOIN_POLICY_V2 = dict(
+    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["host_join_policy"]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OBSERVATION_AUTHORITIES_V2 = frozenset(
+    str(item)
+    for item in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_HOST_JOIN_POLICY_V2[
+        "allowed_observation_authorities"
+    ]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMPLETED_STATUS_CLASSES_V2 = frozenset(
+    str(item)
+    for item in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_HOST_JOIN_POLICY_V2[
+        "completed_allowed_http_status_classes"
+    ]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_EMPTY_STATUS_CLASSES_V2 = frozenset(
+    str(item)
+    for item in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_HOST_JOIN_POLICY_V2[
+        "confirmed_empty_allowed_http_status_classes"
+    ]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_EMPTY_STATUSES_V2 = frozenset(
+    int(item)
+    for item in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_HOST_JOIN_POLICY_V2[
+        "confirmed_empty_allowed_http_statuses"
+    ]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_NEVER_COMPLETE_STATUSES_V2 = frozenset(
+    int(item)
+    for item in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_HOST_JOIN_POLICY_V2[
+        "never_complete_http_statuses"
+    ]
+)
+_QUALIFICATION_OUTCOME_REQUIRED_ROUTE_NEVER_COMPLETE_STATUS_CLASSES_V2 = (
+    frozenset(
+        str(item)
+        for item in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_HOST_JOIN_POLICY_V2[
+            "never_complete_http_status_classes"
+        ]
+    )
+)
+if (
+    _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2.get("semantic_unit")
+    != "logical_obligation"
+    or _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_SORTED_UNIQUE_BY_V2
+    != "commitment"
+    or not _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_PRODUCTION_REQUIRED_V2
+    or not _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_PROBE_EXEMPT_V2
+    or set(QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOME_STATES_V2)
+    != {
+        "completed",
+        "confirmed_empty",
+        "retryable_failed",
+        "terminal_failed",
+    }
+    or _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_HOST_JOIN_POLICY_V2.get(
+        "failed_states_satisfy_complete"
+    )
+    is not False
+):
+    raise RuntimeError("qualification outcome route policy is unsupported")
 _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_NESTING_DEPTH_V2 = int(
     _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2["maximum_nesting_depth"]
 )
@@ -220,6 +298,11 @@ _QUALIFICATION_OUTCOME_SAFE_NAME_RE = re.compile(
 _QUALIFICATION_OUTCOME_FAILURE_CLASS_RE = re.compile(
     str(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["failure_class_policy"]["regex"])
 )
+QUALIFICATION_OUTCOME_MAX_FAILURE_CLASSES_V2 = int(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["failure_class_policy"][
+        "maximum_count"
+    ]
+)
 _QUALIFICATION_OUTCOME_EXTENSION_KEY_RE = re.compile(
     r"^[a-z][a-z0-9-]{0,%d}(?:\.[a-z][a-z0-9-]{0,%d})+$"
     % (
@@ -240,6 +323,59 @@ _QUALIFICATION_OUTCOME_EXTENSION_TOKEN_RE = re.compile(
 _QUALIFICATION_OUTCOME_PROBE_NONCE_RE = re.compile(
     str(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["probe"]["nonce_regex"])
 )
+
+
+def qualification_outcome_probe_nonce_valid_v1(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and _QUALIFICATION_OUTCOME_PROBE_NONCE_RE.fullmatch(value) is not None
+    )
+
+
+def qualification_outcome_failure_class_valid_v2(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and _QUALIFICATION_OUTCOME_FAILURE_CLASS_RE.fullmatch(value) is not None
+    )
+
+
+def qualification_outcome_required_route_terminal_satisfies_v2(
+    state: Any,
+    terminal_status: Any,
+    http_status: Any,
+) -> bool:
+    """Apply the artifact-bound model-state/host-terminal join policy."""
+
+    if (
+        state not in QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOME_STATES_V2
+        or terminal_status
+        not in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OBSERVATION_AUTHORITIES_V2
+        or type(http_status) is not int
+        or not 100 <= http_status <= 599
+    ):
+        return False
+    status_class = f"{http_status // 100}xx"
+    if (
+        http_status
+        in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_NEVER_COMPLETE_STATUSES_V2
+        or status_class
+        in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_NEVER_COMPLETE_STATUS_CLASSES_V2
+    ):
+        return False
+    if state == "completed":
+        return (
+            status_class
+            in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMPLETED_STATUS_CLASSES_V2
+        )
+    if state == "confirmed_empty":
+        return (
+            status_class
+            in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_EMPTY_STATUS_CLASSES_V2
+            or http_status in _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_EMPTY_STATUSES_V2
+        )
+    return False
+
+
 EXPECTED_ROUTING_COMPILER_VERSIONS = frozenset(
     str(
         snapshot["contract"]["exact_constants"]
@@ -579,7 +715,7 @@ def _qualification_outcome_extension_limits_v2() -> tuple[int, int]:
         type(maximum_entries) is not int
         or not 1 <= maximum_entries <= 32
         or type(maximum_canonical_bytes) is not int
-        or not 1024 <= maximum_canonical_bytes <= 64 * 1024
+        or not 1024 <= maximum_canonical_bytes <= 16 * 1024 * 1024
         or not 1
         <= _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_NESTING_DEPTH_V2
         <= 8
@@ -648,7 +784,7 @@ def _qualification_outcome_extension_value_valid_v2(
 def _qualification_outcome_extensions_valid_v2(
     value: Any,
     *,
-    allow_required_route_commitments: bool = False,
+    allow_required_route_outcomes: bool = False,
 ) -> bool:
     if not isinstance(value, Mapping):
         return False
@@ -656,31 +792,43 @@ def _qualification_outcome_extensions_valid_v2(
         _qualification_outcome_extension_limits_v2()
     )
     document = dict(value)
-    required_commitments = document.get(
-        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2
+    required_outcomes = document.get(
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
     )
-    if required_commitments is not None and (
-        not allow_required_route_commitments
-        or not isinstance(required_commitments, list)
-        or required_commitments != sorted(required_commitments)
-        or len(set(required_commitments)) != len(required_commitments)
-        or len(required_commitments)
-        > QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2
-        or any(
-            not isinstance(item, str)
-            or _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_RE.fullmatch(
-                item
-            )
-            is None
-            for item in required_commitments
+    if required_outcomes is not None:
+        commitments = (
+            [item.get("commitment") for item in required_outcomes]
+            if isinstance(required_outcomes, list)
+            and all(isinstance(item, Mapping) for item in required_outcomes)
+            else []
         )
-    ):
-        return False
+        if (
+            not allow_required_route_outcomes
+            or not isinstance(required_outcomes, list)
+            or len(required_outcomes)
+            > QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2
+            or any(
+                set(item) != {"commitment", "state"}
+                or not isinstance(item.get("commitment"), str)
+                or _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_RE.fullmatch(
+                    item["commitment"]
+                )
+                is None
+                or item.get("state")
+                not in QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOME_STATES_V2
+                for item in required_outcomes
+                if isinstance(item, Mapping)
+            )
+            or len(commitments) != len(required_outcomes)
+            or commitments != sorted(commitments)
+            or len(set(commitments)) != len(commitments)
+        ):
+            return False
     generic_extensions = {
         key: item
         for key, item in document.items()
         if key
-        != QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2
+        != QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
     }
     return (
         len(document) <= maximum_entries
@@ -756,7 +904,7 @@ def validate_qualification_outcome_protocol_metadata_v2(
         or set(probe) != {"schema_version", "mode", "case_ids"}
         or probe.get("schema_version")
         != QUALIFICATION_OUTCOME_PROTOCOL_PROBE_SCHEMA_V1
-        or probe.get("mode") != "consumer_qualification_protocol_probe"
+        or probe.get("mode") != QUALIFICATION_OUTCOME_PROTOCOL_PROBE_MODE_V1
         or not isinstance(probe.get("case_ids"), list)
         or probe["case_ids"] != sorted(probe["case_ids"])
         or len(set(probe["case_ids"])) != len(probe["case_ids"])
@@ -835,15 +983,14 @@ def validate_qualification_route_completion_receipt_v1(
         or not isinstance(failures, list)
         or failures != sorted(failures)
         or len(set(failures)) != len(failures)
-        or len(failures) > 16
+        or len(failures) > QUALIFICATION_OUTCOME_MAX_FAILURE_CLASSES_V2
         or any(
-            not isinstance(item, str)
-            or not _QUALIFICATION_OUTCOME_FAILURE_CLASS_RE.fullmatch(item)
+            not qualification_outcome_failure_class_valid_v2(item)
             for item in failures
         )
         or not _qualification_outcome_extensions_valid_v2(
             extensions,
-            allow_required_route_commitments=True,
+            allow_required_route_outcomes=True,
         )
         or document.get("receipt_sha256") != _qualification_outcome_sha256(body)
     ):
@@ -863,6 +1010,25 @@ def validate_qualification_route_completion_receipt_v1(
     ):
         raise PrivateModelRuntimeError(
             "private model route completion probe is invalid"
+        )
+    required_outcomes = dict(extensions).get(
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
+    )
+    if (
+        probe is None
+        and _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_PRODUCTION_REQUIRED_V2
+        and (
+            not isinstance(required_outcomes, list)
+            or summary.get("attempted") != len(required_outcomes)
+            or any(
+                summary.get(state)
+                != sum(item.get("state") == state for item in required_outcomes)
+                for state in QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOME_STATES_V2
+            )
+        )
+    ):
+        raise PrivateModelRuntimeError(
+            "private model route completion outcomes are incomplete"
         )
     return document
 
@@ -984,51 +1150,26 @@ def validate_qualification_outcome_protocol_probe_cases_v1(
         raise PrivateModelRuntimeError(
             "private model qualification outcome protocol probe differs"
         )
-    complete = validate_qualification_outcome_envelope_v2(
-        document["complete_confirmed_empty"]
-    )
-    incomplete = validate_qualification_outcome_envelope_v2(
-        document["incomplete_retryable"]
-    )
-    complete_receipt = complete["route_completion_receipt"]
-    incomplete_receipt = incomplete["route_completion_receipt"]
-    complete_summary = complete_receipt["route_summary"]
-    incomplete_summary = incomplete_receipt["route_summary"]
-    if (
-        complete["completion_state"] != "complete"
-        or complete["companies"]
-        or complete_receipt["disposition"] != "complete_confirmed_empty"
-        or complete_receipt["retryable"]
-        or complete_receipt["failure_classes"]
-        or complete_summary
-        != {
-            "attempted": 1,
-            "completed": 0,
-            "confirmed_empty": 1,
-            "retryable_failed": 0,
-            "terminal_failed": 0,
-            "skipped": 0,
-            "retried": 0,
-        }
-        or incomplete["completion_state"] != "incomplete"
-        or incomplete["companies"]
-        or incomplete_receipt["disposition"] != "incomplete_retryable"
-        or incomplete_receipt["retryable"] is not True
-        or incomplete_receipt["failure_classes"] != ["retryable_provider"]
-        or incomplete_summary
-        != {
-            "attempted": 1,
-            "completed": 0,
-            "confirmed_empty": 0,
-            "retryable_failed": 1,
-            "terminal_failed": 0,
-            "skipped": 0,
-            "retried": 0,
-        }
-    ):
-        raise PrivateModelRuntimeError(
-            "private model qualification outcome protocol probe semantics differ"
-        )
+    for case_id, expected in _QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASE_POLICY_V1.items():
+        envelope = validate_qualification_outcome_envelope_v2(document[case_id])
+        receipt = envelope["route_completion_receipt"]
+        expected_document = dict(expected)
+        if (
+            envelope["completion_state"]
+            != expected_document.get("completion_state")
+            or len(envelope["companies"])
+            != expected_document.get("returned_count")
+            or receipt["disposition"] != expected_document.get("disposition")
+            or receipt["retryable"] != expected_document.get("retryable")
+            or receipt["returned_count"] != expected_document.get("returned_count")
+            or receipt["route_summary"]
+            != dict(expected_document.get("route_summary") or {})
+            or receipt["failure_classes"]
+            != list(expected_document.get("failure_classes") or [])
+        ):
+            raise PrivateModelRuntimeError(
+                "private model qualification outcome protocol probe semantics differ"
+            )
     expected_hashes = dict(expected_nonce_sha256s or {})
     for case_id, envelope in document.items():
         probe = envelope["route_completion_receipt"].get("probe")
@@ -4287,15 +4428,21 @@ def _docker_adapter_bootstrap_for_qualification_protocol_v2() -> str:
     if (
         not isinstance(_outcome_protocol, dict)
         or _outcome_protocol.get("protocol_id")
-        != "sourcing-model.qualification-outcome"
-        or _outcome_protocol.get("major") != 2
-        or _outcome_protocol.get("entrypoint") != "run_icp_outcome"
+        != %r
+        or _outcome_protocol.get("major") != %r
+        or _outcome_protocol.get("entrypoint") != %r
         or _outcome_protocol.get("result_schema_version")
-        != "sourcing-model.qualification-outcome.v2"
+        != %r
     ):
         raise RuntimeError("qualification outcome protocol is unsupported")
-    fn = getattr(module, "run_icp_outcome")
-'''
+    fn = getattr(module, %r)
+''' % (
+        QUALIFICATION_OUTCOME_PROTOCOL_ID_V2,
+        QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2,
+        QUALIFICATION_OUTCOME_ENTRYPOINT_V2,
+        QUALIFICATION_OUTCOME_ENVELOPE_SCHEMA_V2,
+        QUALIFICATION_OUTCOME_ENTRYPOINT_V2,
+    )
     if bootstrap.count(old) != 1:
         raise PrivateModelRuntimeError(
             "qualification outcome bootstrap template is invalid"

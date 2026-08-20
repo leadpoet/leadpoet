@@ -1,6 +1,7 @@
 {
   "protocol_id": "sourcing-model.qualification-outcome",
   "protocol_major": 2,
+  "entrypoint": "run_icp_outcome",
   "result_schema_version": "sourcing-model.qualification-outcome.v2",
   "route_completion_receipt_schema_version": "sourcing-model.route-completion-receipt.v1",
   "metadata_core_fields": [
@@ -172,7 +173,7 @@
     "core_extensions_field_required": true,
     "reverse_dns_keys_only": true,
     "maximum_entries": 8,
-    "maximum_canonical_bytes": 32768,
+    "maximum_canonical_bytes": 1048576,
     "maximum_nesting_depth": 3,
     "maximum_array_items": 256,
     "maximum_object_entries": 32,
@@ -182,15 +183,49 @@
     "additive_optional_extensions_same_major": true,
     "additive_optional_capabilities_same_major": true
   },
-  "required_route_commitments": {
-    "extension_key": "com.leadpoet.required-route-commitments",
-    "maximum_count": 256,
-    "value_regex": "^[0-9a-f]{64}$",
-    "sorted_unique": true,
+  "required_route_outcomes": {
+    "extension_key": "com.leadpoet.required-route-outcomes",
+    "maximum_count": 8192,
+    "commitment_regex": "^[0-9a-f]{64}$",
+    "states": [
+      "completed",
+      "confirmed_empty",
+      "retryable_failed",
+      "terminal_failed"
+    ],
+    "sorted_unique_by": "commitment",
     "semantic_unit": "logical_obligation",
     "production_required": true,
-    "probe_exempt": true
+    "probe_exempt": true,
+    "host_join_policy": {
+      "allowed_observation_authorities": [
+        "attested_local_response",
+        "authenticated_response"
+      ],
+      "completed_allowed_http_status_classes": [
+        "2xx"
+      ],
+      "confirmed_empty_allowed_http_status_classes": [
+        "2xx"
+      ],
+      "confirmed_empty_allowed_http_statuses": [
+        404,
+        410
+      ],
+      "failed_states_satisfy_complete": false,
+      "never_complete_http_statuses": [
+        401,
+        402,
+        403,
+        408,
+        425,
+        429
+      ],
+      "never_complete_http_status_classes": [
+        "5xx"
+      ]
+    }
   },
-  "production_complete_authority": "model_semantics_joined_to_every_required_commitment_host_observed_latest_successful_terminal",
-  "production_confirmed_empty_authority": "model_semantics_joined_to_every_required_commitment_host_observed_latest_successful_terminal"
+  "production_complete_authority": "model_semantics_joined_to_every_state_compatible_required_route_latest_terminal",
+  "production_confirmed_empty_authority": "model_semantics_joined_to_every_state_compatible_required_route_latest_terminal"
 }

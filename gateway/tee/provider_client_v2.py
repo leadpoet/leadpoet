@@ -42,7 +42,7 @@ from gateway.tee.source_add_runtime_v2 import (
     validate_source_add_runtime_catalog_v2,
 )
 from research_lab.eval.private_runtime import (
-    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2,
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
     QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2,
 )
 
@@ -257,7 +257,7 @@ _QUALIFICATION_ROUTE_COMMITMENT_RE = re.compile(
     QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2
 )
 _MAX_QUALIFICATION_ROUTE_COMMITMENTS = (
-    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2
 )
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -396,6 +396,8 @@ class _ExecutionScope:
         self.terminal_http_statuses = {}
         self.terminal_attempt_hashes = {}
         self.route_commitments = {}
+        self.known_route_commitments = set()
+        self.inflight_route_commitments = set()
         self.intent_sequences = {}
         self.next_intent_sequence = 0
         self.lock = threading.Lock()
@@ -423,21 +425,14 @@ class _ExecutionScope:
                 raise ProviderClientV2Error(
                     "qualification route commitment is invalid"
                 )
-            known_commitments = {
-                item for item in self.route_commitments.values() if item
-            }
-            if commitment and any(
-                existing_commitment == commitment
-                and existing_key not in self.terminals
-                for existing_key, existing_commitment in self.route_commitments.items()
-            ):
+            if commitment and commitment in self.inflight_route_commitments:
                 raise ProviderClientV2Error(
                     "qualification route commitment already has an in-flight intent"
                 )
             if (
                 commitment
-                and commitment not in known_commitments
-                and len(known_commitments)
+                and commitment not in self.known_route_commitments
+                and len(self.known_route_commitments)
                 >= _MAX_QUALIFICATION_ROUTE_COMMITMENTS
             ):
                 raise ProviderClientV2Error(
@@ -445,6 +440,9 @@ class _ExecutionScope:
                 )
             self.request_intents.add(key)
             self.route_commitments[key] = commitment
+            if commitment:
+                self.known_route_commitments.add(commitment)
+                self.inflight_route_commitments.add(commitment)
             self.intent_sequences[key] = self.next_intent_sequence
             self.next_intent_sequence += 1
 
@@ -488,6 +486,9 @@ class _ExecutionScope:
             self.terminals[key] = str(terminal_status)
             self.terminal_http_statuses[key] = normalized_http_status
             self.terminal_attempt_hashes[key] = normalized_attempt_hash
+            commitment = self.route_commitments.get(key)
+            if commitment:
+                self.inflight_route_commitments.discard(commitment)
 
     def assert_accepted_result_is_complete(self) -> None:
         with self.lock:

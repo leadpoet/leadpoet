@@ -62,6 +62,8 @@ from leadpoet_canonical.attested_v2 import (
 )
 from research_lab.eval.private_runtime import (
     QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2,
     PrivateModelRuntimeError,
     _docker_adapter_bootstrap_for_qualify_compatibility,
     _docker_adapter_bootstrap_for_qualification_protocol_v2,
@@ -218,6 +220,13 @@ def _ready_v2_adapter_metadata() -> dict:
         },
         "qualification_outcome_protocol": _metadata(),
     }
+
+
+def _required_route_outcomes(commitments, state: str) -> list[dict[str, str]]:
+    return [
+        {"commitment": commitment, "state": state}
+        for commitment in sorted(commitments)
+    ]
 
 
 def _envelope(case_id: str, nonce: str) -> dict:
@@ -429,14 +438,15 @@ def test_cross_repository_semantic_contract_fixture_is_exact() -> None:
     document = qualification_outcome_contract_v2()
 
     assert _plain_hash(document) == QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+    assert document["entrypoint"] == "run_icp_outcome"
     assert document["completion_rules"]["unreceipted_empty_allowed"] is False
     assert document["production_complete_authority"] == (
-        "model_semantics_joined_to_every_required_commitment_"
-        "host_observed_latest_successful_terminal"
+        "model_semantics_joined_to_every_state_compatible_"
+        "required_route_latest_terminal"
     )
     assert document["production_confirmed_empty_authority"] == (
-        "model_semantics_joined_to_every_required_commitment_"
-        "host_observed_latest_successful_terminal"
+        "model_semantics_joined_to_every_state_compatible_"
+        "required_route_latest_terminal"
     )
 
 
@@ -460,7 +470,10 @@ def test_same_major_metadata_allows_harmless_additive_capability() -> None:
 
 
 def test_extension_limits_are_contract_derived_and_route_specific() -> None:
-    commitments = [f"{index:064x}" for index in range(256)]
+    commitments = [
+        f"{index:064x}"
+        for index in range(QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2)
+    ]
     envelope = _envelope(
         "complete_confirmed_empty", "complete-probe-nonce-0001"
     )
@@ -468,7 +481,9 @@ def test_extension_limits_are_contract_derived_and_route_specific() -> None:
     receipt["route_summary"]["attempted"] = len(commitments)
     receipt["route_summary"]["confirmed_empty"] = len(commitments)
     receipt["extensions"] = {
-        "com.leadpoet.required-route-commitments": commitments
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+            _required_route_outcomes(commitments, "confirmed_empty")
+        )
     }
 
     assert validate_qualification_outcome_envelope_v2(
@@ -476,7 +491,12 @@ def test_extension_limits_are_contract_derived_and_route_specific() -> None:
     )["route_completion_receipt"]["extensions"] == receipt["extensions"]
 
     oversized = deepcopy(envelope)
-    oversized_commitments = [f"{index:064x}" for index in range(257)]
+    oversized_commitments = [
+        f"{index:064x}"
+        for index in range(
+            QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2 + 1
+        )
+    ]
     oversized_receipt = oversized["route_completion_receipt"]
     oversized_receipt["route_summary"]["attempted"] = len(
         oversized_commitments
@@ -485,7 +505,12 @@ def test_extension_limits_are_contract_derived_and_route_specific() -> None:
         oversized_commitments
     )
     oversized_receipt["extensions"] = {
-        "com.leadpoet.required-route-commitments": oversized_commitments
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+            _required_route_outcomes(
+                oversized_commitments,
+                "confirmed_empty",
+            )
+        )
     }
     with pytest.raises(PrivateModelRuntimeError):
         validate_qualification_outcome_envelope_v2(
@@ -500,6 +525,15 @@ def test_extension_limits_are_contract_derived_and_route_specific() -> None:
     unrelated["extensions"]["com.example.optional"].append(256)
     with pytest.raises(PrivateModelRuntimeError):
         validate_qualification_outcome_protocol_metadata_v2(unrelated)
+
+
+def test_route_outcome_budget_covers_configured_all_flow_with_headroom() -> None:
+    # Current bounded ALL flow: four branches, goal 50, candidate adjudication,
+    # acquisition, and bounded liveness produce at most 3,742 obligations.
+    configured_all_flow_upper_bound = 3_742
+    assert QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2 >= (
+        configured_all_flow_upper_bound * 2
+    )
 
 
 def test_generic_extension_nested_and_exact_byte_bounds_match_contract() -> None:
@@ -525,22 +559,47 @@ def test_generic_extension_nested_and_exact_byte_bounds_match_contract() -> None
 
     def extension_with_canonical_size(target: int):
         key = "com.example.boundary"
-        for count in range(1, 257):
-            values = ["a" * 128 for _ in range(count - 1)] + [""]
-            document = {key: values}
-            base_size = len(canonical_json(document).encode("utf-8"))
+        def build(count: int, final_size: int = 0):
+            values = ["a" * 128 for _ in range(max(0, count - 2))]
+            if count >= 2:
+                values.extend(
+                    [
+                        "b" * min(final_size, 128),
+                        "c" * max(0, final_size - 128),
+                    ]
+                )
+            elif count:
+                values.append("b" * final_size)
+            fields = {
+                f"field{index:02d}": values[index * 256 : (index + 1) * 256]
+                for index in range(32)
+            }
+            return {key: fields}
+
+        low, high = 1, 32 * 256
+        while low <= high:
+            count = (low + high) // 2
+            base = build(count)
+            base_size = len(canonical_json(base).encode("utf-8"))
             remainder = target - base_size
-            if 0 <= remainder <= 128:
-                values[-1] = "b" * remainder
+            if 0 <= remainder <= (256 if count >= 2 else 128):
+                document = build(count, remainder)
                 assert len(canonical_json(document).encode("utf-8")) == target
                 return document
+            if remainder < 0:
+                high = count - 1
+            else:
+                low = count + 1
         raise AssertionError("extension byte-boundary fixture is unavailable")
 
+    maximum_bytes = qualification_outcome_contract_v2()[
+        "extension_evolution"
+    ]["maximum_canonical_bytes"]
     exact = _metadata()
-    exact["extensions"] = extension_with_canonical_size(32768)
+    exact["extensions"] = extension_with_canonical_size(maximum_bytes)
     assert validate_qualification_outcome_protocol_metadata_v2(exact)
     oversized = _metadata()
-    oversized["extensions"] = extension_with_canonical_size(32769)
+    oversized["extensions"] = extension_with_canonical_size(maximum_bytes + 1)
     with pytest.raises(PrivateModelRuntimeError):
         validate_qualification_outcome_protocol_metadata_v2(oversized)
 
@@ -549,7 +608,9 @@ def test_required_route_extension_is_receipt_only() -> None:
     commitment = "1" * 64
     metadata = _metadata()
     metadata["extensions"] = {
-        "com.leadpoet.required-route-commitments": [commitment]
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+            _required_route_outcomes([commitment], "confirmed_empty")
+        )
     }
     with pytest.raises(PrivateModelRuntimeError):
         validate_qualification_outcome_protocol_metadata_v2(metadata)
@@ -558,7 +619,9 @@ def test_required_route_extension_is_receipt_only() -> None:
         "complete_confirmed_empty", "complete-probe-nonce-0001"
     )
     envelope["extensions"] = {
-        "com.leadpoet.required-route-commitments": [commitment]
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+            _required_route_outcomes([commitment], "confirmed_empty")
+        )
     }
     with pytest.raises(PrivateModelRuntimeError):
         validate_qualification_outcome_envelope_v2(envelope)
@@ -623,7 +686,7 @@ def test_two_exact_artifacts_select_same_versioned_profile_without_hash_allowlis
     assert "_research_lab_patch_affected_runtime_capability_scope(module)" not in (
         first_bootstrap
     )
-    assert 'getattr(module, "run_icp_outcome")' in first_bootstrap
+    assert "getattr(module, 'run_icp_outcome')" in first_bootstrap
 
 
 def test_v2_native_capability_scope_does_not_remove_e55_transition_patch() -> None:
@@ -838,9 +901,18 @@ async def test_hermetic_v2_incomplete_to_complete_transition(
         receipt["probe"] = None
         receipt["invocation_sha256"] = _plain_hash(input_doc)
         if commitments:
+            state = (
+                "confirmed_empty"
+                if disposition == "complete_confirmed_empty"
+                else "completed"
+                if disposition == "complete_nonempty"
+                else "retryable_failed"
+                if disposition == "incomplete_retryable"
+                else "terminal_failed"
+            )
             receipt["extensions"] = {
-                "com.leadpoet.required-route-commitments": sorted(
-                    commitments
+                QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+                    _required_route_outcomes(commitments, state)
                 )
             }
         receipt["receipt_sha256"] = _plain_hash(
@@ -925,7 +997,7 @@ async def test_hermetic_v2_incomplete_to_complete_transition(
     complete_authority, complete_root = measured_authority(
         "complete_confirmed_empty",
         terminal_status="attested_local_response",
-        http_status=200,
+        http_status=404,
         commitment="7" * 64,
     )
     incomplete = QualificationOutcomeIncompleteV2Error(
@@ -1395,7 +1467,8 @@ async def test_production_path_hermetic_v2_transition_emits_stage_ledger(
         "        after = runtime_capabilities.snapshot()\n"
         "        if set(after) != set(before) or any(after[name] is not before[name] for name in before):\n"
         "            raise RuntimeError('host runtime capability scope was not restored')\n"
-        "        extensions = {'com.leadpoet.required-route-commitments': [_ROUTE_COMMITMENT]}\n"
+        "        route_state = 'confirmed_empty' if complete else 'retryable_failed'\n"
+        "        extensions = {'com.leadpoet.required-route-outcomes': [{'commitment': _ROUTE_COMMITMENT, 'state': route_state}]}\n"
         "        envelope_extensions = {'com.leadpoet.capability-scope-proof': {'preserved': True, 'restored': True}}\n"
         "    receipt = {\n"
         "        'schema_version': 'sourcing-model.route-completion-receipt.v1',\n"
@@ -1579,7 +1652,7 @@ async def test_production_path_hermetic_v2_transition_emits_stage_ledger(
         compatibility_receipt,
         artifact=artifact,
     )
-    assert 'getattr(module, "run_icp_outcome")' in selected_bootstrap
+    assert "getattr(module, 'run_icp_outcome')" in selected_bootstrap
     assert "_research_lab_patch_affected_runtime_capability_scope(module)" not in (
         selected_bootstrap
     )
@@ -2147,7 +2220,9 @@ def test_host_join_uses_latest_logical_attempt_and_rejects_latest_http_500() -> 
     )
     envelope_receipt = envelope["route_completion_receipt"]
     envelope_receipt["extensions"] = {
-        "com.leadpoet.required-route-commitments": [route_commitment]
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+            _required_route_outcomes([route_commitment], "confirmed_empty")
+        )
     }
     envelope_receipt["receipt_sha256"] = _plain_hash(
         {
@@ -2207,7 +2282,7 @@ def test_host_join_uses_latest_logical_attempt_and_rejects_latest_http_500() -> 
         ("transport_failure", None, False),
     ],
 )
-def test_required_route_success_uses_attested_2xx_only(
+def test_raw_required_route_success_counter_uses_attested_2xx_only(
     terminal_status,
     http_status,
     successful,
@@ -2227,6 +2302,69 @@ def test_required_route_success_uses_attested_2xx_only(
 
     assert observation["successful_required_route_count"] == int(successful)
     assert observation["unresolved_required_route_count"] == int(not successful)
+
+
+@pytest.mark.parametrize(
+    ("state", "http_status", "accepted"),
+    [
+        ("completed", 200, True),
+        ("completed", 404, False),
+        ("completed", 410, False),
+        ("confirmed_empty", 200, True),
+        ("confirmed_empty", 404, True),
+        ("confirmed_empty", 410, True),
+        ("confirmed_empty", 403, False),
+        ("confirmed_empty", 500, False),
+        ("retryable_failed", 200, False),
+    ],
+)
+def test_complete_route_join_is_model_state_and_status_aware(
+    state,
+    http_status,
+    accepted,
+) -> None:
+    commitment = "c" * 64
+    scope = _provider_scope()
+    scope.record_intent("state-aware-route", 0, commitment)
+    scope.record_terminal(
+        "state-aware-route",
+        0,
+        "authenticated_response",
+        http_status,
+        "sha256:" + "d" * 64,
+    )
+    envelope = _envelope(
+        "complete_confirmed_empty", "complete-probe-nonce-0001"
+    )
+    receipt = envelope["route_completion_receipt"]
+    receipt["probe"] = None
+    receipt["route_summary"] = {
+        "attempted": 1,
+        "completed": int(state == "completed"),
+        "confirmed_empty": int(state == "confirmed_empty"),
+        "retryable_failed": int(state == "retryable_failed"),
+        "terminal_failed": int(state == "terminal_failed"),
+        "skipped": 0,
+        "retried": 0,
+    }
+    receipt["extensions"] = {
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+            _required_route_outcomes([commitment], state)
+        )
+    }
+    _rehash_receipt(envelope)
+
+    if accepted:
+        _validate_qualification_terminal_observation_v1(
+            envelope,
+            scope.completion_observation(),
+        )
+    else:
+        with pytest.raises(ModelSandboxV2Error):
+            _validate_qualification_terminal_observation_v1(
+                envelope,
+                scope.completion_observation(),
+            )
 
 
 def test_required_route_replacement_supersedes_by_commitment_sequence() -> None:
@@ -2327,10 +2465,12 @@ def test_distinct_required_slots_can_share_one_request_fingerprint() -> None:
     receipt["route_summary"]["attempted"] = 2
     receipt["route_summary"]["confirmed_empty"] = 2
     receipt["extensions"] = {
-        "com.leadpoet.required-route-commitments": [
-            first_commitment,
-            second_commitment,
-        ]
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+            _required_route_outcomes(
+                [first_commitment, second_commitment],
+                "confirmed_empty",
+            )
+        )
     }
     receipt["receipt_sha256"] = _plain_hash(
         {
@@ -2400,7 +2540,9 @@ def test_optional_failed_call_does_not_veto_bound_required_route_success() -> No
     )
     receipt = envelope["route_completion_receipt"]
     receipt["extensions"] = {
-        "com.leadpoet.required-route-commitments": [commitment]
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+            _required_route_outcomes([commitment], "confirmed_empty")
+        )
     }
     receipt["receipt_sha256"] = _plain_hash(
         {
@@ -2475,7 +2617,9 @@ def test_complete_nonempty_requires_every_bound_route_success(
                 "retried": 0,
             },
             "extensions": {
-                "com.leadpoet.required-route-commitments": [commitment]
+                QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+                    _required_route_outcomes([commitment], "completed")
+                )
             },
         }
     )
@@ -2491,7 +2635,10 @@ def test_complete_nonempty_requires_every_bound_route_success(
         joined = _host_provider_observation_v1([attempt], observation)
         assert joined["successful_required_route_count"] == 1
     else:
-        with pytest.raises(ModelSandboxV2Error, match="complete outcome"):
+        with pytest.raises(
+            ModelSandboxV2Error,
+            match="qualification outcome required routes differ",
+        ):
             _validate_qualification_terminal_observation_v1(
                 envelope,
                 observation,
@@ -2548,16 +2695,21 @@ def test_complete_authority_cannot_hide_one_failed_required_slot() -> None:
                 "retried": 0,
             },
             "extensions": {
-                "com.leadpoet.required-route-commitments": [
-                    failed_commitment,
-                    successful_commitment,
-                ]
+                QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+                    _required_route_outcomes(
+                        [failed_commitment, successful_commitment],
+                        "completed",
+                    )
+                )
             },
         }
     )
     _rehash_receipt(envelope)
     observation = scope.completion_observation()
-    with pytest.raises(ModelSandboxV2Error, match="complete outcome"):
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="qualification outcome required routes differ",
+    ):
         _validate_qualification_terminal_observation_v1(
             envelope,
             observation,
@@ -2590,7 +2742,7 @@ def test_complete_authority_cannot_hide_one_failed_required_slot() -> None:
     }
     with pytest.raises(
         AttestedPrivateModelRunnerV2Error,
-        match="complete outcome",
+        match="qualification outcome lacks exact required-route authority",
     ):
         _model_qualification_authority_v1(
             envelope=envelope,
@@ -2654,7 +2806,9 @@ def test_incomplete_semantics_may_have_successful_required_transport() -> None:
     receipt = envelope["route_completion_receipt"]
     receipt["probe"] = None
     receipt["extensions"] = {
-        "com.leadpoet.required-route-commitments": [commitment]
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+            _required_route_outcomes([commitment], "retryable_failed")
+        )
     }
     _rehash_receipt(envelope)
 

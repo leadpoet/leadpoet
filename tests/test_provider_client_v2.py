@@ -25,6 +25,7 @@ from gateway.tee.provider_broker_v2 import (
 from gateway.tee.provider_client_v2 import (
     BrokeredProviderTransportV2,
     ProviderClientV2Error,
+    _ExecutionScope,
 )
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
@@ -36,6 +37,9 @@ from leadpoet_verifier.semantic_gates import (
     SemanticGateEvaluator,
 )
 from qualification.scoring.company_verification import verify_company_exists
+from research_lab.eval.private_runtime import (
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
+)
 
 
 HASH = "sha256:" + "a" * 64
@@ -171,6 +175,40 @@ def test_qualification_route_header_is_consumed_and_excluded_from_identity():
         ]
     finally:
         router.restore()
+
+
+def test_high_cardinality_route_accounting_never_scans_prior_commitments():
+    class NoScanDict(dict):
+        def items(self):
+            raise AssertionError("intent admission scanned prior routes")
+
+        def values(self):
+            raise AssertionError("intent admission scanned prior routes")
+
+    scope = _ExecutionScope(
+        job_id="job-high-cardinality",
+        purpose="research_lab.provider_evidence.v2",
+        logical_operation_id="score-high-cardinality",
+        retry_policy_hashes={},
+        default_timeout_ms=1000,
+        terminal_sink=None,
+    )
+    scope.route_commitments = NoScanDict()
+    for index in range(QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2):
+        commitment = f"{index:064x}"
+        scope.record_intent("same-operation", index, commitment)
+        scope.record_terminal(
+            "same-operation",
+            index,
+            "authenticated_response",
+            200,
+            "sha256:" + f"{index:064x}",
+        )
+
+    assert len(scope.known_route_commitments) == (
+        QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2
+    )
+    assert scope.inflight_route_commitments == set()
 
 
 def test_simultaneous_identical_requests_keep_distinct_route_identities():

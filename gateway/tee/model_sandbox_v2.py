@@ -47,10 +47,15 @@ from research_lab.eval.private_runtime import (
     PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
     PRIVATE_RUNTIME_FAILURE_MARKER,
     PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION,
-    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2,
-    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2,
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
+    QUALIFICATION_OUTCOME_ENTRYPOINT_V2,
+    QUALIFICATION_OUTCOME_PROTOCOL_PROBE_MODE_V1,
+    QUALIFICATION_OUTCOME_PROTOCOL_PROBE_SCHEMA_V1,
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2,
+    qualification_outcome_required_route_terminal_satisfies_v2,
     QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1,
     qualification_outcome_contract_sha256_v2,
+    qualification_outcome_probe_nonce_valid_v1,
     SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS,
     canonicalize_private_model_icp,
     context_with_runtime_options,
@@ -864,7 +869,7 @@ def _validate_qualification_terminal_observation_v1(
         or required_commitments != sorted(required_commitments)
         or len(set(required_commitments)) != len(required_commitments)
         or len(required_commitments)
-        > QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_COMMITMENTS_V2
+        > QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2
         or any(
             re.fullmatch(r"[0-9a-f]{64}", str(item or "")) is None
             for item in required_commitments
@@ -921,25 +926,47 @@ def _validate_qualification_terminal_observation_v1(
         raise ModelSandboxV2Error(
             "qualification outcome differs from measured provider terminals"
         )
-    bound_commitments = receipt.get("extensions", {}).get(
-        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENTS_EXTENSION_V2
+    bound_outcomes = receipt.get("extensions", {}).get(
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
+    )
+    bound_commitments = (
+        [item.get("commitment") for item in bound_outcomes]
+        if isinstance(bound_outcomes, list)
+        and all(isinstance(item, Mapping) for item in bound_outcomes)
+        else []
     )
     if (
-        not isinstance(bound_commitments, list)
+        not isinstance(bound_outcomes, list)
         or bound_commitments != required_commitments
         or receipt["route_summary"]["attempted"]
         != len(required_commitments)
+        or any(
+            outcome.get("commitment") != terminal.get("route_commitment")
+            or (
+                outcome.get("state") in {"completed", "confirmed_empty"}
+                and not qualification_outcome_required_route_terminal_satisfies_v2(
+                    outcome.get("state"),
+                    terminal.get("terminal_status"),
+                    terminal.get("http_status"),
+                )
+            )
+            for outcome, terminal in zip(bound_outcomes, required_terminals)
+        )
     ):
         raise ModelSandboxV2Error(
             "qualification outcome required routes differ from host observation"
         )
     if disposition.startswith("complete_") and (
         not required_commitments
-        or receipt["route_summary"]["attempted"]
-        != len(required_commitments)
-        or document["unresolved_required_route_count"] != 0
-        or document["successful_required_route_count"]
-        != len(required_commitments)
+        or any(
+            outcome.get("state") not in {"completed", "confirmed_empty"}
+            or not qualification_outcome_required_route_terminal_satisfies_v2(
+                outcome.get("state"),
+                terminal.get("terminal_status"),
+                terminal.get("http_status"),
+            )
+            for outcome, terminal in zip(bound_outcomes, required_terminals)
+        )
     ):
         raise ModelSandboxV2Error(
             "complete outcome lacks complete required-route authority"
@@ -1072,19 +1099,31 @@ def _runtime_probe_expected_invariants(
 def _runtime_probe_observation_plan_v1(
     compatibility_receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
-    return {
+    invariant_policy = _runtime_invariant_policy_v1(compatibility_receipt)
+    document = {
         "schema_version": CONSUMER_RUNTIME_OBSERVATION_PLAN_SCHEMA_V1,
-        "runtime_invariants": _runtime_invariant_policy_v1(
-            compatibility_receipt
-        ),
-        "qualification_outcome_probes": [
+        "runtime_invariants": invariant_policy,
+    }
+    if invariant_policy == {"profile": "qualification_protocol_v2"}:
+        document.update(
+            {
+                "qualification_outcome_entrypoint": QUALIFICATION_OUTCOME_ENTRYPOINT_V2,
+                "qualification_outcome_probe_mode": (
+                    QUALIFICATION_OUTCOME_PROTOCOL_PROBE_MODE_V1
+                ),
+                "qualification_outcome_probe_schema_version": (
+                    QUALIFICATION_OUTCOME_PROTOCOL_PROBE_SCHEMA_V1
+                ),
+                "qualification_outcome_probes": [
             {
                 "case_id": case_id,
                 "nonce": secrets.token_hex(24),
             }
             for case_id in QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1
-        ],
-    }
+                ],
+            }
+        )
+    return document
 
 
 def _consumer_runtime_probe_v1(
@@ -1242,11 +1281,9 @@ def _build_consumer_runtime_probe_from_observation_v1(
             or not isinstance(cases, Mapping)
             or any(
                 not isinstance(item, Mapping)
-                or re.fullmatch(
-                    r"[A-Za-z0-9._:-]{16,128}",
-                    str(item.get("nonce") or ""),
+                or not qualification_outcome_probe_nonce_valid_v1(
+                    item.get("nonce")
                 )
-                is None
                 for item in probe_plan
             )
         ):
@@ -1325,6 +1362,9 @@ if (
         {
             "schema_version",
             "runtime_invariants",
+            "qualification_outcome_entrypoint",
+            "qualification_outcome_probe_mode",
+            "qualification_outcome_probe_schema_version",
             "qualification_outcome_probes",
         },
     )
@@ -1376,6 +1416,25 @@ _lp_qualification_outcome_observation = None
 if isinstance(_lp_metadata, dict) and _lp_metadata.get(
     "qualification_outcome_protocol"
 ) is not None:
+    _lp_qualification_protocol = _lp_metadata[
+        "qualification_outcome_protocol"
+    ]
+    _lp_outcome_entrypoint_name = _lp_plan.get(
+        "qualification_outcome_entrypoint"
+    )
+    _lp_probe_mode = _lp_plan.get("qualification_outcome_probe_mode")
+    _lp_probe_schema_version = _lp_plan.get(
+        "qualification_outcome_probe_schema_version"
+    )
+    if (
+        not isinstance(_lp_qualification_protocol, dict)
+        or not isinstance(_lp_outcome_entrypoint_name, str)
+        or _lp_qualification_protocol.get("entrypoint")
+        != _lp_outcome_entrypoint_name
+        or not isinstance(_lp_probe_mode, str)
+        or not isinstance(_lp_probe_schema_version, str)
+    ):
+        raise RuntimeError("qualification outcome protocol plan is invalid")
     _lp_qualification_route = _lp_importlib.import_module(
         "sourcing_model.qualification_route"
     )
@@ -1392,18 +1451,18 @@ if isinstance(_lp_metadata, dict) and _lp_metadata.get(
         )
     ):
         raise RuntimeError("qualification outcome probe plan is invalid")
-    _lp_outcome_entrypoint = getattr(_lp_adapter_module, "run_icp_outcome")
+    _lp_outcome_entrypoint = getattr(
+        _lp_adapter_module, _lp_outcome_entrypoint_name
+    )
     _lp_observed_cases = {}
     for _lp_case in _lp_probe_cases:
         with _lp_contextlib.redirect_stdout(_lp_sys.stderr):
             _lp_observed_cases[_lp_case["case_id"]] = _lp_outcome_entrypoint(
                 {},
                 {
-                    "mode": "consumer_qualification_protocol_probe",
+                    "mode": _lp_probe_mode,
                     "probe": {
-                        "schema_version": (
-                            "sourcing-model.qualification-outcome-probe.v1"
-                        ),
+                        "schema_version": _lp_probe_schema_version,
                         "case_id": _lp_case["case_id"],
                         "nonce": _lp_case["nonce"],
                     },

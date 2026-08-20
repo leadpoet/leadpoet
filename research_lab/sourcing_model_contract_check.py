@@ -102,12 +102,38 @@ QUALIFICATION_PROTOCOL_CONSUMER_API_V2 = (
     "research-lab-qualification-consumer-api:v2"
 )
 QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2 = "qualification_protocol_v2"
+QUALIFICATION_OUTCOME_CONTRACT_V2_PATH = Path(__file__).with_name(
+    "sourcing_model_qualification_outcome_v2.json"
+)
+_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2 = json.loads(
+    QUALIFICATION_OUTCOME_CONTRACT_V2_PATH.read_text(encoding="utf-8")
+)
+_QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2 = (
+    "e618f73abddd2ddef88fa62d09fd7ad90b3ca7c69b97da7444424abdd8e9c0fa"
+)
+if (
+    not isinstance(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2, Mapping)
+    or hashlib.sha256(
+        json.dumps(
+            dict(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    != _QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+):
+    raise RuntimeError("qualification outcome contract differs from protected policy")
 QUALIFICATION_PROTOCOL_POLICY_SHA256_V2 = (
-    "sha256:1348bed0207daab8a1ab0bbdce9495c294c7f9e411ce39c0b4aeb1450b9cf8ba"
+    f"sha256:{_QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2}"
+)
+QUALIFICATION_PROTOCOL_ENTRYPOINT_V2 = str(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["entrypoint"]
 )
 QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2 = {
     "adapter_metadata": (),
-    "run_icp_outcome": ("icp", "context"),
+    QUALIFICATION_PROTOCOL_ENTRYPOINT_V2: ("icp", "context"),
 }
 SEMANTIC_COMPATIBILITY_RECEIPT_FIELDS_V1 = frozenset(
     {
@@ -2603,22 +2629,25 @@ def _qualification_protocol_entrypoint_declared_v2(root: Path) -> bool:
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == "run_icp_outcome":
+            if node.name == QUALIFICATION_PROTOCOL_ENTRYPOINT_V2:
                 return True
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(_target_binds_name(target, "run_icp_outcome") for target in targets):
+            if any(
+                _target_binds_name(target, QUALIFICATION_PROTOCOL_ENTRYPOINT_V2)
+                for target in targets
+            ):
                 return True
         elif isinstance(node, ast.Import):
             if any(
                 (alias.asname or alias.name.split(".", 1)[0])
-                == "run_icp_outcome"
+                == QUALIFICATION_PROTOCOL_ENTRYPOINT_V2
                 for alias in node.names
             ):
                 return True
         elif isinstance(node, ast.ImportFrom):
             if any(
-                (alias.asname or alias.name) == "run_icp_outcome"
+                (alias.asname or alias.name) == QUALIFICATION_PROTOCOL_ENTRYPOINT_V2
                 for alias in node.names
             ):
                 return True
@@ -2661,7 +2690,7 @@ def _qualification_protocol_adapter_surface_v2(root: Path) -> bool:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     metadata = functions.get("adapter_metadata")
-    outcome = functions.get("run_icp_outcome")
+    outcome = functions.get(QUALIFICATION_PROTOCOL_ENTRYPOINT_V2)
     if (
         metadata is None
         or outcome is None

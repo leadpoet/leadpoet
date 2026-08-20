@@ -1330,6 +1330,7 @@ def test_worker_container_cleanup_fails_if_container_still_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _load_controller()
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_REMOVAL_SECONDS", 0.02)
     monkeypatch.setattr(controller, "_WORKER_DOCKER_CONVERGENCE_SECONDS", 0.02)
     monkeypatch.setattr(controller, "_WORKER_DOCKER_POLL_SECONDS", 0.001)
     monkeypatch.setattr(
@@ -1343,16 +1344,17 @@ def test_worker_container_cleanup_fails_if_container_still_exists(
         ),
     )
 
-    with pytest.raises(RuntimeError, match="absence did not converge"):
+    with pytest.raises(RuntimeError, match="stable absence did not converge"):
         controller._remove_worker_container("exact-worker")
 
 
-def test_worker_container_cleanup_fails_on_t025_late_name_publication(
+def test_worker_container_cleanup_restarts_proof_after_late_name_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _load_controller()
     clock = [0.0]
     inspection_times: list[float] = []
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_REMOVAL_SECONDS", 0.3)
     monkeypatch.setattr(controller, "_WORKER_DOCKER_CONVERGENCE_SECONDS", 0.3)
     monkeypatch.setattr(controller, "_WORKER_DOCKER_ABSENCE_OBSERVATIONS", 3)
     monkeypatch.setattr(controller, "_WORKER_DOCKER_POLL_SECONDS", 0.05)
@@ -1379,14 +1381,52 @@ def test_worker_container_cleanup_fails_on_t025_late_name_publication(
 
     monkeypatch.setattr(controller.subprocess, "run", run)
 
-    with pytest.raises(RuntimeError, match="absence did not converge"):
-        controller._remove_worker_container("exact-worker")
+    controller._remove_worker_container("exact-worker")
 
     assert 0.0 in inspection_times
     assert 0.1 in inspection_times
     assert 0.2 in inspection_times
     assert 0.25 in inspection_times
-    assert inspection_times[-1] >= 0.3
+    assert inspection_times[-1] >= 0.55
+
+
+def test_worker_container_cleanup_allows_async_removal_then_proves_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _load_controller()
+    clock = [0.0]
+    inspection_times: list[float] = []
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_REMOVAL_SECONDS", 0.3)
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_CONVERGENCE_SECONDS", 0.2)
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_ABSENCE_OBSERVATIONS", 3)
+    monkeypatch.setattr(controller, "_WORKER_DOCKER_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(controller.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        controller.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    def run(command, **_kwargs):
+        if command[2] == "rm":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        observed_at = round(clock[0], 2)
+        inspection_times.append(observed_at)
+        if observed_at < 0.15:
+            return subprocess.CompletedProcess(command, 0, "container-id", "")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            "Error: No such container: exact-worker",
+        )
+
+    monkeypatch.setattr(controller.subprocess, "run", run)
+
+    controller._remove_worker_container("exact-worker")
+
+    assert inspection_times[:4] == [0.0, 0.05, 0.1, 0.15]
+    assert inspection_times[-1] >= 0.35
 
 
 def test_worker_run_communicate_failure_reaps_exact_container(

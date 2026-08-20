@@ -387,6 +387,7 @@ def _provision_official_buildx(docker_client_root: Path) -> Path:
 _WORKER_PROCESS_STATE = threading.local()
 _WORKER_TERMINATE_GRACE_SECONDS = 2.0
 _WORKER_DOCKER_CLEANUP_SECONDS = 2.0
+_WORKER_DOCKER_REMOVAL_SECONDS = 12.0
 _WORKER_DOCKER_CONVERGENCE_SECONDS = 6.0
 _WORKER_DOCKER_ABSENCE_OBSERVATIONS = 3
 _WORKER_DOCKER_POLL_SECONDS = 0.05
@@ -464,18 +465,19 @@ def _terminate_worker_process(process: subprocess.Popen[Any]) -> None:
 def _remove_worker_container(container_name: str) -> None:
     """Force-remove one run-owned container until absence is stably proven."""
 
-    deadline: float | None = None
-    absence_continuous = True
-    absent_observations = 0
+    started_at = time.monotonic()
+    removal_deadline = started_at + _WORKER_DOCKER_REMOVAL_SECONDS
+    hard_deadline = removal_deadline + _WORKER_DOCKER_CONVERGENCE_SECONDS
+    absence_started_at: float | None = None
+    consecutive_absent_observations = 0
     while True:
-        if deadline is not None and time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now > hard_deadline:
             break
-        command_timeout = _WORKER_DOCKER_CLEANUP_SECONDS
-        if deadline is not None:
-            command_timeout = max(
-                0.001,
-                min(command_timeout, deadline - time.monotonic()),
-            )
+        command_timeout = max(
+            0.001,
+            min(_WORKER_DOCKER_CLEANUP_SECONDS, hard_deadline - now),
+        )
         try:
             subprocess.run(
                 ["docker", "container", "rm", "--force", container_name],
@@ -486,14 +488,13 @@ def _remove_worker_container(container_name: str) -> None:
             )
         except subprocess.TimeoutExpired:
             pass
-        if deadline is not None and time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now > hard_deadline:
             break
-        command_timeout = _WORKER_DOCKER_CLEANUP_SECONDS
-        if deadline is not None:
-            command_timeout = max(
-                0.001,
-                min(command_timeout, deadline - time.monotonic()),
-            )
+        command_timeout = max(
+            0.001,
+            min(_WORKER_DOCKER_CLEANUP_SECONDS, hard_deadline - now),
+        )
         try:
             inspected = subprocess.run(
                 ["docker", "container", "inspect", container_name],
@@ -503,7 +504,7 @@ def _remove_worker_container(container_name: str) -> None:
                 timeout=command_timeout,
             )
         except subprocess.TimeoutExpired:
-            absence_continuous = False
+            absent = False
         else:
             error = (inspected.stderr or "").lower()
             absent = (
@@ -513,56 +514,33 @@ def _remove_worker_container(container_name: str) -> None:
                     or "no such object" in error
                 )
             )
-            if absent:
-                absent_observations += 1
-            else:
-                absence_continuous = False
         observed_at = time.monotonic()
-        if deadline is None:
-            deadline = observed_at + _WORKER_DOCKER_CONVERGENCE_SECONDS
-        remaining = deadline - observed_at
+        if absent:
+            if absence_started_at is None:
+                absence_started_at = observed_at
+                consecutive_absent_observations = 1
+            else:
+                consecutive_absent_observations += 1
+            if (
+                consecutive_absent_observations
+                >= _WORKER_DOCKER_ABSENCE_OBSERVATIONS
+                and observed_at - absence_started_at
+                >= _WORKER_DOCKER_CONVERGENCE_SECONDS
+            ):
+                return
+        else:
+            absence_started_at = None
+            consecutive_absent_observations = 0
+        if observed_at >= hard_deadline:
+            break
+        remaining = hard_deadline - observed_at
         if remaining > 0:
             time.sleep(min(_WORKER_DOCKER_POLL_SECONDS, remaining))
-    try:
-        subprocess.run(
-            ["docker", "container", "rm", "--force", container_name],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_WORKER_DOCKER_CLEANUP_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        final_inspection = subprocess.run(
-            ["docker", "container", "inspect", container_name],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_WORKER_DOCKER_CLEANUP_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        final_absent = False
-    else:
-        final_error = (final_inspection.stderr or "").lower()
-        final_absent = (
-            final_inspection.returncode != 0
-            and (
-                "no such container" in final_error
-                or "no such object" in final_error
-            )
-        )
-    if final_absent:
-        absent_observations += 1
-    if (
-        absence_continuous
-        and final_absent
-        and absent_observations >= _WORKER_DOCKER_ABSENCE_OBSERVATIONS
-    ):
-        return
     raise RuntimeError(
-        "worker container absence did not converge within "
-        f"{_WORKER_DOCKER_CONVERGENCE_SECONDS:g}s name={container_name}"
+        "worker container removal and stable absence did not converge within "
+        f"{_WORKER_DOCKER_REMOVAL_SECONDS:g}s removal plus "
+        f"{_WORKER_DOCKER_CONVERGENCE_SECONDS:g}s proof "
+        f"name={container_name}"
     )
 
 

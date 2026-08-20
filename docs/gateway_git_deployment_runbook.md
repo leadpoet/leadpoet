@@ -5,9 +5,11 @@ The gateway runs all host code from the complete checkout at
 
 ```bash
 : "${EXPECTED_ATTESTED_SHA:?set the full attested release SHA}"
+: "${LOCAL_READINESS_PYTHON:?set an absolute venv bin/python path}"
 cd /path/to/the/exact/candidate/checkout
 bash scripts/restart_attested_release_local.sh \
   --commit "$EXPECTED_ATTESTED_SHA" \
+  --local-python "$LOCAL_READINESS_PYTHON" \
   --component all
 ```
 
@@ -102,10 +104,12 @@ Do not run a separate remote helper or an unpinned host wrapper:
 ```bash
 set -euo pipefail
 : "${EXPECTED_ATTESTED_SHA:?set the full attested release SHA}"
+: "${LOCAL_READINESS_PYTHON:?set an absolute venv bin/python path}"
 [[ "$EXPECTED_ATTESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
 cd /path/to/the/exact/candidate/checkout
 bash scripts/restart_attested_release_local.sh \
   --commit "$EXPECTED_ATTESTED_SHA" \
+  --local-python "$LOCAL_READINESS_PYTHON" \
   --component all \
   --disable-miner-submissions-before-restart
 ```
@@ -172,11 +176,19 @@ fails before shutdown. Keep scoring and autoresearch in their separately
 recorded invocation-time maintenance states.
 
 ```bash
+: "${LOCAL_READINESS_PYTHON:?set an absolute venv bin/python path}"
 cd /path/to/the/exact/candidate/checkout
 bash scripts/restart_attested_release_local.sh \
   --commit "$EXPECTED_ATTESTED_SHA" \
+  --local-python "$LOCAL_READINESS_PYTHON" \
   --component all
 ```
+
+`--local-python` is required. It must select a dependency-complete virtual
+environment containing the declared `cbor2` and `cryptography` packages. The
+operator executes its local readiness phases with `-I -S`, admits only the
+exact candidate root plus that venv's site-packages, and never falls back to an
+ambient system interpreter.
 
 If an authorized operation must transition miner submissions from true to
 false, use the paired `--disable-miner-submissions-before-restart` command
@@ -265,7 +277,8 @@ restart-start decision and one selected release:
 
 ```bash
 bash scripts/restart_attested_release_local.sh \
-  --commit <full-sha>
+  --commit <full-sha> \
+  --local-python </absolute/venv/bin/python>
 ```
 
 Use `--component gateway` or `--component validator` only when the other

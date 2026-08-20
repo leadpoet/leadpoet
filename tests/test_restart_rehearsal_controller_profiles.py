@@ -3316,13 +3316,18 @@ def test_normalization_deadline_is_not_swallowed(
     assert raised.value is deadline
 
 
-def test_instruction_files_define_fast_default_and_match() -> None:
+def test_instruction_files_define_deterministic_default_and_match() -> None:
     agents = (ROOT / "AGENTS.md").read_bytes()
     claude = (ROOT / "CLAUDE.md").read_bytes()
 
     assert agents == claude
     text = agents.decode("utf-8")
-    assert "## Default verification: 5-10 minutes" in text
-    assert "explicitly includes `un-accelerated` or" in text
+    assert "## Default verification: deterministic 2-minute gate" in text
+    assert "120-second outer deadline" in text
+    assert "the legacy `prepush` profile asynchronously" in text
+    assert "Record the map before the first source" in text
+    assert "At T+90" in text
+    assert "Preserve the last valid published baseline" in text
+    assert "`un-accelerated` or `unaccelerated`" in text
     assert '"production-equivalent"' in text
     assert "--profile unaccelerated" in text

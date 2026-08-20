@@ -2362,7 +2362,7 @@
       "symbol": "ExecutionContextV2.record_transport"
     },
     {
-      "ast_sha256": "sha256:4e67bf654cb46e0ff990514f49a0ee38b568b30c0d4bd37e525ff78af1ae2ec0",
+      "ast_sha256": "sha256:e17aca1cc5f4a11a5c4eac8975f198d45869261358e831244aa1e03c14b1c547",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
     },
@@ -2370,6 +2370,11 @@
       "ast_sha256": "sha256:b227e46cacdf93a6af979732ca8fdf3176c71fea506ea6f3b380cb3fbfb1cc6d",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "_DIRECT_SUPABASE_SIDECAR_NAMESPACES"
+    },
+    {
+      "ast_sha256": "sha256:a5226e1b8b3a012f7279daebf21ecf73153476bca220481e3be68ff7b7572116",
+      "path": "gateway/tee/execution_job_manager_v2.py",
+      "symbol": "_execution_failure_code"
     },
     {
       "ast_sha256": "sha256:c5243a3573e22ef6c38cec540f1730288e0cf8c79b0d6e80e4e1fc737994250f",
@@ -2997,17 +3002,37 @@
       "symbol": "MODEL_SANDBOX_VISIBLE_ROOT"
     },
     {
+      "ast_sha256": "sha256:9cb384095a48ee4451e79fa45f0b5e6acefba17b60366b0d70850246b3c4ff69",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "ModelSandboxFailureProjectionV1"
+    },
+    {
+      "ast_sha256": "sha256:c983acf160c3068803af024d2a4c01b78351cf1a0f864189965863566f2884b7",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "ModelSandboxV2Error"
+    },
+    {
       "ast_sha256": "sha256:e20aeeb718bc800a669aaa25e10e7412a5cdbb85e8f7a487968c43177533f9fa",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "NATIVE_QUALIFY_RELEASE_IDENTITY_V1"
     },
     {
-      "ast_sha256": "sha256:24e7b0a87aebacd2b5ab0eca8551e946669bf92f7427699fe8337a8333579d73",
+      "ast_sha256": "sha256:9464c586e61854876475ea4c4420ea2e14e5dc0d4bb0ee6884fad1dd295d25c6",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "PRIVATE_RUNTIME_FAILURE_MARKER_MAX_BYTES"
+    },
+    {
+      "ast_sha256": "sha256:e94721ccaff297a2385ece753e40b40a6ad7fc1c89b2705528bd4571f06cc4b1",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "RUNSC_FAILURE_CODES_V1"
+    },
+    {
+      "ast_sha256": "sha256:c481389adeaaf5ec27af6687fc01d12e8ec49fda87b74948349f489d6c7ef51b",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
     {
-      "ast_sha256": "sha256:cd142bd27aab780bd216942c656be3f42dd3d6d9cc637f956b409f7733c583a0",
+      "ast_sha256": "sha256:95b89ad140087d928db457f06e19f88d52aa3e7cbea86557e2d10761f902f404",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2._run_metadata_compatibility"
     },
@@ -3097,6 +3122,16 @@
       "symbol": "_run_bounded_metadata_process"
     },
     {
+      "ast_sha256": "sha256:4fdde500aa9418732ae92961ec1257d9a37dd2b77abe98b9248f85f73017cd38",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_runsc_failure_evidence"
+    },
+    {
+      "ast_sha256": "sha256:d523ad0319577c1bd605ed10d070c1f62918f8f0551d80327b3be01dbe2e5490",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_runsc_model_sandbox_error"
+    },
+    {
       "ast_sha256": "sha256:d7a054b1b57db787d3434aa282ddd5729aeb0db65945dd3e752175dc86187271",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_runsc_run_command"
@@ -3137,6 +3172,16 @@
       "symbol": "_stop_bounded_process"
     },
     {
+      "ast_sha256": "sha256:6f8e68bfe66d2b95257e5cd1de63fb17d408bad88279162f0f1831c2e31dd891",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_strip_private_runtime_failure_markers_v1"
+    },
+    {
+      "ast_sha256": "sha256:48ac2c5ccf1586ac49726ffbc93e3e018e48d79d98d7cfc305259fcb35c9864d",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_validated_private_runtime_failure_marker_v1"
+    },
+    {
       "ast_sha256": "sha256:0890ee87f2dcb0976babc204998055433ad8416cfcaf4e30656a83846eb4adf6",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_write_process_input"
@@ -3160,6 +3205,11 @@
       "ast_sha256": "sha256:fa99cede4236cb40ac89fb71d8523304aa6cdf76bd819cb1a1c3ead483806c48",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "validate_consumer_runtime_probe_v1"
+    },
+    {
+      "ast_sha256": "sha256:368d2419dbaa7f91e871bd57675e85148c423e073cd2b0f06997d1923d53e4d4",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "validate_model_sandbox_failure_projection_v1"
     },
     {
       "ast_sha256": "sha256:b5488d76a7e9d380b3280c8f14d94fbb6700dd934156bcf5a41f8de0c21e4c25",
@@ -3707,9 +3757,19 @@
       "symbol": "rpc_method_allowed"
     },
     {
+      "ast_sha256": "sha256:0b4c98861ea9d3343dda88736d9ae263e840d7c87337b47cde076b7bb52e6096",
+      "path": "gateway/tee/sandbox_http_shim_v2.py",
+      "symbol": "EVIDENCE_MISS_SENTINEL"
+    },
+    {
       "ast_sha256": "sha256:b3d2953c36db9fe7a258f10df2b31e393ea4bf4fa4a847a98692efc2ad080570",
       "path": "gateway/tee/sandbox_http_shim_v2.py",
       "symbol": "SandboxHTTPShimTransportCleanupError"
+    },
+    {
+      "ast_sha256": "sha256:6aad52af7c70d3c4cf734553283e18f799ab3302ee821dda629d27042ebef71d",
+      "path": "gateway/tee/sandbox_http_shim_v2.py",
+      "symbol": "_EVIDENCE_MISS_WRITE"
     },
     {
       "ast_sha256": "sha256:496e746db27f0af7865ae3c983aaf6ef51756c1c7c62dd1429f0486838110368",
@@ -3725,6 +3785,11 @@
       "ast_sha256": "sha256:8887d969f179cf4e8164dc38c5f8e4122b8d7fc2deafe9721bbd9c790578fb23",
       "path": "gateway/tee/sandbox_http_shim_v2.py",
       "symbol": "_RETIRED_CLEANUP_RESOURCES"
+    },
+    {
+      "ast_sha256": "sha256:0ed121f5d723eb52f29b99453d9b93f5dc2853c3a2901dc724f6720dfd851da9",
+      "path": "gateway/tee/sandbox_http_shim_v2.py",
+      "symbol": "_cached_terminal"
     },
     {
       "ast_sha256": "sha256:61e508470b444cf0d519f5bc3a10d1b11c94661b454f01807b772273e67948a7",
@@ -5137,9 +5202,44 @@
       "symbol": "EXPECTED_ROUTING_COMPILER_VERSIONS"
     },
     {
-      "ast_sha256": "sha256:9f157697fc7e6d679c8ed0dc5fd4b26f7e4795c000550addf9e0ccfa5a952fba",
+      "ast_sha256": "sha256:943d0fdd5f5261b3431a575722671270227bfd5c9f8305a50bc878e8479656c6",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "PRIVATE_RUNTIME_FAILURE_CLASS_IDENTITY_MAX_BYTES"
+    },
+    {
+      "ast_sha256": "sha256:c68a0c79a16ea5bfb0f0c09beced19b8f19144e9723fe5efae0250860ddce4ca",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "PRIVATE_RUNTIME_FAILURE_EXIT_CODE"
+    },
+    {
+      "ast_sha256": "sha256:e4829d888be8de81f5fe6ad6b4a4c0ae92471ca94ce4864a45e0c7146d4ff887",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "PRIVATE_RUNTIME_FAILURE_FALLBACK_EXIT_CODE"
+    },
+    {
+      "ast_sha256": "sha256:28a491de382c3d3e706337a568007fe5e266c82343a576dfa824efb714dd4c62",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "PRIVATE_RUNTIME_FAILURE_MARKER"
+    },
+    {
+      "ast_sha256": "sha256:9a1fbebe0a7cc2f9a884c22d0b994669c3b6b3f04a9fb262b06dd24ee62ff6bd",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:d3995e2c974735e46964ef6098d3fe48751b6b4cfd95d020fff529b30be04cf9",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_ADAPTER_BOOTSTRAP"
+    },
+    {
+      "ast_sha256": "sha256:ba10f8f7b25d4938ff9fdf0bd9ed64e53735e49aeac130fd48ad4f0a0a54a0fa",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_DOCKER_ADAPTER_BOOTSTRAP"
+    },
+    {
+      "ast_sha256": "sha256:9cc3542e0e6d38729e5f9939a65ecab78eeac9230414a4ac33969324dba01558",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_PRIVATE_RUNTIME_FAILURE_BOOTSTRAP"
     },
     {
       "ast_sha256": "sha256:69c6f3b0947809c0a921289016036f52f8e01c8fd4f4e421f36cef2eea84090a",
@@ -5157,7 +5257,7 @@
       "symbol": "_REVIEWED_CONSUMER_MANIFEST_PAIRS"
     },
     {
-      "ast_sha256": "sha256:10e44ead51c76b0ea004d2a2fad767b6937e60c116d1940f5a4f838e782cc95d",
+      "ast_sha256": "sha256:1a9dbf63db5a8bff4303d4d78919397e828802d715d4d73b3d9e54ea413bf5fc",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_docker_adapter_bootstrap_for_qualify_compatibility"
     },
@@ -5862,7 +5962,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:109865271c625fea876032e76d1e5914b314c18a32f3f270305c7e3b7e13f8b9",
-  "protected_source_commit": "d30bb98b562b138ca6016edb6b7a893b7bdfb4d2",
+  "manifest_hash": "sha256:499abed1970bc7063645b46de3417a7f90144b278b3f0322c85e4367684babc7",
+  "protected_source_commit": "09a334fbacb4cfca572cbbd40cbe61eaadbb30f9",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -598,7 +598,7 @@ build_gateway_restart_command() {
       mkdir -m 700 "\$candidate_root"
       controller_current='$PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT'
       run_verified_gateway_git_helper() {
-        printf '%s' '$controller_verifier_b64' | '$GATEWAY_PYTHON_BIN' -I -S -c 'import base64,sys; source=base64.b64decode(sys.stdin.buffer.read(), validate=True); exec(compile(source, "<exact-installed-controller-verifier>", "exec"))' --repo-root '$GATEWAY_REPO_ROOT' --controller-current "\$controller_current" --host-restart-path '$GATEWAY_RESTART' --expected-commit '$commit' --exec-helper scripts/gateway_git_deploy.py -- "\$@"
+        printf '%s' '$controller_verifier_b64' | '$GATEWAY_PYTHON_BIN' -I -S -c 'import base64,sys; source=base64.b64decode(sys.stdin.buffer.read(), validate=True); exec(compile(source, \"<exact-installed-controller-verifier>\", \"exec\"))' --repo-root '$GATEWAY_REPO_ROOT' --controller-current "\$controller_current" --host-restart-path '$GATEWAY_RESTART' --expected-commit '$commit' --exec-helper scripts/gateway_git_deploy.py -- "\$@"
       }
       prepared_sha=\$(run_verified_gateway_git_helper prepare --repo-root '$GATEWAY_REPO_ROOT' --repo-url https://github.com/leadpoet/leadpoet.git --branch main --deploy-commit '$commit' --plan-file "\$bootstrap_root/plan.json" --manifest-file "\$bootstrap_root/manifest.json" --last-good-file "\$bootstrap_root/last-good-unused.json")
       test "\$prepared_sha" = '$commit'

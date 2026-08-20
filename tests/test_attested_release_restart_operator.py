@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -168,6 +169,66 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
         'for _ in $(seq 1 "$VALIDATOR_FAILURE_CLEANUP_ATTEMPTS")'
     )
     assert "VALIDATOR_FAILURE_MARKER_ATTEMPTS" in source
+
+
+def test_miner_maintenance_bootstrap_command_is_shell_parseable() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    function_start = source.index("build_gateway_restart_command() {")
+    function_end = source.index(
+        "\n}\n\nrun_gateway_restart()", function_start
+    ) + 2
+    function_source = source[function_start:function_end]
+    commit = "1" * 40
+    shell_program = f"""
+set -Eeuo pipefail
+commit={shlex.quote(commit)}
+disable_miner_submissions_before_restart=1
+GATEWAY_ENV_SECRET_ID=''
+controller_verifier_b64='YQ=='
+GATEWAY_PYTHON_BIN='/usr/bin/python3.11'
+GATEWAY_REPO_ROOT='/home/ec2-user/leadpoet_repo'
+PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT='/controller/current'
+PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT='/controller'
+GATEWAY_RESTART='/home/ec2-user/gw_restart.sh'
+RELEASE_PREFIX='weights/v2/release-evidence'
+gateway_handoff_file='/tmp/handoff'
+gateway_handoff_nonce='{'2' * 64}'
+GATEWAY_KEY='/tmp/key'
+GATEWAY_HOST='gateway.invalid'
+ssh_common=('-o' 'BatchMode=yes')
+{function_source}
+build_gateway_restart_command
+printf '%s\\0' "${{gateway_restart_command[@]}}"
+"""
+    rendered = subprocess.run(
+        ["bash", "-c", shell_program],
+        check=False,
+        capture_output=True,
+        timeout=5,
+    )
+
+    assert rendered.returncode == 0, rendered.stderr.decode("utf-8", "replace")
+    remote_command = rendered.stdout.rstrip(b"\0").split(b"\0")[-1]
+    encoded_match = re.search(
+        rb"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 --decode",
+        remote_command,
+    )
+    assert encoded_match is not None
+    bootstrap_command = base64.b64decode(
+        encoded_match.group(1), validate=True
+    ).decode("utf-8")
+    assert (
+        'exec(compile(source, "<exact-installed-controller-verifier>", "exec"))'
+        in bootstrap_command
+    )
+    syntax = subprocess.run(
+        ["bash", "-n", "-c", bootstrap_command],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert syntax.returncode == 0, syntax.stderr
 
 
 def test_attested_release_restart_operator_rejects_invalid_input() -> None:

@@ -204,8 +204,7 @@ protect_exact_host_gateway_runtime() {
     exit 1
   fi
   if [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
-    echo "ERROR: REQUIRE_ZERO_RUNTIME_RECONCILE requires the exact live host gateway" >&2
-    exit 1
+    echo "Docker storage reconciliation admitted with the exact host gateway absent: phase=$phase"
   fi
 }
 
@@ -485,9 +484,17 @@ require_same_online_gateway() {
   local phase="$1"
 
   inspect_exact_host_gateway_runtime "$phase"
-  if [ "$HOST_GATEWAY_LIVE" -ne 1 ] \
-      || [ "$HOST_GATEWAY_PID" -ne "$ONLINE_GATEWAY_PID" ] \
-      || [ "$HOST_GATEWAY_START_TIME_TICKS" -ne "$ONLINE_GATEWAY_START_TIME_TICKS" ]; then
+  if [ "$HOST_GATEWAY_LIVE" -ne "$ONLINE_GATEWAY_LIVE" ]; then
+    if [ "$ONLINE_GATEWAY_LIVE" -eq 1 ]; then
+      echo "ERROR: exact host gateway identity changed during online Docker reclaim: phase=$phase" >&2
+    else
+      echo "ERROR: exact host gateway state changed during online Docker reclaim: phase=$phase" >&2
+    fi
+    return 1
+  fi
+  if [ "$ONLINE_GATEWAY_LIVE" -eq 1 ] \
+      && { [ "$HOST_GATEWAY_PID" -ne "$ONLINE_GATEWAY_PID" ] \
+        || [ "$HOST_GATEWAY_START_TIME_TICKS" -ne "$ONLINE_GATEWAY_START_TIME_TICKS" ]; }; then
     echo "ERROR: exact host gateway identity changed during online Docker reclaim: phase=$phase" >&2
     return 1
   fi
@@ -735,7 +742,9 @@ if before["active_manifest_hash"] != after["active_manifest_hash"]:
 '
 }
 
-if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
+if [ "$HOST_GATEWAY_LIVE" -eq 1 ] \
+    || [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
+  ONLINE_GATEWAY_LIVE="$HOST_GATEWAY_LIVE"
   ONLINE_GATEWAY_PID="$HOST_GATEWAY_PID"
   ONLINE_GATEWAY_START_TIME_TICKS="$HOST_GATEWAY_START_TIME_TICKS"
   inventory_empty_online_runtime "pre-prune"
@@ -931,7 +940,12 @@ if not isinstance(manifest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifes
     echo "ERROR: refusing daemon stop or data-root reset while the exact host gateway is live" >&2
     exit 1
   fi
-  echo "Docker storage ready after bounded online reclaim: free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES runtime_mode=host-gateway-live"
+  if [ "$ONLINE_GATEWAY_LIVE" -eq 1 ]; then
+    ONLINE_RUNTIME_MODE="host-gateway-live"
+  else
+    ONLINE_RUNTIME_MODE="host-gateway-absent"
+  fi
+  echo "Docker storage ready after bounded online reclaim: free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES runtime_mode=$ONLINE_RUNTIME_MODE"
   exit 0
 fi
 

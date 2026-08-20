@@ -73,13 +73,14 @@ def test_exact_host_gateway_guard_is_rechecked_at_the_stop_boundary():
 
 def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
     inventory = SCRIPT.index("inventory_empty_online_runtime()")
-    lane = SCRIPT.index('if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then', inventory)
+    lane = SCRIPT.index('if [ "$HOST_GATEWAY_LIVE" -eq 1 ] \\', inventory)
     offline_image_prune = SCRIPT.index(
         "run_prune_with_retry image docker image prune --all --force",
         lane,
     )
     source = SCRIPT[lane:offline_image_prune]
 
+    assert '|| [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]' in source
     assert "run_prune_with_retry builder docker builder prune --all --force" in source
     assert "docker_stale_mount_reclaimer_v2.py" in source
     assert "docker_zero_runtime_reconciler_v2.py" in source
@@ -106,7 +107,7 @@ def test_required_zero_runtime_reconcile_is_strict_and_builder_first():
     )
     acquire = SCRIPT.index("leadpoet_acquire_docker_operation_lock_v2")
     lane = SCRIPT.index(
-        'if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then',
+        'if [ "$HOST_GATEWAY_LIVE" -eq 1 ] \\',
         SCRIPT.index("inventory_empty_online_runtime()"),
     )
     builder_prune = SCRIPT.index(

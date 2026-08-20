@@ -1460,20 +1460,49 @@ def test_required_zero_runtime_reconcile_requires_live_prune_admission(
     assert not (tmp_path / "builder-pruned").exists()
 
 
-def test_required_zero_runtime_reconcile_requires_exact_live_gateway(
+def test_required_zero_runtime_reconcile_accepts_stably_absent_gateway(
     tmp_path: Path,
 ) -> None:
     result, sudo_log = _run_recovery(
         tmp_path,
         available=25_000_000_000,
+        images=2,
+        layerdb_images=3,
         allow_live_host_gateway_prune=True,
         require_zero_runtime_reconcile="1",
     )
 
+    assert result.returncode == 0, result.stderr
+    assert "exact host gateway absent" in result.stdout
+    assert "runtime_mode=host-gateway-absent" in result.stdout
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "2"
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
+    assert " rm " not in sudo_log
+
+
+def test_required_zero_runtime_reconcile_rejects_absent_to_live_gateway_race(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=2,
+        layerdb_images=3,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        host_gateway_live_after_inventory=True,
+    )
+
     assert result.returncode == 1
-    assert "requires the exact live host gateway" in result.stderr
+    assert "exact host gateway state changed" in result.stderr
     assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
-    assert not (tmp_path / "builder-pruned").exists()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "1"
+    assert not (tmp_path / "image-pruned").exists()
+    assert not (tmp_path / "system-prune-attempts").exists()
+    assert "systemctl" not in sudo_log
 
 
 @pytest.mark.parametrize(

@@ -75,6 +75,7 @@ from research_lab.routing_experiments import (
     RoutingDecisionReceiptStore,
     RoutingExperimentArtifactAuthority,
     RoutingExperimentError,
+    RoutingExperimentDeferredRecoverySignal,
     RoutingExperimentV2Adapter,
     RoutingExperimentV2Evaluation,
     RoutingExperimentV2Spec,
@@ -170,7 +171,10 @@ class RoutingExperimentTerminalRecoveryError(RoutingExperimentRuntimeError):
     """A durable recovery fact requires a new immutable experiment."""
 
 
-class RoutingExperimentDeferredRecoveryError(RoutingExperimentRuntimeError):
+class RoutingExperimentDeferredRecoveryError(
+    RoutingExperimentRuntimeError,
+    RoutingExperimentDeferredRecoverySignal,
+):
     """Durable cleanup could not be confirmed; the queue lease must expire."""
 
 

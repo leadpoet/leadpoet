@@ -116,6 +116,10 @@ class RoutingExperimentError(ValueError):
     """A routing experiment violates its immutable Lab contract."""
 
 
+class RoutingExperimentDeferredRecoverySignal:
+    """Marker for host recovery failures that must escape experiment scoring."""
+
+
 class ProviderOutcome(str, Enum):
     VERIFIED = "verified"
     REJECTED = "rejected"
@@ -6579,6 +6583,11 @@ def _v2_run_unit(
                         request_fingerprint=request_fingerprint,
                     )
                 except Exception as exc:
+                    if isinstance(exc, RoutingExperimentDeferredRecoverySignal):
+                        # Uncertain billing or a lost protected-dispatch receipt
+                        # is not provider evidence. Leave the attempt uncached so
+                        # the fenced queue recovery path can reconcile it first.
+                        raise
                     receipt = _v2_failure_receipt(
                         binding=binding,
                         unit_ref=unit_ref,
@@ -6660,6 +6669,8 @@ def _v2_run_unit(
         except RoutingExperimentError:
             raise
         except Exception as exc:
+            if isinstance(exc, RoutingExperimentDeferredRecoverySignal):
+                raise
             raise RoutingExperimentError(f"v2_model_plan_execution_failed:{type(exc).__name__}") from exc
         finally:
             reserved_total[0] -= requested_total

@@ -146,8 +146,9 @@ def test_deepline_binding_enforces_reviewed_cost_limit():
         binding_contract_sha256=CONTRACT_HASH,
         client=FakeDeeplineClient(cost=0.57),
     )
+    assert not hasattr(binding, "execute")
     try:
-        binding.execute(_action())
+        binding.dispatch(_action())
     except ModelRunnerHostError as exc:
         assert "cost limit" in str(exc)
     else:

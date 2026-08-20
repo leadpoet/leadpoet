@@ -1101,7 +1101,11 @@ def test_subprocess_runner_publishes_entries_and_strips_error_diagnostics(tmp_pa
     # exception text bound for diagnostics/audit docs.
     assert [entry["seq"] for entry in entries] == [1]
     assert INCONTAINER_TRACE_MARKER not in str(excinfo.value)
-    assert "adapter exploded for test" in str(excinfo.value)
+    failure_text = str(excinfo.value)
+    expected_class_hash = hashlib.sha256(b"builtins.RuntimeError").hexdigest()
+    assert "adapter exploded for test" not in failure_text
+    assert "research_lab.private_runtime_failure.v1" in failure_text
+    assert f'"exception_class_hash":"sha256:{expected_class_hash}"' in failure_text
 
 
 def test_subprocess_runner_skips_publish_when_capture_disabled(tmp_path, monkeypatch):

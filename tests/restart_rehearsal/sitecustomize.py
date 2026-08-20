@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import builtins
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -45,6 +46,9 @@ except ModuleNotFoundError as exc:
 
 
 STATE_ROOT = Path(os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state"))
+DURABLE_STATE_ROOT = Path(
+    os.environ.get("REHEARSAL_DURABLE_STATE_ROOT", "/rehearsal-durable-state")
+)
 SOURCE_ROOT = Path(os.environ.get("REHEARSAL_SOURCE_ROOT", "/source"))
 FROM_FIXTURE_SEED_ROOT = Path("/rehearsal-from-fixture-seed")
 DURABLE_SCHEMA_SEED_ROOT = Path("/rehearsal-durable-schema-seed")
@@ -82,6 +86,158 @@ _ORIGINAL_SOCKET = socket.socket
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
 _RESTART_EPOCH_TRANSIENT_HEAD_CALLS = 0
 _BLOCK_NUMBERS_BY_HASH: dict[str, int] = {}
+_GATEWAY_SECRET_ID = "leadpoet/prod/gateway/env"
+_GATEWAY_SECRET_STATE_SCHEMA = "leadpoet.restart_rehearsal.gateway_secret_state.v1"
+_GATEWAY_SECRET_INITIAL_VERSION = hashlib.sha256(
+    b"leadpoet-rehearsal-gateway-secret-initial-v1"
+).hexdigest()
+_GATEWAY_ROLE_ACCOUNT = "493765492819"
+_GATEWAY_ROLE_NAME = "leadpoet-gateway-s3-cloudwatch-role"
+_GATEWAY_ROLE_ARN = (
+    f"arn:aws:sts::{_GATEWAY_ROLE_ACCOUNT}:assumed-role/"
+    f"{_GATEWAY_ROLE_NAME}/i-0123456789abcdef0"
+)
+
+
+def _gateway_secret_state_paths() -> tuple[Path, Path]:
+    name = "gateway-secret-state.json"
+    return DURABLE_STATE_ROOT / name, DURABLE_STATE_ROOT / f"{name}.lock"
+
+
+def _initial_gateway_secret_string() -> str:
+    try:
+        from contract_adapter import (
+            _gateway_secret,
+            _initial_gateway_miner_submissions_state,
+        )
+    except ModuleNotFoundError:
+        from tests.restart_rehearsal.contract_adapter import (
+            _gateway_secret,
+            _initial_gateway_miner_submissions_state,
+        )
+
+    values = _gateway_secret()
+    values["RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"] = (
+        _initial_gateway_miner_submissions_state()
+    )
+    values["GITHUB_REPO_URL"] = "https://github.com/leadpoet/leadpoet.git"
+    return json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+
+def _new_gateway_secret_state() -> dict[str, Any]:
+    return {
+        "schema_version": _GATEWAY_SECRET_STATE_SCHEMA,
+        "secret_id": _GATEWAY_SECRET_ID,
+        "versions": {
+            _GATEWAY_SECRET_INITIAL_VERSION: {
+                "secret_string": _initial_gateway_secret_string(),
+                "stages": ["AWSCURRENT"],
+            }
+        },
+    }
+
+
+def _validate_gateway_secret_state(value: Any) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "secret_id", "versions"}
+        or value.get("schema_version") != _GATEWAY_SECRET_STATE_SCHEMA
+        or value.get("secret_id") != _GATEWAY_SECRET_ID
+        or not isinstance(value.get("versions"), dict)
+        or not value["versions"]
+    ):
+        raise ValueError("durable rehearsal gateway secret state is invalid")
+    stage_holders: dict[str, str] = {}
+    for version_id, row in value["versions"].items():
+        if (
+            not re.fullmatch(r"[A-Za-z0-9-]{32,64}", str(version_id))
+            or not isinstance(row, dict)
+            or set(row) != {"secret_string", "stages"}
+            or not isinstance(row.get("secret_string"), str)
+            or not isinstance(row.get("stages"), list)
+            or len(set(row["stages"])) != len(row["stages"])
+        ):
+            raise ValueError("durable rehearsal gateway secret version is invalid")
+        for stage in row["stages"]:
+            if (
+                not isinstance(stage, str)
+                or not re.fullmatch(r"[A-Za-z0-9_+=.@-]{1,256}", stage)
+                or stage in stage_holders
+            ):
+                raise ValueError("durable rehearsal gateway secret topology is invalid")
+            stage_holders[stage] = str(version_id)
+    if "AWSCURRENT" not in stage_holders:
+        raise ValueError("durable rehearsal gateway secret current stage is invalid")
+    current = json.loads(
+        value["versions"][stage_holders["AWSCURRENT"]]["secret_string"]
+    )
+    if not isinstance(current, dict):
+        raise ValueError("durable rehearsal gateway secret document is invalid")
+    try:
+        from contract_adapter import _validate_gateway_miner_submissions_state
+    except ModuleNotFoundError:
+        from tests.restart_rehearsal.contract_adapter import (
+            _validate_gateway_miner_submissions_state,
+        )
+
+    _validate_gateway_miner_submissions_state(
+        current.get("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED")
+    )
+    return value
+
+
+def _write_gateway_secret_state(path: Path, value: dict[str, Any]) -> None:
+    payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("durable rehearsal gateway secret write stalled")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+@contextmanager
+def _locked_gateway_secret_state() -> Any:
+    path, lock_path = _gateway_secret_state_paths()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+    try:
+        if path.exists():
+            state = _validate_gateway_secret_state(
+                json.loads(path.read_text(encoding="utf-8"))
+            )
+        else:
+            state = _new_gateway_secret_state()
+            _write_gateway_secret_state(path, state)
+        yield state
+        _write_gateway_secret_state(path, _validate_gateway_secret_state(state))
+    finally:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        os.close(lock_descriptor)
+
+
+def _gateway_secret_stage_holder(state: Mapping[str, Any], stage: str) -> str | None:
+    holders = [
+        version_id
+        for version_id, row in state["versions"].items()
+        if stage in row["stages"]
+    ]
+    if len(holders) > 1:
+        raise ValueError("durable rehearsal gateway secret stage is ambiguous")
+    return str(holders[0]) if holders else None
 
 
 def _candidate_hybrid_constraint_definition() -> str:
@@ -3094,7 +3250,223 @@ def _release_channel(commit: str) -> dict[str, Any]:
     )
 
 
+class _LocalClientMeta:
+    def __init__(self, endpoint_url: str):
+        self.endpoint_url = endpoint_url
+
+
+class _LocalInstanceRoleCredentials:
+    method = "iam-role"
+
+
+class _LocalSTS:
+    meta = _LocalClientMeta("https://sts.us-east-1.amazonaws.com")
+
+    def get_caller_identity(self) -> dict[str, str]:
+        _external_event(
+            "aws_instance_role",
+            "get_caller_identity",
+            service="sts",
+            account=_GATEWAY_ROLE_ACCOUNT,
+            role_name=_GATEWAY_ROLE_NAME,
+            restart_stage=os.environ.get("GATEWAY_DEPLOY_STAGE", ""),
+            proof_fd_190_open=Path("/proc/self/fd/190").exists(),
+            proof_fd_environment=os.environ.get(
+                "GATEWAY_MINER_MAINTENANCE_PROOF_FD", ""
+            ),
+        )
+        return {
+            "Account": _GATEWAY_ROLE_ACCOUNT,
+            "Arn": _GATEWAY_ROLE_ARN,
+            "UserId": "AROAREHEARSALGATEWAY:i-0123456789abcdef0",
+        }
+
+
+class _LocalSecretsManager:
+    meta = _LocalClientMeta("https://secretsmanager.us-east-1.amazonaws.com")
+
+    @staticmethod
+    def _require_secret_id(secret_id: str) -> None:
+        if secret_id != _GATEWAY_SECRET_ID:
+            raise ValueError("local Secrets Manager secret identity differs")
+
+    def describe_secret(self, *, SecretId: str) -> dict[str, Any]:
+        self._require_secret_id(SecretId)
+        with _locked_gateway_secret_state() as state:
+            topology = {
+                version_id: list(row["stages"])
+                for version_id, row in state["versions"].items()
+                if row["stages"]
+            }
+        _external_event(
+            "aws_secretsmanager",
+            "describe_secret",
+            service="secretsmanager",
+            secret_id=SecretId,
+            version_count=len(topology),
+        )
+        return {"Name": SecretId, "VersionIdsToStages": topology}
+
+    def get_secret_value(
+        self,
+        *,
+        SecretId: str,
+        VersionId: str | None = None,
+        VersionStage: str | None = None,
+    ) -> dict[str, Any]:
+        self._require_secret_id(SecretId)
+        if VersionId is not None and VersionStage is not None:
+            raise ValueError("local Secrets Manager version selector differs")
+        with _locked_gateway_secret_state() as state:
+            selected = str(VersionId or "")
+            if not selected:
+                selected = _gateway_secret_stage_holder(
+                    state, str(VersionStage or "AWSCURRENT")
+                ) or ""
+            row = state["versions"].get(selected)
+            if row is None:
+                raise ValueError("local Secrets Manager version is unavailable")
+            if VersionStage is not None and VersionStage not in row["stages"]:
+                raise ValueError("local Secrets Manager stage identity differs")
+            secret_string = str(row["secret_string"])
+        _external_event(
+            "aws_secretsmanager",
+            "get_secret_value",
+            service="secretsmanager",
+            secret_id=SecretId,
+            version_id=selected,
+            version_stage=VersionStage,
+        )
+        return {
+            "Name": SecretId,
+            "VersionId": selected,
+            "SecretString": secret_string,
+        }
+
+    def put_secret_value(
+        self,
+        *,
+        SecretId: str,
+        SecretString: str,
+        ClientRequestToken: str,
+        VersionStages: list[str],
+    ) -> dict[str, Any]:
+        self._require_secret_id(SecretId)
+        token = str(ClientRequestToken)
+        stages = list(VersionStages)
+        if (
+            not re.fullmatch(r"[A-Za-z0-9-]{32,64}", token)
+            or not isinstance(SecretString, str)
+            or len(stages) != 1
+            or not re.fullmatch(r"LEADPOET_MINER_DISABLE_[0-9a-f]{32}", stages[0])
+        ):
+            raise ValueError("local Secrets Manager staged write differs")
+        with _locked_gateway_secret_state() as state:
+            existing = state["versions"].get(token)
+            expected = {"secret_string": SecretString, "stages": stages}
+            if existing is not None and existing != expected:
+                raise ValueError("local Secrets Manager request token was reused")
+            if any(
+                stages[0] in row["stages"]
+                for version_id, row in state["versions"].items()
+                if version_id != token
+            ):
+                raise ValueError("local Secrets Manager stage already exists")
+            state["versions"][token] = expected
+        _external_event(
+            "aws_secretsmanager",
+            "put_secret_value",
+            service="secretsmanager",
+            secret_id=SecretId,
+            version_id=token,
+            version_stages=stages,
+        )
+        return {"Name": SecretId, "VersionId": token}
+
+    def update_secret_version_stage(
+        self,
+        *,
+        SecretId: str,
+        VersionStage: str,
+        MoveToVersionId: str | None = None,
+        RemoveFromVersionId: str | None = None,
+    ) -> dict[str, Any]:
+        self._require_secret_id(SecretId)
+        stage = str(VersionStage)
+        move_to = str(MoveToVersionId or "")
+        remove_from = str(RemoveFromVersionId or "")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_+=.@-]{1,256}", stage)
+            or (not move_to and not remove_from)
+        ):
+            raise ValueError("local Secrets Manager stage update differs")
+        with _locked_gateway_secret_state() as state:
+            versions = state["versions"]
+            if move_to and move_to not in versions:
+                raise ValueError("local Secrets Manager move target is unavailable")
+            if remove_from and remove_from not in versions:
+                raise ValueError("local Secrets Manager remove target is unavailable")
+            holder = _gateway_secret_stage_holder(state, stage)
+            if remove_from and holder != remove_from:
+                raise ValueError("local Secrets Manager version fence differs")
+            if move_to and holder not in {None, remove_from, move_to}:
+                raise ValueError("local Secrets Manager stage owner differs")
+            if remove_from:
+                versions[remove_from]["stages"] = [
+                    value for value in versions[remove_from]["stages"] if value != stage
+                ]
+            if stage == "AWSCURRENT" and move_to:
+                for row in versions.values():
+                    row["stages"] = [
+                        value for value in row["stages"] if value != "AWSPREVIOUS"
+                    ]
+                if remove_from and remove_from != move_to:
+                    versions[remove_from]["stages"].append("AWSPREVIOUS")
+            if move_to and stage not in versions[move_to]["stages"]:
+                versions[move_to]["stages"].append(stage)
+        _external_event(
+            "aws_secretsmanager",
+            "update_secret_version_stage",
+            service="secretsmanager",
+            secret_id=SecretId,
+            version_stage=stage,
+            move_to_version_id=move_to or None,
+            remove_from_version_id=remove_from or None,
+        )
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+
+class _LocalInstanceRoleSession:
+    def __init__(
+        self,
+        *,
+        botocore_session: Any = None,
+        region_name: str | None = None,
+        **kwargs: Any,
+    ):
+        if botocore_session is None or region_name != "us-east-1" or kwargs:
+            raise ValueError("local instance-role Session contract differs")
+
+    def get_credentials(self) -> _LocalInstanceRoleCredentials:
+        return _LocalInstanceRoleCredentials()
+
+    def client(self, service_name: str, *args: Any, **kwargs: Any) -> Any:
+        if args or kwargs:
+            raise ValueError("local instance-role client arguments differ")
+        clients = {
+            "sts": _LocalSTS,
+            "secretsmanager": _LocalSecretsManager,
+            "s3": _LocalS3,
+        }
+        client_type = clients.get(str(service_name))
+        if client_type is None:
+            raise ValueError("local instance-role AWS service is unknown")
+        return client_type()
+
+
 class _LocalS3:
+    meta = _LocalClientMeta("https://s3.us-east-1.amazonaws.com")
+
     def _channel(self, key: str) -> tuple[str, bytes]:
         match = __import__("re").search(
             r"/([0-9a-f]{40})/release-channel-v2\.json$", key
@@ -3109,13 +3481,35 @@ class _LocalS3:
         ).encode() + b"\n"
         return commit, body
 
-    def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+    def _channel_identity(self, key: str) -> dict[str, Any]:
+        commit, body = self._channel(key)
+        digest = hashlib.sha256(body).hexdigest()
+        return {
+            "commit": commit,
+            "body": body,
+            "version_id": "local-release-" + digest[:40],
+            "etag": f'"{digest}"',
+            "retain_until": datetime(2100, 1, 1, tzinfo=timezone.utc),
+        }
+
+    def get_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        VersionId: str | None = None,
+    ) -> dict[str, Any]:
         private_model_identity = (str(Bucket), str(Key))
         with _PRIVATE_MODEL_OBJECTS_LOCK:
             private_model_body = _PRIVATE_MODEL_OBJECTS.get(
                 private_model_identity
             )
         if private_model_body is not None:
+            private_version = "local-private-model-" + hashlib.sha256(
+                private_model_body
+            ).hexdigest()[:24]
+            if VersionId is not None and VersionId != private_version:
+                raise ValueError("local S3 private-model version differs")
             _external_event(
                 "aws_s3_object_lock",
                 "get_object",
@@ -3127,12 +3521,13 @@ class _LocalS3:
             return {
                 "Body": io.BytesIO(private_model_body),
                 "ContentLength": len(private_model_body),
-                "VersionId": "local-private-model-"
-                + hashlib.sha256(private_model_body).hexdigest()[:24],
+                "VersionId": private_version,
             }
         artifact_path = _artifact_record_path(Bucket, Key)
         if artifact_path.is_file():
             record = json.loads(artifact_path.read_text(encoding="utf-8"))
+            if VersionId is not None and VersionId != record["version_id"]:
+                raise ValueError("local S3 artifact version differs")
             body = base64.b64decode(record["body_b64"], validate=True)
             _external_event(
                 "aws_s3_object_lock",
@@ -3149,24 +3544,48 @@ class _LocalS3:
                 "ObjectLockRetainUntilDate": record["retain_until"],
                 "VersionId": record["version_id"],
             }
-        commit, body = self._channel(Key)
+        if Bucket != "leadpoet-attested-v2-artifacts-493765492819":
+            raise ValueError("local release-channel bucket differs")
+        identity = self._channel_identity(Key)
+        if VersionId is not None and VersionId != identity["version_id"]:
+            raise ValueError("local release-channel version differs")
         _external_event(
             "aws_s3_object_lock",
             "get_object",
             service="s3",
             bucket=Bucket,
             key=Key,
-            commit_sha=commit,
+            commit_sha=identity["commit"],
+            version_id=identity["version_id"],
+            version_pinned=VersionId is not None,
         )
-        return {"Body": io.BytesIO(body)}
+        return {
+            "Body": io.BytesIO(identity["body"]),
+            "ContentLength": len(identity["body"]),
+            "ETag": identity["etag"],
+            "ObjectLockMode": "COMPLIANCE",
+            "ObjectLockRetainUntilDate": identity["retain_until"],
+            "VersionId": identity["version_id"],
+        }
 
-    def head_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+    def head_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        VersionId: str | None = None,
+    ) -> dict[str, Any]:
         private_model_identity = (str(Bucket), str(Key))
         with _PRIVATE_MODEL_OBJECTS_LOCK:
             private_model_body = _PRIVATE_MODEL_OBJECTS.get(
                 private_model_identity
             )
         if private_model_body is not None:
+            private_version = "local-private-model-" + hashlib.sha256(
+                private_model_body
+            ).hexdigest()[:24]
+            if VersionId is not None and VersionId != private_version:
+                raise ValueError("local S3 private-model version differs")
             _external_event(
                 "aws_s3_object_lock",
                 "head_object",
@@ -3177,12 +3596,13 @@ class _LocalS3:
             )
             return {
                 "ContentLength": len(private_model_body),
-                "VersionId": "local-private-model-"
-                + hashlib.sha256(private_model_body).hexdigest()[:24],
+                "VersionId": private_version,
             }
         artifact_path = _artifact_record_path(Bucket, Key)
         if artifact_path.is_file():
             record = json.loads(artifact_path.read_text(encoding="utf-8"))
+            if VersionId is not None and VersionId != record["version_id"]:
+                raise ValueError("local S3 artifact version differs")
             _external_event(
                 "aws_s3_object_lock",
                 "head_object",
@@ -3198,19 +3618,27 @@ class _LocalS3:
                 "ObjectLockRetainUntilDate": record["retain_until"],
                 "VersionId": record["version_id"],
             }
-        commit, body = self._channel(Key)
+        if Bucket != "leadpoet-attested-v2-artifacts-493765492819":
+            raise ValueError("local release-channel bucket differs")
+        identity = self._channel_identity(Key)
+        if VersionId is not None and VersionId != identity["version_id"]:
+            raise ValueError("local release-channel version differs")
         _external_event(
             "aws_s3_object_lock",
             "head_object",
             service="s3",
             bucket=Bucket,
             key=Key,
-            commit_sha=commit,
+            commit_sha=identity["commit"],
+            version_id=identity["version_id"],
+            version_pinned=VersionId is not None,
         )
         return {
-            "ContentLength": len(body),
+            "ContentLength": len(identity["body"]),
+            "ETag": identity["etag"],
             "ObjectLockMode": "COMPLIANCE",
-            "VersionId": "local-version",
+            "ObjectLockRetainUntilDate": identity["retain_until"],
+            "VersionId": identity["version_id"],
         }
 
     def put_object(
@@ -3342,13 +3770,50 @@ class _LocalS3:
             raise ValueError("local S3 received an unexpected pagination limit")
         _external_event(
             "aws_s3_object_lock",
-            "get_object",
+            "list_objects_v2",
             service="s3",
             bucket=Bucket,
             prefix=Prefix,
             commit_sha=commit,
         )
         return {"Contents": [{"Key": key}], "IsTruncated": False}
+
+    def list_object_versions(
+        self,
+        *,
+        Bucket: str,
+        Prefix: str,
+        MaxKeys: int,
+    ) -> dict[str, Any]:
+        if (
+            Bucket != "leadpoet-attested-v2-artifacts-493765492819"
+            or MaxKeys != 1000
+        ):
+            raise ValueError("local S3 release history contract differs")
+        identity = self._channel_identity(Prefix)
+        _external_event(
+            "aws_s3_object_lock",
+            "list_object_versions",
+            service="s3",
+            bucket=Bucket,
+            prefix=Prefix,
+            commit_sha=identity["commit"],
+            version_id=identity["version_id"],
+            singleton=True,
+        )
+        return {
+            "Versions": [
+                {
+                    "Key": Prefix,
+                    "VersionId": identity["version_id"],
+                    "IsLatest": True,
+                    "ETag": identity["etag"],
+                    "Size": len(identity["body"]),
+                }
+            ],
+            "DeleteMarkers": [],
+            "IsTruncated": False,
+        }
 
     def get_bucket_versioning(self, *, Bucket: str) -> dict[str, str]:
         _external_event(
@@ -4015,7 +4480,6 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     bittensor.AsyncSubtensor = _LocalAsyncSubtensor
     bittensor.Metagraph = _LocalMetagraph
     bittensor_subtensor.Subtensor = _LocalSubtensor
-    _real_boto3_client = boto3.client
     _real_socket = _ORIGINAL_SOCKET
     _real_getaddrinfo = _ORIGINAL_GETADDRINFO
     _real_sysconf = os.sysconf
@@ -4028,13 +4492,24 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     _rehearsal_proxy_port = 18443
 
     def _local_boto3_client(service_name: str, *args: Any, **kwargs: Any) -> Any:
-        if service_name == "s3":
-            return _LocalS3()
-        if service_name == "kms":
-            return _LocalKMS()
-        return _real_boto3_client(service_name, *args, **kwargs)
+        clients = {
+            "s3": _LocalS3,
+            "kms": _LocalKMS,
+            "sts": _LocalSTS,
+            "secretsmanager": _LocalSecretsManager,
+        }
+        client_type = clients.get(str(service_name))
+        if client_type is None:
+            raise ValueError("local boto3 AWS service is unknown")
+        if args:
+            raise ValueError("local boto3 client positional arguments differ")
+        if set(kwargs) - {"region_name", "endpoint_url"}:
+            raise ValueError("local boto3 client options differ")
+        return client_type()
 
     boto3.client = _local_boto3_client
+    boto3.session.Session = _LocalInstanceRoleSession
+    boto3.Session = _LocalInstanceRoleSession
     urllib.request.urlopen = _local_urlopen
 
     class _RehearsalSocket(_real_socket):

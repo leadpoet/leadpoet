@@ -41,6 +41,8 @@ REAL_LIVE_GATEWAY_RESTART_AUTHORITY_COMMITMENT = (
 
 @pytest.fixture(autouse=True)
 def _stable_live_gateway_identity(monkeypatch: pytest.MonkeyPatch):
+    for name in disable_operation._FORBIDDEN_AWS_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(
         maintenance,
         "_live_gateway_restart_authority_commitment",
@@ -51,6 +53,27 @@ def _stable_live_gateway_identity(monkeypatch: pytest.MonkeyPatch):
         "_require_hydrated_environment_commitment",
         lambda **kwargs: str(kwargs["expected_commitment"]),
     )
+
+
+def test_ci_environment_fixture_scrubs_static_aws_authority() -> None:
+    assert not (
+        disable_operation._FORBIDDEN_AWS_ENV_NAMES & set(os.environ)
+    )
+
+
+def test_prepare_still_rejects_explicit_static_aws_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeSecretsClient(
+        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n"
+    )
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "explicit-rejection-sentinel")
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="authority differs from production",
+    ):
+        _prepare(tmp_path, monkeypatch, client)
 
 
 def _locked_release_evidence() -> dict[str, object]:

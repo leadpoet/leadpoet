@@ -10,6 +10,7 @@ targeted regression run.
 
 from __future__ import annotations
 
+import configparser
 import fcntl
 import hashlib
 import io
@@ -51,6 +52,7 @@ LOCK_PATH = STATE_ROOT / "adapter.lock"
 REAL_PYTHON = "/usr/bin/python3.11"
 REAL_BASH = "/bin/bash"
 REAL_CURL = "/usr/bin/curl"
+REAL_GIT = "/usr/bin/git"
 _PCR0_CANDIDATE = os.environ.get("REHEARSAL_CANDIDATE_SHA", "").encode("ascii")
 PCR0 = artifact_pcr0(_PCR0_CANDIDATE.decode("ascii"))
 HASH64 = hashlib.sha256(b"leadpoet-local-restart-rehearsal").hexdigest()
@@ -73,6 +75,23 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
 }
 RUNSC_LOCK_PATH = Path("/opt/leadpoet/runsc-runtime.lock.json")
 EXTERNAL_ARTIFACT_ROOT = Path("/opt/leadpoet/external-artifacts")
+GITHUB_GIT_FIXTURE_REMOTE = Path("/srv/origin.git")
+LOCAL_GIT_FIXTURE_SOURCE = Path("/source")
+GIT_FETCH_REPOSITORY_ROOTS = (
+    Path("/home/ec2-user/leadpoet_repo"),
+    Path("/home/ec2-user/leadpoet/leadpoet"),
+    Path("/tmp"),
+)
+GATEWAY_SECRET_STATE_PATH = Path(
+    os.environ.get("REHEARSAL_DURABLE_STATE_ROOT", "/rehearsal-durable-state")
+) / "gateway-secret-state.json"
+LEGACY_GATEWAY_MINER_MAINTENANCE_FROM_SHA = (
+    "0dd3a385a23a3af0fa17210bfe02a39cc4023952"
+)
+POST_GATEWAY_MINER_MAINTENANCE_FROM_SHA = (
+    "7ac1553e32d85d9babda3b3836f4c93cf92e6d60"
+)
+GATEWAY_MINER_MAINTENANCE_LINEAGE_REPOSITORY = Path("/source")
 
 
 def _ensure_state() -> None:
@@ -391,6 +410,75 @@ def _write_json(path: str | Path, value: dict[str, Any]) -> None:
     )
 
 
+def _git_commit_is_ancestor(
+    ancestor: str,
+    descendant: str,
+    *,
+    repository: Path = GATEWAY_MINER_MAINTENANCE_LINEAGE_REPOSITORY,
+) -> bool:
+    result = subprocess.run(
+        [
+            REAL_GIT,
+            "-C",
+            str(repository),
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode not in {0, 1}:
+        raise ValueError("gateway miner-maintenance lineage is unavailable")
+    return result.returncode == 0
+
+
+def _gateway_miner_maintenance_lineage() -> str:
+    from_sha = os.environ.get("REHEARSAL_FROM_SHA", "").strip()
+    transition = os.environ.get("REHEARSAL_TRANSITION", "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", from_sha):
+        raise ValueError("gateway miner-maintenance from-SHA is invalid")
+    if transition == "rollback":
+        return "rollback"
+    if transition != "forward":
+        raise ValueError("gateway miner-maintenance transition is invalid")
+    if from_sha == LEGACY_GATEWAY_MINER_MAINTENANCE_FROM_SHA:
+        return "legacy"
+    if from_sha == POST_GATEWAY_MINER_MAINTENANCE_FROM_SHA:
+        return "post_rollout"
+    if _git_commit_is_ancestor(
+        POST_GATEWAY_MINER_MAINTENANCE_FROM_SHA,
+        from_sha,
+    ):
+        return "post_rollout"
+    raise ValueError("gateway miner-maintenance from-SHA lineage is unknown")
+
+
+def _initial_gateway_miner_submissions_state() -> str:
+    lineage = _gateway_miner_maintenance_lineage()
+    if lineage == "rollback":
+        raise ValueError(
+            "gateway miner-maintenance rollback requires durable state"
+        )
+    return "true" if lineage == "legacy" else "false"
+
+
+def _validate_gateway_miner_submissions_state(value: Any) -> str:
+    normalized = str(value).strip().lower()
+    if normalized not in {"true", "false"}:
+        raise ValueError("durable miner-maintenance setting is invalid")
+    lineage = _gateway_miner_maintenance_lineage()
+    if lineage == "legacy":
+        return "legacy_first_rollout" if normalized == "true" else "legacy_retry"
+    if normalized != "false":
+        raise ValueError(
+            "durable miner-maintenance setting conflicts with release lineage"
+        )
+    return lineage
+
+
 def _gateway_secret() -> dict[str, str]:
     values = {
         "AWS_REGION": "us-east-1",
@@ -408,6 +496,7 @@ def _gateway_secret() -> dict[str, str]:
         "DEEPLINE_API_KEY": "rehearsal-deepline",
         "TRUELIST_API_KEY": "rehearsal-truelist",
         "RESEARCH_LAB_TEE_PROTOCOL": "v2",
+        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "true",
         # Exercise an installed N-1 secret with stale source values. The
         # candidate restart must replace all three before gateway.main starts.
         "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "main",
@@ -491,6 +580,40 @@ def _gateway_secret() -> dict[str, str]:
             }
         )
     return values
+
+
+def _current_gateway_secret() -> dict[str, str]:
+    if not GATEWAY_SECRET_STATE_PATH.is_file():
+        secret = _gateway_secret()
+        secret["RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"] = (
+            _initial_gateway_miner_submissions_state()
+        )
+        return secret
+    state = json.loads(GATEWAY_SECRET_STATE_PATH.read_text(encoding="utf-8"))
+    if (
+        state.get("schema_version")
+        != "leadpoet.restart_rehearsal.gateway_secret_state.v1"
+        or state.get("secret_id") != "leadpoet/prod/gateway/env"
+        or not isinstance(state.get("versions"), dict)
+    ):
+        raise ValueError("durable rehearsal gateway secret state is invalid")
+    current = [
+        row
+        for row in state["versions"].values()
+        if isinstance(row, dict) and "AWSCURRENT" in (row.get("stages") or [])
+    ]
+    if len(current) != 1 or not isinstance(current[0].get("secret_string"), str):
+        raise ValueError("durable rehearsal gateway current secret is invalid")
+    secret = json.loads(current[0]["secret_string"])
+    if not isinstance(secret, dict) or not all(
+        isinstance(name, str) and isinstance(value, str)
+        for name, value in secret.items()
+    ):
+        raise ValueError("durable rehearsal gateway secret document is invalid")
+    _validate_gateway_miner_submissions_state(
+        secret.get("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED")
+    )
+    return secret
 
 
 def _candidate_worker_ids(
@@ -604,7 +727,27 @@ def _validator_secret() -> dict[str, str]:
 def command_aws(argv: list[str]) -> int:
     if argv[:2] == ["secretsmanager", "get-secret-value"]:
         component = os.environ.get("REHEARSAL_COMPONENT", "")
-        secret = _gateway_secret() if component == "gateway" else _validator_secret()
+        expected_secret_id = (
+            "leadpoet/prod/gateway/env"
+            if component == "gateway"
+            else "leadpoet/prod/validator/env"
+        )
+        if argv != [
+            "secretsmanager",
+            "get-secret-value",
+            "--secret-id",
+            expected_secret_id,
+            "--query",
+            "SecretString",
+            "--output",
+            "text",
+        ]:
+            return _fail("aws", argv, "Secrets Manager CLI contract differs")
+        secret = (
+            _current_gateway_secret()
+            if component == "gateway"
+            else _validator_secret()
+        )
         _record_external_boundary(
             kind="aws",
             argv=argv,
@@ -632,6 +775,154 @@ def command_aws(argv: list[str]) -> int:
         print("rehearsal-ecr-password")
         return 0
     return _fail("aws", argv, "unknown AWS operation")
+
+
+def _is_allowed_git_fetch_repository(repository: Path) -> bool:
+    try:
+        resolved = repository.resolve(strict=True)
+    except OSError:
+        return False
+    return any(
+        resolved == root.resolve() or root.resolve() in resolved.parents
+        for root in GIT_FETCH_REPOSITORY_ROOTS
+        if root.is_dir()
+    )
+
+
+def _git_origin_url_without_execution(repository: Path) -> str:
+    git_directory = repository / ".git"
+    config_path = git_directory / "config"
+    if (
+        not git_directory.is_dir()
+        or git_directory.is_symlink()
+        or not config_path.is_file()
+        or config_path.is_symlink()
+    ):
+        raise ValueError("candidate Git repository metadata is unsafe")
+    parser = configparser.RawConfigParser(
+        interpolation=None,
+        strict=True,
+    )
+    try:
+        parser.read_string(config_path.read_text(encoding="utf-8"))
+        origin_url = parser.get('remote "origin"', "url")
+    except (OSError, UnicodeError, configparser.Error) as exc:
+        raise ValueError("candidate Git origin configuration is invalid") from exc
+    if not origin_url or origin_url != origin_url.strip():
+        raise ValueError("candidate Git origin configuration is invalid")
+    return origin_url
+
+
+def _is_safe_origin_fetch(argv: list[str], fetch_index: int) -> bool:
+    values = argv[fetch_index + 1 :]
+    if values.count("origin") != 1:
+        return False
+    origin_index = values.index("origin")
+    options = values[:origin_index]
+    refs = values[origin_index + 1 :]
+    if not refs:
+        return False
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option in {"-q", "--quiet", "--prune", "--no-tags", "-f", "--force"}:
+            index += 1
+            continue
+        if option == "--depth":
+            if index + 1 >= len(options) or not options[index + 1].isdigit():
+                return False
+            index += 2
+            continue
+        if re.fullmatch(r"--depth=[1-9][0-9]*", option):
+            index += 1
+            continue
+        return False
+    for ref in refs:
+        if re.fullmatch(r"[0-9a-f]{40}", ref):
+            continue
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}", ref) and not any(
+            unsafe in ref for unsafe in ("..", "//", "@{")
+        ):
+            continue
+        if re.fullmatch(
+            r"\+refs/heads/([A-Za-z0-9][A-Za-z0-9._/-]{0,127}):"
+            r"refs/remotes/origin/\1",
+            ref,
+        ) and not any(unsafe in ref for unsafe in ("..", "//", "@{")):
+            continue
+        return False
+    return True
+
+
+def _is_local_fixture_seed_fetch(argv: list[str]) -> bool:
+    if len(argv) != 5:
+        return False
+    git_dir, command, quiet, source, refspec = argv
+    return (
+        git_dir == f"--git-dir={GITHUB_GIT_FIXTURE_REMOTE}"
+        and command == "fetch"
+        and quiet == "-q"
+        and source == str(LOCAL_GIT_FIXTURE_SOURCE)
+        and GITHUB_GIT_FIXTURE_REMOTE.is_dir()
+        and LOCAL_GIT_FIXTURE_SOURCE.is_dir()
+        and re.fullmatch(
+            r"[0-9a-f]{40}:refs/heads/(?:main|rehearsal-target|rehearsal-deployed)",
+            refspec,
+        )
+        is not None
+    )
+
+
+def command_git(argv: list[str]) -> int:
+    rewritten = list(argv)
+    fetch_indexes = [
+        index for index, value in enumerate(rewritten) if value == "fetch"
+    ]
+    if not fetch_indexes:
+        os.execv(REAL_GIT, [REAL_GIT, *rewritten])
+        return 127
+    if len(fetch_indexes) != 1:
+        return _fail("git", argv, "candidate Git fetch command is ambiguous")
+    if _is_local_fixture_seed_fetch(rewritten):
+        os.execv(REAL_GIT, [REAL_GIT, *rewritten])
+        return 127
+
+    fetch_index = fetch_indexes[0]
+    prefix = rewritten[:fetch_index]
+    if len(prefix) == 2 and prefix[0] == "-C":
+        repository = Path(prefix[1])
+    elif not prefix:
+        repository = Path.cwd()
+    else:
+        return _fail("git", argv, "candidate Git fetch repository differs")
+    if not _is_allowed_git_fetch_repository(repository):
+        return _fail("git", argv, "candidate Git fetch repository is not allowlisted")
+    if not _is_safe_origin_fetch(rewritten, fetch_index):
+        return _fail("git", argv, "candidate Git fetch arguments are unsafe")
+    try:
+        origin_url = _git_origin_url_without_execution(repository)
+    except ValueError as exc:
+        return _fail("git", argv, str(exc))
+    if origin_url not in {
+        "https://github.com/leadpoet/leadpoet.git",
+        str(GITHUB_GIT_FIXTURE_REMOTE),
+    }:
+        return _fail("git", argv, "candidate Git fetch origin is not allowlisted")
+    if not GITHUB_GIT_FIXTURE_REMOTE.is_dir():
+        return _fail("git", argv, "local Git fixture remote is unavailable")
+    origin_index = rewritten.index("origin", fetch_index + 1)
+    rewritten[origin_index] = str(GITHUB_GIT_FIXTURE_REMOTE)
+    if origin_url == "https://github.com/leadpoet/leadpoet.git":
+        _record_external_boundary(
+            kind="git",
+            argv=argv,
+            boundary="github_git_transport",
+            operation="fetch",
+            remote_url=origin_url,
+            fixture_remote=str(GITHUB_GIT_FIXTURE_REMOTE),
+        )
+    os.execv(REAL_GIT, [REAL_GIT, *rewritten])
+    return 127
 
 
 def _image_id(name: str) -> str:
@@ -2667,6 +2958,7 @@ COMMANDS = {
     "nitro-cli": command_nitro,
     "systemctl": command_systemctl,
     "curl": command_curl,
+    "git": command_git,
     "sudo": command_sudo,
     "df": command_df,
     "getconf": command_getconf,

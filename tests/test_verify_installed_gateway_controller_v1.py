@@ -18,7 +18,46 @@ from scripts import verify_installed_gateway_controller_v1 as verifier
 
 CANDIDATE_COMMIT = "a" * 40
 N_MINUS_ONE_COMMIT = next(iter(verifier.SUPPORTED_CONTROLLER_COMMITS))
-REAL_CANDIDATE_COMMIT = "f7595d26ee937412bde40a05c5758bc0f9ff9fca"
+
+
+def _source_candidate_commit(source_repository: Path) -> str:
+    candidate = subprocess.check_output(
+        ["git", "-C", str(source_repository), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    if len(candidate) != 40:
+        raise ValueError("source candidate commit is invalid")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repository),
+            "merge-base",
+            "--is-ancestor",
+            N_MINUS_ONE_COMMIT,
+            candidate,
+        ],
+        check=True,
+    )
+    return candidate
+
+
+def test_stale_repository_fixture_uses_resolvable_committed_ancestry() -> None:
+    source_repository = Path(__file__).resolve().parents[1]
+    candidate = _source_candidate_commit(source_repository)
+    assert candidate != N_MINUS_ONE_COMMIT
+    for commit in (N_MINUS_ONE_COMMIT, candidate):
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source_repository),
+                "cat-file",
+                "-e",
+                f"{commit}^{{commit}}",
+            ],
+            check=True,
+        )
 
 
 def _controller_fixture(
@@ -496,6 +535,7 @@ def test_exact_operator_shape_fetches_candidate_missing_from_deployed_repo(
     tmp_path: Path,
 ) -> None:
     source_repository = Path(__file__).resolve().parents[1]
+    real_candidate_commit = _source_candidate_commit(source_repository)
     origin = tmp_path / "origin.git"
     subprocess.run(
         ["git", "clone", "--bare", "-q", str(source_repository), str(origin)],
@@ -503,8 +543,19 @@ def test_exact_operator_shape_fetches_candidate_missing_from_deployed_repo(
     )
     for branch, commit in (
         ("deployed", N_MINUS_ONE_COMMIT),
-        ("main", REAL_CANDIDATE_COMMIT),
+        ("main", real_candidate_commit),
     ):
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(origin),
+                "cat-file",
+                "-e",
+                f"{commit}^{{commit}}",
+            ],
+            check=True,
+        )
         subprocess.run(
             [
                 "git",
@@ -541,7 +592,7 @@ def test_exact_operator_shape_fetches_candidate_missing_from_deployed_repo(
             str(repository),
             "cat-file",
             "-e",
-            f"{REAL_CANDIDATE_COMMIT}^{{commit}}",
+            f"{real_candidate_commit}^{{commit}}",
         ],
         check=False,
         capture_output=True,
@@ -610,7 +661,7 @@ def test_exact_operator_shape_fetches_candidate_missing_from_deployed_repo(
             "--host-restart-path",
             str(host_restart),
             "--expected-commit",
-            REAL_CANDIDATE_COMMIT,
+            real_candidate_commit,
             "--exec-helper",
             "scripts/gateway_git_deploy.py",
             "--",
@@ -622,7 +673,7 @@ def test_exact_operator_shape_fetches_candidate_missing_from_deployed_repo(
             "--branch",
             "main",
             "--deploy-commit",
-            REAL_CANDIDATE_COMMIT,
+            real_candidate_commit,
             "--plan-file",
             str(plan),
             "--manifest-file",
@@ -647,9 +698,9 @@ def test_exact_operator_shape_fetches_candidate_missing_from_deployed_repo(
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == REAL_CANDIDATE_COMMIT
+    assert result.stdout.strip() == real_candidate_commit
     assert json.loads(plan.read_text(encoding="utf-8"))["target_sha"] == (
-        REAL_CANDIDATE_COMMIT
+        real_candidate_commit
     )
     subprocess.run(
         [
@@ -658,7 +709,7 @@ def test_exact_operator_shape_fetches_candidate_missing_from_deployed_repo(
             str(repository),
             "cat-file",
             "-e",
-            f"{REAL_CANDIDATE_COMMIT}^{{commit}}",
+            f"{real_candidate_commit}^{{commit}}",
         ],
         check=True,
     )

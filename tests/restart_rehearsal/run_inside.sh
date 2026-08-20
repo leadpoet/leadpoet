@@ -101,6 +101,16 @@ preserve_rehearsal_evidence() {
       "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}-postgres-v2-schema-contract.json" \
       2>/dev/null || true
   fi
+  if [ -f "$REHEARSAL_DURABLE_STATE_ROOT/gateway-secret-state.json" ]; then
+    cp "$REHEARSAL_DURABLE_STATE_ROOT/gateway-secret-state.json" \
+      "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}-gateway-secret-state.json" \
+      2>/dev/null || true
+  fi
+  if [ -f "$REHEARSAL_STATE_ROOT/miner-maintenance-bootstrap.log" ]; then
+    cp "$REHEARSAL_STATE_ROOT/miner-maintenance-bootstrap.log" \
+      "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}-miner-maintenance-bootstrap.log" \
+      2>/dev/null || true
+  fi
 }
 cleanup_boundary_service() {
   if [ -n "$GATEWAY_ENCLAVE_SERVICE_PIDS" ]; then
@@ -146,7 +156,7 @@ EOF
 }
 
 for command in \
-  aws docker nitro-cli systemctl curl sudo df getconf awk sleep ss ctr nsenter \
+  aws docker nitro-cli systemctl curl git sudo df getconf awk sleep ss ctr nsenter \
   pgrep pkill python3 python3.11 bash; do
   make_adapter "$command"
 done
@@ -544,6 +554,11 @@ PY
 fi
 
 if [ "$COMPONENT" = "gateway" ]; then
+  MINER_FIRST_ROLLOUT=0
+  MINER_BOOTSTRAP_ROOT=""
+  MINER_HANDOFF_FILE=""
+  MINER_HANDOFF_NONCE=""
+  MINER_BOOTSTRAP_LOG=""
   git clone -q /srv/origin.git /home/ec2-user/leadpoet_repo
   git -C /home/ec2-user/leadpoet_repo checkout -q --detach "$FROM_SHA"
   git -C /home/ec2-user/leadpoet_repo branch -f main "$FROM_SHA"
@@ -552,6 +567,88 @@ if [ "$COMPONENT" = "gateway" ]; then
   git -C /home/ec2-user/leadpoet_repo show "$FROM_SHA:gw_restart.sh" \
     >/home/ec2-user/gw_restart.sh
   chmod 700 /home/ec2-user/gw_restart.sh
+
+  MINER_MAINTENANCE_MODE="$(
+    /usr/bin/python3.11 - <<'PY'
+from contract_adapter import (
+    _current_gateway_secret,
+    _validate_gateway_miner_submissions_state,
+)
+
+secret = _current_gateway_secret()
+print(
+    _validate_gateway_miner_submissions_state(
+        secret.get("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED")
+    )
+)
+PY
+  )"
+  if [ "$MINER_MAINTENANCE_MODE" = "legacy_first_rollout" ]; then
+    CONTROLLER_ROOT=/home/ec2-user/.config/leadpoet/restart-controller/gateway
+    CONTROLLER_PARENT="$(dirname "$CONTROLLER_ROOT")"
+    CONTROLLER_RELEASE="$CONTROLLER_ROOT/releases/$FROM_SHA"
+    install -d -m 0700 \
+      "$CONTROLLER_PARENT" \
+      "$CONTROLLER_ROOT" \
+      "$CONTROLLER_ROOT/releases" \
+      "$CONTROLLER_RELEASE" \
+      "$CONTROLLER_RELEASE/scripts" \
+      "$CONTROLLER_RELEASE/Leadpoet" \
+      "$CONTROLLER_RELEASE/Leadpoet/utils" \
+      "$CONTROLLER_RELEASE/gateway" \
+      "$CONTROLLER_RELEASE/gateway/tee"
+    git -C /source show "$FROM_SHA:gw_restart.sh" \
+      >"$CONTROLLER_RELEASE/gw_restart.sh"
+    git -C /source show "$FROM_SHA:scripts/gateway_git_deploy.py" \
+      >"$CONTROLLER_RELEASE/scripts/gateway_git_deploy.py"
+    git -C /source show \
+      "$FROM_SHA:Leadpoet/utils/exact_commit_restart_v2.py" \
+      >"$CONTROLLER_RELEASE/Leadpoet/utils/exact_commit_restart_v2.py"
+    git -C /source show "$FROM_SHA:gateway/tee/host_memory_guard_v2.py" \
+      >"$CONTROLLER_RELEASE/gateway/tee/host_memory_guard_v2.py"
+    chmod 0700 "$CONTROLLER_RELEASE/gw_restart.sh"
+    chmod 0600 \
+      "$CONTROLLER_RELEASE/scripts/gateway_git_deploy.py" \
+      "$CONTROLLER_RELEASE/Leadpoet/utils/exact_commit_restart_v2.py" \
+      "$CONTROLLER_RELEASE/gateway/tee/host_memory_guard_v2.py"
+    ln -s "releases/$FROM_SHA" "$CONTROLLER_ROOT/current"
+
+    git -C /home/ec2-user/leadpoet_repo remote set-url origin \
+      https://github.com/leadpoet/leadpoet.git
+    MINER_FIRST_ROLLOUT=1
+    MINER_BOOTSTRAP_ROOT="$(
+      mktemp -d /tmp/gateway-miner-maintenance-bootstrap.XXXXXX
+    )"
+    chmod 0700 "$MINER_BOOTSTRAP_ROOT"
+    mkdir -m 0700 "$MINER_BOOTSTRAP_ROOT/candidate"
+    PREPARED_SHA="$(
+      HOME=/home/ec2-user PYTHONPATH=/harness /usr/bin/python3.11 \
+        "$CONTROLLER_RELEASE/scripts/gateway_git_deploy.py" prepare \
+        --repo-root /home/ec2-user/leadpoet_repo \
+        --repo-url https://github.com/leadpoet/leadpoet.git \
+        --branch main \
+        --deploy-commit "$CANDIDATE_SHA" \
+        --plan-file "$MINER_BOOTSTRAP_ROOT/plan.json" \
+        --manifest-file "$MINER_BOOTSTRAP_ROOT/manifest.json" \
+        --last-good-file "$MINER_BOOTSTRAP_ROOT/last-good-unused.json"
+    )"
+    test "$PREPARED_SHA" = "$CANDIDATE_SHA"
+    GIT_NO_REPLACE_OBJECTS=1 \
+      git -C /home/ec2-user/leadpoet_repo archive "$PREPARED_SHA" \
+      | tar -xf - -C "$MINER_BOOTSTRAP_ROOT/candidate"
+    HOME=/home/ec2-user PYTHONPATH=/harness /usr/bin/python3.11 \
+      "$CONTROLLER_RELEASE/scripts/gateway_git_deploy.py" verify-tree \
+      --plan-file "$MINER_BOOTSTRAP_ROOT/plan.json" \
+      --materialized-root "$MINER_BOOTSTRAP_ROOT/candidate" \
+      --phase prepared_archive \
+      --strict-extras >/dev/null
+    MINER_HANDOFF_FILE="/tmp/leadpoet-gateway-miner-maintenance-handoff.rehearsal-${RUN_ORDINAL}.ready"
+    MINER_HANDOFF_NONCE="$(
+      printf '%s' "$FROM_SHA:$CANDIDATE_SHA:$RUN_ORDINAL" | sha256sum | cut -d' ' -f1
+    )"
+    MINER_BOOTSTRAP_LOG="$REHEARSAL_STATE_ROOT/miner-maintenance-bootstrap.log"
+    rm -f -- "$MINER_HANDOFF_FILE" "$MINER_BOOTSTRAP_LOG"
+  fi
 
   echo "REHEARSAL_START component=gateway from=$FROM_SHA candidate=$CANDIDATE_SHA transition=$TRANSITION scenario=$WEIGHT_READINESS_SCENARIO scope=$REHEARSAL_SCOPE"
   set +e
@@ -569,6 +666,87 @@ if [ "$COMPONENT" = "gateway" ]; then
       RESEARCH_LAB_TEE_PROTOCOL=v2 \
       GATEWAY_V2_DEFER_WORKER_FLEETS="$GATEWAY_DEFER_WORKER_FLEETS" \
       bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"
+    RESTART_STATUS=$?
+  elif [ "$MINER_FIRST_ROLLOUT" = "1" ]; then
+    env \
+      -u AWS_ACCESS_KEY_ID \
+      -u AWS_SECRET_ACCESS_KEY \
+      -u AWS_SESSION_TOKEN \
+      -u AWS_SECURITY_TOKEN \
+      -u AWS_PROFILE \
+      -u AWS_DEFAULT_PROFILE \
+      -u AWS_SHARED_CREDENTIALS_FILE \
+      -u AWS_WEB_IDENTITY_TOKEN_FILE \
+      -u AWS_ROLE_ARN \
+      -u AWS_ROLE_SESSION_NAME \
+      -u AWS_CONTAINER_CREDENTIALS_FULL_URI \
+      -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+      -u AWS_CONFIG_FILE \
+      -u AWS_CA_BUNDLE \
+      -u AWS_ENDPOINT_URL \
+      -u AWS_ENDPOINT_URL_S3 \
+      -u AWS_ENDPOINT_URL_STS \
+      -u AWS_ENDPOINT_URL_SECRETSMANAGER \
+      -u AWS_EC2_METADATA_SERVICE_ENDPOINT \
+      -u AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE \
+      -u AWS_METADATA_SERVICE_TIMEOUT \
+      -u AWS_METADATA_SERVICE_NUM_ATTEMPTS \
+      -u BOTO_CONFIG \
+      -u HTTP_PROXY \
+      -u HTTPS_PROXY \
+      -u ALL_PROXY \
+      -u http_proxy \
+      -u https_proxy \
+      -u all_proxy \
+      HOME=/home/ec2-user \
+      LEADPOET_REPO_ROOT=/home/ec2-user/leadpoet_repo \
+      GATEWAY_ROOT=/home/ec2-user/leadpoet_repo/gateway \
+      GATEWAY_LOG_ROOT=/home/ec2-user/gateway \
+      GATEWAY_LOG_FILE=/home/ec2-user/gateway/gateway.log \
+      GATEWAY_HOST_RESTART_SCRIPT=/home/ec2-user/gw_restart.sh \
+      GATEWAY_RESTART_CONTROLLER_ROOT=/home/ec2-user/.config/leadpoet/restart-controller/gateway \
+      GATEWAY_TEE_EIF_ROOT=/home/ec2-user/tee \
+      GATEWAY_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
+      GATEWAY_TEE_TOPOLOGY_MODE=full \
+      RESEARCH_LAB_TEE_PROTOCOL=v2 \
+      GATEWAY_V2_DEFER_WORKER_FLEETS="$GATEWAY_DEFER_WORKER_FLEETS" \
+      LEADPOET_GATEWAY_ENV_SECRET_ID=leadpoet/prod/gateway/env \
+      GATEWAY_V2_RELEASE_BUCKET=leadpoet-attested-v2-artifacts-493765492819 \
+      RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET=leadpoet-attested-v2-artifacts-493765492819 \
+      GATEWAY_V2_RELEASE_PREFIX=attested-v2/releases \
+      AWS_REGION=us-east-1 \
+      AWS_DEFAULT_REGION=us-east-1 \
+      bash "$MINER_BOOTSTRAP_ROOT/candidate/gw_restart.sh" \
+        --commit "$CANDIDATE_SHA" \
+        --miner-maintenance-bootstrap-plan "$MINER_BOOTSTRAP_ROOT/plan.json" \
+        --miner-maintenance-bootstrap-root "$MINER_BOOTSTRAP_ROOT" \
+        --miner-maintenance-handoff-file "$MINER_HANDOFF_FILE" \
+        --miner-maintenance-handoff-nonce "$MINER_HANDOFF_NONCE" \
+      > >(/usr/bin/tee "$MINER_BOOTSTRAP_LOG") 2>&1 &
+    MINER_BOOTSTRAP_PID=$!
+    MINER_BOOTSTRAP_READY=0
+    for _attempt in $(seq 1 6000); do
+      if grep -Fq \
+          "Prepared exact-candidate miner maintenance under the canonical restart lock" \
+          "$MINER_BOOTSTRAP_LOG" 2>/dev/null; then
+        MINER_BOOTSTRAP_READY=1
+        break
+      fi
+      kill -0 "$MINER_BOOTSTRAP_PID" 2>/dev/null || break
+      /bin/sleep 0.05
+    done
+    if [ "$MINER_BOOTSTRAP_READY" = "1" ]; then
+      printf '%s %s\n' "$CANDIDATE_SHA" "$MINER_HANDOFF_NONCE" \
+        >"$MINER_HANDOFF_FILE.tmp"
+      chmod 0600 "$MINER_HANDOFF_FILE.tmp"
+      mv -f -- "$MINER_HANDOFF_FILE.tmp" "$MINER_HANDOFF_FILE"
+    fi
+    wait "$MINER_BOOTSTRAP_PID"
+    RESTART_STATUS=$?
+    rm -f -- "$MINER_HANDOFF_FILE" "$MINER_HANDOFF_FILE.tmp"
+    if [[ "$MINER_BOOTSTRAP_ROOT" =~ ^/tmp/gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+$ ]]; then
+      rm -rf -- "$MINER_BOOTSTRAP_ROOT"
+    fi
   else
     env \
       HOME=/home/ec2-user \
@@ -583,8 +761,8 @@ if [ "$COMPONENT" = "gateway" ]; then
       RESEARCH_LAB_TEE_PROTOCOL=v2 \
       GATEWAY_V2_DEFER_WORKER_FLEETS="$GATEWAY_DEFER_WORKER_FLEETS" \
       bash /home/ec2-user/gw_restart.sh
+    RESTART_STATUS=$?
   fi
-  RESTART_STATUS=$?
   set -e
 
   if [ "$WEIGHT_READINESS_SCENARIO" = "plaintext_proxy_rejected" ]; then
@@ -666,6 +844,141 @@ PY
     fi
     echo "ERROR: exact gateway launcher failed" >&2
     exit "$RESTART_STATUS"
+  fi
+
+  if [ "$MINER_FIRST_ROLLOUT" = "1" ]; then
+    test ! -e "$MINER_HANDOFF_FILE"
+    test ! -e "$MINER_BOOTSTRAP_ROOT"
+    test ! -e /proc/$$/fd/190
+    /usr/bin/python3.11 - "$CANDIDATE_SHA" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+candidate = sys.argv[1]
+durable = json.loads(
+    Path("/rehearsal-durable-state/gateway-secret-state.json").read_text()
+)
+versions = durable["versions"]
+current = [row for row in versions.values() if "AWSCURRENT" in row["stages"]]
+previous = [row for row in versions.values() if "AWSPREVIOUS" in row["stages"]]
+if len(current) != 1 or len(previous) != 1:
+    raise SystemExit("miner-maintenance secret topology is not current/previous")
+current_secret = json.loads(current[0]["secret_string"])
+previous_secret = json.loads(previous[0]["secret_string"])
+if previous_secret.get("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED") != "true":
+    raise SystemExit("miner-maintenance rehearsal did not begin enabled")
+if current_secret.get("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED") != "false":
+    raise SystemExit("miner-maintenance rehearsal did not finish disabled")
+
+events = [
+    json.loads(line)
+    for line in Path("/rehearsal-state/events.jsonl").read_text().splitlines()
+    if line.strip()
+]
+secret_operations = {
+    row["operation"]
+    for row in events
+    if row.get("boundary") == "aws_secretsmanager"
+}
+if secret_operations != {
+    "describe_secret",
+    "get_secret_value",
+    "put_secret_value",
+    "update_secret_version_stage",
+}:
+    raise SystemExit(f"Secrets Manager operation inventory differs: {secret_operations}")
+release_operations = {
+    row["operation"]
+    for row in events
+    if row.get("boundary") == "aws_s3_object_lock"
+    and row.get("commit_sha") == candidate
+    and str(row.get("version_id") or "").startswith("local-release-")
+}
+if release_operations != {"list_object_versions", "head_object", "get_object"}:
+    raise SystemExit(f"locked release operation inventory differs: {release_operations}")
+identity_events = [
+    row
+    for row in events
+    if row.get("boundary") == "aws_instance_role"
+    and row.get("operation") == "get_caller_identity"
+]
+if not identity_events:
+    raise SystemExit("instance-role identity was not exercised")
+proof_stages = {
+    row.get("restart_stage")
+    for row in identity_events
+    if row.get("proof_fd_190_open") is True
+    and row.get("proof_fd_environment") == "190"
+}
+if not {
+    "v2_pre_shutdown_preflight",
+    "miner_maintenance_runtime_verify",
+} <= proof_stages:
+    raise SystemExit("sealed proof FD did not survive preflight and runtime verification")
+if os.environ.get("GATEWAY_MINER_MAINTENANCE_PROOF_FD") or Path(
+    "/proc/self/fd/190"
+).exists():
+    raise SystemExit("sealed proof FD escaped the completed restart")
+
+hydrated = Path("/home/ec2-user/.config/leadpoet/gateway.env").read_text()
+if "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n" not in hydrated:
+    raise SystemExit("installed N-1 hydration did not persist disabled state")
+bootstrap_log = Path(
+    "/rehearsal-state/miner-maintenance-bootstrap.log"
+).read_text()
+marker = "Prepared exact-candidate miner maintenance under the canonical restart lock"
+if bootstrap_log.count(marker) != 1:
+    raise SystemExit("canonical miner-maintenance bootstrap was not invoked exactly once")
+PY
+  else
+    test ! -e "$REHEARSAL_STATE_ROOT/miner-maintenance-bootstrap.log"
+    /usr/bin/python3.11 - "$MINER_MAINTENANCE_MODE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+mode = sys.argv[1]
+if mode not in {"legacy_retry", "post_rollout", "rollback"}:
+    raise SystemExit(f"direct miner-maintenance mode is invalid: {mode}")
+events_path = Path("/rehearsal-state/events.jsonl")
+events = (
+    [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if events_path.is_file()
+    else []
+)
+write_operations = [
+    row.get("operation")
+    for row in events
+    if row.get("boundary") == "aws_secretsmanager"
+    and row.get("operation")
+    in {"put_secret_value", "update_secret_version_stage"}
+]
+if write_operations:
+    raise SystemExit(
+        f"direct miner-maintenance restart performed secret writes: {write_operations}"
+    )
+durable_path = Path("/rehearsal-durable-state/gateway-secret-state.json")
+if durable_path.is_file():
+    durable = json.loads(durable_path.read_text(encoding="utf-8"))
+    current = [
+        row
+        for row in durable.get("versions", {}).values()
+        if "AWSCURRENT" in (row.get("stages") or [])
+    ]
+    if len(current) != 1:
+        raise SystemExit("direct miner-maintenance current stage is ambiguous")
+    secret = json.loads(current[0]["secret_string"])
+    if secret.get("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED") != "false":
+        raise SystemExit("direct miner-maintenance state is not disabled")
+elif mode in {"legacy_retry", "post_rollout"}:
+    raise SystemExit("direct forward restart did not persist miner-maintenance state")
+PY
   fi
 
   test "$(git -C /home/ec2-user/leadpoet_repo rev-parse HEAD)" = "$CANDIDATE_SHA"

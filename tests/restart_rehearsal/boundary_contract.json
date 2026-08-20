@@ -9,8 +9,16 @@
       "allowed_operations": ["decrypt", "encrypt", "generate_data_key_pair_without_plaintext", "sign", "verify"],
       "reject_unknown": true
     },
+    "aws_instance_role": {
+      "allowed_operations": ["get_caller_identity"],
+      "reject_unknown": true
+    },
+    "aws_secretsmanager": {
+      "allowed_operations": ["describe_secret", "get_secret_value", "put_secret_value", "update_secret_version_stage"],
+      "reject_unknown": true
+    },
     "aws_s3_object_lock": {
-      "allowed_operations": ["get_object", "head_object", "list_objects_v2", "put_object"],
+      "allowed_operations": ["get_object", "head_object", "list_object_versions", "list_objects_v2", "put_object"],
       "reject_unknown": true
     },
     "docker_daemon": {
@@ -27,6 +35,10 @@
         "stop",
         "tag"
       ],
+      "reject_unknown": true
+    },
+    "github_git_transport": {
+      "allowed_operations": ["fetch"],
       "reject_unknown": true
     },
     "host_kernel": {

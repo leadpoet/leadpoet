@@ -2378,6 +2378,558 @@ def test_gateway_rehearsal_artifact_store_is_object_locked_and_immutable(
         )
 
 
+@pytest.mark.parametrize(
+    ("from_sha", "transition", "ancestor", "state", "mode"),
+    [
+        (
+            "0dd3a385a23a3af0fa17210bfe02a39cc4023952",
+            "forward",
+            False,
+            "true",
+            "legacy_first_rollout",
+        ),
+        (
+            "7ac1553e32d85d9babda3b3836f4c93cf92e6d60",
+            "forward",
+            True,
+            "false",
+            "post_rollout",
+        ),
+        ("8" * 40, "forward", True, "false", "post_rollout"),
+    ],
+)
+def test_gateway_rehearsal_miner_state_is_derived_from_release_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+    from_sha: str,
+    transition: str,
+    ancestor: bool,
+    state: str,
+    mode: str,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    monkeypatch.setenv("REHEARSAL_FROM_SHA", from_sha)
+    monkeypatch.setenv("REHEARSAL_TRANSITION", transition)
+    ancestry_calls: list[tuple[str, str]] = []
+
+    def is_ancestor(parent: str, child: str, **_kwargs: Any) -> bool:
+        ancestry_calls.append((parent, child))
+        return ancestor
+
+    monkeypatch.setattr(contract_adapter, "_git_commit_is_ancestor", is_ancestor)
+    assert contract_adapter._initial_gateway_miner_submissions_state() == state
+    assert contract_adapter._validate_gateway_miner_submissions_state(state) == mode
+    if from_sha in {
+        contract_adapter.LEGACY_GATEWAY_MINER_MAINTENANCE_FROM_SHA,
+        contract_adapter.POST_GATEWAY_MINER_MAINTENANCE_FROM_SHA,
+    }:
+        assert ancestry_calls == []
+    else:
+        assert set(ancestry_calls) == {
+            (
+                contract_adapter.POST_GATEWAY_MINER_MAINTENANCE_FROM_SHA,
+                from_sha,
+            )
+        }
+
+
+def test_gateway_rehearsal_rollback_requires_durable_false_and_stays_direct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    monkeypatch.setenv("REHEARSAL_FROM_SHA", "9" * 40)
+    monkeypatch.setenv("REHEARSAL_TRANSITION", "rollback")
+    monkeypatch.setattr(
+        contract_adapter,
+        "_git_commit_is_ancestor",
+        lambda *_args, **_kwargs: pytest.fail("rollback must use durable state"),
+    )
+    with pytest.raises(ValueError, match="rollback requires durable state"):
+        contract_adapter._initial_gateway_miner_submissions_state()
+    assert (
+        contract_adapter._validate_gateway_miner_submissions_state("false")
+        == "rollback"
+    )
+    with pytest.raises(ValueError, match="conflicts with release lineage"):
+        contract_adapter._validate_gateway_miner_submissions_state("true")
+
+
+def test_gateway_rehearsal_unknown_miner_lineage_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    monkeypatch.setenv("REHEARSAL_FROM_SHA", "a" * 40)
+    monkeypatch.setenv("REHEARSAL_TRANSITION", "forward")
+    monkeypatch.setattr(
+        contract_adapter,
+        "_git_commit_is_ancestor",
+        lambda *_args, **_kwargs: False,
+    )
+    with pytest.raises(ValueError, match="lineage is unknown"):
+        contract_adapter._initial_gateway_miner_submissions_state()
+    with pytest.raises(ValueError, match="lineage is unknown"):
+        contract_adapter._validate_gateway_miner_submissions_state("false")
+
+
+def test_gateway_rehearsal_post_rollout_state_is_false_with_zero_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gateway.tee.disable_gateway_miner_submissions_secret import GATEWAY_SECRET_ID
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    state_root = tmp_path / "state"
+    durable_root = tmp_path / "durable"
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize, "EVENT_PATH", state_root / "events.jsonl"
+    )
+    monkeypatch.setattr(rehearsal_sitecustomize, "DURABLE_STATE_ROOT", durable_root)
+    monkeypatch.setenv(
+        "REHEARSAL_FROM_SHA",
+        contract_adapter.POST_GATEWAY_MINER_MAINTENANCE_FROM_SHA,
+    )
+    monkeypatch.setenv("REHEARSAL_TRANSITION", "forward")
+    monkeypatch.setattr(
+        contract_adapter,
+        "_git_commit_is_ancestor",
+        lambda ancestor, descendant, **_kwargs: (
+            ancestor == contract_adapter.POST_GATEWAY_MINER_MAINTENANCE_FROM_SHA
+            and descendant == contract_adapter.POST_GATEWAY_MINER_MAINTENANCE_FROM_SHA
+        ),
+    )
+    client = rehearsal_sitecustomize._LocalInstanceRoleSession(
+        botocore_session=object(),
+        region_name="us-east-1",
+    ).client("secretsmanager")
+    current = client.get_secret_value(
+        SecretId=GATEWAY_SECRET_ID,
+        VersionStage="AWSCURRENT",
+    )
+    client.describe_secret(SecretId=GATEWAY_SECRET_ID)
+    assert (
+        json.loads(current["SecretString"])[
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"
+        ]
+        == "false"
+    )
+    operations = [
+        row["operation"]
+        for row in (
+            json.loads(line)
+            for line in (state_root / "events.jsonl").read_text().splitlines()
+        )
+        if row.get("boundary") == "aws_secretsmanager"
+    ]
+    assert set(operations) == {"describe_secret", "get_secret_value"}
+    assert "put_secret_value" not in operations
+    assert "update_secret_version_stage" not in operations
+
+
+def test_gateway_rehearsal_instance_role_secret_transaction_is_durable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gateway.tee.disable_gateway_miner_submissions_secret import (
+        GATEWAY_SECRET_ID,
+        _apply_gateway_miner_submissions_secret,
+    )
+
+    state_root = tmp_path / "state"
+    durable_root = tmp_path / "durable"
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize, "EVENT_PATH", state_root / "events.jsonl"
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize, "DURABLE_STATE_ROOT", durable_root
+    )
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    monkeypatch.setenv(
+        "REHEARSAL_FROM_SHA",
+        "0dd3a385a23a3af0fa17210bfe02a39cc4023952",
+    )
+    monkeypatch.setenv("REHEARSAL_TRANSITION", "forward")
+    session = rehearsal_sitecustomize._LocalInstanceRoleSession(
+        botocore_session=object(),
+        region_name="us-east-1",
+    )
+    assert session.get_credentials().method == "iam-role"
+    assert session.client("sts").get_caller_identity()["Account"] == (
+        "493765492819"
+    )
+    client = session.client("secretsmanager")
+    initial = client.get_secret_value(
+        SecretId=GATEWAY_SECRET_ID,
+        VersionStage="AWSCURRENT",
+    )
+    assert (
+        json.loads(initial["SecretString"])[
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"
+        ]
+        == "true"
+    )
+    journal = tmp_path / "private" / "transaction.json"
+    journal.parent.mkdir(mode=0o700)
+    result = _apply_gateway_miner_submissions_secret(
+        secrets_client=client,
+        expected_current_version_id=initial["VersionId"],
+        recovery_journal_path=journal,
+    )
+    assert result["status"] == "updated"
+    final = client.get_secret_value(
+        SecretId=GATEWAY_SECRET_ID,
+        VersionStage="AWSCURRENT",
+    )
+    assert (
+        json.loads(final["SecretString"])[
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"
+        ]
+        == "false"
+    )
+    topology = client.describe_secret(SecretId=GATEWAY_SECRET_ID)[
+        "VersionIdsToStages"
+    ]
+    assert topology[initial["VersionId"]] == ["AWSPREVIOUS"]
+    assert topology[final["VersionId"]] == ["AWSCURRENT"]
+    assert not journal.exists()
+    assert not [path for path in durable_root.iterdir() if path.suffix == ".tmp"]
+    json.loads(
+        (durable_root / "gateway-secret-state.json").read_text(encoding="utf-8")
+    )
+    from tests.restart_rehearsal import contract_adapter
+
+    monkeypatch.setattr(
+        contract_adapter,
+        "GATEWAY_SECRET_STATE_PATH",
+        durable_root / "gateway-secret-state.json",
+    )
+    retry_state = contract_adapter._current_gateway_secret()[
+        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"
+    ]
+    assert retry_state == "false"
+    assert (
+        contract_adapter._validate_gateway_miner_submissions_state(retry_state)
+        == "legacy_retry"
+    )
+    operations = {
+        row["operation"]
+        for row in (
+            json.loads(line)
+            for line in (state_root / "events.jsonl").read_text().splitlines()
+        )
+        if row.get("boundary") == "aws_secretsmanager"
+    }
+    assert operations == {
+        "describe_secret",
+        "get_secret_value",
+        "put_secret_value",
+        "update_secret_version_stage",
+    }
+    with pytest.raises(ValueError, match="version fence differs"):
+        client.update_secret_version_stage(
+            SecretId=GATEWAY_SECRET_ID,
+            VersionStage="AWSCURRENT",
+            MoveToVersionId=initial["VersionId"],
+            RemoveFromVersionId=initial["VersionId"],
+        )
+    with pytest.raises(ValueError, match="service is unknown"):
+        session.client("lambda")
+    with pytest.raises(TypeError):
+        client.describe_secret(SecretId=GATEWAY_SECRET_ID, Unknown=True)
+
+
+def test_gateway_rehearsal_release_channel_is_singleton_and_version_pinned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize, "EVENT_PATH", tmp_path / "events.jsonl"
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_release_channel",
+        lambda commit: {"commit_sha": commit},
+    )
+    client = rehearsal_sitecustomize._LocalS3()
+    key = f"attested-v2/releases/{COMMIT}/release-channel-v2.json"
+    arguments = {
+        "Bucket": "leadpoet-attested-v2-artifacts-493765492819",
+        "Key": key,
+    }
+    history = client.list_object_versions(
+        Bucket=arguments["Bucket"], Prefix=key, MaxKeys=1000
+    )
+    assert history["IsTruncated"] is False
+    assert history["DeleteMarkers"] == []
+    assert len(history["Versions"]) == 1
+    version_id = history["Versions"][0]["VersionId"]
+    head = client.head_object(**arguments, VersionId=version_id)
+    response = client.get_object(**arguments, VersionId=version_id)
+    assert response["Body"].read() == (
+        b'{"commit_sha":"' + COMMIT.encode() + b'"}\n'
+    )
+    assert {
+        (
+            history["Versions"][0]["VersionId"],
+            history["Versions"][0]["ETag"],
+            history["Versions"][0]["Size"],
+        ),
+        (head["VersionId"], head["ETag"], head["ContentLength"]),
+        (response["VersionId"], response["ETag"], response["ContentLength"]),
+    } == {(version_id, head["ETag"], head["ContentLength"])}
+    assert head["ObjectLockMode"] == "COMPLIANCE"
+    assert head["ObjectLockRetainUntilDate"] > datetime.now(timezone.utc)
+    with pytest.raises(ValueError, match="version differs"):
+        client.get_object(**arguments, VersionId="wrong-version")
+
+
+def test_gateway_rehearsal_git_adapter_rewrites_only_github_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    fixture_remote = tmp_path / "origin.git"
+    fixture_remote.mkdir()
+    repository = tmp_path / "repo"
+    git_directory = repository / ".git"
+    git_directory.mkdir(parents=True)
+    (git_directory / "config").write_text(
+        '[core]\n\trepositoryformatversion = 0\n'
+        '[remote "origin"]\n'
+        '\turl = https://github.com/leadpoet/leadpoet.git\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        contract_adapter, "GITHUB_GIT_FIXTURE_REMOTE", fixture_remote
+    )
+    monkeypatch.setattr(
+        contract_adapter,
+        "GIT_FETCH_REPOSITORY_ROOTS",
+        (tmp_path,),
+    )
+    observed: dict[str, Any] = {}
+
+    def fake_boundary(**kwargs: Any) -> None:
+        observed["boundary"] = kwargs
+
+    def fake_exec(_executable: str, argv: list[str]) -> None:
+        observed["argv"] = argv
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter, "_record_external_boundary", fake_boundary)
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter.command_git(
+            [
+                "-C",
+                str(repository),
+                "fetch",
+                "--prune",
+                "origin",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ]
+        )
+    assert observed["argv"] == [
+        contract_adapter.REAL_GIT,
+        "-C",
+        str(repository),
+        "fetch",
+        "--prune",
+        str(fixture_remote),
+        "+refs/heads/main:refs/remotes/origin/main",
+    ]
+    assert observed["boundary"]["boundary"] == "github_git_transport"
+    assert observed["boundary"]["operation"] == "fetch"
+
+
+def test_gateway_rehearsal_git_adapter_keeps_candidate_fetch_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    fixture_remote = tmp_path / "origin.git"
+    fixture_remote.mkdir()
+    repository = tmp_path / "repo"
+    git_directory = repository / ".git"
+    git_directory.mkdir(parents=True)
+    (git_directory / "config").write_text(
+        '[core]\n\trepositoryformatversion = 0\n'
+        '[remote "origin"]\n'
+        f'\turl = {fixture_remote}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        contract_adapter, "GITHUB_GIT_FIXTURE_REMOTE", fixture_remote
+    )
+    monkeypatch.setattr(
+        contract_adapter,
+        "GIT_FETCH_REPOSITORY_ROOTS",
+        (tmp_path,),
+    )
+    observed: list[list[str]] = []
+
+    def fake_exec(_executable: str, argv: list[str]) -> None:
+        observed.append(argv)
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    monkeypatch.setattr(
+        contract_adapter,
+        "_record_external_boundary",
+        lambda **_kwargs: pytest.fail("local fetch is not an external boundary"),
+    )
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter.command_git(
+            ["-C", str(repository), "fetch", "origin", "main"]
+        )
+    assert observed == [
+        [
+            contract_adapter.REAL_GIT,
+            "-C",
+            str(repository),
+            "fetch",
+            str(fixture_remote),
+            "main",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("origin_url", "fetch_tail", "reason"),
+    [
+        (
+            "https://attacker.invalid/leadpoet.git",
+            ["origin", "main"],
+            "origin is not allowlisted",
+        ),
+        (
+            "https://github.com/leadpoet/leadpoet.git",
+            ["https://attacker.invalid/leadpoet.git", "main"],
+            "arguments are unsafe",
+        ),
+        (
+            "https://github.com/leadpoet/leadpoet.git",
+            ["--upload-pack=/tmp/attacker", "origin", "main"],
+            "arguments are unsafe",
+        ),
+    ],
+)
+def test_gateway_rehearsal_git_adapter_rejects_network_fetch_without_real_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    origin_url: str,
+    fetch_tail: list[str],
+    reason: str,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    fixture_remote = tmp_path / "origin.git"
+    fixture_remote.mkdir()
+    repository = tmp_path / "repo"
+    git_directory = repository / ".git"
+    git_directory.mkdir(parents=True)
+    (git_directory / "config").write_text(
+        '[core]\n\trepositoryformatversion = 0\n'
+        '[remote "origin"]\n'
+        f'\turl = {origin_url}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        contract_adapter, "GITHUB_GIT_FIXTURE_REMOTE", fixture_remote
+    )
+    monkeypatch.setattr(
+        contract_adapter,
+        "GIT_FETCH_REPOSITORY_ROOTS",
+        (tmp_path,),
+    )
+    exec_calls: list[list[str]] = []
+    failures: list[str] = []
+
+    def fake_exec(_executable: str, argv: list[str]) -> None:
+        exec_calls.append(argv)
+        raise AssertionError("unexpected real Git invocation")
+
+    def fake_fail(_kind: str, _argv: list[str], message: str) -> int:
+        failures.append(message)
+        return 97
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    monkeypatch.setattr(contract_adapter, "_fail", fake_fail)
+    assert (
+        contract_adapter.command_git(
+            ["-C", str(repository), "fetch", *fetch_tail]
+        )
+        == 97
+    )
+    assert exec_calls == []
+    assert failures == [f"candidate Git fetch {reason}"]
+
+
+def test_gateway_rehearsal_git_adapter_allows_only_local_fixture_seed_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    fixture_remote = tmp_path / "origin.git"
+    fixture_source = tmp_path / "source"
+    fixture_remote.mkdir()
+    fixture_source.mkdir()
+    monkeypatch.setattr(
+        contract_adapter, "GITHUB_GIT_FIXTURE_REMOTE", fixture_remote
+    )
+    monkeypatch.setattr(
+        contract_adapter, "LOCAL_GIT_FIXTURE_SOURCE", fixture_source
+    )
+    observed: list[list[str]] = []
+
+    def fake_exec(_executable: str, argv: list[str]) -> None:
+        observed.append(argv)
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    argv = [
+        f"--git-dir={fixture_remote}",
+        "fetch",
+        "-q",
+        str(fixture_source),
+        f"{'1' * 40}:refs/heads/main",
+    ]
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter.command_git(argv)
+    assert observed == [[contract_adapter.REAL_GIT, *argv]]
+
+
+def test_gateway_rehearsal_git_adapter_keeps_non_fetch_local_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    observed: list[list[str]] = []
+
+    def fake_exec(_executable: str, argv: list[str]) -> None:
+        observed.append(argv)
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    argv = ["-C", str(tmp_path), "status", "--short"]
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter.command_git(argv)
+    assert observed == [[contract_adapter.REAL_GIT, *argv]]
+
+
 def test_private_model_rehearsal_boundary_is_signed_and_fail_closed(
     tmp_path,
     monkeypatch,
@@ -8013,14 +8565,35 @@ def test_rehearsal_inherits_the_installed_cutover_manifest() -> None:
     assert '"status": "stateful_active"' not in script
 
 
-def test_forward_rehearsal_uses_the_normal_unpinned_operator_paths() -> None:
+def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths() -> None:
     script = (
         Path(__file__).resolve().parent / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+    adapter = (
+        Path(__file__).resolve().parent / "sitecustomize.py"
+    ).read_text(encoding="utf-8")
+    contract = (
+        Path(__file__).resolve().parent / "contract_adapter.py"
     ).read_text(encoding="utf-8")
 
     assert 'GATEWAY_DEPLOY_COMMIT="$CANDIDATE_SHA"' not in script
     assert 'VALIDATOR_DEPLOY_COMMIT="$CANDIDATE_SHA"' not in script
-    assert script.count('--commit "$CANDIDATE_SHA"') == 2
+    assert "0dd3a385a23a3af0fa17210bfe02a39cc4023952" in contract
+    assert "7ac1553e32d85d9babda3b3836f4c93cf92e6d60" in contract
+    assert '[ "$MINER_MAINTENANCE_MODE" = "legacy_first_rollout" ]' in script
+    assert '"legacy_retry", "post_rollout", "rollback"' in script
+    assert '"$MINER_BOOTSTRAP_ROOT/candidate/gw_restart.sh"' in script
+    assert '--miner-maintenance-bootstrap-plan "$MINER_BOOTSTRAP_ROOT/plan.json"' in script
+    assert '--miner-maintenance-handoff-file "$MINER_HANDOFF_FILE"' in script
+    assert (
+        "Prepared exact-candidate miner maintenance under the canonical restart lock"
+        in script
+    )
+    assert 'bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"' in script
+    assert 'bash /home/ec2-user/gw_restart.sh\n' in script
+    assert "direct miner-maintenance restart performed secret writes" in script
+    assert "return _real_boto3_client" not in adapter
+    assert 'raise ValueError("local boto3 AWS service is unknown")' in adapter
 
 
 def test_gateway_readiness_requires_exact_production_launcher_invocations() -> None:

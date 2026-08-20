@@ -1259,13 +1259,16 @@ def _build_consumer_runtime_probe_from_observation_v1(
     observation_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw = dict(observation)
-    if set(raw) != {"invariants", "qualification_outcome_protocol"} or not isinstance(
+    metadata_document = dict(metadata)
+    expected_observation_fields = {"invariants"}
+    if metadata_document.get("qualification_outcome_protocol") is not None:
+        expected_observation_fields.add("qualification_outcome_protocol")
+    if set(raw) != expected_observation_fields or not isinstance(
         raw.get("invariants"), Mapping
     ):
         raise ModelSandboxV2Error(
             "consumer runtime observation fields are invalid"
         )
-    metadata_document = dict(metadata)
     raw_qualification = raw.get("qualification_outcome_protocol")
     normalized_qualification = None
     if metadata_document.get("qualification_outcome_protocol") is not None:

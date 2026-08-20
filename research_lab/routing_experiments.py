@@ -4291,6 +4291,16 @@ def _v2_variant_artifact_key(variant: RoutingExperimentV2Variant) -> str:
     )
 
 
+def routing_experiment_v2_artifact_key(
+    variant: RoutingExperimentV2Variant,
+) -> str:
+    """Return PR93's canonical immutable artifact key for one variant."""
+
+    if not isinstance(variant, RoutingExperimentV2Variant):
+        raise RoutingExperimentError("v2_artifact_key_requires_typed_variant")
+    return _v2_variant_artifact_key(variant)
+
+
 def _company_first_artifact_key(
     artifact: SourcingModelArtifactIdentity,
 ) -> str:
@@ -5403,6 +5413,31 @@ def validate_routing_decision_receipt(
     if receipt.receipt_id != expected_id:
         errors.append("v2_decision_receipt_id_mismatch")
     return sorted(set(errors))
+
+
+def finalize_routing_decision_receipt_v2(
+    draft: RoutingDecisionReceiptV2,
+) -> RoutingDecisionReceiptV2:
+    """Assign and validate PR93's content-addressed decision receipt ID."""
+
+    if not isinstance(draft, RoutingDecisionReceiptV2):
+        raise RoutingExperimentError("v2_decision_draft_must_be_typed")
+    if draft.receipt_id != "routing_decision:pending":
+        raise RoutingExperimentError("v2_decision_draft_id_must_be_pending")
+    identity = draft.to_dict()
+    receipt = replace(
+        draft,
+        receipt_id=(
+            "routing_decision:"
+            + sha256_json(identity).split(":", 1)[1][:16]
+        ),
+    )
+    errors = validate_routing_decision_receipt(receipt)
+    if errors:
+        raise RoutingExperimentError(
+            "v2_decision_draft_is_invalid:" + ";".join(errors)
+        )
+    return receipt
 
 
 class RoutingDecisionReceiptRepository(Protocol):
@@ -6978,6 +7013,283 @@ def _v2_metrics(
     )
 
 
+def build_routing_evaluation_v2_from_observations(
+    spec: RoutingExperimentV2Spec,
+    *,
+    gold_labels: Mapping[str, bool],
+    predictions_by_variant: Mapping[str, Mapping[str, bool]],
+    receipts_by_variant: Mapping[
+        str, Mapping[str, Sequence[ProviderReceipt]]
+    ],
+    decision_receipts_by_variant: Mapping[
+        str, Sequence[RoutingDecisionReceiptV2]
+    ],
+    authoritative_billing_rollup: Callable[
+        [ProviderReceiptStore], Mapping[str, Any]
+    ] | None = None,
+    provider_cache_hits: int = 0,
+    provider_cache_misses: int = 0,
+) -> RoutingExperimentV2Evaluation:
+    """Apply PR93 evaluation and selection rules to exact observed receipts.
+
+    The caller supplies only outcomes emitted by a reviewed runner. This
+    function never compiles a route, selects a provider, or performs a call.
+    """
+
+    if not isinstance(spec, RoutingExperimentV2Spec):
+        raise RoutingExperimentError("v2_observed_evaluation_requires_typed_spec")
+    _v2_labels(spec.input, gold_labels)
+    variant_ids = {item.variant_id for item in spec.variants}
+    ordered_units = tuple(spec.input.calibration_unit_refs) + tuple(
+        spec.input.holdout_unit_refs
+    )
+    expected_units = set(ordered_units)
+    if (
+        set(predictions_by_variant) != variant_ids
+        or set(receipts_by_variant) != variant_ids
+        or set(decision_receipts_by_variant) != variant_ids
+    ):
+        raise RoutingExperimentError("v2_observed_evaluation_variant_set_differs")
+    normalized_receipts: dict[
+        str, dict[str, tuple[ProviderReceipt, ...]]
+    ] = {}
+    decision_refs_by_variant: dict[str, tuple[str, ...]] = {}
+    for variant in spec.variants:
+        variant_id = variant.variant_id
+        predictions = predictions_by_variant[variant_id]
+        receipts_by_unit = receipts_by_variant[variant_id]
+        decisions = tuple(decision_receipts_by_variant[variant_id])
+        if set(predictions) != expected_units or set(receipts_by_unit) != expected_units:
+            raise RoutingExperimentError("v2_observed_evaluation_unit_set_differs")
+        if any(type(value) is not bool for value in predictions.values()):
+            raise RoutingExperimentError("v2_observed_prediction_must_be_boolean")
+        if len(decisions) < len(ordered_units):
+            raise RoutingExperimentError("v2_observed_decision_coverage_differs")
+        decisions_by_unit: dict[str, list[RoutingDecisionReceiptV2]] = {}
+        for decision in decisions:
+            errors = validate_routing_decision_receipt(decision)
+            if errors:
+                raise RoutingExperimentError(
+                    "v2_observed_decision_is_invalid:" + ";".join(errors)
+                )
+            if (
+                decision.experiment_id != spec.experiment_id
+                or decision.variant_id != variant_id
+                or decision.stage != variant.stage
+            ):
+                raise RoutingExperimentError(
+                    "v2_observed_decision_lineage_differs"
+                )
+            decisions_by_unit.setdefault(decision.unit_ref, []).append(decision)
+        if set(decisions_by_unit) != expected_units:
+            raise RoutingExperimentError("v2_observed_decision_unit_set_differs")
+        normalized_receipts[variant_id] = {}
+        for unit_ref in ordered_units:
+            receipts = tuple(receipts_by_unit[unit_ref])
+            unit_decisions = decisions_by_unit[unit_ref]
+            decision_provider_refs = {
+                ref
+                for decision in unit_decisions
+                for ref in decision.provider_receipt_refs
+            }
+            execution_modes = {
+                decision.execution_mode for decision in unit_decisions
+            }
+            if len(execution_modes) != 1:
+                raise RoutingExperimentError(
+                    "v2_observed_decision_execution_mode_differs"
+                )
+            for receipt in receipts:
+                errors = validate_provider_receipt(receipt)
+                if errors:
+                    raise RoutingExperimentError(
+                        "v2_observed_provider_receipt_is_invalid:"
+                        + ";".join(errors)
+                    )
+                if (
+                    receipt.unit_ref != unit_ref
+                    or receipt.execution_mode not in execution_modes
+                    or receipt.receipt_ref not in decision_provider_refs
+                ):
+                    raise RoutingExperimentError(
+                        "v2_observed_provider_receipt_lineage_differs"
+                    )
+            if decision_provider_refs != {
+                item.receipt_ref for item in receipts
+            }:
+                raise RoutingExperimentError(
+                    "v2_observed_provider_receipt_coverage_differs"
+                )
+            normalized_receipts[variant_id][unit_ref] = receipts
+        decision_refs_by_variant[variant_id] = tuple(
+            sorted(item.receipt_id for item in decisions)
+        )
+
+    baseline_predictions = predictions_by_variant[spec.baseline_variant_id]
+    baseline_positive_units = {
+        "calibration": {
+            unit
+            for unit in spec.input.calibration_unit_refs
+            if baseline_predictions[unit]
+        },
+        "holdout": {
+            unit
+            for unit in spec.input.holdout_unit_refs
+            if baseline_predictions[unit]
+        },
+    }
+    evaluations: list[RoutingExperimentV2VariantEvaluation] = []
+    for variant in spec.variants:
+        variant_id = variant.variant_id
+        predictions = predictions_by_variant[variant_id]
+        receipts_by_unit = normalized_receipts[variant_id]
+        calibration = _v2_metrics(
+            split="calibration",
+            unit_refs=spec.input.calibration_unit_refs,
+            gold_labels=gold_labels,
+            predictions=predictions,
+            receipts_by_unit=receipts_by_unit,
+            baseline_positive_units=baseline_positive_units["calibration"],
+        )
+        holdout = _v2_metrics(
+            split="holdout",
+            unit_refs=spec.input.holdout_unit_refs,
+            gold_labels=gold_labels,
+            predictions=predictions,
+            receipts_by_unit=receipts_by_unit,
+            baseline_positive_units=baseline_positive_units["holdout"],
+        )
+        passed_precision = (
+            calibration.precision >= spec.gates.min_calibration_precision
+            and holdout.precision >= spec.gates.min_holdout_precision
+        )
+        passed_recall = holdout.recall >= spec.gates.min_holdout_recall
+        passed_cost = (
+            holdout.no_signal_credit_microunits
+            <= spec.gates.max_holdout_no_signal_credit_microunits
+        )
+        passed_efficiency = (
+            holdout.marginal_verified_positives_per_credit
+            >= spec.gates.min_marginal_verified_positives_per_credit
+        )
+        passed_transport = (
+            calibration.adapter_failure_count == 0
+            and holdout.adapter_failure_count == 0
+        )
+        provider_refs = tuple(sorted({
+            receipt.receipt_ref
+            for receipts in receipts_by_unit.values()
+            for receipt in receipts
+        }))
+        evaluations.append(RoutingExperimentV2VariantEvaluation(
+            variant_id=variant_id,
+            artifact_key=_v2_variant_artifact_key(variant),
+            stage=variant.stage,
+            calibration=calibration,
+            holdout=holdout,
+            passed_precision_gate=passed_precision,
+            passed_recall_gate=passed_recall,
+            passed_cost_gate=passed_cost,
+            passed_efficiency_gate=passed_efficiency,
+            passed=(
+                passed_precision
+                and passed_recall
+                and passed_cost
+                and passed_efficiency
+                and passed_transport
+            ),
+            decision_receipt_refs=decision_refs_by_variant[variant_id],
+            provider_receipt_refs=provider_refs,
+        ))
+    passing = [item for item in evaluations if item.passed]
+    selected = ""
+    if passing:
+        selected = sorted(
+            passing,
+            key=lambda item: (
+                item.holdout.total_credit_microunits,
+                len(item.provider_receipt_refs),
+                -item.holdout.unique_rescue_count,
+                -item.holdout.recall,
+                item.variant_id,
+            ),
+        )[0].variant_id
+
+    billing_id = billing_hash = ""
+    billing_total = 0
+    if spec.allow_live_credit_spend:
+        if authoritative_billing_rollup is None:
+            raise RoutingExperimentError(
+                "v2_live_spend_requires_authoritative_billing_rollup"
+            )
+        exact_total = _v2_exact_evaluation_receipt_total(normalized_receipts)
+        store = ProviderReceiptStore()
+        for receipts_by_unit in normalized_receipts.values():
+            for receipts in receipts_by_unit.values():
+                for receipt in receipts:
+                    store.put(
+                        provider_receipt_key(
+                            tool_id=receipt.tool_id,
+                            binding_version=receipt.binding_version,
+                            request_fingerprint=receipt.request_fingerprint,
+                        ),
+                        receipt,
+                    )
+        rollup = authoritative_billing_rollup(store)
+        if not isinstance(rollup, Mapping):
+            raise RoutingExperimentError(
+                "v2_authoritative_billing_rollup_must_be_an_object"
+            )
+        billing_id = _ensure_safe_ref(
+            rollup.get("rollup_id"), "v2_billing_rollup_id"
+        )
+        billing_hash = _ensure_hash(
+            rollup.get("rollup_hash"), "v2_billing_rollup_hash"
+        )
+        billing_total = int(rollup.get("total_credit_microunits", -1))
+        if billing_total != exact_total:
+            raise RoutingExperimentError(
+                "v2_authoritative_billing_total_mismatch"
+            )
+    elif authoritative_billing_rollup is not None:
+        raise RoutingExperimentError(
+            "v2_fixture_evaluation_cannot_use_billing_rollup"
+        )
+    if type(provider_cache_hits) is not int or provider_cache_hits < 0:
+        raise RoutingExperimentError("v2_provider_cache_hits_is_invalid")
+    if type(provider_cache_misses) is not int or provider_cache_misses < 0:
+        raise RoutingExperimentError("v2_provider_cache_misses_is_invalid")
+    decision_refs = tuple(sorted({
+        ref for item in evaluations for ref in item.decision_receipt_refs
+    }))
+    provider_refs = tuple(sorted({
+        ref for item in evaluations for ref in item.provider_receipt_refs
+    }))
+    draft = RoutingExperimentV2Evaluation(
+        receipt_id="routing_evaluation_v2:pending",
+        experiment_id=spec.experiment_id,
+        experiment_hash=spec.experiment_hash(),
+        variants=tuple(evaluations),
+        baseline_variant_id=spec.baseline_variant_id,
+        selected_variant_id=selected,
+        decision_receipt_refs=decision_refs,
+        provider_receipt_refs=provider_refs,
+        provider_cache_hits=provider_cache_hits,
+        provider_cache_misses=provider_cache_misses,
+        billing_rollup_id=billing_id,
+        billing_rollup_hash=billing_hash,
+        billing_rollup_total_credit_microunits=billing_total,
+        live_credit_spend=spec.allow_live_credit_spend,
+    )
+    return replace(
+        draft,
+        receipt_id=(
+            "routing_evaluation_v2:"
+            + sha256_json(draft.to_dict()).split(":", 1)[1][:16]
+        ),
+    )
+
+
 def evaluate_routing_experiment_v2(
     spec: RoutingExperimentV2Spec | Mapping[str, Any],
     *,
@@ -7051,16 +7363,13 @@ def evaluate_routing_experiment_v2(
     reserved_by_binding: dict[str, int] = {}
     per_variant_predictions: dict[str, dict[str, bool]] = {}
     per_variant_receipts: dict[str, dict[str, tuple[ProviderReceipt, ...]]] = {}
-    per_variant_decisions: dict[str, list[str]] = {}
-    per_variant_provider_refs: dict[str, set[str]] = {}
-    baseline_predictions: dict[str, dict[str, bool]] = {"calibration": {}, "holdout": {}}
+    per_variant_decisions: dict[str, list[RoutingDecisionReceiptV2]] = {}
     ordered_units = tuple(spec.input.calibration_unit_refs) + tuple(spec.input.holdout_unit_refs)
     for variant in spec.variants:
         adapter = adapters[variant.variant_id]
         predictions: dict[str, bool] = {}
         receipts_by_unit: dict[str, tuple[ProviderReceipt, ...]] = {}
-        decision_refs: list[str] = []
-        provider_refs: set[str] = set()
+        unit_decision_receipts: list[RoutingDecisionReceiptV2] = []
         for unit_ref in ordered_units:
             receipts, predicted, unit_decisions = _v2_run_unit(
                 spec,
@@ -7080,121 +7389,19 @@ def evaluate_routing_experiment_v2(
             )
             predictions[unit_ref] = predicted
             receipts_by_unit[unit_ref] = tuple(receipts)
-            decision_refs.extend(item.receipt_id for item in unit_decisions)
-            provider_refs.update(item.receipt_ref for item in receipts)
-            if variant.variant_id == spec.baseline_variant_id:
-                split = "calibration" if unit_ref in spec.input.calibration_unit_refs else "holdout"
-                baseline_predictions[split][unit_ref] = predicted
+            unit_decision_receipts.extend(unit_decisions)
         per_variant_predictions[variant.variant_id] = predictions
         per_variant_receipts[variant.variant_id] = receipts_by_unit
-        per_variant_decisions[variant.variant_id] = decision_refs
-        per_variant_provider_refs[variant.variant_id] = provider_refs
-    evaluations: list[RoutingExperimentV2VariantEvaluation] = []
-    for variant in spec.variants:
-        predictions = per_variant_predictions[variant.variant_id]
-        receipts_by_unit = per_variant_receipts[variant.variant_id]
-        calibration = _v2_metrics(
-            split="calibration",
-            unit_refs=spec.input.calibration_unit_refs,
-            gold_labels=gold_labels,
-            predictions=predictions,
-            receipts_by_unit=receipts_by_unit,
-            baseline_positive_units={unit for unit, value in baseline_predictions["calibration"].items() if value},
-        )
-        holdout = _v2_metrics(
-            split="holdout",
-            unit_refs=spec.input.holdout_unit_refs,
-            gold_labels=gold_labels,
-            predictions=predictions,
-            receipts_by_unit=receipts_by_unit,
-            baseline_positive_units={unit for unit, value in baseline_predictions["holdout"].items() if value},
-        )
-        passed_precision = calibration.precision >= spec.gates.min_calibration_precision and holdout.precision >= spec.gates.min_holdout_precision
-        passed_recall = holdout.recall >= spec.gates.min_holdout_recall
-        passed_cost = holdout.no_signal_credit_microunits <= spec.gates.max_holdout_no_signal_credit_microunits
-        passed_efficiency = holdout.marginal_verified_positives_per_credit >= spec.gates.min_marginal_verified_positives_per_credit
-        # A transport or adapter failure is not evidence of a negative
-        # signal.  It must make the variant ineligible even where the metric
-        # thresholds would otherwise pass (for example when no positive was
-        # expected in a split).
-        passed_transport = (
-            calibration.adapter_failure_count == 0
-            and holdout.adapter_failure_count == 0
-        )
-        evaluations.append(
-            RoutingExperimentV2VariantEvaluation(
-                variant_id=variant.variant_id,
-                artifact_key=_v2_variant_artifact_key(variant),
-                stage=variant.stage,
-                calibration=calibration,
-                holdout=holdout,
-                passed_precision_gate=passed_precision,
-                passed_recall_gate=passed_recall,
-                passed_cost_gate=passed_cost,
-                passed_efficiency_gate=passed_efficiency,
-                passed=(
-                    passed_precision
-                    and passed_recall
-                    and passed_cost
-                    and passed_efficiency
-                    and passed_transport
-                ),
-                decision_receipt_refs=tuple(sorted(set(per_variant_decisions[variant.variant_id]))),
-                provider_receipt_refs=tuple(sorted(per_variant_provider_refs[variant.variant_id])),
-            )
-        )
-    passing = [item for item in evaluations if item.passed]
-    selected = ""
-    if passing:
-        selected = sorted(
-            passing,
-            key=lambda item: (
-                item.holdout.total_credit_microunits,
-                len(item.provider_receipt_refs),
-                -item.holdout.unique_rescue_count,
-                -item.holdout.recall,
-                item.variant_id,
-            ),
-        )[0].variant_id
-    billing_id = billing_hash = ""
-    billing_total = 0
-    if spec.allow_live_credit_spend:
-        exact_receipt_total = _v2_exact_evaluation_receipt_total(per_variant_receipts)
-        # The authoritative callback reports the total for this exact
-        # evaluation.  Cached receipts remain part of the evaluation evidence
-        # and therefore remain part of the reconciled total.  The receipt
-        # total is derived from the exact evaluation references above, rather
-        # than from the reusable store's full contents.
-        rollup = authoritative_billing_rollup(store) if authoritative_billing_rollup is not None else None
-        if not isinstance(rollup, Mapping):
-            raise RoutingExperimentError("v2_authoritative_billing_rollup_must_be_an_object")
-        billing_id = _ensure_safe_ref(rollup.get("rollup_id"), "v2_billing_rollup_id")
-        billing_hash = _ensure_hash(rollup.get("rollup_hash"), "v2_billing_rollup_hash")
-        billing_total = int(rollup.get("total_credit_microunits", -1))
-        if billing_total != exact_receipt_total:
-            raise RoutingExperimentError("v2_authoritative_billing_total_mismatch")
-    decision_refs = tuple(sorted({ref for item in evaluations for ref in item.decision_receipt_refs}))
-    provider_refs = tuple(sorted({ref for item in evaluations for ref in item.provider_receipt_refs}))
-    draft = RoutingExperimentV2Evaluation(
-        receipt_id="routing_evaluation_v2:pending",
-        experiment_id=spec.experiment_id,
-        experiment_hash=spec.experiment_hash(),
-        variants=tuple(evaluations),
-        baseline_variant_id=spec.baseline_variant_id,
-        selected_variant_id=selected,
-        decision_receipt_refs=decision_refs,
-        provider_receipt_refs=provider_refs,
+        per_variant_decisions[variant.variant_id] = unit_decision_receipts
+    return build_routing_evaluation_v2_from_observations(
+        spec,
+        gold_labels=gold_labels,
+        predictions_by_variant=per_variant_predictions,
+        receipts_by_variant=per_variant_receipts,
+        decision_receipts_by_variant=per_variant_decisions,
+        authoritative_billing_rollup=authoritative_billing_rollup,
         provider_cache_hits=store.cache_hits - initial_cache_hits,
         provider_cache_misses=store.cache_misses - initial_cache_misses,
-        billing_rollup_id=billing_id,
-        billing_rollup_hash=billing_hash,
-        billing_rollup_total_credit_microunits=billing_total,
-        live_credit_spend=spec.allow_live_credit_spend,
-    )
-    payload = draft.to_dict()
-    return replace(
-        draft,
-        receipt_id="routing_evaluation_v2:" + sha256_json(payload).split(":", 1)[1][:16],
     )
 
 
@@ -7342,6 +7549,7 @@ __all__ = [
     "RoutingEvaluationGates",
     "RoutingEvaluationMetrics",
     "RoutingEvaluationReceipt",
+    "RoutingExperimentDeferredRecoverySignal",
     "RoutingExperimentError",
     "RoutingExperimentSpec",
     "RoutingExperimentV2Input",
@@ -7371,9 +7579,12 @@ __all__ = [
     "admit_llm_routing_profile_proposal",
     "evaluate_routing_experiment",
     "evaluate_routing_experiment_v2",
+    "build_routing_evaluation_v2_from_observations",
+    "finalize_routing_decision_receipt_v2",
     "promote_routing_profile_to_lab",
     "promote_routing_experiment_v2_to_lab",
     "provider_receipt_key",
+    "routing_experiment_v2_artifact_key",
     "select_smallest_passing_variant",
     "validate_frozen_routing_input",
     "validate_llm_routing_profile_proposal",

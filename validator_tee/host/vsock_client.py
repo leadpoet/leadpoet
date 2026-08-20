@@ -13,6 +13,7 @@ import socket
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import zlib
@@ -149,10 +150,13 @@ def get_enclave_cid() -> Optional[int]:
     if env_cid:
         try:
             cid = int(env_cid)
-            print(f"[vsock] Using ENCLAVE_CID from environment: {cid}")
+            print(
+                f"[vsock] Using ENCLAVE_CID from environment: {cid}",
+                file=sys.stderr,
+            )
             return cid
         except ValueError:
-            print(f"[vsock] Invalid ENCLAVE_CID: {env_cid}")
+            print(f"[vsock] Invalid ENCLAVE_CID: {env_cid}", file=sys.stderr)
     
     # Fall back to nitro-cli (for host). Resolve an absolute path first:
     # coordinator/worker processes can run with a PATH that lacks /usr/bin.
@@ -180,7 +184,7 @@ def get_enclave_cid() -> Optional[int]:
         return None
         
     except Exception as e:
-        print(f"[vsock] Error getting enclave CID: {e}")
+        print(f"[vsock] Error getting enclave CID: {e}", file=sys.stderr)
         return None
 
 

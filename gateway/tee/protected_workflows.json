@@ -2507,7 +2507,7 @@
       "symbol": "_VERSION_ID_RE"
     },
     {
-      "ast_sha256": "sha256:670294a90c838a8ed8feee850f8d9ba103dee7ba2fc1677b0d83185b4dcd2ef8",
+      "ast_sha256": "sha256:a56d0c1edcea5a67803e5807354858979561ff9e60a96757a70b97c64067d1a2",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "__module__"
     },
@@ -2555,6 +2555,11 @@
       "ast_sha256": "sha256:e10febe03cf89765f72d5b423c09fc3b07f06625e248e44bd9e0210b90758cec",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_json_object_without_duplicates"
+    },
+    {
+      "ast_sha256": "sha256:a709eb1408f5ba0c48764f249d227aba9bdf8a61b93404b238f9c990c0f382ca",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_leave_and_close_bootstrap_tree"
     },
     {
       "ast_sha256": "sha256:e8febb97cdf046d0263663c99cb1ff8aa8b752d61842eed269d8894b8418e690",
@@ -2787,7 +2792,7 @@
       "symbol": "_wait_for_handoff_marker"
     },
     {
-      "ast_sha256": "sha256:4a5e5c3e6d9b6d3fd59e549055c9dffee477240b0a201e68c10b76a1a9e88e3b",
+      "ast_sha256": "sha256:4cf4bab693c9d490c96d037dba78dc96932620436a8fc32a8554683cc92c26b4",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "bootstrap_gateway_miner_maintenance_restart"
     },
@@ -5812,7 +5817,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:10c4dad6915bced04b1b328c6e83f2be6a011f66ed1ed8d233d65a9bae13bb5a",
-  "protected_source_commit": "e8819b272e10649fb5785637dafa68a412e7f749",
+  "manifest_hash": "sha256:cf6a0ddaf424509f4a9f0d980d5dbcc458443ef1eb3918a6adcce0acb98dab5b",
+  "protected_source_commit": "a63a746d7950300dda0f6ccd5bf37b8cac3b9243",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

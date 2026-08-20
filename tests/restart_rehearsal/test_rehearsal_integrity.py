@@ -15,6 +15,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -2750,6 +2751,62 @@ def test_gateway_rehearsal_git_adapter_rewrites_only_github_fetch(
     ]
     assert observed["boundary"]["boundary"] == "github_git_transport"
     assert observed["boundary"]["operation"] == "fetch"
+
+
+def test_gateway_rehearsal_git_adapter_preserves_ref_less_origin_main_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    fixture_remote = tmp_path / "origin.git"
+    fixture_remote.mkdir()
+    repository = tmp_path / "repo"
+    git_directory = repository / ".git"
+    git_directory.mkdir(parents=True)
+    (git_directory / "config").write_text(
+        '[core]\n\trepositoryformatversion = 0\n'
+        '[remote "origin"]\n'
+        '\turl = https://github.com/leadpoet/leadpoet.git\n'
+        '\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        contract_adapter, "GITHUB_GIT_FIXTURE_REMOTE", fixture_remote
+    )
+    monkeypatch.setattr(
+        contract_adapter,
+        "GIT_FETCH_REPOSITORY_ROOTS",
+        (tmp_path,),
+    )
+    observed: dict[str, Any] = {}
+
+    def fake_exec(_executable: str, argv: list[str]) -> None:
+        observed["argv"] = argv
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    monkeypatch.setattr(
+        contract_adapter,
+        "_record_external_boundary",
+        lambda **kwargs: observed.setdefault("boundary", kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter.command_git(
+            ["-C", str(repository), "fetch", "origin"]
+        )
+
+    assert observed["argv"] == [
+        contract_adapter.REAL_GIT,
+        "-C",
+        str(repository),
+        "fetch",
+        str(fixture_remote),
+        "+refs/heads/main:refs/remotes/origin/main",
+    ]
+    assert observed["boundary"]["boundary"] == "github_git_transport"
 
 
 def test_gateway_rehearsal_git_adapter_keeps_candidate_fetch_local(
@@ -8757,6 +8814,41 @@ def test_module_provenance_follows_prepared_archive_python_path(
     assert rehearsal_contract_adapter._module_source(
         "gateway.tee.verify_weight_submission_ready_v2"
     ) == module_path
+
+
+def test_module_provenance_accepts_only_candidate_miner_bootstrap_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    with tempfile.TemporaryDirectory(
+        dir="/tmp",
+        prefix="gateway-miner-maintenance-bootstrap.",
+    ) as raw:
+        bootstrap_root = Path(raw)
+        module_path = (
+            bootstrap_root
+            / "candidate/gateway/tee/gateway_miner_maintenance_restart_v1.py"
+        )
+        module_path.parent.mkdir(parents=True)
+        module_path.write_text("VALUE = 'candidate archive'\n", encoding="utf-8")
+        outside = bootstrap_root / "unbound.py"
+        outside.write_text("VALUE = 'outside candidate'\n", encoding="utf-8")
+
+        relative, source_kind = contract_adapter._candidate_git_path(
+            module_path.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+        assert relative == Path(
+            "gateway/tee/gateway_miner_maintenance_restart_v1.py"
+        )
+        assert source_kind == "candidate_archive"
+        with pytest.raises(RuntimeError, match="outside the candidate checkout"):
+            contract_adapter._candidate_git_path(
+                outside.resolve(),
+                Path("/home/ec2-user/leadpoet_repo"),
+            )
 
 
 def test_docker_contract_inherits_name_only_environment_without_argv_secret(

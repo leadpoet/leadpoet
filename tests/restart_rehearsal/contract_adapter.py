@@ -217,12 +217,26 @@ def _candidate_git_path(resolved: Path, root: Path) -> tuple[Path, str]:
     if resolved == root or root in resolved.parents:
         return resolved.relative_to(root), "candidate_checkout"
 
+    archive_parent = Path("/tmp").resolve()
     for parent in resolved.parents:
         if (
-            parent.parent == Path("/tmp")
+            parent.parent == archive_parent
             and re.fullmatch(r"gateway-v2-preflight\.[A-Za-z0-9]+", parent.name)
         ):
             return resolved.relative_to(parent), "candidate_archive"
+        if (
+            parent.parent == archive_parent
+            and re.fullmatch(
+                r"gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+",
+                parent.name,
+            )
+        ):
+            candidate_archive = parent / "candidate"
+            if candidate_archive in resolved.parents:
+                return (
+                    resolved.relative_to(candidate_archive),
+                    "candidate_archive",
+                )
 
     raise RuntimeError(
         "production source is outside the candidate checkout or a recognized "
@@ -820,8 +834,6 @@ def _is_safe_origin_fetch(argv: list[str], fetch_index: int) -> bool:
     origin_index = values.index("origin")
     options = values[:origin_index]
     refs = values[origin_index + 1 :]
-    if not refs:
-        return False
     index = 0
     while index < len(options):
         option = options[index]
@@ -912,6 +924,10 @@ def command_git(argv: list[str]) -> int:
         return _fail("git", argv, "local Git fixture remote is unavailable")
     origin_index = rewritten.index("origin", fetch_index + 1)
     rewritten[origin_index] = str(GITHUB_GIT_FIXTURE_REMOTE)
+    if not rewritten[origin_index + 1 :]:
+        rewritten.append(
+            "+refs/heads/main:refs/remotes/origin/main"
+        )
     if origin_url == "https://github.com/leadpoet/leadpoet.git":
         _record_external_boundary(
             kind="git",

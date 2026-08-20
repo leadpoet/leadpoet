@@ -3097,7 +3097,7 @@
       "symbol": "_BoundedPipeCapture"
     },
     {
-      "ast_sha256": "sha256:00c62a8b88d780a78f3a39843ab5a37e2badeefb02ad2b31fa936ad567a620a2",
+      "ast_sha256": "sha256:f2a40db9b1d0088d0803c4a5f6698fe3ededcf67f5f67e08c29d7079093088f4",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_MEASURED_METADATA_BOOTSTRAP"
     },
@@ -6312,7 +6312,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:25b64de10f04ed5948346f3987f01a8c14fa229261c66e1916091b5cb615eefd",
-  "protected_source_commit": "b121722b5bf429894625874beb082bd93466d1bd",
+  "manifest_hash": "sha256:ef36b54879f9ece3a60f7985d19cd5fd103a653c50c6bb2a9b42c2695f1b53e2",
+  "protected_source_commit": "b09f7508ef39040c9fed125d13cba655e1b24096",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

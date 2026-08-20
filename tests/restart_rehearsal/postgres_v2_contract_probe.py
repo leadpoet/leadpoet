@@ -243,6 +243,18 @@ ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION = (
 PRODUCTION_PARITY_READER_MIGRATION = (
     "156-production-parity-readonly-role.sql"
 )
+ROUTING_EXPERIMENT_AUTHORITY_MIGRATION = (
+    "157-research-lab-routing-experiment-authority.sql"
+)
+ROUTING_EXPERIMENT_PURPOSES_MIGRATION = (
+    "158-research-lab-routing-experiment-purposes.sql"
+)
+ROUTING_EXECUTION_QUEUE_MIGRATION = (
+    "159-research-lab-routing-execution-queue.sql"
+)
+ROUTING_ADAPTER_FAILURES_MIGRATION = (
+    "160-research-lab-routing-adapter-failures.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -300,6 +312,10 @@ EXPECTED_APPLIED_MIGRATIONS = (
     MODEL_COMPATIBILITY_PURPOSE_MIGRATION,
     ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION,
     PRODUCTION_PARITY_READER_MIGRATION,
+    ROUTING_EXPERIMENT_AUTHORITY_MIGRATION,
+    ROUTING_EXPERIMENT_PURPOSES_MIGRATION,
+    ROUTING_EXECUTION_QUEUE_MIGRATION,
+    ROUTING_ADAPTER_FAILURES_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -5498,6 +5514,65 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         ):
             raise PostgresContractProbeError(
                 "post-156 production parity reader contract differs"
+            )
+        database.apply_migration(
+            scripts / ROUTING_EXPERIMENT_AUTHORITY_MIGRATION
+        )
+        applied.append(ROUTING_EXPERIMENT_AUTHORITY_MIGRATION)
+        database.apply_migration(
+            scripts / ROUTING_EXPERIMENT_PURPOSES_MIGRATION
+        )
+        applied.append(ROUTING_EXPERIMENT_PURPOSES_MIGRATION)
+        database.apply_migration(
+            scripts / ROUTING_EXECUTION_QUEUE_MIGRATION
+        )
+        applied.append(ROUTING_EXECUTION_QUEUE_MIGRATION)
+        database.apply_migration(
+            scripts / ROUTING_ADAPTER_FAILURES_MIGRATION
+        )
+        applied.append(ROUTING_ADAPTER_FAILURES_MIGRATION)
+        routing_purpose_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_candidate_hybrid_purpose_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        routing_definition = routing_purpose_contract.get(
+            "constraint_definition"
+        )
+        routing_clauses = re.findall(
+            r"\(role = '([^']+)'::text\)\s+AND\s+"
+            r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
+            routing_definition if isinstance(routing_definition, str) else "",
+            flags=re.DOTALL,
+        )
+        routing_pairs = {
+            role: frozenset(
+                re.findall(r"'([^']+)'::text", encoded_purposes)
+            )
+            for role, encoded_purposes in routing_clauses
+        }
+        expected_routing_pairs = {
+            str(role): frozenset(str(purpose) for purpose in purposes)
+            for role, purposes in ROLE_PURPOSES.items()
+        }
+        expected_routing_pairs["gateway_scoring"] = expected_routing_pairs[
+            "gateway_scoring"
+        ] | frozenset(
+            {
+                "research_lab.routing_experiment.v2",
+                "research_lab.routing_provider_evidence.v2",
+            }
+        )
+        if (
+            routing_purpose_contract.get("constraint_valid") is not True
+            or routing_pairs != expected_routing_pairs
+        ):
+            raise PostgresContractProbeError(
+                "post-158 routing experiment purpose contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 import os
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +31,7 @@ from research_lab.routing_experiments import (
     IsolatedRoutingAdapter,
     RoutingExperimentV2AdapterFactory,
     RoutingPlanStepBudget,
+    RoutingWorstCaseVariantBudget,
     SourceAddProvenance,
     SourcingModelArtifactIdentity,
     evaluate_routing_experiment_v2,
@@ -41,6 +44,33 @@ from research_lab.routing_experiments import (
 H = lambda char: "sha256:" + char * 64
 FEATURES = {"schema_version": "routing-feature-set:v1", "features": ["company.country.us", "icp.company_size.201_500"]}
 FEATURE_HASH = sha256_json(FEATURES)
+EXACT_MODEL_ROOT = "/private/tmp/sourcing-model-main-294ce330"
+EXACT_MODEL_SHA = "294ce330efaad72988b7e865450bba36be00eafd"
+
+
+def _exact_model_root() -> str:
+    """Return the requested model checkout, or skip when it is unavailable."""
+
+    model_root = os.getenv(
+        "LEADPOET_PINNED_SOURCING_MODEL_ROOT",
+        EXACT_MODEL_ROOT,
+    ).strip()
+    if not model_root or not os.path.isdir(model_root):
+        pytest.skip("exact Sourcing_model checkout is unavailable")
+    try:
+        actual_sha = subprocess.check_output(
+            ["git", "-C", model_root, "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        ).strip().lower()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.fail(f"could not verify exact Sourcing_model SHA: {exc}")
+    if actual_sha != EXACT_MODEL_SHA:
+        pytest.fail(
+            f"exact Sourcing_model checkout must be {EXACT_MODEL_SHA}; "
+            f"found {actual_sha}"
+        )
+    return model_root
 
 
 def _authority(*, model_hash: str, commit: str, route_hashes: dict[str, str]) -> dict[str, str]:
@@ -87,6 +117,14 @@ def _artifact(char: str = "a", commit_char: str = "1") -> tuple[SourcingModelArt
 class Plan:
     payload: dict
     tools: tuple[str, ...]
+
+    @property
+    def conditional_tool_ids(self) -> tuple[str, ...]:
+        return tuple(self.payload.get("conditional", ()))
+
+    @property
+    def dormant_tool_ids(self) -> tuple[str, ...]:
+        return tuple(self.payload.get("dormant", ()))
 
 
 class FakeV2Adapter:
@@ -187,6 +225,45 @@ class FakeV2Adapter:
         tools = tuple(tool for tool in payload.get("tools", ()) if available_tools.get(tool, False))
         return Plan({"feature_set_sha256": FEATURE_HASH.split(":", 1)[1], "steps": list(tools), "skipped": payload.get("skipped", {})}, tools)
 
+    # The v2 contract owns all intent waterfall transitions.  The default
+    # fixture deliberately has neither a confirmation nor a dormant
+    # challenger, but it must still expose the model contract so that the Lab
+    # never falls back to a site-owned route.
+    def has_conditional_confirmation(self, plan):
+        return bool(plan.payload.get("conditional", ()))
+
+    def compile_confirmation(self, parent_plan, *, profile, feature_set, available_tools, remaining_seconds, remaining_calls, credit_cap):
+        del profile, feature_set, available_tools, remaining_seconds, remaining_calls, credit_cap
+        conditional = tuple(parent_plan.payload.get("conditional", ()))
+        if not conditional:
+            raise ValueError("no conditional confirmation remains")
+        tool = conditional[0]
+        return Plan(
+            {
+                "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                "steps": [tool],
+                "conditional": [],
+                "dormant": list(parent_plan.payload.get("dormant", ())),
+            },
+            (tool,),
+        )
+
+    def compile_challenger(self, parent_plan, *, profile, feature_set, available_tools, attempted_tool_ids, attempted_source_lineages, remaining_seconds, remaining_calls, credit_cap):
+        del profile, feature_set, available_tools, attempted_source_lineages, remaining_seconds, remaining_calls, credit_cap
+        dormant = tuple(tool for tool in parent_plan.payload.get("dormant", ()) if tool not in attempted_tool_ids)
+        if not dormant:
+            raise ValueError("no distinct dormant challenger remains")
+        tool = dormant[0]
+        return Plan(
+            {
+                "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                "steps": [tool],
+                "conditional": [],
+                "dormant": [],
+            },
+            (tool,),
+        )
+
     def execute_plan(self, plan, invoke):
         results = []
         for tool in plan.tools:
@@ -213,10 +290,89 @@ class FakeV2Adapter:
 
     def considered_tool_ids(self, plan, *, stage):
         del stage
-        return tuple(dict.fromkeys((*plan.tools, *plan.payload.get("considered", ()))))
+        return tuple(
+            dict.fromkeys(
+                (
+                    *plan.tools,
+                    *plan.payload.get("considered", ()),
+                    *plan.payload.get("conditional", ()),
+                    *plan.payload.get("dormant", ()),
+                )
+            )
+        )
 
     def plan_decision_projection(self, plan):
         return {"attempted_tool_ids": plan.tools, "skipped_tool_reasons": plan.payload.get("skipped", {}), "outcome_reasons": {}}
+
+    def worst_case_variant_budget(
+        self,
+        payload,
+        *,
+        stage,
+        feature_set,
+        available_tools,
+        expected_signal_type="",
+    ):
+        del stage, feature_set, expected_signal_type
+        phases = (
+            tuple(payload.get("tools", ())),
+            tuple(payload.get("conditional", ())),
+            tuple(payload.get("dormant", ()))[:1],
+        )
+        tool_credit = {}
+        total = 0
+        for phase in phases:
+            for tool in phase:
+                if available_tools.get(tool, True) is not True:
+                    continue
+                tool_credit[tool] = tool_credit.get(tool, 0) + 10
+                total += 10
+        return RoutingWorstCaseVariantBudget(total, tool_credit)
+
+
+class FakeArtifactAuthority:
+    """Deterministic stand-in for the runtime KMS verification authority."""
+
+    def __init__(self, *, verified=True):
+        self.verified = verified
+        self.calls = []
+
+    def verify(self, *, artifact, manifest):
+        self.calls.append((artifact, manifest))
+        return {
+            "verified": self.verified,
+            "model_artifact_hash": artifact.model_artifact_hash,
+            "manifest_hash": artifact.manifest_hash,
+            "commit_sha": artifact.commit_sha,
+        }
+
+
+class FakePromotionAuthority:
+    authoritative = True
+
+    def __init__(self):
+        self.reconcile_calls = []
+        self.promote_calls = []
+
+    def reconcile(self, *, spec, evaluation):
+        self.reconcile_calls.append((spec, evaluation))
+        return {
+            "reconciled": True,
+            "experiment_hash": spec.experiment_hash(),
+            "evaluation_receipt_id": evaluation.receipt_id,
+            "evaluation_hash": sha256_json(evaluation.to_dict()),
+            "selected_variant_id": evaluation.selected_variant_id,
+        }
+
+    def promote(self, *, spec, evaluation, reconciliation):
+        self.promote_calls.append((spec, evaluation, reconciliation))
+        return sha256_json(
+            {
+                "reference": "test",
+                "evaluation": evaluation.receipt_id,
+                "experiment": spec.experiment_hash(),
+            }
+        )
 
 
 def _binding(binding_id: str, tool_id: str, manifest: str) -> ProviderBindingIdentity:
@@ -301,7 +457,16 @@ def _spec(stage: str = "intent_evidence", *, with_source_add: bool = False, two_
         (source_tool,) if with_source_add else (),
     )
     labels = {"cal-1": True, "hold-1": False}
-    inp = RoutingExperimentV2Input(stage, FEATURE_HASH, FEATURES, ("cal-1",), ("hold-1",), sha256_json({"labels": sorted(labels.items())}), "HIRING" if stage == "intent_evidence" else "")
+    inp = RoutingExperimentV2Input(
+        stage,
+        FEATURE_HASH,
+        FEATURES,
+        ("cal-1",),
+        ("hold-1",),
+        sha256_json({"labels": sorted(labels.items())}),
+        "HIRING" if stage == "intent_evidence" else "",
+        unit_input_set_hash=H("d"),
+    )
     spec = RoutingExperimentV2Spec(
         experiment_id=f"v2-{stage}", input=inp, variants=(baseline, candidate), baseline_variant_id="baseline",
         provider_bindings=tuple(bindings), credit_budget=ExperimentCreditBudget(1000, {item.binding_id: 1000 for item in bindings}),
@@ -322,6 +487,15 @@ def _runner(binding, unit_ref, request_fingerprint):
     }
     identity["receipt_ref"] = "provider_receipt:" + sha256_json({key: value for key, value in identity.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
     return identity
+
+
+def _measured_receipt(binding, unit_ref, request_fingerprint):
+    value = dict(_runner(binding, unit_ref, request_fingerprint))
+    value["execution_mode"] = ReceiptExecutionMode.MEASURED_LAB.value
+    value["receipt_ref"] = "provider_receipt:" + sha256_json(
+        {key: item for key, item in value.items() if key != "receipt_ref"}
+    ).split(":", 1)[1][:16]
+    return value
 
 
 def test_v2_intent_route_only_and_combined_source_add_run_with_decision_receipts():
@@ -346,11 +520,493 @@ def test_v2_intent_route_only_and_combined_source_add_run_with_decision_receipts
     tool_only = replace(spec.variants[1], variant_id="tool-only", routing_payload=tool_only_payload, change_kind="tool_only")
     tool_only_spec = replace(spec, experiment_id="v2-tool-only", variants=(spec.variants[0], tool_only))
     assert validate_routing_experiment_v2_spec(tool_only_spec, adapters={"baseline": adapters["baseline"], "tool-only": adapters["candidate"]}) == []
-    assert promote_routing_experiment_v2_to_lab(evaluation).startswith("sha256:")
+    promotion = FakePromotionAuthority()
+    assert promote_routing_experiment_v2_to_lab(
+        evaluation,
+        spec=spec,
+        authority=promotion,
+    ).startswith("sha256:")
+    assert promotion.promote_calls
 
 
-@pytest.mark.parametrize("stage", ["candidate_acquisition", "intent_evidence"])
-def test_v2_declared_new_tool_positive_for_candidate_and_intent(stage):
+def test_v2_variant_rejects_duplicate_tool_bindings_before_provider_calls():
+    spec, adapters, labels, tool, _source_tool = _spec("intent_evidence")
+    duplicate_binding = _binding("baseline-duplicate", tool, H("4"))
+    candidate = replace(
+        spec.variants[1],
+        binding_ids=("baseline", "baseline-duplicate"),
+    )
+    invalid = replace(
+        spec,
+        experiment_id="duplicate-tool-binding",
+        variants=(spec.variants[0], candidate),
+        provider_bindings=(*spec.provider_bindings, duplicate_binding),
+        credit_budget=replace(
+            spec.credit_budget,
+            provider_credit_ceilings={
+                **spec.credit_budget.provider_credit_ceilings,
+                "baseline-duplicate": 1000,
+            },
+        ),
+    )
+    errors = validate_routing_experiment_v2_spec(invalid, adapters=adapters)
+    assert (
+        "v2_variant_binding_tool_ids_must_be_unique:candidate:intent.baseline"
+        in errors
+    )
+    calls = []
+
+    def recording_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _runner(*args[:3])
+
+    with pytest.raises(RoutingExperimentError, match="variant_binding_tool_ids_must_be_unique"):
+        evaluate_routing_experiment_v2(
+            invalid,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=adapters,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_combined_route_allows_baseline_registered_source_add_plus_new_source_add():
+    spec, _adapters, labels, tool, source_tool = _spec(
+        "intent_evidence", with_source_add=True
+    )
+    registered_tool = "intent.source_add.baseline"
+    registered_binding = _binding("registered", registered_tool, H("6"))
+    baseline_payload = dict(spec.variants[0].routing_payload)
+    baseline_payload["tools"] = [tool, registered_tool]
+    baseline_payload["manifest_hashes"] = {tool: H("4"), registered_tool: H("6")}
+    candidate_payload = dict(spec.variants[1].routing_payload)
+    candidate_payload["tools"] = [tool, registered_tool, source_tool]
+    candidate_payload["manifest_hashes"] = {
+        tool: H("4"),
+        registered_tool: H("6"),
+        source_tool: candidate_payload["manifest_hashes"][source_tool],
+    }
+    variants = (
+        replace(
+            spec.variants[0],
+            routing_payload=baseline_payload,
+            binding_ids=("baseline", "registered"),
+        ),
+        replace(
+            spec.variants[1],
+            routing_payload=candidate_payload,
+            binding_ids=("baseline", "registered", "source"),
+        ),
+    )
+    updated = replace(
+        spec,
+        experiment_id="baseline-and-new-source-add",
+        variants=variants,
+        provider_bindings=(*spec.provider_bindings, registered_binding),
+        credit_budget=replace(
+            spec.credit_budget,
+            provider_credit_ceilings={
+                **spec.credit_budget.provider_credit_ceilings,
+                "registered": 1000,
+            },
+        ),
+    )
+    manifests = {tool: H("4"), registered_tool: H("6"), source_tool: variants[1].routing_payload["manifest_hashes"][source_tool]}
+    adapters = {
+        "baseline": FakeV2Adapter(
+            manifests, registered_source_add_tool_ids=(registered_tool,)
+        ),
+        "candidate": FakeV2Adapter(
+            manifests, registered_source_add_tool_ids=(registered_tool,)
+        ),
+    }
+    assert validate_routing_experiment_v2_spec(updated, adapters=adapters) == []
+    evaluation = evaluate_routing_experiment_v2(
+        updated,
+        gold_labels=labels,
+        runner=_runner,
+        adapters=adapters,
+        require_isolation=False,
+    )
+    assert evaluation.provider_receipt_refs
+
+
+def test_v2_requires_complete_provider_credit_ceilings():
+    spec, adapters, _labels, _tool, _source_tool = _spec("intent_evidence")
+    incomplete = replace(
+        spec,
+        credit_budget=ExperimentCreditBudget(spec.credit_budget.total_credit_microunits, {}),
+    )
+    errors = validate_routing_experiment_v2_spec(incomplete, adapters=adapters)
+    assert "v2_provider_credit_ceiling_missing:baseline" in errors
+
+
+def test_v2_required_tool_validation_uses_parsed_model_profile():
+    @dataclass(frozen=True)
+    class ParsedProfile:
+        payload: dict
+        tools: tuple[str, ...]
+
+    class ParsedProfileAdapter(FakeV2Adapter):
+        def parse_variant_payload(self, payload, *, stage):
+            raw = super().parse_variant_payload(payload, stage=stage)
+            return ParsedProfile(raw, tuple(raw.get("tools", ())))
+
+        @staticmethod
+        def _raw(payload):
+            return payload.payload if isinstance(payload, ParsedProfile) else payload
+
+        def validate_variant_payload(self, payload, **kwargs):
+            return super().validate_variant_payload(self._raw(payload), **kwargs)
+
+        def routing_identity(self, payload, **kwargs):
+            return super().routing_identity(self._raw(payload), **kwargs)
+
+        def compile_variant(self, payload, **kwargs):
+            raw = dict(self._raw(payload))
+            # The model profile declares a required tool, but this adversarial
+            # compiler drops it from the compiled route.
+            raw["tools"] = []
+            return super().compile_variant(raw, **kwargs)
+
+        def variant_tool_descriptors(self, payload, *, stage):
+            if not isinstance(payload, ParsedProfile):
+                # This is the old bug: a raw mapping has no typed ``tools``
+                # field and would make the required-tool set appear empty.
+                return ()
+            return tuple(
+                {
+                    "tool_id": tool_id,
+                    "stage": stage,
+                    "source_add": False,
+                    "required": True,
+                    "manifest_hash": payload.payload.get("manifest_hashes", {}).get(tool_id, ""),
+                }
+                for tool_id in payload.tools
+            )
+
+    spec, adapters, labels, tool, _source_tool = _spec("intent_evidence")
+    parsed_adapters = {
+        "baseline": ParsedProfileAdapter(adapters["baseline"].manifests),
+        "candidate": ParsedProfileAdapter(adapters["candidate"].manifests),
+    }
+    calls = []
+
+    def recording_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _runner(*args[:3])
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="required_tool_missing_from_compiled_plan:intent.baseline",
+    ):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=parsed_adapters,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_admits_experiment_worst_case_spend_before_first_provider_call():
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    # Each of two variants runs over two units at 10 microunits per initial
+    # plan: 40 microunits is required before the first call can be admitted.
+    underbudget = replace(
+        spec,
+        experiment_id="underbudget-multi-variant",
+        credit_budget=replace(spec.credit_budget, total_credit_microunits=39),
+    )
+    calls = []
+
+    def recording_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _runner(*args[:3])
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="v2_experiment_worst_case_credit_budget_exceeded",
+    ):
+        evaluate_routing_experiment_v2(
+            underbudget,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=adapters,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_admits_possible_confirmation_before_first_provider_call():
+    spec, adapters, labels, tool, _source_tool = _spec("intent_evidence")
+    continuation_tool = "intent.confirmation"
+    continuation_binding = _binding("confirmation", continuation_tool, H("5"))
+    variants = tuple(
+        replace(
+            variant,
+            binding_ids=(*variant.binding_ids, "confirmation"),
+            routing_payload={
+                **variant.routing_payload,
+                "conditional": [continuation_tool],
+            },
+        )
+        for variant in spec.variants
+    )
+    updated = replace(
+        spec,
+        experiment_id="underbudget-confirmation-wave",
+        variants=variants,
+        provider_bindings=(*spec.provider_bindings, continuation_binding),
+        credit_budget=replace(
+            spec.credit_budget,
+            # Initial waves cost 40.  The possible confirmation wave adds 40.
+            total_credit_microunits=79,
+            provider_credit_ceilings={
+                **spec.credit_budget.provider_credit_ceilings,
+                "confirmation": 1000,
+            },
+        ),
+    )
+
+    class ConfirmationBudgetAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del kwargs
+            return Plan(
+                {
+                    "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                    "steps": [tool],
+                    "conditional": [continuation_tool],
+                },
+                (tool,),
+            )
+
+        def has_conditional_confirmation(self, plan):
+            return bool(plan.payload.get("conditional"))
+
+        def compile_confirmation(self, parent_plan, **kwargs):
+            del kwargs
+            return Plan(
+                {
+                    "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                    "steps": [continuation_tool],
+                },
+                (continuation_tool,),
+            )
+
+    confirmation_adapters = {
+        key: ConfirmationBudgetAdapter(
+            {**value.manifests, continuation_tool: H("5")}
+        )
+        for key, value in adapters.items()
+    }
+    calls = []
+
+    def recording_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _runner(*args[:3])
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="v2_experiment_worst_case_credit_budget_exceeded",
+    ):
+        evaluate_routing_experiment_v2(
+            updated,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=confirmation_adapters,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_declared_confirmation_source_is_bound_before_calls_and_invoked_after_hit():
+    spec, adapters, labels, tool, source_tool = _spec(
+        "intent_evidence", with_source_add=True
+    )
+    candidate = replace(
+        spec.variants[1],
+        routing_payload={
+            **spec.variants[1].routing_payload,
+            "conditional": [source_tool],
+        },
+    )
+    conditional_spec = replace(
+        spec,
+        experiment_id="declared-confirmation-source",
+        variants=(spec.variants[0], candidate),
+    )
+
+    class ConditionalSourceAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del kwargs
+            conditional = tuple(payload.get("conditional", ()))
+            primary = tuple(
+                item for item in payload.get("tools", ()) if item not in conditional
+            )
+            return Plan(
+                {
+                    "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                    "steps": list(primary),
+                    "conditional": list(conditional),
+                },
+                primary,
+            )
+
+    conditional_adapters = {
+        "baseline": adapters["baseline"],
+        "candidate": ConditionalSourceAdapter(adapters["candidate"].manifests),
+    }
+    calls = []
+
+    def recording_runner(binding, unit, request):
+        calls.append((binding.tool_id, unit))
+        return _runner(binding, unit, request)
+
+    evaluation = evaluate_routing_experiment_v2(
+        conditional_spec,
+        gold_labels=labels,
+        runner=recording_runner,
+        adapters=conditional_adapters,
+        require_isolation=False,
+    )
+    assert evaluation.provider_receipt_refs
+    assert (source_tool, "cal-1") in calls
+    assert (source_tool, "hold-1") not in calls
+    assert (tool, "cal-1") in calls
+
+
+def test_v2_invalid_confirmation_compiler_fails_before_any_provider_call():
+    spec, adapters, labels, tool, _source_tool = _spec("intent_evidence")
+    confirmation_tool = "intent.confirmation"
+    confirmation_binding = _binding("confirmation", confirmation_tool, H("5"))
+    variants = tuple(
+        replace(
+            variant,
+            binding_ids=(*variant.binding_ids, "confirmation"),
+            routing_payload={
+                **variant.routing_payload,
+                "conditional": [confirmation_tool],
+            },
+        )
+        for variant in spec.variants
+    )
+    invalid = replace(
+        spec,
+        experiment_id="invalid-confirmation-global-preflight",
+        variants=variants,
+        provider_bindings=(*spec.provider_bindings, confirmation_binding),
+        credit_budget=replace(
+            spec.credit_budget,
+            provider_credit_ceilings={
+                **spec.credit_budget.provider_credit_ceilings,
+                "confirmation": 1_000,
+            },
+        ),
+    )
+
+    class BrokenConfirmationAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del kwargs
+            return Plan(
+                {
+                    "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                    "steps": [tool],
+                    "conditional": [confirmation_tool],
+                },
+                (tool,),
+            )
+
+        def compile_confirmation(self, parent_plan, **kwargs):
+            del parent_plan, kwargs
+            raise RuntimeError("confirmation compiler is invalid")
+
+    invalid_adapters = {
+        key: BrokenConfirmationAdapter(
+            {**value.manifests, confirmation_tool: H("5")}
+        )
+        for key, value in adapters.items()
+    }
+    calls = []
+
+    def recording_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _runner(*args[:3])
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="v2_model_confirmation_global_preflight_failed",
+    ):
+        evaluate_routing_experiment_v2(
+            invalid,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=invalid_adapters,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_declared_challenger_source_is_preflighted_and_runs_after_miss():
+    spec, adapters, labels, tool, source_tool = _spec(
+        "intent_evidence", with_source_add=True
+    )
+    candidate = replace(
+        spec.variants[1],
+        routing_payload={
+            **spec.variants[1].routing_payload,
+            "dormant": [source_tool],
+        },
+    )
+    challenger_spec = replace(
+        spec,
+        experiment_id="declared-challenger-source",
+        variants=(spec.variants[0], candidate),
+    )
+
+    class ChallengerSourceAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            del kwargs
+            dormant = tuple(payload.get("dormant", ()))
+            primary = tuple(
+                item for item in payload.get("tools", ()) if item not in dormant
+            )
+            return Plan(
+                {
+                    "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
+                    "steps": list(primary),
+                    "dormant": list(dormant),
+                },
+                primary,
+            )
+
+    challenger_adapters = {
+        "baseline": adapters["baseline"],
+        "candidate": ChallengerSourceAdapter(adapters["candidate"].manifests),
+    }
+    calls = []
+
+    def recording_runner(binding, unit, request):
+        calls.append((binding.tool_id, unit))
+        return _runner(binding, unit, request)
+
+    evaluation = evaluate_routing_experiment_v2(
+        challenger_spec,
+        gold_labels=labels,
+        runner=recording_runner,
+        adapters=challenger_adapters,
+        require_isolation=False,
+    )
+    assert evaluation.provider_receipt_refs
+    assert (source_tool, "hold-1") in calls
+    assert (source_tool, "cal-1") not in calls
+    assert (tool, "hold-1") in calls
+
+
+def test_v2_declared_new_intent_tool_positive():
+    stage = "intent_evidence"
     spec, adapters, labels, _tool, source_tool = _spec(
         stage, with_source_add=True
     )
@@ -655,6 +1311,89 @@ def test_v2_provider_receipt_is_the_only_positive_signal_authority():
     assert calls
 
 
+def test_pinned_adapter_invokes_atomic_workflow_once_and_accounts_full_call_units():
+    tool_id = "intent.source_add.predictleads_connections"
+
+    class Runtime:
+        EXECUTION_INVOKE = "invoke"
+
+        @staticmethod
+        def runtime_catalog(_availability):
+            return object()
+
+        @staticmethod
+        def runtime_policy():
+            return object()
+
+    step = SimpleNamespace(
+        tool_id=tool_id,
+        execution_mode="invoke",
+        max_calls=3,
+        stop_on_success=True,
+    )
+    plan = SimpleNamespace(route=SimpleNamespace(steps=(step,)))
+    adapter = PinnedSourcingModelRoutingAdapter(
+        runtime=Runtime(),
+        profiles=object(),
+        features=object(),
+        atomic_workflow_tool_ids=(tool_id,),
+    )
+    calls = []
+    results, predicted = adapter.execute_plan(
+        plan,
+        lambda selected: (
+            calls.append(selected)
+            or {"outcome": ProviderOutcome.SOURCE_MISS.value}
+        ),
+    )
+    assert calls == [tool_id]
+    assert len(results) == 1
+    assert predicted is False
+    assert adapter.execution_call_units(plan, tool_id) == 3
+
+    direct = PinnedSourcingModelRoutingAdapter(
+        runtime=Runtime(),
+        profiles=object(),
+        features=object(),
+    )
+    direct_calls = []
+    direct.execute_plan(
+        plan,
+        lambda selected: (
+            direct_calls.append(selected)
+            or {"outcome": ProviderOutcome.SOURCE_MISS.value}
+        ),
+    )
+    assert direct_calls == [tool_id, tool_id, tool_id]
+    assert direct.execution_call_units(plan, tool_id) == 1
+
+
+def test_v2_rejects_invalid_atomic_workflow_call_units_before_runner():
+    spec, adapters, labels, tool, _source_tool = _spec("intent_evidence")
+
+    class InvalidAtomicUnitsAdapter(FakeV2Adapter):
+        def execution_call_units(self, plan, tool_id):
+            del plan, tool_id
+            return 3
+
+    calls = []
+    with pytest.raises(
+        RoutingExperimentError,
+        match="v2_model_plan_execution_call_units_are_invalid",
+    ):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=lambda *args: calls.append(args),
+            adapters={
+                "baseline": InvalidAtomicUnitsAdapter({tool: H("4")}),
+                "candidate": adapters["candidate"],
+            },
+            require_isolation=False,
+        )
+    assert calls == []
+
+
 @pytest.mark.parametrize("case", ["omitted", "extra"])
 def test_v2_source_add_provenance_must_match_declared_new_tools(case):
     spec, adapters, labels, _tool, _source_tool = _spec(
@@ -873,7 +1612,37 @@ def test_v2_empty_considered_no_call_plan_is_allowed():
 
 
 def test_v2_canonicalizes_skipped_receipt_order_to_considered_tools():
-    spec, adapters, labels, tool, source_tool = _spec("intent_evidence", with_source_add=True)
+    spec, adapters, labels, tool, _source_tool = _spec("intent_evidence")
+    second_tool = "intent.secondary"
+    second_binding = _binding("secondary", second_tool, H("5"))
+    candidate = replace(
+        spec.variants[1],
+        routing_payload={
+            "stage": "intent_evidence",
+            "tools": [tool, second_tool],
+            "manifest_hashes": {tool: H("4"), second_tool: H("5")},
+            "signal_type": "HIRING",
+            "route_change_class": "custom",
+            "route_variant": "candidate-reverse-skip",
+        },
+        binding_ids=("baseline", "secondary"),
+    )
+    spec = replace(
+        spec,
+        variants=(spec.variants[0], candidate),
+        provider_bindings=(*spec.provider_bindings, second_binding),
+        credit_budget=replace(
+            spec.credit_budget,
+            provider_credit_ceilings={
+                **spec.credit_budget.provider_credit_ceilings,
+                "secondary": 1000,
+            },
+        ),
+    )
+    adapters = {
+        "baseline": FakeV2Adapter({tool: H("4"), second_tool: H("5")} ),
+        "candidate": FakeV2Adapter({tool: H("4"), second_tool: H("5")} ),
+    }
 
     class ReverseSkipAdapter(FakeV2Adapter):
         def compile_variant(self, payload, **kwargs):
@@ -882,7 +1651,7 @@ def test_v2_canonicalizes_skipped_receipt_order_to_considered_tools():
                 {
                     "feature_set_sha256": FEATURE_HASH.split(":", 1)[1],
                     "steps": [],
-                    "considered": [tool, source_tool],
+                    "considered": [tool, second_tool],
                 },
                 (),
             )
@@ -893,13 +1662,13 @@ def test_v2_canonicalizes_skipped_receipt_order_to_considered_tools():
 
         def considered_tool_ids(self, plan, *, stage):
             del plan, stage
-            return (tool, source_tool)
+            return (tool, second_tool)
 
         def plan_decision_projection(self, plan):
             del plan
             return {
                 "skipped_tool_reasons": {
-                    source_tool: "second",
+                    second_tool: "second",
                     tool: "first",
                 },
                 "attempted_tool_ids": (),
@@ -921,7 +1690,7 @@ def test_v2_canonicalizes_skipped_receipt_order_to_considered_tools():
     candidate_receipts = [item for item in decisions.values() if item.variant_id == "candidate"]
     assert candidate_receipts
     assert all(
-        receipt.skipped_tool_reasons == ((tool, "first"), (source_tool, "second"))
+        receipt.skipped_tool_reasons == ((tool, "first"), (second_tool, "second"))
         for receipt in candidate_receipts
     )
 
@@ -1462,6 +2231,7 @@ def test_v2_live_runner_with_named_authorization_parameter_passes(tmp_path):
             "rollup_hash": H("8"),
             "total_credit_microunits": 40,
         },
+        artifact_authority=FakeArtifactAuthority(),
         require_isolation=False,
     )
     assert evaluation.live_credit_spend is True
@@ -1848,13 +2618,19 @@ def test_v2_live_billing_is_explicit_and_never_promoted(tmp_path):
         value["receipt_ref"] = "provider_receipt:" + sha256_json({key: item for key, item in value.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
         return value
     rollup = lambda _store: {"rollup_id": "billing-v2", "rollup_hash": H("7"), "total_credit_microunits": 40}
-    evaluation = evaluate_routing_experiment_v2(measured, gold_labels=labels, runner=measured_runner, adapters=adapters, receipt_store=store, decision_store=decisions, authoritative_billing_rollup=rollup, require_isolation=False)
+    evaluation = evaluate_routing_experiment_v2(measured, gold_labels=labels, runner=measured_runner, adapters=adapters, receipt_store=store, decision_store=decisions, authoritative_billing_rollup=rollup, artifact_authority=FakeArtifactAuthority(), require_isolation=False)
     assert evaluation.live_credit_spend is True
-    with pytest.raises(RoutingExperimentError, match="cannot_auto_promote"):
+    with pytest.raises(RoutingExperimentError, match="promotion_spec_must_be_typed"):
         promote_routing_experiment_v2_to_lab(evaluation)
+    promotion = FakePromotionAuthority()
+    assert promote_routing_experiment_v2_to_lab(
+        evaluation,
+        spec=measured,
+        authority=promotion,
+    ).startswith("sha256:")
 
 
-def test_v2_live_resume_uses_exact_measured_cache_and_zero_new_billing(tmp_path):
+def test_v2_live_resume_reconciles_all_cached_receipt_costs(tmp_path):
     spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
     measured = replace(
         spec,
@@ -1876,7 +2652,7 @@ def test_v2_live_resume_uses_exact_measured_cache_and_zero_new_billing(tmp_path)
         value["receipt_ref"] = "provider_receipt:" + sha256_json({key: item for key, item in value.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
         return value
 
-    rollups = iter((40, 0))
+    rollups = iter((40, 40))
     first = evaluate_routing_experiment_v2(
         measured,
         gold_labels=labels,
@@ -1885,6 +2661,7 @@ def test_v2_live_resume_uses_exact_measured_cache_and_zero_new_billing(tmp_path)
         receipt_store=store,
         decision_store=decisions,
         authoritative_billing_rollup=lambda _store: {"rollup_id": "r1", "rollup_hash": H("7"), "total_credit_microunits": next(rollups)},
+        artifact_authority=FakeArtifactAuthority(),
         require_isolation=False,
     )
     assert first.billing_rollup_total_credit_microunits == 40
@@ -1902,11 +2679,180 @@ def test_v2_live_resume_uses_exact_measured_cache_and_zero_new_billing(tmp_path)
         receipt_store=store,
         decision_store=RoutingDecisionReceiptStore(JsonlRoutingDecisionReceiptRepository(decision_path)),
         authoritative_billing_rollup=lambda _store: {"rollup_id": "r2", "rollup_hash": H("8"), "total_credit_microunits": next(rollups)},
+        artifact_authority=FakeArtifactAuthority(),
         require_isolation=False,
     )
-    assert resumed.billing_rollup_total_credit_microunits == 0
+    assert resumed.billing_rollup_total_credit_microunits == 40
     assert resumed.provider_cache_hits == 4
     assert all(item.holdout.total_credit_microunits == 10 for item in resumed.variants)
+
+
+def test_v2_live_mixed_cache_and_fresh_receipts_reconcile_to_exact_total(tmp_path):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        experiment_id=spec.experiment_id + "-mixed-cache",
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+    from research_lab.routing_experiments import JsonlProviderReceiptRepository
+
+    full_store = ProviderReceiptStore(
+        JsonlProviderReceiptRepository(tmp_path / "full.jsonl")
+    )
+    evaluate_routing_experiment_v2(
+        measured,
+        gold_labels=labels,
+        runner=lambda binding, unit, request, authorization: _measured_receipt(
+            binding, unit, request
+        ),
+        adapters=adapters,
+        receipt_store=full_store,
+        decision_store=RoutingDecisionReceiptStore(
+            JsonlRoutingDecisionReceiptRepository(tmp_path / "full-decisions.jsonl")
+        ),
+        authoritative_billing_rollup=lambda _store: {
+            "rollup_id": "full",
+            "rollup_hash": H("7"),
+            "total_credit_microunits": 40,
+        },
+        artifact_authority=FakeArtifactAuthority(),
+        require_isolation=False,
+    )
+
+    partial_store = ProviderReceiptStore(
+        JsonlProviderReceiptRepository(tmp_path / "partial.jsonl")
+    )
+    full_keys = tuple(full_store.repository.keys())
+    assert len(full_keys) == 4
+    for key in full_keys[:2]:
+        receipt = full_store.repository.get(key)
+        assert receipt is not None
+        partial_store.put(key, receipt)
+    fresh_calls = []
+
+    def fresh_runner(binding, unit, request, authorization):
+        fresh_calls.append((binding.tool_id, unit))
+        return _measured_receipt(binding, unit, request)
+
+    mixed = evaluate_routing_experiment_v2(
+        measured,
+        gold_labels=labels,
+        runner=fresh_runner,
+        adapters=adapters,
+        receipt_store=partial_store,
+        decision_store=RoutingDecisionReceiptStore(
+            JsonlRoutingDecisionReceiptRepository(tmp_path / "partial-decisions.jsonl")
+        ),
+        authoritative_billing_rollup=lambda _store: {
+            "rollup_id": "mixed",
+            "rollup_hash": H("8"),
+            "total_credit_microunits": 40,
+        },
+        artifact_authority=FakeArtifactAuthority(),
+        require_isolation=False,
+    )
+    assert mixed.billing_rollup_total_credit_microunits == 40
+    assert mixed.provider_cache_hits == 2
+    assert mixed.provider_cache_misses == 2
+    assert len(fresh_calls) == 2
+
+
+def test_v2_live_replay_does_not_double_count_cached_receipts(tmp_path):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        experiment_id=spec.experiment_id + "-replay",
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+    from research_lab.routing_experiments import JsonlProviderReceiptRepository
+
+    store = ProviderReceiptStore(
+        JsonlProviderReceiptRepository(tmp_path / "replay.jsonl")
+    )
+    decisions_path = tmp_path / "replay-decisions.jsonl"
+    first = evaluate_routing_experiment_v2(
+        measured,
+        gold_labels=labels,
+        runner=lambda binding, unit, request, authorization: _measured_receipt(
+            binding, unit, request
+        ),
+        adapters=adapters,
+        receipt_store=store,
+        decision_store=RoutingDecisionReceiptStore(
+            JsonlRoutingDecisionReceiptRepository(decisions_path)
+        ),
+        authoritative_billing_rollup=lambda _store: {
+            "rollup_id": "replay-1",
+            "rollup_hash": H("7"),
+            "total_credit_microunits": 40,
+        },
+        artifact_authority=FakeArtifactAuthority(),
+        require_isolation=False,
+    )
+    replay = evaluate_routing_experiment_v2(
+        measured,
+        gold_labels=labels,
+        runner=lambda binding, unit, request, authorization: pytest.fail(
+            "replay made a provider call"
+        ),
+        adapters=adapters,
+        receipt_store=store,
+        decision_store=RoutingDecisionReceiptStore(
+            JsonlRoutingDecisionReceiptRepository(decisions_path)
+        ),
+        authoritative_billing_rollup=lambda _store: {
+            "rollup_id": "replay-2",
+            "rollup_hash": H("8"),
+            "total_credit_microunits": 40,
+        },
+        artifact_authority=FakeArtifactAuthority(),
+        require_isolation=False,
+    )
+    assert first.billing_rollup_total_credit_microunits == 40
+    assert replay.billing_rollup_total_credit_microunits == 40
+    assert replay.provider_cache_hits == 4
+    assert len(store) == 4
+
+
+def test_v2_live_billing_accepts_exact_experiment_budget_boundary(tmp_path):
+    spec, adapters, labels, _tool, _source_tool = _spec("intent_evidence")
+    measured = replace(
+        spec,
+        experiment_id=spec.experiment_id + "-exact-budget",
+        credit_budget=replace(
+            spec.credit_budget,
+            total_credit_microunits=40,
+            provider_credit_ceilings={"baseline": 40},
+        ),
+        allow_live_credit_spend=True,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+    from research_lab.routing_experiments import JsonlProviderReceiptRepository
+
+    evaluation = evaluate_routing_experiment_v2(
+        measured,
+        gold_labels=labels,
+        runner=lambda binding, unit, request, authorization: _measured_receipt(
+            binding, unit, request
+        ),
+        adapters=adapters,
+        receipt_store=ProviderReceiptStore(
+            JsonlProviderReceiptRepository(tmp_path / "exact-budget.jsonl")
+        ),
+        decision_store=RoutingDecisionReceiptStore(
+            JsonlRoutingDecisionReceiptRepository(tmp_path / "exact-budget-decisions.jsonl")
+        ),
+        authoritative_billing_rollup=lambda _store: {
+            "rollup_id": "exact-budget",
+            "rollup_hash": H("9"),
+            "total_credit_microunits": 40,
+        },
+        artifact_authority=FakeArtifactAuthority(),
+        require_isolation=False,
+    )
+    assert evaluation.billing_rollup_total_credit_microunits == 40
 
 
 def test_v2_route_payload_changes_cannot_reuse_same_request_cache():
@@ -1968,6 +2914,7 @@ def test_v2_live_mode_rejects_fixture_or_replay_cache_entries(tmp_path):
         receipt_store=measured_store,
         decision_store=decisions,
         authoritative_billing_rollup=lambda _store: {"rollup_id": "m", "rollup_hash": H("7"), "total_credit_microunits": 40},
+        artifact_authority=FakeArtifactAuthority(),
         require_isolation=False,
     )
     fixture_store = ProviderReceiptStore(JsonlProviderReceiptRepository(tmp_path / "fixture.jsonl"))
@@ -1994,15 +2941,20 @@ def test_v2_live_mode_rejects_fixture_or_replay_cache_entries(tmp_path):
                 JsonlRoutingDecisionReceiptRepository(tmp_path / "fixture-decisions.jsonl")
             ),
             authoritative_billing_rollup=lambda _store: {"rollup_id": "m2", "rollup_hash": H("8"), "total_credit_microunits": 0},
+            artifact_authority=FakeArtifactAuthority(),
             require_isolation=False,
         )
 
 
 def test_exact_candidate_model_profile_and_plan_contract():
-    model_root = os.getenv("LEADPOET_PINNED_SOURCING_MODEL_ROOT", "").strip()
-    if not model_root:
-        pytest.skip("set LEADPOET_PINNED_SOURCING_MODEL_ROOT for exact model integration")
+    model_root = _exact_model_root()
     adapter = PinnedSourcingModelRoutingAdapter.from_model_root(model_root)
+    assert adapter.observed_artifact_identity()["commit_sha"] == EXACT_MODEL_SHA
+    # SHA 294 has a candidate profile contract but no candidate SourceAdd
+    # registration. A candidate experiment must not invent one in the Lab.
+    assert adapter.registered_source_add_tool_ids(
+        stage="candidate_acquisition"
+    ) == ()
     metadata = adapter.candidate_profiles.candidate_routing_profile_metadata()
     feature_set = adapter.parse_feature_set(FEATURES)
     default_payload = metadata["profiles"][0]
@@ -2093,4 +3045,304 @@ def test_exact_candidate_model_profile_and_plan_contract():
         ],
     ]
     inserted = adapter.parse_variant_payload(inserted_payload, stage="candidate_acquisition")
+    inserted_errors = adapter.validate_variant_payload(
+        inserted,
+        stage="candidate_acquisition",
+        feature_set=feature_set,
+        binding_tool_ids={
+            item.tool_id for item in adapter.catalog.tools
+        } | {"candidate.source_add.synthetic"},
+        binding_source_lineages={
+            item.tool_id: f"lineage.{item.tool_id}"
+            for item in adapter.catalog.tools
+        } | {"candidate.source_add.synthetic": "lineage.synthetic"},
+    )
+    assert (
+        "candidate_profile_tool_missing_from_catalog:"
+        "candidate.source_add.synthetic"
+    ) in inserted_errors
     assert adapter.routing_identity(inserted, stage="candidate_acquisition", exclude_tool_ids=("candidate.source_add.synthetic",)) == adapter.routing_identity(profile, stage="candidate_acquisition")
+
+
+def test_exact_model_intent_source_adds_can_be_profiled_bound_and_considered():
+    model_root = _exact_model_root()
+    adapter = PinnedSourcingModelRoutingAdapter.from_model_root(model_root)
+    assert adapter.observed_artifact_identity()["commit_sha"] == EXACT_MODEL_SHA
+    feature_set = adapter.parse_feature_set(FEATURES)
+    profile_metadata = adapter.profiles.routing_profile_metadata()["profiles"]
+    registrations = tuple(
+        item
+        for item in adapter.runtime.SOURCE_ADD_ROUTING_REGISTRATIONS
+        if item.stage == adapter.runtime.STAGE_INTENT_EVIDENCE
+    )
+    required_tool_ids = {
+        "intent.source_add.bloomberry",
+        "intent.source_add.bloomberry_jobs",
+        "intent.source_add.builtwith",
+        "intent.source_add.podscan",
+        "intent.source_add.predictleads_connections",
+        "intent.source_add.predictleads_financing",
+        "intent.source_add.predictleads_jobs",
+        "intent.source_add.predictleads_news",
+        "intent.source_add.predictleads_technology",
+        "intent.source_add.sumble",
+    }
+    registered_tool_ids = set(
+        adapter.registered_source_add_tool_ids(stage="intent_evidence")
+    )
+    assert registered_tool_ids == required_tool_ids
+    assert {item.tool_id for item in registrations} == registered_tool_ids
+
+    for registration in registrations:
+        signal_type = registration.intent_categories[0]
+        base_payload = next(
+            item
+            for item in profile_metadata
+            if item["intent_category"] == signal_type
+        )
+        phase = (
+            "confirmation"
+            if "routing.confirmation_only" in registration.capabilities
+            else "primary"
+        )
+        payload = dict(base_payload)
+        payload["profile_id"] = f"exact-source-add-{registration.provider_id}"
+        payload["is_default"] = False
+        steps = [dict(item) for item in payload["steps"]]
+        for step in steps:
+            if step["phase"] == phase:
+                step["order"] = int(step["order"]) + 1
+        steps.append(
+            {
+                "tool_id": registration.tool_id,
+                "phase": phase,
+                "order": 0,
+                "source_lineage_id": registration.route_name,
+                "required": False,
+            }
+        )
+        payload["steps"] = steps
+        payload["call_cap"] = 100
+        payload["credit_cap"] = 1_000.0
+        payload["challenger_call_cap"] = 10
+        payload["challenger_credit_cap"] = 1_000.0
+        profile = adapter.parse_variant_payload(payload, stage="intent_evidence")
+        assert registration.tool_id in {
+            step.tool_id for step in profile.steps
+        }
+        lineages = {
+            step.tool_id: step.source_lineage_id for step in profile.steps
+        }
+        assert adapter.validate_variant_payload(
+            profile,
+            stage="intent_evidence",
+            feature_set=feature_set,
+            binding_tool_ids=frozenset(lineages),
+            binding_source_lineages=lineages,
+            expected_signal_type=signal_type,
+        ) == []
+        descriptor = next(
+            item
+            for item in adapter.variant_tool_descriptors(
+                profile, stage="intent_evidence"
+            )
+            if item["tool_id"] == registration.tool_id
+        )
+        assert descriptor["source_add"] is True
+        catalog_descriptor = adapter.lookup_tool_descriptor(
+            registration.tool_id, stage="intent_evidence"
+        )
+        assert catalog_descriptor is not None
+        assert descriptor["manifest_hash"] == catalog_descriptor["manifest_hash"]
+        binding = ProviderBindingIdentity(
+            binding_id=f"binding-{registration.provider_id}",
+            provider_id=registration.provider_id,
+            tool_id=registration.tool_id,
+            source_lineage_id=registration.route_name,
+            adapter_version="exact-model-test",
+            manifest_hash=descriptor["manifest_hash"],
+            capability_hash=H("1"),
+            execution_contract_hash=H("2"),
+            cost_model_hash=H("3"),
+        )
+        assert adapter.validate_provider_binding(
+            binding, stage="intent_evidence"
+        ) == ()
+        plan = adapter.compile_variant(
+            profile,
+            stage="intent_evidence",
+            feature_set=feature_set,
+            available_tools={item.tool_id: True for item in adapter.catalog.tools},
+            remaining_seconds=900,
+            remaining_calls=100,
+            credit_cap=1_000,
+            expected_signal_type=signal_type,
+        )
+        assert registration.tool_id in adapter.considered_tool_ids(
+            plan, stage="intent_evidence"
+        )
+
+
+def _assert_v2_rejected_before_provider_calls(
+    spec,
+    adapters,
+    labels,
+    *,
+    error_match: str,
+):
+    calls = []
+
+    def recording_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _runner(*args[:3])
+
+    with pytest.raises(RoutingExperimentError, match=error_match):
+        evaluate_routing_experiment_v2(
+            spec,
+            gold_labels=labels,
+            runner=recording_runner,
+            adapters=adapters,
+            require_isolation=False,
+        )
+    assert calls == []
+
+
+def test_v2_source_add_false_model_descriptor_is_rejected_before_provider_calls():
+    spec, adapters, labels, _tool, source_tool = _spec(
+        "intent_evidence", with_source_add=True
+    )
+
+    class FalseSourceAddDescriptorAdapter(FakeV2Adapter):
+        def variant_tool_descriptors(self, payload, *, stage):
+            return tuple(
+                {
+                    **descriptor,
+                    "source_add": False,
+                }
+                if descriptor["tool_id"] == source_tool
+                else descriptor
+                for descriptor in super().variant_tool_descriptors(
+                    payload, stage=stage
+                )
+            )
+
+    invalid_adapters = {
+        "baseline": adapters["baseline"],
+        "candidate": FalseSourceAddDescriptorAdapter(
+            adapters["candidate"].manifests
+        ),
+    }
+    errors = validate_routing_experiment_v2_spec(
+        spec,
+        adapters=invalid_adapters,
+    )
+    assert f"v2_new_tool_is_not_source_add:{source_tool}" in errors
+    _assert_v2_rejected_before_provider_calls(
+        spec,
+        invalid_adapters,
+        labels,
+        error_match="v2_new_tool_is_not_source_add",
+    )
+
+
+def test_v2_source_add_catalog_binding_mismatch_is_rejected_before_provider_calls():
+    spec, adapters, labels, _tool, source_tool = _spec(
+        "intent_evidence", with_source_add=True
+    )
+    source_binding = next(
+        item
+        for item in spec.provider_bindings
+        if item.tool_id == source_tool
+    )
+    invalid = replace(
+        spec,
+        experiment_id="source-add-binding-manifest-mismatch",
+        provider_bindings=tuple(
+            replace(item, manifest_hash=H("9"))
+            if item.binding_id == source_binding.binding_id
+            else item
+            for item in spec.provider_bindings
+        ),
+    )
+    errors = validate_routing_experiment_v2_spec(
+        invalid,
+        adapters=adapters,
+    )
+    assert any(
+        source_tool in error
+        and (
+            "provider_binding_manifest_mismatch" in error
+            or "source_add_provider_binding_manifest_hash_mismatch" in error
+        )
+        for error in errors
+    )
+    _assert_v2_rejected_before_provider_calls(
+        invalid,
+        adapters,
+        labels,
+        error_match="provider_binding_manifest_mismatch|source_add_provider_binding_manifest_hash_mismatch",
+    )
+
+
+def test_v2_source_add_omitted_binding_id_is_rejected_before_provider_calls():
+    spec, adapters, labels, _tool, source_tool = _spec(
+        "intent_evidence", with_source_add=True
+    )
+    invalid_variant = replace(
+        spec.variants[1],
+        variant_id="source-add-binding-omitted",
+        binding_ids=("baseline",),
+    )
+    invalid = replace(
+        spec,
+        experiment_id="source-add-binding-omitted",
+        variants=(spec.variants[0], invalid_variant),
+    )
+    invalid_adapters = {
+        "baseline": adapters["baseline"],
+        invalid_variant.variant_id: adapters["candidate"],
+    }
+    errors = validate_routing_experiment_v2_spec(
+        invalid,
+        adapters=invalid_adapters,
+    )
+    assert any(
+        f"v2_source_add_binding_missing:{source_tool}" in error
+        for error in errors
+    )
+    _assert_v2_rejected_before_provider_calls(
+        invalid,
+        invalid_adapters,
+        labels,
+        error_match="v2_source_add_binding_missing",
+    )
+
+
+@pytest.mark.parametrize("mode", ["omitted", "considered_only"])
+def test_v2_declared_source_add_must_be_invokable_in_compiled_plan_before_calls(
+    mode,
+):
+    spec, adapters, labels, baseline_tool, source_tool = _spec(
+        "intent_evidence", with_source_add=True
+    )
+
+    class NonInvokableSourceAddAdapter(FakeV2Adapter):
+        def compile_variant(self, payload, **kwargs):
+            raw = dict(payload)
+            raw["tools"] = [baseline_tool]
+            if mode == "considered_only":
+                raw["considered"] = [source_tool]
+            return super().compile_variant(raw, **kwargs)
+
+    invalid_adapters = {
+        "baseline": adapters["baseline"],
+        "candidate": NonInvokableSourceAddAdapter(
+            adapters["candidate"].manifests
+        ),
+    }
+    _assert_v2_rejected_before_provider_calls(
+        spec,
+        invalid_adapters,
+        labels,
+        error_match="v2_declared_new_tool_missing_from_compiled_plan",
+    )

@@ -512,6 +512,10 @@ def _migration_schema_contract(
         "154-research-lab-model-compatibility-purpose.sql",
         "155-research-lab-ancestry-disclosure-root-fast-path.sql",
         "156-production-parity-readonly-role.sql",
+        "157-research-lab-routing-experiment-authority.sql",
+        "158-research-lab-routing-experiment-purposes.sql",
+        "159-research-lab-routing-execution-queue.sql",
+        "160-research-lab-routing-adapter-failures.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (

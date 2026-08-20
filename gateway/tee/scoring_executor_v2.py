@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 from pathlib import Path
 import re
@@ -13,6 +15,55 @@ from typing import Any, Callable, Dict, Iterable, Mapping
 from gateway.tee.execution_job_manager_v2 import (
     ExecutionContextV2,
     ExecutionResultV2,
+)
+from gateway.research_lab.routing_experiment_attestation import (
+    ROUTING_EXPERIMENT_ATTESTATION_OPERATION_V2,
+    ROUTING_EXPERIMENT_ATTESTATION_PURPOSE_V2,
+    routing_experiment_attestation_receipt_output_v2,
+)
+from gateway.research_lab.routing_execution_authorization import (
+    ROUTING_PROVIDER_AUTHORIZATION_OPERATION_V2,
+    ROUTING_PROVIDER_AUTHORIZATION_PURPOSE_V2,
+    RoutingProviderCallAuthorizationV2,
+    execute_routing_provider_call_authorization_v2,
+    routing_provider_dispatch_job_id_v2,
+    validate_routing_provider_authorization_request_v2,
+)
+from gateway.research_lab.routing_experiment_artifacts import (
+    VerifiedRoutingArtifactLineage,
+)
+from gateway.research_lab.routing_model_binding_observation import (
+    ROUTING_MODEL_BINDING_OBSERVATION_PURPOSE_V2,
+    RoutingModelBindingObservationError,
+    observe_routing_model_bindings_v2,
+)
+from gateway.research_lab.routing_model_binding_producer import (
+    ROUTING_MODEL_BINDING_OBSERVATION_OPERATION_V2,
+    RoutingModelBindingProducerError,
+    _build_metadata_payload,
+    _validate_lineage_and_artifact,
+    _validate_model_result,
+    _validate_source_bundle,
+    resolve_verified_routing_artifact_lineage_v2,
+)
+from gateway.research_lab.routing_provider_terminal_protected import (
+    ROUTING_BUDGET_RESERVATION_PURPOSE_V3,
+    ROUTING_PROVIDER_DISPATCH_OPERATION_V2,
+    ROUTING_PROVIDER_DISPATCH_PURPOSE_V2,
+    ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2,
+    ROUTING_PROVIDER_TERMINAL_OPERATION_V2,
+    ROUTING_PROVIDER_TERMINAL_PURPOSE_V2,
+    ProtectedRoutingProviderTerminalError,
+    routing_budget_reservation_proof_v3,
+    execute_protected_routing_provider_terminal_v2,
+    prepared_routing_provider_call_from_mapping,
+    validate_routing_budget_reservation_result_v3,
+    validate_routing_budget_reservation_v3,
+)
+from gateway.research_lab.routing_provider_bindings import (
+    ReviewedDeeplineActionCompiler,
+    VerifiedRoutingBindingCatalog,
+    VerifiedRoutingUnitDataset,
 )
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
 from gateway.tee.model_sandbox_v2 import (
@@ -38,7 +89,12 @@ from gateway.tee.scoring_executor import (
     configuration_hash,
     execute_scoring_operation,
 )
-from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
+from leadpoet_canonical.attested_v2 import (
+    canonical_json,
+    sha256_bytes,
+    sha256_json,
+    validate_transport_attempt,
+)
 from research_lab.eval import PrivateModelArtifactManifest
 from research_lab.eval.dev_eval import (
     compute_dev_set_hash,
@@ -86,6 +142,18 @@ OP_DEV_REPLAY_V2 = "run_dev_replay_v2"
 OP_DEV_HYBRID_V2 = "run_dev_hybrid_v2"
 OP_PROVIDER_PREFLIGHT_V2 = "provider_preflight_v2"
 OP_SOURCE_ADD_LEG2_JUDGE_V2 = "source_add_leg2_judge_v2"
+OP_ATTEST_ROUTING_EXPERIMENT_V2 = ROUTING_EXPERIMENT_ATTESTATION_OPERATION_V2
+OP_ATTEST_ROUTING_PROVIDER_CALL_V2 = ROUTING_PROVIDER_AUTHORIZATION_OPERATION_V2
+OP_OBSERVE_ROUTING_MODEL_BINDINGS_V2 = (
+    ROUTING_MODEL_BINDING_OBSERVATION_OPERATION_V2
+)
+OP_PROTECTED_ROUTING_PROVIDER_TERMINAL_V2 = (
+    ROUTING_PROVIDER_TERMINAL_OPERATION_V2
+)
+OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2 = ROUTING_PROVIDER_DISPATCH_OPERATION_V2
+# Short alias for callers that refer to the operation by its protected job
+# name rather than its executor family.
+OP_ROUTING_PROVIDER_DISPATCH_V2 = OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2
 DEV_REPLAY_REQUEST_SCHEMA_VERSION = "leadpoet.dev_replay_request.v4"
 DEV_HYBRID_REQUEST_SCHEMA_VERSION = "leadpoet.dev_hybrid_request.v4"
 PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION = "leadpoet.provider_preflight_request.v3"
@@ -123,6 +191,28 @@ SCORING_OPERATIONS_V2 = {
     OP_SOURCE_ADD_LEG2_JUDGE_V2: frozenset(
         {"research_lab.source_add_judge.v2"}
     ),
+    # This isolated, deterministic operation is intentionally not activated
+    # by the current protected release manifest or durable purpose allowlist.
+    # Keeping it separate from score/bundle operations prevents a routing Lab
+    # reference from being confused with a production scoring decision.
+    OP_ATTEST_ROUTING_EXPERIMENT_V2: frozenset(
+        {ROUTING_EXPERIMENT_ATTESTATION_PURPOSE_V2}
+    ),
+    # Code-owned pre-dispatch authorization.  Durable activation is separate
+    # from the final evaluation purpose and remains blocked until the new
+    # append-only purpose migration and protected manifest are released.
+    OP_ATTEST_ROUTING_PROVIDER_CALL_V2: frozenset(
+        {ROUTING_PROVIDER_AUTHORIZATION_PURPOSE_V2}
+    ),
+    OP_OBSERVE_ROUTING_MODEL_BINDINGS_V2: frozenset(
+        {ROUTING_MODEL_BINDING_OBSERVATION_PURPOSE_V2}
+    ),
+    OP_PROTECTED_ROUTING_PROVIDER_TERMINAL_V2: frozenset(
+        {ROUTING_PROVIDER_TERMINAL_PURPOSE_V2}
+    ),
+    OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2: frozenset(
+        {ROUTING_PROVIDER_DISPATCH_PURPOSE_V2}
+    ),
     OP_QUALIFICATION_COMPANY_SCORES: SCORE_PURPOSES_V2,
     OP_BENCHMARK_ICP_SCORE: SCORE_PURPOSES_V2,
     OP_BUILD_SCORE_BUNDLE: frozenset(
@@ -157,12 +247,31 @@ class ScoringExecutorV2:
             ResearchLabGatewayConfig
         ),
         execution_config: Mapping[str, Any] | None = None,
+        routing_binding_catalog: VerifiedRoutingBindingCatalog | None = None,
+        routing_unit_dataset: VerifiedRoutingUnitDataset | None = None,
+        routing_artifact_lineage: VerifiedRoutingArtifactLineage | None = None,
+        routing_artifact_lineage_resolver: Callable[..., VerifiedRoutingArtifactLineage]
+        | None = None,
+        routing_coordinator_boot_identity_supplier: Callable[
+            [], Mapping[str, Any]
+        ]
+        | None = None,
     ) -> None:
         self._provider_execute = provider_execute
         self._retry_policy_hashes = dict(retry_policy_hashes)
         self._transport = BrokeredProviderTransportV2(self._provider_execute)
         self._model_sandbox = model_sandbox
         self._artifact_seal = artifact_seal
+        self._routing_binding_catalog = routing_binding_catalog
+        self._routing_unit_dataset = routing_unit_dataset
+        self._routing_artifact_lineage = routing_artifact_lineage
+        self._routing_artifact_lineage_resolver = (
+            routing_artifact_lineage_resolver
+            or resolve_verified_routing_artifact_lineage_v2
+        )
+        self._routing_coordinator_boot_identity_supplier = (
+            routing_coordinator_boot_identity_supplier
+        )
         self._config = config_supplier()
         self._execution_config = validate_research_lab_execution_config(
             execution_config
@@ -250,6 +359,112 @@ class ScoringExecutorV2:
             return await self._execute_dev_replay(payload, context)
         if operation == OP_DEV_HYBRID_V2:
             return await self._execute_dev_hybrid(payload, context)
+        if operation == OP_ATTEST_ROUTING_EXPERIMENT_V2:
+            if credential_profile != "default" or credential_refs:
+                raise ValueError(
+                    "routing experiment attestation must not use provider credentials"
+                )
+            if context.purpose != ROUTING_EXPERIMENT_ATTESTATION_PURPOSE_V2:
+                raise ValueError("routing experiment attestation purpose is invalid")
+            return ExecutionResultV2(
+                output=routing_experiment_attestation_receipt_output_v2(payload),
+                artifact_hashes=(),
+            )
+        if operation == OP_ATTEST_ROUTING_PROVIDER_CALL_V2:
+            if credential_profile != "default" or credential_refs:
+                raise ValueError(
+                    "routing provider authorization must not use provider credentials"
+                )
+            if context.purpose != ROUTING_PROVIDER_AUTHORIZATION_PURPOSE_V2:
+                raise ValueError("routing provider authorization purpose is invalid")
+            if (
+                self._routing_artifact_lineage is None
+                or self._routing_binding_catalog is None
+                or self._routing_unit_dataset is None
+            ):
+                raise ValueError(
+                    "routing provider authorization authorities are unavailable"
+                )
+            try:
+                (
+                    authorization,
+                    observation,
+                    _envelope,
+                    _admission,
+                    protected_receipt,
+                ) = validate_routing_provider_authorization_request_v2(
+                    payload,
+                    artifact_lineage=self._routing_artifact_lineage,
+                    binding_catalog=self._routing_binding_catalog,
+                    unit_dataset=self._routing_unit_dataset,
+                )
+                required_parent_receipts = (
+                    dict(observation.signed_receipt),
+                    dict(protected_receipt),
+                )
+                declared_parents = set(context.parent_receipt_hashes)
+                observed_receipts = {
+                    str(receipt.get("receipt_hash") or ""): dict(receipt)
+                    for graph in context.external_receipt_graphs
+                    for receipt in graph.get("receipts") or ()
+                    if isinstance(receipt, Mapping)
+                }
+                for receipt in required_parent_receipts:
+                    receipt_hash = str(receipt.get("receipt_hash") or "")
+                    if (
+                        receipt_hash not in declared_parents
+                        or observed_receipts.get(receipt_hash) != receipt
+                    ):
+                        raise ValueError(
+                            "routing provider authorization parent authority differs"
+                        )
+            except Exception as exc:  # noqa: BLE001 - protected boundary
+                raise ValueError(
+                    "routing provider authorization context is invalid"
+                ) from exc
+            authorization_result = execute_routing_provider_call_authorization_v2(
+                authorization.to_dict(),
+                authorization_job_id=context.job_id,
+            )
+            if (
+                authorization_result.get("authorization_job_id") != context.job_id
+                or authorization_result.get("admission_job_id")
+                != authorization.admission_job_id
+            ):
+                raise ValueError(
+                    "routing provider authorization execution identity differs"
+                )
+            return ExecutionResultV2(
+                output=authorization_result,
+                artifact_hashes=(),
+            )
+        if operation == OP_OBSERVE_ROUTING_MODEL_BINDINGS_V2:
+            return await self._execute_routing_model_binding_observation(
+                payload,
+                context,
+                credential_profile=credential_profile,
+                credential_refs=credential_refs,
+            )
+        if operation == OP_PROTECTED_ROUTING_PROVIDER_TERMINAL_V2:
+            if credential_profile != "default" or credential_refs:
+                raise ValueError(
+                    "routing provider terminal must not use provider credentials"
+                )
+            if context.purpose != ROUTING_PROVIDER_TERMINAL_PURPOSE_V2:
+                raise ValueError("routing provider terminal purpose is invalid")
+            return await self._execute_protected_routing_provider_terminal(
+                payload, context
+            )
+        if operation == OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2:
+            if credential_profile != "default" or credential_refs:
+                raise ValueError(
+                    "routing provider dispatch must not use provider credentials"
+                )
+            if context.purpose != ROUTING_PROVIDER_DISPATCH_PURPOSE_V2:
+                raise ValueError("routing provider dispatch purpose is invalid")
+            return await self._execute_protected_routing_provider_dispatch(
+                payload, context
+            )
         if operation == OP_RUN_MODEL_SANDBOX_V2:
             if self._model_sandbox is None:
                 raise ValueError("measured model sandbox is unavailable")
@@ -479,6 +694,565 @@ class ScoringExecutorV2:
             output=output,
             artifact_hashes=tuple(evidence_hashes),
         )
+
+    async def _execute_routing_model_binding_observation(
+        self,
+        payload: Mapping[str, Any],
+        context: ExecutionContextV2,
+        *,
+        credential_profile: str,
+        credential_refs: Mapping[str, Any],
+    ) -> ExecutionResultV2:
+        """Run model metadata and chain a standard stage receipt.
+
+        This operation has no provider channel. It calls the existing measured
+        metadata sandbox directly with an empty provider state, then records a
+        stage through the execution context. The ExecutionJobManager signs the
+        synthetic stage receipt and final job receipt; no caller-supplied
+        signer or receipt is accepted here.
+        """
+
+        if context.purpose != ROUTING_MODEL_BINDING_OBSERVATION_PURPOSE_V2:
+            raise ValueError("routing model binding observation purpose is invalid")
+        if credential_profile != "default" or credential_refs:
+            raise ValueError(
+                "routing model binding observation must not use provider credentials"
+            )
+        if self._model_sandbox is None:
+            raise ValueError("measured model sandbox is unavailable")
+        required = {
+            "schema_version",
+            "model_kind",
+            "artifact_lineage",
+            "artifact",
+            "source_bundle",
+            "provider_bindings",
+        }
+        if not isinstance(payload, Mapping) or set(payload) != required:
+            raise ValueError("routing model binding observation payload is invalid")
+        if payload.get("schema_version") != "leadpoet.routing_model_binding_request.v2":
+            raise ValueError("routing model binding observation schema is invalid")
+        model_kind = str(payload.get("model_kind") or "")
+        if model_kind not in {"private", "candidate"}:
+            raise ValueError("routing model binding observation model kind is invalid")
+        try:
+            lineage = self._routing_artifact_lineage_resolver(
+                lineage_document=payload["artifact_lineage"],
+                artifact_document=payload["artifact"],
+            )
+            artifact = _validate_lineage_and_artifact(lineage, payload["artifact"])
+            source_bundle = _validate_source_bundle(
+                payload["source_bundle"],
+                artifact_hash=artifact.model_artifact_hash,
+            )
+        except (TypeError, KeyError, RoutingModelBindingProducerError) as exc:
+            raise ValueError("routing model binding artifact lineage is invalid") from exc
+        raw_bindings = payload["provider_bindings"]
+        if (
+            not isinstance(raw_bindings, list)
+            or not raw_bindings
+            or any(not isinstance(item, Mapping) for item in raw_bindings)
+        ):
+            raise ValueError("routing model binding identities are invalid")
+        from research_lab.routing_experiments import ProviderBindingIdentity
+
+        try:
+            bindings = tuple(
+                ProviderBindingIdentity.from_mapping(item) for item in raw_bindings
+            )
+            request = _build_metadata_payload(
+                artifact=artifact,
+                source_bundle=source_bundle,
+                model_kind=model_kind,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError("routing model binding metadata request is invalid") from exc
+        result = await asyncio.to_thread(
+            self._model_sandbox.execute,
+            request,
+            job_id=context.job_id,
+            purpose=context.purpose,
+            retry_policy_hashes={},
+            terminal_sink=context.record_transport,
+            artifact_sink=context.record_artifact,
+        )
+        try:
+            measured = _validate_model_result(
+                result,
+                payload=request,
+                artifact=artifact,
+                source_bundle=source_bundle,
+                model_kind=model_kind,
+            )
+            observation = observe_routing_model_bindings_v2(
+                runtime_metadata=measured["output"]["runtime_routing"],
+                provider_bindings=bindings,
+                artifact_lineage_hash=lineage.identity_hash(),
+            )
+        except (RoutingModelBindingProducerError, RoutingModelBindingObservationError) as exc:
+            raise ValueError("measured routing model binding observation is invalid") from exc
+        context.record_stage(
+            purpose=ROUTING_MODEL_BINDING_OBSERVATION_PURPOSE_V2,
+            # This stage receipt is consumed by
+            # VerifiedRoutingModelBindingRequirements, whose signed input is
+            # the canonical observation request.  The complete measured
+            # sandbox result is still bound by the stage artifact hashes and
+            # the enclosing ExecutionJobManager receipt.
+            input_root=observation["request_root"],
+            output_root=sha256_json(observation),
+            artifact_hashes=(
+                measured["model_artifact_hash"],
+                measured["model_manifest_hash"],
+                measured["source_bundle_hash"],
+                measured["compatibility_policy_hash"],
+                measured["compatibility_admission_hash"],
+                measured["runtime_config_hash"],
+                measured["provider_runtime_catalog_hash"],
+                measured["trace_entries_hash"],
+                measured["output_hash"],
+                measured["output"]["runtime_routing"]["catalog_sha256"],
+                measured["output"]["runtime_routing"]["policy_sha256"],
+            ),
+        )
+        output = {
+            "schema_version": "leadpoet.routing_model_binding_result.v2",
+            "operation": OP_OBSERVE_ROUTING_MODEL_BINDINGS_V2,
+            "artifact_lineage_hash": lineage.identity_hash(),
+            "model_result": {
+                "model_artifact_hash": measured["model_artifact_hash"],
+                "model_manifest_hash": measured["model_manifest_hash"],
+                "source_bundle_hash": measured["source_bundle_hash"],
+                "compatibility_policy_hash": measured["compatibility_policy_hash"],
+                "compatibility_admission_hash": measured["compatibility_admission_hash"],
+                "runtime_config_hash": measured["runtime_config_hash"],
+                "provider_runtime_catalog_hash": measured["provider_runtime_catalog_hash"],
+                "trace_entries_hash": measured["trace_entries_hash"],
+                "output_hash": measured["output_hash"],
+                "runtime_catalog_sha256": measured["output"]["runtime_routing"]["catalog_sha256"],
+                "runtime_policy_sha256": measured["output"]["runtime_routing"]["policy_sha256"],
+            },
+            "observation": observation,
+        }
+        return ExecutionResultV2(
+            output=output,
+            artifact_hashes=tuple(
+                str(value)
+                for value in (
+                    measured["model_artifact_hash"],
+                    measured["model_manifest_hash"],
+                    measured["source_bundle_hash"],
+                    measured["compatibility_policy_hash"],
+                    measured["compatibility_admission_hash"],
+                    measured["runtime_config_hash"],
+                    measured["provider_runtime_catalog_hash"],
+                    measured["trace_entries_hash"],
+                    measured["output_hash"],
+                    measured["output"]["runtime_routing"]["catalog_sha256"],
+                    measured["output"]["runtime_routing"]["policy_sha256"],
+                )
+            ),
+        )
+
+    async def _execute_protected_routing_provider_terminal(
+        self,
+        payload: Mapping[str, Any],
+        context: ExecutionContextV2,
+    ) -> ExecutionResultV2:
+        """Normalize one provider response inside the protected scorer.
+
+        The job payload carries only signed evidence and exact transport
+        commitments.  The reviewed catalog and immutable unit dataset are
+        provisioned when this executor is constructed; the caller cannot
+        inject a compiler, action policy, or billing implementation.
+        """
+
+        required = {
+            "schema_version",
+            "authorization_proof",
+            "prepared_call",
+            "broker_request",
+            "broker_result",
+            "provider_record",
+            "raw_response_body_b64",
+        }
+        if not isinstance(payload, Mapping) or set(payload) != required:
+            raise ValueError("routing provider terminal payload is invalid")
+        if payload.get("schema_version") != (
+            "leadpoet.routing_provider_terminal_request.v2"
+        ):
+            raise ValueError("routing provider terminal schema is invalid")
+        if self._routing_binding_catalog is None or self._routing_unit_dataset is None:
+            raise ValueError("routing provider terminal authorities are unavailable")
+        if self._routing_coordinator_boot_identity_supplier is None:
+            raise ValueError(
+                "routing provider trusted coordinator identity is unavailable"
+            )
+        try:
+            prepared = prepared_routing_provider_call_from_mapping(
+                payload["prepared_call"]
+            )
+            raw_body = base64.b64decode(
+                str(payload["raw_response_body_b64"]), validate=True
+            )
+        except Exception as exc:  # noqa: BLE001 - protected boundary
+            raise ValueError("routing provider terminal payload encoding is invalid") from exc
+        if not raw_body or len(raw_body) > 8 * 1024 * 1024:
+            raise ValueError("routing provider terminal response body is invalid")
+        try:
+            proof = payload["authorization_proof"]
+            if not isinstance(proof, Mapping):
+                raise ValueError("authorization proof is not an object")
+            authorization_receipt = proof.get("authorization_receipt")
+            if not isinstance(authorization_receipt, Mapping):
+                raise ValueError("authorization receipt is not an object")
+            if authorization_receipt.get("receipt_hash") not in set(
+                context.parent_receipt_hashes
+            ):
+                raise ValueError("authorization receipt is not a declared parent")
+            output = execute_protected_routing_provider_terminal_v2(
+                authorization_proof=proof,
+                prepared_call=prepared,
+                broker_request=payload["broker_request"],
+                broker_result=payload["broker_result"],
+                provider_record=payload["provider_record"],
+                trusted_coordinator_boot_identity=(
+                    self._routing_coordinator_boot_identity_supplier()
+                ),
+                raw_response_body=raw_body,
+                binding_catalog=self._routing_binding_catalog,
+                unit_dataset=self._routing_unit_dataset,
+            )
+        except ProtectedRoutingProviderTerminalError as exc:
+            raise ValueError("routing provider terminal validation failed") from exc
+        return ExecutionResultV2(
+            output=output,
+            # The manager hashes this exact redacted result for the standard
+            # job receipt. The protected function does not create a second
+            # terminal signer or replace the manager's roots.
+            receipt_output=output,
+            artifact_hashes=(),
+        )
+
+    async def _execute_protected_routing_provider_dispatch(
+        self,
+        payload: Mapping[str, Any],
+        context: ExecutionContextV2,
+    ) -> ExecutionResultV2:
+        """Dispatch one exact compiled routing call through the coordinator.
+
+        This is the only host-facing provider dispatch seam for the reviewed
+        routing product.  The host cannot supply a broker result, provider
+        record, response body, compiler, or provider singleton.  All of those
+        values are obtained and checked inside the scoring enclave after the
+        signed authorization and parent ancestry have been validated.
+        """
+
+        required = {
+            "schema_version",
+            "authorization_proof",
+            "prepared_call",
+            "broker_request",
+            "budget_reservation",
+        }
+        if not isinstance(payload, Mapping) or set(payload) != required:
+            raise ValueError("routing provider dispatch payload is invalid")
+        if payload.get("schema_version") != ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2:
+            raise ValueError("routing provider dispatch schema is invalid")
+        if self._routing_binding_catalog is None or self._routing_unit_dataset is None:
+            raise ValueError("routing provider dispatch authorities are unavailable")
+        if self._routing_coordinator_boot_identity_supplier is None:
+            raise ValueError(
+                "routing provider trusted coordinator identity is unavailable"
+            )
+
+        try:
+            prepared = prepared_routing_provider_call_from_mapping(
+                payload["prepared_call"]
+            )
+            proof = payload["authorization_proof"]
+            broker_request = payload["broker_request"]
+            if not isinstance(proof, Mapping) or not isinstance(broker_request, Mapping):
+                raise ValueError("routing provider dispatch documents are invalid")
+            authorization = RoutingProviderCallAuthorizationV2.from_mapping(
+                proof["authorization"]
+            )
+            if authorization.purpose != ROUTING_PROVIDER_DISPATCH_PURPOSE_V2:
+                raise ValueError("routing provider dispatch authorization purpose differs")
+            authorization_receipt = proof["authorization_receipt"]
+            if not isinstance(authorization_receipt, Mapping):
+                raise ValueError("routing provider dispatch authorization receipt is invalid")
+            receipt_hash = str(authorization_receipt.get("receipt_hash") or "")
+            if receipt_hash not in set(context.parent_receipt_hashes):
+                raise ValueError("routing provider dispatch parent is not declared")
+            dispatch_job_id = routing_provider_dispatch_job_id_v2(proof)
+            if (
+                context.job_id != dispatch_job_id
+                or broker_request.get("job_id") != dispatch_job_id
+            ):
+                raise ValueError("routing provider dispatch job differs")
+            matching_parent = any(
+                receipt == dict(authorization_receipt)
+                for graph in context.external_receipt_graphs
+                for receipt in graph.get("receipts") or ()
+                if isinstance(receipt, Mapping)
+            )
+            if not matching_parent:
+                raise ValueError("routing provider dispatch parent receipt is unavailable")
+
+            # Verify the complete signed proof before the provider boundary.
+            # The compact request fields are also checked against a fresh
+            # compiler projection, so a host cannot alter the URL, body, or
+            # retry identity while retaining a valid proof.
+            from gateway.tee.provider_broker_v2 import (
+                validate_routing_authorization_proof_v2,
+            )
+
+            validate_routing_authorization_proof_v2(proof, broker_request)
+            if (
+                prepared.binding != authorization.binding
+                or prepared.binding_catalog_manifest_hash
+                != authorization.binding_catalog_manifest_hash
+                or prepared.binding_catalog_version
+                != authorization.binding_catalog_version
+                or prepared.action_id != authorization.action_id
+                or prepared.transport_id != authorization.transport_id
+                or prepared.unit_ref != authorization.unit_ref
+                or prepared.unit_input_hash != authorization.unit_input_hash
+                or prepared.unit_dataset_manifest_hash
+                != authorization.unit_dataset_manifest_hash
+                or prepared.unit_set_hash != authorization.unit_set_hash
+                or prepared.request_body_hash != authorization.request_body_hash
+                or prepared.retry_policy_hash != authorization.retry_policy_hash
+                or prepared.credit_ceiling_microunits
+                != authorization.credit_cap_microunits
+                or prepared.timeout_ms != authorization.timeout_ms
+            ):
+                raise ValueError("routing provider dispatch prepared call differs")
+            compiler = ReviewedDeeplineActionCompiler(
+                binding_catalog=self._routing_binding_catalog,
+                unit_dataset=self._routing_unit_dataset,
+            )
+            expected_request = dict(
+                compiler.broker_request(
+                    prepared=prepared,
+                    experiment_hash=authorization.experiment_hash,
+                    dispatch_job_id=dispatch_job_id,
+                    variant_id=authorization.variant_id,
+                    attempt_number=authorization.attempt,
+                    core_request_fingerprint=authorization.core_request_fingerprint,
+                    authorization_hash=str(proof["authorization_hash"]),
+                    authorization_proof_hash=str(proof["authorization_proof_hash"]),
+                )
+            )
+            expected_request["routing_authorization"] = dict(proof)
+            if dict(broker_request) != expected_request:
+                raise ValueError("routing provider dispatch compiled request differs")
+            budget_reservation = validate_routing_budget_reservation_v3(
+                payload["budget_reservation"],
+                authorization=authorization,
+                prepared_call=prepared,
+            )
+        except Exception as exc:  # noqa: BLE001 - protected boundary
+            raise ValueError("routing provider dispatch authorization is invalid") from exc
+
+        # The budget authority is invoked inside this measured operation. A
+        # caller that submits the dispatch job directly therefore cannot cross
+        # the paid-provider boundary without first creating the exact durable
+        # reservation under the active queue-fenced claim.
+        try:
+            (
+                budget_reservation_proof,
+                budget_transport_attempt,
+                budget_artifact_hashes,
+            ) = self._reserve_routing_budget_v3(
+                reservation=budget_reservation,
+                context=context,
+            )
+        except Exception as exc:  # noqa: BLE001 - protected boundary
+            raise ValueError("routing provider budget reservation failed") from exc
+
+        # This is the measured scoring -> coordinator path.  Its result never
+        # enters the host payload; only the normalizer's bounded projection is
+        # returned below.
+        broker_result = self._provider_execute(dict(broker_request))
+        if not isinstance(broker_result, Mapping):
+            raise ValueError("routing provider dispatch coordinator result is invalid")
+        provider_record = broker_result.get("routing_provider_record")
+        if provider_record is None:
+            provider_record = broker_result.get("provider_record")
+        if not isinstance(provider_record, Mapping):
+            raise ValueError("routing provider dispatch coordinator evidence is missing")
+        try:
+            raw_response_body = base64.b64decode(
+                str(broker_result.get("body_b64") or ""), validate=True
+            )
+            output = execute_protected_routing_provider_terminal_v2(
+                authorization_proof=proof,
+                prepared_call=prepared,
+                broker_request=broker_request,
+                broker_result=broker_result,
+                provider_record=provider_record,
+                trusted_coordinator_boot_identity=(
+                    self._routing_coordinator_boot_identity_supplier()
+                ),
+                raw_response_body=raw_response_body,
+                binding_catalog=self._routing_binding_catalog,
+                unit_dataset=self._routing_unit_dataset,
+            )
+            output = {
+                **output,
+                "budget_reservation": budget_reservation_proof,
+            }
+        except (ProtectedRoutingProviderTerminalError, ValueError, TypeError) as exc:
+            raise ValueError("routing provider dispatch terminal validation failed") from exc
+        transport_attempts = [budget_transport_attempt]
+        provider_attempt = broker_result.get("transport_attempt")
+        if not isinstance(provider_attempt, Mapping):
+            raise ValueError("routing provider dispatch transport attempt is missing")
+        transport_attempts.append(dict(provider_attempt))
+        additional_attempts = broker_result.get("additional_transport_attempts") or ()
+        if (
+            not isinstance(additional_attempts, (list, tuple))
+            or any(not isinstance(item, Mapping) for item in additional_attempts)
+        ):
+            raise ValueError("routing provider dispatch transport attempts are invalid")
+        transport_attempts.extend(dict(item) for item in additional_attempts)
+        deduplicated_attempts: list[dict[str, Any]] = []
+        seen_attempt_hashes: set[str] = set()
+        for attempt in transport_attempts:
+            try:
+                validate_transport_attempt(attempt)
+            except Exception as exc:  # noqa: BLE001 - protected boundary
+                raise ValueError(
+                    "routing provider dispatch transport attempt is invalid"
+                ) from exc
+            attempt_hash = str(attempt["attempt_hash"])
+            if attempt_hash not in seen_attempt_hashes:
+                seen_attempt_hashes.add(attempt_hash)
+                deduplicated_attempts.append(dict(attempt))
+        artifact_hashes = set(budget_artifact_hashes)
+        provider_artifact_hashes = broker_result.get("evidence_artifact_hashes") or ()
+        if (
+            not isinstance(provider_artifact_hashes, (list, tuple))
+            or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", str(item or "")) for item in provider_artifact_hashes)
+        ):
+            raise ValueError("routing provider dispatch artifact hashes are invalid")
+        artifact_hashes.update(str(item) for item in provider_artifact_hashes)
+        return ExecutionResultV2(
+            output=output,
+            receipt_output=output,
+            transport_attempts=tuple(deduplicated_attempts),
+            artifact_hashes=tuple(sorted(artifact_hashes)),
+        )
+
+    def _reserve_routing_budget_v3(
+        self,
+        *,
+        reservation: Mapping[str, Any],
+        context: ExecutionContextV2,
+    ) -> tuple[dict[str, Any], dict[str, Any], tuple[str, ...]]:
+        """Reserve the exact call cap through measured coordinator transport."""
+
+        from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
+        from leadpoet_canonical.production_parity_boundary_v2 import (
+            validate_production_parity_boundary_document_v2,
+        )
+
+        retry_policy_hash = str(self._retry_policy_hashes.get("supabase") or "")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", retry_policy_hash):
+            raise ValueError("routing budget retry policy is unavailable")
+        boundary = validate_production_parity_boundary_document_v2(
+            self._execution_config["behavior_environment"],
+            network=str(self._execution_config["deployment"]["network"]),
+            netuid=int(self._execution_config["deployment"]["netuid"]),
+        )
+        origin = str(boundary["supabase_origin"]).rstrip("/")
+        rpc_params = {
+            "p_event_key": reservation["event_key"],
+            "p_reservation_id": reservation["reservation_id"],
+            "p_experiment_hash": reservation["experiment_hash"],
+            "p_binding_id": reservation["binding_id"],
+            "p_claim_key": reservation["claim_key"],
+            "p_claim_generation": reservation["claim_generation"],
+            "p_credit_microunits": reservation["credit_microunits"],
+            "p_lease_seconds": reservation["lease_seconds"],
+            "p_event_doc": reservation["event_doc"],
+        }
+        request_body = canonical_json(rpc_params).encode("utf-8")
+        request = {
+            "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
+            "logical_operation_id": (
+                f"{context.job_id}:routing-budget-reservation:"
+                + str(reservation["event_key"]).split(":", 1)[1][:32]
+            ),
+            "job_id": context.job_id,
+            "purpose": ROUTING_BUDGET_RESERVATION_PURPOSE_V3,
+            "provider_id": "supabase",
+            "attempt_number": 0,
+            "method": "POST",
+            "url": (
+                origin
+                + "/rest/v1/rpc/research_lab_routing_reserve_budget_v3"
+            ),
+            "headers": {
+                "accept": "application/json",
+                "content-type": "application/json",
+            },
+            "body_b64": base64.b64encode(request_body).decode("ascii"),
+            "timeout_ms": 5_000,
+            "retry_policy_hash": retry_policy_hash,
+        }
+        result = self._provider_execute(request)
+        if not isinstance(result, Mapping):
+            raise ValueError("routing budget coordinator result is invalid")
+        attempt = result.get("transport_attempt")
+        if not isinstance(attempt, Mapping):
+            raise ValueError("routing budget transport attempt is missing")
+        validate_transport_attempt(attempt)
+        try:
+            http_status = int(result.get("http_status") or 0)
+            response_body = base64.b64decode(
+                str(result.get("body_b64") or ""), validate=True
+            )
+        except Exception as exc:  # noqa: BLE001 - protected boundary
+            raise ValueError("routing budget response is invalid") from exc
+        if (
+            result.get("terminal_status") != "authenticated_response"
+            or not 200 <= http_status < 300
+            or attempt.get("terminal_status") != "authenticated_response"
+            or attempt.get("provider_id") != "supabase"
+            or attempt.get("purpose") != ROUTING_BUDGET_RESERVATION_PURPOSE_V3
+            or attempt.get("job_id") != context.job_id
+            or attempt.get("logical_operation_id")
+            != request["logical_operation_id"]
+            or attempt.get("body_hash") != sha256_bytes(request_body)
+            or attempt.get("response_hash") != sha256_bytes(response_body)
+            or attempt.get("retry_policy_hash") != retry_policy_hash
+        ):
+            raise ValueError("routing budget authenticated response differs")
+        try:
+            response_document = json.loads(response_body.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 - protected boundary
+            raise ValueError("routing budget response JSON is invalid") from exc
+        normalized_result = validate_routing_budget_reservation_result_v3(
+            response_document,
+            reservation=reservation,
+        )
+        proof = routing_budget_reservation_proof_v3(
+            reservation_result=normalized_result,
+            response_hash=str(attempt["response_hash"]),
+            transport_attempt_hash=str(attempt["attempt_hash"]),
+        )
+        artifact_hashes = result.get("evidence_artifact_hashes") or ()
+        if (
+            not isinstance(artifact_hashes, (list, tuple))
+            or any(
+                not re.fullmatch(r"sha256:[0-9a-f]{64}", str(item or ""))
+                for item in artifact_hashes
+            )
+        ):
+            raise ValueError("routing budget artifact hashes are invalid")
+        return proof, dict(attempt), tuple(str(item) for item in artifact_hashes)
 
     def _validate_model_provider_catalog_ancestry(
         self,

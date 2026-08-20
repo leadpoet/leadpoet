@@ -35,6 +35,7 @@ HOST_OPERATION_REQUEST_SCHEMA_VERSION = "leadpoet.host_operation_request.v2"
 HOST_OPERATION_TERMINAL_SCHEMA_VERSION = "leadpoet.host_operation_terminal.v2"
 BOOT_ATTESTATION_CLAIM_SCHEMA_VERSION = "leadpoet.attested_boot_claim.v2"
 BOOT_ATTESTATION_PURPOSE = "leadpoet.boot_identity.v2"
+ROUTING_PROVIDER_EVIDENCE_PURPOSE_V2 = "research_lab.routing_provider_evidence.v2"
 
 COORDINATOR_ROLE = "gateway_coordinator"
 SCORING_ROLE = "gateway_scoring"
@@ -86,6 +87,9 @@ ROLE_PURPOSES = {
             "research_lab.candidate_hybrid_test.v2",
             "research_lab.candidate_hybrid_discovery.v2",
             "research_lab.model_compatibility.v2",
+            "research_lab.routing_model_binding_observation.v2",
+            "research_lab.routing_experiment.v2",
+            "research_lab.routing_provider_evidence.v2",
             "research_lab.company_score.v2",
             "research_lab.provider_preflight.v2",
             "research_lab.candidate_score.v2",
@@ -777,6 +781,14 @@ def build_execution_receipt_body(
     else:
         _require(failure_code in (None, ""), "successful receipt cannot have failure_code")
         normalized_failure = None
+    normalized_parent_hashes = [
+        _hash(item, "parent_receipt_hash") for item in parent_receipt_hashes
+    ]
+    if normalized_purpose == ROUTING_PROVIDER_EVIDENCE_PURPOSE_V2:
+        if len(set(normalized_parent_hashes)) != len(normalized_parent_hashes):
+            raise AttestedV2Error("parent_receipt_hashes contain duplicates")
+    else:
+        normalized_parent_hashes = sorted(set(normalized_parent_hashes))
     return {
         "schema_version": EXECUTION_RECEIPT_SCHEMA_VERSION,
         "role": normalized_role,
@@ -797,9 +809,7 @@ def build_execution_receipt_body(
             host_operation_root_hash, "host_operation_root"
         ),
         "artifact_root": _hash(artifact_root, "artifact_root"),
-        "parent_receipt_hashes": sorted(
-            {_hash(item, "parent_receipt_hash") for item in parent_receipt_hashes}
-        ),
+        "parent_receipt_hashes": normalized_parent_hashes,
         "status": status,
         "failure_code": normalized_failure,
         "issued_at": _timestamp(issued_at, "issued_at"),

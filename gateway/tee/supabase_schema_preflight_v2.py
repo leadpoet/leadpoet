@@ -573,6 +573,105 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "current_reward_status",
         ),
     ),
+    # Routing experiments are an independent, append-only authority. Keep
+    # every durable relation in the restart gate so a worker cannot start
+    # against a partially applied 157 schema.
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_experiments_v2",
+        ("experiment_hash", "experiment_id", "spec_doc", "receipt_execution_mode"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_experiment_events_v2",
+        ("event_hash", "experiment_hash", "event_type", "event_doc"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_experiment_claims_v2",
+        ("claim_key", "experiment_hash", "claim_generation", "claim_state"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_experiment_claim_heartbeats_v2",
+        ("heartbeat_key", "claim_key", "claim_generation", "lease_expires_at"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_experiment_claim_closures_v2",
+        ("close_key", "claim_key", "claim_generation", "close_reason"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_experiment_claims_v3",
+        (
+            "claim_key",
+            "experiment_hash",
+            "request_hash",
+            "lease_hash",
+            "lease_generation",
+            "claim_generation",
+            "claim_state",
+        ),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_experiment_claim_heartbeats_v3",
+        ("heartbeat_key", "claim_key", "claim_generation", "lease_expires_at"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_experiment_claim_closures_v3",
+        ("close_key", "claim_key", "claim_generation", "close_reason"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_provider_attempts_v2",
+        ("attempt_key", "experiment_hash", "provider_receipt_ref", "billing_state"),
+    ),
+    (
+        "scripts/160-research-lab-routing-adapter-failures.sql",
+        "research_lab_routing_adapter_failures_v2",
+        (
+            "failure_key",
+            "experiment_hash",
+            "provider_receipt_ref",
+            "claim_key",
+            "claim_generation",
+            "failure_doc",
+        ),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_decision_receipts_v2",
+        ("receipt_id", "experiment_hash", "variant_id", "decision_doc"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_evaluation_receipts_v2",
+        ("receipt_id", "experiment_hash", "evaluation_hash", "evaluation_doc"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_lab_references_v2",
+        ("reference_hash", "experiment_hash", "evaluation_receipt_id", "reconciliation_doc"),
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_budget_events_v2",
+        ("event_key", "reservation_id", "experiment_hash", "event_type"),
+    ),
+    (
+        "scripts/159-research-lab-routing-execution-queue.sql",
+        "research_lab_routing_execution_request_leases_v2",
+        (
+            "request_hash",
+            "lease_hash",
+            "lease_generation",
+            "worker_ref",
+            "lease_state",
+        ),
+    ),
 )
 
 REQUIRED_SUPABASE_V2_RPCS = (
@@ -816,6 +915,108 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/153-research-lab-private-model-lineage-generation.sql",
         "research_lab_private_model_lineage_generation",
     ),
+    # These RPCs are the complete durable store surface used by the isolated
+    # routing worker. The API only uses the first entry (submit); all others
+    # remain restart-gated for a later explicitly registered worker.
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_submit_experiment_v2",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_request_execution_v2",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_claim_experiment_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_renew_claim_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_close_claim_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_append_fenced_event_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_recover_claim_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_append_provider_attempt_v3",
+    ),
+    (
+        "scripts/160-research-lab-routing-adapter-failures.sql",
+        "research_lab_routing_append_adapter_failure_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_append_decision_receipt_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_append_evaluation_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_reserve_budget_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_settle_budget_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_mark_budget_uncertain_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_recover_budget_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_list_expired_budget_reservations_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_list_unresolved_budget_reservations_v3",
+    ),
+    (
+        "scripts/157-research-lab-routing-experiment-authority.sql",
+        "research_lab_routing_promote_v3",
+    ),
+    (
+        "scripts/159-research-lab-routing-execution-queue.sql",
+        "research_lab_routing_claim_execution_requests_v2",
+    ),
+    (
+        "scripts/159-research-lab-routing-execution-queue.sql",
+        "research_lab_routing_renew_execution_request_lease_v2",
+    ),
+    (
+        "scripts/159-research-lab-routing-execution-queue.sql",
+        "research_lab_routing_close_execution_request_lease_v2",
+    ),
+    (
+        "scripts/159-research-lab-routing-execution-queue.sql",
+        "research_lab_routing_claim_execution_v3",
+    ),
+)
+
+# 158 changes the attested receipt purpose allowlist in place, so it has no
+# relation or RPC of its own. It is still part of the immutable restart
+# migration inventory and must be present in the candidate source tree.
+REQUIRED_SUPABASE_V2_POLICY_MIGRATIONS = (
+    "scripts/158-research-lab-routing-experiment-purposes.sql",
+)
+
+REQUIRED_SUPABASE_V2_QUEUE_MIGRATIONS = (
+    "scripts/159-research-lab-routing-execution-queue.sql",
 )
 
 
@@ -1138,6 +1339,8 @@ def verify_required_supabase_v2_schema(
         "apikey": service_role_key,
     }
     migrations = set()
+    migrations.update(REQUIRED_SUPABASE_V2_POLICY_MIGRATIONS)
+    migrations.update(REQUIRED_SUPABASE_V2_QUEUE_MIGRATIONS)
     for migration, table, columns in REQUIRED_SUPABASE_V2_SCHEMA:
         query = urlencode({"select": ",".join(columns), "limit": "0"})
         request = Request(

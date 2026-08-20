@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import importlib
 import os
 from pathlib import Path
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +20,7 @@ from research_lab.routing_experiments import (
     ExperimentCreditBudget,
     ProviderBindingIdentity,
     ProviderReceipt,
+    PinnedSourcingModelRoutingAdapter,
     ReceiptExecutionMode,
     RoutingDecisionReceiptV2,
     RoutingEvaluationGates,
@@ -33,6 +32,7 @@ from research_lab.routing_experiments import (
     RoutingExperimentV2Variant,
     RoutingExperimentV2VariantEvaluation,
     SourcingModelArtifactIdentity,
+    model_hash_to_lab,
 )
 
 
@@ -122,7 +122,13 @@ def _spec() -> RoutingExperimentV2Spec:
     )
 
 
-def _runtime(*, contract_hash: str = "c" * 64, receipt: object | None = None):
+def _adapter(
+    *,
+    contract_hash: str = "c" * 64,
+    receipt: object | None = None,
+    target: int = 2,
+    artifact_errors: tuple[str, ...] = (),
+):
     attempt = receipt or SimpleNamespace(
         plan_sha256="a" * 64,
         stop_policy_sha256="b" * 64,
@@ -155,15 +161,51 @@ def _runtime(*, contract_hash: str = "c" * 64, receipt: object | None = None):
         "retry_precondition": "deferred",
         "contract_sha256": contract_hash,
     }
-    return SimpleNamespace(
+    stop = SimpleNamespace(
+        target_verified_qualified_count=target,
+        sha256=lambda: "b" * 64,
+    )
+    runtime = SimpleNamespace(
         candidate_waterfall_execution_contract_identity=lambda: identity,
-        compile_candidate_stop_policy=lambda *args, **kwargs: None,
-        compile_profiled_candidate_acquisition_route=lambda *args, **kwargs: None,
-        evaluate_candidate_waterfall=lambda *args, **kwargs: None,
-        runtime_catalog=lambda *args, **kwargs: None,
-        runtime_policy=lambda *args, **kwargs: None,
-        runtime_tool_definitions=lambda *args, **kwargs: None,
+        runtime_routing_metadata=lambda: {
+            "catalog_sha256": "3" * 64,
+            "policy_sha256": "4" * 64,
+            "candidate_waterfall_execution": identity,
+        },
+        evaluate_candidate_waterfall_payloads=lambda *args: {
+            "progress": {},
+            "decision": {},
+        },
+        CandidateStopPolicy=SimpleNamespace(from_payload=lambda payload: stop),
         CandidateStepAttemptReceipt=SimpleNamespace(from_payload=lambda payload: attempt),
+    )
+    return SimpleNamespace(
+        runtime=runtime,
+        validate_artifact_identity=lambda artifact: artifact_errors,
+        parse_plan=lambda payload: SimpleNamespace(),
+        plan_hash=lambda plan: "a" * 64,
+        route_hash=lambda plan: "b" * 64,
+    )
+
+
+def _adapt_receipt(
+    *,
+    spec: RoutingExperimentV2Spec,
+    decision: RoutingDecisionReceiptV2,
+    provider: ProviderReceipt | None,
+    adapter: object | None = None,
+    published_count: int = 0,
+) -> CandidateWaterfallReceipt:
+    return candidate_waterfall_receipt_from_model(
+        spec=spec,
+        variant_id=decision.variant_id,
+        decision_receipt=decision,
+        provider_receipt=provider,
+        plan_payload={"schema_version": "candidate-routing-plan:v1"},
+        stop_policy_payload={"schema_version": "candidate-stop-policy:v1"},
+        receipt_payloads=({},),
+        model_adapter=adapter or _adapter(),
+        published_count=published_count,
     )
 
 
@@ -206,6 +248,8 @@ def _decision(
     *,
     variant_id: str = "baseline",
     skipped: bool = False,
+    plan_hash: str = H("a"),
+    route_hash: str = H("b"),
 ) -> RoutingDecisionReceiptV2:
     draft = RoutingDecisionReceiptV2(
         receipt_id="routing_decision:pending",
@@ -214,8 +258,8 @@ def _decision(
         artifact_key=_artifact_key(spec, variant_id),
         stage="candidate_acquisition",
         unit_ref=provider.unit_ref,
-        plan_hash=H("a"),
-        route_hash=H("b"),
+        plan_hash=plan_hash,
+        route_hash=route_hash,
         considered_tool_ids=(provider.tool_id,),
         attempted_tool_ids=() if skipped else (provider.tool_id,),
         skipped_tool_reasons=(
@@ -305,13 +349,10 @@ def test_model_receipt_adapter_uses_shared_experiment_provider_and_decision_cont
     spec = _spec()
     provider = _provider_receipt()
     decision = _decision(spec, provider)
-    receipt = candidate_waterfall_receipt_from_model(
+    receipt = _adapt_receipt(
         spec=spec,
-        variant_id="baseline",
-        decision_receipt=decision,
-        provider_receipt=provider,
-        receipt_payload={"attempt_receipt_sha256": "d" * 64},
-        model_runtime=_runtime(),
+        decision=decision,
+        provider=provider,
         published_count=1,
     )
 
@@ -322,24 +363,39 @@ def test_model_receipt_adapter_uses_shared_experiment_provider_and_decision_cont
     assert receipt.verified_qualified_count == 2
     assert receipt.published_count == 1
     assert receipt.cost_microusd == 12_500
+    assert receipt.target_verified_qualified_count == 2
+    assert receipt.prior_attempt_receipt_sha256 == ""
     assert receipt.to_dict()["receipt_hash"].startswith("sha256:")
 
 
 def test_exact_model_contract_preflight_fails_closed():
     spec = _spec()
-    with pytest.raises(RoutingExperimentError, match="contract_hash_differs"):
+    identity = _adapter().runtime.candidate_waterfall_execution_contract_identity()
+    unsafe_adapter = _adapter()
+    unsafe_adapter.runtime.runtime_routing_metadata = lambda: {
+        "catalog_sha256": "3" * 64,
+        "policy_sha256": "4" * 64,
+        "candidate_waterfall_execution": {**identity, "contract_sha256": "9" * 64},
+    }
+    with pytest.raises(RoutingExperimentError, match="identity_differs_from_metadata"):
         validate_candidate_routing_model_runtime(
             spec=spec,
             variant_id="baseline",
-            model_runtime=_runtime(contract_hash="9" * 64),
+            model_adapter=unsafe_adapter,
+        )
+    with pytest.raises(RoutingExperimentError, match="artifact_identity_differs"):
+        validate_candidate_routing_model_runtime(
+            spec=spec,
+            variant_id="baseline",
+            model_adapter=_adapter(
+                artifact_errors=("model_artifact_hash_mismatch",)
+            ),
         )
     with pytest.raises(RoutingExperimentError, match="runtime_contract_is_incomplete"):
         validate_candidate_routing_model_runtime(
             spec=spec,
             variant_id="baseline",
-            model_runtime=SimpleNamespace(
-                candidate_waterfall_execution_contract_identity=lambda: {}
-            ),
+            model_adapter=SimpleNamespace(runtime=SimpleNamespace()),
         )
 
 
@@ -349,13 +405,10 @@ def test_model_receipt_adapter_rejects_unlinked_provider_receipt():
     decision = _decision(spec, provider)
     other = _provider_receipt("icp.hold")
     with pytest.raises(RoutingExperimentError, match="not_in_decision"):
-        candidate_waterfall_receipt_from_model(
+        _adapt_receipt(
             spec=spec,
-            variant_id="baseline",
-            decision_receipt=decision,
-            provider_receipt=other,
-            receipt_payload={},
-            model_runtime=_runtime(),
+            decision=decision,
+            provider=other,
         )
 
 
@@ -380,13 +433,11 @@ def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
         verification_receipt_sha256="",
         sha256=lambda: "8" * 64,
     )
-    receipt = candidate_waterfall_receipt_from_model(
+    receipt = _adapt_receipt(
         spec=spec,
-        variant_id="baseline",
-        decision_receipt=_decision(spec, provider, skipped=True),
-        provider_receipt=None,
-        receipt_payload={},
-        model_runtime=_runtime(receipt=skipped_model_receipt),
+        decision=_decision(spec, provider, skipped=True),
+        provider=None,
+        adapter=_adapter(receipt=skipped_model_receipt),
     )
 
     assert receipt.disposition == "skipped"
@@ -397,7 +448,7 @@ def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
         spec=spec,
         evaluation=_evaluation(spec, receipt),
         receipts=(receipt,),
-        target_verified_qualified_count=1,
+        target_verified_qualified_count=2,
     )
     assert metrics[0].waterfall_attempt_count == 1
     assert metrics[0].provider_receipt_refs == ()
@@ -407,33 +458,67 @@ def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
     not os.environ.get("SOURCING_MODEL_CHECKOUT"),
     reason="requires an exact Sourcing_model checkout",
 )
-def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(monkeypatch):
+def test_exact_sourcing_model_candidate_receipt_contract_is_compatible():
     checkout = Path(os.environ["SOURCING_MODEL_CHECKOUT"]).resolve()
-    package = ModuleType("sourcing_model")
-    package.__path__ = [str(checkout / "sourcing_model")]
-    routing_package = ModuleType("sourcing_model.routing")
-    routing_package.__path__ = [str(checkout / "sourcing_model" / "routing")]
-    monkeypatch.setitem(sys.modules, "sourcing_model", package)
-    monkeypatch.setitem(sys.modules, "sourcing_model.routing", routing_package)
-    runtime_contract = importlib.import_module(
-        "sourcing_model.routing.candidate_execution"
+    adapter = PinnedSourcingModelRoutingAdapter.from_model_root(checkout)
+    runtime = adapter.runtime
+    candidate_profiles = adapter.candidate_profiles
+    tool_id = runtime.TOOL_CANDIDATE_REGISTRY
+    profile = candidate_profiles.CandidateRoutingProfile(
+        profile_id="candidate-exact",
+        version="v1",
+        required_features=(),
+        forbidden_features=(),
+        steps=(candidate_profiles.CandidateRoutingProfileStep(tool_id, 0),),
+        is_default=True,
     )
-    identity = runtime_contract.candidate_waterfall_execution_contract_identity()
+    registry = candidate_profiles.CandidateRoutingProfileRegistry(
+        profiles=(profile,)
+    )
+    features = adapter.features.RoutingFeatureSet(("icp.structured_eligible",))
+    policy = runtime.runtime_policy()
+    plan = runtime.compile_candidate_routing_plan(
+        catalog=runtime.runtime_catalog({tool_id: True}),
+        policy=policy,
+        context=runtime.RouteContext(
+            stage=runtime.STAGE_CANDIDATE_ACQUISITION,
+            features=("runtime.registry_available",),
+            remaining_seconds=300,
+            remaining_calls=4,
+            remaining_results=100,
+            credit_cap=4,
+        ),
+        feature_set=features,
+        registry=registry,
+    )
+    stop = runtime.compile_candidate_stop_policy(
+        plan,
+        target_verified_qualified_count=2,
+        registry=registry,
+        policy=policy,
+    )
+    identity = runtime.candidate_waterfall_execution_contract_identity()
 
     spec = _spec()
+    observed = adapter.observed_artifact_identity()
     exact_artifact = replace(
         _artifact(),
-        routing_contract_hash="sha256:" + identity["contract_sha256"],
+        **{
+            field_name: value
+            for field_name, value in observed.items()
+            if field_name in _artifact().__dataclass_fields__
+        },
     )
     exact_variants = tuple(
         replace(item, artifact=exact_artifact) for item in spec.variants
     )
     spec = replace(spec, variants=exact_variants)
-    model_receipt = runtime_contract.CandidateStepAttemptReceipt(
-        plan_sha256="a" * 64,
-        stop_policy_sha256="b" * 64,
-        step_order=0,
-        tool_id="candidate.registry_feed",
+    model_step = plan.route.steps[0]
+    model_receipt = runtime.CandidateStepAttemptReceipt(
+        plan_sha256=plan.sha256(),
+        stop_policy_sha256=stop.sha256(),
+        step_order=model_step.order,
+        tool_id=model_step.tool_id,
         attempt=0,
         disposition="succeeded",
         raw_candidate_count=8,
@@ -444,28 +529,24 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(monkeypat
         outcome_code="verified_candidates",
         latency_seconds=0.25,
         provider_call_count=1,
-        estimated_cost_usd=0.0125,
-    )
-    model_runtime = SimpleNamespace(
-        candidate_waterfall_execution_contract_identity=(
-            runtime_contract.candidate_waterfall_execution_contract_identity
-        ),
-        compile_candidate_stop_policy=lambda *args, **kwargs: None,
-        compile_profiled_candidate_acquisition_route=lambda *args, **kwargs: None,
-        evaluate_candidate_waterfall=runtime_contract.evaluate_candidate_waterfall,
-        runtime_catalog=lambda *args, **kwargs: None,
-        runtime_policy=lambda *args, **kwargs: None,
-        runtime_tool_definitions=lambda *args, **kwargs: None,
-        CandidateStepAttemptReceipt=runtime_contract.CandidateStepAttemptReceipt,
+        estimated_cost_usd=0.0,
     )
     provider = _provider_receipt()
+    decision = _decision(
+        spec,
+        provider,
+        plan_hash=model_hash_to_lab(plan.sha256(), "plan_sha256"),
+        route_hash=model_hash_to_lab(plan.route.sha256(), "route_sha256"),
+    )
     receipt = candidate_waterfall_receipt_from_model(
         spec=spec,
         variant_id="baseline",
-        decision_receipt=_decision(spec, provider),
+        decision_receipt=decision,
         provider_receipt=provider,
-        receipt_payload=model_receipt.as_payload(),
-        model_runtime=model_runtime,
+        plan_payload=plan.as_payload(),
+        stop_policy_payload=stop.as_payload(),
+        receipt_payloads=(model_receipt.as_payload(),),
+        model_adapter=adapter,
         published_count=1,
     )
 
@@ -475,14 +556,41 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(monkeypat
 
     malformed_payload = model_receipt.as_payload()
     malformed_payload["unknown_provider_field"] = "not-admitted"
-    with pytest.raises(RoutingExperimentError, match="attempt_receipt_is_invalid"):
+    with pytest.raises(RoutingExperimentError, match="attempt_prefix_is_invalid"):
         candidate_waterfall_receipt_from_model(
             spec=spec,
             variant_id="baseline",
-            decision_receipt=_decision(spec, provider),
+            decision_receipt=decision,
             provider_receipt=provider,
-            receipt_payload=malformed_payload,
-            model_runtime=model_runtime,
+            plan_payload=plan.as_payload(),
+            stop_policy_payload=stop.as_payload(),
+            receipt_payloads=(malformed_payload,),
+            model_adapter=adapter,
+        )
+
+    continued_after_target = runtime.CandidateStepAttemptReceipt(
+        plan_sha256=plan.sha256(),
+        stop_policy_sha256=stop.sha256(),
+        step_order=model_step.order,
+        tool_id=model_step.tool_id,
+        attempt=1,
+        disposition="missed",
+        outcome_code="provider_miss",
+        provider_call_count=1,
+    )
+    with pytest.raises(RoutingExperimentError, match="attempt_prefix_is_invalid"):
+        candidate_waterfall_receipt_from_model(
+            spec=spec,
+            variant_id="baseline",
+            decision_receipt=decision,
+            provider_receipt=provider,
+            plan_payload=plan.as_payload(),
+            stop_policy_payload=stop.as_payload(),
+            receipt_payloads=(
+                model_receipt.as_payload(),
+                continued_after_target.as_payload(),
+            ),
+            model_adapter=adapter,
         )
 
 
@@ -490,13 +598,10 @@ def test_candidate_metrics_are_sidecars_on_shared_evaluation():
     spec = _spec()
     provider = _provider_receipt()
     decision = _decision(spec, provider)
-    receipt = candidate_waterfall_receipt_from_model(
+    receipt = _adapt_receipt(
         spec=spec,
-        variant_id="baseline",
-        decision_receipt=decision,
-        provider_receipt=provider,
-        receipt_payload={},
-        model_runtime=_runtime(),
+        decision=decision,
+        provider=provider,
         published_count=1,
     )
     metrics = evaluate_candidate_waterfall_metrics(
@@ -525,33 +630,75 @@ def test_candidate_metrics_are_sidecars_on_shared_evaluation():
 def test_candidate_metrics_reject_duplicate_attempts():
     spec = _spec()
     provider = _provider_receipt()
-    receipt = candidate_waterfall_receipt_from_model(
+    receipt = _adapt_receipt(
         spec=spec,
-        variant_id="baseline",
-        decision_receipt=_decision(spec, provider),
-        provider_receipt=provider,
-        receipt_payload={},
-        model_runtime=_runtime(),
+        decision=_decision(spec, provider),
+        provider=provider,
     )
     with pytest.raises(RoutingExperimentError, match="attempt_is_duplicated"):
         evaluate_candidate_waterfall_metrics(
             spec=spec,
             evaluation=_evaluation(spec, receipt),
             receipts=(receipt, receipt),
-            target_verified_qualified_count=1,
+            target_verified_qualified_count=2,
+        )
+
+
+def test_candidate_metrics_reject_duplicate_provider_receipt_sidecars():
+    spec = _spec()
+    provider = _provider_receipt()
+    receipt = _adapt_receipt(
+        spec=spec,
+        decision=_decision(spec, provider),
+        provider=provider,
+    )
+    duplicate_provider = replace(
+        receipt,
+        attempt_sequence=1,
+        prior_attempt_receipt_sha256=receipt.attempt_receipt_sha256,
+        attempt_receipt_sha256="7" * 64,
+        attempt_chain_sha256="6" * 64,
+    )
+    with pytest.raises(RoutingExperimentError, match="sidecar_is_duplicated"):
+        evaluate_candidate_waterfall_metrics(
+            spec=spec,
+            evaluation=_evaluation(spec, receipt),
+            receipts=(receipt, duplicate_provider),
+            target_verified_qualified_count=2,
+        )
+
+
+def test_candidate_metrics_reject_stop_target_and_attempt_chain_drift():
+    spec = _spec()
+    provider = _provider_receipt()
+    receipt = _adapt_receipt(
+        spec=spec,
+        decision=_decision(spec, provider),
+        provider=provider,
+    )
+    with pytest.raises(RoutingExperimentError, match="target_differs"):
+        evaluate_candidate_waterfall_metrics(
+            spec=spec,
+            evaluation=_evaluation(spec, receipt),
+            receipts=(receipt,),
+            target_verified_qualified_count=3,
+        )
+    with pytest.raises(RoutingExperimentError, match="chain_hash_differs"):
+        evaluate_candidate_waterfall_metrics(
+            spec=spec,
+            evaluation=_evaluation(spec, receipt),
+            receipts=(replace(receipt, attempt_chain_sha256="7" * 64),),
+            target_verified_qualified_count=2,
         )
 
 
 def test_candidate_metrics_reject_partial_provider_sidecar_coverage():
     spec = _spec()
     provider = _provider_receipt()
-    receipt = candidate_waterfall_receipt_from_model(
+    receipt = _adapt_receipt(
         spec=spec,
-        variant_id="baseline",
-        decision_receipt=_decision(spec, provider),
-        provider_receipt=provider,
-        receipt_payload={},
-        model_runtime=_runtime(),
+        decision=_decision(spec, provider),
+        provider=provider,
     )
     evaluation = _evaluation(spec, receipt)
 
@@ -560,7 +707,7 @@ def test_candidate_metrics_reject_partial_provider_sidecar_coverage():
             spec=spec,
             evaluation=evaluation,
             receipts=(),
-            target_verified_qualified_count=1,
+            target_verified_qualified_count=2,
         )
 
 
@@ -585,13 +732,11 @@ def test_candidate_metrics_reject_partial_decision_sidecar_coverage():
         verification_receipt_sha256="",
         sha256=lambda: "8" * 64,
     )
-    skipped_receipt = candidate_waterfall_receipt_from_model(
+    skipped_receipt = _adapt_receipt(
         spec=spec,
-        variant_id="baseline",
-        decision_receipt=_decision(spec, provider, skipped=True),
-        provider_receipt=None,
-        receipt_payload={},
-        model_runtime=_runtime(receipt=skipped_model_receipt),
+        decision=_decision(spec, provider, skipped=True),
+        provider=None,
+        adapter=_adapter(receipt=skipped_model_receipt),
     )
     evaluation = _evaluation(spec, skipped_receipt)
 
@@ -600,7 +745,7 @@ def test_candidate_metrics_reject_partial_decision_sidecar_coverage():
             spec=spec,
             evaluation=evaluation,
             receipts=(),
-            target_verified_qualified_count=1,
+            target_verified_qualified_count=2,
         )
 
 
@@ -608,7 +753,7 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     sql = (
         Path(__file__).parents[1]
         / "scripts"
-        / "156-research-lab-candidate-routing-experiments.sql"
+        / "162-research-lab-candidate-routing-experiments.sql"
     ).read_text()
     assert "research_lab_candidate_waterfall_receipts" in sql
     assert "research_lab_candidate_waterfall_metrics" in sql
@@ -626,6 +771,12 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "FOR INSERT TO service_role WITH CHECK (true)" in sql
     assert "provider_receipt_ref = ''" in sql
     assert "disposition = 'skipped'" in sql
+    assert "idx_research_lab_candidate_waterfall_provider_receipt" in sql
+    assert sql.count("REFERENCES public.research_lab_routing_experiments_v2") == 2
+    assert "REFERENCES public.research_lab_routing_decision_receipts_v2" in sql
+    assert "REFERENCES public.research_lab_routing_evaluation_receipts_v2" in sql
+    assert "prior_attempt_receipt_sha256" in sql
+    assert "attempt_chain_sha256" in sql
     assert sql.count("= jsonb_build_object(") == 2
     assert "provider_outcome IN (" in sql
     assert sql.count("jsonb_typeof(metric_doc->") == 3

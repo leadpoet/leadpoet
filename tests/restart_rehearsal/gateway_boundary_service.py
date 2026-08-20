@@ -517,6 +517,7 @@ def _migration_schema_contract(
             "159-research-lab-routing-execution-queue.sql",
             "160-research-lab-routing-adapter-failures.sql",
             "161-research-lab-exact-model-transitions.sql",
+            "162-research-lab-candidate-routing-experiments.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -594,6 +595,8 @@ def _migration_schema_contract(
         "research_lab_allocation_settlement_frontiers_v2",
         "research_lab_allocation_settlement_frontier_activation_v2",
         "research_lab_compact_weight_authorities_v2",
+        "research_lab_candidate_waterfall_receipts",
+        "research_lab_candidate_waterfall_metrics",
     }
     if not required_relations <= set(relations):
         raise RuntimeError(

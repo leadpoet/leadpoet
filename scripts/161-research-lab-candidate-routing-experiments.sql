@@ -18,14 +18,18 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
         contract_version = 'leadpoet.candidate_waterfall_receipt_sidecar:v1'
     ),
     experiment_id                 TEXT NOT NULL,
-    experiment_hash               TEXT NOT NULL CHECK (
+    experiment_hash               TEXT NOT NULL
+        REFERENCES public.research_lab_routing_experiments_v2(experiment_hash)
+        CHECK (
         experiment_hash ~ '^sha256:[0-9a-f]{64}$'
     ),
     variant_id                    TEXT NOT NULL,
     artifact_key                  TEXT NOT NULL CHECK (
         artifact_key ~ '^sha256:[0-9a-f]{64}$'
     ),
-    decision_receipt_id           TEXT NOT NULL CHECK (
+    decision_receipt_id           TEXT NOT NULL
+        REFERENCES public.research_lab_routing_decision_receipts_v2(receipt_id)
+        CHECK (
         decision_receipt_id ~ '^routing_decision:[0-9a-f]{16}$'
     ),
     provider_receipt_ref          TEXT NOT NULL DEFAULT '' CHECK (
@@ -67,12 +71,22 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
     attempt_receipt_sha256        TEXT NOT NULL CHECK (
         attempt_receipt_sha256 ~ '^[0-9a-f]{64}$'
     ),
+    prior_attempt_receipt_sha256  TEXT NOT NULL DEFAULT '' CHECK (
+        prior_attempt_receipt_sha256 = ''
+        OR prior_attempt_receipt_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    attempt_chain_sha256          TEXT NOT NULL CHECK (
+        attempt_chain_sha256 ~ '^[0-9a-f]{64}$'
+    ),
     verification_receipt_sha256   TEXT NOT NULL DEFAULT '' CHECK (
         verification_receipt_sha256 = ''
         OR verification_receipt_sha256 ~ '^[0-9a-f]{64}$'
     ),
     step_order                    INTEGER NOT NULL CHECK (step_order >= 0),
     attempt_sequence              INTEGER NOT NULL CHECK (attempt_sequence >= 0),
+    target_verified_qualified_count INTEGER NOT NULL CHECK (
+        target_verified_qualified_count >= 1
+    ),
     disposition                   TEXT NOT NULL CHECK (
         disposition IN ('succeeded', 'missed', 'failed', 'deferred', 'skipped')
     ),
@@ -101,11 +115,13 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
             disposition = 'skipped'
             AND provider_receipt_ref = ''
             AND provider_outcome = 'skipped'
+            AND provider_call_count = 0
         )
         OR (
             disposition <> 'skipped'
             AND provider_receipt_ref <> ''
             AND provider_outcome <> 'skipped'
+            AND provider_call_count = 1
         )
     ),
     CHECK (receipt_doc = jsonb_build_object(
@@ -129,9 +145,12 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
         'model_plan_sha256', model_plan_sha256,
         'stop_policy_sha256', stop_policy_sha256,
         'attempt_receipt_sha256', attempt_receipt_sha256,
+        'prior_attempt_receipt_sha256', prior_attempt_receipt_sha256,
+        'attempt_chain_sha256', attempt_chain_sha256,
         'verification_receipt_sha256', verification_receipt_sha256,
         'step_order', step_order,
         'attempt_sequence', attempt_sequence,
+        'target_verified_qualified_count', target_verified_qualified_count,
         'disposition', disposition,
         'outcome_code', outcome_code,
         'provider_call_count', provider_call_count,
@@ -156,11 +175,15 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
     contract_version                TEXT NOT NULL CHECK (
         contract_version = 'leadpoet.candidate_waterfall_metric_sidecar:v1'
     ),
-    evaluation_receipt_id           TEXT NOT NULL CHECK (
-        evaluation_receipt_id ~ '^routing_evaluation_v2:[A-Za-z0-9_.:-]+$'
+    evaluation_receipt_id           TEXT NOT NULL
+        REFERENCES public.research_lab_routing_evaluation_receipts_v2(receipt_id)
+        CHECK (
+        evaluation_receipt_id ~ '^routing_evaluation_v2:[0-9a-f]{16}$'
     ),
     experiment_id                   TEXT NOT NULL,
-    experiment_hash                 TEXT NOT NULL CHECK (
+    experiment_hash                 TEXT NOT NULL
+        REFERENCES public.research_lab_routing_experiments_v2(experiment_hash)
+        CHECK (
         experiment_hash ~ '^sha256:[0-9a-f]{64}$'
     ),
     variant_id                      TEXT NOT NULL,
@@ -252,6 +275,13 @@ CREATE INDEX IF NOT EXISTS idx_research_lab_candidate_waterfall_receipts_evaluat
         step_order,
         attempt_sequence
     );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_research_lab_candidate_waterfall_provider_receipt
+    ON public.research_lab_candidate_waterfall_receipts(
+        experiment_id,
+        provider_receipt_ref
+    )
+    WHERE provider_receipt_ref <> '';
 
 CREATE INDEX IF NOT EXISTS idx_research_lab_candidate_waterfall_metrics_evaluation
     ON public.research_lab_candidate_waterfall_metrics(

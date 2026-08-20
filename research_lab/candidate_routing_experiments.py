@@ -97,38 +97,77 @@ def validate_candidate_routing_model_runtime(
     *,
     spec: RoutingExperimentV2Spec,
     variant_id: str,
-    model_runtime: Any,
+    model_adapter: Any,
 ) -> Mapping[str, Any]:
     """Fail closed unless the exact variant Model contract is available."""
 
     variant = _candidate_variant(spec, variant_id)
+    runtime = getattr(model_adapter, "runtime", None)
     required_callables = (
         "candidate_waterfall_execution_contract_identity",
-        "compile_candidate_stop_policy",
-        "compile_profiled_candidate_acquisition_route",
-        "evaluate_candidate_waterfall",
-        "runtime_catalog",
-        "runtime_policy",
-        "runtime_tool_definitions",
+        "evaluate_candidate_waterfall_payloads",
+        "runtime_routing_metadata",
     )
-    if any(not callable(getattr(model_runtime, name, None)) for name in required_callables):
+    adapter_callables = (
+        "parse_plan",
+        "plan_hash",
+        "route_hash",
+        "validate_artifact_identity",
+    )
+    if runtime is None or any(
+        not callable(getattr(runtime, name, None)) for name in required_callables
+    ) or any(
+        not callable(getattr(model_adapter, name, None))
+        for name in adapter_callables
+    ):
         raise RoutingExperimentError("model_candidate_routing_runtime_contract_is_incomplete")
-    receipt_type = getattr(model_runtime, "CandidateStepAttemptReceipt", None)
-    if not callable(getattr(receipt_type, "from_payload", None)):
-        raise RoutingExperimentError("model_candidate_routing_receipt_parser_is_unavailable")
+    for type_name, error_code in (
+        (
+            "CandidateStepAttemptReceipt",
+            "model_candidate_routing_receipt_parser_is_unavailable",
+        ),
+        (
+            "CandidateStopPolicy",
+            "model_candidate_stop_policy_parser_is_unavailable",
+        ),
+    ):
+        model_type = getattr(runtime, type_name, None)
+        if not callable(getattr(model_type, "from_payload", None)):
+            raise RoutingExperimentError(error_code)
     try:
-        identity = model_runtime.candidate_waterfall_execution_contract_identity()
+        artifact_errors = tuple(
+            model_adapter.validate_artifact_identity(variant.artifact)
+        )
+        identity = runtime.candidate_waterfall_execution_contract_identity()
+        metadata = runtime.runtime_routing_metadata()
     except Exception as exc:
         raise RoutingExperimentError("model_candidate_routing_identity_is_unavailable") from exc
+    if artifact_errors:
+        raise RoutingExperimentError(
+            "model_candidate_artifact_identity_differs_from_variant:"
+            + ";".join(str(item) for item in artifact_errors)
+        )
     if not isinstance(identity, Mapping):
         raise RoutingExperimentError("model_candidate_routing_identity_is_invalid")
-    actual_raw_hash = _model_hash(identity.get("contract_sha256"), "routing_contract_hash")
-    expected_lab_hash = _lab_hash(
-        variant.artifact.routing_contract_hash,
-        "artifact_routing_contract_hash",
-    )
-    if model_hash_to_lab(actual_raw_hash, "candidate_routing_contract_hash") != expected_lab_hash:
-        raise RoutingExperimentError("model_candidate_routing_contract_hash_differs_from_variant")
+    if not isinstance(metadata, Mapping):
+        raise RoutingExperimentError("model_candidate_routing_metadata_is_invalid")
+    nested_identity = metadata.get("candidate_waterfall_execution")
+    if not isinstance(nested_identity, Mapping) or dict(nested_identity) != dict(
+        identity
+    ):
+        raise RoutingExperimentError("model_candidate_routing_identity_differs_from_metadata")
+    _model_hash(identity.get("contract_sha256"), "routing_contract_hash")
+    for metadata_field, artifact_field in (
+        ("catalog_sha256", "routing_catalog_hash"),
+        ("policy_sha256", "routing_policy_hash"),
+    ):
+        if model_hash_to_lab(
+            _model_hash(metadata.get(metadata_field), metadata_field),
+            metadata_field,
+        ) != _lab_hash(getattr(variant.artifact, artifact_field), artifact_field):
+            raise RoutingExperimentError(
+                f"model_candidate_{metadata_field}_differs_from_variant"
+            )
     if identity.get("provider_results_can_satisfy_target") is not False:
         raise RoutingExperimentError("model_candidate_routing_stop_contract_is_unsafe")
     for field_name in (
@@ -155,6 +194,12 @@ def validate_candidate_routing_model_runtime(
     return dict(identity)
 
 
+def _attempt_chain_sha256(attempt_hashes: Sequence[str]) -> str:
+    for attempt_hash in attempt_hashes:
+        _model_hash(attempt_hash, "attempt_chain_member")
+    return sha256_json(list(attempt_hashes)).split(":", 1)[1]
+
+
 @dataclass(frozen=True)
 class CandidateWaterfallReceipt:
     """Redacted candidate counts attached to shared routing receipts."""
@@ -176,7 +221,10 @@ class CandidateWaterfallReceipt:
     model_plan_sha256: str
     stop_policy_sha256: str
     attempt_receipt_sha256: str
+    prior_attempt_receipt_sha256: str
+    attempt_chain_sha256: str
     verification_receipt_sha256: str
+    target_verified_qualified_count: int
     step_order: int
     attempt_sequence: int
     disposition: str
@@ -231,8 +279,14 @@ class CandidateWaterfallReceipt:
             "model_plan_sha256",
             "stop_policy_sha256",
             "attempt_receipt_sha256",
+            "attempt_chain_sha256",
         ):
             _model_hash(getattr(self, field_name), field_name)
+        _model_hash(
+            self.prior_attempt_receipt_sha256,
+            "prior_attempt_receipt_sha256",
+            optional=True,
+        )
         _model_hash(
             self.verification_receipt_sha256,
             "verification_receipt_sha256",
@@ -241,6 +295,7 @@ class CandidateWaterfallReceipt:
         for field_name in (
             "step_order",
             "attempt_sequence",
+            "target_verified_qualified_count",
             "provider_call_count",
             "cost_microusd",
             "latency_ms",
@@ -254,14 +309,20 @@ class CandidateWaterfallReceipt:
         if self.disposition not in _DISPOSITIONS:
             raise RoutingExperimentError("candidate_disposition_is_invalid")
         if self.disposition == "skipped":
-            if self.provider_receipt_ref or self.provider_outcome != "skipped":
+            if (
+                self.provider_receipt_ref
+                or self.provider_outcome != "skipped"
+                or self.provider_call_count != 0
+            ):
                 raise RoutingExperimentError(
                     "candidate_skipped_attempt_cannot_claim_provider_receipt"
                 )
-        elif not self.provider_receipt_ref:
+        elif not self.provider_receipt_ref or self.provider_call_count != 1:
             raise RoutingExperimentError(
-                "candidate_attempt_requires_provider_receipt"
+                "candidate_attempt_requires_one_unique_provider_receipt"
             )
+        if self.target_verified_qualified_count < 1:
+            raise RoutingExperimentError("candidate_receipt_target_must_be_positive")
         if not (
             self.raw_count
             >= self.normalized_count
@@ -302,17 +363,19 @@ def candidate_waterfall_receipt_from_model(
     variant_id: str,
     decision_receipt: RoutingDecisionReceiptV2,
     provider_receipt: ProviderReceipt | None,
-    receipt_payload: Mapping[str, Any],
-    model_runtime: Any,
+    plan_payload: Mapping[str, Any],
+    stop_policy_payload: Mapping[str, Any],
+    receipt_payloads: Sequence[Mapping[str, Any]],
+    model_adapter: Any,
     published_count: int = 0,
 ) -> CandidateWaterfallReceipt:
-    """Parse one exact Model receipt and bind it to PR 93 receipts."""
+    """Parse one exact Model receipt prefix and bind it to PR 93 receipts."""
 
     variant = _candidate_variant(spec, variant_id)
     identity = validate_candidate_routing_model_runtime(
         spec=spec,
         variant_id=variant_id,
-        model_runtime=model_runtime,
+        model_adapter=model_adapter,
     )
     decision_errors = validate_routing_decision_receipt(decision_receipt)
     if decision_errors:
@@ -334,15 +397,41 @@ def candidate_waterfall_receipt_from_model(
     )
     if decision_receipt.artifact_key != expected_artifact_key:
         raise RoutingExperimentError("candidate_decision_receipt_artifact_differs_from_variant")
+    if not isinstance(receipt_payloads, Sequence) or isinstance(
+        receipt_payloads, (str, bytes)
+    ) or not receipt_payloads:
+        raise RoutingExperimentError("model_candidate_attempt_prefix_is_invalid")
+    runtime = model_adapter.runtime
     try:
-        model_receipt = model_runtime.CandidateStepAttemptReceipt.from_payload(receipt_payload)
+        plan = model_adapter.parse_plan(plan_payload)
+        stop_policy = runtime.CandidateStopPolicy.from_payload(stop_policy_payload)
+        evaluated = runtime.evaluate_candidate_waterfall_payloads(
+            plan_payload,
+            stop_policy_payload,
+            list(receipt_payloads),
+        )
+        model_receipts = tuple(
+            runtime.CandidateStepAttemptReceipt.from_payload(item)
+            for item in receipt_payloads
+        )
     except Exception as exc:
-        raise RoutingExperimentError("model_candidate_attempt_receipt_is_invalid") from exc
-    if (
-        model_hash_to_lab(model_receipt.plan_sha256, "candidate_model_plan_hash")
-        != decision_receipt.plan_hash
-    ):
+        raise RoutingExperimentError("model_candidate_attempt_prefix_is_invalid") from exc
+    if not isinstance(evaluated, Mapping) or set(evaluated) != {"progress", "decision"}:
+        raise RoutingExperimentError("model_candidate_attempt_evaluation_is_invalid")
+    model_receipt = model_receipts[-1]
+    model_plan_hash = model_adapter.plan_hash(plan)
+    if model_receipt.plan_sha256 != model_plan_hash or model_hash_to_lab(
+        model_plan_hash,
+        "candidate_model_plan_hash",
+    ) != decision_receipt.plan_hash:
         raise RoutingExperimentError("model_candidate_attempt_plan_differs_from_decision")
+    if model_hash_to_lab(
+        model_adapter.route_hash(plan),
+        "candidate_model_route_hash",
+    ) != decision_receipt.route_hash:
+        raise RoutingExperimentError("model_candidate_route_differs_from_decision")
+    if model_receipt.stop_policy_sha256 != stop_policy.sha256():
+        raise RoutingExperimentError("model_candidate_attempt_stop_policy_differs")
     variant_bindings = [
         item
         for item in spec.provider_bindings
@@ -416,6 +505,7 @@ def candidate_waterfall_receipt_from_model(
     published = _nonnegative_int(published_count, "published_count")
     if published > model_receipt.verified_qualified_count:
         raise RoutingExperimentError("candidate_published_count_exceeds_verified_count")
+    attempt_hashes = tuple(item.sha256() for item in model_receipts)
     return CandidateWaterfallReceipt(
         experiment_id=spec.experiment_id,
         experiment_hash=spec.experiment_hash(),
@@ -434,7 +524,12 @@ def candidate_waterfall_receipt_from_model(
         model_plan_sha256=model_receipt.plan_sha256,
         stop_policy_sha256=model_receipt.stop_policy_sha256,
         attempt_receipt_sha256=model_receipt.sha256(),
+        prior_attempt_receipt_sha256=(
+            attempt_hashes[-2] if len(attempt_hashes) > 1 else ""
+        ),
+        attempt_chain_sha256=_attempt_chain_sha256(attempt_hashes),
         verification_receipt_sha256=model_receipt.verification_receipt_sha256,
+        target_verified_qualified_count=stop_policy.target_verified_qualified_count,
         step_order=model_receipt.step_order,
         attempt_sequence=model_receipt.attempt,
         disposition=model_receipt.disposition,
@@ -637,6 +732,7 @@ def evaluate_candidate_waterfall_metrics(
     if set(evaluation_by_variant) != {item.variant_id for item in spec.variants}:
         raise RoutingExperimentError("candidate_evaluation_variants_differ_from_experiment")
     receipt_keys: set[tuple[str, str, int, int]] = set()
+    provider_receipt_refs: set[str] = set()
     for receipt in receipts:
         if not isinstance(receipt, CandidateWaterfallReceipt):
             raise RoutingExperimentError("candidate_metrics_require_typed_waterfall_receipts")
@@ -662,6 +758,39 @@ def evaluate_candidate_waterfall_metrics(
         if key in receipt_keys:
             raise RoutingExperimentError("candidate_waterfall_attempt_is_duplicated")
         receipt_keys.add(key)
+        if receipt.target_verified_qualified_count != target:
+            raise RoutingExperimentError(
+                "candidate_receipt_target_differs_from_metric_target"
+            )
+        if receipt.provider_receipt_ref:
+            if receipt.provider_receipt_ref in provider_receipt_refs:
+                raise RoutingExperimentError(
+                    "candidate_provider_receipt_sidecar_is_duplicated"
+                )
+            provider_receipt_refs.add(receipt.provider_receipt_ref)
+
+    receipt_groups: dict[tuple[str, str], list[CandidateWaterfallReceipt]] = {}
+    for receipt in receipts:
+        receipt_groups.setdefault((receipt.variant_id, receipt.unit_ref), []).append(
+            receipt
+        )
+    for group in receipt_groups.values():
+        ordered = sorted(
+            group,
+            key=lambda item: (item.step_order, item.attempt_sequence),
+        )
+        prefix_hashes: list[str] = []
+        for receipt in ordered:
+            expected_prior = prefix_hashes[-1] if prefix_hashes else ""
+            if receipt.prior_attempt_receipt_sha256 != expected_prior:
+                raise RoutingExperimentError(
+                    "candidate_attempt_sidecar_prefix_is_not_contiguous"
+                )
+            prefix_hashes.append(receipt.attempt_receipt_sha256)
+            if receipt.attempt_chain_sha256 != _attempt_chain_sha256(prefix_hashes):
+                raise RoutingExperimentError(
+                    "candidate_attempt_sidecar_chain_hash_differs"
+                )
 
     for variant_id, variant_evaluation in evaluation_by_variant.items():
         if len(set(variant_evaluation.provider_receipt_refs)) != len(

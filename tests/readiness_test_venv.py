@@ -21,7 +21,14 @@ def _remove_group_world_write(root: Path) -> None:
 def build_dependency_complete_readiness_venv(root: Path) -> Path:
     """Build the isolated, local-only verifier environment used by restart tests."""
 
-    venv.EnvBuilder(with_pip=False, symlinks=True).create(root)
+    # Copy the interpreter into the generated venv. A GitHub runner's shared
+    # tool-cache interpreter can be group writable, while the production
+    # readiness preflight correctly rejects a resolved executable with that
+    # mode. The fixture must own and harden the complete executable path.
+    venv.EnvBuilder(
+        with_pip=False,
+        symlinks=sys.platform == "darwin",
+    ).create(root)
     python = root / "bin" / "python"
     site_packages = (
         root

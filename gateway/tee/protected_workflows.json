@@ -1577,7 +1577,7 @@
       "symbol": "RoutingBindingManifest"
     },
     {
-      "ast_sha256": "sha256:664ffd2d33b0b868f34be1daf08088ae65cc4013bedff2b0c3d82c5c7ce1b859",
+      "ast_sha256": "sha256:3c1ed4bf1b5075f709345c4e819105f87a016ac2f664aa46a836228a17f4c8f1",
       "path": "gateway/research_lab/routing_provider_bindings.py",
       "symbol": "SignedRoutingBindingCatalogLoader"
     },
@@ -6517,7 +6517,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:f4b14f1d6720e4559e5e7ec9efc27858f61e29c7588cf26d03d31fa0ff1a8637",
-  "protected_source_commit": "0a58c6a35566157976d5b534b2d6bc85c93894f4",
+  "manifest_hash": "sha256:87b6f9ecd1dd1c2418e2cb40574dfa833b620f7e94967191466cbabd4811d9b6",
+  "protected_source_commit": "30a793f8d6981617aa0304da2a19e298c6db4bd2",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

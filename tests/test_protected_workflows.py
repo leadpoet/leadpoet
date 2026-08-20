@@ -446,6 +446,8 @@ def test_git_tree_source_authority_boundaries_are_protected():
 
 def test_model_sandbox_launcher_boundaries_are_protected():
     assert {
+        "NATIVE_QUALIFY_RELEASE_IDENTITY_V1",
+        "_model_adapter_bootstrap_for_compatibility_receipt_v1",
         "MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES",
         "_pid_is_direct_cgroup_member",
         "_normalized_cgroup_relative_path",
@@ -458,6 +460,11 @@ def test_model_sandbox_launcher_boundaries_are_protected():
         "_oci_config",
         "RunscModelSandboxV2",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/model_sandbox_v2.py"])
+    assert {
+        "_PROVIDER_DIAGNOSTICS_BOOTSTRAP",
+        "_DOCKER_ADAPTER_BOOTSTRAP",
+        "_docker_adapter_bootstrap_for_qualify_compatibility",
+    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
 
 
 def test_artifact_egress_transport_boundaries_are_protected():

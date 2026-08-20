@@ -41,6 +41,7 @@ from research_lab.eval import (
 )
 from research_lab.eval.private_runtime import (
     _DOCKER_ADAPTER_BOOTSTRAP,
+    _docker_adapter_bootstrap_for_qualify_compatibility,
     _raise_on_empty_provider_error,
     SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS,
     canonicalize_private_model_icp,
@@ -67,6 +68,7 @@ from research_lab.sourcing_model_contract_check import (
     SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
     semantic_compatibility_policy_identity_v1,
     source_tree_compatibility_admission_v1,
+    validate_source_tree_compatibility_receipt_v1,
 )
 
 
@@ -75,6 +77,19 @@ logger = logging.getLogger(__name__)
 
 MODEL_SANDBOX_REQUEST_SCHEMA_VERSION = "leadpoet.model_sandbox_request.v2"
 MODEL_SANDBOX_RESULT_SCHEMA_VERSION = "leadpoet.model_sandbox_result.v2"
+NATIVE_QUALIFY_RELEASE_IDENTITY_V1 = {
+    "source_tree_hash": (
+        "sha256:491d6e76adf629b60d913062005191673f962db3cd5cd77223a68cf6262ac60f"
+    ),
+    "git_commit_sha": "e55e57f2be0ddadcc6b9c92c18b932dc2c354d21",
+    "manifest_hash": (
+        "sha256:af68f0fbd29c77f9ffe686dcbddbc1e5dd1cab6c8725c7c9669de367bd592928"
+    ),
+    "image_digest": (
+        "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+        "sourcing-model@sha256:f1ae9bc0ba2cd55450e4c1b1bbdb0030514dbf5afd380f29a09d5e95bdb0ade5"
+    ),
+}
 PROVIDER_EVIDENCE_TAPE_INPUT_SCHEMA_VERSION = (
     "leadpoet.provider_evidence_tape_input.v2"
 )
@@ -549,6 +564,48 @@ def trusted_model_sandbox_import_bootstrap() -> str:
 import research_lab.eval.provider_evidence_cache as _lp_trusted_evidence_cache
 import research_lab.eval.snapshot_store as _lp_trusted_snapshot_store
 """
+
+
+def _model_adapter_bootstrap_for_compatibility_receipt_v1(
+    compatibility_receipt: Mapping[str, Any],
+    *,
+    artifact: PrivateModelArtifactManifest,
+) -> str:
+    """Select host-owned adapter bytes from an exact artifact-bound receipt."""
+
+    try:
+        validated_receipt = validate_source_tree_compatibility_receipt_v1(
+            compatibility_receipt,
+            manifest=artifact,
+            source_tree_hash=artifact.model_artifact_hash,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ModelSandboxV2Error(
+            "qualify compatibility receipt differs from signed artifact"
+        ) from exc
+    release_identity = {
+        "source_tree_hash": artifact.model_artifact_hash,
+        "git_commit_sha": artifact.git_commit_sha,
+        "manifest_hash": artifact.manifest_hash,
+        "image_digest": artifact.image_digest,
+    }
+    native_source_tree = NATIVE_QUALIFY_RELEASE_IDENTITY_V1[
+        "source_tree_hash"
+    ]
+    if (
+        validated_receipt.get("source_tree_hash") == native_source_tree
+        and release_identity != NATIVE_QUALIFY_RELEASE_IDENTITY_V1
+    ):
+        raise ModelSandboxV2Error(
+            "native qualify source differs from its reviewed release identity"
+        )
+    return _docker_adapter_bootstrap_for_qualify_compatibility(
+        preserve_native_qualify=(
+            validated_receipt.get("source_tree_hash")
+            == artifact.model_artifact_hash
+            and release_identity == NATIVE_QUALIFY_RELEASE_IDENTITY_V1
+        )
+    )
 
 
 def _runtime_invariant_policy_v1(
@@ -3064,7 +3121,10 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             + trusted_model_sandbox_import_bootstrap()
             + "_lp_install();\n"
             + model_source_import_bootstrap()
-            + _DOCKER_ADAPTER_BOOTSTRAP
+            + _model_adapter_bootstrap_for_compatibility_receipt_v1(
+                compatibility_receipt,
+                artifact=artifact,
+            )
         )
         encoded_input = canonical_json(stdin_payload)
         process_timeout_seconds = _model_sandbox_process_timeout_seconds(value)

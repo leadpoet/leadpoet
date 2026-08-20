@@ -161,6 +161,47 @@ def test_scoring_contract_hash_tracks_model_sandbox_import_contract(monkeypatch)
     assert changed != original
 
 
+def test_scoring_contract_hash_tracks_qualify_compatibility_bootstrap(monkeypatch):
+    from research_lab.eval import private_runtime
+
+    sw._baseline_scoring_contract_hash.cache_clear()
+    original = sw._baseline_scoring_contract_hash()
+    monkeypatch.setattr(
+        private_runtime,
+        "_DOCKER_ADAPTER_BOOTSTRAP",
+        private_runtime._DOCKER_ADAPTER_BOOTSTRAP + "\n# changed qualify bootstrap\n",
+    )
+    sw._baseline_scoring_contract_hash.cache_clear()
+    try:
+        changed = sw._baseline_scoring_contract_hash()
+    finally:
+        sw._baseline_scoring_contract_hash.cache_clear()
+
+    assert changed != original
+
+
+def test_scoring_contract_hash_tracks_native_qualify_release_identity(monkeypatch):
+    from gateway.tee import model_sandbox_v2
+
+    sw._baseline_scoring_contract_hash.cache_clear()
+    original = sw._baseline_scoring_contract_hash()
+    monkeypatch.setattr(
+        model_sandbox_v2,
+        "NATIVE_QUALIFY_RELEASE_IDENTITY_V1",
+        {
+            **model_sandbox_v2.NATIVE_QUALIFY_RELEASE_IDENTITY_V1,
+            "git_commit_sha": "f" * 40,
+        },
+    )
+    sw._baseline_scoring_contract_hash.cache_clear()
+    try:
+        changed = sw._baseline_scoring_contract_hash()
+    finally:
+        sw._baseline_scoring_contract_hash.cache_clear()
+
+    assert changed != original
+
+
 def test_scoring_contract_hash_tracks_employee_scorer_source(monkeypatch):
     from qualification.scoring import lead_scorer
 

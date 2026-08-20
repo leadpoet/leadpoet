@@ -3478,6 +3478,26 @@ sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")))
 """
 
 
+def _docker_adapter_bootstrap_for_qualify_compatibility(
+    *,
+    preserve_native_qualify: bool,
+) -> str:
+    """Select trusted bootstrap bytes before any private model code imports."""
+
+    if preserve_native_qualify is False:
+        return _DOCKER_ADAPTER_BOOTSTRAP
+    if preserve_native_qualify is not True:
+        raise PrivateModelRuntimeError(
+            "private model qualify compatibility decision is invalid"
+        )
+    legacy_patch_call = "_research_lab_patch_strict_qualify(module)\n"
+    if _DOCKER_ADAPTER_BOOTSTRAP.count(legacy_patch_call) != 1:
+        raise PrivateModelRuntimeError(
+            "private model qualify compatibility bootstrap is invalid"
+        )
+    return _DOCKER_ADAPTER_BOOTSTRAP.replace(legacy_patch_call, "", 1)
+
+
 _DOCKER_METADATA_BOOTSTRAP = r"""
 import importlib
 import json

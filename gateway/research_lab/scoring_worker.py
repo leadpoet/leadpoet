@@ -766,10 +766,8 @@ def _baseline_scoring_contract_hash() -> str:
     import research_lab.eval as evaluation_package
     from qualification.scoring import lead_scorer as lead_scorer_module
     from research_lab import employee_buckets as employee_buckets_module
-    from gateway.tee.model_sandbox_v2 import (
-        model_source_import_bootstrap,
-        trusted_model_sandbox_import_bootstrap,
-    )
+    from gateway.tee import model_sandbox_v2 as model_sandbox_module
+    from research_lab.eval import private_runtime as private_runtime_module
     from gateway.tee.sandbox_http_shim_v2 import (
         _cached_terminal,
         _snapshot_terminal,
@@ -786,8 +784,10 @@ def _baseline_scoring_contract_hash() -> str:
         _accept_provider_backed_empty_retry,
         evaluation_package.__getattr__,
         evaluation_package.lazy_import_contract,
-        model_source_import_bootstrap,
-        trusted_model_sandbox_import_bootstrap,
+        model_sandbox_module.model_source_import_bootstrap,
+        model_sandbox_module.trusted_model_sandbox_import_bootstrap,
+        model_sandbox_module._model_adapter_bootstrap_for_compatibility_receipt_v1,
+        private_runtime_module._docker_adapter_bootstrap_for_qualify_compatibility,
         _cached_terminal,
         _snapshot_terminal,
         execute_sandbox_provider_request,
@@ -831,8 +831,23 @@ def _baseline_scoring_contract_hash() -> str:
         ) from exc
     return sha256_json(
         {
-            "schema_version": "research_lab_baseline_scoring_contract.v3",
+            "schema_version": "research_lab_baseline_scoring_contract.v4",
             "lazy_import_contract": evaluation_package.lazy_import_contract(),
+            "qualify_compatibility_contract": {
+                "native_release_identity": dict(
+                    model_sandbox_module.NATIVE_QUALIFY_RELEASE_IDENTITY_V1
+                ),
+                "legacy_bootstrap_hash": sha256_json(
+                    private_runtime_module._docker_adapter_bootstrap_for_qualify_compatibility(
+                        preserve_native_qualify=False
+                    )
+                ),
+                "native_bootstrap_hash": sha256_json(
+                    private_runtime_module._docker_adapter_bootstrap_for_qualify_compatibility(
+                        preserve_native_qualify=True
+                    )
+                ),
+            },
             "employee_bucket_contract": {
                 "linkedin_buckets": list(
                     employee_buckets_module.LINKEDIN_EMPLOYEE_BUCKETS

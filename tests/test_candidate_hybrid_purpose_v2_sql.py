@@ -12,7 +12,6 @@ import pytest
 
 from gateway.tee.supabase_schema_preflight_v2 import (
     REQUIRED_SUPABASE_V2_RPCS,
-    _role_purpose_pairs_from_constraint_v1,
 )
 from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
 from tests.historical_sql_purpose_contract import (
@@ -208,9 +207,16 @@ def test_candidate_hybrid_purpose_migration_is_idempotent_and_fail_closed() -> N
         psql(UPGRADE_SQL)
         psql(UPGRADE_SQL)
 
+        expected_historical_purposes = {
+            role: canonical_purposes_before_routing_experiment_v2(role)
+            for role in ROLE_PURPOSES
+        }
+        expected_historical_purposes["gateway_scoring"].add(
+            "research_lab.model_compatibility.v2"
+        )
         values = ",".join(
             "(%s,%s)" % (_sql_text(role), _sql_text(purpose))
-            for role, purposes in ROLE_PURPOSES.items()
+            for role, purposes in expected_historical_purposes.items()
             for purpose in sorted(purposes)
         )
         psql(
@@ -239,11 +245,21 @@ def test_candidate_hybrid_purpose_migration_is_idempotent_and_fail_closed() -> N
         assert contract["constraint_name"] == (
             "research_lab_attested_execution_receipts_v2_role_purpose_check"
         )
-        assert _role_purpose_pairs_from_constraint_v1(
-            contract["constraint_definition"]
-        ) == {
+        historical_clauses = re.findall(
+            r"\(role = '([^']+)'::text\)\s+AND\s+"
+            r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
+            contract["constraint_definition"],
+            flags=re.DOTALL,
+        )
+        historical_pairs = {
+            role: frozenset(
+                re.findall(r"'([^']+)'::text", encoded_purposes)
+            )
+            for role, encoded_purposes in historical_clauses
+        }
+        assert historical_pairs == {
             role: frozenset(purposes)
-            for role, purposes in ROLE_PURPOSES.items()
+            for role, purposes in expected_historical_purposes.items()
         }
     finally:
         subprocess.run(

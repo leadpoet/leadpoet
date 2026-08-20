@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
 
--- Run only against a disposable PostgreSQL database after migrations 157/158/159.
+-- Run only against a disposable PostgreSQL database after migrations 157-161.
 BEGIN;
 
 CREATE OR REPLACE FUNCTION pg_temp.routing_test_spec(
@@ -802,8 +802,12 @@ DECLARE
     terminal_body JSONB;
     terminal_result_hash TEXT;
     terminal_job_id TEXT;
+    model_response_hash TEXT := 'sha256:' || repeat('7', 64);
+    model_contract_hash TEXT := 'sha256:' || repeat('8', 64);
     terminal_doc JSONB;
     attempt_doc JSONB;
+    transition_doc JSONB;
+    transition_result JSONB;
     attempt_key TEXT := public.research_lab_routing_jsonb_hash_v2(
         pg_catalog.jsonb_build_object('fixture', 'provider-attempt-v3')
     );
@@ -1161,7 +1165,9 @@ BEGIN
         'transport_attempt_hash', 'sha256:' || repeat('6', 64),
         'budget_reservation', budget_proof,
         'projection', projection,
-        'provider_receipt', provider_receipt
+        'provider_receipt', provider_receipt,
+        'model_provider_response_sha256', model_response_hash,
+        'model_completion_contract_hash', model_contract_hash
     );
     terminal_result_hash := public.research_lab_routing_jsonb_hash_v2(terminal_body);
     terminal_request_hash := public.research_lab_routing_jsonb_hash_v2(
@@ -1303,6 +1309,51 @@ BEGIN
     IF (append_result->>'idempotent')::BOOLEAN IS NOT TRUE THEN
         RAISE EXCEPTION 'exact v3 terminal attempt replay was not idempotent: %', append_result;
     END IF;
+
+    transition_doc := pg_catalog.jsonb_build_object(
+        'schema_version', 'leadpoet.research_lab.routing_event.v2',
+        'event_schema_version', 'leadpoet.research_lab.model_transition.v1',
+        'variant_id', 'candidate',
+        'unit_ref', 'unit-one',
+        'idempotency_key', repeat('7', 64),
+        'action_sha256', repeat('8', 64),
+        'continuation_sha256', 'sha256:' || repeat('9', 64),
+        'completion_sha256', repeat('a', 64),
+        'provider_response_sha256', model_response_hash,
+        'provider_receipt', provider_receipt,
+        'protected_dispatch_job_id', terminal_job_id,
+        'terminal_receipt_hash', terminal_hash,
+        'model_completion_contract_hash', model_contract_hash
+    );
+    transition_result := public.research_lab_routing_append_fenced_event_v3(
+        public.research_lab_routing_jsonb_hash_v2(transition_doc),
+        experiment_hash, 'model_transition_completed', claim_key, 1,
+        transition_doc
+    );
+    IF (transition_result->>'idempotent')::BOOLEAN IS NOT FALSE THEN
+        RAISE EXCEPTION 'exact Model transition did not append: %', transition_result;
+    END IF;
+    transition_result := public.research_lab_routing_append_fenced_event_v3(
+        public.research_lab_routing_jsonb_hash_v2(transition_doc),
+        experiment_hash, 'model_transition_completed', claim_key, 1,
+        transition_doc
+    );
+    IF (transition_result->>'idempotent')::BOOLEAN IS NOT TRUE THEN
+        RAISE EXCEPTION 'exact Model transition replay was not idempotent: %', transition_result;
+    END IF;
+    bad_doc := pg_catalog.jsonb_set(
+        transition_doc, '{provider_response_sha256}',
+        pg_catalog.to_jsonb(('sha256:' || repeat('0', 64))::TEXT)
+    );
+    BEGIN
+        PERFORM public.research_lab_routing_append_fenced_event_v3(
+            public.research_lab_routing_jsonb_hash_v2(bad_doc),
+            experiment_hash, 'model_transition_completed', claim_key, 1,
+            bad_doc
+        );
+        RAISE EXCEPTION 'forged exact Model transition unexpectedly succeeded';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
 
     FOREACH bad_doc IN ARRAY ARRAY[
         pg_catalog.jsonb_set(
@@ -1851,6 +1902,9 @@ BEGIN
         RAISE EXCEPTION 'promotion reconciliation helper is directly callable';
     END IF;
 
+    -- Keep the recovery bootstrap and read-only reservation-list RPCs
+    -- available. Retire only the bearer claim helpers and the twelve V2
+    -- mutation or promotion RPCs.
     FOREACH target IN ARRAY ARRAY[
         'public.research_lab_routing_claim_capability_commitment_v2(text)'::REGPROCEDURE,
         'public.research_lab_routing_assert_claim_v2(text,text,bigint,text)'::REGPROCEDURE,
@@ -1858,7 +1912,6 @@ BEGIN
         'public.research_lab_routing_renew_claim_v2(text,text,text,bigint,text,integer,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_close_claim_v2(text,text,text,bigint,text,text,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_append_fenced_event_v2(text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
-        'public.research_lab_routing_recover_claim_v2(text,text,text,jsonb,text,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_append_provider_attempt_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,bigint,text,text,text,bigint,bigint,text,text,bigint,text,text,text,text,text,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_append_decision_receipt_v2(text,text,text,text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_append_evaluation_v2(text,text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
@@ -1866,8 +1919,6 @@ BEGIN
         'public.research_lab_routing_settle_budget_v2(text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_mark_budget_uncertain_v2(text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_recover_budget_v2(text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
-        'public.research_lab_routing_list_expired_budget_reservations_v2(text,text,bigint,text)'::REGPROCEDURE,
-        'public.research_lab_routing_list_unresolved_budget_reservations_v2(text,text,bigint,text)'::REGPROCEDURE,
         'public.research_lab_routing_promote_v2(text,text,text,text,text,jsonb,text,jsonb)'::REGPROCEDURE
     ] LOOP
         IF pg_catalog.has_function_privilege('service_role', target, 'EXECUTE')

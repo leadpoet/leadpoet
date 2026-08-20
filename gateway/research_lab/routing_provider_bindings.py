@@ -894,6 +894,9 @@ def _validate_unit_input(value: Mapping[str, Any]) -> None:
         raise RoutingProviderBindingError("routing unit input has too many fields")
     for key, item in value.items():
         name = str(key)
+        if name == "model_input":
+            _validate_signed_model_input(item, depth=0)
+            continue
         if (
             not _REF_RE.fullmatch(name)
             or name.lower() in _SENSITIVE_KEYS
@@ -906,6 +909,46 @@ def _validate_unit_input(value: Mapping[str, Any]) -> None:
                 raise RoutingProviderBindingError("routing unit input list is invalid")
         elif item is not None and type(item) not in {str, bool, int}:
             raise RoutingProviderBindingError("routing unit input value is invalid")
+
+
+def _validate_signed_model_input(value: Any, *, depth: int) -> None:
+    """Allow one bounded JSON Model start input in the signed unit artifact."""
+
+    if depth > 8:
+        raise RoutingProviderBindingError("routing Model input is too deep")
+    if isinstance(value, Mapping):
+        if len(value) > 64:
+            raise RoutingProviderBindingError(
+                "routing Model input has too many fields"
+            )
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            if (
+                not _REF_RE.fullmatch(key)
+                or key.casefold() in _SENSITIVE_KEYS
+            ):
+                raise RoutingProviderBindingError(
+                    "routing Model input field is invalid"
+                )
+            _validate_signed_model_input(child, depth=depth + 1)
+        return
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        if len(value) > 256:
+            raise RoutingProviderBindingError(
+                "routing Model input list is too large"
+            )
+        for child in value:
+            _validate_signed_model_input(child, depth=depth + 1)
+        return
+    if value is None or type(value) in {str, bool, int}:
+        if isinstance(value, str) and len(value) > 8_192:
+            raise RoutingProviderBindingError(
+                "routing Model input text is too large"
+            )
+        return
+    raise RoutingProviderBindingError("routing Model input value is invalid")
 
 
 @dataclass(frozen=True)

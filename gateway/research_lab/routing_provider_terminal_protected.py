@@ -68,6 +68,14 @@ ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2 = (
     "leadpoet.routing_provider_dispatch_request.v2"
 )
 ROUTING_PROVIDER_DISPATCH_PURPOSE_V2 = ROUTING_PROVIDER_TERMINAL_PURPOSE_V2
+ROUTING_MODEL_COMPLETION_CONTRACT_SCHEMA_V1 = (
+    "leadpoet.routing_model_completion_contract.v1"
+)
+ROUTING_MODEL_COMPLETION_MODE_RECEIPT_ONLY = "receipt_only"
+ROUTING_MODEL_COMPLETION_MODE_MODEL_RUNNER = "model_runner_completion"
+HOST_PROVIDER_RESPONSE_SCHEMA_VERSION = "host-provider-response:v1"
+MODEL_PROVIDER_RESPONSE_SCHEMA_VERSION = "model-provider-response:v1"
+MAX_ROUTING_MODEL_RESPONSE_BYTES = 8 * 1024 * 1024
 ROUTING_BUDGET_RESERVATION_SCHEMA_V3 = (
     "leadpoet.research_lab.routing_budget_reservation.v3"
 )
@@ -87,6 +95,179 @@ _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}$")
 
 class ProtectedRoutingProviderTerminalError(ValueError):
     """A protected routing terminal input is not exact or authoritative."""
+
+
+def build_routing_model_completion_contract_v1(
+    action: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the one bounded result contract for a PR274 action.
+
+    A receipt-only caller cannot receive provider data. A Model caller must
+    supply the exact validated PR274 action fields that bound the completion.
+    This document contains no route, provider endpoint, credential, or broker.
+    """
+
+    if action is None:
+        return {
+            "schema_version": ROUTING_MODEL_COMPLETION_CONTRACT_SCHEMA_V1,
+            "mode": ROUTING_MODEL_COMPLETION_MODE_RECEIPT_ONLY,
+        }
+    if not isinstance(action, Mapping):
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model completion action is invalid"
+        )
+    action_sha256 = str(action.get("action_sha256") or "").lower()
+    response_schema_version = str(
+        action.get("response_schema_version") or ""
+    )
+    max_response_bytes = action.get("max_response_bytes")
+    if (
+        not _HEX64_RE.fullmatch(action_sha256)
+        or response_schema_version != MODEL_PROVIDER_RESPONSE_SCHEMA_VERSION
+        or type(max_response_bytes) is not int
+        or not 1 <= max_response_bytes <= MAX_ROUTING_MODEL_RESPONSE_BYTES
+    ):
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model completion action contract is invalid"
+        )
+    return {
+        "schema_version": ROUTING_MODEL_COMPLETION_CONTRACT_SCHEMA_V1,
+        "mode": ROUTING_MODEL_COMPLETION_MODE_MODEL_RUNNER,
+        "model_action_sha256": action_sha256,
+        "response_schema_version": response_schema_version,
+        "max_response_bytes": max_response_bytes,
+    }
+
+
+def validate_routing_model_completion_contract_v1(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate an exact receipt-only or PR274 completion contract."""
+
+    if not isinstance(value, Mapping):
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model completion contract is invalid"
+        )
+    mode = str(value.get("mode") or "")
+    if mode == ROUTING_MODEL_COMPLETION_MODE_RECEIPT_ONLY:
+        expected = build_routing_model_completion_contract_v1()
+    elif mode == ROUTING_MODEL_COMPLETION_MODE_MODEL_RUNNER:
+        expected = build_routing_model_completion_contract_v1(
+            {
+                "action_sha256": value.get("model_action_sha256"),
+                "response_schema_version": value.get(
+                    "response_schema_version"
+                ),
+                "max_response_bytes": value.get("max_response_bytes"),
+            }
+        )
+    else:
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model completion mode is invalid"
+        )
+    if dict(value) != expected:
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model completion contract differs"
+        )
+    return expected
+
+
+def _model_provider_response_v1(
+    *,
+    prepared_call: PreparedRoutingProviderCall,
+    broker_result: Mapping[str, Any],
+    raw_response_body: bytes,
+    completion_contract: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Return only the bounded native response envelope PR274 must parse."""
+
+    contract = validate_routing_model_completion_contract_v1(
+        completion_contract
+    )
+    if contract["mode"] == ROUTING_MODEL_COMPLETION_MODE_RECEIPT_ONLY:
+        return None
+    try:
+        body = json.loads(raw_response_body.decode("utf-8"))
+    except Exception as exc:
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model provider response is not UTF-8 JSON"
+        ) from exc
+    if not isinstance(body, Mapping):
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model provider response body is not an object"
+        )
+    from gateway.research_lab.bundles import contains_secret_material
+
+    response = {
+        "schema_version": HOST_PROVIDER_RESPONSE_SCHEMA_VERSION,
+        "provider": prepared_call.provider,
+        "status_code": broker_result.get("http_status"),
+        "body": dict(body),
+    }
+    status_code = response["status_code"]
+    if (
+        type(status_code) is not int
+        or not 100 <= status_code <= 599
+        or contains_secret_material(response)
+    ):
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model provider response is unsafe"
+        )
+    encoded = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(encoded) > contract["max_response_bytes"]:
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model provider response exceeds action limit"
+        )
+    return response
+
+
+def routing_provider_dispatch_receipt_output_v2(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project the signed, PostgreSQL-safe terminal result.
+
+    The protected job retains the bounded provider response for same-job
+    replay. The execution receipt and append-only Lab row retain only its
+    hash. This prevents provider-derived company data from entering Lab SQL.
+    """
+
+    if not isinstance(value, Mapping):
+        raise ProtectedRoutingProviderTerminalError(
+            "routing provider dispatch result is invalid"
+        )
+    result = dict(value)
+    if "model_provider_response" not in result:
+        return result
+    response = result.pop("model_provider_response")
+    response_hash = str(
+        result.get("model_provider_response_sha256") or ""
+    )
+    if (
+        not _HASH_RE.fullmatch(response_hash)
+        or response_hash != sha256_json(response)
+    ):
+        raise ProtectedRoutingProviderTerminalError(
+            "routing Model provider response hash differs"
+        )
+    if response is not None:
+        if (
+            not isinstance(response, Mapping)
+            or set(response)
+            != {"schema_version", "provider", "status_code", "body"}
+            or response.get("schema_version")
+            != HOST_PROVIDER_RESPONSE_SCHEMA_VERSION
+            or not isinstance(response.get("body"), Mapping)
+        ):
+            raise ProtectedRoutingProviderTerminalError(
+                "routing Model provider response envelope is invalid"
+            )
+    return result
 
 
 def build_routing_budget_reservation_v3(
@@ -455,6 +636,7 @@ def execute_protected_routing_provider_terminal_v2(
     raw_response_body: bytes,
     binding_catalog: VerifiedRoutingBindingCatalog,
     unit_dataset: VerifiedRoutingUnitDataset,
+    model_completion_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize one authenticated provider response inside the boundary.
 
@@ -716,6 +898,26 @@ def execute_protected_routing_provider_terminal_v2(
         "projection": derived,
         "provider_receipt": provider_receipt.to_dict(),
     }
+    if model_completion_contract is not None:
+        completion_contract = validate_routing_model_completion_contract_v1(
+            model_completion_contract
+        )
+        model_provider_response = _model_provider_response_v1(
+            prepared_call=prepared_call,
+            broker_result=broker_result,
+            raw_response_body=response_body,
+            completion_contract=completion_contract,
+        )
+        output = {
+            **output,
+            "model_completion_contract_hash": sha256_json(
+                completion_contract
+            ),
+            "model_provider_response_sha256": sha256_json(
+                model_provider_response
+            ),
+            "model_provider_response": model_provider_response,
+        }
     return output
 
 
@@ -726,6 +928,15 @@ __all__ = [
     "ROUTING_PROVIDER_DISPATCH_OPERATION_V2",
     "ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2",
     "ROUTING_PROVIDER_DISPATCH_PURPOSE_V2",
+    "ROUTING_MODEL_COMPLETION_CONTRACT_SCHEMA_V1",
+    "ROUTING_MODEL_COMPLETION_MODE_RECEIPT_ONLY",
+    "ROUTING_MODEL_COMPLETION_MODE_MODEL_RUNNER",
+    "HOST_PROVIDER_RESPONSE_SCHEMA_VERSION",
+    "MODEL_PROVIDER_RESPONSE_SCHEMA_VERSION",
+    "MAX_ROUTING_MODEL_RESPONSE_BYTES",
+    "build_routing_model_completion_contract_v1",
+    "validate_routing_model_completion_contract_v1",
+    "routing_provider_dispatch_receipt_output_v2",
     "ROUTING_BUDGET_RESERVATION_SCHEMA_V3",
     "ROUTING_BUDGET_RESERVATION_RESULT_SCHEMA_V3",
     "ROUTING_BUDGET_RESERVATION_PROOF_SCHEMA_V3",

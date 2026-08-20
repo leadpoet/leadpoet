@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "scripts" / "157-research-lab-routing-experiment-authority.sql"
 PURPOSE_MIGRATION = ROOT / "scripts" / "158-research-lab-routing-experiment-purposes.sql"
+TRANSITION_MIGRATION = ROOT / "scripts" / "161-research-lab-exact-model-transitions.sql"
 BEHAVIOR = ROOT / "tests" / "sql" / "test_routing_experiment_authority_v2.sql"
 
 
@@ -232,6 +233,44 @@ def test_routing_authority_purpose_migration_is_exact_and_replay_safe():
     assert "role = 'gateway_scoring'" in sql
     assert "NOT VALID" in sql
     assert "VALIDATE CONSTRAINT" in sql
+
+
+def test_exact_model_transition_migration_is_redacted_and_retires_v2_mutations():
+    sql = TRANSITION_MIGRATION.read_text()
+    assert "model_transition_completed" in sql
+    assert "research_lab_routing_experiment_events_v2_event_type_check" in sql
+    assert "VALIDATE CONSTRAINT" in sql
+    assert "leadpoet.research_lab.model_transition.v1" in sql
+    assert "provider_response_sha256" in sql
+    assert "provider_response'" not in sql
+    assert "p_event_doc->'provider_receipt'" in sql
+    assert "jsonb_object_length" not in sql
+    assert "jsonb_object_keys(p_event_doc)" in sql
+    assert ") <> 13" in sql
+    for replay_field in (
+        "protected_dispatch_job_id",
+        "terminal_receipt_hash",
+        "model_completion_contract_hash",
+        "model_provider_response_sha256",
+    ):
+        assert replay_field in sql
+    assert (
+        "attempt.attempt_doc->'terminal_result'->>'model_provider_response_sha256'"
+        in sql
+    )
+    assert sql.count("REVOKE ALL ON FUNCTION public.research_lab_routing_") == 12
+    for preserved in (
+        "research_lab_routing_submit_experiment_v2",
+        "research_lab_routing_request_execution_v2",
+        "research_lab_routing_recover_claim_v2",
+        "research_lab_routing_claim_execution_requests_v2",
+        "research_lab_routing_claim_execution_v3",
+    ):
+        assert f"REVOKE ALL ON FUNCTION public.{preserved}" not in sql
+    behavior = BEHAVIOR.read_text()
+    assert "exact Model transition did not append" in behavior
+    assert "exact Model transition replay was not idempotent" in behavior
+    assert "forged exact Model transition unexpectedly succeeded" in behavior
 
 
 @pytest.mark.skipif(

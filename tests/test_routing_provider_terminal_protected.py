@@ -26,9 +26,11 @@ from gateway.research_lab.routing_provider_bindings import (
 )
 from gateway.research_lab.routing_provider_terminal_protected import (
     ProtectedRoutingProviderTerminalError,
+    build_routing_model_completion_contract_v1,
     build_routing_budget_reservation_v3,
     execute_protected_routing_provider_terminal_v2,
     routing_budget_reservation_proof_v3,
+    routing_provider_dispatch_receipt_output_v2,
     validate_routing_budget_reservation_result_v3,
     validate_routing_budget_reservation_v3,
 )
@@ -473,6 +475,124 @@ def test_terminal_derives_success_miss_and_billed_failure(response, expected):
     assert output["provider_receipt"]["outcome"] == expected
     assert "standard_receipt_commitments" not in output
     assert "input_commitment" not in output
+
+
+def test_model_response_channel_is_bounded_signed_and_sql_redacted():
+    provider_response = {
+        "result": {
+            "data": {
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "title": "Machine Learning Engineer",
+                        "company_domain": "example.com",
+                        "snapshot_date": "2026-08-19",
+                        "inactive": False,
+                        "displayed_url": "https://jobs.example.com/job-1",
+                    }
+                ]
+            }
+        },
+        "billing": {"credits_charged": 0.09},
+        "run": {"status": "completed"},
+        "outputs": {
+            "model_provider_records": [
+                {
+                    "company_name": "Example",
+                    "official_domain": "example.com",
+                }
+            ],
+            "freshness_context": {},
+        },
+    }
+    fixture = _call_fixture(provider_response)
+    (
+        compiler,
+        prepared,
+        request,
+        proof,
+        result,
+        record,
+        boot,
+        response_body,
+        _key,
+        _auth_boot,
+    ) = fixture
+    action = {
+        "action_sha256": "4" * 64,
+        "response_schema_version": "model-provider-response:v1",
+        "max_response_bytes": 1_000_000,
+    }
+    output = execute_protected_routing_provider_terminal_v2(
+        authorization_proof=proof,
+        prepared_call=prepared,
+        broker_request=request,
+        broker_result=result,
+        provider_record=record,
+        trusted_coordinator_boot_identity=boot,
+        raw_response_body=response_body,
+        binding_catalog=compiler.binding_catalog,
+        unit_dataset=compiler.unit_dataset,
+        model_completion_contract=(
+            build_routing_model_completion_contract_v1(action)
+        ),
+    )
+
+    assert output["model_provider_response"]["body"] == provider_response
+    assert output["model_provider_response_sha256"] == sha256_json(
+        output["model_provider_response"]
+    )
+    receipt_output = routing_provider_dispatch_receipt_output_v2(output)
+    assert "model_provider_response" not in receipt_output
+    assert receipt_output["model_provider_response_sha256"] == output[
+        "model_provider_response_sha256"
+    ]
+
+    forged = deepcopy(output)
+    forged["model_provider_response"]["body"]["outputs"][
+        "model_provider_records"
+    ] = []
+    with pytest.raises(
+        ProtectedRoutingProviderTerminalError,
+        match="hash differs",
+    ):
+        routing_provider_dispatch_receipt_output_v2(forged)
+
+
+def test_model_response_channel_rejects_secret_shaped_provider_data():
+    response = {
+        "result": {"data": {"jobs": []}},
+        "billing": {"credits_charged": 0},
+        "run": {"status": "completed"},
+        "outputs": {
+            "model_provider_records": [{"api_key": "must-not-cross"}],
+            "freshness_context": {},
+        },
+    }
+    fixture = _call_fixture(response)
+    compiler, prepared, request, proof, result, record, boot, body, _key, _auth_boot = fixture
+    with pytest.raises(
+        ProtectedRoutingProviderTerminalError,
+        match="unsafe",
+    ):
+        execute_protected_routing_provider_terminal_v2(
+            authorization_proof=proof,
+            prepared_call=prepared,
+            broker_request=request,
+            broker_result=result,
+            provider_record=record,
+            trusted_coordinator_boot_identity=boot,
+            raw_response_body=body,
+            binding_catalog=compiler.binding_catalog,
+            unit_dataset=compiler.unit_dataset,
+            model_completion_contract=build_routing_model_completion_contract_v1(
+                {
+                    "action_sha256": "4" * 64,
+                    "response_schema_version": "model-provider-response:v1",
+                    "max_response_bytes": 1_000_000,
+                }
+            ),
+        )
 
 
 @pytest.mark.parametrize(

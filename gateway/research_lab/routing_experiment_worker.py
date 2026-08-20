@@ -32,8 +32,20 @@ from gateway.research_lab.routing_experiment_store import (
 from gateway.research_lab.routing_execution_envelope import (
     RoutingExperimentExecutionEnvelopeV2,
 )
+from gateway.research_lab.common_model_experiment import (
+    ExactModelExperimentCoordinator,
+    ExactModelUnitResult,
+    FencedModelTransitionRepository,
+    ReviewedModelVerificationAuthority,
+    ReviewedProtectedModelActionDispatcher,
+)
+from gateway.research_lab.routing_provider_bindings import (
+    VerifiedRoutingUnitDataset,
+)
+from research_lab.model_runner_protocol import ExactModelRunnerRegistry
 from research_lab.routing_experiments import (
     ProviderReceiptStore,
+    RoutingDecisionReceiptV2,
     RoutingExperimentArtifactAuthority,
     RoutingExperimentV2Adapter,
     RoutingExperimentV2Evaluation,
@@ -168,7 +180,8 @@ class _RoutingClaimHeartbeat:
             self._deadline_monotonic = renewed_deadline
 
 
-REVIEWED_ROUTING_FACTORY_NAME = "attested_provider_broker_v2"
+REVIEWED_ROUTING_FACTORY_NAME = "exact_model_runner_v3"
+LEGACY_ROUTING_FACTORY_NAME = "attested_provider_broker_v2"
 ROUTING_CLAIM_AUTHORITY_ENV = "RESEARCH_LAB_ROUTING_EXPERIMENT_CLAIM_AUTHORITY"
 ROUTING_ATTESTATION_AUTHORITY_ENV = (
     "RESEARCH_LAB_ROUTING_EXPERIMENT_ATTESTATION_AUTHORITY"
@@ -287,6 +300,40 @@ class RoutingExperimentRunInputs:
     authoritative_billing_rollup: Callable[[ProviderReceiptStore], Mapping[str, Any]] | None = None
 
 
+class ExactModelEvaluationAdapter(Protocol):
+    """Adapt canonical PR274 receipts into PR93 evaluation contracts only."""
+
+    def build_decision_receipts(
+        self,
+        *,
+        spec: RoutingExperimentV2Spec,
+        unit_results: Mapping[str, Mapping[str, ExactModelUnitResult]],
+    ) -> tuple[RoutingDecisionReceiptV2, ...]: ...
+
+    def build_evaluation(
+        self,
+        *,
+        spec: RoutingExperimentV2Spec,
+        gold_labels: Mapping[str, bool],
+        unit_results: Mapping[str, Mapping[str, ExactModelUnitResult]],
+        authoritative_billing_rollup: Callable[..., Mapping[str, Any]],
+    ) -> RoutingExperimentV2Evaluation: ...
+
+
+@dataclass(frozen=True)
+class ExactModelRoutingRunInputs:
+    """Exact artifact and PR93 authorities validated before the V3 claim."""
+
+    registry: ExactModelRunnerRegistry
+    gold_labels: Mapping[str, bool]
+    unit_dataset: VerifiedRoutingUnitDataset
+    reviewed_runner: ReviewedProviderBrokerRoutingRunner
+    verifier: ReviewedModelVerificationAuthority
+    evaluation_adapter: ExactModelEvaluationAdapter
+    execution_envelope: RoutingExperimentExecutionEnvelopeV2
+    authoritative_billing_rollup: Callable[..., Mapping[str, Any]]
+
+
 class RoutingExperimentRunFactory(Protocol):
     """A reviewed, named factory; never a user-supplied import path."""
 
@@ -294,7 +341,143 @@ class RoutingExperimentRunFactory(Protocol):
 
     def validate_readiness(self) -> None: ...
 
-    def build(self, spec: RoutingExperimentV2Spec) -> RoutingExperimentRunInputs: ...
+    def build(
+        self, spec: RoutingExperimentV2Spec
+    ) -> RoutingExperimentRunInputs | ExactModelRoutingRunInputs: ...
+
+
+@dataclass(frozen=True)
+class ExactModelRoutingRunFactory:
+    """The only active factory: PR274 runner plus PR93 control authorities."""
+
+    registry: ExactModelRunnerRegistry
+    gold_labels: Mapping[str, bool]
+    unit_dataset: VerifiedRoutingUnitDataset
+    reviewed_runner_factory: Callable[
+        [RoutingExperimentV2Spec], ReviewedProviderBrokerRoutingRunner
+    ]
+    verifier: ReviewedModelVerificationAuthority
+    evaluation_adapter: ExactModelEvaluationAdapter
+    execution_envelope_factory: Callable[
+        [RoutingExperimentV2Spec], RoutingExperimentExecutionEnvelopeV2
+    ]
+    billing_rollup_factory: Callable[
+        [RoutingExperimentV2Spec], Callable[..., Mapping[str, Any]]
+    ]
+    durable_authority_identity: str | None = None
+    name: str = REVIEWED_ROUTING_FACTORY_NAME
+
+    def validate_readiness(self) -> None:
+        if not isinstance(self.registry, ExactModelRunnerRegistry):
+            raise RoutingExperimentWorkerError(
+                "exact Model runner registry is unavailable"
+            )
+        self.registry.preflight_all()
+        if not isinstance(self.unit_dataset, VerifiedRoutingUnitDataset):
+            raise RoutingExperimentWorkerError(
+                "reviewed routing unit dataset is unavailable"
+            )
+        for method in ("verify_company", "verify_intent", "verify_contact"):
+            if not callable(getattr(self.verifier, method, None)):
+                raise RoutingExperimentWorkerError(
+                    "reviewed Model verifier is unavailable"
+                )
+        if not callable(
+            getattr(self.evaluation_adapter, "build_decision_receipts", None)
+        ) or not callable(
+            getattr(self.evaluation_adapter, "build_evaluation", None)
+        ):
+            raise RoutingExperimentWorkerError(
+                "canonical Model evaluation adapter is unavailable"
+            )
+        for dependency, label in (
+            (self.reviewed_runner_factory, "protected runner"),
+            (self.execution_envelope_factory, "execution envelope"),
+            (self.billing_rollup_factory, "billing rollup"),
+        ):
+            if not callable(dependency):
+                raise RoutingExperimentWorkerError(
+                    f"reviewed routing {label} is unavailable"
+                )
+
+    def build(self, spec: RoutingExperimentV2Spec) -> ExactModelRoutingRunInputs:
+        self.validate_readiness()
+        if len(spec.variants) < 2:
+            raise RoutingExperimentWorkerError(
+                "exact baseline and challenger artifacts are required"
+            )
+        registrations = {
+            variant.variant_id: self.registry.resolve(
+                variant.artifact.to_dict()
+            )
+            for variant in spec.variants
+        }
+        baseline = registrations.get(spec.baseline_variant_id)
+        if baseline is None:
+            raise RoutingExperimentWorkerError(
+                "exact baseline artifact is unavailable"
+            )
+        artifact_keys: set[str] = set()
+        for variant in spec.variants:
+            registration = registrations[variant.variant_id]
+            registration.validate_variant_audit_payload(
+                variant.routing_payload
+            )
+            if (
+                variant.variant_id != spec.baseline_variant_id
+                and registration.key == baseline.key
+            ):
+                raise RoutingExperimentWorkerError(
+                    "each challenger must use a distinct exact Model artifact"
+                )
+            if registration.key in artifact_keys:
+                raise RoutingExperimentWorkerError(
+                    "exact Model artifact is duplicated across variants"
+                )
+            artifact_keys.add(registration.key)
+        refs = tuple(spec.input.calibration_unit_refs) + tuple(
+            spec.input.holdout_unit_refs
+        )
+        if set(refs) != set(self.unit_dataset.units):
+            raise RoutingExperimentWorkerError(
+                "reviewed routing unit dataset differs from the spec"
+            )
+        if set(self.gold_labels) != set(refs):
+            raise RoutingExperimentWorkerError(
+                "reviewed routing labels differ from the spec"
+            )
+        runner = self.reviewed_runner_factory(spec)
+        if not isinstance(runner, ReviewedProviderBrokerRoutingRunner):
+            raise RoutingExperimentWorkerError(
+                "reviewed protected provider runner is invalid"
+            )
+        runner.validate_composition()
+        if self.durable_authority_identity is not None and getattr(
+            runner, "durable_authority_identity", None
+        ) != self.durable_authority_identity:
+            raise RoutingExperimentWorkerError(
+                "reviewed routing durable authority identity differs"
+            )
+        envelope = self.execution_envelope_factory(spec)
+        if not isinstance(envelope, RoutingExperimentExecutionEnvelopeV2):
+            raise RoutingExperimentWorkerError(
+                "reviewed routing execution envelope is invalid"
+            )
+        rollup = self.billing_rollup_factory(spec)
+        if not callable(rollup):
+            raise RoutingExperimentWorkerError(
+                "reviewed routing billing authority is invalid"
+            )
+        return ExactModelRoutingRunInputs(
+            registry=self.registry,
+            gold_labels=dict(self.gold_labels),
+            unit_dataset=self.unit_dataset,
+            reviewed_runner=runner,
+            verifier=self.verifier,
+            evaluation_adapter=self.evaluation_adapter,
+            execution_envelope=envelope,
+            authoritative_billing_rollup=rollup,
+        )
 
 
 @dataclass(frozen=True)
@@ -424,10 +607,13 @@ class RoutingExperimentWorker:
         self,
         *,
         spec: RoutingExperimentV2Spec,
-        inputs: RoutingExperimentRunInputs,
+        inputs: RoutingExperimentRunInputs | ExactModelRoutingRunInputs,
         lease: RoutingExecutionRequestLease | None = None,
     ) -> RoutingExperimentV2Evaluation:
         """Run one claimed spec and leave an append-only terminal event."""
+
+        if isinstance(inputs, ExactModelRoutingRunInputs):
+            return self._run_exact_model(spec=spec, inputs=inputs, lease=lease)
 
         for method_name in ("renew_claim", "close_claim"):
             if not callable(getattr(self.service.store, method_name, None)):
@@ -512,6 +698,174 @@ class RoutingExperimentWorker:
         finally:
             heartbeat.stop()
 
+    def _run_exact_model(
+        self,
+        *,
+        spec: RoutingExperimentV2Spec,
+        inputs: ExactModelRoutingRunInputs,
+        lease: RoutingExecutionRequestLease | None,
+    ) -> RoutingExperimentV2Evaluation:
+        """Run baseline and challenger through only PR274's action protocol."""
+
+        # Factory construction and exact artifact preflight happen before
+        # this method. Submit is therefore the first SQL mutation.
+        self.service.submit(spec, execution_envelope=inputs.execution_envelope)
+        claim = self.service.claim_execution(
+            spec=spec,
+            worker_ref=self.worker_ref,
+            lease=lease,
+        )
+        heartbeat = _RoutingClaimHeartbeat(
+            store=self.service.store,
+            claim=claim,
+            lease_seconds=self.service.config.worker_lease_seconds,
+        )
+        heartbeat.start()
+        try:
+            heartbeat.ensure_held()
+            self._append_execution_event(
+                spec=spec,
+                claim=claim,
+                event_type="run_started",
+                event_doc={
+                    "worker_ref": self.worker_ref,
+                    "runner_contract": "pr274_model_runner",
+                },
+            )
+            dispatcher = ReviewedProtectedModelActionDispatcher(
+                spec=spec,
+                runner=inputs.reviewed_runner,
+                claim=claim,
+                deadline_supplier=lambda: heartbeat.deadline_monotonic,
+                verifier=inputs.verifier,
+            )
+            transitions = FencedModelTransitionRepository(
+                store=self.service.store,
+                claim=claim,
+            )
+            ordered_units = tuple(spec.input.calibration_unit_refs) + tuple(
+                spec.input.holdout_unit_refs
+            )
+            unit_results: dict[str, dict[str, ExactModelUnitResult]] = {}
+            for variant in spec.variants:
+                registration = inputs.registry.resolve(
+                    variant.artifact.to_dict()
+                )
+                per_unit: dict[str, ExactModelUnitResult] = {}
+                for unit_ref in ordered_units:
+                    heartbeat.ensure_held()
+                    unit_input, _unit_hash = inputs.unit_dataset.resolve(unit_ref)
+                    model_input = unit_input.get("model_input")
+                    execution_mode = unit_input.get("execution_mode")
+                    target_count = unit_input.get("target_count")
+                    evaluated_on = unit_input.get("evaluated_on")
+                    if (
+                        not isinstance(model_input, Mapping)
+                        or execution_mode
+                        not in {
+                            "full_company",
+                            "full_contact_optional",
+                            "full_contact_required",
+                            "intent_refresh",
+                        }
+                        or type(target_count) is not int
+                        or not 1 <= target_count <= 50
+                        or not re.fullmatch(
+                            r"\d{4}-\d{2}-\d{2}",
+                            str(evaluated_on or ""),
+                        )
+                    ):
+                        raise RoutingExperimentWorkerError(
+                            "signed Model unit input is invalid"
+                        )
+                    coordinator = ExactModelExperimentCoordinator(
+                        experiment_hash=spec.experiment_hash(),
+                        registration=registration,
+                        dispatcher=dispatcher,
+                        transitions=transitions,
+                    )
+                    per_unit[unit_ref] = coordinator.run_unit(
+                        variant_id=variant.variant_id,
+                        unit_ref=unit_ref,
+                        model_input=model_input,
+                        execution_mode=str(execution_mode),
+                        target_count=target_count,
+                        evaluated_on=str(evaluated_on),
+                    )
+                unit_results[variant.variant_id] = per_unit
+            decisions = inputs.evaluation_adapter.build_decision_receipts(
+                spec=spec,
+                unit_results=unit_results,
+            )
+            if not isinstance(decisions, tuple):
+                raise RoutingExperimentWorkerError(
+                    "canonical Model decision receipts are invalid"
+                )
+            for receipt in decisions:
+                if not isinstance(receipt, RoutingDecisionReceiptV2):
+                    raise RoutingExperimentWorkerError(
+                        "canonical Model decision receipt is invalid"
+                    )
+                self.service.store.append_decision(
+                    experiment_hash=spec.experiment_hash(),
+                    receipt=receipt,
+                    claim=claim,
+                )
+            evaluation = inputs.evaluation_adapter.build_evaluation(
+                spec=spec,
+                gold_labels=inputs.gold_labels,
+                unit_results=unit_results,
+                authoritative_billing_rollup=(
+                    inputs.authoritative_billing_rollup
+                ),
+            )
+            if not isinstance(evaluation, RoutingExperimentV2Evaluation):
+                raise RoutingExperimentWorkerError(
+                    "canonical Model evaluation is invalid"
+                )
+            self.service.store.append_evaluation(
+                spec=spec,
+                evaluation=evaluation,
+                claim=claim,
+            )
+            self._append_execution_event(
+                spec=spec,
+                claim=claim,
+                event_type="run_completed",
+                event_doc={
+                    "evaluation_receipt_id": evaluation.receipt_id,
+                    "selected_variant_id": (
+                        evaluation.selected_variant_id or "unselected"
+                    ),
+                    "runner_contract": "pr274_model_runner",
+                },
+            )
+            heartbeat.ensure_held()
+            self._close_claim(spec=spec, claim=claim, reason="completed")
+            return evaluation
+        except RoutingExperimentDeferredRecoveryError:
+            raise
+        except Exception as exc:
+            try:
+                self._append_execution_event(
+                    spec=spec,
+                    claim=claim,
+                    event_type="run_failed",
+                    event_doc={
+                        "error_class": type(exc).__name__,
+                        "worker_ref": self.worker_ref,
+                        "runner_contract": "pr274_model_runner",
+                    },
+                )
+            except Exception as event_error:
+                raise RoutingExperimentDeferredRecoveryError(
+                    "exact Model failure event could not be confirmed"
+                ) from event_error
+            self._close_claim(spec=spec, claim=claim, reason="failed")
+            raise
+        finally:
+            heartbeat.stop()
+
     def _close_claim(
         self,
         *,
@@ -568,7 +922,9 @@ class RoutingExperimentWorker:
         if spec is None:
             raise RoutingExperimentWorkerError("routing experiment was not found")
         inputs = input_factory(spec)
-        if not isinstance(inputs, RoutingExperimentRunInputs):
+        if not isinstance(
+            inputs, (RoutingExperimentRunInputs, ExactModelRoutingRunInputs)
+        ):
             raise RoutingExperimentWorkerError("routing worker input factory is invalid")
         return self.run(spec=spec, inputs=inputs, lease=lease)
 
@@ -648,7 +1004,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=REVIEWED_ROUTING_FACTORY_NAME,
         help=(
             "Reviewed routing runtime factory name "
-            "(default: attested_provider_broker_v2)."
+            "(default: exact_model_runner_v3)."
         ),
     )
     return parser

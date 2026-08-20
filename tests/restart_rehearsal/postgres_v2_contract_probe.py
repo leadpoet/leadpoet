@@ -255,6 +255,9 @@ ROUTING_EXECUTION_QUEUE_MIGRATION = (
 ROUTING_ADAPTER_FAILURES_MIGRATION = (
     "160-research-lab-routing-adapter-failures.sql"
 )
+EXACT_MODEL_TRANSITIONS_MIGRATION = (
+    "161-research-lab-exact-model-transitions.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -316,6 +319,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ROUTING_EXPERIMENT_PURPOSES_MIGRATION,
     ROUTING_EXECUTION_QUEUE_MIGRATION,
     ROUTING_ADAPTER_FAILURES_MIGRATION,
+    EXACT_MODEL_TRANSITIONS_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -349,6 +353,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_154_model_compatibility_purpose_contract_valid",
     "post_155_ancestry_disclosure_lookup_contract_valid",
     "post_156_production_parity_reader_contract_valid",
+    "post_161_exact_model_transition_contract_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5531,6 +5536,74 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / ROUTING_ADAPTER_FAILURES_MIGRATION
         )
         applied.append(ROUTING_ADAPTER_FAILURES_MIGRATION)
+        database.apply_migration(
+            scripts / EXACT_MODEL_TRANSITIONS_MIGRATION
+        )
+        applied.append(EXACT_MODEL_TRANSITIONS_MIGRATION)
+        exact_model_transition_contract = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.jsonb_build_object(
+                    'event_constraint', pg_catalog.pg_get_constraintdef(oid),
+                    'v3_append_callable', pg_catalog.has_function_privilege(
+                        'service_role',
+                        'public.research_lab_routing_append_fenced_event_v3(text,text,text,text,bigint,jsonb)',
+                        'EXECUTE'
+                    ),
+                    'retired_v2_mutations', (
+                        SELECT pg_catalog.bool_and(
+                            NOT pg_catalog.has_function_privilege(
+                                'service_role', rpc, 'EXECUTE'
+                            )
+                        )
+                        FROM pg_catalog.unnest(ARRAY[
+                            'public.research_lab_routing_claim_experiment_v2(text,text,text,text,integer,jsonb,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_renew_claim_v2(text,text,text,bigint,text,integer,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_close_claim_v2(text,text,text,bigint,text,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_append_fenced_event_v2(text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_append_provider_attempt_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,bigint,text,text,text,bigint,bigint,text,text,bigint,text,text,text,text,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_append_decision_receipt_v2(text,text,text,text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_append_evaluation_v2(text,text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_reserve_budget_v2(text,text,text,text,text,bigint,text,bigint,integer,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_settle_budget_v2(text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_mark_budget_uncertain_v2(text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_recover_budget_v2(text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_promote_v2(text,text,text,text,text,jsonb,text,jsonb)'::REGPROCEDURE
+                        ]) AS retired(rpc)
+                    ),
+                    'bootstrap_recovery_callable',
+                        pg_catalog.has_function_privilege(
+                            'service_role',
+                            'public.research_lab_routing_recover_claim_v2(text,text,text,jsonb,text,jsonb)',
+                            'EXECUTE'
+                        ),
+                    'queue_claim_callable',
+                        pg_catalog.has_function_privilege(
+                            'service_role',
+                            'public.research_lab_routing_claim_execution_requests_v2(text,integer,integer)',
+                            'EXECUTE'
+                        )
+                )::text
+                  FROM pg_catalog.pg_constraint
+                 WHERE conrelid =
+                       'public.research_lab_routing_experiment_events_v2'::REGCLASS
+                   AND conname =
+                       'research_lab_routing_experiment_events_v2_event_type_check';
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            "model_transition_completed"
+            not in str(exact_model_transition_contract.get("event_constraint"))
+            or exact_model_transition_contract.get("v3_append_callable") is not True
+            or exact_model_transition_contract.get("retired_v2_mutations") is not True
+            or exact_model_transition_contract.get("bootstrap_recovery_callable") is not True
+            or exact_model_transition_contract.get("queue_claim_callable") is not True
+        ):
+            raise PostgresContractProbeError(
+                "post-161 exact Model transition contract differs"
+            )
         routing_purpose_contract = json.loads(
             database.psql(
                 """

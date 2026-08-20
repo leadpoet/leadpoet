@@ -658,6 +658,12 @@ def test_routing_dispatch_and_budget_contract_tampering_is_protected(
         "ROUTING_PROVIDER_DISPATCH_OPERATION_V2",
         "ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2",
         "ROUTING_PROVIDER_DISPATCH_PURPOSE_V2",
+        "ROUTING_MODEL_COMPLETION_CONTRACT_SCHEMA_V1",
+        "ROUTING_MODEL_COMPLETION_MODE_RECEIPT_ONLY",
+        "ROUTING_MODEL_COMPLETION_MODE_MODEL_RUNNER",
+        "HOST_PROVIDER_RESPONSE_SCHEMA_VERSION",
+        "MODEL_PROVIDER_RESPONSE_SCHEMA_VERSION",
+        "MAX_ROUTING_MODEL_RESPONSE_BYTES",
         "ROUTING_BUDGET_RESERVATION_SCHEMA_V3",
         "ROUTING_BUDGET_RESERVATION_RESULT_SCHEMA_V3",
         "ROUTING_BUDGET_RESERVATION_PROOF_SCHEMA_V3",
@@ -666,6 +672,9 @@ def test_routing_dispatch_and_budget_contract_tampering_is_protected(
         "validate_routing_budget_reservation_v3",
         "validate_routing_budget_reservation_result_v3",
         "routing_budget_reservation_proof_v3",
+        "build_routing_model_completion_contract_v1",
+        "validate_routing_model_completion_contract_v1",
+        "routing_provider_dispatch_receipt_output_v2",
     )
     assert set(symbols) <= set(PROTECTED_SYMBOLS[relative_path])
     source = (ROOT / relative_path).read_text(encoding="utf-8")

@@ -46,7 +46,7 @@ async def test_fully_registered_routing_readiness_is_ready(monkeypatch) -> None:
     service = RoutingExperimentApiService()
     composition = SimpleNamespace(
         api_service=service,
-        run_factory=SimpleNamespace(name="attested_provider_broker_v2"),
+        run_factory=SimpleNamespace(name="exact_model_runner_v3"),
     )
 
     class _Supervisor:

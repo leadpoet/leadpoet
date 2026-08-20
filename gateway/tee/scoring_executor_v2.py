@@ -54,11 +54,13 @@ from gateway.research_lab.routing_provider_terminal_protected import (
     ROUTING_PROVIDER_TERMINAL_OPERATION_V2,
     ROUTING_PROVIDER_TERMINAL_PURPOSE_V2,
     ProtectedRoutingProviderTerminalError,
+    routing_provider_dispatch_receipt_output_v2,
     routing_budget_reservation_proof_v3,
     execute_protected_routing_provider_terminal_v2,
     prepared_routing_provider_call_from_mapping,
     validate_routing_budget_reservation_result_v3,
     validate_routing_budget_reservation_v3,
+    validate_routing_model_completion_contract_v1,
 )
 from gateway.research_lab.routing_provider_bindings import (
     ReviewedDeeplineActionCompiler,
@@ -954,7 +956,14 @@ class ScoringExecutorV2:
             "broker_request",
             "budget_reservation",
         }
-        if not isinstance(payload, Mapping) or set(payload) != required:
+        if (
+            not isinstance(payload, Mapping)
+            or frozenset(payload)
+            not in {
+                frozenset(required),
+                frozenset(required | {"model_completion_contract"}),
+            }
+        ):
             raise ValueError("routing provider dispatch payload is invalid")
         if payload.get("schema_version") != ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2:
             raise ValueError("routing provider dispatch schema is invalid")
@@ -1052,6 +1061,13 @@ class ScoringExecutorV2:
                 authorization=authorization,
                 prepared_call=prepared,
             )
+            model_completion_contract = None
+            if "model_completion_contract" in payload:
+                model_completion_contract = (
+                    validate_routing_model_completion_contract_v1(
+                        payload["model_completion_contract"]
+                    )
+                )
         except Exception as exc:  # noqa: BLE001 - protected boundary
             raise ValueError("routing provider dispatch authorization is invalid") from exc
 
@@ -1098,6 +1114,7 @@ class ScoringExecutorV2:
                 raw_response_body=raw_response_body,
                 binding_catalog=self._routing_binding_catalog,
                 unit_dataset=self._routing_unit_dataset,
+                model_completion_contract=model_completion_contract,
             )
             output = {
                 **output,
@@ -1140,7 +1157,7 @@ class ScoringExecutorV2:
         artifact_hashes.update(str(item) for item in provider_artifact_hashes)
         return ExecutionResultV2(
             output=output,
-            receipt_output=output,
+            receipt_output=routing_provider_dispatch_receipt_output_v2(output),
             transport_attempts=tuple(deduplicated_attempts),
             artifact_hashes=tuple(sorted(artifact_hashes)),
         )

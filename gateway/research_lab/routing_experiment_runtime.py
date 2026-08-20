@@ -51,7 +51,9 @@ from gateway.research_lab.routing_provider_terminal_protected import (
     ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2,
     ROUTING_PROVIDER_TERMINAL_OPERATION_V2,
     ROUTING_PROVIDER_TERMINAL_PURPOSE_V2,
+    build_routing_model_completion_contract_v1,
     build_routing_budget_reservation_v3,
+    routing_provider_dispatch_receipt_output_v2,
     validate_routing_budget_reservation_result_v3,
 )
 from gateway.research_lab.routing_model_binding_observation import (
@@ -793,6 +795,7 @@ class AttestedScoringV2RoutingProviderDispatchAuthority:
         broker_request: Mapping[str, Any],
         budget_reservation: Mapping[str, Any],
         parent_receipt_graphs: Sequence[Mapping[str, Any]],
+        model_action: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         if self._executor is None:
             raise RoutingExperimentRuntimeError(
@@ -878,6 +881,14 @@ class AttestedScoringV2RoutingProviderDispatchAuthority:
             raise RoutingExperimentRuntimeError(
                 "routing provider dispatch budget reservation is invalid"
             )
+        try:
+            model_completion_contract = (
+                build_routing_model_completion_contract_v1(model_action)
+            )
+        except Exception as exc:
+            raise RoutingExperimentRuntimeError(
+                "routing provider Model completion contract is invalid"
+            ) from exc
         payload = {
             "schema_version": ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2,
             "authorization_proof": dict(authorization_proof),
@@ -888,6 +899,8 @@ class AttestedScoringV2RoutingProviderDispatchAuthority:
                 dict(item) for item in parent_receipt_graphs
             ],
         }
+        if model_action is not None:
+            payload["model_completion_contract"] = model_completion_contract
         dispatch_job_id = routing_provider_dispatch_job_id_v2(
             authorization_proof
         )
@@ -926,7 +939,8 @@ class AttestedScoringV2RoutingProviderDispatchAuthority:
             or receipt.get("status") != "succeeded"
             or receipt.get("job_id") != dispatch_job_id
             or receipt.get("input_root") != sha256_json(payload)
-            or receipt.get("output_root") != sha256_json(dict(result))
+            or receipt.get("output_root")
+            != sha256_json(routing_provider_dispatch_receipt_output_v2(result))
             or receipt.get("parent_receipt_hashes") != [authorization_receipt_hash]
             or receipt.get("enclave_pubkey") != release.get("enclave_pubkey")
             or any(
@@ -953,8 +967,75 @@ class AttestedScoringV2RoutingProviderDispatchAuthority:
         _validate_redacted_routing_dispatch_result(result)
         return {"result": dict(result), "execution_receipt": dict(receipt)}
 
+    def replay_model_completion(
+        self,
+        *,
+        replay_ref: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Retrieve one same-job PR274 response without provider dispatch."""
 
-_ROUTING_DISPATCH_RESULT_FIELDS = frozenset(
+        self.validate_composition()
+        replay = getattr(
+            self._executor, "replay_protected_model_result", None
+        )
+        if not callable(replay):
+            raise RoutingExperimentRuntimeError(
+                "routing provider protected replay is unavailable"
+            )
+        try:
+            response = replay(replay_ref)
+        except Exception as exc:
+            raise RoutingExperimentRuntimeError(
+                "routing provider protected replay failed"
+            ) from exc
+        result = response.get("result") if isinstance(response, Mapping) else None
+        receipt = (
+            response.get("execution_receipt")
+            if isinstance(response, Mapping)
+            else None
+        )
+        release = self._protected_release_receipt
+        if (
+            not isinstance(result, Mapping)
+            or not isinstance(receipt, Mapping)
+            or not isinstance(release, Mapping)
+            or receipt.get("receipt_hash")
+            != replay_ref.get("terminal_receipt_hash")
+            or receipt.get("job_id")
+            != replay_ref.get("protected_dispatch_job_id")
+            or receipt.get("enclave_pubkey") != release.get("enclave_pubkey")
+            or any(
+                receipt.get(name) != release.get(name)
+                for name in (
+                    "commit_sha",
+                    "pcr0",
+                    "build_manifest_hash",
+                    "dependency_lock_hash",
+                    "config_hash",
+                    "boot_identity_hash",
+                )
+            )
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing provider protected replay identity differs"
+            )
+        _validate_redacted_routing_dispatch_result(result)
+        if (
+            result.get("model_provider_response_sha256")
+            != replay_ref.get("model_provider_response_sha256")
+            or result.get("model_completion_contract_hash")
+            != replay_ref.get("model_completion_contract_hash")
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing provider protected replay commitments differ"
+            )
+        return {
+            "result": dict(result),
+            "execution_receipt": dict(receipt),
+        }
+
+
+_ROUTING_DISPATCH_RESULT_BASE_FIELDS = frozenset(
     {
         "schema_version",
         "operation",
@@ -970,6 +1051,13 @@ _ROUTING_DISPATCH_RESULT_FIELDS = frozenset(
         "projection",
         "provider_receipt",
         "budget_reservation",
+    }
+)
+_ROUTING_DISPATCH_RESULT_FIELDS = _ROUTING_DISPATCH_RESULT_BASE_FIELDS | frozenset(
+    {
+        "model_completion_contract_hash",
+        "model_provider_response_sha256",
+        "model_provider_response",
     }
 )
 _ROUTING_DISPATCH_PROJECTION_FIELDS = frozenset(
@@ -1000,9 +1088,16 @@ _ROUTING_DISPATCH_RAW_FIELDS = frozenset(
 
 
 def _validate_redacted_routing_dispatch_result(value: Any) -> None:
-    """Reject raw provider data before it can cross the host boundary."""
+    """Accept only the signed bounded response channel and redacted receipt."""
 
-    if not isinstance(value, Mapping) or set(value) != _ROUTING_DISPATCH_RESULT_FIELDS:
+    if (
+        not isinstance(value, Mapping)
+        or frozenset(value)
+        not in {
+            _ROUTING_DISPATCH_RESULT_BASE_FIELDS,
+            _ROUTING_DISPATCH_RESULT_FIELDS,
+        }
+    ):
         raise RoutingExperimentRuntimeError(
             "routing provider dispatch result is not the redacted schema"
         )
@@ -1010,6 +1105,26 @@ def _validate_redacted_routing_dispatch_result(value: Any) -> None:
         raise RoutingExperimentRuntimeError(
             "routing provider dispatch result contains raw provider data"
         )
+    if frozenset(value) == _ROUTING_DISPATCH_RESULT_FIELDS:
+        try:
+            receipt_output = routing_provider_dispatch_receipt_output_v2(value)
+        except Exception as exc:
+            raise RoutingExperimentRuntimeError(
+                "routing provider dispatch Model response channel is invalid"
+            ) from exc
+        if (
+            not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(receipt_output.get("model_completion_contract_hash") or ""),
+            )
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(receipt_output.get("model_provider_response_sha256") or ""),
+            )
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing provider dispatch Model response commitments are invalid"
+            )
     if value.get("operation") != ROUTING_PROVIDER_TERMINAL_OPERATION_V2:
         raise RoutingExperimentRuntimeError(
             "routing provider dispatch result operation differs"
@@ -1839,12 +1954,14 @@ class ReviewedProviderBrokerRoutingRunner:
             ),
         )
 
-    def __call__(
+    def _dispatch_call(
         self,
         binding: ProviderBindingIdentity,
         unit_ref: str,
         request_fingerprint: str,
         authorization: RoutingCallAuthorization,
+        *,
+        model_action: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         self.config.assert_live_enabled()
         execution = self._execution
@@ -2106,6 +2223,7 @@ class ReviewedProviderBrokerRoutingRunner:
                 broker_request=broker_request,
                 budget_reservation=budget_reservation,
                 parent_receipt_graphs=self.dispatch_parent_receipt_graphs,
+                model_action=model_action,
             )
             terminal_result = dispatch_response.get("result")
             if not isinstance(terminal_result, Mapping):
@@ -2173,6 +2291,9 @@ class ReviewedProviderBrokerRoutingRunner:
                 binding_version=receipt.binding_version,
                 request_fingerprint=receipt.request_fingerprint,
             )
+            terminal_receipt_result = (
+                routing_provider_dispatch_receipt_output_v2(terminal_result)
+            )
             self.store.append_protected_provider_attempt(
                 experiment_hash=execution.experiment_hash,
                 key=key,
@@ -2184,7 +2305,7 @@ class ReviewedProviderBrokerRoutingRunner:
                 authorization_proof_hash=str(proof["authorization_proof_hash"]),
                 authorization_request_hash=str(proof["authorization_request_hash"]),
                 authorization_receipt=authorization_receipt,
-                terminal_result=terminal_result,
+                terminal_result=terminal_receipt_result,
                 terminal_execution_receipt=dispatch_response.get(
                     "execution_receipt"
                 ),
@@ -2221,7 +2342,28 @@ class ReviewedProviderBrokerRoutingRunner:
                     claim=execution.claim,
                     event_doc={**reserve_doc, "attempt_key": key, "billing_state": "known"},
                 )
-            return receipt.to_dict()
+            return {
+                "provider_receipt": receipt.to_dict(),
+                "model_provider_response": terminal_result.get(
+                    "model_provider_response"
+                ),
+                "model_provider_response_sha256": terminal_result.get(
+                    "model_provider_response_sha256"
+                ),
+                "model_completion_contract_hash": terminal_result.get(
+                    "model_completion_contract_hash"
+                ),
+                "protected_dispatch_job_id": str(
+                    dispatch_response.get("execution_receipt", {}).get(
+                        "job_id"
+                    )
+                ),
+                "terminal_receipt_hash": str(
+                    dispatch_response.get("execution_receipt", {}).get(
+                        "receipt_hash"
+                    )
+                ),
+            }
         except RoutingExperimentDeferredRecoveryError:
             raise
         except Exception as exc:
@@ -2240,6 +2382,164 @@ class ReviewedProviderBrokerRoutingRunner:
                 expected_credit_microunits=prepared.credit_ceiling_microunits,
             )
             raise
+
+    def __call__(
+        self,
+        binding: ProviderBindingIdentity,
+        unit_ref: str,
+        request_fingerprint: str,
+        authorization: RoutingCallAuthorization,
+    ) -> Mapping[str, Any]:
+        """Preserve PR93's receipt-only adapter contract."""
+
+        result = self._dispatch_call(
+            binding,
+            unit_ref,
+            request_fingerprint,
+            authorization,
+        )
+        receipt = result.get("provider_receipt")
+        if not isinstance(receipt, Mapping):
+            raise RoutingExperimentRuntimeError(
+                "routing provider receipt-only result is invalid"
+            )
+        return dict(receipt)
+
+    def dispatch_model_action(
+        self,
+        *,
+        binding: ProviderBindingIdentity,
+        unit_ref: str,
+        request_fingerprint: str,
+        authorization: RoutingCallAuthorization,
+        action: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Dispatch one exact PR274 action through the protected channel."""
+
+        if (
+            not isinstance(action, Mapping)
+            or str(action.get("tool_id") or "") != binding.tool_id
+            or str(action.get("stage") or "") != authorization.stage
+            or action.get("sequence") != authorization.attempt
+            or "sha256:" + str(action.get("request_fingerprint_sha256") or "")
+            != request_fingerprint
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing Model action differs from provider authorization"
+            )
+        result = self._dispatch_call(
+            binding,
+            unit_ref,
+            request_fingerprint,
+            authorization,
+            model_action=action,
+        )
+        if (
+            not isinstance(result.get("provider_receipt"), Mapping)
+            or not isinstance(result.get("model_provider_response"), Mapping)
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(result.get("model_provider_response_sha256") or ""),
+            )
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(result.get("model_completion_contract_hash") or ""),
+            )
+            or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}",
+                str(result.get("protected_dispatch_job_id") or ""),
+            )
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(result.get("terminal_receipt_hash") or ""),
+            )
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing Model protected result is invalid"
+            )
+        return dict(result)
+
+    def replay_model_action(
+        self,
+        *,
+        binding: ProviderBindingIdentity,
+        unit_ref: str,
+        action: Mapping[str, Any],
+        replay_ref: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Reopen one signed protected result without budget or provider work."""
+
+        execution = self._execution
+        if execution is None:
+            raise RoutingExperimentRuntimeError(
+                "routing Model replay runner is not bound to an experiment"
+            )
+        if (
+            not isinstance(action, Mapping)
+            or str(action.get("tool_id") or "") != binding.tool_id
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing Model replay action differs"
+            )
+        response = self.dispatch_authority.replay_model_completion(
+            replay_ref=replay_ref
+        )
+        result = response.get("result")
+        terminal_receipt = response.get("execution_receipt")
+        if not isinstance(result, Mapping) or not isinstance(
+            terminal_receipt, Mapping
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing Model replay result is invalid"
+            )
+        raw_receipt = result.get("provider_receipt")
+        try:
+            receipt = ProviderReceipt.from_mapping(raw_receipt)
+        except Exception as exc:
+            raise RoutingExperimentRuntimeError(
+                "routing Model replay provider receipt is invalid"
+            ) from exc
+        request_fingerprint = (
+            "sha256:"
+            + str(action.get("request_fingerprint_sha256") or "")
+        )
+        if (
+            validate_provider_receipt(receipt)
+            or receipt.binding_id != binding.binding_id
+            or receipt.tool_id != binding.tool_id
+            or receipt.unit_ref != unit_ref
+            or receipt.request_fingerprint != request_fingerprint
+            or result.get("model_completion_contract_hash")
+            != sha256_json(build_routing_model_completion_contract_v1(action))
+            or result.get("model_provider_response_sha256")
+            != replay_ref.get("model_provider_response_sha256")
+            or terminal_receipt.get("receipt_hash")
+            != replay_ref.get("terminal_receipt_hash")
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing Model replay identity differs"
+            )
+        model_response = result.get("model_provider_response")
+        if (
+            not isinstance(model_response, Mapping)
+            or sha256_json(model_response)
+            != result.get("model_provider_response_sha256")
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing Model replay response differs"
+            )
+        return {
+            "provider_receipt": receipt.to_dict(),
+            "model_provider_response": dict(model_response),
+            "model_provider_response_sha256": result[
+                "model_provider_response_sha256"
+            ],
+            "model_completion_contract_hash": result[
+                "model_completion_contract_hash"
+            ],
+            "protected_dispatch_job_id": terminal_receipt["job_id"],
+            "terminal_receipt_hash": terminal_receipt["receipt_hash"],
+        }
 
     def _mark_budget_uncertain_or_defer(
         self,

@@ -62,6 +62,14 @@ from gateway.research_lab.routing_execution_authorization import (
 from gateway.research_lab.routing_execution_envelope import (
     RoutingExperimentExecutionEnvelopeV2,
 )
+from gateway.research_lab.routing_provider_bindings import (
+    VerifiedRoutingBindingCatalog,
+    VerifiedRoutingUnitDataset,
+)
+from gateway.research_lab.routing_provider_terminal_protected import (
+    routing_provider_dispatch_receipt_output_v2,
+)
+from research_lab.model_runner_protocol import ExactModelRunnerRegistry
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
     ExecutionResultV2,
@@ -187,6 +195,7 @@ class _ExecutionManagerRpc:
     def __init__(self, manager):
         self.manager = manager
         self.manifest = None
+        self.submit_calls = 0
 
     def _summary(self, summary):
         value = dict(summary)
@@ -196,6 +205,7 @@ class _ExecutionManagerRpc:
         return value
 
     def submit_job(self, manifest):
+        self.submit_calls += 1
         self.manifest = dict(manifest)
         manager_manifest = {
             "schema_version": JOB_SCHEMA_VERSION,
@@ -239,15 +249,38 @@ class _ExecutionManagerRpc:
         return self.manager.receipts(job_id)
 
 
-class _AdapterFactory:
+class _ModelRunnerRegistry(ExactModelRunnerRegistry):
     def __init__(self):
-        self.validated = False
+        pass
 
-    def validate_admission(self, **_kwargs):
-        self.validated = True
+    def preflight_all(self):
+        return {"reviewed": {"preflight_sha256": "9" * 64}}
 
-    def build_adapters(self, spec):
-        return {variant.variant_id: object() for variant in spec.variants}
+    def resolve(self, _artifact):
+        return SimpleNamespace(
+            key="reviewed",
+            preflight=lambda: {"preflight_sha256": "9" * 64},
+            host_capability_manifest={"bindings": []},
+        )
+
+
+class _ModelVerifier:
+    def verify_company(self, **_kwargs):
+        raise AssertionError("not called")
+
+    def verify_intent(self, **_kwargs):
+        raise AssertionError("not called")
+
+    def verify_contact(self, **_kwargs):
+        raise AssertionError("not called")
+
+
+class _EvaluationAdapter:
+    def build_decision_receipts(self, **_kwargs):
+        return ()
+
+    def build_evaluation(self, **_kwargs):
+        raise AssertionError("not called")
 
 
 class _ArtifactAuthority:
@@ -267,16 +300,27 @@ class _Lineage(SimpleNamespace):
 
 
 def _inputs():
-    adapter = _AdapterFactory()
     lineage = _Lineage(
         commit_sha=COMMIT,
         routing_catalog_hash=MODEL_CATALOG,
         routing_contract_hash=CONTRACT,
     )
-    binding_catalog = SimpleNamespace(manifest_hash=BINDING_CATALOG)
-    unit_dataset = SimpleNamespace(
+    binding_catalog = VerifiedRoutingBindingCatalog(
+        manifest_uri="s3://reviewed/bindings.json",
+        manifest_hash=BINDING_CATALOG,
+        signature_ref="kms:bindings",
+        signing_key_id="kms-key",
+        catalog_version="test-v1",
+        bindings={},
+    )
+    unit_dataset = VerifiedRoutingUnitDataset(
+        manifest_uri="s3://reviewed/units.json",
         manifest_hash=UNIT_MANIFEST,
+        signature_ref="kms:units",
+        signing_key_id="kms-key",
         unit_set_hash=UNIT_SET,
+        provenance_hash="sha256:" + "3" * 64,
+        units={},
     )
     return ReviewedRoutingReleaseInputs(
         artifact_lineage=lineage,
@@ -294,7 +338,9 @@ def _inputs():
         ),
         protected_release_receipt=dict(_PROTECTED_RELEASE_RECEIPT),
         artifact_authority=_ArtifactAuthority(),
-        model_adapter_factory=adapter,
+        model_runner_registry=_ModelRunnerRegistry(),
+        model_verifier=_ModelVerifier(),
+        evaluation_adapter=_EvaluationAdapter(),
         scoring_job_rpc=_Rpc(),
         call_authorization_job_rpc=_Rpc(),
         dispatch_job_rpc=_Rpc(),
@@ -340,15 +386,15 @@ def test_reviewed_gate_keeps_model_and_protected_release_identities_separate():
     assert authority.inputs.artifact_lineage.commit_sha == COMMIT
 
 
-def test_reviewed_gate_rejects_missing_adapter_before_provider_rpc():
+def test_reviewed_gate_rejects_missing_model_registry_before_provider_rpc():
     inputs = _inputs()
     inputs = inputs.__class__(
         **{
             **inputs.__dict__,
-            "model_adapter_factory": None,
+            "model_runner_registry": None,
         }
     )
-    with pytest.raises(RoutingProductCompositionError, match="adapter"):
+    with pytest.raises(RoutingProductCompositionError, match="runner registry"):
         build_reviewed_admission_authority(inputs, environment=_env())
 
 
@@ -538,6 +584,93 @@ def test_dispatch_executor_binds_dynamic_authorization_receipt_parent():
     assert rpc.manifest is None
 
 
+def test_dispatch_executor_replays_signed_model_result_without_resubmit(
+    monkeypatch,
+):
+    from gateway.tee import execution_job_manager_v2 as job_manager_v2
+    from tests.test_execution_job_manager_v2 import _manager
+
+    monkeypatch.setattr(
+        job_manager_v2,
+        "validate_receipt_graphs",
+        lambda *args, **kwargs: None,
+    )
+    model_response = {
+        "schema_version": "host-provider-response:v1",
+        "provider": "deepline",
+        "status_code": 200,
+        "body": {
+            "run": {"status": "completed"},
+            "outputs": {
+                "model_provider_records": [],
+                "freshness_context": {},
+            },
+        },
+    }
+    output = {
+        "model_completion_contract_hash": "sha256:" + "3" * 64,
+        "model_provider_response_sha256": sha256_json(model_response),
+        "model_provider_response": model_response,
+    }
+
+    def manager_executor(_operation, _payload, _context):
+        return ExecutionResultV2(
+            output=output,
+            receipt_output=routing_provider_dispatch_receipt_output_v2(
+                output
+            ),
+        )
+
+    manager, _ = _manager(
+        manager_executor,
+        operations={
+            ROUTING_PROVIDER_DISPATCH_OPERATION_V2: {
+                ROUTING_PROVIDER_DISPATCH_PURPOSE_V2
+            }
+        },
+    )
+    rpc = _ExecutionManagerRpc(manager)
+    executor = _TeeJobRpcOperationExecutor(
+        RoutingProviderDispatchTeeRpc(rpc),
+        allowed_operation=ROUTING_PROVIDER_DISPATCH_OPERATION_V2,
+        allowed_purpose=ROUTING_PROVIDER_DISPATCH_PURPOSE_V2,
+        dispatch_token=_ROUTING_DISPATCH_EXECUTOR_TOKEN,
+    )
+    first = executor(
+        {
+            "operation": ROUTING_PROVIDER_DISPATCH_OPERATION_V2,
+            "purpose": ROUTING_PROVIDER_DISPATCH_PURPOSE_V2,
+            "payload": {"exact": True},
+            "job_id": "routing-dispatch:" + "1" * 32,
+            "parent_receipt_hashes": [],
+        }
+    )
+    replay_ref = {
+        "schema_version": (
+            "leadpoet.research_lab.protected_model_replay_ref.v1"
+        ),
+        "protected_dispatch_job_id": first["execution_receipt"]["job_id"],
+        "terminal_receipt_hash": first["execution_receipt"]["receipt_hash"],
+        "model_provider_response_sha256": output[
+            "model_provider_response_sha256"
+        ],
+        "model_completion_contract_hash": output[
+            "model_completion_contract_hash"
+        ],
+    }
+    replayed = executor.replay_protected_model_result(replay_ref)
+
+    assert replayed["result"] == output
+    assert rpc.submit_calls == 1
+    with pytest.raises(RoutingProductCompositionError, match="differs"):
+        executor.replay_protected_model_result(
+            {
+                **replay_ref,
+                "model_provider_response_sha256": "sha256:" + "4" * 64,
+            }
+        )
+
+
 def test_authorize_composition_and_manager_preserve_authorization_parent_order(
     monkeypatch,
 ):
@@ -589,7 +722,9 @@ def test_authorize_composition_and_manager_preserve_authorization_parent_order(
         model_binding_observation=context["observation"],
         protected_release_receipt=release,
         artifact_authority=_ArtifactAuthority(),
-        model_adapter_factory=_AdapterFactory(),
+        model_runner_registry=_ModelRunnerRegistry(),
+        model_verifier=_ModelVerifier(),
+        evaluation_adapter=_EvaluationAdapter(),
         scoring_job_rpc=_Rpc(),
         call_authorization_job_rpc=rpc,
         dispatch_job_rpc=_Rpc(),
@@ -657,6 +792,8 @@ def test_authorize_composition_and_manager_preserve_authorization_parent_order(
 
 def test_reviewed_product_composition_installs_api_and_one_factory():
     calls = []
+    durable_identity = "sha256:" + "7" * 64
+    durable_store = _DurableStore(durable_identity)
     protected_authorities = build_attested_protected_authorities(
         _inputs(), environment=_env()
     )
@@ -665,7 +802,7 @@ def test_reviewed_product_composition_installs_api_and_one_factory():
         calls.append(spec)
         return ReviewedProviderBrokerRoutingRunner(
             config=RoutingExperimentRuntimeConfig(enabled=True),
-            store=object(),
+            store=durable_store,
             artifact_lineage=object(),
             compiler=object(),
             model_binding_requirements=object(),
@@ -678,6 +815,7 @@ def test_reviewed_product_composition_installs_api_and_one_factory():
         )
 
     reviewed_runner_factory.validate_readiness = lambda: None
+    reviewed_runner_factory.durable_authority_identity = durable_identity
 
     envelope = RoutingExperimentExecutionEnvelopeV2.from_mapping(
         authority_fixture()["execution_envelope"]
@@ -687,17 +825,14 @@ def test_reviewed_product_composition_installs_api_and_one_factory():
         reviewed_runner_factory=reviewed_runner_factory,
         billing_rollup_factory=lambda _spec: lambda _store: {},
         execution_envelope_factory=lambda _spec: envelope,
-        store_factory=lambda: object(),
+        store_factory=lambda: durable_store,
         environment=_env(),
     )
     assert isinstance(composition.api_service, RoutingExperimentApiService)
     assert set(composition.factory_registry) == {REVIEWED_ROUTING_FACTORY_NAME}
-    spec = SimpleNamespace(
-        variants=(SimpleNamespace(variant_id="baseline"),),
-    )
-    built = composition.run_factory.build(spec)
-    assert isinstance(built.runner, ReviewedProviderBrokerRoutingRunner)
-    assert calls == [spec]
+    assert composition.api_service.store_factory() is durable_store
+    assert composition.run_factory.name == REVIEWED_ROUTING_FACTORY_NAME
+    assert calls == []
 
 
 def test_reviewed_runner_requires_authorization_ancestry_before_queue_execution():
@@ -718,8 +853,8 @@ def test_reviewed_runner_requires_authorization_ancestry_before_queue_execution(
         runner.validate_composition()
 
 
-def test_bootstrap_without_model_owned_v2_adapter_fails_before_sql_or_queue():
-    with pytest.raises(RoutingProductCompositionError, match="adapter worker"):
+def test_bootstrap_without_exact_model_runner_fails_before_sql_or_queue():
+    with pytest.raises(RoutingProductCompositionError, match="runner"):
         bootstrap_reviewed_routing_product(environment=_env())
 
 

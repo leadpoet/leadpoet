@@ -43,8 +43,12 @@ from gateway.research_lab.routing_experiment_api import (
     RoutingExperimentSpecAdmissionAuthority,
 )
 from gateway.research_lab.routing_experiment_worker import (
-    AttestedProviderBrokerRoutingRunFactory,
+    ExactModelEvaluationAdapter,
+    ExactModelRoutingRunFactory,
     RoutingExperimentRunFactory,
+)
+from gateway.research_lab.common_model_experiment import (
+    ReviewedModelVerificationAuthority,
 )
 from gateway.research_lab.routing_model_binding_observation import (
     VerifiedRoutingModelBindingRequirements,
@@ -67,12 +71,14 @@ from gateway.research_lab.routing_provider_bindings import (
 from gateway.research_lab.routing_provider_terminal_protected import (
     ROUTING_PROVIDER_DISPATCH_OPERATION_V2,
     ROUTING_PROVIDER_DISPATCH_PURPOSE_V2,
+    routing_provider_dispatch_receipt_output_v2,
 )
 from research_lab.routing_experiments import (
     RoutingExperimentArtifactAuthority,
     RoutingExperimentError,
     RoutingExperimentV2Spec,
 )
+from research_lab.model_runner_protocol import ExactModelRunnerRegistry
 from research_lab.canonical import sha256_json
 from leadpoet_canonical.attested_v2 import validate_signed_execution_receipt
 
@@ -186,27 +192,6 @@ class RoutingProviderDispatchTeeRpc:
 
     def receipts(self, job_id: str) -> Sequence[Mapping[str, Any]]:
         return tuple(dict(item) for item in self._rpc.receipts(job_id))
-
-
-class RequiredRoutingModelAdapterFactory(Protocol):
-    """Model-owned V2 adapter seam required by the product composition.
-
-    The current exact model may not export this seam.  In that case the
-    bootstrap builder must reject the composition.  The site must not copy
-    model routing code to fill the gap.
-    """
-
-    def validate_admission(
-        self,
-        *,
-        spec: RoutingExperimentV2Spec,
-        envelope: RoutingExperimentExecutionEnvelopeV2,
-        binding_catalog: VerifiedRoutingBindingCatalog,
-    ) -> None: ...
-
-    def build_adapters(
-        self, spec: RoutingExperimentV2Spec
-    ) -> Mapping[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -499,8 +484,19 @@ class _TeeJobRpcOperationExecutor(RoutingProviderDispatchExecutor):
         result_payload = result.get("result")
         output_root_matches = False
         if isinstance(result_payload, Mapping):
+            receipt_payload = dict(result_payload)
+            if (
+                (operation, purpose)
+                == (
+                    ROUTING_PROVIDER_DISPATCH_OPERATION_V2,
+                    ROUTING_PROVIDER_DISPATCH_PURPOSE_V2,
+                )
+            ):
+                receipt_payload = routing_provider_dispatch_receipt_output_v2(
+                    result_payload
+                )
             output_root_matches = (
-                receipt.get("output_root") == sha256_json(dict(result_payload))
+                receipt.get("output_root") == sha256_json(receipt_payload)
                 if isinstance(receipt, Mapping)
                 else False
             )
@@ -543,6 +539,96 @@ class _TeeJobRpcOperationExecutor(RoutingProviderDispatchExecutor):
             "status": "succeeded",
             "operation": operation,
             "purpose": purpose,
+            "result": dict(result_payload),
+            "execution_receipt": dict(receipt),
+        }
+
+    def replay_protected_model_result(
+        self,
+        replay_ref: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Read one completed dispatch job without submitting another job."""
+
+        if (
+            self._allowed_operation != ROUTING_PROVIDER_DISPATCH_OPERATION_V2
+            or self._allowed_purpose != ROUTING_PROVIDER_DISPATCH_PURPOSE_V2
+            or self._routing_dispatch_executor_token
+            is not _ROUTING_DISPATCH_EXECUTOR_TOKEN
+        ):
+            raise RoutingProductCompositionError(
+                "routing protected Model replay executor is not fixed"
+            )
+        expected_fields = {
+            "schema_version",
+            "protected_dispatch_job_id",
+            "terminal_receipt_hash",
+            "model_provider_response_sha256",
+            "model_completion_contract_hash",
+        }
+        if (
+            not isinstance(replay_ref, Mapping)
+            or set(replay_ref) != expected_fields
+            or replay_ref.get("schema_version")
+            != "leadpoet.research_lab.protected_model_replay_ref.v1"
+        ):
+            raise RoutingProductCompositionError(
+                "routing protected Model replay reference is invalid"
+            )
+        job_id = str(replay_ref.get("protected_dispatch_job_id") or "")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}", job_id)
+            or any(
+                not _SHA256_RE.fullmatch(str(replay_ref.get(name) or ""))
+                for name in (
+                    "terminal_receipt_hash",
+                    "model_provider_response_sha256",
+                    "model_completion_contract_hash",
+                )
+            )
+        ):
+            raise RoutingProductCompositionError(
+                "routing protected Model replay commitments are invalid"
+            )
+        result = dict(self._rpc.result(job_id))
+        receipts = tuple(dict(item) for item in self._rpc.receipts(job_id))
+        result_payload = result.get("result")
+        receipt = result.get("execution_receipt") or result.get("receipt")
+        if not isinstance(receipt, Mapping) and receipts:
+            receipt = receipts[-1]
+        if (
+            result.get("job_id") != job_id
+            or not isinstance(result_payload, Mapping)
+            or not isinstance(receipt, Mapping)
+            or receipt.get("job_id") != job_id
+            or receipt.get("role") != "gateway_scoring"
+            or receipt.get("purpose")
+            != ROUTING_PROVIDER_DISPATCH_PURPOSE_V2
+            or receipt.get("status") != "succeeded"
+            or receipt.get("receipt_hash")
+            != replay_ref["terminal_receipt_hash"]
+            or receipt.get("output_root")
+            != sha256_json(
+                routing_provider_dispatch_receipt_output_v2(result_payload)
+            )
+            or result_payload.get("model_provider_response_sha256")
+            != replay_ref["model_provider_response_sha256"]
+            or result_payload.get("model_completion_contract_hash")
+            != replay_ref["model_completion_contract_hash"]
+            or sum(item == dict(receipt) for item in receipts) != 1
+        ):
+            raise RoutingProductCompositionError(
+                "routing protected Model replay result differs"
+            )
+        try:
+            validate_signed_execution_receipt(receipt)
+        except Exception as exc:
+            raise RoutingProductCompositionError(
+                "routing protected Model replay receipt is invalid"
+            ) from exc
+        return {
+            "status": "succeeded",
+            "operation": ROUTING_PROVIDER_DISPATCH_OPERATION_V2,
+            "purpose": ROUTING_PROVIDER_DISPATCH_PURPOSE_V2,
             "result": dict(result_payload),
             "execution_receipt": dict(receipt),
         }
@@ -630,7 +716,9 @@ class ReviewedRoutingReleaseInputs:
     model_binding_observation: VerifiedRoutingModelBindingRequirements
     protected_release_receipt: Mapping[str, Any]
     artifact_authority: RoutingExperimentArtifactAuthority
-    model_adapter_factory: RequiredRoutingModelAdapterFactory
+    model_runner_registry: ExactModelRunnerRegistry
+    model_verifier: ReviewedModelVerificationAuthority
+    evaluation_adapter: ExactModelEvaluationAdapter
     scoring_job_rpc: RoutingTeeJobRpc
     call_authorization_job_rpc: RoutingTeeJobRpc
     dispatch_job_rpc: RoutingProviderDispatchTeeRpc
@@ -647,17 +735,30 @@ def _require_rpc(value: Any, name: str) -> RoutingTeeJobRpc:
     return value
 
 
-def _require_adapter(value: Any) -> RequiredRoutingModelAdapterFactory:
-    if value is None:
+def _require_exact_model_authorities(inputs: ReviewedRoutingReleaseInputs) -> None:
+    if not isinstance(inputs.model_runner_registry, ExactModelRunnerRegistry):
         raise RoutingProductCompositionError(
-            "routing model V2 adapter factory is unavailable"
+            "exact Model runner registry is unavailable"
         )
-    for method in ("validate_admission", "build_adapters"):
-        if not callable(getattr(value, method, None)):
+    try:
+        inputs.model_runner_registry.preflight_all()
+    except Exception as exc:
+        raise RoutingProductCompositionError(
+            "exact Model runner preflight failed"
+        ) from exc
+    for method in ("verify_company", "verify_intent", "verify_contact"):
+        if not callable(getattr(inputs.model_verifier, method, None)):
             raise RoutingProductCompositionError(
-                "routing model V2 adapter factory is unavailable"
+                "reviewed Model verifier is unavailable"
             )
-    return value
+    if not callable(
+        getattr(inputs.evaluation_adapter, "build_decision_receipts", None)
+    ) or not callable(
+        getattr(inputs.evaluation_adapter, "build_evaluation", None)
+    ):
+        raise RoutingProductCompositionError(
+            "canonical Model evaluation adapter is unavailable"
+        )
 
 
 def _require_hash(value: Any, name: str) -> str:
@@ -735,7 +836,7 @@ def validate_reviewed_release_inputs(
         raise RoutingProductCompositionError(
             "routing authority bundle unit dataset differs"
         )
-    _require_adapter(inputs.model_adapter_factory)
+    _require_exact_model_authorities(inputs)
     if not callable(getattr(inputs.artifact_authority, "verify", None)):
         raise RoutingProductCompositionError(
             "routing artifact authority is unavailable"
@@ -816,13 +917,81 @@ class ReviewedRoutingAdmissionAuthority(RoutingExperimentSpecAdmissionAuthority)
                 envelope=envelope,
                 binding_catalog=self.inputs.binding_catalog,
             )
-            self.inputs.model_adapter_factory.validate_admission(
-                spec=spec,
-                envelope=envelope,
-                binding_catalog=self.inputs.binding_catalog,
-            )
+            bindings_by_tool = {
+                binding.tool_id: binding
+                for binding in spec.provider_bindings
+            }
+            if len(bindings_by_tool) != len(spec.provider_bindings):
+                raise RoutingProductCompositionError(
+                    "routing provider tool bindings are duplicated"
+                )
+            if len(spec.variants) < 2:
+                raise RoutingProductCompositionError(
+                    "exact baseline and challenger artifacts are required"
+                )
+            registrations = {}
+            for variant in spec.variants:
+                registration = self.inputs.model_runner_registry.resolve(
+                    variant.artifact.to_dict()
+                )
+                registration.preflight()
+                registration.validate_variant_audit_payload(
+                    variant.routing_payload
+                )
+                registrations[variant.variant_id] = registration
+                raw_bindings = registration.host_capability_manifest.get(
+                    "bindings"
+                )
+                if not isinstance(raw_bindings, Sequence):
+                    raise RoutingProductCompositionError(
+                        "Model host capability bindings are invalid"
+                    )
+                for model_binding in raw_bindings:
+                    if (
+                        not isinstance(model_binding, Mapping)
+                        or model_binding.get("available") is not True
+                        or model_binding.get("action_type")
+                        not in {
+                            "execute_candidate_tool",
+                            "execute_intent_tool",
+                            "execute_contact_tool",
+                        }
+                    ):
+                        continue
+                    tool_id = str(model_binding.get("tool_id") or "")
+                    binding = bindings_by_tool.get(tool_id)
+                    if binding is None or binding.execution_contract_hash != (
+                        "sha256:"
+                        + str(
+                            model_binding.get("binding_contract_sha256")
+                            or ""
+                        )
+                    ):
+                        raise RoutingProductCompositionError(
+                            "Model provider binding registration differs"
+                        )
+            baseline = registrations.get(spec.baseline_variant_id)
+            if baseline is None:
+                raise RoutingProductCompositionError(
+                    "exact baseline artifact is unavailable"
+                )
+            artifact_keys = set()
+            for variant in spec.variants:
+                artifact_key = registrations[variant.variant_id].key
+                if (
+                    variant.variant_id != spec.baseline_variant_id
+                    and artifact_key == baseline.key
+                ):
+                    raise RoutingProductCompositionError(
+                        "each challenger must use a distinct exact Model artifact"
+                    )
+                if artifact_key in artifact_keys:
+                    raise RoutingProductCompositionError(
+                        "exact Model artifact is duplicated across variants"
+                    )
+                artifact_keys.add(artifact_key)
             return envelope
-        except (RoutingExperimentError, ValueError, TypeError) as exc:
+        except Exception as exc:  # noqa: BLE001 - admission must fail closed
             if isinstance(exc, RoutingProductCompositionError):
                 raise
             raise RoutingProductCompositionError(
@@ -841,7 +1010,7 @@ def build_reviewed_admission_authority(
     return ReviewedRoutingAdmissionAuthority(inputs=inputs)
 
 
-def build_attested_provider_broker_factory(
+def build_exact_model_runner_factory(
     *,
     inputs: ReviewedRoutingReleaseInputs,
     reviewed_runner_factory: Callable[
@@ -853,7 +1022,7 @@ def build_attested_provider_broker_factory(
     ],
     environment: Mapping[str, str] | None = None,
 ) -> RoutingExperimentRunFactory:
-    """Build the sole named run factory after static trust checks.
+    """Build the sole PR274 run factory after static trust checks.
 
     ``reviewed_runner_factory`` is a release-owned constructor. It must close
     over typed TEE RPC authorities created at bootstrap. The function does not
@@ -866,17 +1035,31 @@ def build_attested_provider_broker_factory(
         raise RoutingProductCompositionError(
             "reviewed routing runner factory is unavailable"
         )
-    factory = AttestedProviderBrokerRoutingRunFactory(
-        adapter_factory=lambda spec: inputs.model_adapter_factory.build_adapters(spec),
-        gold_label_loader=lambda _spec: inputs.gold_labels.labels,
+    factory = ExactModelRoutingRunFactory(
+        registry=inputs.model_runner_registry,
+        gold_labels=inputs.gold_labels.labels,
+        unit_dataset=inputs.unit_dataset,
         reviewed_runner_factory=reviewed_runner_factory,
-        artifact_authority=inputs.artifact_authority,
+        verifier=inputs.model_verifier,
+        evaluation_adapter=inputs.evaluation_adapter,
         billing_rollup_factory=billing_rollup_factory,
         execution_envelope_factory=execution_envelope_factory,
     )
-    if factory.name != "attested_provider_broker_v2":
+    if factory.name != "exact_model_runner_v3":
         raise RoutingProductCompositionError("reviewed routing factory name is invalid")
     return factory
+
+
+def build_attested_provider_broker_factory(
+    **kwargs: Any,
+) -> RoutingExperimentRunFactory:
+    """Compatibility alias for callers that have not renamed bootstrap code.
+
+    The returned factory is still ``exact_model_runner_v3``. This alias does
+    not install or expose the legacy provider-broker runner.
+    """
+
+    return build_exact_model_runner_factory(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -889,9 +1072,9 @@ class ReviewedRoutingProductComposition:
 
     @property
     def factory_registry(self) -> Mapping[str, RoutingExperimentRunFactory]:
-        if getattr(self.run_factory, "name", None) != "attested_provider_broker_v2":
+        if getattr(self.run_factory, "name", None) != "exact_model_runner_v3":
             raise RoutingProductCompositionError("reviewed routing factory name is invalid")
-        return {"attested_provider_broker_v2": self.run_factory}
+        return {"exact_model_runner_v3": self.run_factory}
 
 
 def build_reviewed_routing_product(
@@ -913,7 +1096,7 @@ def build_reviewed_routing_product(
     protected_authorities = build_attested_protected_authorities(
         inputs, environment=environment
     )
-    run_factory = build_attested_provider_broker_factory(
+    run_factory = build_exact_model_runner_factory(
         inputs=inputs,
         reviewed_runner_factory=reviewed_runner_factory,
         billing_rollup_factory=billing_rollup_factory,
@@ -953,7 +1136,7 @@ def bootstrap_reviewed_routing_product(
 
     if inputs is None:
         raise RoutingProductCompositionError(
-            "reviewed routing bootstrap inputs are unavailable; model adapter worker is required"
+            "reviewed routing bootstrap inputs are unavailable; exact Model runner is required"
         )
     if not callable(reviewed_runner_factory):
         raise RoutingProductCompositionError(
@@ -1025,7 +1208,6 @@ __all__ = [
     "RoutingProductCompositionError",
     "RoutingTeeJobRpc",
     "RoutingProviderDispatchTeeRpc",
-    "RequiredRoutingModelAdapterFactory",
     "ReviewedRoutingReleaseInputs",
     "ReviewedRoutingAdmissionAuthority",
     "ReviewedRoutingProductComposition",
@@ -1033,6 +1215,7 @@ __all__ = [
     "validate_reviewed_release_inputs",
     "build_reviewed_admission_authority",
     "build_attested_provider_broker_factory",
+    "build_exact_model_runner_factory",
     "build_attested_protected_authorities",
     "build_reviewed_routing_product",
     "bootstrap_reviewed_routing_product",

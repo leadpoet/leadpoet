@@ -620,6 +620,130 @@ class SupabaseRoutingExperimentStore:
             raise RoutingExperimentStoreError("routing event result is malformed")
         return dict(result)
 
+    def load_model_transition_marker(
+        self,
+        *,
+        experiment_hash: str,
+        variant_id: str,
+        unit_ref: str,
+        idempotency_key: str,
+    ) -> Mapping[str, Any] | None:
+        """Read one redacted paid-call/recovery marker, never a provider body."""
+
+        normalized_experiment_hash = _require_hash(
+            experiment_hash, "experiment_hash"
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", str(idempotency_key or "")):
+            raise RoutingExperimentStoreError(
+                "Model transition idempotency key is invalid"
+            )
+        matches: list[Mapping[str, Any]] = []
+        for row in self._select_rows(
+            "research_lab_routing_experiment_events_v2",
+            experiment_hash=normalized_experiment_hash,
+            order_column="created_at",
+        ):
+            if row.get("event_type") != "model_transition_completed":
+                continue
+            document = row.get("event_doc")
+            if not isinstance(document, Mapping):
+                raise RoutingExperimentStoreError(
+                    "Model transition marker is malformed"
+                )
+            if (
+                document.get("variant_id") == variant_id
+                and document.get("unit_ref") == unit_ref
+                and document.get("idempotency_key") == idempotency_key
+            ):
+                matches.append(dict(document))
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise RoutingExperimentStoreError(
+                "Model transition marker is duplicated"
+            )
+        marker = matches[0]
+        expected = {
+            "schema_version",
+            "event_schema_version",
+            "variant_id",
+            "unit_ref",
+            "idempotency_key",
+            "action_sha256",
+            "continuation_sha256",
+            "completion_sha256",
+            "provider_response_sha256",
+            "provider_receipt",
+            "protected_dispatch_job_id",
+            "terminal_receipt_hash",
+            "model_completion_contract_hash",
+        }
+        if (
+            set(marker) != expected
+            or marker.get("schema_version")
+            != "leadpoet.research_lab.routing_event.v2"
+            or marker.get("event_schema_version")
+            != "leadpoet.research_lab.model_transition.v1"
+        ):
+            raise RoutingExperimentStoreError(
+                "Model transition marker fields are malformed"
+            )
+        for name in (
+            "continuation_sha256",
+            "provider_response_sha256",
+        ):
+            _require_hash(marker.get(name), name)
+        for name in ("action_sha256", "completion_sha256"):
+            value = str(marker.get(name) or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise RoutingExperimentStoreError(
+                    f"Model transition {name} is invalid"
+                )
+        raw_receipt = marker.get("provider_receipt")
+        if raw_receipt is not None:
+            try:
+                receipt = ProviderReceipt.from_mapping(raw_receipt)
+            except (RoutingExperimentError, TypeError, ValueError) as exc:
+                raise RoutingExperimentStoreError(
+                    "Model transition provider receipt is invalid"
+                ) from exc
+            errors = validate_provider_receipt(receipt)
+            if errors:
+                raise RoutingExperimentStoreError(
+                    "Model transition provider receipt is invalid"
+                )
+            if (
+                not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}",
+                    str(marker.get("protected_dispatch_job_id") or ""),
+                )
+                or any(
+                    not re.fullmatch(
+                        r"sha256:[0-9a-f]{64}",
+                        str(marker.get(name) or ""),
+                    )
+                    for name in (
+                        "terminal_receipt_hash",
+                        "model_completion_contract_hash",
+                    )
+                )
+            ):
+                raise RoutingExperimentStoreError(
+                    "Model transition protected replay reference is invalid"
+                )
+        elif any(
+            marker.get(name) is not None
+            for name in (
+                "protected_dispatch_job_id",
+                "terminal_receipt_hash",
+                "model_completion_contract_hash",
+            )
+        ):
+            raise RoutingExperimentStoreError(
+                "Model verifier transition has protected replay state"
+            )
+        return marker
+
     def append_adapter_failure(
         self,
         *,

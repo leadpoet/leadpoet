@@ -18,7 +18,7 @@ def _install_api_composition(application: SimpleNamespace) -> None:
     service = RoutingExperimentApiService()
     composition = SimpleNamespace(
         api_service=service,
-        run_factory=SimpleNamespace(name="attested_provider_broker_v2"),
+        run_factory=SimpleNamespace(name="exact_model_runner_v3"),
     )
     application.state.reviewed_routing_product_composition = composition
     application.state.routing_experiment_api_service = service

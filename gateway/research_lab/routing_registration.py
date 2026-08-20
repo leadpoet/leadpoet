@@ -13,6 +13,7 @@ _ROUTING_FEATURE_ENV_NAMES = (
 )
 _ROUTING_PRODUCT_COMPOSITION_ENV = "RESEARCH_LAB_ROUTING_PRODUCT_COMPOSITION"
 _ROUTING_PRODUCT_COMPOSITION_VALUE = "reviewed_v2"
+_ROUTING_FACTORY_NAME = "exact_model_runner_v3"
 _ROUTING_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
@@ -33,7 +34,7 @@ def routing_registration_health(application: Any) -> dict[str, object]:
         and api_service is not None
         and api_service is getattr(composition, "api_service", None)
         and getattr(getattr(composition, "run_factory", None), "name", None)
-        == "attested_provider_broker_v2"
+        == _ROUTING_FACTORY_NAME
     )
     configured = composition is not None or any(
         str(os.environ.get(name, "")).strip().lower() in _ROUTING_TRUE_VALUES

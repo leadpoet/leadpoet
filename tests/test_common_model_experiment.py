@@ -1,0 +1,363 @@
+from __future__ import annotations
+
+from research_lab.common_model_runner_host import HostActionResult
+from research_lab.model_runner_protocol import (
+    ExactModelRunnerRegistration,
+    ModelRunnerHostError,
+    ResearchLabModelRunnerProtocol,
+)
+from research_lab.routing_experiments import ProviderReceipt
+from research_lab.canonical import sha256_json
+from gateway.research_lab.common_model_experiment import (
+    CommonModelExperimentError,
+    ExactModelExperimentCoordinator,
+    FencedModelTransitionRepository,
+    ProtectedModelActionResult,
+)
+
+
+HASHES = {name: char * 64 for name, char in zip(
+    ("artifact", "manifest", "contract", "catalog", "policy", "feature", "binding", "release"),
+    "abcdefgh",
+)}
+
+
+def _artifact():
+    return {
+        "repository": "leadpoet/Sourcing_model",
+        "branch": "leadpoet-lab",
+        "commit_sha": "1" * 40,
+        "artifact_uri": "s3://reviewed/model.tar.gz",
+        "model_artifact_hash": "sha256:" + HASHES["artifact"],
+        "manifest_hash": "sha256:" + HASHES["manifest"],
+        "routing_contract_hash": "sha256:" + HASHES["contract"],
+        "routing_catalog_hash": "sha256:" + HASHES["catalog"],
+        "routing_policy_hash": "sha256:" + HASHES["policy"],
+        "feature_schema_hash": "sha256:" + HASHES["feature"],
+        "verifier_contract_hash": "sha256:" + "9" * 64,
+    }
+
+
+def _release():
+    return {
+        "source_commit": "1" * 40,
+        "model_artifact_digest": "sha256:" + HASHES["artifact"],
+        "consumer_contract_sha256": HASHES["contract"],
+        "catalog_sha256": HASHES["catalog"],
+        "policy_sha256": HASHES["policy"],
+        "candidate_profiles_sha256": "2" * 64,
+        "intent_profiles_sha256": "3" * 64,
+        "feature_schema_sha256": HASHES["feature"],
+        "tool_binding_manifest_sha256": HASHES["binding"],
+        "release_identity_sha256": HASHES["release"],
+    }
+
+
+def _action():
+    return {
+        "action_type": "execute_candidate_tool",
+        "tool_id": "candidate.reviewed",
+        "binding_contract_sha256": HASHES["binding"],
+        "action_sha256": "4" * 64,
+        "idempotency_key": "5" * 64,
+        "max_response_bytes": 1_000_000,
+    }
+
+
+class _Transport:
+    def build_runner_start(self, **values):
+        return {"start": True, **values}
+
+    def runner_preflight(self, **_values):
+        release = _release()
+        return {
+            "preflight_sha256": "6" * 64,
+            "release_identity_sha256": release["release_identity_sha256"],
+            "source_commit": release["source_commit"],
+            "consumer_contract_sha256": release["consumer_contract_sha256"],
+            "catalog_sha256": release["catalog_sha256"],
+            "policy_sha256": release["policy_sha256"],
+            "candidate_profiles_sha256": release["candidate_profiles_sha256"],
+            "intent_profiles_sha256": release["intent_profiles_sha256"],
+            "feature_schema_sha256": release["feature_schema_sha256"],
+            "binding_contracts_sha256": release["tool_binding_manifest_sha256"],
+        }
+
+    def continue_runner(self, _start, *, continuation, completion, **_values):
+        if continuation is None:
+            return {
+                "status": "action_required",
+                "action": _action(),
+                "continuation": {"pending": "4" * 64},
+            }
+        assert completion["completion_sha256"] == "7" * 64
+        return {
+            "status": "completed",
+            "action": None,
+            "continuation": {"terminal": True},
+            "result": {"leads": []},
+            "model_receipt": {"receipt_sha256": "8" * 64},
+        }
+
+    def validate_runner_result(self, value, **_values):
+        return value
+
+    def build_runner_completion(self, _action_value, result):
+        return {
+            "completion_sha256": "7" * 64,
+            "provider_response": result["provider_response"],
+        }
+
+
+def _registration():
+    manifest = {
+        "bindings": [{
+            "action_type": "execute_candidate_tool",
+            "tool_id": "candidate.reviewed",
+            "binding_contract_sha256": HASHES["binding"],
+            "available": True,
+        }]
+    }
+    protocol = ResearchLabModelRunnerProtocol(
+        transport=_Transport(), expected_release_identity=_release()
+    )
+    return ExactModelRunnerRegistration(
+        artifact_identity=_artifact(),
+        protocol=protocol,
+        host_capability_manifest=manifest,
+    )
+
+
+class _Transitions:
+    def __init__(self):
+        self.values = {}
+
+    def load_model_transition(self, **identity):
+        return self.values.get(identity["idempotency_key"])
+
+    def append_model_transition(self, **value):
+        self.values[value["action"]["idempotency_key"]] = {
+            "action": dict(value["action"]),
+            "continuation": dict(value["continuation"]),
+            "completion": dict(value["completion"]),
+            "provider_receipt": dict(value["provider_receipt"]),
+        }
+
+
+class _Dispatcher:
+    calls = 0
+
+    def dispatch_provider_action(self, *, action, unit_ref, **_values):
+        self.calls += 1
+        receipt = ProviderReceipt(
+            receipt_ref="provider_receipt:" + "a" * 16,
+            binding_id="reviewed-binding",
+            tool_id=action["tool_id"],
+            binding_version="v1",
+            source_lineage_id="reviewed-source",
+            unit_ref=unit_ref,
+            request_fingerprint="sha256:" + "b" * 64,
+            outcome="verified",
+            evidence_hash="sha256:" + "c" * 64,
+            credit_microunits=10,
+            latency_ms=20,
+            execution_mode="measured_lab",
+        )
+        return ProtectedModelActionResult(
+            host_result=HostActionResult(
+                outcome="succeeded",
+                reason_code="reviewed_provider",
+                provider_response={"provider": "fixture"},
+                calls=1,
+                cost_credits=0.00001,
+                latency_ms=20,
+            ),
+            provider_receipt=receipt,
+        )
+
+    def verify_company_action(self, **_values):
+        raise AssertionError("not called")
+
+    def verify_intent_action(self, **_values):
+        raise AssertionError("not called")
+
+    def verify_contact_action(self, **_values):
+        raise AssertionError("not called")
+
+
+def test_exact_coordinator_replays_persisted_completion_without_paid_call():
+    transitions = _Transitions()
+    dispatcher = _Dispatcher()
+    coordinator = ExactModelExperimentCoordinator(
+        experiment_hash="sha256:" + "d" * 64,
+        registration=_registration(),
+        dispatcher=dispatcher,
+        transitions=transitions,
+    )
+    values = dict(
+        variant_id="baseline",
+        unit_ref="unit-1",
+        model_input={"kind": "normalized_icp", "normalized_icp": {}},
+        execution_mode="full_company",
+        target_count=1,
+        evaluated_on="2026-08-20",
+    )
+    first = coordinator.run_unit(**values)
+    second = coordinator.run_unit(**values)
+
+    assert first.terminal_result == second.terminal_result
+    assert dispatcher.calls == 1
+    assert second.replayed_transition_count == 1
+
+
+def test_fenced_restart_replays_signed_job_result_without_paid_call():
+    class _Store:
+        marker = None
+
+        def load_model_transition_marker(self, **_identity):
+            return self.marker
+
+        def append_event(self, **value):
+            self.marker = {
+                "schema_version": "leadpoet.research_lab.routing_event.v2",
+                **value["event_doc"],
+            }
+            return {"inserted": True}
+
+    class _ReplayDispatcher(_Dispatcher):
+        dispatch_calls = 0
+        replay_calls = 0
+
+        @staticmethod
+        def _result(action, unit_ref):
+            result = _Dispatcher().dispatch_provider_action(
+                action=action, unit_ref=unit_ref
+            )
+            response = result.host_result.provider_response
+            return ProtectedModelActionResult(
+                host_result=result.host_result,
+                provider_receipt=result.provider_receipt,
+                replay_ref={
+                    "schema_version": (
+                        "leadpoet.research_lab.protected_model_replay_ref.v1"
+                    ),
+                    "protected_dispatch_job_id": "routing-dispatch:" + "1" * 32,
+                    "terminal_receipt_hash": "sha256:" + "2" * 64,
+                    "model_provider_response_sha256": sha256_json(response),
+                    "model_completion_contract_hash": "sha256:" + "3" * 64,
+                },
+            )
+
+        def dispatch_provider_action(self, *, action, unit_ref, **_values):
+            self.dispatch_calls += 1
+            return self._result(action, unit_ref)
+
+        def replay_provider_action(self, *, action, unit_ref, **_values):
+            self.replay_calls += 1
+            return self._result(action, unit_ref)
+
+    store = _Store()
+    dispatcher = _ReplayDispatcher()
+    values = dict(
+        variant_id="baseline",
+        unit_ref="unit-1",
+        model_input={"kind": "normalized_icp", "normalized_icp": {}},
+        execution_mode="full_company",
+        target_count=1,
+        evaluated_on="2026-08-20",
+    )
+    for _ in range(2):
+        coordinator = ExactModelExperimentCoordinator(
+            experiment_hash="sha256:" + "d" * 64,
+            registration=_registration(),
+            dispatcher=dispatcher,
+            transitions=FencedModelTransitionRepository(
+                store=store, claim=object()
+            ),
+        )
+        result = coordinator.run_unit(**values)
+
+    assert dispatcher.dispatch_calls == 1
+    assert dispatcher.replay_calls == 1
+    assert result.replayed_transition_count == 1
+
+
+def test_fenced_transition_repository_persists_hashes_not_provider_body():
+    class _Store:
+        def __init__(self):
+            self.document = None
+
+        def load_model_transition_marker(self, **_identity):
+            return None
+
+        def append_event(self, **value):
+            self.document = value["event_doc"]
+            return {"inserted": True}
+
+    store = _Store()
+    repository = FencedModelTransitionRepository(store=store, claim=object())
+    repository.append_model_transition(
+        experiment_hash="sha256:" + "d" * 64,
+        variant_id="baseline",
+        unit_ref="unit-1",
+        action=_action(),
+        continuation={"private": "continuation"},
+        completion={
+            "completion_sha256": "7" * 64,
+            "provider_response": {"private": "provider-value"},
+        },
+        provider_receipt=None,
+    )
+
+    assert "provider_response" not in store.document
+    assert "completion" not in store.document
+    assert "continuation" not in store.document
+    assert "provider-value" not in str(store.document)
+
+
+def test_stored_transition_action_substitution_fails_closed():
+    transitions = _Transitions()
+    transitions.values[_action()["idempotency_key"]] = {
+        "action": {**_action(), "tool_id": "candidate.forged"},
+        "continuation": {"pending": "4" * 64},
+        "completion": {"completion_sha256": "7" * 64},
+        "provider_receipt": None,
+    }
+    coordinator = ExactModelExperimentCoordinator(
+        experiment_hash="sha256:" + "d" * 64,
+        registration=_registration(),
+        dispatcher=_Dispatcher(),
+        transitions=transitions,
+    )
+    try:
+        coordinator.run_unit(
+            variant_id="baseline",
+            unit_ref="unit-1",
+            model_input={"kind": "normalized_icp", "normalized_icp": {}},
+            execution_mode="full_company",
+            target_count=1,
+            evaluated_on="2026-08-20",
+        )
+    except CommonModelExperimentError as exc:
+        assert "action differs" in str(exc)
+    else:
+        raise AssertionError("forged stored action must fail closed")
+
+
+def test_exact_variant_payload_is_identity_only_and_tamper_evident():
+    registration = _registration()
+    payload = registration.variant_audit_payload()
+
+    registration.validate_variant_audit_payload(payload)
+    assert set(payload) == {"schema_version", "artifact_key"}
+
+    for forged in (
+        {**payload, "provider_order": ["candidate.forged"]},
+        {**payload, "artifact_key": payload["artifact_key"] + "0"},
+    ):
+        try:
+            registration.validate_variant_audit_payload(forged)
+        except ModelRunnerHostError as exc:
+            assert "exact Model artifact identity" in str(exc)
+        else:
+            raise AssertionError("forged variant payload must fail closed")

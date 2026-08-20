@@ -11,6 +11,13 @@ import venv
 _READINESS_DISTRIBUTIONS = ("cbor2", "cryptography", "cffi", "pycparser")
 
 
+def _remove_group_world_write(root: Path) -> None:
+    for path in (root, *root.rglob("*")):
+        if path.is_symlink():
+            continue
+        path.chmod(path.stat().st_mode & ~0o022)
+
+
 def build_dependency_complete_readiness_venv(root: Path) -> Path:
     """Build the isolated, local-only verifier environment used by restart tests."""
 
@@ -40,6 +47,10 @@ def build_dependency_complete_readiness_venv(root: Path) -> Path:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
 
+    # GitHub-hosted runners may use a collaborative umask. Production's
+    # verifier correctly rejects writable venv metadata and dependencies, so
+    # make this generated test environment satisfy the same ownership mode.
+    _remove_group_world_write(root)
     subprocess.run(
         [
             str(python),

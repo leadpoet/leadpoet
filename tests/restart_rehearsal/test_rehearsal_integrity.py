@@ -204,6 +204,34 @@ def _atomic_credit_resume_fixture() -> dict[str, Any]:
     return json.loads(json.dumps(EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE))
 
 
+def test_gateway_cli_secret_matches_initial_durable_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    monkeypatch.setenv(
+        "REHEARSAL_FROM_SHA",
+        "7ac1553e32d85d9babda3b3836f4c93cf92e6d60",
+    )
+    monkeypatch.setenv("REHEARSAL_TRANSITION", "forward")
+    from tests.restart_rehearsal import contract_adapter
+
+    monkeypatch.setattr(
+        contract_adapter,
+        "GATEWAY_SECRET_STATE_PATH",
+        tmp_path / "missing-gateway-secret-state.json",
+    )
+    monkeypatch.setattr(
+        contract_adapter,
+        "_initial_gateway_miner_submissions_state",
+        lambda: "false",
+    )
+
+    assert contract_adapter._current_gateway_secret() == json.loads(
+        rehearsal_sitecustomize._initial_gateway_secret_string()
+    )
+
+
 def _receipt_graph_seed_contract() -> tuple[
     dict[str, dict[str, Any]],
     dict[str, list[dict[str, Any]]],

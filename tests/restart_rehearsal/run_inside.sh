@@ -698,6 +698,21 @@ PY
       -u http_proxy \
       -u https_proxy \
       -u all_proxy \
+      -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      -u GIT_CEILING_DIRECTORIES \
+      -u GIT_COMMON_DIR \
+      -u GIT_CONFIG \
+      -u GIT_CONFIG_COUNT \
+      -u GIT_CONFIG_GLOBAL \
+      -u GIT_CONFIG_KEY_0 \
+      -u GIT_CONFIG_PARAMETERS \
+      -u GIT_CONFIG_SYSTEM \
+      -u GIT_CONFIG_VALUE_0 \
+      -u GIT_DIR \
+      -u GIT_INDEX_FILE \
+      -u GIT_OBJECT_DIRECTORY \
+      -u GIT_REPLACE_REF_BASE \
+      -u GIT_WORK_TREE \
       HOME=/home/ec2-user \
       LEADPOET_REPO_ROOT=/home/ec2-user/leadpoet_repo \
       GATEWAY_ROOT=/home/ec2-user/leadpoet_repo/gateway \

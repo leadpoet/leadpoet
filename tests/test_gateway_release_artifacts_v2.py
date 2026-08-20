@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
+import subprocess
 
 import pytest
 
@@ -167,6 +170,136 @@ def test_role_build_archives_only_after_local_release_verification():
     assert verify_offset < archive_offset
     assert '--retain 3' in script
     assert '--last-good-manifest "$LAST_GOOD_MANIFEST"' in script
+
+
+def test_cold_build_verifies_complete_staging_set_before_transactional_install():
+    script = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
+        encoding="utf-8"
+    )
+    staging = script.index(
+        'COLD_BUILD_ROOT="$(mktemp -d "$EIF_ROOT/.gateway-eif-cold-build.XXXXXXXX")"'
+    )
+    build = script.index("sudo nitro-cli build-enclave", staging)
+    verify = script.index("verify_release_artifacts_v2.py", build)
+    archive = script.index("--archive", verify)
+    restore = script.index("--restore", archive)
+    cleanup = script.index("cleanup_cold_build_root", restore)
+
+    assert staging < build < verify < archive < restore < cleanup
+    cold_slice = script[staging:cleanup]
+    assert '--eif-root "$BUILD_EIF_ROOT"' in cold_slice
+    assert '--eif-root "$EIF_ROOT"' in script[restore:cleanup]
+    assert 'output="$BUILD_EIF_ROOT/tee-enclave-${role}.eif"' in cold_slice
+    assert 'output="$EIF_ROOT/tee-enclave-${role}.eif"' not in cold_slice
+
+
+def test_cold_build_publishes_root_created_eif_to_unprivileged_verifier(
+    tmp_path,
+):
+    script = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
+        encoding="utf-8"
+    )
+    function_start = script.index("publish_built_eif_for_verification() {")
+    function_end = script.index("\n}\n", function_start) + len("\n}\n")
+    function_source = script[function_start:function_end]
+    build_offset = script.index("sudo nitro-cli build-enclave")
+    publish_offset = script.index(
+        'publish_built_eif_for_verification "$output"', build_offset
+    )
+    describe_offset = script.index(
+        'nitro-cli describe-eif --eif-path "$output"', publish_offset
+    )
+    verify_offset = script.index("verify_release_artifacts_v2.py", describe_offset)
+    assert build_offset < publish_offset < describe_offset < verify_offset
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sudo_log = tmp_path / "sudo.log"
+    sudo = fake_bin / "sudo"
+    sudo.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$SUDO_LOG\"\n"
+        "exec \"$@\"\n",
+        encoding="utf-8",
+    )
+    sudo.chmod(0o700)
+    artifact = tmp_path / "role.eif"
+    artifact.write_bytes(b"complete-eif")
+    artifact.chmod(0o000)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            function_source
+            + '\npublish_built_eif_for_verification "$1"\n',
+            "publish-eif-test",
+            str(artifact),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+            "SUDO_LOG": str(sudo_log),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(artifact.stat().st_mode) == 0o600
+    assert artifact.read_bytes() == b"complete-eif"
+    assert sudo_log.read_text(encoding="utf-8").startswith(
+        "chown --no-dereference -- "
+    )
+
+
+def test_cold_build_rejects_symlink_before_privileged_eif_publication(tmp_path):
+    script = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
+        encoding="utf-8"
+    )
+    function_start = script.index("publish_built_eif_for_verification() {")
+    function_end = script.index("\n}\n", function_start) + len("\n}\n")
+    function_source = script[function_start:function_end]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sudo_log = tmp_path / "sudo.log"
+    sudo = fake_bin / "sudo"
+    sudo.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$SUDO_LOG\"\n"
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    sudo.chmod(0o700)
+    target = tmp_path / "target.eif"
+    target.write_bytes(b"do-not-publish")
+    linked = tmp_path / "linked.eif"
+    linked.symlink_to(target)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            function_source
+            + '\npublish_built_eif_for_verification "$1"\n',
+            "publish-eif-test",
+            str(linked),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+            "SUDO_LOG": str(sudo_log),
+        },
+    )
+
+    assert result.returncode != 0
+    assert "unavailable or unsafe" in result.stderr
+    assert not sudo_log.exists()
+    assert target.read_bytes() == b"do-not-publish"
 
 
 def test_restart_preserves_exact_role_artifacts_until_verified_restore_or_build():

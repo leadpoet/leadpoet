@@ -1216,7 +1216,13 @@ def _observe_future_runtime_dependencies(
         timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
-    return json.loads(completed.stdout)
+    observed = json.loads(completed.stdout)
+    assert set(observed["runtime_observation"]) == {
+        "invariants",
+        "qualification_outcome_protocol",
+    }
+    assert observed["runtime_observation"]["qualification_outcome_protocol"] is None
+    return observed
 
 
 def test_adapter_dependency_runtime_protocols_match_consumer_expectations(
@@ -1273,7 +1279,7 @@ def test_adapter_dependency_runtime_protocol_drift_is_quarantined(
 
     with pytest.raises(
         model_sandbox_v2.ModelSandboxV2Error,
-        match="runtime probe differs",
+        match="^consumer runtime probe differs from host admission$",
     ):
         model_sandbox_v2._build_consumer_runtime_probe_from_observation_v1(
             observed["runtime_observation"],
@@ -2339,9 +2345,16 @@ def test_runtime_metadata_is_cross_bound_to_admitted_source() -> None:
     ]
     expanded = deepcopy(ready)
     expanded["runtime_capabilities"].append("shell")
-    with pytest.raises(PrivateModelRuntimeError, match="capability set differs"):
+    assert validate_sourcing_adapter_metadata(
+        expanded,
+        expected_semantic_bindings=bindings,
+        require_company_fit_contract=True,
+    ) == expanded
+    missing_required = deepcopy(ready)
+    missing_required["runtime_capabilities"].remove("resolve_host")
+    with pytest.raises(PrivateModelRuntimeError, match="missing a Lab requirement"):
         validate_sourcing_adapter_metadata(
-            expanded,
+            missing_required,
             expected_semantic_bindings=bindings,
             require_company_fit_contract=True,
         )

@@ -21,7 +21,11 @@ def _remove_group_world_write(root: Path) -> None:
 def build_dependency_complete_readiness_venv(root: Path) -> Path:
     """Build the isolated, local-only verifier environment used by restart tests."""
 
-    venv.EnvBuilder(with_pip=False, symlinks=True).create(root)
+    # Own the interpreter target inside the fixture venv. GitHub's setup-python
+    # tool cache may be group/world writable, and a symlink back into it must be
+    # rejected by the production readiness verifier just like any other mutable
+    # executable target.
+    venv.EnvBuilder(with_pip=False, symlinks=False).create(root)
     python = root / "bin" / "python"
     site_packages = (
         root
@@ -51,6 +55,8 @@ def build_dependency_complete_readiness_venv(root: Path) -> Path:
     # verifier correctly rejects writable venv metadata and dependencies, so
     # make this generated test environment satisfy the same ownership mode.
     _remove_group_world_write(root)
+    if not python.resolve(strict=True).is_relative_to(root.resolve(strict=True)):
+        raise RuntimeError("readiness test venv does not own its interpreter target")
     subprocess.run(
         [
             str(python),

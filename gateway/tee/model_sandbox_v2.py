@@ -1659,11 +1659,10 @@ else:
         },
     }
 
-_lp_runtime_observation = {"invariants": _lp_invariants}
-if "qualification_outcome_probes" in _lp_plan:
-    _lp_runtime_observation["qualification_outcome_protocol"] = (
-        _lp_qualification_outcome_observation
-    )
+_lp_runtime_observation = {
+    "invariants": _lp_invariants,
+    "qualification_outcome_protocol": _lp_qualification_outcome_observation,
+}
 _lp_sys.stdout.write(_lp_json.dumps(
     {
         "metadata": _lp_metadata,

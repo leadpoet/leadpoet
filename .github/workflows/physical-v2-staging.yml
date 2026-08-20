@@ -409,18 +409,20 @@ jobs:
           sudo mkdir -p {q(root)}
           sudo chown ec2-user:ec2-user {q(root)}
           failure_stage=candidate-bundle-download
-          aws s3 cp {q(f"s3://{artifact_bucket}/{prefix}/candidate.bundle")} {q(root + "/candidate.bundle")} --region {q(required['AWS_REGION'])} --only-show-errors
-          failure_stage=candidate-bundle-metadata
-          aws s3api head-object \
+          candidate_bundle_metadata="$(aws s3api get-object \
             --bucket {q(artifact_bucket)} \
             --key {q(prefix + "/candidate.bundle")} \
             --query Metadata \
             --output json \
-            --region {q(required['AWS_REGION'])} 2>/dev/null | \
+            --region {q(required['AWS_REGION'])} \
+            "$candidate_bundle" 2>/dev/null)"
+          failure_stage=candidate-bundle-metadata
+          printf '%s' "$candidate_bundle_metadata" | \
             /usr/bin/python3.11 -c {q(candidate_bundle_metadata_validator)} \
             {q(required['CANDIDATE_SHA'])} \
             "$candidate_bundle_sha256" \
             "$candidate_bundle_size_bytes"
+          unset candidate_bundle_metadata
           failure_stage=candidate-bundle-file-integrity
           test -f "$candidate_bundle"
           test ! -L "$candidate_bundle"

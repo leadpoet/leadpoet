@@ -667,10 +667,17 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     metadata_stage = execute.split(
         "failure_stage=candidate-bundle-metadata", 1
     )[1].split("failure_stage=candidate-bundle-file-integrity", 1)[0]
-    assert "--query Metadata" in metadata_stage
-    assert "--output json" in metadata_stage
+    download_stage = execute.split(
+        "failure_stage=candidate-bundle-download", 1
+    )[1].split("failure_stage=candidate-bundle-metadata", 1)[0]
+    assert "aws s3api get-object" in download_stage
+    assert "--query Metadata" in download_stage
+    assert "--output json" in download_stage
+    assert '"$candidate_bundle"' in download_stage
+    assert "head-object" not in execute
+    assert 'printf \'%s\' "$candidate_bundle_metadata"' in metadata_stage
     assert "--output text" not in metadata_stage
-    assert "candidate_bundle_metadata=" not in execute
+    assert "unset candidate_bundle_metadata" in metadata_stage
 
 
 def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
@@ -722,8 +729,8 @@ import sys
 arguments = sys.argv[1:]
 with open(os.environ["AWS_CALLS"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(arguments, separators=(",", ":")) + "\\n")
-if arguments[:2] == ["s3", "cp"]:
-    destination = Path(arguments[3])
+if arguments[:2] == ["s3api", "get-object"]:
+    destination = Path(arguments[-1])
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = bytes.fromhex(os.environ["BUNDLE_HEX"])
     if os.environ.get("BUNDLE_AS_SYMLINK") == "1":
@@ -732,7 +739,6 @@ if arguments[:2] == ["s3", "cp"]:
         destination.symlink_to(symlink_target)
     else:
         destination.write_bytes(payload)
-elif arguments[:2] == ["s3api", "head-object"]:
     sys.stdout.write(os.environ["METADATA_RAW_JSON"])
 elif arguments[:2] == ["s3api", "put-object"]:
     if os.environ.get("FAIL_EVIDENCE_UPLOAD") == "1":
@@ -947,6 +953,25 @@ def test_rendered_ssm_preserves_success_and_uploads_host_evidence(
     assert not (tmp_path / "work" / "candidate.bundle").exists()
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+def test_rendered_ssm_downloads_body_and_metadata_in_one_get(
+    tmp_path: Path,
+) -> None:
+    result, _capture = _run_rendered_ssm(tmp_path)
+
+    assert result.returncode == 0
+    calls = [
+        json.loads(line)
+        for line in (tmp_path / "aws-calls.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    reads = [call for call in calls if call[:2] == ["s3api", "get-object"]]
+    assert len(reads) == 1
+    assert reads[0][reads[0].index("--query") + 1] == "Metadata"
+    assert reads[0][-1] == str(tmp_path / "work" / "candidate.bundle")
+    assert not any(call[:2] == ["s3api", "head-object"] for call in calls)
 
 
 def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(

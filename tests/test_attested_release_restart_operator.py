@@ -524,14 +524,9 @@ def test_gateway_cleanup_kills_term_ignoring_owned_process_group(
 
 @pytest.fixture(scope="module")
 def dependency_complete_readiness_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    tmp_root = tmp_path_factory.mktemp("restart-readiness-venv")
-    # CI uses a 0002 umask, while the release operator requires every selected
-    # venv directory to reject group and world writes.
-    previous_umask = os.umask(0o077)
-    try:
-        return build_dependency_complete_readiness_venv(tmp_root / "venv")
-    finally:
-        os.umask(previous_umask)
+    return build_dependency_complete_readiness_venv(
+        tmp_path_factory.mktemp("restart-readiness-venv") / "venv"
+    )
 
 
 def _fake_operator_commands(

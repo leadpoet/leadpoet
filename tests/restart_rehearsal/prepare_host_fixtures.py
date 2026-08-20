@@ -323,6 +323,25 @@ def _release_build_input(*, commit: str, destination: Path) -> dict:
     return value
 
 
+def _release_build_input_without_scratch(
+    *,
+    commit: str,
+    destination: Path,
+) -> dict:
+    """Retain only the immutable fixture outputs consumed by launchers."""
+
+    builder_root = destination / "release-builder"
+    try:
+        value = _release_build_input(commit=commit, destination=destination)
+    except BaseException:
+        shutil.rmtree(builder_root, ignore_errors=True)
+        raise
+    shutil.rmtree(builder_root)
+    if builder_root.exists():
+        raise RuntimeError("release fixture scratch cleanup did not converge")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -386,7 +405,7 @@ def main() -> int:
         encoding="utf-8",
     )
     manifest_path.chmod(0o600)
-    release_input = _release_build_input(
+    release_input = _release_build_input_without_scratch(
         commit=args.candidate_sha,
         destination=Path(
             os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state")

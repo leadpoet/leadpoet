@@ -5349,6 +5349,65 @@ def test_host_fixture_preparation_consumes_both_transition_wheelhouse_aliases(
     }
 
 
+def test_host_fixture_preparation_removes_release_builder_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from tests.restart_rehearsal import prepare_host_fixtures
+
+    destination = tmp_path / "state"
+    destination.mkdir()
+    retained = destination / "release-build-input.json"
+
+    def prepare(*, commit: str, destination: Path) -> dict:
+        assert commit == "1" * 40
+        scratch = destination / "release-builder/source"
+        scratch.mkdir(parents=True)
+        (scratch / "large-disposable-input").write_bytes(b"scratch")
+        retained.write_text("{}\n", encoding="utf-8")
+        return {"commit_sha": commit}
+
+    monkeypatch.setattr(prepare_host_fixtures, "_release_build_input", prepare)
+
+    result = prepare_host_fixtures._release_build_input_without_scratch(
+        commit="1" * 40,
+        destination=destination,
+    )
+
+    assert result == {"commit_sha": "1" * 40}
+    assert retained.read_text(encoding="utf-8") == "{}\n"
+    assert not (destination / "release-builder").exists()
+
+
+def test_host_fixture_failure_removes_scratch_without_masking_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from tests.restart_rehearsal import prepare_host_fixtures
+
+    destination = tmp_path / "state"
+    destination.mkdir()
+    expected = RuntimeError("fixture generation failed")
+
+    def fail(*, commit: str, destination: Path) -> dict:
+        assert commit == "2" * 40
+        scratch = destination / "release-builder/offline"
+        scratch.mkdir(parents=True)
+        (scratch / "partial").write_bytes(b"partial")
+        raise expected
+
+    monkeypatch.setattr(prepare_host_fixtures, "_release_build_input", fail)
+
+    with pytest.raises(RuntimeError) as raised:
+        prepare_host_fixtures._release_build_input_without_scratch(
+            commit="2" * 40,
+            destination=destination,
+        )
+
+    assert raised.value is expected
+    assert not (destination / "release-builder").exists()
+
+
 @pytest.mark.parametrize(
     ("aliases", "target_digest", "message"),
     (

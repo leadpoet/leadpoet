@@ -56,7 +56,9 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     assert "wait_for_gateway_build_memory" in script
     assert "--watch-parent" not in script
     assert "PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT=" in script
-    assert script.count("< /dev/null 7>&- 8>&- 9>&- &") == 2
+    assert script.count(
+        "7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &"
+    ) == 2
 
 
 def test_validator_holds_shared_host_lock_through_late_activation_barrier() -> None:

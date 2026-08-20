@@ -23,6 +23,12 @@ from gateway.tee.acceptance_corpus_v2 import (
     load_and_validate_acceptance_corpus_v2,
 )
 from gateway.tee.artifact_persistence_v2 import validate_artifact_policy
+from gateway.tee.gateway_miner_maintenance_restart_v1 import (
+    verify_gateway_miner_maintenance_state,
+)
+from gateway.tee.disable_gateway_miner_submissions_secret import (
+    _instance_role_aws_clients,
+)
 from gateway.tee.provider_broker_v2 import (
     credential_reference_hash,
     expected_provider_credential_slots,
@@ -431,11 +437,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "prepared gateway candidate tree does not match its exact Git blobs"
         ) from exc
     parent_vcpus, parent_memory_mib = _observed_capacity()
-    import boto3
-
+    release_manifest = _json(
+        args.release_manifest,
+        "gateway V2 release manifest",
+    )
+    parent_environment = load_parent_environment(args.parent_env_file)
+    aws_clients = _instance_role_aws_clients(
+        environ={**os.environ, **parent_environment},
+    )
     result = verify_gateway_restart_preflight_v2(
         deploy_commit=args.deploy_commit,
-        release_manifest=_json(args.release_manifest, "gateway V2 release manifest"),
+        release_manifest=release_manifest,
         topology_manifest=_json(args.topology_manifest, "gateway topology manifest"),
         artifact_policy=_json(args.artifact_policy, "encrypted artifact policy"),
         credential_envelope_paths=args.credential_envelope,
@@ -444,12 +456,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         instance_type=_imds_instance_type(),
         parent_vcpus=parent_vcpus,
         parent_memory_mib=parent_memory_mib,
-        parent_environment=load_parent_environment(args.parent_env_file),
+        parent_environment=parent_environment,
         acceptance_corpus_manifest_path=args.acceptance_corpus_manifest,
         acceptance_corpus_root=args.acceptance_corpus_root,
-        artifact_s3_client=boto3.client("s3"),
+        artifact_s3_client=aws_clients["s3"],
     )
     result["prepared_candidate_tree"] = candidate_tree_evidence
+    result["miner_maintenance_restart"] = (
+        verify_gateway_miner_maintenance_state(
+            deploy_commit=str(args.deploy_commit).lower(),
+            candidate_tree_hash=str(candidate_tree_evidence["tree_hash"]),
+            gateway_release_hash=str(result["release_hash"]),
+            parent_environment={**os.environ, **parent_environment},
+            secrets_client=aws_clients["secretsmanager"],
+            release_s3_client=aws_clients["s3"],
+        )
+    )
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 

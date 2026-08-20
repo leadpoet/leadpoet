@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -174,6 +177,151 @@ def test_attested_release_restart_operator_rejects_invalid_input() -> None:
     assert "Fetching current public V2 compatibility authority" not in result.stdout
 
 
+def test_miner_maintenance_operator_rejects_replace_ref_before_ssh(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "operator-repository"
+    scripts = repository / "scripts"
+    scripts.mkdir(parents=True)
+    copied_script = scripts / SCRIPT.name
+    copied_script.write_bytes(SCRIPT.read_bytes())
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "scripts"], check=True)
+    commit_command = [
+        "git",
+        "-C",
+        str(repository),
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-qm",
+    ]
+    subprocess.run([*commit_command, "official"], check=True)
+    official = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    (repository / "replacement.txt").write_text("replacement\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "replacement.txt"],
+        check=True,
+    )
+    subprocess.run([*commit_command, "replacement"], check=True)
+    replacement = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    subprocess.run(
+        ["git", "-C", str(repository), "replace", official, replacement],
+        check=True,
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ssh_sentinel = tmp_path / "ssh-was-called"
+    fake_ssh = bin_dir / "ssh"
+    fake_ssh.write_text(
+        f"#!/bin/bash\ntouch {ssh_sentinel}\nexit 99\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    gateway_key = tmp_path / "gateway.pem"
+    validator_key = tmp_path / "validator.pem"
+    gateway_key.write_text("test\n", encoding="utf-8")
+    validator_key.write_text("test\n", encoding="utf-8")
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "LEADPOET_GATEWAY_SSH_KEY": str(gateway_key),
+            "LEADPOET_VALIDATOR_SSH_KEY": str(validator_key),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(copied_script),
+            "--commit",
+            official,
+            "--component",
+            "all",
+            "--disable-miner-submissions-before-restart",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert "replacement refs" in result.stderr
+    assert not ssh_sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("LEADPOET_GATEWAY_SSH_HOST", "ec2-user@127.0.0.1"),
+        ("LEADPOET_GATEWAY_RESTART_PATH", "/tmp/wrapper'$(touch injected)"),
+        ("LEADPOET_GATEWAY_REPO_ROOT", "/tmp/alternate-repo"),
+        ("LEADPOET_GATEWAY_PYTHON_BIN", "/usr/bin/python3"),
+        (
+            "LEADPOET_GATEWAY_DEPLOY_READINESS_PATH",
+            "/tmp/alternate-readiness.json",
+        ),
+        ("GATEWAY_RESTART_CONTROLLER_ROOT", "/tmp/controller"),
+        ("GATEWAY_RESTART_CONTROLLER_CURRENT", "/tmp/controller/current"),
+    ],
+)
+def test_miner_maintenance_operator_rejects_topology_override_before_ssh(
+    tmp_path: Path,
+    name: str,
+    value: str,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ssh_sentinel = tmp_path / "ssh-was-called"
+    fake_ssh = bin_dir / "ssh"
+    fake_ssh.write_text(
+        f"#!/bin/bash\ntouch {shlex.quote(str(ssh_sentinel))}\nexit 99\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+        name: value,
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--commit",
+            "a" * 40,
+            "--component",
+            "all",
+            "--disable-miner-submissions-before-restart",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    assert "fixed production gateway topology" in result.stderr
+    assert not ssh_sentinel.exists()
+
+
 def test_attested_release_restart_operator_documents_one_command_modes() -> None:
     result = subprocess.run(
         ["bash", str(SCRIPT), "--help"],
@@ -188,6 +336,80 @@ def test_attested_release_restart_operator_documents_one_command_modes() -> None
     assert "single-component restart is accepted only when the other component" in (
         result.stdout
     )
+
+
+def test_gateway_cleanup_kills_term_ignoring_owned_process_group(
+    tmp_path: Path,
+) -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    prefix_end = source.index("trap cleanup EXIT") + len("trap cleanup EXIT")
+    late_activation = tmp_path / "late-activation"
+    process_group_ready = tmp_path / "process-group-ready"
+    cancellation = tmp_path / "cancellation"
+    harness = tmp_path / "cleanup-harness.sh"
+    harness.write_text(
+        source[:prefix_end]
+        + "\ntrap - EXIT\n"
+        + "publish_gateway_handoff_value() { printf '%s\\n' \"$1\" > "
+        + shlex.quote(str(cancellation))
+        + "; }\n"
+        + "ssh() { return 0; }\nssh_common=(test)\nGATEWAY_KEY=x\nGATEWAY_HOST=x\n"
+        + "VALIDATOR_KEY=x\nVALIDATOR_HOST=x\n"
+        + "temporary_root=''\ncoordination_file=''\nvalidator_job=''\n"
+        + "failure_marker_job=''\ngateway_handoff_file='/tmp/test-handoff'\n"
+        + "gateway_handoff_nonce='nonce'\ncommit='"
+        + "a" * 40
+        + "'\n"
+        + "python3 -c "
+        + shlex.quote(
+            "import os,signal,sys,time\n"
+            "os.setsid()\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "child=os.fork()\n"
+            "if child == 0:\n"
+            " signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            " time.sleep(3)\n"
+            " open(sys.argv[2], 'w').write('unsafe')\n"
+            " time.sleep(30)\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "time.sleep(30)\n"
+        )
+        + " "
+        + shlex.quote(str(process_group_ready))
+        + " "
+        + shlex.quote(str(late_activation))
+        + " &\n"
+        + "gateway_job=$!\n"
+        + "for _ in $(seq 1 100); do [ -s "
+        + shlex.quote(str(process_group_ready))
+        + " ] && break; sleep 0.01; done\n"
+        + "gateway_job_pgid=$gateway_job\n"
+        + "cleanup\n"
+        + "trap - EXIT\n"
+        + "sleep 1.5\n"
+        + "test ! -e "
+        + shlex.quote(str(late_activation))
+        + "\n"
+        + "test \"$(cat "
+        + shlex.quote(str(cancellation))
+        + ")\" = 'failed:"
+        + "a" * 40
+        + "'\n",
+        encoding="utf-8",
+    )
+
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert time.monotonic() - started < 7
+    assert not late_activation.exists()
 
 
 def _fake_operator_commands(tmp_path: Path, commit: str) -> tuple[Path, Path]:

@@ -1,3 +1,4 @@
+import ast
 import io
 from pathlib import Path
 import re
@@ -19,6 +20,37 @@ from gateway.tee.protected_workflows import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "gateway" / "tee" / "protected_workflows.json"
+MINER_MAINTENANCE_TRUST_FILES = (
+    "gateway/tee/disable_gateway_miner_submissions_secret.py",
+    "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+    "gateway/tee/restart_preflight_v2.py",
+    "scripts/verify_installed_gateway_controller_v1.py",
+)
+
+
+def _top_level_source_symbols(relative_path: str) -> set[str]:
+    tree = ast.parse(
+        (ROOT / relative_path).read_text(encoding="utf-8"),
+        filename=relative_path,
+    )
+    symbols: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.add(node.name)
+        elif isinstance(node, ast.Assign):
+            symbols.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            symbols.add(node.target.id)
+    return symbols | {"__module__"}
+
+
+def test_miner_maintenance_protected_inventory_is_complete():
+    for relative_path in MINER_MAINTENANCE_TRUST_FILES:
+        assert set(PROTECTED_SYMBOLS[relative_path]) == _top_level_source_symbols(
+            relative_path
+        )
 
 
 def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
@@ -114,6 +146,27 @@ def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
         "stage_external_protected_sources",
         "main",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/protected_workflows.py"])
+    assert {
+        "prepare_gateway_miner_maintenance_restart",
+        "verify_gateway_miner_maintenance_state",
+        "bootstrap_gateway_miner_maintenance_restart",
+        "verify_gateway_miner_maintenance_runtime_state",
+        "main",
+    } <= set(
+        PROTECTED_SYMBOLS[
+            "gateway/tee/gateway_miner_maintenance_restart_v1.py"
+        ]
+    )
+    assert {
+        "verify_installed_controller_bundle",
+        "_exec_verified_helper",
+        "main",
+    } <= set(
+        PROTECTED_SYMBOLS[
+            "scripts/verify_installed_gateway_controller_v1.py"
+        ]
+    )
+    assert "main" in PROTECTED_SYMBOLS["gateway/tee/restart_preflight_v2.py"]
     assert {
         "_EXACT_HOST_GATEWAY_ARGS",
         "_HOST_GATEWAY_PYTHON_COMMAND",

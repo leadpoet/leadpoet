@@ -2,16 +2,23 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PRODUCTION_GATEWAY_HOST="ec2-user@52.91.135.79"
+PRODUCTION_GATEWAY_RESTART="/home/ec2-user/gw_restart.sh"
+PRODUCTION_GATEWAY_REPO_ROOT="/home/ec2-user/leadpoet_repo"
+PRODUCTION_GATEWAY_PYTHON_BIN="/home/ec2-user/venv311/bin/python3"
+PRODUCTION_GATEWAY_DEPLOY_READINESS_PATH="/home/ec2-user/gateway/deploy_readiness.json"
+PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT="/home/ec2-user/.config/leadpoet/restart-controller/gateway"
+PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT="$PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT/current"
 GATEWAY_KEY="${LEADPOET_GATEWAY_SSH_KEY:-$HOME/Downloads/leadpoet-2026-07-28.pem}"
 VALIDATOR_KEY="${LEADPOET_VALIDATOR_SSH_KEY:-$HOME/Downloads/leadpoet-2026-07-28.pem}"
-GATEWAY_HOST="${LEADPOET_GATEWAY_SSH_HOST:-ec2-user@52.91.135.79}"
+GATEWAY_HOST="${LEADPOET_GATEWAY_SSH_HOST:-$PRODUCTION_GATEWAY_HOST}"
 VALIDATOR_HOST="${LEADPOET_VALIDATOR_SSH_HOST:-ec2-user@100.59.201.156}"
-GATEWAY_RESTART="${LEADPOET_GATEWAY_RESTART_PATH:-/home/ec2-user/gw_restart.sh}"
+GATEWAY_RESTART="${LEADPOET_GATEWAY_RESTART_PATH:-$PRODUCTION_GATEWAY_RESTART}"
 VALIDATOR_RESTART="${LEADPOET_VALIDATOR_RESTART_PATH:-/home/ec2-user/validator_restart.sh}"
-GATEWAY_REPO_ROOT="${LEADPOET_GATEWAY_REPO_ROOT:-/home/ec2-user/leadpoet_repo}"
-GATEWAY_PYTHON_BIN="${LEADPOET_GATEWAY_PYTHON_BIN:-/home/ec2-user/venv311/bin/python3}"
+GATEWAY_REPO_ROOT="${LEADPOET_GATEWAY_REPO_ROOT:-$PRODUCTION_GATEWAY_REPO_ROOT}"
+GATEWAY_PYTHON_BIN="${LEADPOET_GATEWAY_PYTHON_BIN:-$PRODUCTION_GATEWAY_PYTHON_BIN}"
 VALIDATOR_REPO_ROOT="${LEADPOET_VALIDATOR_REPO_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
-GATEWAY_DEPLOY_READINESS_PATH="${LEADPOET_GATEWAY_DEPLOY_READINESS_PATH:-/home/ec2-user/gateway/deploy_readiness.json}"
+GATEWAY_DEPLOY_READINESS_PATH="${LEADPOET_GATEWAY_DEPLOY_READINESS_PATH:-$PRODUCTION_GATEWAY_DEPLOY_READINESS_PATH}"
 GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-}"
 VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-}"
 RELEASE_PREFIX="${LEADPOET_RELEASE_PREFIX:-attested-v2/releases}"
@@ -24,10 +31,19 @@ VALIDATOR_FAILURE_MARKER_ATTEMPTS=20
 
 commit=""
 component="all"
+disable_miner_submissions_before_restart=0
 validator_job=""
+gateway_job=""
+gateway_job_pgid=""
+gateway_job_session_file=""
+gateway_restart_command=()
 failure_marker_job=""
 temporary_root=""
 coordination_file=""
+gateway_handoff_file=""
+gateway_handoff_nonce=""
+controller_verifier_b64=""
+gateway_restart_log=""
 gateway_observation=""
 gateway_evidence=""
 validator_observation=""
@@ -40,18 +56,80 @@ usage() {
 Usage:
   bash scripts/restart_attested_release_local.sh \
     --commit <full-40-character-sha> \
-    [--component all|gateway|validator]
+    [--component all|gateway|validator] \
+    [--disable-miner-submissions-before-restart]
 
 The default "all" mode starts both exact-commit restarts in one invocation.
 A single-component restart is accepted only when the other component is
 already running the selected commit.
+The miner-submission option is paired-only. It prepares the exact candidate
+under the canonical gateway lock before the installed N-1 wrapper hydrates.
 EOF
 }
 
 cleanup() {
   local status="$?"
   local failure_marker_command=""
+  local gateway_cancel_job=""
   set +e
+  if [ -n "$gateway_job" ]; then
+    if [ -n "$gateway_job_pgid" ]; then
+      kill -TERM -- "-$gateway_job_pgid" 2>/dev/null || true
+    else
+      kill -TERM "$gateway_job" 2>/dev/null || true
+    fi
+    if [ -n "$gateway_handoff_file" ] && [ -n "$gateway_handoff_nonce" ]; then
+      publish_gateway_handoff_value "failed:$commit" >/dev/null 2>&1 &
+      gateway_cancel_job="$!"
+    fi
+    for _ in $(seq 1 20); do
+      if [ -n "$gateway_job_pgid" ] \
+          && kill -0 -- "-$gateway_job_pgid" 2>/dev/null; then
+        sleep 0.1
+        continue
+      fi
+      if ! kill -0 "$gateway_job" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    if { [ -n "$gateway_job_pgid" ] \
+          && kill -0 -- "-$gateway_job_pgid" 2>/dev/null; } \
+        || kill -0 "$gateway_job" 2>/dev/null; then
+      if [ -n "$gateway_job_pgid" ]; then
+        kill -KILL -- "-$gateway_job_pgid" 2>/dev/null || true
+      fi
+      kill -KILL "$gateway_job" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        if ! kill -0 "$gateway_job" 2>/dev/null \
+            && { [ -z "$gateway_job_pgid" ] \
+              || ! kill -0 -- "-$gateway_job_pgid" 2>/dev/null; }; then
+          break
+        fi
+        sleep 0.1
+      done
+    fi
+    if ! kill -0 "$gateway_job" 2>/dev/null; then
+      wait "$gateway_job" 2>/dev/null || true
+    fi
+    gateway_job=""
+    gateway_job_pgid=""
+    if [ -n "$gateway_cancel_job" ] && kill -0 "$gateway_cancel_job" 2>/dev/null; then
+      kill -TERM "$gateway_cancel_job" 2>/dev/null || true
+    fi
+    if [ -n "$gateway_cancel_job" ]; then
+      for _ in $(seq 1 10); do
+        if ! kill -0 "$gateway_cancel_job" 2>/dev/null; then
+          break
+        fi
+        sleep 0.1
+      done
+      if kill -0 "$gateway_cancel_job" 2>/dev/null; then
+        kill -KILL "$gateway_cancel_job" 2>/dev/null || true
+      fi
+      wait "$gateway_cancel_job" 2>/dev/null || true
+    fi
+  fi
   if [ -n "$validator_job" ] && kill -0 "$validator_job" 2>/dev/null; then
     # Cancellation is the authority revocation. Signal the remote validator
     # before attempting the durable failure marker so a slow SSH connection
@@ -98,6 +176,10 @@ cleanup() {
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
       "rm -f -- '$coordination_file'" >/dev/null 2>&1 || true
   fi
+  if [ -n "$gateway_handoff_file" ]; then
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "rm -f -- '$gateway_handoff_file'" >/dev/null 2>&1 || true
+  fi
   if [ -n "$temporary_root" ]; then
     rm -rf -- "$temporary_root"
   fi
@@ -133,6 +215,10 @@ while [ "$#" -gt 0 ]; do
       component="${1#--component=}"
       shift
       ;;
+    --disable-miner-submissions-before-restart)
+      disable_miner_submissions_before_restart=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -156,6 +242,37 @@ case "$component" in
     exit 2
     ;;
 esac
+if [ "$disable_miner_submissions_before_restart" = "1" ] \
+    && [ "$component" != "all" ]; then
+  echo "ERROR: --disable-miner-submissions-before-restart requires --component all" >&2
+  exit 2
+fi
+if [ "$disable_miner_submissions_before_restart" = "1" ] \
+    && [ -n "$GATEWAY_ENV_SECRET_ID" ] \
+    && [ "$GATEWAY_ENV_SECRET_ID" != "leadpoet/prod/gateway/env" ]; then
+  echo "ERROR: miner-maintenance bootstrap requires the fixed production gateway secret" >&2
+  exit 2
+fi
+if [ "$disable_miner_submissions_before_restart" = "1" ]; then
+  if [ "$GATEWAY_HOST" != "$PRODUCTION_GATEWAY_HOST" ] \
+      || [ "$GATEWAY_RESTART" != "$PRODUCTION_GATEWAY_RESTART" ] \
+      || [ "$GATEWAY_REPO_ROOT" != "$PRODUCTION_GATEWAY_REPO_ROOT" ] \
+      || [ "$GATEWAY_PYTHON_BIN" != "$PRODUCTION_GATEWAY_PYTHON_BIN" ] \
+      || [ "$GATEWAY_DEPLOY_READINESS_PATH" != "$PRODUCTION_GATEWAY_DEPLOY_READINESS_PATH" ]; then
+    echo "ERROR: miner-maintenance bootstrap requires the fixed production gateway topology" >&2
+    exit 2
+  fi
+  if [ -n "${GATEWAY_RESTART_CONTROLLER_ROOT:-}" ] \
+      && [ "$GATEWAY_RESTART_CONTROLLER_ROOT" != "$PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT" ]; then
+    echo "ERROR: miner-maintenance bootstrap requires the fixed production gateway topology" >&2
+    exit 2
+  fi
+  if [ -n "${GATEWAY_RESTART_CONTROLLER_CURRENT:-}" ] \
+      && [ "$GATEWAY_RESTART_CONTROLLER_CURRENT" != "$PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT" ]; then
+    echo "ERROR: miner-maintenance bootstrap requires the fixed production gateway topology" >&2
+    exit 2
+  fi
+fi
 for key in "$GATEWAY_KEY" "$VALIDATOR_KEY"; do
   if [ ! -r "$key" ]; then
     echo "ERROR: SSH key is unavailable: $key" >&2
@@ -185,6 +302,46 @@ case "$RELEASE_PREFIX" in
     exit 2
     ;;
 esac
+if [ "$disable_miner_submissions_before_restart" = "1" ] \
+    && [ "$RELEASE_PREFIX" != "attested-v2/releases" ]; then
+  echo "ERROR: miner-maintenance bootstrap requires the production release channel" >&2
+  exit 2
+fi
+if [ "$disable_miner_submissions_before_restart" = "1" ]; then
+  unsafe_git_environment=(
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_COMMON_DIR
+    GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_PARAMETERS
+    GIT_CONFIG_SYSTEM GIT_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+    GIT_REPLACE_REF_BASE GIT_WORK_TREE
+  )
+  for git_environment_name in "${unsafe_git_environment[@]}"; do
+    if [ -n "${!git_environment_name:-}" ]; then
+      echo "ERROR: miner-maintenance Git authority contains environment overrides" >&2
+      exit 1
+    fi
+  done
+  export GIT_CONFIG_NOSYSTEM=1
+  export GIT_NO_REPLACE_OBJECTS=1
+  if [ -n "$(git -C "$ROOT" for-each-ref --format='%(refname)' refs/replace)" ]; then
+    echo "ERROR: miner-maintenance Git authority contains replacement refs" >&2
+    exit 1
+  fi
+  for git_authority_path in info/grafts objects/info/alternates; do
+    resolved_git_authority_path="$(
+      git -C "$ROOT" rev-parse --git-path "$git_authority_path"
+    )"
+    if [[ "$resolved_git_authority_path" != /* ]]; then
+      resolved_git_authority_path="$ROOT/$resolved_git_authority_path"
+    fi
+    if [ -e "$resolved_git_authority_path" ] \
+        && { [ ! -f "$resolved_git_authority_path" ] \
+          || [ -L "$resolved_git_authority_path" ] \
+          || [ -s "$resolved_git_authority_path" ]; }; then
+      echo "ERROR: miner-maintenance Git authority contains graft or alternate objects" >&2
+      exit 1
+    fi
+  done
+fi
 
 temporary_root="$(mktemp -d /tmp/leadpoet-attested-restart.XXXXXX)"
 helper="$temporary_root/exact_commit_restart_v2.py"
@@ -197,6 +354,27 @@ final_manifest="$temporary_root/deploy-readiness-v2.json"
 
 echo "Fetching current public V2 compatibility authority"
 git -C "$ROOT" fetch origin main
+if [ "$disable_miner_submissions_before_restart" = "1" ]; then
+  if [ -n "$(git -C "$ROOT" for-each-ref --format='%(refname)' refs/replace)" ]; then
+    echo "ERROR: miner-maintenance Git authority changed to include replacement refs" >&2
+    exit 1
+  fi
+  for git_authority_path in info/grafts objects/info/alternates; do
+    resolved_git_authority_path="$(
+      git -C "$ROOT" rev-parse --git-path "$git_authority_path"
+    )"
+    if [[ "$resolved_git_authority_path" != /* ]]; then
+      resolved_git_authority_path="$ROOT/$resolved_git_authority_path"
+    fi
+    if [ -e "$resolved_git_authority_path" ] \
+        && { [ ! -f "$resolved_git_authority_path" ] \
+          || [ -L "$resolved_git_authority_path" ] \
+          || [ -s "$resolved_git_authority_path" ]; }; then
+      echo "ERROR: miner-maintenance Git authority changed to include graft or alternate objects" >&2
+      exit 1
+    fi
+  done
+fi
 branch_commit="$(git -C "$ROOT" rev-parse --verify origin/main^{commit})"
 git -C "$ROOT" cat-file -e "$commit^{commit}"
 git -C "$ROOT" show \
@@ -207,6 +385,45 @@ python3 "$helper" \
   --branch-ref origin/main
 echo "Selected release is compatible with current public auditors: $commit"
 echo "Current public V2 authority commit: $branch_commit"
+if [ "$disable_miner_submissions_before_restart" = "1" ]; then
+  selected_operator_blob="$(
+    git -C "$ROOT" rev-parse \
+      "$commit:scripts/restart_attested_release_local.sh"
+  )"
+  local_operator_blob="$(
+    git -C "$ROOT" hash-object \
+      "$ROOT/scripts/restart_attested_release_local.sh"
+  )"
+  if [ "$local_operator_blob" != "$selected_operator_blob" ]; then
+    echo "ERROR: miner-maintenance restart operator is not the exact candidate Git blob" >&2
+    exit 1
+  fi
+  selected_controller_verifier_blob="$(
+    git -C "$ROOT" rev-parse \
+      "$commit:scripts/verify_installed_gateway_controller_v1.py"
+  )"
+  local_controller_verifier_blob="$(
+    git -C "$ROOT" hash-object \
+      "$ROOT/scripts/verify_installed_gateway_controller_v1.py"
+  )"
+  if [ "$local_controller_verifier_blob" != "$selected_controller_verifier_blob" ]; then
+    echo "ERROR: installed-controller verifier is not the exact candidate Git blob" >&2
+    exit 1
+  fi
+  controller_verifier_b64="$(
+    base64 < "$ROOT/scripts/verify_installed_gateway_controller_v1.py" \
+      | tr -d '\n'
+  )"
+  if [ -z "$controller_verifier_b64" ]; then
+    echo "ERROR: installed-controller verifier could not be encoded" >&2
+    exit 1
+  fi
+  gateway_handoff_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  if ! [[ "$gateway_handoff_nonce" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: miner-maintenance handoff nonce generation failed" >&2
+    exit 1
+  fi
+fi
 
 ssh_common=(
   -n
@@ -312,6 +529,31 @@ publish_coordination_value() {
     "$remote_command"
 }
 
+gateway_handoff_remote_command() {
+  local value="$1"
+  case "$value" in
+    "$commit"|"failed:$commit") ;;
+    *)
+      echo "ERROR: invalid gateway miner-maintenance handoff value" >&2
+      return 2
+      ;;
+  esac
+  printf '%s\n' \
+    "set -Eeuo pipefail
+     umask 077
+     marker='$gateway_handoff_file.tmp'
+     printf '%s %s\\n' '$value' '$gateway_handoff_nonce' > \"\$marker\"
+     chmod 600 \"\$marker\"
+     mv -f -- \"\$marker\" '$gateway_handoff_file'"
+}
+
+publish_gateway_handoff_value() {
+  local remote_command
+  remote_command="$(gateway_handoff_remote_command "$1")"
+  ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "$remote_command"
+}
+
 gateway_active_commit() {
   ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
     "curl -fsS --connect-timeout 5 --max-time 15 \
@@ -326,15 +568,128 @@ validator_active_commit() {
       | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p'"
 }
 
-run_gateway_restart() {
+build_gateway_restart_command() {
   local secret_environment=""
+  local bootstrap_command=""
+  local bootstrap_command_quoted=""
+  gateway_restart_command=()
   if [ -n "$GATEWAY_ENV_SECRET_ID" ]; then
     secret_environment="LEADPOET_GATEWAY_ENV_SECRET_ID='$GATEWAY_ENV_SECRET_ID'"
   fi
-  ssh -tt "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+  if [ "$disable_miner_submissions_before_restart" = "1" ]; then
+    bootstrap_command="
+      set -Eeuo pipefail
+      umask 077
+      unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+      unset AWS_SECURITY_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE
+      unset AWS_SHARED_CREDENTIALS_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
+      unset AWS_ROLE_SESSION_NAME AWS_CONTAINER_CREDENTIALS_FULL_URI
+      unset AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONFIG_FILE AWS_CA_BUNDLE
+      unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_STS
+      unset AWS_ENDPOINT_URL_SECRETSMANAGER AWS_EC2_METADATA_SERVICE_ENDPOINT
+      unset AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE AWS_METADATA_SERVICE_TIMEOUT
+      unset AWS_METADATA_SERVICE_NUM_ATTEMPTS BOTO_CONFIG HTTP_PROXY HTTPS_PROXY
+      unset ALL_PROXY http_proxy https_proxy all_proxy
+      export AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1
+      bootstrap_root=\$(mktemp -d /tmp/gateway-miner-maintenance-bootstrap.XXXXXX)
+      trap 'rm -rf -- \"\$bootstrap_root\"' EXIT
+      chmod 700 \"\$bootstrap_root\"
+      candidate_root="\$bootstrap_root/candidate"
+      mkdir -m 700 "\$candidate_root"
+      controller_current='$PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT'
+      run_verified_gateway_git_helper() {
+        printf '%s' '$controller_verifier_b64' | '$GATEWAY_PYTHON_BIN' -I -S -c 'import base64,sys; source=base64.b64decode(sys.stdin.buffer.read(), validate=True); exec(compile(source, "<exact-installed-controller-verifier>", "exec"))' --repo-root '$GATEWAY_REPO_ROOT' --controller-current "\$controller_current" --host-restart-path '$GATEWAY_RESTART' --expected-commit '$commit' --exec-helper scripts/gateway_git_deploy.py -- "\$@"
+      }
+      prepared_sha=\$(run_verified_gateway_git_helper prepare --repo-root '$GATEWAY_REPO_ROOT' --repo-url https://github.com/leadpoet/leadpoet.git --branch main --deploy-commit '$commit' --plan-file "\$bootstrap_root/plan.json" --manifest-file "\$bootstrap_root/manifest.json" --last-good-file "\$bootstrap_root/last-good-unused.json")
+      test "\$prepared_sha" = '$commit'
+      GIT_NO_REPLACE_OBJECTS=1 git -C '$GATEWAY_REPO_ROOT' archive "\$prepared_sha" | tar -xf - -C "\$candidate_root"
+      run_verified_gateway_git_helper verify-tree --plan-file "\$bootstrap_root/plan.json" --materialized-root "\$candidate_root" --phase prepared_archive --strict-extras >/dev/null
+      exec env \\
+        LEADPOET_REPO_ROOT='$GATEWAY_REPO_ROOT' \\
+        GATEWAY_ROOT='$GATEWAY_REPO_ROOT/gateway' \\
+        GATEWAY_PYTHON_BIN='$GATEWAY_PYTHON_BIN' \\
+        GATEWAY_HOST_RESTART_SCRIPT='$GATEWAY_RESTART' \\
+        GATEWAY_RESTART_CONTROLLER_ROOT='$PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT' \\
+        LEADPOET_GATEWAY_ENV_SECRET_ID='leadpoet/prod/gateway/env' \\
+        GATEWAY_V2_RELEASE_BUCKET='leadpoet-attested-v2-artifacts-493765492819' \\
+        RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET='leadpoet-attested-v2-artifacts-493765492819' \\
+        GATEWAY_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \\
+        AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \\
+        bash \"\$candidate_root/gw_restart.sh\" \\
+          --commit '$commit' \\
+          --miner-maintenance-bootstrap-plan \"\$bootstrap_root/plan.json\" \\
+          --miner-maintenance-bootstrap-root \"\$bootstrap_root\" \\
+          --miner-maintenance-handoff-file '$gateway_handoff_file' \\
+          --miner-maintenance-handoff-nonce '$gateway_handoff_nonce'"
+    printf -v bootstrap_command_quoted '%q' "$bootstrap_command"
+    gateway_restart_command=(
+      ssh -tt "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST"
+      "exec bash -c $bootstrap_command_quoted"
+    )
+    return
+  fi
+  gateway_restart_command=(
+    ssh -tt "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST"
     "exec env $secret_environment \
       GATEWAY_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \
       bash '$GATEWAY_RESTART' --commit '$commit'"
+  )
+}
+
+run_gateway_restart() {
+  build_gateway_restart_command
+  "${gateway_restart_command[@]}"
+}
+
+start_gateway_restart_job() {
+  local launcher_pid=""
+  local observed_pgid=""
+  build_gateway_restart_command
+  gateway_job_session_file="$temporary_root/gateway-job-session"
+  rm -f -- "$gateway_job_session_file"
+  python3 -c '
+import os
+import sys
+
+marker = sys.argv[1]
+command = sys.argv[2:]
+os.setsid()
+descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    os.write(descriptor, (str(os.getpid()) + "\n").encode("ascii"))
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+os.execvp(command[0], command)
+' "$gateway_job_session_file" "${gateway_restart_command[@]}" &
+  launcher_pid="$!"
+  gateway_job="$launcher_pid"
+  for _ in $(seq 1 100); do
+    if [ -s "$gateway_job_session_file" ]; then
+      break
+    fi
+    if ! kill -0 "$launcher_pid" 2>/dev/null; then
+      wait "$launcher_pid"
+      return 1
+    fi
+    sleep 0.05
+  done
+  if [ "$(cat "$gateway_job_session_file" 2>/dev/null || true)" != "$launcher_pid" ]; then
+    echo "ERROR: gateway restart did not establish its owned process group" >&2
+    kill -KILL "$launcher_pid" 2>/dev/null || true
+    wait "$launcher_pid" 2>/dev/null || true
+    gateway_job=""
+    return 1
+  fi
+  observed_pgid="$(ps -o pgid= -p "$launcher_pid" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$observed_pgid" != "$launcher_pid" ]; then
+    echo "ERROR: gateway restart process-group identity differs" >&2
+    kill -KILL "$launcher_pid" 2>/dev/null || true
+    wait "$launcher_pid" 2>/dev/null || true
+    gateway_job=""
+    return 1
+  fi
+  gateway_job_pgid="$observed_pgid"
 }
 
 run_validator_restart() {
@@ -790,6 +1145,34 @@ case "$component" in
   all)
     validator_log="$temporary_root/validator-restart.log"
     coordination_file="/tmp/leadpoet-coordinated-restart.$(basename "$temporary_root").ready"
+    if [ "$disable_miner_submissions_before_restart" = "1" ]; then
+      gateway_restart_log="$temporary_root/gateway-restart.log"
+      gateway_handoff_file="/tmp/leadpoet-gateway-miner-maintenance-handoff.$(basename "$temporary_root").ready"
+      ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+        "rm -f -- '$gateway_handoff_file'"
+      echo "Starting exact-candidate miner maintenance before readiness invalidation"
+      start_gateway_restart_job > >(tee "$gateway_restart_log") 2>&1
+
+      gateway_bootstrap_ready=0
+      for _ in $(seq 1 300); do
+        if grep -Fq \
+            "Prepared exact-candidate miner maintenance under the canonical restart lock" \
+            "$gateway_restart_log"; then
+          gateway_bootstrap_ready=1
+          break
+        fi
+        if ! kill -0 "$gateway_job" 2>/dev/null; then
+          wait "$gateway_job"
+          exit 1
+        fi
+        sleep 1
+      done
+      if [ "$gateway_bootstrap_ready" != "1" ]; then
+        echo "ERROR: gateway miner-maintenance bootstrap did not become ready" >&2
+        exit 1
+      fi
+      echo "Exact-candidate miner maintenance is prepared under the canonical restart lock"
+    fi
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
       "rm -f -- '$coordination_file'"
     invalidate_deploy_readiness
@@ -819,7 +1202,14 @@ case "$component" in
     fi
 
     echo "Validator restart start captured; restarting the gateway while validator preparation continues"
-    run_gateway_restart
+    if [ "$disable_miner_submissions_before_restart" = "1" ]; then
+      publish_gateway_handoff_value "$commit"
+      wait "$gateway_job"
+      gateway_job=""
+      gateway_job_pgid=""
+    else
+      run_gateway_restart
+    fi
     publish_coordination_value "$commit"
     echo "Gateway restart completed; releasing exact-SHA validator activation"
     wait "$validator_job"

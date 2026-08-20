@@ -48,6 +48,10 @@ GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl}"
 GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
+GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN=""
+GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT=""
+GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE=""
+GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE=""
 
 gateway_restart_invocation_id_from_timing_file() {
   local ledger_name ledger_epoch ledger_pid expected_ledger
@@ -276,6 +280,38 @@ while [ "$#" -gt 0 ]; do
       REQUESTED_GATEWAY_DEPLOY_COMMIT="$requested_commit"
       shift
       ;;
+    --miner-maintenance-bootstrap-plan)
+      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "ERROR: --miner-maintenance-bootstrap-plan requires a path" >&2
+        exit 2
+      fi
+      GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN="$2"
+      shift 2
+      ;;
+    --miner-maintenance-bootstrap-root)
+      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "ERROR: --miner-maintenance-bootstrap-root requires a path" >&2
+        exit 2
+      fi
+      GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT="$2"
+      shift 2
+      ;;
+    --miner-maintenance-handoff-file)
+      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "ERROR: --miner-maintenance-handoff-file requires a path" >&2
+        exit 2
+      fi
+      GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE="$2"
+      shift 2
+      ;;
+    --miner-maintenance-handoff-nonce)
+      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "ERROR: --miner-maintenance-handoff-nonce requires a value" >&2
+        exit 2
+      fi
+      GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE="$2"
+      shift 2
+      ;;
     *)
       echo "ERROR: unsupported gateway restart argument: $1" >&2
       exit 2
@@ -286,6 +322,43 @@ if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
     && ! [[ "$REQUESTED_GATEWAY_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
   echo "ERROR: --commit must be a lowercase full 40-character SHA" >&2
   exit 2
+fi
+miner_maintenance_bootstrap_values=(
+  "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN"
+  "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT"
+  "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE"
+  "$GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE"
+)
+miner_maintenance_bootstrap_count=0
+for bootstrap_value in "${miner_maintenance_bootstrap_values[@]}"; do
+  [ -n "$bootstrap_value" ] && miner_maintenance_bootstrap_count=$((miner_maintenance_bootstrap_count + 1))
+done
+if [ "$miner_maintenance_bootstrap_count" -ne 0 ] \
+    && [ "$miner_maintenance_bootstrap_count" -ne 4 ]; then
+  echo "ERROR: miner-maintenance bootstrap arguments must be supplied together" >&2
+  exit 2
+fi
+if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
+  if [ "$miner_maintenance_bootstrap_count" -ne 0 ] \
+      || [ "$GATEWAY_MINER_MAINTENANCE_PROOF_FD" != "190" ] \
+      || [ ! -r "/proc/$$/fd/190" ]; then
+    echo "ERROR: miner-maintenance invocation proof descriptor is invalid" >&2
+    exit 2
+  fi
+fi
+if [ "$miner_maintenance_bootstrap_count" -eq 4 ]; then
+  if [ -z "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]; then
+    echo "ERROR: miner-maintenance bootstrap requires --commit" >&2
+    exit 2
+  fi
+  if ! [[ "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT" =~ ^/tmp/gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+$ ]] \
+      || [ "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN" != \
+        "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT/plan.json" ] \
+      || ! [[ "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" =~ ^/tmp/leadpoet-gateway-miner-maintenance-handoff\.[A-Za-z0-9._-]+$ ]] \
+      || ! [[ "$GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: miner-maintenance bootstrap authority is invalid" >&2
+    exit 2
+  fi
 fi
 if ! [[ "$GATEWAY_RELEASE_SUPERSESSION_COUNT" =~ ^[0-9]+$ ]] \
     || ! [[ "$GATEWAY_RELEASE_SUPERSESSION_MAX" =~ ^[1-9][0-9]*$ ]]; then
@@ -426,6 +499,54 @@ cancel_gateway_owned_process_group() {
   rm -f -- "$ready_marker"
 }
 
+stop_failed_miner_maintenance_runtime() {
+  local process_pid=""
+  echo "Stopping the newly launched gateway after miner-maintenance verification failure" >&2
+  for process_pid in \
+      "${GATEWAY_LAUNCHER_PID:-}" \
+      "${TEE_EGRESS_FORWARDER_PID:-}" \
+      "${INTER_ENCLAVE_RELAY_PID:-}"; do
+    if ! [[ "$process_pid" =~ ^[1-9][0-9]*$ ]]; then
+      continue
+    fi
+    kill -TERM -- "-$process_pid" 2>/dev/null || true
+    kill -TERM "$process_pid" 2>/dev/null || true
+  done
+  for _ in $(seq 1 50); do
+    local running=0
+    for process_pid in \
+        "${GATEWAY_LAUNCHER_PID:-}" \
+        "${TEE_EGRESS_FORWARDER_PID:-}" \
+        "${INTER_ENCLAVE_RELAY_PID:-}"; do
+      if [[ "$process_pid" =~ ^[1-9][0-9]*$ ]] \
+          && { kill -0 -- "-$process_pid" 2>/dev/null \
+            || kill -0 "$process_pid" 2>/dev/null; }; then
+        running=1
+      fi
+    done
+    [ "$running" -eq 0 ] && break
+    sleep 0.1
+  done
+  for process_pid in \
+      "${GATEWAY_LAUNCHER_PID:-}" \
+      "${TEE_EGRESS_FORWARDER_PID:-}" \
+      "${INTER_ENCLAVE_RELAY_PID:-}"; do
+    if ! [[ "$process_pid" =~ ^[1-9][0-9]*$ ]]; then
+      continue
+    fi
+    kill -KILL -- "-$process_pid" 2>/dev/null || true
+    kill -KILL "$process_pid" 2>/dev/null || true
+    wait "$process_pid" 2>/dev/null || true
+  done
+  sudo systemctl stop leadpoet-tee-egress-forwarder.service 2>/dev/null || true
+  stop_research_lab_private_model_containers
+  if [ -r "$GATEWAY_ROOT/tee/stop_enclave.sh" ]; then
+    sudo bash "$GATEWAY_ROOT/tee/stop_enclave.sh" >/dev/null 2>&1 || true
+  else
+    sudo nitro-cli terminate-enclave --all >/dev/null 2>&1 || true
+  fi
+}
+
 start_gateway_offline_artifact_prepare() {
   local prepare_script process_group_marker
   local -a prepare_command
@@ -455,7 +576,11 @@ start_gateway_offline_artifact_prepare() {
   # Own the whole helper process group so an interrupted curl/pip/rsync child
   # cannot outlive the candidate tree.  Keep this release-independent work at
   # low CPU and I/O priority while the attestation runner is building.
-  python3 -c '
+  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_GIT_HELPER \
+    -u GATEWAY_EXACT_COMMIT_HELPER \
+    -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    python3 -c '
 import os
 import sys
 
@@ -470,7 +595,8 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
     os.fsync(handle.fileno())
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${prepare_command[@]}" \
-    >"$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" 2>&1 &
+    >"$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" 2>&1 \
+    190>&- 191>&- 192>&- 193>&- 194>&- &
   GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID" \
@@ -764,7 +890,11 @@ exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
   record_gateway_restart_timing "ancestry_precheckpoint_started"
   process_group_marker="${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
   rm -f -- "$process_group_marker"
-  python3 -c '
+  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_GIT_HELPER \
+    -u GATEWAY_EXACT_COMMIT_HELPER \
+    -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    python3 -c '
 import os
 import sys
 
@@ -779,7 +909,8 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
     os.fsync(handle.fileno())
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${checkpoint_command[@]}" \
-    >"$GATEWAY_ANCESTRY_CHECKPOINT_LOG" 2>&1 &
+    >"$GATEWAY_ANCESTRY_CHECKPOINT_LOG" 2>&1 \
+    190>&- 191>&- 192>&- 193>&- 194>&- &
   GATEWAY_ANCESTRY_CHECKPOINT_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_ANCESTRY_CHECKPOINT_PID" \
@@ -1193,6 +1324,66 @@ finalize_deployment_record() {
     --eif-root "$GATEWAY_TEE_EIF_ROOT"
 }
 
+cleanup_gateway_miner_maintenance_bootstrap() {
+  if [ -n "${GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE:-}" ] \
+      && [[ "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" =~ ^/tmp/leadpoet-gateway-miner-maintenance-handoff\.[A-Za-z0-9._-]+$ ]]; then
+    rm -f -- "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" 2>/dev/null || true
+  fi
+  if [ -n "${GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT:-}" ] \
+      && [[ "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT" =~ ^/tmp/gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+$ ]]; then
+    rm -rf -- "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT" 2>/dev/null || true
+  fi
+}
+
+scrub_gateway_bootstrap_aws_environment() {
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+    AWS_SECURITY_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE \
+    AWS_SHARED_CREDENTIALS_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
+    AWS_ROLE_SESSION_NAME AWS_CONTAINER_CREDENTIALS_FULL_URI \
+    AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONFIG_FILE AWS_CA_BUNDLE \
+    AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_STS \
+    AWS_ENDPOINT_URL_SECRETSMANAGER AWS_EC2_METADATA_SERVICE_ENDPOINT \
+    AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE AWS_METADATA_SERVICE_TIMEOUT \
+    AWS_METADATA_SERVICE_NUM_ATTEMPTS BOTO_CONFIG HTTP_PROXY HTTPS_PROXY \
+    ALL_PROXY http_proxy https_proxy all_proxy
+  export AWS_REGION=us-east-1
+  export AWS_DEFAULT_REGION=us-east-1
+}
+
+validate_gateway_aws_authority() {
+  local name value
+  for name in \
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+    AWS_SECURITY_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE \
+    AWS_SHARED_CREDENTIALS_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
+    AWS_ROLE_SESSION_NAME AWS_CONTAINER_CREDENTIALS_FULL_URI \
+    AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONFIG_FILE AWS_CA_BUNDLE \
+    AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_STS \
+    AWS_ENDPOINT_URL_SECRETSMANAGER AWS_EC2_METADATA_SERVICE_ENDPOINT \
+    AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE AWS_METADATA_SERVICE_TIMEOUT \
+    AWS_METADATA_SERVICE_NUM_ATTEMPTS BOTO_CONFIG HTTP_PROXY HTTPS_PROXY \
+    ALL_PROXY http_proxy https_proxy all_proxy; do
+    value="${!name-}"
+    if [ -n "$value" ]; then
+      echo "ERROR: gateway restart inherited delegated AWS authority: $name" >&2
+      return 1
+    fi
+  done
+  if { [ -n "${AWS_REGION:-}" ] && [ "$AWS_REGION" != "us-east-1" ]; } \
+      || { [ -n "${AWS_DEFAULT_REGION:-}" ] \
+        && [ "$AWS_DEFAULT_REGION" != "us-east-1" ]; }; then
+    echo "ERROR: gateway restart AWS region differs from us-east-1" >&2
+    return 1
+  fi
+  if [ -n "${LEADPOET_AWS_INSTANCE_ROLE_ONLY:-}" ] \
+      && [ "${LEADPOET_AWS_INSTANCE_ROLE_ONLY,,}" != "true" ]; then
+    echo "ERROR: gateway restart instance-role-only authority differs" >&2
+    return 1
+  fi
+  scrub_gateway_bootstrap_aws_environment
+  export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
+}
+
 on_gateway_restart_exit() {
   local status="$?"
   if [ "$status" -ne 0 ]; then
@@ -1202,6 +1393,7 @@ on_gateway_restart_exit() {
   emit_gateway_restart_sentry_summary "$status"
   cancel_gateway_offline_artifact_prepare
   cancel_gateway_ancestry_checkpoint_bootstrap
+  cleanup_gateway_miner_maintenance_bootstrap
   rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" 2>/dev/null || true
   rm -f -- \
     "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
@@ -1354,6 +1546,10 @@ install_successful_restart_script() {
   local target_dir temporary
   controller_sha="$GATEWAY_DEPLOY_SHA"
   mkdir -p "$GATEWAY_RESTART_CONTROLLER_ROOT/releases"
+  chmod 700 \
+    "$(dirname "$GATEWAY_RESTART_CONTROLLER_ROOT")" \
+    "$GATEWAY_RESTART_CONTROLLER_ROOT" \
+    "$GATEWAY_RESTART_CONTROLLER_ROOT/releases"
   release_dir="$GATEWAY_RESTART_CONTROLLER_ROOT/releases/$controller_sha"
   temporary_dir="$(mktemp -d "$GATEWAY_RESTART_CONTROLLER_ROOT/.release.XXXXXX")"
   mkdir -p \
@@ -1369,11 +1565,34 @@ install_successful_restart_script() {
     "$temporary_dir/Leadpoet/utils/exact_commit_restart_v2.py"
   install -m 600 "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py" \
     "$temporary_dir/gateway/tee/host_memory_guard_v2.py"
-  rm -rf -- "$release_dir"
-  mv -- "$temporary_dir" "$release_dir"
-  temporary_link="$GATEWAY_RESTART_CONTROLLER_ROOT/.current.$$"
-  ln -s "releases/$controller_sha" "$temporary_link"
-  mv -Tf "$temporary_link" "$GATEWAY_RESTART_CONTROLLER_CURRENT"
+  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
+    if [ ! -d "$release_dir" ] \
+        || [ -L "$release_dir" ] \
+        || [ "$(stat -c '%u:%g:%a' "$release_dir")" != "$(id -u):$(id -g):700" ] \
+        || [ "$(stat -c '%u:%g:%a' "$release_dir/gw_restart.sh")" != "$(id -u):$(id -g):700" ] \
+        || [ "$(stat -c '%u:%g:%a' "$release_dir/scripts/gateway_git_deploy.py")" != "$(id -u):$(id -g):600" ] \
+        || [ "$(stat -c '%u:%g:%a' "$release_dir/Leadpoet/utils/exact_commit_restart_v2.py")" != "$(id -u):$(id -g):600" ] \
+        || [ "$(stat -c '%u:%g:%a' "$release_dir/gateway/tee/host_memory_guard_v2.py")" != "$(id -u):$(id -g):600" ] \
+        || ! cmp -s "$temporary_dir/gw_restart.sh" "$release_dir/gw_restart.sh" \
+        || ! cmp -s "$temporary_dir/scripts/gateway_git_deploy.py" "$release_dir/scripts/gateway_git_deploy.py" \
+        || ! cmp -s "$temporary_dir/Leadpoet/utils/exact_commit_restart_v2.py" "$release_dir/Leadpoet/utils/exact_commit_restart_v2.py" \
+        || ! cmp -s "$temporary_dir/gateway/tee/host_memory_guard_v2.py" "$release_dir/gateway/tee/host_memory_guard_v2.py"; then
+      rm -rf -- "$temporary_dir"
+      echo "ERROR: installed gateway restart controller release differs from the exact candidate" >&2
+      return 1
+    fi
+    rm -rf -- "$temporary_dir"
+  else
+    chmod 700 "$temporary_dir"
+    mv -- "$temporary_dir" "$release_dir"
+  fi
+  if [ "$(readlink "$GATEWAY_RESTART_CONTROLLER_CURRENT" 2>/dev/null || true)" != \
+      "releases/$controller_sha" ]; then
+    temporary_link="$GATEWAY_RESTART_CONTROLLER_ROOT/.current.$$"
+    rm -f -- "$temporary_link"
+    ln -s "releases/$controller_sha" "$temporary_link"
+    mv -Tf "$temporary_link" "$GATEWAY_RESTART_CONTROLLER_CURRENT"
+  fi
   source_script="$GATEWAY_RESTART_CONTROLLER_CURRENT/gw_restart.sh"
   if [ "$(cd "$(dirname "$source_script")" && pwd)/$(basename "$source_script")" = \
       "$(cd "$(dirname "$target_script")" && pwd)/$(basename "$target_script")" ]; then
@@ -1381,6 +1600,12 @@ install_successful_restart_script() {
   fi
   target_dir="$(dirname "$target_script")"
   mkdir -p "$target_dir"
+  if [ -f "$target_script" ] \
+      && [ ! -L "$target_script" ] \
+      && [ "$(stat -c '%u:%g:%a' "$target_script")" = "$(id -u):$(id -g):700" ] \
+      && cmp -s "$source_script" "$target_script"; then
+    return 0
+  fi
   temporary="$(mktemp "$target_dir/.gw_restart.sh.XXXXXX")"
   if ! install -m 700 "$source_script" "$temporary"; then
     rm -f "$temporary"
@@ -1727,6 +1952,49 @@ else
 fi
 
 if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
+  validate_gateway_aws_authority
+fi
+
+if [ "$miner_maintenance_bootstrap_count" -eq 4 ]; then
+  bootstrap_script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  bootstrap_candidate_root="$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT/candidate"
+  if [ "$GATEWAY_RESTART_PHASE" != "prepare" ] \
+      || [ "${GATEWAY_RESTART_LOCK_HELD:-0}" != "1" ] \
+      || [ ! -e "/proc/$$/fd/9" ] \
+      || [ "$(readlink "/proc/$$/fd/9" 2>/dev/null || true)" != "$GATEWAY_RESTART_LOCK_FILE" ] \
+      || [ "$bootstrap_script_root" != "$bootstrap_candidate_root" ] \
+      || [ -e "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" ] \
+      || [ "$GATEWAY_V2_RELEASE_PREFIX" != "attested-v2/releases" ] \
+      || [ "$GATEWAY_V2_RELEASE_BUCKET" != "leadpoet-attested-v2-artifacts-493765492819" ] \
+      || [ "$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" != "leadpoet-attested-v2-artifacts-493765492819" ] \
+      || [ "$LEADPOET_GATEWAY_ENV_SECRET_ID" != "leadpoet/prod/gateway/env" ] \
+      || [ "${AWS_REGION:-us-east-1}" != "us-east-1" ] \
+      || [ "${AWS_DEFAULT_REGION:-us-east-1}" != "us-east-1" ] \
+      || [ ! -x "$GATEWAY_HOST_RESTART_SCRIPT" ]; then
+    echo "ERROR: miner-maintenance bootstrap did not acquire an isolated canonical handoff" >&2
+    exit 1
+  fi
+
+  GATEWAY_DEPLOY_STAGE="miner_maintenance_pre_hydration"
+  export GATEWAY_DEPLOY_STAGE
+  echo "Preparing disabled miner submissions from the exact candidate under the canonical restart lock"
+  cd "$bootstrap_candidate_root"
+  export PYTHONDONTWRITEBYTECODE=1
+  export PYTHONPATH="$bootstrap_candidate_root"
+  exec "$GATEWAY_PYTHON_BIN" \
+    -m gateway.tee.gateway_miner_maintenance_restart_v1 \
+    --bootstrap-exec \
+    --expected-commit "$REQUESTED_GATEWAY_DEPLOY_COMMIT" \
+    --repo-root "$LEADPOET_REPO_ROOT" \
+    --plan-file "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN" \
+    --bootstrap-root "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT" \
+    --controller-current "$GATEWAY_RESTART_CONTROLLER_CURRENT" \
+    --host-restart-path "$GATEWAY_HOST_RESTART_SCRIPT" \
+    --handoff-file "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" \
+    --handoff-nonce "$GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE"
+fi
+
+if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
 cd "$GATEWAY_ROOT"
 
 PID="$(pgrep -f "python3 -u main.py|python3 -u -m gateway.main" | head -1 || true)"
@@ -1782,6 +2050,10 @@ restart_only_keys = {
     "GATEWAY_RESTART_CONTROLLER_ROOT",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_RESTART_INVOCATION_ID",
+    "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
+    "GATEWAY_GIT_HELPER",
+    "GATEWAY_EXACT_COMMIT_HELPER",
+    "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
     "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
     "GATEWAY_V2_ARTIFACT_POLICY",
@@ -1854,10 +2126,37 @@ env_path = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
 skip_keys = {
     "AWS_ACCESS_KEY_ID",
+    "AWS_CA_BUNDLE",
+    "AWS_CONFIG_FILE",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_DEFAULT_REGION",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_S3",
+    "AWS_ENDPOINT_URL_SECRETSMANAGER",
+    "AWS_ENDPOINT_URL_STS",
+    "AWS_METADATA_SERVICE_NUM_ATTEMPTS",
+    "AWS_METADATA_SERVICE_TIMEOUT",
+    "AWS_REGION",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
     "AWS_SECRET_ACCESS_KEY",
+    "AWS_SHARED_CREDENTIALS_FILE",
     "AWS_SESSION_TOKEN",
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "BOTO_CONFIG",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
     "GATEWAY_DEPLOY_COMMIT",
     "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_V2_DEFER_WORKER_FLEETS",
@@ -1889,6 +2188,9 @@ skip_keys = {
     "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES",
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
+    "GATEWAY_EXACT_COMMIT_HELPER",
+    "GATEWAY_HOST_MEMORY_GUARD_PATH",
+    "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_RESTART_STARTED_EPOCH",
@@ -1971,10 +2273,37 @@ pid = sys.argv[1]
 out_path = sys.argv[2]
 skip_keys = {
     "AWS_ACCESS_KEY_ID",
+    "AWS_CA_BUNDLE",
+    "AWS_CONFIG_FILE",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_DEFAULT_REGION",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_S3",
+    "AWS_ENDPOINT_URL_SECRETSMANAGER",
+    "AWS_ENDPOINT_URL_STS",
+    "AWS_METADATA_SERVICE_NUM_ATTEMPTS",
+    "AWS_METADATA_SERVICE_TIMEOUT",
+    "AWS_REGION",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
     "AWS_SECRET_ACCESS_KEY",
+    "AWS_SHARED_CREDENTIALS_FILE",
     "AWS_SESSION_TOKEN",
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "BOTO_CONFIG",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
     "GATEWAY_DEPLOY_COMMIT",
     "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_V2_DEFER_WORKER_FLEETS",
@@ -2006,6 +2335,9 @@ skip_keys = {
     "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES",
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
+    "GATEWAY_EXACT_COMMIT_HELPER",
+    "GATEWAY_HOST_MEMORY_GUARD_PATH",
+    "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_RESTART_STARTED_EPOCH",
@@ -2078,6 +2410,9 @@ printf 'export GATEWAY_RESTART_INVOCATION_ID=%q\n' \
   "$GATEWAY_RESTART_INVOCATION_ID" >> "$ENV_CLONE"
 printf 'export LEADPOET_RESTART_INVOCATION_ID=%q\n' \
   "$GATEWAY_RESTART_INVOCATION_ID" >> "$ENV_CLONE"
+printf 'export AWS_REGION=us-east-1\n' >> "$ENV_CLONE"
+printf 'export AWS_DEFAULT_REGION=us-east-1\n' >> "$ENV_CLONE"
+printf 'export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true\n' >> "$ENV_CLONE"
 printf 'export GATEWAY_PRIVATE_KEY_PATH=%q\n' "$GATEWAY_PRIVATE_KEY_PATH" >> "$ENV_CLONE"
 printf 'export ARWEAVE_KEYFILE_PATH=%q\n' "$ARWEAVE_KEYFILE_PATH" >> "$ENV_CLONE"
 if [ -n "$GATEWAY_RESTART_GIT_SSH_COMMAND" ]; then
@@ -2890,8 +3225,14 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
 
   echo "Starting parent-side opaque enclave egress forwarder"
   cd "$LEADPOET_REPO_ROOT"
-  PYTHONPATH="$LEADPOET_REPO_ROOT" setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
-    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null 7>&- 8>&- 9>&- &
+  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_GIT_HELPER \
+    -u GATEWAY_EXACT_COMMIT_HELPER \
+    -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    PYTHONPATH="$LEADPOET_REPO_ROOT" \
+    setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
+    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null \
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
   TEE_EGRESS_FORWARDER_PID="$!"
   sleep 2
   if ! ps -p "$TEE_EGRESS_FORWARDER_PID" >/dev/null 2>&1; then
@@ -2902,8 +3243,14 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
 
   echo "Starting opaque inter-enclave TLS relay"
   cd "$LEADPOET_REPO_ROOT"
-  PYTHONPATH="$LEADPOET_REPO_ROOT" setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
-    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null 7>&- 8>&- 9>&- &
+  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_GIT_HELPER \
+    -u GATEWAY_EXACT_COMMIT_HELPER \
+    -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    PYTHONPATH="$LEADPOET_REPO_ROOT" \
+    setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
+    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null \
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
   INTER_ENCLAVE_RELAY_PID="$!"
   sleep 2
   if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then
@@ -3084,7 +3431,13 @@ record_gateway_restart_timing "validator_weight_input_ready"
 leadpoet_release_docker_operation_lock_v2
 
 cd "$LEADPOET_REPO_ROOT"
-setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &
+env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+  -u GATEWAY_GIT_HELPER \
+  -u GATEWAY_EXACT_COMMIT_HELPER \
+  -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+  setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
+  > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
+  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
 
 GATEWAY_LAUNCHER_PID="$!"
 GATEWAY_PID=""
@@ -3166,10 +3519,28 @@ export GATEWAY_DEPLOY_STAGE
 install_research_lab_admin_wrapper
 install_successful_restart_script
 
+GATEWAY_DEPLOY_STAGE="miner_maintenance_runtime_verify"
+export GATEWAY_DEPLOY_STAGE
+echo "Revalidating exact-candidate miner maintenance state against the live runtime"
+if ! PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+    -m gateway.tee.gateway_miner_maintenance_restart_v1 \
+    --verify-runtime \
+    --expected-commit "$GATEWAY_DEPLOY_SHA" \
+    --repo-root "$LEADPOET_REPO_ROOT" \
+    --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"; then
+  stop_failed_miner_maintenance_runtime
+  exit 1
+fi
 GATEWAY_DEPLOY_STAGE="completed"
 export GATEWAY_DEPLOY_STAGE
 finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null
+if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
+  exec 190>&- 191>&- 192>&- 193>&- 194>&-
+  unset GATEWAY_MINER_MAINTENANCE_PROOF_FD
+  unset GATEWAY_GIT_HELPER GATEWAY_EXACT_COMMIT_HELPER
+  unset GATEWAY_HOST_MEMORY_GUARD_PATH
+fi
 GATEWAY_DEPLOY_COMPLETED=1
-rm -f "$GATEWAY_DEPLOY_PLAN_FILE"
+rm -f "$GATEWAY_DEPLOY_PLAN_FILE" || true
 record_gateway_restart_timing "completed" "passed"
 echo "Gateway restart command completed; tail logs with: tail -f $GATEWAY_LOG_FILE"

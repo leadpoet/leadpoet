@@ -1,14 +1,17 @@
 # Gateway Git Deployment Runbook
 
 The gateway runs all host code from the complete checkout at
-`/home/ec2-user/leadpoet_repo`. The operator command remains:
+`/home/ec2-user/leadpoet_repo`. The canonical paired operator command is:
 
 ```bash
-cd /home/ec2-user
-bash /home/ec2-user/gw_restart.sh
+: "${EXPECTED_ATTESTED_SHA:?set the full attested release SHA}"
+cd /path/to/the/exact/candidate/checkout
+bash scripts/restart_attested_release_local.sh \
+  --commit "$EXPECTED_ATTESTED_SHA" \
+  --component all
 ```
 
-The restart selects one commit from `GITHUB_REPO_URL` and `GITHUB_BRANCH`,
+The restart selects the supplied exact attested commit,
 stops the existing processes, fast-forwards the checkout to that exact commit,
 and then runs the existing cleanup, PCR0, enclave, dependency, process launch,
 and health workflow. Gateway and validator controllers may run concurrently,
@@ -89,86 +92,97 @@ checkout must resolve both key paths absolutely; absent overrides default to:
 - `/home/ec2-user/gateway/secrets/gateway_private_key.pem`
 - `/home/ec2-user/gateway/secrets/arweave_keyfile.json`
 
+## First Release With Miner-Maintenance Control
+
+The deployed N-1 controller hydrates the gateway secret before it fetches and
+materializes the candidate. The first release containing the protected
+miner-maintenance helper must therefore use the paired exact-candidate option.
+Do not run a separate remote helper or an unpinned host wrapper:
+
+```bash
+set -euo pipefail
+: "${EXPECTED_ATTESTED_SHA:?set the full attested release SHA}"
+[[ "$EXPECTED_ATTESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+cd /path/to/the/exact/candidate/checkout
+bash scripts/restart_attested_release_local.sh \
+  --commit "$EXPECTED_ATTESTED_SHA" \
+  --component all \
+  --disable-miner-submissions-before-restart
+```
+
+The paired operator first proves that its own script and the installed-controller
+verifier are the selected candidate's exact Git blobs. It rejects replacement
+refs, grafts, alternates, unsafe Git environment overrides, non-production
+release prefixes, alternate secret identities, and single-component use. On
+the gateway it verifies and seals the complete installed controller bundle
+before executing its deployment helper.
+
+The exact candidate archive then acquires the existing canonical gateway lock
+on descriptor 9. Under that uninterrupted lock it revalidates the isolated
+plan and candidate tree, the singleton actively COMPLIANCE-locked release
+channel, the protected source, the fixed EC2 instance-role authority, and the
+installed controller. Only then does it change
+`RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED` to `false`. The version-stage
+transaction uses a private non-secret crash journal and reconstructs the exact
+original `AWSCURRENT`/`AWSPREVIOUS`/custom-label topology. After interruption,
+a retry either restores that exact prior topology when `AWSCURRENT` never
+moved, or completes the exact verified false promotion when it did. Reconciliation
+finishes before any new change.
+
+No persistent restart receipt is created. The candidate carries only a sealed,
+unlinked invocation proof through the exact installed N-1 wrapper. The proof
+binds the candidate/tree/release/controller identities, the final
+`AWSCURRENT` VersionId, strict raw-document hash, complete stage-topology hash,
+and the exact deterministic gateway-env bytes that frozen controller `0dd`
+derives from that document. The N-1 wrapper itself remains byte-identical to
+Git; there is no AWS executable, PATH, or wrapper interposition.
+
+Before shutdown and again after startup, the candidate descriptor-safely reads
+the installed env cache and requires its byte hash to equal that expected
+rendering. It also rechecks the current raw document and complete topology,
+requires the hydrated parent value to be exactly `false`, and requires the live
+Research Lab status boolean to be exactly false. A transient alternate
+Secrets Manager VersionId is equivalent only when its raw document and the
+resulting filtered env bytes are byte-identical and the proof-bound current
+VersionId/topology are restored at verification. A differing-document drift
+fails closed. Secrets Manager write authority is trusted and non-adversarial
+during this canonical locked restart; this path does not claim to prevent an
+authorized secret writer from deliberately changing runtime configuration.
+
+The proof and all four controller snapshots are closed in every long-lived
+runtime child and closed by the restart parent after the post-start check.
+After preparation reports success and the false promotion is durable, any
+later failure leaves miner submissions disabled and retains no cross-run
+restart authority; the same exact paired command is safe to retry. An earlier
+failure may instead leave or restore the exact original secret topology.
+
 ## Normal Restart
 
 The checkout must have no visible tracked, staged, or untracked files. Ignored
 generated enclave/build artifacts are allowed and are rebuilt by the existing
 workflow.
 
-If miner submissions were disabled at the start of an authorized maintenance
-operation, preserve that state in the gateway Secrets Manager source before
-the restart hydrates its environment. Use only the fixed-purpose protected
-operation below, from the exact attested release checkout. It does not change
-the scoring or autoresearch maintenance controls, does not alter the running
-process, and never prints or stores the secret document. Its read-only first
-step returns the existing Secrets Manager VersionId, which is both the apply
-fence and the recoverable backup version. Apply snapshots the complete version-
-label topology, uses one bounded candidate-unique custom label rather than the
-shared `AWSPENDING` label, and removes only that custom label on pre-promotion
-failure. A post-promotion failure restores the original `AWSCURRENT` and
-`AWSPREVIOUS` placement or absence and verifies the entire original topology.
-Existing rotation labels, including `AWSPENDING`, are never borrowed or removed:
-
-```bash
-set -euo pipefail
-cd /home/ec2-user/leadpoet_repo
-: "${EXPECTED_ATTESTED_SHA:?set the full attested release SHA}"
-GATEWAY_PYTHON_BIN="${GATEWAY_PYTHON_BIN:-/home/ec2-user/venv311/bin/python3}"
-[[ "$EXPECTED_ATTESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-test "$(git rev-parse HEAD)" = "$EXPECTED_ATTESTED_SHA"
-git diff --exit-code "$EXPECTED_ATTESTED_SHA" --
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
-"$GATEWAY_PYTHON_BIN" -m gateway.tee.protected_workflows \
-  --root . \
-  --manifest gateway/tee/protected_workflows.json
-
-unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
-  AWS_SECURITY_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE \
-  AWS_SHARED_CREDENTIALS_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
-  AWS_ROLE_SESSION_NAME AWS_CONTAINER_CREDENTIALS_FULL_URI \
-  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
-export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
-
-VERIFY_RESULT="$(
-  "$GATEWAY_PYTHON_BIN" \
-    -m gateway.tee.disable_gateway_miner_submissions_secret
-)"
-printf '%s\n' "$VERIFY_RESULT"
-EXPECTED_SECRET_VERSION="$(
-  printf '%s' "$VERIFY_RESULT" \
-    | "$GATEWAY_PYTHON_BIN" -c \
-      'import json,sys; print(json.load(sys.stdin)["current_version_id"])'
-)"
-
-APPLY_RESULT="$(
-  "$GATEWAY_PYTHON_BIN" \
-    -m gateway.tee.disable_gateway_miner_submissions_secret \
-    --apply \
-    --expected-current-version-id "$EXPECTED_SECRET_VERSION"
-)"
-printf '%s\n' "$APPLY_RESULT"
-APPLIED_SECRET_VERSION="$(
-  printf '%s' "$APPLY_RESULT" \
-    | "$GATEWAY_PYTHON_BIN" -c \
-      'import json,sys; print(json.load(sys.stdin)["current_version_id"])'
-)"
-
-"$GATEWAY_PYTHON_BIN" \
-  -m gateway.tee.disable_gateway_miner_submissions_secret \
-  --expected-current-version-id "$APPLIED_SECRET_VERSION"
-```
-
-The final result must be `already_disabled`. Do not place a credential value,
-secret document, or decoded environment in a shell variable, file, log, or
-command argument. The next canonical restart hydrates the explicit `false`
-value; until that restart succeeds, the already-running gateway retains its
-invocation-time environment. Keep scoring and autoresearch in their separately
+Once the durable gateway source already contains the explicit `false` value,
+ordinary exact-SHA restarts need no persistent proof. Candidate preflight still
+requires parent hydration to be exactly false, performs an instance-role-only
+Secrets Manager readback, verifies the current document and topology are
+stable while descriptor-checking the hydrated cache, and revalidates the
+singleton locked release channel. A stale or direct launcher with a true value
+fails before shutdown. Keep scoring and autoresearch in their separately
 recorded invocation-time maintenance states.
 
 ```bash
-cd /home/ec2-user
-bash /home/ec2-user/gw_restart.sh
+cd /path/to/the/exact/candidate/checkout
+bash scripts/restart_attested_release_local.sh \
+  --commit "$EXPECTED_ATTESTED_SHA" \
+  --component all
 ```
+
+If an authorized operation must transition miner submissions from true to
+false, use the paired `--disable-miner-submissions-before-restart` command
+above. Do not invoke the fixed-purpose apply CLI manually; the paired path owns
+the canonical lock, recovery journal, exact controller handoff, and post-start
+proof.
 
 If GitHub fetch, branch validation, remote validation, or checkout cleanliness
 fails, the restart exits before stopping the running gateway. Failures after

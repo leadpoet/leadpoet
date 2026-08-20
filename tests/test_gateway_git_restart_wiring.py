@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 from gateway.tee import build_identity
 
 
@@ -1888,7 +1890,8 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
     launch = (
         '-m gateway.utils.tee_egress_forwarder \\\n'
         '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
-        '2>&1 < /dev/null 7>&- 8>&- 9>&- &'
+        '2>&1 < /dev/null \\\n'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
     )
     readiness = '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
 
@@ -1912,7 +1915,8 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
     assert (
         '-m gateway.utils.tee_inter_enclave_relay \\\n'
         '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" '
-        '2>&1 < /dev/null 7>&- 8>&- 9>&- &'
+        '2>&1 < /dev/null \\\n'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
     ) in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script
@@ -2208,3 +2212,137 @@ def test_gateway_restart_wires_automatic_signed_dev_snapshot_refresh() -> None:
         'RESEARCH_LAB_DEV_SNAPSHOT_KMS_KEY_ID:-alias/'
         'leadpoet-research-lab-artifact-signing}"'
     ) in script
+
+
+@pytest.mark.parametrize(
+    "failure_reason",
+    ["status_true", "durable_secret_drift", "locked_channel_drift"],
+)
+def test_failed_miner_maintenance_runtime_gate_stops_before_terminal_success(
+    tmp_path: Path,
+    failure_reason: str,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    start = script.index(
+        'GATEWAY_DEPLOY_STAGE="miner_maintenance_runtime_verify"'
+    )
+    terminal = 'finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null'
+    end = script.index(terminal, start) + len(terminal)
+    gate = script[start:end]
+    stopped = tmp_path / "runtime-stopped"
+    succeeded = tmp_path / "terminal-success"
+    fake_python = tmp_path / "verify-runtime"
+    fake_python.write_text(
+        "#!/bin/bash\nprintf '%s\\n' "
+        + shlex.quote(failure_reason)
+        + " >&2\nexit 86\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o700)
+    harness = tmp_path / "runtime-gate.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -Eeuo pipefail\n"
+        f"LEADPOET_REPO_ROOT={shlex.quote(str(tmp_path))}\n"
+        f"GATEWAY_PYTHON_BIN={shlex.quote(str(fake_python))}\n"
+        "GATEWAY_DEPLOY_SHA='" + "a" * 40 + "'\n"
+        f"GATEWAY_V2_RELEASE_MANIFEST={shlex.quote(str(tmp_path / 'release.json'))}\n"
+        f"stop_failed_miner_maintenance_runtime() {{ touch {shlex.quote(str(stopped))}; }}\n"
+        f"finalize_deployment_record() {{ touch {shlex.quote(str(succeeded))}; }}\n"
+        + gate
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 1
+    assert stopped.exists()
+    assert not succeeded.exists()
+
+
+def test_failed_miner_maintenance_cleanup_kills_all_new_runtime_groups(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    cleanup = _shell_function_source(
+        script, "stop_failed_miner_maintenance_runtime"
+    )
+    stopped_private_models = tmp_path / "private-models-stopped"
+    late_runtime = tmp_path / "late-runtime"
+    ready_paths = [tmp_path / f"ready-{index}" for index in range(3)]
+    harness = tmp_path / "runtime-cleanup.sh"
+    launch_code = (
+        "import os,signal,sys,time\n"
+        "os.setsid()\n"
+        "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(7)\n"
+        "open(sys.argv[2], 'w').write('unsafe')\n"
+        "time.sleep(30)\n"
+    )
+    launch_lines = []
+    pid_names = (
+        "GATEWAY_LAUNCHER_PID",
+        "TEE_EGRESS_FORWARDER_PID",
+        "INTER_ENCLAVE_RELAY_PID",
+    )
+    for name, ready in zip(pid_names, ready_paths):
+        launch_lines.extend(
+            [
+                "python3 -c "
+                + shlex.quote(launch_code)
+                + " "
+                + shlex.quote(str(ready))
+                + " "
+                + shlex.quote(str(late_runtime))
+                + " &",
+                f"{name}=$!",
+            ]
+        )
+    harness.write_text(
+        "#!/bin/bash\nset -Eeuo pipefail\n"
+        + cleanup
+        + "\n"
+        + "sudo() { return 0; }\n"
+        + "stop_research_lab_private_model_containers() { touch "
+        + shlex.quote(str(stopped_private_models))
+        + "; }\n"
+        + "GATEWAY_ROOT="
+        + shlex.quote(str(tmp_path / "gateway"))
+        + "\n"
+        + "\n".join(launch_lines)
+        + "\n"
+        + "for _ in $(seq 1 200); do\n"
+        + "  [ -s "
+        + shlex.quote(str(ready_paths[0]))
+        + " ] && [ -s "
+        + shlex.quote(str(ready_paths[1]))
+        + " ] && [ -s "
+        + shlex.quote(str(ready_paths[2]))
+        + " ] && break\n"
+        + "  sleep 0.01\ndone\n"
+        + "stop_failed_miner_maintenance_runtime\n"
+        + "sleep 2.5\n"
+        + "test ! -e "
+        + shlex.quote(str(late_runtime))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert stopped_private_models.exists()
+    assert not late_runtime.exists()

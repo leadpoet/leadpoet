@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import types
 
 import pytest
 
@@ -11,6 +16,7 @@ INITIAL_VERSION = "11111111-1111-4111-8111-111111111111"
 CONCURRENT_VERSION = "22222222-2222-4222-8222-222222222222"
 PREVIOUS_VERSION = "33333333-3333-4333-8333-333333333333"
 PENDING_VERSION = "44444444-4444-4444-8444-444444444444"
+RECOVERY_CANDIDATE_VERSION = "55555555-5555-4555-8555-555555555555"
 
 
 class FakeSecretsClient:
@@ -143,11 +149,12 @@ class FakeSecretsClient:
 
 
 def _apply(client: FakeSecretsClient):
-    return operation.disable_gateway_miner_submissions_secret(
-        secrets_client=client,
-        expected_current_version_id=INITIAL_VERSION,
-        apply=True,
-    )
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+        return operation._apply_gateway_miner_submissions_secret(
+            secrets_client=client,
+            expected_current_version_id=INITIAL_VERSION,
+            recovery_journal_path=Path(directory) / "transaction.json",
+        )
 
 
 def _custom_labels(client: FakeSecretsClient) -> set[str]:
@@ -157,6 +164,181 @@ def _custom_labels(client: FakeSecretsClient) -> set[str]:
         for label in labels
         if label.startswith(operation._CUSTOM_STAGE_PREFIX)
     }
+
+
+def _install_recovery_journal(client: FakeSecretsClient, path: Path) -> tuple[str, str]:
+    prior_secret = client.versions[INITIAL_VERSION]
+    candidate_secret, _document_format, status = operation._validated_candidate(
+        prior_secret
+    )
+    assert status == "verified"
+    initial_topology = operation._version_stages(client)
+    custom_label = operation._custom_stage_label(RECOVERY_CANDIDATE_VERSION)
+    operation._write_recovery_journal(
+        path,
+        operation._recovery_journal_body(
+            prior_version_id=INITIAL_VERSION,
+            candidate_version_id=RECOVERY_CANDIDATE_VERSION,
+            custom_stage_label=custom_label,
+            initial_topology=initial_topology,
+            prior_document_commitment=operation._document_commitment(prior_secret),
+            candidate_document_commitment=operation._document_commitment(
+                candidate_secret
+            ),
+        ),
+    )
+    return candidate_secret, custom_label
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    [
+        "after_journal",
+        "after_stage",
+        "after_promotion",
+        "after_custom_removal",
+        "during_rollback",
+    ],
+)
+def test_crash_journal_reconciles_exact_topology_without_secret_bytes(
+    tmp_path,
+    crash_point,
+):
+    client = FakeSecretsClient("UNCHANGED=private-value\n", omit_unlabeled=True)
+    client.add_version(PREVIOUS_VERSION, {"AWSPREVIOUS"})
+    client.add_version(PENDING_VERSION, {"AWSPENDING"})
+    initial_topology = operation._version_stages(client)
+    journal_path = tmp_path / "transaction.json"
+    candidate_secret, custom_label = _install_recovery_journal(client, journal_path)
+    assert "private-value" not in journal_path.read_text(encoding="utf-8")
+    assert journal_path.stat().st_mode & 0o777 == 0o600
+
+    if crash_point != "after_journal":
+        client.put_secret_value(
+            SecretId=operation.GATEWAY_SECRET_ID,
+            SecretString=candidate_secret,
+            ClientRequestToken=RECOVERY_CANDIDATE_VERSION,
+            VersionStages=[custom_label],
+        )
+    if crash_point in {
+        "after_promotion",
+        "after_custom_removal",
+        "during_rollback",
+    }:
+        client.update_secret_version_stage(
+            SecretId=operation.GATEWAY_SECRET_ID,
+            VersionStage="AWSCURRENT",
+            MoveToVersionId=RECOVERY_CANDIDATE_VERSION,
+            RemoveFromVersionId=INITIAL_VERSION,
+        )
+    if crash_point == "after_custom_removal":
+        client.update_secret_version_stage(
+            SecretId=operation.GATEWAY_SECRET_ID,
+            VersionStage=custom_label,
+            RemoveFromVersionId=RECOVERY_CANDIDATE_VERSION,
+        )
+    if crash_point == "during_rollback":
+        client.update_secret_version_stage(
+            SecretId=operation.GATEWAY_SECRET_ID,
+            VersionStage="AWSCURRENT",
+            MoveToVersionId=INITIAL_VERSION,
+            RemoveFromVersionId=RECOVERY_CANDIDATE_VERSION,
+        )
+
+    operation._recover_orphan_transaction(
+        client,
+        recovery_journal_path=journal_path,
+    )
+
+    assert not journal_path.exists()
+    assert _custom_labels(client) == set()
+    if crash_point in {"after_promotion", "after_custom_removal"}:
+        assert client.current == RECOVERY_CANDIDATE_VERSION
+        assert operation._validated_candidate(client.versions[client.current])[2] == (
+            "already_disabled"
+        )
+        assert client.stages[INITIAL_VERSION] == {"AWSPREVIOUS"}
+        assert client.stages[PENDING_VERSION] == {"AWSPENDING"}
+    else:
+        assert client.current == INITIAL_VERSION
+        assert operation._version_stages(client) == initial_topology
+
+
+def test_read_only_verification_never_recovers_orphan_transaction(tmp_path):
+    client = FakeSecretsClient("UNCHANGED=private-value\n", omit_unlabeled=True)
+    journal_path = tmp_path / "transaction.json"
+    candidate_secret, custom_label = _install_recovery_journal(client, journal_path)
+    client.put_secret_value(
+        SecretId=operation.GATEWAY_SECRET_ID,
+        SecretString=candidate_secret,
+        ClientRequestToken=RECOVERY_CANDIDATE_VERSION,
+        VersionStages=[custom_label],
+    )
+    put_count = len(client.put_calls)
+    stage_count = len(client.stage_calls)
+
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match="another fixed-purpose miner disable operation is staged",
+    ):
+        operation.disable_gateway_miner_submissions_secret(secrets_client=client)
+
+    assert journal_path.exists()
+    assert _custom_labels(client) == {custom_label}
+    assert len(client.put_calls) == put_count
+    assert len(client.stage_calls) == stage_count
+
+
+def test_recovery_rejects_noncanonical_false_candidate_bytes(tmp_path):
+    client = FakeSecretsClient("UNCHANGED=private-value\n", omit_unlabeled=True)
+    journal_path = tmp_path / "transaction.json"
+    candidate_secret, custom_label = _install_recovery_journal(client, journal_path)
+    noncanonical = (
+        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n"
+        "UNCHANGED=private-value\n"
+    )
+    assert noncanonical != candidate_secret
+    client.put_secret_value(
+        SecretId=operation.GATEWAY_SECRET_ID,
+        SecretString=noncanonical,
+        ClientRequestToken=RECOVERY_CANDIDATE_VERSION,
+        VersionStages=[custom_label],
+    )
+
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match="candidate document differs",
+    ):
+        operation._recover_orphan_transaction(
+            client,
+            recovery_journal_path=journal_path,
+        )
+
+    assert journal_path.exists()
+    assert client.current == INITIAL_VERSION
+
+
+def test_second_journal_writer_fails_before_secret_or_stage_mutation(tmp_path):
+    client = FakeSecretsClient("UNCHANGED=private-value\n", omit_unlabeled=True)
+    journal_path = tmp_path / "transaction.json"
+    original_topology = operation._version_stages(client)
+    _install_recovery_journal(client, journal_path)
+    original_journal = journal_path.read_bytes()
+
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match="recovery journal already exists",
+    ):
+        operation._apply_gateway_miner_submissions_secret(
+            secrets_client=client,
+            expected_current_version_id=INITIAL_VERSION,
+            recovery_journal_path=journal_path,
+        )
+
+    assert journal_path.read_bytes() == original_journal
+    assert client.put_calls == []
+    assert client.stage_calls == []
+    assert operation._version_stages(client) == original_topology
 
 
 def test_verify_is_read_only_and_reports_only_commitments_and_version_ids():
@@ -184,10 +366,143 @@ def test_verify_is_read_only_and_reports_only_commitments_and_version_ids():
         "prior_stage_topology_commitment": operation._topology_commitment(
             {INITIAL_VERSION: frozenset({"AWSCURRENT"})}
         ),
+        "current_document_commitment": operation._document_commitment(original),
+        "current_hydrated_environment_commitment": (
+            operation._n_minus_one_hydrated_environment_commitment(original)
+        ),
+        "current_stage_topology_commitment": operation._topology_commitment(
+            {INITIAL_VERSION: frozenset({"AWSCURRENT"})}
+        ),
     }
     assert client.put_calls == []
     assert client.stage_calls == []
     assert "do-not-print" not in json.dumps(result)
+
+
+def test_n_minus_one_hydration_commitment_matches_exact_json_rendering():
+    raw = json.dumps(
+        {
+            "NORMAL": "value",
+            "NESTED": {"b": 2, "a": 1},
+            "EMPTY": None,
+            "BOOLEAN": True,
+            "GATEWAY_RESTART_INVOCATION_ID": "must-be-filtered",
+            operation.TARGET_ENV_NAME: operation.TARGET_ENV_VALUE,
+        },
+        separators=(",", ":"),
+    )
+    expected = (
+        "NORMAL=value\n"
+        'NESTED={"b":2,"a":1}\n'
+        "EMPTY=\n"
+        "BOOLEAN=True\n"
+        f"{operation.TARGET_ENV_NAME}={operation.TARGET_ENV_VALUE}\n"
+    )
+
+    assert operation._n_minus_one_hydrated_environment(raw) == expected
+    assert operation._n_minus_one_hydrated_environment_commitment(raw) == (
+        operation._document_commitment(expected)
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        json.dumps(
+            {
+                "ORDER_Z": "first",
+                "ORDER_A": "second",
+                "NESTED": {"b": 2, "a": [1, None]},
+                "BOOLEAN": False,
+                "EMPTY": None,
+                "GATEWAY_RESTART_INVOCATION_ID": "filtered",
+                operation.TARGET_ENV_NAME: operation.TARGET_ENV_VALUE,
+            },
+            separators=(",", ":"),
+        ),
+        (
+            "# preserved\r\n"
+            "ORDER_Z='first value'\x00"
+            "GATEWAY_RESTART_INVOCATION_ID=filtered\r\n"
+            "ORDER_A=second\n"
+            f"{operation.TARGET_ENV_NAME}=false\r\n\r\n"
+        ),
+    ],
+)
+def test_hydration_commitment_exactly_models_frozen_n_minus_one(
+    raw: str,
+    tmp_path: Path,
+):
+    repository = Path(__file__).resolve().parents[1]
+    source = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "show",
+            "0dd3a385a23a3af0fa17210bfe02a39cc4023952:gw_restart.sh",
+        ],
+        text=True,
+    )
+    marker = 'python3 - "$SECRET_TMP" "$GATEWAY_ENV_FILE" <<\'PY\'\n'
+    frozen_renderer = source.split(marker, 1)[1].split("\nPY\n", 1)[0]
+    secret_path = tmp_path / "secret.txt"
+    output_path = tmp_path / "gateway.env"
+    secret_path.write_bytes(raw.encode("utf-8"))
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            frozen_renderer,
+            str(secret_path),
+            str(output_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    expected = output_path.read_bytes()
+    assert operation._n_minus_one_hydrated_environment(raw).encode() == expected
+    assert operation._n_minus_one_hydrated_environment_commitment(raw) == (
+        operation._document_commitment(expected.decode("utf-8"))
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "error"),
+    [
+        ("AWS_ENDPOINT_URL", "https://attacker.invalid", "restart or AWS"),
+        ("AWS_CONFIG_FILE", "/tmp/config", "restart or AWS"),
+        ("GATEWAY_EXACT_COMMIT_HELPER", "", "restart or AWS"),
+        ("AWS_REGION", "us-west-2", "conflicting AWS"),
+        ("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "false", "conflicting AWS"),
+    ],
+)
+def test_secret_authority_collisions_fail_before_any_aws_mutation(
+    name: str,
+    value: str,
+    error: str,
+    tmp_path: Path,
+):
+    client = FakeSecretsClient(
+        f"{name}={value}\n"
+        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n"
+    )
+
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match=error,
+    ):
+        operation._apply_gateway_miner_submissions_secret(
+            secrets_client=client,
+            expected_current_version_id=INITIAL_VERSION,
+            recovery_journal_path=tmp_path / "transaction.json",
+        )
+
+    assert client.put_calls == []
+    assert client.stage_calls == []
 
 
 def test_apply_stages_then_cas_promotes_and_preserves_unrelated_shell_bytes():
@@ -210,6 +525,15 @@ def test_apply_stages_then_cas_promotes_and_preserves_unrelated_shell_bytes():
     assert result["status"] == "updated"
     assert result["backup_version_id"] == INITIAL_VERSION
     assert result["current_version_id"] == result["candidate_version_id"]
+    assert result["current_document_commitment"] == operation._document_commitment(
+        expected
+    )
+    assert result["current_hydrated_environment_commitment"] == (
+        operation._n_minus_one_hydrated_environment_commitment(expected)
+    )
+    assert result["current_stage_topology_commitment"] == (
+        operation._topology_commitment(operation._version_stages(client))
+    )
     assert client.versions[client.current] == expected
     assert client.versions[INITIAL_VERSION] == original
     assert client.stages[INITIAL_VERSION] == {"AWSPREVIOUS"}
@@ -329,17 +653,17 @@ def test_unknown_or_ambiguous_documents_fail_without_staging(secret, message):
     assert client.stage_calls == []
 
 
-def test_apply_requires_matching_prior_verification_version():
+def test_apply_requires_matching_prior_verification_version(tmp_path):
     client = FakeSecretsClient("UNCHANGED=value\n")
 
     with pytest.raises(
         operation.GatewayMinerSubmissionsDisableError,
         match="differs from the expected current version",
     ):
-        operation.disable_gateway_miner_submissions_secret(
+        operation._apply_gateway_miner_submissions_secret(
             secrets_client=client,
             expected_current_version_id=CONCURRENT_VERSION,
-            apply=True,
+            recovery_journal_path=tmp_path / "transaction.json",
         )
 
     assert client.put_calls == []
@@ -635,52 +959,23 @@ def test_preexisting_custom_stage_collision_fails_without_removing_it():
     assert client.stage_calls == []
 
 
-def test_rollback_failure_is_redacted_and_removes_only_custom_stage(
+def test_standalone_apply_is_refused_before_aws_client_or_write(
     monkeypatch,
     capsys,
 ):
-    class FailedRollbackClient(FakeSecretsClient):
-        corrupt_final = False
-
-        def update_secret_version_stage(self, **kwargs):
-            is_promotion = (
-                kwargs.get("VersionStage") == "AWSCURRENT"
-                and kwargs.get("RemoveFromVersionId") == INITIAL_VERSION
-            )
-            is_rollback = (
-                kwargs.get("VersionStage") == "AWSCURRENT"
-                and kwargs.get("MoveToVersionId") == INITIAL_VERSION
-                and kwargs.get("RemoveFromVersionId") != INITIAL_VERSION
-            )
-            if is_rollback:
-                raise RuntimeError("SENSITIVE_ROLLBACK_BACKEND_DETAIL")
-            result = super().update_secret_version_stage(**kwargs)
-            if is_promotion:
-                self.corrupt_final = True
-            return result
-
-        def get_secret_value(self, **kwargs):
-            response = super().get_secret_value(**kwargs)
-            if self.corrupt_final and kwargs.get("VersionStage") == "AWSCURRENT":
-                self.corrupt_final = False
-                response["SecretString"] += "CORRUPTED=value\n"
-            return response
-
-    client = FailedRollbackClient("UNCHANGED=value\n")
-    client.add_version(PENDING_VERSION, {"AWSPENDING"})
-    monkeypatch.setattr(operation, "_verify_protected_source", lambda: None)
-    monkeypatch.setattr(operation, "_instance_role_secrets_client", lambda: client)
-
-    assert (
-        operation.main(["--apply", "--expected-current-version-id", INITIAL_VERSION])
-        == 2
+    aws_client_calls = []
+    monkeypatch.setattr(
+        operation,
+        "_instance_role_secrets_client",
+        lambda: aws_client_calls.append("called"),
     )
+
+    assert operation.main(["--apply"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "SENSITIVE_ROLLBACK_BACKEND_DETAIL" not in captured.err
     assert '"status":"failed_closed"' in captured.err
-    assert _custom_labels(client) == set()
-    assert client.stages[PENDING_VERSION] == {"AWSPENDING"}
+    assert "standalone mutation is forbidden" in captured.err
+    assert aws_client_calls == []
 
 
 class _FakeCredentials:
@@ -689,6 +984,12 @@ class _FakeCredentials:
 
 
 class _FakeSts:
+    meta = type(
+        "Meta",
+        (),
+        {"endpoint_url": "https://sts.us-east-1.amazonaws.com"},
+    )()
+
     def get_caller_identity(self):
         return {
             "Account": operation.EXPECTED_AWS_ACCOUNT_ID,
@@ -699,16 +1000,28 @@ class _FakeSts:
         }
 
 
+class _FakeServiceClient:
+    def __init__(self, endpoint_url):
+        self.meta = type("Meta", (), {"endpoint_url": endpoint_url})()
+
+
 class _FakeSession:
     def __init__(self, *, credential_method="iam-role", **_kwargs):
         self.credentials = _FakeCredentials(credential_method)
-        self.secrets_client = object()
+        self.secrets_client = _FakeServiceClient(
+            "https://secretsmanager.us-east-1.amazonaws.com"
+        )
+        self.s3_client = _FakeServiceClient("https://s3.amazonaws.com")
 
     def get_credentials(self):
         return self.credentials
 
     def client(self, service):
-        return _FakeSts() if service == "sts" else self.secrets_client
+        if service == "sts":
+            return _FakeSts()
+        if service == "s3":
+            return self.s3_client
+        return self.secrets_client
 
 
 def test_instance_role_client_rejects_static_credential_environment():
@@ -722,6 +1035,40 @@ def test_instance_role_client_rejects_static_credential_environment():
                 "AWS_ACCESS_KEY_ID": "must-not-be-used",
             },
             session_factory=_FakeSession,
+        )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["AWS_ENDPOINT_URL", "AWS_CONFIG_FILE", "AWS_CA_BUNDLE", "HTTPS_PROXY"],
+)
+def test_instance_role_clients_reject_endpoint_config_and_proxy_overrides(name):
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match="credential configuration is forbidden",
+    ):
+        operation._instance_role_aws_clients(
+            environ={
+                "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
+                name: "unsafe-override",
+            },
+            session_factory=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("session must not be created")
+            ),
+        )
+
+
+def test_instance_role_clients_reject_forged_service_endpoint():
+    session = _FakeSession()
+    session.s3_client.meta.endpoint_url = "https://attacker.invalid"
+
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match="endpoint identity differs",
+    ):
+        operation._instance_role_aws_clients(
+            environ={"LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true"},
+            session_factory=lambda **_kwargs: session,
         )
 
 
@@ -750,8 +1097,54 @@ def test_instance_role_client_accepts_only_explicit_ec2_role_mode():
     assert result is session.secrets_client
 
 
+def test_default_instance_role_session_disables_aws_profile_files_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    configured: list[tuple[str, str]] = []
+    core_session = types.SimpleNamespace(
+        set_config_variable=lambda name, value: configured.append((name, value))
+    )
+    resolved_session = _FakeSession()
+
+    botocore_package = types.ModuleType("botocore")
+    botocore_package.__path__ = []
+    botocore_session_module = types.ModuleType("botocore.session")
+    botocore_session_module.get_session = lambda: core_session
+    botocore_package.session = botocore_session_module
+    boto3_module = types.ModuleType("boto3")
+
+    def build_session(**kwargs):
+        assert configured == [
+            ("config_file", operation.os.devnull),
+            ("credentials_file", operation.os.devnull),
+        ]
+        assert kwargs == {
+            "botocore_session": core_session,
+            "region_name": operation.EXPECTED_AWS_REGION,
+        }
+        return resolved_session
+
+    boto3_module.session = types.SimpleNamespace(Session=build_session)
+    monkeypatch.setitem(sys.modules, "botocore", botocore_package)
+    monkeypatch.setitem(sys.modules, "botocore.session", botocore_session_module)
+    monkeypatch.setitem(sys.modules, "boto3", boto3_module)
+
+    clients = operation._instance_role_aws_clients(
+        environ={"LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true"},
+    )
+
+    assert clients["secretsmanager"] is resolved_session.secrets_client
+    assert clients["s3"] is resolved_session.s3_client
+
+
 def test_instance_role_client_rejects_another_ec2_role_in_same_account():
     class WrongRoleSts:
+        meta = type(
+            "Meta",
+            (),
+            {"endpoint_url": "https://sts.us-east-1.amazonaws.com"},
+        )()
+
         def get_caller_identity(self):
             return {
                 "Account": operation.EXPECTED_AWS_ACCOUNT_ID,
@@ -763,7 +1156,9 @@ def test_instance_role_client_rejects_another_ec2_role_in_same_account():
 
     class WrongRoleSession(_FakeSession):
         def client(self, service):
-            return WrongRoleSts() if service == "sts" else self.secrets_client
+            if service == "sts":
+                return WrongRoleSts()
+            return super().client(service)
 
     with pytest.raises(
         operation.GatewayMinerSubmissionsDisableError,

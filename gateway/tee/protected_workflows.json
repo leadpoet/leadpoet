@@ -5117,7 +5117,7 @@
       "symbol": "_PROVIDER_OUTAGE_TEXT_MARKERS"
     },
     {
-      "ast_sha256": "sha256:680df3b60298fb5f1bb62aac049d534db17ef6ebda127c5a27d38c855a04d860",
+      "ast_sha256": "sha256:7a2b640c021fbe9bdd52d95f0a42d58fe7c26f1955ea14b6059231afa3e0c184",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_REVIEWED_CONSUMER_MANIFEST_PAIRS"
     },
@@ -5292,6 +5292,11 @@
       "symbol": "validate_source_add_reward_record"
     },
     {
+      "ast_sha256": "sha256:0e654e2583734e226c4a6fc6b74e9fc6d8b1a98e1811919e152489046006b53f",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "REVIEWED_CONSUMER_ALTERNATE_SNAPSHOT_SPECS"
+    },
+    {
       "ast_sha256": "sha256:6354cc83ed195a01c08c83046632650bf5400991090256774d93243c5c4952c3",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "REVIEWED_CONSUMER_SNAPSHOT_SPECS"
@@ -5432,7 +5437,7 @@
       "symbol": "_required_import_matches_v1"
     },
     {
-      "ast_sha256": "sha256:9d0d03c40b6fac65e30137394c75a61a012c1ca55b672b87ee3128d520e1f5a4",
+      "ast_sha256": "sha256:26b1223d0f00f19ee2057ace57f00f59bba8dbcd6a6d14f990aa9d2db88b44ec",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "_resolve_reviewed_consumer_contract_pair"
     },
@@ -5440,6 +5445,11 @@
       "ast_sha256": "sha256:bf8d057da7b0ea43dbe8f87c1cf60d08b453be9397873cb07e005d7884ce2731",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "_reviewed_consumer_snapshot_for_source_hash"
+    },
+    {
+      "ast_sha256": "sha256:c2bccb516d368c879085f39e609653a4af2970b6bb82f82b636d97b207f1b505",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "_reviewed_consumer_snapshot_from_spec"
     },
     {
       "ast_sha256": "sha256:06fe27cf11c86b3c8cdb581af2b26e530d59e50e3d6055f4e39930b1cb52fcb5",
@@ -5507,12 +5517,17 @@
       "symbol": "resolve_reviewed_consumer_snapshot"
     },
     {
-      "ast_sha256": "sha256:68d3f67f579eb6b348a9fac8e2fd03ef53a14eed81c27c45edf3036424326ddb",
+      "ast_sha256": "sha256:20b9562b9af62ed597fb551eab139476d346ca000945cdac174e2bcb5765d321",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "reviewed_consumer_profiles"
+    },
+    {
+      "ast_sha256": "sha256:f62a76cadc4f56ef5f5d87ab2142b1e29e12d547a9d4fdc94f57e7f0c4a89446",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "reviewed_consumer_snapshots"
     },
     {
-      "ast_sha256": "sha256:e9c7c55b80842ad268c791809b505eb0c6c41b631234c3217a30394133c6b184",
+      "ast_sha256": "sha256:e9bcad6d1a7603d00edaf44f19ca4f563865db3032f23526958ad57e95a7de72",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "semantic_compatibility_policy_hash_v1"
     },
@@ -5532,12 +5547,12 @@
       "symbol": "source_tree_compatibility_admission_v1"
     },
     {
-      "ast_sha256": "sha256:2ab1085da728e6c73fc70670840c92b489537d70f4cfef40100580cfee4a1b49",
+      "ast_sha256": "sha256:c6415ef71b2a2388f0b743dbcd16ae8f21930c25ec65ca40035563873f41f3db",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "validate_reviewed_legacy_release_manifest_identity_v1"
     },
     {
-      "ast_sha256": "sha256:3db9c2d801042e3f78b556bc43c67c0bcb5aec57538c125c75e6d4c3edd5fa37",
+      "ast_sha256": "sha256:528df72392d83242146fb698147fdc664f6e61f2adba1c7ef1d9c1698ad45f5c",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "validate_source_tree_compatibility_receipt_v1"
     },
@@ -5797,7 +5812,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:4d53d8ff72aaa8bb6e0dc9f7267466973295dc110bfdcaf6a0c65929e3838ca5",
-  "protected_source_commit": "ee9fddc32df94912af863c765d09de60dabd969e",
+  "manifest_hash": "sha256:10c4dad6915bced04b1b328c6e83f2be6a011f66ed1ed8d233d65a9bae13bb5a",
+  "protected_source_commit": "e8819b272e10649fb5785637dafa68a412e7f749",
   "schema_version": "leadpoet.protected_workflows.v2"
 }
